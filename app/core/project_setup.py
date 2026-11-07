@@ -11,11 +11,13 @@ The flow, for a project the owner wants on worker B, asked from worker A's UI:
    git-ops claim pass runs it in the background (``git_ops_runner``).
 3. The op clones the remote with B's OWN credentials into a temporary sibling
    folder and renames it into place (never over an existing folder), or adopts
-   a folder that is already a clone of the same repository, or creates an empty
-   folder for a folder project. Then it registers a normal project row (B's
-   ``instance_id``), the git repository record and the base checkout, so the
-   catalog, eligibility, ``ensure_checkout`` and the composer's runner picker
-   see B as able to run the project with no special case.
+   a folder that is already a clone of the same repository; a folder project
+   uses the folder already there as it is, or creates an empty one. Then it
+   registers a normal project row (B's ``instance_id``, under the logical
+   project's origin from the start), the git repository record and the base
+   checkout, so the catalog, eligibility, ``ensure_checkout`` and the
+   composer's runner picker see B as able to run the project with no special
+   case.
 4. On every state change B tells A (``projects-changed``) so A's open pages
    refresh; A reads the live state with the ``status`` action.
 
@@ -825,7 +827,9 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     """Run one claimed ``setup_project`` op on THIS worker (sync, in a thread).
 
     Returns the op's result; raises :class:`SetupError` with a stable code.
-    Never deletes or overwrites a folder it did not create.
+    Never deletes or overwrites a folder it did not create. A folder that is
+    already this worker's copy of the project, or (for a plain folder project)
+    any existing folder, is adopted as it is.
     """
     from app.db import git_ops as git_ops_db
 
@@ -853,6 +857,17 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         path_text = str(resolved)
         params["path"] = path_text
     path = Path(path_text)
+    registered = _own_row_at(path)
+    if registered is not None:
+        if origin in (_origin_of(registered), "local:" + str(registered["id"])):
+            # This worker's own project already lives in that folder: the request
+            # names it, or names its remote-less identity this worker has since
+            # linked to its remote (#802). Nothing to set up.
+            return {"project_id": registered["id"], "already": True, "adopted": True, "progress": 100}
+        if kind == "folder" and registered.get("link_group_id") not in (None, "", "local:" + str(registered["id"])):
+            # Never relink another logical project's folder (its Git identity, its chats).
+            raise SetupError(FOLDER_EXISTS, f"{path} is already the project {registered.get('name') or registered['id']} "
+                                            "on this worker. Choose another folder.")
     adopted = False
     if kind == "git":
         if path.exists() or path.is_symlink():
@@ -871,9 +886,8 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         if path.exists() or path.is_symlink():
             if not path.is_dir() or path.is_symlink():
                 raise SetupError(FOLDER_EXISTS, f"{path} already exists. Choose another folder.")
-            if mode != "adopt" and not _is_empty_dir(path):
-                raise SetupError(FOLDER_EXISTS, f"{path} already exists and isn't empty. Choose another "
-                                                "folder, or use the folder already there.")
+            # A plain folder project has no files to bring: the folder already
+            # there is used as it is (never written to, emptied or replaced).
             adopted = True
         elif mode == "adopt":
             raise SetupError(NOT_FOUND, f"There is no folder at {path} to use.")
@@ -932,12 +946,15 @@ def register_local_project(project_v2_id: str, *, origin: str, name: str, folder
     from fastapi import HTTPException
 
     resolved = path.resolve()
-    project = next((row for row in _own_project_rows()
-                    if _safe_resolve(row) == resolved), None)
+    project = _own_row_at(path)
     if project is None:
         try:
+            # Created under the logical identity from the start: a row first
+            # seeded as ``local:<id>`` and then linked left that superseded
+            # identity behind as a second, stale project.
             project = create_project_record_sync(ProjectCreate(
-                id=_unique_id(path.name or name), name=_unique_name(name), path=folder))
+                id=_unique_id(path.name or name), name=_unique_name(name), path=folder),
+                link_group_id=origin, link_locked=not origin.startswith("git:"))
         except HTTPException as exc:
             raise SetupError(INTERNAL, f"Couldn't register the project: {_http_detail(exc)}") from exc
     project_id = project["id"]
@@ -956,6 +973,15 @@ def register_local_project(project_v2_id: str, *, origin: str, name: str, folder
     if kind == "git":
         _record_checkout_state(project_v2_id, str(resolved), None)
     return project_id
+
+
+def _own_row_at(path: Path) -> Optional[Dict[str, Any]]:
+    """This worker's project row whose folder is ``path`` (resolved), else None."""
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return None
+    return next((row for row in _own_project_rows() if _safe_resolve(row) == resolved), None)
 
 
 def _safe_resolve(row: Dict[str, Any]) -> Optional[Path]:

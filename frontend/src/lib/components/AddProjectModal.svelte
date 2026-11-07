@@ -15,8 +15,9 @@
 	 * workers follow decision 3 of cross-worker project sync. For a Git repo
 	 * every online worker starts ticked (the owner's last unticks are
 	 * remembered); offline ones start unticked and, if ticked, run when they are
-	 * back. For a plain folder each worker gets an empty folder of the same
-	 * name (files aren't copied), so they start unticked. Setups start only
+	 * back. For a plain folder each worker uses its folder of the same name if
+	 * it has one, else gets an empty one (files aren't copied), so they start
+	 * unticked. Setups start only
 	 * after the local create (and clone) succeeded. The list shows only when
 	 * this worker can set projects up elsewhere (the overview answers).
 	 */
@@ -378,7 +379,7 @@
 									{:else if source === 'github'}
 										…/{folderLeaf}
 									{:else}
-										creates an empty {folderLeaf} folder; files aren't copied
+										uses an existing {folderLeaf} folder there, or creates an empty one; files aren't copied
 									{/if}
 								</span>
                             </span></Checkbox>

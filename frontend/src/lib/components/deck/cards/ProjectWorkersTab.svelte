@@ -270,7 +270,7 @@
 		if (adopting[w.install_id]) {
 			return `Point at a folder on ${w.device_name} that already holds this project. It's adopted as it is; nothing is overwritten.`;
 		}
-		if (kind === 'folder') return `Creates an empty ${data?.default_folder || projectName} folder; files aren't copied.`;
+		if (kind === 'folder') return `Uses an existing ${data?.default_folder || projectName} folder there, or creates an empty one; files aren't copied.`;
 		const remote = data?.remote ? data.remote : 'the repository';
 		return `Clones ${remote} using ${w.device_name}'s own GitHub sign-in. Never overwrites an existing folder.`;
 	}

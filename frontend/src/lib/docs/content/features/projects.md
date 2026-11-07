@@ -34,7 +34,7 @@ A project's **Workers** tab lists each worker's folder and branch. From there yo
 - Cancel a setup that is still running.
 - **Remove from** a worker. This drops that worker's record of the project; its files stay.
 
-Setting up a Git project clones its remote on that worker, with that worker's own GitHub sign-in. A project that isn't a Git repository gets an empty folder. Setup never overwrites anything: a folder that already holds something else is refused, and you can choose another. If a worker is offline, the setup waits and runs when it is back.
+Setting up a Git project clones its remote on that worker, with that worker's own GitHub sign-in. A project that isn't a Git repository uses the worker's folder of that name as it is, or gets an empty folder when there is none. Setup never overwrites anything: for a Git project, a folder that already holds something else is refused, and you can choose another. If a worker is offline, the setup waits and runs when it is back.
 
 When you start a new chat on a worker that doesn't have the project yet, the new chat says so, and the send button becomes **Set up & send**. It sets the project up there first, then sends your message.
 
