@@ -405,42 +405,6 @@ const cases = [{
 		log(`placeholder ${JSON.stringify(geometry)}`);
 		expect(geometry.neededBottom <= geometry.editorBottom + 1, 'every line of the placeholder fits inside the editor, above the controls');
 	}
-}, {
-	// #1085, #1073: the first message moves the composer from the new chat's
-	// hero to the dock. It travels from where it was to where it lands, in one
-	// direction: no first frame above the hero (a fixed -30vh start), no dip
-	// past the dock (an overshooting curve). Where the hero already docks it
-	// (phone widths), it does not move at all.
-	name: 'first-send-motion',
-	async setup(ctx) {
-		await gotoApp(ctx.page, ctx.status, prefix(ctx.variant));
-		await waitChat(ctx.page, { surface: 'new', loading: 'false' });
-		await pickAgent(ctx.page, ctx.page.getByRole('region', { name: 'New chat' }));
-		await composer(ctx.page).fill('hi');
-		await ctx.page.waitForTimeout(1000);
-	},
-	async act({ page, mark, log, variant }) {
-		await mark('send the first message');
-		const stop = await watchFrames(page);
-		await sendButton(page).click();
-		await waitTurnSettled(page);
-		const frames = await stop();
-		const tops = frames.map(f => f.composer?.top).filter(Number.isFinite);
-		expect(tops.length > 4, 'the composer was sampled through the first send');
-		const [from, to] = [tops[0], tops.at(-1)];
-		let direction = 0, reversals = 0;
-		for (let i = 1; i < tops.length; i++) {
-			const step = Math.sign(Math.round(tops[i] - tops[i - 1]));
-			if (step && direction && step !== direction) reversals++;
-			if (step) direction = step;
-		}
-		log(`first send composer tops ${JSON.stringify([...new Set(tops.map(Math.round))])}`);
-		if (variant.viewport === 'desktop') expect(to - from > 50, `the desktop composer really moved from the hero to the dock (${(to - from).toFixed(1)}px)`);
-		else expect(travel(frames, 'composer') <= 2, `an already-docked composer stays put (${travel(frames, 'composer').toFixed(1)}px)`);
-		expect(Math.min(...tops) >= Math.min(from, to) - 2, `the composer never starts above where it was (${Math.min(...tops).toFixed(1)} vs ${from.toFixed(1)})`);
-		expect(Math.max(...tops) <= Math.max(from, to) + 2, `the composer never overshoots the dock (${Math.max(...tops).toFixed(1)} vs ${to.toFixed(1)})`);
-		expect(reversals === 0, `the composer moves in one direction (${reversals} reversals)`);
-	}
 }, ...(mobile ? ['first-send', 'switch-from-empty'].map(action => ({
 	name: `mobile-${action}`, viewports: ['phone'],
 	async setup(ctx) {

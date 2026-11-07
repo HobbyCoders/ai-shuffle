@@ -1,5 +1,5 @@
 {
-  "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from green main-suite push-to-main runs: python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
+  "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from green main-suite push-to-main runs: python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample. new-chat-project gained two phone cases in #1200: its seconds are scaled from 85.33 at 8 cases to 106.66 at 10 by its own per-case median until the next refresh.",
   "source_runs": [
     42295256527
   ],
@@ -23,7 +23,7 @@
     "html-preview-image-click.journey.mjs": 4,
     "mirrored-chat.journey.mjs": 24,
     "native-scratch-context.journey.mjs": 1,
-    "new-chat-project.journey.mjs": 8,
+    "new-chat-project.journey.mjs": 10,
     "new-worktree-session.journey.mjs": 28,
     "notes-writing.journey.mjs": 6,
     "open-unloaded-chat.journey.mjs": 86,
@@ -79,7 +79,7 @@
     "html-preview-image-click.journey.mjs": 39.3,
     "mirrored-chat.journey.mjs": 250.33,
     "native-scratch-context.journey.mjs": 36.59,
-    "new-chat-project.journey.mjs": 85.33,
+    "new-chat-project.journey.mjs": 106.66,
     "new-worktree-session.journey.mjs": 273.91,
     "notes-writing.journey.mjs": 34.49,
     "open-unloaded-chat.journey.mjs": 490.93,
