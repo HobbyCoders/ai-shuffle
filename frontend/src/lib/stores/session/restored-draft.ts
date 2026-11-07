@@ -36,6 +36,7 @@ export interface UnfinishedRestore {
 	rowId: string;
 	prompt: string;
 	uploadPaths: string[];
+	composerAtConfirm?: string | null;
 	page: string;
 }
 
@@ -57,9 +58,9 @@ if (typeof window !== 'undefined') {
 }
 export const pageIsLeaving = () => leaving;
 
-export function noteRestoreStarted(sessionId: string, rowId: string, prompt: string, uploadPaths: string[] = []): void {
+export function noteRestoreStarted(sessionId: string, rowId: string, prompt: string, uploadPaths: string[] = [], composerAtConfirm: string | null = null): void {
 	try {
-		const note: UnfinishedRestore = { rowId, prompt, uploadPaths, page: THIS_PAGE };
+		const note: UnfinishedRestore = { rowId, prompt, uploadPaths, composerAtConfirm, page: THIS_PAGE };
 		sessionStorage.setItem(noteKey(sessionId, rowId), JSON.stringify(note));
 	} catch { /* Storage is a safety net: the restore itself still runs. */ }
 }

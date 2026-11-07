@@ -66,6 +66,14 @@ describe('restores a reload cut off', () => {
 		expect(takeUnfinishedRestores('s1', new Set(), LATER_PAGE)).toEqual([]);
 	});
 
+	it('round-trips the confirmation baseline while not-sent restores keep null', () => {
+		noteRestoreStarted('s1', 'sent', 'old words', [], 'words at confirm');
+		noteRestoreStarted('s1', 'unsent', 'not sent');
+		const notes = takeUnfinishedRestores('s1', new Set(), LATER_PAGE);
+		expect(notes.find(n => n.rowId === 'sent')?.composerAtConfirm).toBe('words at confirm');
+		expect(notes.find(n => n.rowId === 'unsent')?.composerAtConfirm).toBeNull();
+	});
+
 	it('keeps the note while the row is still on screen, in case the request lands late', () => {
 		noteRestoreStarted('s1', 'row-1', 'kept words');
 		expect(takeUnfinishedRestores('s1', new Set(['row-1']), LATER_PAGE)).toEqual([]);
