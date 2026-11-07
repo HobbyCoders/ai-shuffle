@@ -417,7 +417,30 @@ python -m scripts.perf.sync_bench run --runs 10 --stream-only \
   --output /tmp/sync-stream.json
 ```
 
-### Ranked follow-up candidates (not implemented)
+### Project creation fix, 2026-11-07
+
+Same-host paired Linux lab, default seed, production creation and peer catalog
+API, 100 ms visibility polling, ten requested and ten recorded attempts per
+journey on each side. Before: `a21aebffb`; after: `d46fba315` (backend change).
+Both use `--projects-only` and the independent pre-upgrade resolution fixture
+above. No provider calls or browser rendering are measured.
+
+| Journey | Before p50 / p75 / max (ms) | After p50 / p75 / max (ms) |
+| --- | ---: | ---: |
+| Plain creation → peer catalog | not visible in 10/10 three-second windows | 264.4 / 385.7 / 1130.1 |
+| Legacy first-chat resolution → peer catalog | 1204.5 / 1212.5 / 1548.7 | 372.5 / 375.4 / 495.1 |
+| Legacy resolution commit → publication | 1018.4 / 1026.6 / 1336.1 | 123.6 / 126.3 / 204.4 |
+
+All ten creations were visible after the fix (nine under a second); the first
+run's 1.13 s maximum includes 924 ms before publication. All twenty operations
+after the fix published in targeted passes. The earlier legacy resolver's
+roughly one-second publication wait was its missing resource wake, not a
+transport/protocol delay. Successful labs both exited zero with both apps and
+PostgreSQL down; their process lists were also checked for lease leftovers.
+An initial before-run listener collision was a setup failure, not a sample,
+and its lease also shut down. Timing is observational, not a CI threshold.
+
+### Ranked follow-up candidates (baseline estimates; project item now implemented)
 
 Gains below are **estimates**, not demonstrated optimizations. Preserve full
 reconciliation and mixed-version compatibility; measure again before ratcheting.

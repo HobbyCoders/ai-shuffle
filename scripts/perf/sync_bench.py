@@ -759,8 +759,9 @@ def main():
     p.add_argument("--offline-seconds", type=float, default=10)
     p.add_argument("--idle-seconds", type=float, default=180)
     p.add_argument("--long-seed", action="store_true")
-    p.add_argument("--stream-only", action="store_true", help="fresh paired lab; omit mutations/catch-up/idle")
-    p.add_argument("--projects-only", action="store_true", help="only create and pre-upgrade first-chat resolution")
+    selection = p.add_mutually_exclusive_group()
+    selection.add_argument("--stream-only", action="store_true", help="fresh paired lab; omit mutations/catch-up/idle")
+    selection.add_argument("--projects-only", action="store_true", help="only create and pre-upgrade first-chat resolution")
     args = parser.parse_args()
     if args.mode == "child":
         child()
