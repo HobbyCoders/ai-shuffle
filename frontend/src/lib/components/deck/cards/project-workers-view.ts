@@ -161,22 +161,44 @@ export function seenAgo(iso: string | null | undefined, now = Date.now()): strin
 }
 
 /**
- * Whether the Projects list shows its "All workers / On <this worker>" filter.
+ * Where the Projects list stands on its "All workers / On <this worker>"
+ * filter row. One rule (#1210): the row's space never appears or disappears
+ * under a painted list during a visit, whichever answer comes first or late.
  *
- * Once the overview has answered, it decides: more than one worker across its
- * rows. Before that (the overview asks every online peer, so it can take
- * seconds), the install registry, which is a plain database read loaded
- * early, says whether it will: the same approved installs the overview
- * reports. The filter row then sits above the list from its first paint
- * instead of pushing the whole list down when the overview lands (#1210). A
- * worker without the overview (`supported === false`) never shows it.
+ * - `shown`: the overview answered with more than one worker.
+ * - `reserved`: the row's space is kept, its control invisible and inert,
+ *   because the overview may still show it (it asks every online peer, so
+ *   it can take seconds) or because this visit already kept that space
+ *   (`kept`): an answer of "no filter" (an older worker without the
+ *   overview, a single worker after all, a failed load) leaves a blank row
+ *   rather than pulling the list up under the user. The next visit starts
+ *   from that answer.
+ * - `hidden`: no row, and no space: the answer is in, or the install
+ *   registry (a plain database read) says this is the only approved worker,
+ *   the same approved installs the overview reports.
+ * - `unknown`: the registry has not answered yet, so the list waits (it is a
+ *   fast read) rather than painting and then gaining or losing the row.
  */
-export function showsWorkerFilter(
-	supported: boolean | null,
-	overviewWorkerCount: number,
-	installs: ReadonlyArray<{ approved?: boolean }> | null
-): boolean {
-	if (supported === true) return overviewWorkerCount > 1;
-	if (supported === false || !installs) return false;
-	return installs.filter((i) => i.approved !== false).length > 1;
+export type WorkerFilterSlot = 'unknown' | 'hidden' | 'reserved' | 'shown';
+
+export function workerFilterSlot(state: {
+	/** `projectsOverviewSupported`: null until the overview has answered. */
+	supported: boolean | null;
+	/** A load finished without an answer (a failed request). */
+	overviewSettled: boolean;
+	overviewWorkerCount: number;
+	/** The install registry, null until loaded. */
+	installs: ReadonlyArray<{ approved?: boolean }> | null;
+	/** The registry request failed: treat it as giving no hint. */
+	registrySettled: boolean;
+	/** This visit already reserved or showed the row. */
+	kept: boolean;
+}): WorkerFilterSlot {
+	const { supported, overviewSettled, overviewWorkerCount, installs, registrySettled, kept } = state;
+	if (supported === true && overviewWorkerCount > 1) return 'shown';
+	if (kept) return 'reserved';
+	if (supported !== null || overviewSettled) return 'hidden';
+	if (!installs) return registrySettled ? 'hidden' : 'unknown';
+	// An older server leaves `approved` out: that means approved.
+	return installs.filter((i) => i.approved !== false).length > 1 ? 'reserved' : 'hidden';
 }

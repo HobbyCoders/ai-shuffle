@@ -19,7 +19,7 @@
 	import { activeView } from '$lib/stores/layout.svelte';
 	import { startProjectSetup, type ProjectKind, type ProjectOverviewRow, type ProjectWorker } from '$lib/api/project-workers';
 	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
-	import { isOnThisWorker, isRunning, missingCount, selfWorker, showsWorkerFilter } from './project-workers-view';
+	import { isOnThisWorker, isRunning, missingCount, selfWorker, workerFilterSlot } from './project-workers-view';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
@@ -85,11 +85,13 @@
 	// Ask for the overview each time the page shows (it stays mounted while
 	// hidden); live-sync's `projects` refresh keeps it fresh while it is used.
 	const shown = $derived(($activeView?.type ?? 'project') === 'project');
+	let overviewSettled = $state(false);
+	let registrySettled = $state(false);
 	$effect(() => {
 		if (!shown) return;
-		void loadProjectsOverview();
-		// The registry decides the worker filter until the overview answers (showsWorkerFilter).
-		if (untrack(() => $workerInstalls) === null) refreshWorkerPresence().catch(() => {});
+		void loadProjectsOverview().finally(() => { overviewSettled = true; });
+		// The registry hints at the worker filter until the overview answers (workerFilterSlot).
+		if (untrack(() => $workerInstalls) === null) refreshWorkerPresence().catch(() => {}).finally(() => { registrySettled = true; });
 	});
 
 	const overviewOn = $derived($projectsOverviewSupported === true);
@@ -141,7 +143,14 @@
 		for (const row of $projectsOverview) for (const w of row.workers) ids.add(w.install_id);
 		return ids.size;
 	});
-	const workerFilterShown = $derived(showsWorkerFilter($projectsOverviewSupported, workerCount, $workerInstalls));
+	/** This visit already reserved or showed the filter row: it keeps that space until the page hides. */
+	let filterKept = $state(false);
+	const filterSlot = $derived(workerFilterSlot({ supported: $projectsOverviewSupported, overviewSettled, overviewWorkerCount: workerCount,
+		installs: $workerInstalls, registrySettled, kept: filterKept }));
+	$effect(() => {
+		if (!shown) filterKept = false;
+		else if (filterSlot === 'reserved' || filterSlot === 'shown') filterKept = true;
+	});
 
 	// Filtered projects
 	const filteredRows = $derived.by(() => {
@@ -157,6 +166,11 @@
 				(r.remote ?? '').toLowerCase().includes(q)
 		);
 	});
+
+	/** Until the list's final shape is known it paints nothing that could move: no rows before the
+	 *  registry answers, and no empty state while peers may still bring projects. */
+	const listPending = $derived(filterSlot === 'unknown' || (filterSlot === 'reserved' && $projectsOverviewSupported === null
+		&& !overviewSettled && !filteredRows.length && !searchQuery.trim()));
 
 	// While a setup runs somewhere, re-read the overview every 2 s (the
 	// resources_changed refresh also lands; this is the fail-safe).
@@ -270,15 +284,18 @@
 
 <ViewShell label="Projects" detailOpen={!!selectedRow} detailKey={selectedKey} onBack={handleBack} bind:stacked>
 	{#snippet panel()}
-		<ViewPanel title="Projects" count={allRows.length}>
+		<ViewPanel title="Projects" count={allRows.length} loading={listPending}>
 			{#snippet actions()}<PanelIconButton label="New project" icon={Plus} onclick={() => (showAddModal = true)} />{/snippet}
 			{#snippet search()}<PanelSearch bind:value={searchQuery} label="Search projects" placeholder="Search projects" />{/snippet}
 			{#snippet filters()}
-				{#if workerFilterShown}
-					<Segmented label="Show projects" size="sm" bind:value={workerFilter} options={[{ value: 'all', label: 'All workers' }, { value: 'here', label: `On ${selfName}` }]} />
+				{#if filterSlot === 'shown' || filterSlot === 'reserved'}
+					<div class="worker-filter" class:reserved={filterSlot === 'reserved'} aria-hidden={filterSlot === 'reserved' || undefined} inert={filterSlot === 'reserved'}>
+						<Segmented label="Show projects" size="sm" bind:value={workerFilter} options={[{ value: 'all', label: 'All workers' }, { value: 'here', label: `On ${selfName}` }]} />
+					</div>
 				{/if}
 			{/snippet}
 			<div data-ui-projects={overviewOn ? 'overview' : 'local'}>
+				{#if !listPending}
 				{#each filteredRows as row (row.key)}
 					<div data-project-key={row.key}>
 						<ListItem id={row.key} name={row.name} summary={rowMeta(row)} icon={row.kind === 'git' ? FolderGit2 : FolderOpen}
@@ -292,6 +309,7 @@
 						<button class="st-btn primary" onclick={() => (showAddModal = true)}><Plus />New project</button>
 					</EmptyDetail>
 				{/each}
+				{/if}
 			</div>
 		</ViewPanel>
 	{/snippet}
@@ -342,3 +360,12 @@
 	{/snippet}
 </ViewShell>
 <AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={() => void loadProjectsOverview()} />
+
+<style>
+	/* The filter's space, held while the overview may still show it (workerFilterSlot). */
+	.worker-filter { display: flex; align-items: center; }
+	.worker-filter.reserved { visibility: hidden; }
+	/* While the list's shape is unknown (listPending) its region holds nothing; it is not painted
+	   until then, so its first paint already sits under the filter row's final space. */
+	:global(.view-panel[aria-label="Projects"][aria-busy="true"] > .panel-body) { visibility: hidden; }
+</style>

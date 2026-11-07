@@ -15,7 +15,7 @@ import {
 	missingOnline,
 	runsOnNote,
 	seenAgo,
-	showsWorkerFilter,
+	workerFilterSlot,
 	workerChip
 } from './project-workers-view';
 
@@ -98,26 +98,40 @@ describe('failures', () => {
 	});
 });
 
-describe('showsWorkerFilter (#1210: the filter row must not pop in above the list)', () => {
-	const self = { approved: true };
-	const peer = { approved: true };
+describe('workerFilterSlot (#1210: the filter row never appears or vanishes under a painted list)', () => {
+	const two = [{ approved: true }, { approved: true }];
+	const base = { supported: null, overviewSettled: false, overviewWorkerCount: 0, installs: two, registrySettled: false, kept: false };
 
-	it('decides from the approved installs while the overview is still out', () => {
-		expect(showsWorkerFilter(null, 0, [self, peer])).toBe(true);
-		expect(showsWorkerFilter(null, 0, [self])).toBe(false);
+	it('waits for the registry before the list paints', () => {
+		expect(workerFilterSlot({ ...base, installs: null })).toBe('unknown');
+		// A failed registry gives no hint: no space held.
+		expect(workerFilterSlot({ ...base, installs: null, registrySettled: true })).toBe('hidden');
+	});
+
+	it('holds the space while the overview may still show the row', () => {
+		expect(workerFilterSlot(base)).toBe('reserved');
 		// An older server leaves `approved` out: that means approved.
-		expect(showsWorkerFilter(null, 0, [{}, {}])).toBe(true);
+		expect(workerFilterSlot({ ...base, installs: [{}, {}] })).toBe('reserved');
+	});
+
+	it('holds no space for the only approved worker', () => {
+		expect(workerFilterSlot({ ...base, installs: [{ approved: true }] })).toBe('hidden');
 		// A peer waiting for approval is not in the overview either.
-		expect(showsWorkerFilter(null, 0, [self, { approved: false }])).toBe(false);
-		expect(showsWorkerFilter(null, 0, null)).toBe(false);
+		expect(workerFilterSlot({ ...base, installs: [{ approved: true }, { approved: false }] })).toBe('hidden');
 	});
 
 	it('follows the overview once it has answered', () => {
-		expect(showsWorkerFilter(true, 3, [self])).toBe(true);
-		expect(showsWorkerFilter(true, 1, [self, peer])).toBe(false);
+		expect(workerFilterSlot({ ...base, supported: true, overviewWorkerCount: 3, installs: null })).toBe('shown');
+		expect(workerFilterSlot({ ...base, supported: true, overviewWorkerCount: 1 })).toBe('hidden');
+		expect(workerFilterSlot({ ...base, supported: false })).toBe('hidden');
+		expect(workerFilterSlot({ ...base, overviewSettled: true })).toBe('hidden');
 	});
 
-	it('never shows on a worker without the overview', () => {
-		expect(showsWorkerFilter(false, 0, [self, peer, peer])).toBe(false);
+	it('keeps the space it held this visit when the answer is "no filter"', () => {
+		// An older worker (no overview), a single worker after all, a failed load.
+		expect(workerFilterSlot({ ...base, supported: false, kept: true })).toBe('reserved');
+		expect(workerFilterSlot({ ...base, supported: true, overviewWorkerCount: 1, kept: true })).toBe('reserved');
+		expect(workerFilterSlot({ ...base, overviewSettled: true, kept: true })).toBe('reserved');
+		expect(workerFilterSlot({ ...base, supported: true, overviewWorkerCount: 2, kept: true })).toBe('shown');
 	});
 });
