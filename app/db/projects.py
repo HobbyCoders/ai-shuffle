@@ -277,15 +277,26 @@ def get_all_project_session_counts() -> Dict[str, int]:
 
 def delete_project(project_id: str) -> bool:
     """Delete a project and all associated sessions (sessions are cwd-dependent)"""
+    from app.db.sessions import delete_session
+
+    # Each chat goes through the ordered delete (app/db/session_locks.py): its
+    # FK cascade removes staged hand-off rows, so a raw DELETE here locked the
+    # session before their headers and deadlocked hand-off cleanup (#1215).
+    # It also clears the runtime rows (runs, turns, events) a raw DELETE left.
+    # A chat created in the project after this read survives as a no-project
+    # chat (project_id is ON DELETE SET NULL), never as a dangling reference.
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sessions WHERE project_id = %s ORDER BY id", (project_id,))
+        session_ids = [row["id"] for row in cursor.fetchall()]
+    for session_id in session_ids:
+        delete_session(session_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, instance_id, link_group_id FROM projects WHERE id = %s", (project_id,))
         project = row_to_dict(cursor.fetchone())
         if project:
             _retire_from_catalog(cursor, project)
-        # First delete all sessions associated with this project
-        cursor.execute("DELETE FROM sessions WHERE project_id = %s", (project_id,))
-        # Then delete the project
         cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
         return cursor.rowcount > 0
 

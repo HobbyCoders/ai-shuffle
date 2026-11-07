@@ -1852,3 +1852,96 @@ def test_header_created_after_tombstone_scan_cannot_deadlock_cleanup(private_poo
         assert cur.fetchone() is None
         cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
         assert cur.fetchone()["n"] == 0
+
+
+def test_acceptance_retires_only_headers_from_its_own_scan(private_pool, monkeypatch):
+    """Review S7: supersession never scans for headers after the session lock.
+
+    Before the fix acceptance locked the existing headers, a newer import then
+    committed its header and its cleanup locked it, and acceptance (holding
+    the session) scanned for superseded headers again: it waited on cleanup's
+    header while cleanup waited on the session row, DeadlockDetected.
+    """
+    from types import SimpleNamespace
+
+    from app.network import handoff
+
+    sid, old, new = "s7-supersede-" + uuid4().hex, uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,'source')", (sid,))
+    handoff.install_history(sid, {"history": {}, "token": old, "_prepare_history": True}, "/tmp/handoff-lab")
+    monkeypatch.setattr(handoff.engine, "require_context", lambda: SimpleNamespace(device_id="target"))
+    barriers = _Barriers(monkeypatch, {
+        # Acceptance: right after its header scan (before C/S).
+        "accept": (lambda sql, params: sql.startswith("SELECT token FROM handoff_history_chunks")
+                   and "FOR UPDATE" in sql, False),
+        # Cleanup of the newer import: holding its header, before the session.
+        "discard": (lambda sql, params: sql.startswith("SELECT sdk_session_id,created_at,rows FROM "
+                                                       "handoff_history_chunks"), False),
+    })
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="accept") as accepting, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="discard") as cleaning:
+        observer.autocommit = True
+        accepted = accepting.submit(handoff._accept_owner, sid, "target", None, old)
+        try:
+            barriers.wait("accept", accepted)
+            handoff.install_history(sid, {"history": {}, "token": new, "_prepare_history": True},
+                                    "/tmp/handoff-lab")
+            discarding = cleaning.submit(handoff._discard_history, sid, new)
+            barriers.wait("discard", discarding)
+            barriers.resume["accept"].set()
+            state = _wait_blocked_or_done(observer, barriers.pids["discard"], accepted)
+        finally:
+            barriers.release_all()
+        assert accepted.result(timeout=10) == []
+        assert discarding.result(timeout=10) is None
+        assert state == "done", "acceptance must not wait on a header created after its scan"
+    session = sessions.get_session(sid)
+    assert session["owner_device_id"] == "target"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_project_delete_takes_the_ordered_session_delete(private_pool, monkeypatch):
+    """Review S8: deleting a project deletes its chats through ``delete_session``.
+
+    Before the fix ``delete_project`` ran a raw ``DELETE FROM sessions``: it
+    locked the chat row, its FK cascade then waited for a hand-off header
+    that staging cleanup held, and cleanup next waited for the chat row:
+    DeadlockDetected. Now the delete waits at the header scan instead.
+    """
+    from app.db import projects
+    from app.network import handoff
+
+    project, sid, token = "s8-project-" + uuid4().hex, "s8-chat-" + uuid4().hex, uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO projects (id,name,path) VALUES (%s,'Lock order','/tmp/s8')", (project,))
+        cur.execute("INSERT INTO sessions (id,project_id) VALUES (%s,%s)", (sid, project))
+        _stage_handoff_header(cur, sid, token)
+    session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
+    barriers = _Barriers(monkeypatch, {"discard": (
+        lambda sql, params: "FROM handoff_history_chunks" in sql and "FOR UPDATE" in sql, False)})
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="discard") as cleaning, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="project") as deleter:
+        observer.autocommit = True
+        discarding = cleaning.submit(handoff._discard_history, sid, token)
+        try:
+            barriers.wait("discard", discarding)
+            deleting = deleter.submit(projects.delete_project, project)
+            _wait_for_lock_wait(observer, barriers.pids["discard"], deleting)
+        finally:
+            barriers.release_all()
+        assert discarding.result(timeout=10) is None
+        assert deleting.result(timeout=10) is True
+    _assert_deleted(sid)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM projects WHERE id=%s", (project,))
+        assert cur.fetchone() is None
+        cur.execute("SELECT COUNT(*) AS n FROM handoff_history_chunks WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0

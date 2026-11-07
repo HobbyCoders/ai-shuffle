@@ -497,7 +497,7 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
             raise ValueError("Unknown moved wake reservation")
         wakes = parse_jsonb(row["wakes"])
         device = engine.require_context().device_id
-        _lock_history_headers(cur, sid)
+        locked = _lock_history_headers(cur, sid)
         # Already-published wake release is short and still shares the owner
         # lock with admission. Only cold publication needs an optimistic read.
         owner_lock = " FOR UPDATE" if row["finalized"] else ""
@@ -526,7 +526,7 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
             # even when the earlier commit response never reached this worker.
             metadata = _publish_history(cur, sid, token)
             _lock_published_owner(cur, sid, device, token, session, metadata)
-            _accept_owner_row(cur, sid, device, row["branch"], token)
+            _accept_owner_row(cur, sid, device, row["branch"], token, locked)
             # This authenticated committed transfer also supersedes older
             # abandoned imports whose cancellation reply never arrived.
             cur.execute("UPDATE handoff_wakes SET finalized=TRUE,wakes='[]' "
@@ -1470,16 +1470,28 @@ def _lock_history_headers(cur, sid):
     # Supersession cleans older headers at the final flip, and acceptance
     # releases hold runs. Lock headers and hold runs before the counter and
     # session row, the order deletion also uses (app/db/session_locks.py).
+    # Returns the locked tokens: supersession may retire only those.
     from app.db.session_locks import lock_handoff_history
 
-    lock_handoff_history(cur, sid)
+    return lock_handoff_history(cur, sid)
 
 
-def _discard_superseded_history(cur, sid, token):
+def _discard_superseded_history(cur, sid, token, locked):
+    """Retire older committed imports among the headers this transaction locked.
+
+    ``locked`` comes from ``_lock_history_headers``, taken before C/S. A
+    header created after that scan belongs to a newer import, and scanning
+    for it now, after the session lock, would wait on its cleanup while that
+    cleanup waits for this session row (review S7).
+    """
     from app.db.base import parse_jsonb
 
+    older = sorted({str(t) for t in (locked or ())} - {str(token)})
+    if not older:
+        return
     cur.execute("SELECT token,sdk_session_id,rows FROM handoff_history_chunks "
-                "WHERE session_id=%s AND token<>%s AND table_name='' AND batch_no=0 FOR UPDATE", (sid, token))
+                f"WHERE session_id=%s AND token IN ({', '.join(['%s'] * len(older))}) "
+                "AND table_name='' AND batch_no=0", (sid, *older))
     for row in cur.fetchall():
         if (parse_jsonb(row["rows"]) or {}).get("commit_sent"):
             _delete_history(cur, sid, row["token"], row["sdk_session_id"])
@@ -1732,7 +1744,7 @@ def install_history(sid, data, cwd):
     return sdk
 
 
-def _accept_owner_row(cur, sid, device_id, branch, token=None):
+def _accept_owner_row(cur, sid, device_id, branch, token=None, locked=()):
     # instance_id moves too (as adopt/unpin do): left on the previous
     # worker's id, the session listed as remote with an unknown state here.
     placement = {"where": "runner:" + device_id}
@@ -1744,7 +1756,7 @@ def _accept_owner_row(cur, sid, device_id, branch, token=None):
         cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
     if token:
         _release_holds(cur, HOLD + token)
-        _discard_superseded_history(cur, sid, token)
+        _discard_superseded_history(cur, sid, token, locked)
 
 
 def _adopt_outcome(cur, sid, failed):
@@ -1789,7 +1801,7 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         cur.execute("SELECT token,wakes,superseded,keep_peer,resume_wait,finalized FROM handoff_wakes "
                     "WHERE session_id=%s ORDER BY token FOR UPDATE", (sid,))
         staged_rows = [row for row in cur.fetchall() if row["token"] == token and not row["finalized"]]
-        _lock_history_headers(cur, sid)
+        locked = _lock_history_headers(cur, sid)
         # The durable import admission fence prevents target turns throughout
         # publication. Let ownership sync/session metadata writes proceed; lock
         # and revalidate the owner only at the final context/ownership flip.
@@ -1813,7 +1825,7 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
         if held_messages is None:
             held_messages = receipt.get("held_messages", 0) if receipt.get("token") == token else 0
-        _accept_owner_row(cur, sid, device_id, branch, token)
+        _accept_owner_row(cur, sid, device_id, branch, token, locked)
         if metadata is not None:
             _adopt_outcome(cur, sid, metadata.get("last_turn_failed"))
         for staged in staged_rows:

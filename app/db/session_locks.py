@@ -24,6 +24,10 @@ Who takes what (keep this table and the code in step):
     be held before S: reaching H through the cascade after S deadlocks
     (#1215). H locks only headers that exist, so X keeps a new header from
     committing between the scan and the cascade.
+  - project delete (``projects.delete_project``): each chat of the project
+    through ``delete_session``, one transaction per chat, then the project
+    row alone (its ``ON DELETE SET NULL`` touches only S of a chat created
+    meanwhile, holding nothing else).
   - header creation (``handoff.install_history``): X, then the INSERT, in its
     own short transaction (one statement: the lock is a materialized CTE). Behind a delete it waits, then fails on the
     session FK: a deleted chat gets no staging.
@@ -36,7 +40,11 @@ Who takes what (keep this table and the code in step):
     Staging cleanup (``handoff._discard_history``): H (+ hold runs), S.
     None of them creates a header, so none needs X. Chunk rows are written
     under an existing header token; a chunk INSERT behind a delete waits on
-    the session FK and fails, holding nothing else.
+    the session FK and fails, holding nothing else. No header is scanned
+    after S: supersession retires only the tokens H returned (a header made
+    after that scan belongs to a newer import, whose cleanup holds it while
+    waiting for S). The accepted token's own header is in that scan: the
+    receive flow installs it and commits before acceptance can start.
   - source commit (``handoff._commit``): N, then its lease and hold runs in
     one sorted lock (``lock_handoff_holds``), then S. Its retry of an already
     transferred move and the cleanup after a refused commit lock only the
@@ -53,6 +61,23 @@ A hand-off publication holds H (and C) for the whole history import. A local
 delete of that chat therefore waits behind it while holding G; that bounded
 wait is the price of one acyclic order (a delete taking H before G formed a
 G -> N -> H -> G cycle with bulk membership and incoming sync deletion).
+
+Every statement that deletes chats or hand-off headers, directly or through
+a foreign key (audit these when adding one; a new path must join the table):
+
+  - ``DELETE FROM sessions``: ``delete_session`` and ``engine.materialize``
+    (above); ``database._retire_assistant_home``, a one-time startup
+    migration for retired assistant conversations, which have no UI or API
+    and so can never start a hand-off: no header exists for its cascade to
+    reach. ``delete_project`` no longer deletes chats itself.
+  - ``ON DELETE CASCADE`` children of ``sessions``: hand-off headers and
+    chunks, plus session-keyed rows that take no lock in this table.
+    ``sessions`` has no cascading parent: projects, agents, API users and
+    worktrees are ``ON DELETE SET NULL``; nothing references the headers.
+  - header deletes: ``handoff._delete_history`` (under H) and publication's
+    own token (under H). Retention and purge jobs never delete chats or
+    headers (their ``sessions`` batches are UPDATEs), and leaving a network
+    deletes only the dependency-free sync and membership tables.
 """
 import threading
 import zlib
