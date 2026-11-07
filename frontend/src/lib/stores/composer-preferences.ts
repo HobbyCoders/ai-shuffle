@@ -196,7 +196,10 @@ function worktreeAdapter(key: string) {
   apply(value: unknown) {
    if (value === null) retiredWorktrees.add(key); else retiredWorktrees.delete(key);
    applyWorktree(key, value ?? undefined); notifyRemote();
-  }};
+  },
+  // Another device's choice won: a held branch move must not land over it,
+  // even when it equals ours (Auto over Auto).
+  conflict() { checkoutRevisions.set(key, (checkoutRevisions.get(key) ?? 0) + 1); }};
 }
 function validWorktreeKey(key: string) {
  try {

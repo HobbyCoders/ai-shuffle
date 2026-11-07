@@ -63,12 +63,15 @@ it('keeps a held branch and its worktree intent when a chain returns to an ident
  expect(server.row(key(ids.M))?.value).toBeNull();
 });
 
-it('never overwrites a choice another device saved over the retired identity', async () => {
+it.each([
+ ['its own branch', {intent:'worktree', checkout:{...ids.N, kind:'branch', branch:'topic/theirs', baseBranch:'main', createNew:false}}],
+ ['Auto, equal to the promoted choice', {intent:'worktree', checkout:null}],
+])('never overwrites a choice another device saved over the retired identity: %s', async (_, theirs) => {
  const {p, key, settle, claim} = await setup();
  p.linkWorktreeProject(ids.N, ids.O); await settle();
  p.linkWorktreeProject(ids.M, ids.N); await settle();
- // Another device picks its own branch under N; this one has not seen it yet.
- const theirs = {intent:'worktree', checkout:{...ids.N, kind:'branch', branch:'topic/theirs', baseBranch:'main', createNew:false}};
+ // Another device saves under N; this one has not seen it yet, so its
+ // promotion back onto N loses the version check.
  server.write(key(ids.N), theirs);
  p.linkWorktreeProject(ids.N, ids.M); await settle();
  claim.release(); await settle();

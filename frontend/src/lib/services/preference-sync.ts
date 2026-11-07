@@ -6,6 +6,9 @@ export interface PreferenceAdapter {
  apply(value: unknown): void; // undefined means reset to defaults
  /** Retired keys: snapshot-only reads, no recreation or alias-addressed GETs. */
  readOnly?: boolean;
+ /** A local save lost a version conflict: another device's write is newer,
+  * even when it equals the local value. Called before the refresh applies it. */
+ conflict?(): void;
 }
 export interface PreferenceTransport {
  all(): Promise<Record<string, unknown>>;
@@ -185,7 +188,7 @@ export class PreferenceSync {
   } catch (error) {
    // A stale snapshot cannot overwrite another device. Reconcile conflicts;
    // retain ordinary transport failures for reconnect or the next local edit.
-   if (epoch === this.epoch && (error as { status?: number }).status === 409) e.pending = undefined;
+   if (epoch === this.epoch && (error as { status?: number }).status === 409) { e.pending = undefined; e.adapter.conflict?.(); }
   }
   finally { if (epoch === this.epoch) e.running = false; }
   // Reconcile response/event ordering from the source of truth after the queue drains.
