@@ -676,7 +676,8 @@
 	let callAvailable = $state(false);
 	const circles = $derived(composerCircles({
 		callAvailable,
-		hasContent: hasMessageContent,
+		// A send just went from here: Send keeps its seat (holdSendCircle).
+		hasContent: hasMessageContent || sendCircleHolds > 0,
 		working: stoppableWork,
 		busy: $activeSession.isCreatingWorktree || heldForCatalog || heldForSetup
 	}));
@@ -1017,13 +1018,35 @@
 	// Held until the composer is cleared, so a new message may go at once.
 	let submitPending = false;
 
+	// Send clears the composer at the click, and an empty composer offers Talk
+	// in Send's place. The Send circle keeps the slot through a double click's
+	// window, and until the send has passed its checks, so the second click of
+	// a double click on Send cannot start a call.
+	const DOUBLE_ACTIVATION_MS = 500;
+	let sendCircleHolds = $state(0);
+	function holdSendCircle(): () => void {
+		sendCircleHolds += 1;
+		let windowOver = false;
+		let sendSettled = false;
+		let held = true;
+		const end = () => {
+			if (!held || !windowOver || !sendSettled) return;
+			held = false;
+			sendCircleHolds -= 1;
+		};
+		setTimeout(() => { windowOver = true; end(); }, DOUBLE_ACTIVATION_MS);
+		return () => { sendSettled = true; end(); };
+	}
+
 	async function handleSubmit(compactBeforeSend = false) {
 		if (submitPending) return;
 		submitPending = true;
+		const releaseSendCircle = holdSendCircle();
 		try {
-			await submitComposer(compactBeforeSend, () => { submitPending = false; });
+			await submitComposer(compactBeforeSend, () => { submitPending = false; releaseSendCircle(); });
 		} finally {
 			submitPending = false;
+			releaseSendCircle();
 		}
 	}
 
