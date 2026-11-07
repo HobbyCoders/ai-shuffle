@@ -159,6 +159,10 @@ export interface MessageHandlerDeps {
  */
 export const SESSION_LIST_RELOAD_DEBOUNCE_MS = 700;
 
+/** A send the owner may have taken with its answer lost (`maybe_applied`). */
+export const SEND_MAYBE_APPLIED_MESSAGE =
+	'The worker that runs this chat did not answer in time. Your message may still run.';
+
 /**
  * Fields of a `session_updated` / `user_session_updated` payload that can be
  * merged straight into the local sidebar row. Everything here is displayed
@@ -1078,15 +1082,25 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// Prefer command identity even when the refusal names another session.
 					const sid = owner ? owner.sessionId : refused ? current.sessionId
 						: typeof data.session_id === 'string' ? data.session_id : null;
+					// The owner may have taken it, its answer lost: not a refusal. Decide
+					// that before anything treats it as one. The send stays unconfirmed:
+					// its chip or row stays, nothing is restored for resending (that would
+					// run it twice), it stays in the run, and later owner snapshots still
+					// apply. Its receipt, a snapshot or an Unsend verdict settles it.
+					if (data.maybe_applied === true) {
+						const hadChip = pendingQueue.answerLost(sid, data.client_message_id);
+						if (sid === getState().sessionId && !hadChip) {
+							update(s => ({ ...s, error: SEND_MAYBE_APPLIED_MESSAGE }));
+						}
+						break;
+					}
 					// Retract/cache the draft before the active-session guard: a refusal
 					// can arrive after switching away from an optimistic idle send.
 					const recovered = feedController.retractOptimisticSend(sid, data.client_message_id);
 					pendingQueue.rejectSend(sid, data.client_message_id, recovered);
-					// A refused send will never run, so a Stop cannot be pressed on it. One
-					// the owner may have applied with its answer lost may still run, so
-					// it stays until its receipt or withdrawal settles it.
+					// A refused send will never run, so a Stop cannot be pressed on it.
 					const refusedId = data.client_message_id;
-					if (data.maybe_applied !== true) update(s => retireSends(s, refusedId));
+					update(s => retireSends(s, refusedId));
 					if (sid !== getState().sessionId) break;
 					const restored = pendingQueue.takeWithdrawnDraft(sid);
 					// Idle sends echo on the transcript, not in the pending queue.

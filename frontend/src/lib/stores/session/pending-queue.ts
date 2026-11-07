@@ -151,6 +151,8 @@ interface CancellationState {
 	drafts: string[];
 	timers: Map<string, ReturnType<typeof setTimeout>>;
 	sends: Map<string, PendingEntry>;
+	/** Command id → marks its send unconfirmed now (the admission timeout, run early). */
+	unconfirm: Map<string, () => void>;
 }
 // Cancellation transactions belong to a session, not its currently mounted
 // feed. A socket verdict can arrive after that feed has been torn down.
@@ -172,7 +174,7 @@ function recoverySend(id: string | null, key: string) {
 function cancellationState(id: string | null): CancellationState {
 	let state = cancellations.get(id);
 	if (!state) {
-		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), terminalVerdicts: new Map(), drafts: [], timers: new Map(), sends: new Map() };
+		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), terminalVerdicts: new Map(), drafts: [], timers: new Map(), sends: new Map(), unconfirm: new Map() };
 		cancellations.set(id, state);
 	}
 	return state;
@@ -400,11 +402,29 @@ export const pendingQueue = {
 		}
 		const state = cancellationState(id);
 		state.sends.set(key, entry);
-		state.timers.set(`send:${key}`, setTimeout(() => {
+		const unconfirm = () => {
+			clearTimeout(state.timers.get(`send:${key}`));
 			state.timers.delete(`send:${key}`);
+			state.unconfirm.delete(key);
 			state.sends.set(key, { ...entry, unconfirmed: true });
 			onTimeout();
-		}, 10_000));
+		};
+		state.unconfirm.set(key, unconfirm);
+		state.timers.set(`send:${key}`, setTimeout(unconfirm, 10_000));
+	},
+
+	/**
+	 * The worker that runs the chat may have taken this send, but its answer was
+	 * lost. That is neither a refusal nor an admission: the send is unconfirmed
+	 * now, exactly as if its admission had timed out. Its chip stays (Unsend
+	 * recovers it through a verdict), its words are not restored, and a later
+	 * owner snapshot, receipt or withdrawal settles it. False for a send with no
+	 * queued chip (an idle transcript echo), which just stays as it is.
+	 */
+	answerLost(id: string | null, key: string): boolean {
+		const unconfirm = cancellations.get(id)?.unconfirm.get(key);
+		unconfirm?.();
+		return !!unconfirm;
 	},
 
 	/** Refusals follow the command's compose, not the socket's current session. */
@@ -432,6 +452,7 @@ export const pendingQueue = {
 		const state = cancellations.get(id);
 		clearTimeout(state?.timers.get(`send:${key}`));
 		state?.timers.delete(`send:${key}`);
+		state?.unconfirm.delete(key);
 		state?.sends.delete(key);
 	},
 

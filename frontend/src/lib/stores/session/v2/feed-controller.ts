@@ -549,6 +549,16 @@ function receiptFor(command: string) {
 	return reducerState.messages.find(m => m.commandId === command && reducerState.messageOriginSeq.has(m.id));
 }
 
+/** The turn of the first of a waiting Stop's sends the feed has receipted; undefined without sends. */
+function turnOfPressedSends(pressedOn: string[] | null | undefined): string | null | undefined {
+	if (!pressedOn?.length) return undefined;
+	for (const command of pressedOn) {
+		const turn = receiptFor(command)?.turnId;
+		if (turn) return turn;
+	}
+	return null;
+}
+
 /**
  * THE RULE: a timed-out Stop's recovery covers exactly one turn, the turn of the
  * send Stop was pressed on. Any other turn ends it. (Which send is chosen in
@@ -721,7 +731,8 @@ function fold(hydrationComplete = false): void {
 		return {
 			...s,
 			...patch,
-			stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true),
+			stopRequestedTurnId: nameStoppedTurn(s.stopRequestedTurnId, reducerState.liveTurnId, patch.isStreaming === true,
+				turnOfPressedSends(s.stopRequestedPressedOn)),
 			stopTimedOutTurnId: nameRecoveryFrom(s, reducerState.liveTurnId),
 			stopTimedOutAfterSeq: pinRecoveryAfter(s),
 			queuedMessages: reconcileQueuedMessages(s.queuedMessages),

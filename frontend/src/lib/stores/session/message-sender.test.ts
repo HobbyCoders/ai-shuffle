@@ -1728,6 +1728,67 @@ describe('Stop timeout recovery', () => {
 				expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
 			});
 
+		// Review round 5 S3: unrelated work arriving BEFORE the timeout. A Stop pressed
+		// with no live turn is named only by the receipt of a send it was pressed on;
+		// a turn U started on another device never claims it, while it waits or after.
+		it.each(['withdrawn while the Stop waits', 'still queued'] as const)(
+			'never lets a turn started elsewhere before the timeout claim a Stop pressed on sends %s', async when => {
+				const test = stopping(null);
+				test.deps.update(s => ({ ...s, isStreaming: false }));
+				feedController.start('sess-1');
+				feed.onEvent!({ type: 'caught_up', seq: 0 });
+				expect(await test.sender.sendMessage('A')).toBe(true);
+				expect(await test.sender.sendMessage('B')).toBe(true);
+				const [a, b] = test.getState().localSendIntent!.commandIds!;
+				test.sender.stopGeneration();
+				expect(test.getState().stopRequestedTurnId).toBe(STOP_TURN_NOT_NAMED);
+				let seq = 0;
+				if (when === 'withdrawn while the Stop waits') {
+					event('queued_message.withdrawn', 'turn-queued-a', ++seq, { command_id: a, message_id: 'turn-queued-a' });
+					event('queued_message.withdrawn', 'turn-queued-b', ++seq, { command_id: b, message_id: 'turn-queued-b' });
+					// Nothing it was pressed on will run: the Stop is over.
+					expect(test.getState().stopRequestedTurnId).toBeNull();
+				}
+				// Another device starts U before the deadline.
+				event('turn.started', 'turn-u', ++seq);
+				event('message.user', 'turn-u', ++seq, { command_id: 'client-from-another-device', content: 'U' });
+				event('assistant.text_delta', 'turn-u', ++seq, { text: 'x' });
+				vi.advanceTimersByTime(300);
+				expect(test.getState().liveTurnId).toBe('turn-u');
+				expect(test.getState().stopRequestedTurnId).not.toBe('turn-u');
+
+				vi.advanceTimersByTime(10000);
+				let state = test.getState();
+				// The timeout leaves U, still running, as it is, and never names it.
+				expect(state.isStreaming).toBe(true);
+				expect(state.stopTimedOutTurnId).not.toBe('turn-u');
+				event('assistant.text_delta', 'turn-u', ++seq, { text: 'y' });
+				vi.advanceTimersByTime(300);
+				state = test.getState();
+				expect(state.stopTimedOutTurnId).toBeNull();
+				// So when U is stopped elsewhere, its rows keep their normal hold.
+				expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
+			});
+
+		it('names a Stop pressed on sends by their receipt even after a turn started elsewhere', async () => {
+			const test = stopping(null);
+			test.deps.update(s => ({ ...s, isStreaming: false }));
+			feedController.start('sess-1');
+			feed.onEvent!({ type: 'caught_up', seq: 0 });
+			expect(await test.sender.sendMessage('A')).toBe(true);
+			const [a] = test.getState().localSendIntent!.commandIds!;
+			test.sender.stopGeneration();
+			event('turn.started', 'turn-u', 1);
+			event('message.user', 'turn-u', 2, { command_id: 'client-from-another-device', content: 'U' });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopRequestedTurnId).toBe(STOP_TURN_NOT_NAMED);
+			event('turn.completed', 'turn-u', 3);
+			event('turn.started', 'turn-a', 4);
+			event('message.user', 'turn-a', 5, { command_id: a, content: 'A' });
+			vi.advanceTimersByTime(300);
+			expect(test.getState().stopRequestedTurnId).toBe('turn-a');
+		});
+
 		// Review round 4 S3: after the timeout, a Stop hands off only within the sends it
 		// was pressed on, never to one sent after it.
 		it('never hands a timed-out Stop to a send made after it', async () => {

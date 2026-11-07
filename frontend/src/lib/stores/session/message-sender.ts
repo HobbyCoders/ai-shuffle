@@ -838,6 +838,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				if (recorded) update(s => ({
 					...s,
 					stopRequestedTurnId: s.liveTurnId ?? STOP_TURN_NOT_NAMED,
+					stopRequestedPressedOn: pressedOn,
 					stopTimedOutTurnId: keepStopRecovery(s.stopTimedOutTurnId, s.liveTurnId),
 				}));
 			} else if (internal.awaitingNewSession) {
@@ -847,7 +848,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// can discard the orphan turn instead of silently dropping the click.
 				internal.stopRequestedBeforeSession = true;
 				recorded = true;
-				update(s => ({ ...s, stopRequestedTurnId: STOP_TURN_NOT_NAMED, stopTimedOutTurnId: null }));
+				update(s => ({ ...s, stopRequestedTurnId: STOP_TURN_NOT_NAMED, stopRequestedPressedOn: pressedOn, stopTimedOutTurnId: null }));
 			}
 
 			const current = stopTimeout.get();
@@ -870,6 +871,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// re-raise isStreaming straight back to true.
 					feedController.clearOptimisticSend(getState().sessionId);
 					update(s => {
+						// A Stop pressed on sends is named only by their receipts (send-run.ts):
+						// a live turn none of them started was begun elsewhere. The feed is
+						// not cut off, and that turn and its rows are left as they are.
+						const unnamed = pressedOn.length > 0 && s.stopRequestedTurnId === STOP_TURN_NOT_NAMED;
+						const leftOn = pressedOn.length ? stillPressedOn(s, _state.sessionId, pressedOn) : [];
+						if (unnamed && s.liveTurnId) {
+							return { ...s, stopTimedOutTurnId: leftOn.length ? STOP_TURN_NOT_NAMED : null,
+								stopTimedOutCommandId: leftOn[0] ?? null, stopTimedOutPressedOn: leftOn,
+								stopTimedOutAfterSeq: pressedAfterSeq };
+						}
 						let messages = s.messages.map(m => {
 							if (m.type === 'tool_use' && m.toolStatus === 'running') return { ...m, streaming: false, toolStatus: 'error' as const };
 							return m.streaming ? { ...m, streaming: false } : m;
@@ -884,7 +895,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						const fallback = newestUser && !newestUser.turnId ? newestUser.commandId ?? null : null;
 						const left = pressedOn.length ? stillPressedOn(s, _state.sessionId, pressedOn)
 							: fallback ? [fallback] : [];
-						const turn = s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED;
+						const turn = unnamed ? STOP_TURN_NOT_NAMED : s.liveTurnId ?? s.stopRequestedTurnId ?? STOP_TURN_NOT_NAMED;
 						// Every send it was pressed on was retired while it waited: none of
 						// them will run, so there is no turn of this page's to recover.
 						const nothingLeft = pressedOn.length > 0 && !left.length && turn === STOP_TURN_NOT_NAMED;

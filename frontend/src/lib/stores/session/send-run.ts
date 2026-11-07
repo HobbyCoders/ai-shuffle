@@ -34,11 +34,14 @@
  *              command a Stop needs is always there; a new run starts with the
  *              next send made while no turn is live.
  *
- * A Stop is pressed on the run's commands without a receipt, from the oldest on,
- * and names the oldest of them. If that command is retired before the Stop names
- * its turn, the next of those takes its place (the send that will now run first);
- * a send made after the Stop never does. When every one is retired, nothing the
- * Stop was pressed on will run, so a recovery still waiting for a turn ends.
+ * A Stop is pressed on the run's commands without a receipt, from the oldest on
+ * (its pressed-on sends), and names the oldest of them. Pressed with no live turn,
+ * it is named only by the receipt of one of its pressed-on sends, while it waits
+ * and after it timed out: a turn started elsewhere never claims it. If that
+ * command is retired first, the next pressed-on send takes its place (the send
+ * that will now run first); a send made after the Stop never does. When every
+ * one is retired, nothing the Stop was pressed on will run: a Stop still waiting
+ * for its turn ends, and so does a timed-out Stop's recovery.
  *
  * Retiring goes by command id alone: ids are unique, so it is safe whichever
  * chat is open when the verdict arrives.
@@ -79,16 +82,19 @@ export function stillPressedOn(s: RunState, sessionId: string | null, pressedOn:
 
 /**
  * The state with `commandIds` retired from the run (withdrawn, refused or
- * failed). A timed-out Stop pressed on a retired command moves to the next send
- * it was pressed on, never to one sent after it; when none is left, a recovery
- * still waiting for a turn ends, since nothing it was pressed on will run.
+ * failed). A Stop pressed on a retired command moves to the next send it was
+ * pressed on, never to one sent after it; when none is left, an unnamed Stop
+ * still waiting ends, and so does a recovery still waiting for a turn, since
+ * nothing it was pressed on will run.
  */
 export function retireSends<S extends Pick<ActiveSessionState, 'localSendIntent'>
-	& Partial<Pick<ActiveSessionState, 'stopTimedOutCommandId' | 'stopTimedOutPressedOn' | 'stopTimedOutTurnId'>>>(s: S,
+	& Partial<Pick<ActiveSessionState, 'stopTimedOutCommandId' | 'stopTimedOutPressedOn' | 'stopTimedOutTurnId'
+		| 'stopRequestedPressedOn' | 'stopRequestedTurnId'>>>(s: S,
 	...commandIds: (string | null | undefined)[]): S {
 	const gone = commandIds.filter((id): id is string => !!id);
 	const run = s.localSendIntent?.commandIds ?? [];
 	const pressedOn = s.stopTimedOutPressedOn ?? [];
+	const waiting = s.stopRequestedPressedOn ?? [];
 	let next = s;
 	if (run.some(id => gone.includes(id))) {
 		next = { ...next, localSendIntent: { ...s.localSendIntent!, commandIds: run.filter(id => !gone.includes(id)) } };
@@ -97,6 +103,11 @@ export function retireSends<S extends Pick<ActiveSessionState, 'localSendIntent'
 		const left = pressedOn.filter(id => !gone.includes(id));
 		next = { ...next, stopTimedOutPressedOn: left, stopTimedOutCommandId: left[0] ?? null,
 			...(!left.length && s.stopTimedOutTurnId === STOP_TURN_NOT_NAMED ? { stopTimedOutTurnId: null } : {}) };
+	}
+	if (waiting.some(id => gone.includes(id))) {
+		const left = waiting.filter(id => !gone.includes(id));
+		next = { ...next, stopRequestedPressedOn: left,
+			...(!left.length && s.stopRequestedTurnId === STOP_TURN_NOT_NAMED ? { stopRequestedTurnId: null } : {}) };
 	}
 	return next;
 }

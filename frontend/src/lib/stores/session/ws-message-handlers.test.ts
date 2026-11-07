@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
 	createMessageHandlers,
 	SESSION_LIST_RELOAD_DEBOUNCE_MS,
+	SEND_MAYBE_APPLIED_MESSAGE,
 	type MessageHandlerDeps,
 	type InternalMutableState,
 } from './ws-message-handlers';
@@ -3076,6 +3077,58 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(state.isStreaming).toBe(true);
 		expect(state.liveTurnId).toBe('real-live');
 		expect(state.streamStartTime).toBe(123);
+	});
+
+	// Review round 5 S5: an error marked `maybe_applied` (the owner took the send, its
+	// answer lost) is not a refusal anywhere: the chip stays, unconfirmed, nothing is
+	// restored for resending, no "not sent" banner, and the owner's late queue
+	// snapshot for it still applies.
+	it('keeps a queued send the owner may have taken, unconfirmed, and lets its late snapshot through', () => {
+		vi.useFakeTimers();
+		vi.mocked(feedController.retractOptimisticSend).mockClear();
+		const b = 'client-' + 'b'.repeat(32);
+		const echo = { id: b, clientMessageId: b, content: 'B words', queuedAt: 1 };
+		const unconfirmed = vi.fn(() => {
+			state = { ...state, queuedMessages: state.queuedMessages.map(m => m.clientMessageId === b ? { ...m, unconfirmed: true } : m) };
+		});
+		pendingQueue.trackSend('session-1', echo, unconfirmed);
+		state = { ...state, queuedMessages: [echo], localSendIntent: { sessionId: 'session-1', revision: 1, commandIds: [b] } };
+
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: b, maybe_applied: true,
+			offer_fork: true, message: 'The worker that runs this session is offline (no answer in time).' });
+		expect(unconfirmed).toHaveBeenCalledTimes(1);
+		expect(state.queuedMessages).toEqual([{ ...echo, unconfirmed: true }]);
+		expect(pendingQueue.reconcile('session-1', state.queuedMessages)).toEqual([{ ...echo, unconfirmed: true }]);
+		expect(feedController.retractOptimisticSend).not.toHaveBeenCalled();
+		expect(state.pendingRestorePrompt).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
+		expect(state.error ?? '').not.toContain('Message not sent');
+		expect(state.localSendIntent?.commandIds).toEqual([b]);
+
+		// The owner's snapshot shows it queued: it applies, and confirms the send.
+		handlers.handleMessage(frame([{ id: 'turn-b', content: 'B words', client_message_id: b }]));
+		expect(pendingIds()).toEqual(['turn-b']);
+		expect(state.queuedMessages[0].unconfirmed).toBeFalsy();
+		vi.advanceTimersByTime(10_000);
+		expect(unconfirmed).toHaveBeenCalledTimes(1);
+		vi.useRealTimers();
+	});
+
+	it('keeps an idle send the owner may have taken on the transcript, without restoring it', () => {
+		vi.mocked(feedController.retractOptimisticSend).mockClear();
+		const sent = { id: 'user-123', role: 'user' as const, content: 'maybe running', commandId: 'client-idle' };
+		pendingQueue.trackSend('session-1', { id: sent.id, clientMessageId: 'client-idle', content: sent.content, queuedAt: 1 });
+		state = { ...state, messages: [sent], queuedMessages: [], isStreaming: true, optimisticStreaming: true,
+			liveTurnId: null, streamStartTime: 123 };
+		handlers.handleMessage({ type: 'error', session_id: 'session-1', client_message_id: 'client-idle', maybe_applied: true,
+			offer_fork: true, message: 'The worker that runs this session is offline (no answer in time).' });
+		expect(state.messages).toEqual([sent]);
+		expect(state.isStreaming).toBe(true);
+		expect(state.optimisticStreaming).toBe(true);
+		expect(state.pendingRestorePrompt).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
+		expect(state.error).toBe(SEND_MAYBE_APPLIED_MESSAGE);
+		expect(feedController.retractOptimisticSend).not.toHaveBeenCalled();
 	});
 
 	it('uses the removal verdict durable id to suppress a delayed pre-receipt snapshot', () => {

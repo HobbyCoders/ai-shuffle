@@ -94,14 +94,21 @@ export function stopPressedOn(requested: string | null | undefined, liveTurnId: 
 	return requested === STOP_TURN_NOT_NAMED || (!!liveTurnId && requested === liveTurnId);
 }
 
-/** The feed names the turn a Stop was for, or ends it. A later turn was never stopped. */
+/**
+ * The feed names the turn a Stop was for, or ends it. A later turn was never stopped.
+ * A Stop pressed on sends of this page's (`pressedTurn` not undefined) is named only
+ * by one of their receipts (`pressedTurn`, null until one shows): any other live
+ * turn was started elsewhere and is not proof that this Stop was for it.
+ */
 export function nameStoppedTurn(
 	requested: string | null | undefined,
 	liveTurnId: string | null,
-	streaming: boolean
+	streaming: boolean,
+	pressedTurn?: string | null
 ): string | null | undefined {
 	if (requested !== STOP_TURN_NOT_NAMED) return requested;
 	if (!streaming) return null;
+	if (pressedTurn !== undefined) return pressedTurn ?? STOP_TURN_NOT_NAMED;
 	return liveTurnId ?? STOP_TURN_NOT_NAMED;
 }
 

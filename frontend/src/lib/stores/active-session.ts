@@ -161,6 +161,9 @@ export interface ActiveSessionState {
 	liveTurnId: string | null;
 	/** The turn this device pressed Stop on, or STOP_TURN_NOT_NAMED before the feed names it (see not-sent-hold). */
 	stopRequestedTurnId?: string | null;
+	/** The sends that waiting Stop was pressed on that may still run, oldest first. An
+	 * unnamed Stop is named only by one of their receipts, and ends when none is left. */
+	stopRequestedPressedOn?: string[] | null;
 	/** This Stop attempt timed out: its turn id, or STOP_TURN_NOT_NAMED until the feed names it.
 	 * Reset by another Stop, a successor, a refused command, or navigation. */
 	stopTimedOutTurnId?: string | null;
