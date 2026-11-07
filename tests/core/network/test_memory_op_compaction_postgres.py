@@ -9,7 +9,6 @@ import json
 import time
 
 import pytest
-from fluid.codemode import transactions
 from fluid.codemode.skills import SkillStore
 
 from app.db import network as store
@@ -29,14 +28,8 @@ SEED_FACTS = 60
 
 
 @pytest.fixture(autouse=True)
-def write_hook(monkeypatch):
-    """The production post-commit hook with fresh coalescing state (#1224).
-
-    Earlier tests in the same process can leave the hook installed, so each
-    test starts from a known state instead of inheriting someone's window.
-    """
-    monkeypatch.setattr(transactions, "_change_callback", None, raising=False)
-    monkeypatch.setattr(memory_records, "_write_window", None)
+def write_hook(_isolate_memory_publisher, monkeypatch):
+    """The production post-commit hook (#1224), on the shared clean publisher state."""
     monkeypatch.setattr(transport, "request_scan", lambda *args, **kwargs: None)
     memory_records.install_write_hook()
 
