@@ -75,9 +75,14 @@
 		filters = { ...DEFAULT_FILTERS };
 	}
 
-	/** The whole meta line, for the tooltip when the phone card cuts it short. */
+	/** Head → base when both are known, else whichever branch there is. */
+	function branchLabel(pr: InboxPullRequest): string {
+		return pr.head_branch && pr.base_branch ? `${pr.head_branch} → ${pr.base_branch}` : pr.head_branch || pr.base_branch || '';
+	}
+
+	/** The whole meta line, for the tooltip when the row cuts it short. */
 	function metaLine(pr: InboxPullRequest): string {
-		return `${pr.repo}#${pr.number} · ${pr.head_branch} → ${pr.base_branch} · by ${pr.author} · ${pr.projects.map((p) => p.name).join(', ')}`;
+		return [branchLabel(pr), `${pr.repo}#${pr.number}`, `by ${pr.author}`, pr.projects.map((p) => p.name).join(', ')].filter(Boolean).join(' · ');
 	}
 
 	function stateLabel(pr: InboxPullRequest): string {
@@ -136,8 +141,8 @@
 										<span>{pr.title}</span><span class="pri-external"><ExternalLink size={12} aria-hidden="true" /></span>
 									</a>
 									<div class="pri-meta" title={metaLine(pr)}>
-										<span class="pri-repo">{pr.repo}#{pr.number}</span>
-										<span class="pri-branch" title="{pr.head_branch} → {pr.base_branch}">{pr.head_branch} → {pr.base_branch}</span>
+										{#if branchLabel(pr)}<span class="pri-branch" title={branchLabel(pr)}>{branchLabel(pr)}</span>{/if}
+										<span class="pri-repo" title="{pr.repo}#{pr.number}">{pr.repo}#{pr.number}</span>
 										<span class="pri-attribution"><span>by {pr.author}</span><span class="pri-projects" title={pr.projects.map((p) => p.name).join(', ')}>{pr.projects.map((p) => p.name).join(', ')}</span></span>
 									</div>
 								</div>
@@ -208,21 +213,25 @@
  .pri-title { display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: start; gap: 6px; width: fit-content; max-width: 100%; font-size: 14px; font-weight: 500; color: var(--st-fg); overflow-wrap: anywhere; }
  .pri-external { display: flex; justify-content: center; padding-top: 3px; }
  .pri-title:hover { color: var(--st-primary); }
- .pri-meta { display: flex; flex-wrap: wrap; row-gap: 4px; margin-top: 4px; color: var(--sidebar-muted); font-size: 12px; overflow-wrap: anywhere; }
+ /* The second line, desktop and phone alike: "branch → base · repo#142 · by
+    author · projects" on ONE line, in the chat rows' second-line grey (12px,
+    --subtle-foreground). The branch leads and gives way last; the repository
+    path ends in an ellipsis first, then the projects, then the author. Every
+    part carries its middot in a 16px seat in front; the row starts 16px early
+    and clips that strip, so the line never starts with "·". */
+ .pri-meta { display: flex; flex-wrap: nowrap; align-items: baseline; min-width: 0; margin-top: 4px; margin-left: -16px; clip-path: inset(0 0 0 16px); color: var(--subtle-foreground); font-size: 12px; line-height: 16px; white-space: nowrap; }
  .pri-attribution { display: contents; }
- /* Desktop: "repo#142 · branch → base · by author · projects", the phone card's
-    middots with about 6px either side (a 16px seat). Every part carries its dot
-    in front; the row starts 16px early and clips that strip, so the part that
-    begins a wrapped line hides its dot and no line ever starts with "·". */
- @media (min-width: 601px) {
-  .pri-meta { margin-left: -16px; clip-path: inset(0 0 0 16px); }
-  .pri-meta > span:not(.pri-attribution), .pri-attribution > span { display: flex; min-width: 0; }
-  .pri-meta > span:not(.pri-attribution)::before, .pri-attribution > span::before { content: '·' / ''; flex: none; width: 16px; text-align: center; font-family: var(--font-sans); }
- }
+ .pri-meta > span:not(.pri-attribution), .pri-attribution > span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+ .pri-meta > span:not(.pri-attribution)::before, .pri-attribution > span::before { content: '·' / ''; display: inline-block; width: 16px; text-align: center; font-family: var(--font-sans); }
+ /* Shrink order: the repository path first, then projects, then the author;
+    the branch last (and never past 70% of the line). */
+ .pri-branch { flex: 0 1 auto; max-width: 70%; }
+ .pri-repo { flex: 0 1000 auto; min-width: calc(16px + 4em); }
+ .pri-attribution > span:first-child { flex: 0 10 auto; }
+ .pri-attribution > .pri-projects { flex: 0 100 auto; }
  /* Checks running: an amber dot in the 14px icon seat, not a hollow ring that reads as "unchecked". */
  .pri-running { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; }
  .pri-running span { width: 8px; height: 8px; border-radius: 50%; background: var(--st-warning); }
- .pri-repo { color: var(--secondary-foreground); }
  .pri-branch { font-family: var(--st-mono); }
  .pri-badges { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; color: var(--st-mfg); font-size: 12px; }
  .pri-chip, .pri-checks { display: inline-flex; align-items: center; gap: 5px; color: var(--st-mfg); white-space: nowrap; }
@@ -231,16 +240,11 @@
  .pri-skipped { margin-top: 24px; color: var(--st-mfg); font-size: 13px; }
  .pri-skipped summary { cursor: pointer; }
  @media (max-width:600px) { .pri-toolbar :global(.st-seg button) { min-height: 44px; padding-inline: 10px; } .pri-filter { min-height: 44px; } .pri-filter-actions button { min-height: 44px; }}
- /* Phone card: title; one meta line "repo#142 · branch → base · by author · projects"
-    that ends in an ellipsis where it runs out (projects, then author, go first);
-    status on one line. */
+ /* Phone card: title; the same one meta line; status on one line. */
  @media (max-width: 600px) {
   .pri-row { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: 12px; row-gap: 6px; align-items: start; }
   .pri-state { padding-top: 2px; }
   .pri-title { width: 100%; }
-  .pri-meta { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
-  .pri-meta > span, .pri-attribution, .pri-attribution > span { display: inline; }
-  .pri-branch::before, .pri-attribution > span::before { content: ' · ' / ''; font-family: var(--font-sans); }
   .pri-badges { grid-column: 2; flex-wrap: nowrap; justify-content: flex-start; min-width: 0; overflow: hidden; }
   .pri-chip, .pri-checks { min-width: 0; }
   .pri-chip > span, .pri-checks > span:last-child { overflow: hidden; text-overflow: ellipsis; }

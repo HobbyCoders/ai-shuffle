@@ -220,11 +220,12 @@ await runJourney({
     expect(row.external.width===20&&row.external.y===row.title.y,'D1: external icon has a fixed top-aligned trailing column');
     if(phone) {
      // Council pass 3 (D6) replaces the three phone lines with one ellipsized
-     // "repo#n · branch → base · by author" line; it never wraps, so a " · " can't lead a line.
+     // meta line; it never wraps, so a " · " can't lead a line.
      expect(row.metaWrap==='nowrap'&&row.meta.height<=row.metaLine*1.5,'D6: phone metadata is one unwrapped line '+JSON.stringify(row));
      expect(Math.abs(row.repo.y-row.branch.y)<=2,'D6: repository and branch share the meta line');
      expect(row.title.y<row.meta.y&&row.meta.y+row.meta.height<=row.badges.y+1,'D6: title, then meta, then status');
-     expect(/#\d+ · .+ → .+ · by /.test(row.metaTitle),'D6: the full meta stays readable in its tooltip');
+     // Council pass 5 (G4) leads the line with the branch: "head → base · repo#n · by author".
+     expect(/^.+ → .+ · .+#\d+ · by /.test(row.metaTitle),'G4: the full branch-first meta stays readable in its tooltip '+row.metaTitle);
     } else {
      // Council pass 4 (S5) separates the desktop parts with middots too. Each part
      // carries its dot in a 16px seat in front, and the meta row starts 16px early
@@ -234,6 +235,9 @@ await runJourney({
      expect(row.clip==='inset(0px 0px 0px 16px)'&&Math.abs(row.metaLeft+16-row.title.x)<=1,'S5: the clipped dot strip sits just left of the title edge '+JSON.stringify({clip:row.clip,metaLeft:row.metaLeft,title:row.title.x}));
      expect(row.parts.every(p=>p.left>=row.metaLeft+16-1||Math.abs(p.left-row.metaLeft)<=1),'D1: wrapping metadata cannot create a leading separator '+JSON.stringify(row.parts));
     }
+    // G4: two lines on every width, the branch first, the repository after it.
+    expect(row.metaWrap==='nowrap'&&row.meta.height<=row.metaLine*1.5,'G4: the meta is one line '+JSON.stringify(row.meta));
+    expect(row.branch.x<row.repo.x&&Math.abs(row.repo.y-row.branch.y)<=2,'G4: the branch leads the meta line');
    }
    if(variant.viewport==='phone')expect(rows[0].external.x===rows[1].external.x,'D1: external-link column stays in the same place');
    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'D1: no horizontal overflow');
