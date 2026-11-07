@@ -87,8 +87,10 @@
 	.panel-filters { display: flex; flex: none; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 8px 8px; }
 	.panel-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 12px; }
 	.panel-body:has(:global(.st-empty-detail)) { display: flex; flex-direction: column; }
-	.panel-body :global(.st-empty-detail) { min-height: 0; flex: none; justify-content: flex-start; padding: 12px; }
-	@media (max-width: 600px) { .panel-body :global(.st-empty-detail) { padding-inline: 0; } }
+	.panel-body :global(.st-empty-detail:not(.list-hero)) { min-height: 0; flex: none; justify-content: flex-start; padding: 12px; }
+	/* A phone list that is truly empty fills the space under the search field. */
+	.panel-body :global(.st-empty-detail.list-hero) { flex: 1; justify-content: center; }
+	@media (max-width: 600px) { .panel-body :global(.st-empty-detail:not(.list-hero)) { padding-inline: 0; } }
 	.panel-filters:not(:has(*)) { display: none; }
 	.view-panel:has(:global(.st-empty-detail)) .panel-search { padding-bottom: 0; }
 	.view-panel:has(:global(.st-empty-detail)) .panel-filters { display: none; }

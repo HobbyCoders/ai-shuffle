@@ -84,7 +84,8 @@
 	// trigger or shrink its height to fit, whichever side has room.
 	const PANEL_PREFERRED_HEIGHT = 346;
 	const PANEL_MIN_HEIGHT = 180;
-	const VIEWPORT_MARGIN = 12;
+	// The panel stops 24px short of whatever edge it opens toward.
+	const VIEWPORT_MARGIN = 24;
 	let openUpward = $state(false);
 	let panelHeight = $state(PANEL_PREFERRED_HEIGHT);
 

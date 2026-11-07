@@ -807,7 +807,7 @@
 		position: fixed;
 		inset: 0;
 		z-index: 140;
-		background: rgb(0 0 0 / 0.5);
+		background: var(--modal-overlay);
 		animation: pa-scrim-in 180ms ease;
 	}
 	@keyframes pa-scrim-in { from { opacity: 0; } to { opacity: 1; } }

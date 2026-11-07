@@ -174,7 +174,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	.view-shell { display: grid; grid-template-columns: var(--view-panel-width, 264px) minmax(0, 1fr); height: 100%; min-height: 0; min-width: 0; }
 	.view-shell[data-docked], .view-shell[data-stacked] { grid-template-columns: minmax(0, 1fr); }
 	.inline-panel { min-height: 0; min-width: 0; border-right: 1px solid var(--sidebar-border); }
-	.view-main-slot { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; container: st-detail / inline-size; }
+	.view-main-slot { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable both-edges; container: st-detail / inline-size; }
 	/* One stable, invisible window-drag band, including when no object is
 	   selected. Sticky so it stays at the top while the detail scrolls; the
 	   negative margin keeps it out of layout. It precedes the controls in

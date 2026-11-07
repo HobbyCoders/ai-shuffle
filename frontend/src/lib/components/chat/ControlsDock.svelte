@@ -127,7 +127,8 @@
 		// the composer. Whenever a usable list fits below, the picker opens 8px under
 		// the composer, right edges aligned, over the empty page and at most the
 		// context row, leaving the headline whole.
-		const roomBelow = card ? window.innerHeight - card.bottom - 20 : 0;
+		// Minus the 8px anchor gap and 24px kept clear of the window bottom.
+		const roomBelow = card ? window.innerHeight - card.bottom - 32 : 0;
 		if (newChat && card && wrapBox && card.width > 0 && roomBelow >= MODEL_MENU_MIN_ROOM) {
 			popoverRoom = Math.max(220, Math.floor(roomBelow));
 			modelMenuAnchor = { top: card.bottom - wrapBox.top + 8, right: wrapBox.right - card.right, width: Math.min(card.width, 380) };
@@ -136,9 +137,15 @@
 		// The model picker clears the whole composer so it never covers what you
 		// are typing. With too little room above (a short window, an open phone
 		// keyboard) it falls back to hanging from the controls row.
-		const top = card && card.width > 0 && card.top - 22 >= MODEL_MENU_MIN_ROOM ? card.top : dockTop;
-		// Minus the 10px anchor gap and a 12px margin from the viewport edge.
-		popoverRoom = Math.max(220, Math.floor(top - 22));
+		// The chat view clips below the top bar, so room above is measured from
+		// the nearest clipping ancestor rather than the window top.
+		let clipTop = 0;
+		for (let node = dockRef.parentElement; node; node = node.parentElement) {
+			if (/^(hidden|clip|auto|scroll)$/.test(getComputedStyle(node).overflowY)) clipTop = Math.max(clipTop, node.getBoundingClientRect().top);
+		}
+		const top = card && card.width > 0 && card.top - clipTop - 34 >= MODEL_MENU_MIN_ROOM ? card.top : dockTop;
+		// Minus the 10px anchor gap and 24px kept clear of the visible edge.
+		popoverRoom = Math.max(220, Math.floor(top - clipTop - 34));
 		const wrap = modelWrapRef?.getBoundingClientRect();
 		modelMenuAnchor = card && wrap && card.width > 0
 			? {
@@ -947,7 +954,7 @@
 		padding: 0;
 		--mpp-width: 100%;
 		/* The list scrolls above the pinned context footer in short viewports. */
-		--mpp-height: min(420px, calc(var(--dock-pop-max, 454px) - 2px));
+		--mpp-height: min(560px, calc(var(--dock-pop-max, 454px) - 2px));
 	}
 
 	/* The panel fills the menu edge to edge, so it follows the menu's corners. */

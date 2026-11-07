@@ -14,6 +14,7 @@
 import { Marked, Renderer, type Tokens } from 'marked';
 import { highlightToInnerHtml, resolveShikiLang } from './shiki';
 import { escapeHtml } from './escape-html';
+import { renderInlineCode } from './inline-code';
 import { registerTable } from './table-export';
 import { commandBlock, registerCommandBlock } from '$lib/terminal/commands';
 
@@ -120,6 +121,8 @@ const chatMarked = new Marked({
 	breaks: true,
 	gfm: true,
 	renderer: {
+		// Short inline code stays one chip on one line (see inline-code.ts).
+		codespan: renderInlineCode,
 		code(token: Tokens.Code): string {
 			return renderCodeBlock(token.text, token.lang, _highlightEnabled);
 		},

@@ -61,7 +61,7 @@ function baseState(): ActiveSessionState {
 	return {
 		sessionId: A, mode: 'code', title: 'A', messages: [], isStreaming: true,
 		liveTurnId: null, liveModel: null, liveRequestedModel: null, liveProvider: null,
-		wsConnected: true, wsReconnectRequired: false, error: null, profile: 'default',
+		wsConnected: true, wsReconnectRequired: false, wsManualReconnect: 'idle', error: null, profile: 'default',
 		sessionProfileId: null, currentQueryProfileId: null, project: '', projectV2Id: null,
 		totalTokensIn: 0, totalTokensOut: 0, totalCacheCreationTokens: 0, totalCacheReadTokens: 0,
 		contextUsed: null, liveContextUsage: null, contextMax: 0, modelOverride: null,

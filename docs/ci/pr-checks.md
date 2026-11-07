@@ -29,7 +29,7 @@ These workflows retain manual dispatch and also run on unfiltered
   credentials; it never installs or updates a production CLI.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
-  tools/WebCrypto vectors, Browser MCP, the ten `UI journeys (N/10)` shards
+  tools/WebCrypto vectors, Browser MCP, the eleven `UI journeys (N/11)` shards
   and `Visual regression (4 viewports)` run in parallel. The stable
   `JavaScript package checks` aggregate requires every branch to succeed, so
   the journeys and the visual comparison are required for merge (see
@@ -950,17 +950,17 @@ and shell overrides on this check, and keeps `contracts` in both the aggregate's
 `needs` and its expected-results list.
 This validates selection metadata; the journey shards still run every journey.
 
-`UI journeys (N/10)`: each shard installs the Python and JavaScript
+`UI journeys (N/11)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
 playwright-core build, cached), builds and stamps the desktop UI, then runs
-`python -m scripts.devloop.ci journeys --shard N/10 --retry-failures`. That starts a fresh dev
+`python -m scripts.devloop.ci journeys --shard N/11 --retry-failures`. That starts a fresh dev
 instance (`python -m scripts.devloop up --ci`: real app, its own throwaway
 PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
 scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
-`down`. The plan step splits the journey files across the ten shards by
+`down`. The plan step splits the journey files across the eleven shards by
 measured hosted runtime, longest first, each file exactly once
-(`python -m scripts.devloop.ci plan --shards 10`). The checked-in medians are
+(`python -m scripts.devloop.ci plan --shards 11`). The checked-in medians are
 in `scripts/devloop/journey_weights.json`, when the current unfiltered `--list`
 case count matches the recorded inventory. New files and changed case counts
 use the current count times the measured median seconds per case, with explicit
@@ -977,16 +977,23 @@ job log and step summary (excluding instance setup/teardown); stdout remains
 the JSON partition consumed by the workflow. A shard with no file stops after
 the plan, and a plan with no journey file at all fails.
 
-Ten standard-runner shards target at most 18.5 minutes of journey runtime plus
-30 seconds for instance startup, so the first pass ends by minute 19 of the
+Eleven free standard-runner shards target at most 18.5 minutes of journey runtime
+plus 30 seconds for instance startup, so the first pass ends by minute 19 of the
 25-minute step. This leaves the full 180-second retry window before the minute-22
-teardown cutoff; the step deadline and retry rules are unchanged. The combined
-49-file, 847-case plan retains the measured 12-case Plan journey (280.91 seconds)
-and the new heavy producer's conservative unmeasured floor (1080 seconds), for
-10662.02 estimated seconds: more than nine shards' combined 9990-second first-pass
-budget. Ten free standard shards cap the estimated load at 1080.19 seconds while
-preserving both runtime guards. These are static planning estimates, not new
-hosted measurements; checked-in measured weights and retry rules are unchanged.
+teardown cutoff, with 180 seconds reserved for teardown. The 1110-second journey
+bound, setup allowance, step deadline and retry rules are unchanged.
+
+At revision `ba7e29e16`, the 55-file, 930-case plan totals 10897.10 estimated seconds.
+Ten shards peak at 1096.30 seconds, or 1106.45 seconds after a 1% weight refresh:
+just 3.55 seconds below the bound. Eleven shards peak at 1081.40 seconds, or
+1092.21 seconds after that refresh, leaving 17.79 seconds. Adding the two journeys
+from #1211 (12 cases, 117.36 estimated seconds) still fits eleven shards at the
+same maximum; ten shards would fail the refreshed bound at 1118.26 seconds.
+Twelve shards cannot reduce that maximum further: the largest journey file is
+indivisible. Eleven therefore restores capacity for new journeys with only one
+extra runner/setup, rather than two. These are static planning estimates, not
+new hosted measurements; checked-in measured weights and historical calibration
+stay unchanged. Measured hosted step-time headroom remains tracked in #1197.
 
 Refresh after journey runtime changes, using a few recent completed green
 `main-suite.yml` and `ci-frontend.yml` run IDs with authenticated `gh`:

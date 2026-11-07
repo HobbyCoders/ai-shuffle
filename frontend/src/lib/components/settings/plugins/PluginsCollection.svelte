@@ -7,7 +7,7 @@
 	 * Settings access.
 	 */
 	import { onMount, untrack } from 'svelte';
-	import { Puzzle } from 'lucide-svelte';
+	import { Plus, Puzzle } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { FORBIDDEN_TEXT, getSettingsAccess } from '$lib/settings/access.svelte';
@@ -15,7 +15,6 @@
 	import EmptyDetail from '../shell/EmptyDetail.svelte';
 	import ListItem from '../rows/ListItem.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
-	import SettingRow from '../rows/SettingRow.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import { PluginsModel, parseItem, plural, setPluginsModel, type PluginEntry } from './plugins-model.svelte';
 	import { EXPLORE_ICON, PACKAGE_ICON, PROJECTS_ICON, REVIEW_ICON, SOURCES_ICON, connectionIcon } from './icons';
@@ -184,11 +183,16 @@
 		{#if model.loading}
 			<p class="st-empty" role="status">Loading plugins…</p>
 		{:else if !model.forbidden && !model.error && installedCount === 0 && !q}
-			<div class="st-card"><SettingRow label="Nothing added yet." /></div>
+			<!-- Full on desktop while the list is the whole page; a muted line beside an open detail. -->
+			<EmptyDetail icon={Puzzle} title="No plugins yet" message="Plugins add skills, commands and connected apps to your agents." full={!selected}>
+				{#if !access.readOnly}<button type="button" class="st-btn primary" onclick={() => settingsNav.selectItem('explore', CATEGORY)}><Plus />Add plugin</button>{/if}
+			</EmptyDetail>
 		{:else if q && !groups.length && !showExplore && !showSources && !showProjects}
 			<EmptyDetail message={`No plugin matches “${filter.trim()}”.`} actionLabel="Clear search" onAction={() => filter = ''} />
 		{/if}
-		{#if showExplore || showSources || showProjects}
+		<!-- More waits for the first load so the list's own content (rows or the
+		     empty state) lands above it without pushing it down. -->
+		{#if !model.loading && (showExplore || showSources || showProjects)}
 			<RowGroup title="More">
 			{#if showExplore}
 				<ListItem variant="card"

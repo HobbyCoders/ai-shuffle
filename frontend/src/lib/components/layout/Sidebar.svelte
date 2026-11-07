@@ -844,18 +844,21 @@
 
 		<div class="p-top">
 			<header class="p-head">
+				<!-- Same order as every other panel: [title][toggle] … [actions]. -->
 				<span class="p-title">Chats</span>
 				<PanelToggle />
-				<!-- The phone drawer keeps its header controls; desktop has one copy in the rail. -->
-				{#if phone}{@render globalControls(false)}{/if}
-				{#if phone}
-					<button class="icon-btn p-new" type="button" aria-label={newLabel} onclick={() => { sheet = null; cancelSelection(); onNewSession(); }}>
-						<SquarePen size={20} strokeWidth={1.75} />
-					</button>
-				{/if}
-				{#if headerAction}
-					{@render headerAction()}
-				{/if}
+				<div class="p-actions">
+					<!-- The phone drawer keeps its header controls; desktop has one copy in the rail. -->
+					{#if phone}{@render globalControls(false)}{/if}
+					{#if phone}
+						<button class="icon-btn p-new" type="button" aria-label={newLabel} onclick={() => { sheet = null; cancelSelection(); onNewSession(); }}>
+							<SquarePen size={20} strokeWidth={1.75} />
+						</button>
+					{/if}
+					{#if headerAction}
+						{@render headerAction()}
+					{/if}
+				</div>
 			</header>
 
 			<div class="searchrow">
@@ -1057,8 +1060,10 @@
 	   notification panel below the rows. */
 	.p-top { flex: none; position: relative; padding: 0 8px; background: var(--sidebar); }
 	.phone .p-top { padding-top: env(safe-area-inset-top, 0px); }
-	.p-head { display: flex; align-items: center; gap: 2px; height: 52px; }
-	.p-title { margin-right: auto; padding-left: 12px; font-size: 16px; font-weight: 600; letter-spacing: -0.005em; color: var(--sidebar-foreground); }
+	/* ViewPanel's header geometry: 20px title inset, 8px gap, actions pushed right. */
+	.p-head { display: flex; align-items: center; gap: 8px; height: 52px; }
+	.p-title { min-width: 0; padding-left: 12px; font-size: 16px; font-weight: 600; line-height: 1.5; letter-spacing: -0.005em; color: var(--sidebar-foreground); }
+	.p-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; }
 
 	/* The bell is shared with the top bars, where it is right-anchored under a
 	   wide header. Inside the panel that anchor puts most of it off the left
@@ -1182,7 +1187,10 @@
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-strong) transparent;
 	}
-	.phone .list { padding-bottom: 24px; }
+	/* The phone card is 4px wider inside (10px inset, 8px gap) than the shared
+	   row, so a 4px list inset puts section labels on the 16px page gutter and
+	   titles at 38, the same x as the Notes, Agents and Projects lists. */
+	.phone .list { padding-left: 4px; padding-bottom: 24px; }
 	/* The mobile drawer is the full screen wide, and Android reserves the
 	   outer ~24dp of each edge for its back gesture. A swipe rail flush with
 	   that edge got taken for a back swipe, and taps on its outer half went

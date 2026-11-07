@@ -205,6 +205,10 @@ interface SendMessageOptions {
 	skipMessageAppend?: boolean;
 	pendingUploadPaths?: string[];
 	compactFirst?: boolean;
+	/** The composer's check that the user is still where they sent from
+	 *  (send-destination.ts). Read once the send knows its target; false
+	 *  sends nothing, sets no error, and the caller keeps the draft (#1077). */
+	stillAtDestination?: () => boolean;
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -419,6 +423,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					return false;
 				}
 			}
+			// New chat or a switch during that wait: the target below would be
+			// the view the user moved to, not the chat they wrote in.
+			if (options?.stillAtDestination && !options.stillAtDestination()) return false;
 
 			const _state = getState();
 			// The call button is creating this compose's session right now. A

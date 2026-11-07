@@ -25,7 +25,7 @@ import type { SdkContextUsage } from '$lib/api/sessions';
 import type { LiveCompaction } from './session/v2/reducer';
 
 // Session infrastructure
-import { createWsConnection, type WsConnection } from './session/ws-connection';
+import { createWsConnection, type WsConnection, type ManualReconnectState } from './session/ws-connection';
 import { createMessageHandlers, type InternalMutableState } from './session/ws-message-handlers';
 import {
 	createSessionSwitcher,
@@ -198,6 +198,10 @@ export interface ActiveSessionState {
 	liveCompaction?: LiveCompaction | null;
 	wsConnected: boolean;
 	wsReconnectRequired: boolean;
+	/** The user's own Reconnect tap: `connecting` while that handshake runs (the
+	 *  control shows busy and ignores further taps), `failed` once it was lost
+	 *  before opening, `idle` otherwise. A successful connect resets it. */
+	wsManualReconnect: ManualReconnectState;
 	error: string | null;
 	/** Session the server offered to fork locally: an `error` frame with
 	 *  `offer_fork` means the worker that owns the session is unreachable.
@@ -417,6 +421,7 @@ function defaultState(): ActiveSessionState {
 		liveCompaction: null,
 		wsConnected: false,
 		wsReconnectRequired: false,
+		wsManualReconnect: 'idle',
 		error: null,
 		forkOfferSessionId: null,
 		profile: getPersistedProfile(),
@@ -579,7 +584,7 @@ const wsConn: WsConnection = createWsConnection({
 		if (acceptUserEvent(data, 'chat')) handleMessage(data);
 	},
 	onConnected: () => {
-		_update(s => ({ ...s, wsConnected: true, wsReconnectRequired: false, error: null }));
+		_update(s => ({ ...s, wsConnected: true, wsReconnectRequired: false, wsManualReconnect: 'idle', error: null }));
 
 		// A WS (re)connect means the backend is reachable again — heal a boot-time
 		// model-registry hydration failure (page booted during a restart window).
@@ -650,8 +655,9 @@ const wsConn: WsConnection = createWsConnection({
 			// does not mean session history is loaded.
 		}
 	},
-	onDisconnected: (code, _reason, _wasClean) => {
-		_update(s => ({ ...s, wsConnected: false }));
+	onDisconnected: (code, _reason, wasClean) => {
+		// An intentional disconnect ends any manual attempt with it.
+		_update(s => ({ ...s, wsConnected: false, ...(wasClean ? { wsManualReconnect: 'idle' as const } : {}) }));
 
 		// The feed controller owns reconnect (SSE backoff + visibility/online
 		// revive), so a WS drop needs no polling revival here.
@@ -670,10 +676,14 @@ const wsConn: WsConnection = createWsConnection({
 		return _state.isStreaming;
 	},
 	hasPendingTools: () => internal.pendingTools.size > 0,
+	onManualReconnectFailed: () => {
+		_update(s => ({ ...s, wsManualReconnect: 'failed' }));
+	},
 	onMaxReconnectAttempts: () => {
 		// No connection means the restore fetch will never happen — release any
 		// pending sendMessage waiters so they fail fast instead of timing out.
-		_update(s => ({ ...s, error: 'Connection lost. Please refresh the page.', isRestoringSession: false }));
+		// Automatic retries have stopped: say so instead of "still retrying".
+		_update(s => ({ ...s, error: 'Connection lost. Please refresh the page.', wsReconnectRequired: true, isRestoringSession: false }));
 	},
 	// The SSE feed self-revives on visibilitychange/online (see sse-feed.ts), so
 	// no visibility-driven polling is wired here.
@@ -714,7 +724,7 @@ function disconnect() {
 	if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
 
 	wsConn.disconnect();
-	_update(s => ({ ...s, wsConnected: false }));
+	_update(s => ({ ...s, wsConnected: false, wsManualReconnect: 'idle' }));
 }
 
 // ─── WebSocket Message Handler (extracted to session/ws-message-handlers.ts) ─
@@ -1039,7 +1049,7 @@ export const activeSession = {
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
 
-	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean }) =>
+	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean; stillAtDestination?: () => boolean }) =>
 		messageSender.sendMessage(prompt, options),
 
 	stopGeneration: () => messageSender.stopGeneration(),
@@ -1561,7 +1571,22 @@ export const activeSession = {
 	 * reports OPEN/CONNECTING. The independent transcript feed keeps running.
 	 */
 	reconnect: () => {
-		wsConn.reconnect();
+		// One manual handshake at a time: a second tap would kill the attempt
+		// still in flight, which a slow server never gets to finish. The
+		// attempt always ends (open, close, or the connect timeout).
+		if (_state.wsManualReconnect === 'connecting') return;
+		_update(s => ({ ...s, wsManualReconnect: 'connecting' }));
+		let started = false;
+		try {
+			started = wsConn.reconnect();
+		} catch (e) {
+			console.error('[ActiveSession] Manual reconnect failed to start:', e);
+		}
+		// Nothing started: report it rather than leave the control busy (unless
+		// the socket layer already settled the attempt).
+		if (!started) {
+			_update(s => (s.wsManualReconnect === 'connecting' ? { ...s, wsManualReconnect: 'failed' } : s));
+		}
 	},
 
 	// ── Getters for derived stores ──────────────────────────────────

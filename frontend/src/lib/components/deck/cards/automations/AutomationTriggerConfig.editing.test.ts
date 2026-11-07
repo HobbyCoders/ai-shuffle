@@ -44,7 +44,22 @@ describe('cron triggers', () => {
 		expect(lastTriggers(onUpdateTriggers)).toEqual([{ type: 'cron', config: { expression: '0 9 * * 1-5' } }]);
 		expect(await screen.findByRole('heading', { name: 'Every weekday at 9 AM' })).toBeTruthy();
 		expect(document.querySelector('.cron-summary-text')).toBeNull();
+		// A preset shows its friendly name; the raw expression waits behind Advanced.
+		expect(screen.queryByLabelText('Cron expression')).toBeNull();
+		const advanced = screen.getByRole('button', { name: 'Show expression' });
+		expect(advanced.getAttribute('aria-expanded')).toBe('false');
+		await fireEvent.click(advanced);
+		expect(screen.getByRole('button', { name: 'Hide expression' }).getAttribute('aria-expanded')).toBe('true');
 		expect((screen.getByLabelText('Cron expression') as HTMLInputElement).value).toBe('0 9 * * 1-5');
+		expect(screen.getAllByText('Timezone: Europe/Berlin')).toHaveLength(1);
+	});
+
+	it('shows a custom expression with its plain-language preview and timezone, without an Advanced row', () => {
+		mount([{ type: 'cron', config: { expression: '30 14 * * *' } }]);
+		expect((screen.getByLabelText('Cron expression') as HTMLInputElement).value).toBe('30 14 * * *');
+		expect(screen.getByText('At 2:30 PM', { selector: '.cron-summary-text' })).toBeTruthy();
+		expect(screen.getByText('Timezone: Europe/Berlin')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /expression$/ })).toBeNull();
 	});
 
 	it('builds the custom expression from the field just changed, not the previous value', async () => {
@@ -63,6 +78,7 @@ describe('cron triggers', () => {
 
 	it('flags a malformed raw expression and switches back to presets for a known one', async () => {
 		const { onUpdateTriggers } = mount([{ type: 'cron', config: { expression: '0 9 * * *' } }]);
+		await fireEvent.click(screen.getByRole('button', { name: 'Show expression' }));
 		const raw = screen.getByPlaceholderText('0 9 * * *') as HTMLInputElement;
 		await fireEvent.input(raw, { target: { value: '0 9 * *' } });
 		expect(lastTriggers(onUpdateTriggers)[0].config.expression).toBe('0 9 * *');
@@ -71,6 +87,30 @@ describe('cron triggers', () => {
 		await fireEvent.input(raw, { target: { value: '*/15 * * * *' } });
 		expect(await screen.findByDisplayValue('Every 15 minutes')).toBeTruthy();
 		expect(screen.queryByLabelText('Minute')).toBeNull();
+		// The same field stayed mounted through both mode switches.
+		expect(screen.getByPlaceholderText('0 9 * * *')).toBe(raw);
+	});
+
+	it('keeps a custom expression field mounted and focused when an edit turns it into a preset', async () => {
+		// Starts in custom mode, with no "Show expression" click first.
+		const { onUpdateTriggers } = mount([{ type: 'cron', config: { expression: '0 19 * * *' } }]);
+		const raw = screen.getByLabelText('Cron expression') as HTMLInputElement;
+		raw.focus();
+		expect(document.activeElement).toBe(raw);
+		// Delete the "1" from the hour: 0 9 * * * is the daily preset.
+		await fireEvent.input(raw, { target: { value: '0 9 * * *' } });
+		expect(lastTriggers(onUpdateTriggers)[0].config.expression).toBe('0 9 * * *');
+		expect(await screen.findByDisplayValue('Every day at 9 AM')).toBeTruthy();
+		expect(screen.queryByLabelText('Minute')).toBeNull(); // the preset view now
+		expect(screen.getByLabelText('Cron expression')).toBe(raw);
+		expect(raw.isConnected).toBe(true);
+		expect(document.activeElement).toBe(raw);
+		expect(screen.getByRole('button', { name: 'Hide expression' }).getAttribute('aria-expanded')).toBe('true');
+		// Typing on back into a custom one keeps the same field too.
+		await fireEvent.input(raw, { target: { value: '0 19 * * *' } });
+		expect(await screen.findByLabelText('Minute')).toBeTruthy();
+		expect(screen.getByLabelText('Cron expression')).toBe(raw);
+		expect(document.activeElement).toBe(raw);
 	});
 });
 

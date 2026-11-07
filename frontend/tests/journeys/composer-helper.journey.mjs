@@ -52,7 +52,9 @@ await runJourney({
 			// dispatched. This is driver scheduling, not a mocked editor/locator:
 			// the real keyboard API still inserts into the production Tiptap.
 			page.keyboard.insertText = async value => {
-				if (input.picker) {
+				// Gate the literal newline this regression exercises, not the
+				// helper's later bulk middle after that newline closed the menu.
+				if (input.picker && value === '\n') {
 					await page.getByRole('listbox', { name: input.picker, exact: true }).getByRole('option').first().waitFor();
 					pickerSeen = true;
 				}

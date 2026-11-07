@@ -6,12 +6,11 @@
  --st-input: var(--field-border); --st-field: var(--field-bg);
  --st-primary: var(--primary); --st-primary-soft: color-mix(in oklch, var(--primary) 13%, transparent);
  --st-radius-md: var(--radius); --st-radius-sm: calc(var(--radius) - 2px); --st-border: var(--border); --st-border-strong: var(--border-strong);
- --ui-dialog-shadow: 0 14px 40px color-mix(in oklch, var(--foreground) 14%, transparent), 0 0 0 1px color-mix(in oklch, var(--foreground) 16%, transparent);
+ --ui-dialog-shadow: var(--shadow-dialog), 0 0 0 1px color-mix(in oklch, var(--foreground) 16%, transparent);
  color: var(--foreground); font-family: var(--font-sans); font-size: 13px; line-height: 1.5;
 }
-.dark .ui-surface { --ui-dialog-shadow: 0 14px 40px color-mix(in oklch, var(--background) 70%, transparent), 0 0 0 1px color-mix(in oklch, var(--foreground) 16%, transparent); }
 .ui-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; }
-.ui-scrim { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; padding: 0; background: color-mix(in oklch, var(--background) 62%, transparent); backdrop-filter: blur(3px); }
+.ui-scrim { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; padding: 0; background: var(--modal-overlay); backdrop-filter: blur(var(--modal-blur, 2px)); }
 .ui-dialog { position: relative; width: min(var(--ui-dialog-width, 520px), 100%); min-width: 0; max-height: 100%; display: flex; flex-direction: column; overflow: auto; background: var(--popover); border-radius: calc(var(--radius) + 8px); box-shadow: var(--ui-dialog-shadow); animation: ui-dialog-in 180ms ease-out; }
 .ui-dialog:focus { outline: none; }
 .ui-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 18px 18px 6px 20px; flex: none; }
@@ -29,6 +28,8 @@
 .ui-button.icon { width: 32px; padding: 0; flex: none; }
 .ui-button:active:not(:disabled) { transform: translateY(1px); }
 .ui-button:disabled { opacity: .5; cursor: not-allowed; }
+/* A disabled primary is the primary colour faded, not a solid grey (app.css token). */
+.ui-button.primary:disabled { opacity: var(--action-disabled-opacity, .4); }
 .ui-surface :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .ui-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .ui-label { font-size: 12px; font-weight: 500; color: var(--muted-foreground); }

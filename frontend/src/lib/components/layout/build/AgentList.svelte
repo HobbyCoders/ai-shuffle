@@ -74,7 +74,7 @@
 		onselect={() => onSelect(p)}
 	>
 		{#snippet lead()}
-			<AgentAvatar avatar={avatarOf(p.id)} size={32} color={colorOf(p)} neutral={p.is_builtin} />
+			<AgentAvatar avatar={avatarOf(p.id)} size={20} color={colorOf(p)} neutral={p.is_builtin} />
 		{/snippet}
 		{#snippet badges()}
 			{#if p.is_builtin && p.is_modified}<span class="chip warn">Modified</span>{/if}
@@ -108,7 +108,7 @@
 					selected={selectedId === ''}
 					onselect={onSelectDraft}
 				>
-					{#snippet lead()}<AgentAvatar avatar="robot" size={32} color={draft.color} />{/snippet}
+					{#snippet lead()}<AgentAvatar avatar="robot" size={20} color={draft.color} />{/snippet}
 					{#snippet badges()}<span class="chip">Draft</span>{/snippet}
 				</ListItem>
 			{/if}
@@ -166,17 +166,18 @@
 	.sk-lg {
 		padding: 18px 10px 6px;
 	}
+	/* Same geometry as the rows: the 20px avatar centred on the 16px slot, text on the Chats title x. */
 	.sk-row {
 		display: grid;
-		grid-template-columns: 32px 1fr;
-		gap: 12px;
+		grid-template-columns: 20px 1fr;
+		gap: 4px;
 		align-items: center;
-		padding: 12px 10px;
+		padding: 12px 10px 12px 6px;
 	}
 	.sk.a {
-		width: 32px;
-		height: 32px;
-		border-radius: 9px;
+		width: 20px;
+		height: 20px;
+		border-radius: 50%;
 	}
 	.sk.l1 {
 		height: 11px;

@@ -230,8 +230,8 @@
 		inset: 0;
 		width: 100%;
 		height: 100%;
-		background: color-mix(in oklch, var(--background) 80%, transparent);
-		backdrop-filter: blur(4px);
+		background: var(--modal-overlay);
+		backdrop-filter: blur(var(--modal-blur, 2px));
 		border: none;
 		cursor: default;
 		padding: 0;
@@ -250,7 +250,7 @@
 		border: 1px solid var(--border);
 		border-radius: 16px;
 		padding: 28px;
-		box-shadow: var(--shadow-l);
+		box-shadow: var(--shadow-dialog);
 		display: flex;
 		flex-direction: column;
 		gap: 12px;

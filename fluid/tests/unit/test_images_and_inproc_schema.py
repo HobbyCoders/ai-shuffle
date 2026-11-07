@@ -61,6 +61,10 @@ def fake_pil(monkeypatch):
     def open_image(raw: bytes):
         return state["image"]
 
+    # Each fake decoder gives the same bytes a different meaning. Isolate its
+    # memo so one test's synthetic image cannot stand in for another's.
+    monkeypatch.setattr(images, "_cache", images.OrderedDict())
+    monkeypatch.setattr(images, "_cache_bytes", 0)
     monkeypatch.setattr(images, "_open_image", open_image)
     monkeypatch.setattr(images, "_resampling", lambda: "lanczos")
     return state

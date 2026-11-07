@@ -180,7 +180,9 @@
 		{:else if q}
 			<EmptyDetail message="No plugins match your search." actionLabel="Clear" onAction={() => { query = ''; kind = 'all'; }} />
 		{:else}
-			<p class="st-empty">Nothing here yet. Add a source.</p>
+			<EmptyDetail icon={EXPLORE_ICON} title="Nothing to add yet" message="Add a plugin source to browse its plugins here.">
+				{#if !access.readOnly}<button type="button" class="st-btn primary" onclick={() => settingsNav.selectItem('sources', 'plugins')}>Add source</button>{/if}
+			</EmptyDetail>
 		{/if}
 	</RowGroup>
 	{#if skipped.length && kind !== 'connections'}

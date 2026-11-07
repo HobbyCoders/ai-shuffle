@@ -110,7 +110,7 @@
 	.primary { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 46px; border: 0; border-radius: calc(var(--radius, 0.75rem) * 1); background: var(--foreground); color: var(--background); font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; transition: opacity 150ms ease, transform 150ms ease; }
 	.primary:active:not(:disabled) { transform: scale(0.985); }
 	.primary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.primary:disabled { opacity: 0.5; cursor: default; }
+	.primary:disabled { opacity: var(--action-disabled-opacity, 0.4); cursor: not-allowed; }
 	@keyframes spin { to { transform: rotate(360deg); } }
 	@media (max-width: 639px) { .export-btn { width: 44px; height: 44px; } }
 	@media (prefers-reduced-motion: reduce) { .export-btn, .primary { transition: none; } .exports :global(.export-spinner) { animation: none; } }

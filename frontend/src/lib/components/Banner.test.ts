@@ -15,6 +15,23 @@ describe('shared banner controls', () => {
   await fireEvent.click(screen.getByRole('button',{name:'Dismiss'}));
   expect(action).toHaveBeenCalledOnce(); expect(dismiss).toHaveBeenCalledOnce();
  });
+ it('shows a busy action as running: spinner, aria-busy, focusable, taps ignored', async () => {
+  const action = vi.fn();
+  const view = render(Banner, {severity:'warning', message:'Down', action:{label:'Working…',onClick:action,busy:true}});
+  const button = screen.getByRole('button',{name:'Working…'}) as HTMLButtonElement;
+  expect(button.getAttribute('aria-busy')).toBe('true');
+  expect(button.getAttribute('aria-disabled')).toBe('true');
+  expect(button.disabled).toBe(false);
+  expect(button.querySelector('svg')).toBeTruthy();
+  await fireEvent.click(button);
+  expect(action).not.toHaveBeenCalled();
+  await view.rerender({severity:'warning', message:'Down', action:{label:'Retry',onClick:action}});
+  const idle = screen.getByRole('button',{name:'Retry'});
+  expect(idle.getAttribute('aria-busy')).toBeNull();
+  expect(idle.querySelector('svg')).toBeNull();
+  await fireEvent.click(idle);
+  expect(action).toHaveBeenCalledOnce();
+ });
  it('announces non-error banners politely without offering an unwired dismiss control', () => {
   render(Banner, {severity:'info',message:'Ready'});
   expect(screen.getByRole('status').textContent).toContain('Ready');

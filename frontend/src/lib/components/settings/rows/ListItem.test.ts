@@ -22,6 +22,14 @@ describe('shared panel row grammar', () => {
   expect(screen.getByText('Off')).toBeTruthy();
   expect(container.querySelector('.chev')).toBeTruthy();
  });
+ it('puts the marker in the leading slot so list-panel titles share one text edge', () => {
+  const { container } = render(ListItem, { id: 'note', name: 'A pinned note', icon: Pin, selected: false });
+  const lead = container.querySelector('.st-it > .lead');
+  expect(lead?.querySelector('svg')).toBeTruthy();
+  // The title follows the slot as its own grid column, never inside it.
+  expect(lead?.textContent).not.toContain('A pinned note');
+  expect(container.querySelector('.st-it > .tx')?.textContent).toContain('A pinned note');
+ });
  it('exposes one-line navigation density without a page-specific selector', () => {
   render(ListItem, { id: 'open', name: 'Open', rowKind: 'navigation', selected: false });
   expect(screen.getByRole('button').classList.contains('navigation')).toBe(true);

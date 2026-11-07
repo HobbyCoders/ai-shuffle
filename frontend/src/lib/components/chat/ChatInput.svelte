@@ -41,6 +41,7 @@
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
 	import { joinDrafts, restoreMessageDocument } from './tiptap/serialization';
+	import { captureDestination, keepUnsentDraft, movedAwayFrom, noteLeftDraft, putBackUnsent, retirePutBack, SEND_MOVED_MESSAGE, stillAtDestination, type SendDestination } from './send-destination';
 	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
@@ -441,6 +442,9 @@
 		if (newSessionId !== prevSessionId) {
 			// Move capture off the shared editor before replacing its document.
 			detachComposerDictation(editorRef?.getEditor());
+			// A send still waiting for the chat being left keeps this, the newest
+			// text, if it is called off (send-destination.ts).
+			if (editorRef) noteLeftDraft(prevSessionId, getDraftJSON());
 			// Persist the LEAVING session's draft from the live editor before we
 			// overwrite it. Reading the editor directly (not the debounced store
 			// draft) guarantees the text follows the session it was typed in,
@@ -971,8 +975,10 @@
 			const slashContent = inputValue.slice(1);
 			const spaceIndex = slashContent.indexOf(' ');
 			// Dismiss once user types text after a space (they've moved past command selection)
-			// e.g., "/compact " still shows (trailing space only), but "/compact arg" dismisses
-			showCommandAutocomplete = spaceIndex === -1 || slashContent.slice(spaceIndex + 1).trim().length === 0;
+			// e.g., "/compact " still shows (trailing space only), but "/compact arg" dismisses.
+			// A new line (Shift+Enter) also moves past the command.
+			showCommandAutocomplete = !/[\r\n]/.test(slashContent) &&
+				(spaceIndex === -1 || slashContent.slice(spaceIndex + 1).trim().length === 0);
 		} else {
 			showCommandAutocomplete = false;
 		}
@@ -983,8 +989,9 @@
 			const atInfo = extractAtMentionQuery(plainTextValue);
 			if (atInfo) {
 				const query = atInfo.query;
-				if (query.length > 0 && /^\s/.test(query)) {
-					// @ followed immediately by whitespace → not a mention
+				if ((query.length > 0 && /^\s/.test(query)) || /[\r\n]/.test(query)) {
+					// @ followed immediately by whitespace → not a mention; a new line
+					// (Shift+Enter) ends the mention too
 					showFileAutocomplete = false;
 				} else if (!query.includes('/') && query.includes(' ')) {
 					// Root level query contains a space → only keep open if user is typing
@@ -1032,6 +1039,11 @@
 
 	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void) {
 		if (!ownsComposer() || heldForCatalog || heldForSetup || (compacting && !compactBeforeSend)) return;
+		// The chat this message was typed in. The checks below and the store's
+		// restore wait can await; a New chat or chat switch in that window must
+		// not carry the message into the view the user moved to (#1077).
+		const destination = captureDestination(composerPlace());
+		const typedDraft = getDraftJSON();
 		if (projectLane !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
 			if (!(await holdForProjectCatalog())) return;
 		}
@@ -1078,9 +1090,20 @@
 			messageToSend = [finalPrompt.trim(), fileRefs].filter(Boolean).join('\n\n');
 		}
 
+		// The view moved on while a check awaited: keep the words as that chat's
+		// draft, unsent, and say so, instead of sending them to the new view.
+		if (!ownsComposer()) return;
+		if (!stillAtDestination(destination, composerPlace())) {
+			// Still on that chat (it was reopened): the words are in front of
+			// the user, edits included, so only say why nothing went out.
+			if (movedAwayFrom(destination, composerPlace())) keepUnsentDraft(destination, typedDraft, false);
+			else refuseSend(SEND_MOVED_MESSAGE, 'warning');
+			return;
+		}
+
 		// Send the message, optionally queued behind a server-owned compaction.
 		// sendMessage clears the composer before its first await.
-		const sending = sendMessage(messageToSend, compactBeforeSend);
+		const sending = sendMessage(messageToSend, destination, compactBeforeSend);
 		composerCleared();
 		await sending;
 	}
@@ -1127,7 +1150,12 @@
 	// turn still goes out, and the backend decides when the model sees it (mid-turn
 	// steer, or the start of the next turn). Until then it renders as a pending
 	// bubble at the tail of the transcript.
-	async function sendMessage(finalPrompt: string, compactBeforeSend = false) {
+	/** Where this composer is now, for the send-destination checks. */
+	function composerPlace() {
+		return { sessionId: get(activeSession).sessionId, editorOwner: prevSessionId };
+	}
+
+	async function sendMessage(finalPrompt: string, destination: SendDestination, compactBeforeSend = false) {
 		if (!ownsComposer()) return;
 		// Enforce the same capability as the hidden worktree checkbox, even if
 		// remembered intent changes before the context bar's effect has flushed.
@@ -1163,7 +1191,6 @@
 		// Snapshot state needed to restore the input on failure. Capturing BEFORE
 		// clearing means a failed interrupt / dropped WS doesn't lose the user's
 		// typed prompt or uploaded attachments — we repopulate the editor.
-		const sendingSessionId = $activeSession.sessionId;
 		const sendingNavigation = getInitGeneration();
 		// A refusal names its reason by setting the error or worktree banner. One
 		// already showing from an earlier attempt is not that reason, so watch
@@ -1184,8 +1211,10 @@
 		uploadedFiles = [];
 		recall.reset();
 
-		// Clear editor content
+		// Clear editor content. Words an earlier refused send put back go out
+		// with this one.
 		editorRef?.clear();
+		retirePutBack(destination.chat);
 
 		// Clear draft immediately (not debounced) - important because
 		// the component may be destroyed/recreated when isEmptyState changes
@@ -1194,12 +1223,11 @@
 		const restoreOnFailure = () => {
 			if (!ownsComposer()) return;
 			// A move to another view hands the text to the session it was typed
-			// in. A New Chat adopting the session its own create made (a worktree
-			// session whose first message was then refused) is still this view
-			// (#1636).
-			const adoptedOwnSession = sendingSessionId === null && getInitGeneration() === sendingNavigation;
-			if ($activeSession.sessionId !== sendingSessionId && !adoptedOwnSession) {
-				writeDraft(sendingSessionId, priorDraftJSON);
+			// in, with whatever was typed after it, and says so. A New Chat
+			// adopting the session its own create made (a worktree session whose
+			// first message was then refused) is still this view (#1636).
+			if (movedAwayFrom(destination, composerPlace())) {
+				keepUnsentDraft(destination, priorDraftJSON, true);
 				return;
 			}
 			// Every refusal names its reason in the session's error or worktree
@@ -1207,12 +1235,14 @@
 			// earlier attempt's banner standing.
 			const now = get(activeSession);
 			if (!(now.error && reasonSet.error) && !(now.worktreeError && reasonSet.worktreeError)) {
-				refuseSend('Message not sent. Try again.', 'warning');
+				// Left and reopened this chat while the send waited: it was called off.
+				const calledOff = !stillAtDestination(destination, composerPlace(), { adoptedOwnChat: true });
+				refuseSend(calledOff ? SEND_MOVED_MESSAGE : 'Message not sent. Try again.', 'warning');
 			}
 			// A slow create can fail after the user started a new message: put
 			// the refused one back in front of it instead of replacing it.
-			const laterDraft = getDraftJSON();
-			const restored = hasComposerDraft(laterDraft) ? joinDrafts(priorDraftJSON, laterDraft) : priorDraftJSON;
+			// Several refused sends come back in the order they were sent.
+			const restored = putBackUnsent(destination, priorDraftJSON, getDraftJSON());
 			uploadedFiles = [...priorUploadedFiles, ...uploadedFiles];
 			editorRef?.setContent(restored);
 			inputValue = editorRef?.getMessage() ?? priorInputValue;
@@ -1248,12 +1278,13 @@
 		};
 
 		try {
-			const sent = await activeSession.sendMessage(
-				finalPrompt,
-				compactBeforeSend || pendingPaths?.length
-					? { pendingUploadPaths: pendingPaths, ...(compactBeforeSend ? { compactFirst: true } : {}) }
-					: undefined,
-			);
+			const sent = await activeSession.sendMessage(finalPrompt, {
+				...(pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : {}),
+				...(compactBeforeSend ? { compactFirst: true } : {}),
+				// Re-checked once the store knows its target (after a reload's
+				// restore wait); false sends nothing and lands in restoreOnFailure.
+				stillAtDestination: () => stillAtDestination(destination, composerPlace()),
+			});
 			if (sent === false) restoreOnFailure();
 			else if (ownsComposer() && !mobileComposerDestroyed && getInitGeneration() === sendingNavigation) {
 				if (compactBeforeSend) coldNotice = null;
@@ -1954,14 +1985,14 @@
 		display: flex;
 		flex-direction: column;
 		border-radius: var(--radius-composer);
-		border: 1px solid var(--border);
-		background: var(--card);
-		box-shadow: var(--shadow-s);
+		border: 1px solid var(--composer-border, var(--border));
+		background: var(--composer-bg, var(--card));
+		box-shadow: var(--composer-shadow, var(--shadow-s));
 		transition: border-color 0.2s ease;
 	}
 
 	.chat-island:focus-within {
-		border-color: var(--border-strong);
+		border-color: var(--composer-border-focus, var(--border-strong));
 	}
 
 	/* ===== THE EDITOR ROW ===== */

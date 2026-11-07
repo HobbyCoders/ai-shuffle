@@ -160,7 +160,7 @@
 		width: 100%;
 		height: 5px;
 		border-radius: 3px;
-		background: var(--st-muted);
+		background: var(--st-meter-track);
 		overflow: hidden;
 	}
 	.spend-bar i {
