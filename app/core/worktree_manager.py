@@ -26,7 +26,7 @@ from typing import Callable, Optional, Tuple, Dict, Any, List
 from app.core.config import settings
 from app.core.git_cache import _git_cache
 from app.core.git_service import git_service
-from app.core.git_worktree_ops import repo_worktree_lock
+from app.core.git_worktree_ops import WorktreeError, repo_worktree_lock
 from app.core.scrub import strip_url_userinfo
 from app.core.project_utils import (
     get_project_working_dir, get_worktree_working_dir,
@@ -38,11 +38,6 @@ from app.db.async_database import run_sync
 from app.db.base import WorktreeStatus
 
 logger = logging.getLogger(__name__)
-
-
-class WorktreeError(Exception):
-    """Exception raised for worktree creation/management errors with user-friendly messages."""
-    pass
 
 
 def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:

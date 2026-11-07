@@ -4,6 +4,7 @@ Git Worktree Operations Mixin
 Provides worktree management: list, add, remove, and prune worktrees.
 """
 
+import asyncio
 import errno
 import hashlib
 import logging
@@ -41,8 +42,46 @@ def _lock_contention(exc: OSError) -> bool:
     return exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or getattr(exc, "winerror", None) == 33
 
 
+class WorktreeError(Exception):
+    """User-facing worktree management refusal (re-exported by worktree_manager)."""
+
+
+class WorktreeAddError(RuntimeError):
+    """Git attempted a checkout and failed, rather than a missing base/branch."""
+
+
+class WorktreeLockError(WorktreeAddError, WorktreeError, ValueError):
+    """Bounded lock refusal for checkout, legacy-worktree and transfer callers."""
+
+
+WORKTREE_LOCK_TIMEOUT = 60.0
+
+
+def _wait_for_lock(attempt, *, blocking: bool, deadline: float) -> bool:
+    from app.db.async_database import sync_cancelled
+
+    while True:
+        if sync_cancelled():
+            raise asyncio.CancelledError("Checkout lock wait cancelled")
+        if blocking and time.monotonic() >= deadline:
+            raise WorktreeLockError("Timed out waiting for the checkout lock; retry when the other operation finishes.")
+        try:
+            if attempt():
+                return True
+        except OSError as exc:
+            if not _lock_contention(exc):
+                raise
+        if not blocking:
+            return False
+        time.sleep(.1)
+
+
 class _RepositoryLock:
-    """Reentrant per-thread lock plus a stable cross-process metadata lock."""
+    """Reentrant repository lock; all local/OS waits share one deadline.
+
+    run_sync cancellation interrupts waiting, never a critical section already
+    running. Direct synchronous callers are still bounded by the same deadline.
+    """
 
     def __init__(self, common: Path):
         self.common = common
@@ -51,34 +90,41 @@ class _RepositoryLock:
         self.file = None
 
     def acquire(self, blocking: bool = True) -> bool:
-        if not self.thread_lock.acquire(blocking=blocking):
+        # Nested validation is part of the already-running critical section,
+        # not a new wait that cancellation may interrupt halfway through a write.
+        if self.thread_lock.acquire(blocking=False):
+            if self.depth:
+                self.depth += 1
+                return True
+            self.thread_lock.release()
+        deadline = time.monotonic() + WORKTREE_LOCK_TIMEOUT
+        if not _wait_for_lock(lambda: self.thread_lock.acquire(blocking=False),
+                              blocking=blocking, deadline=deadline):
             return False
         try:
             if self.depth == 0 and (self.common / "HEAD").is_file():
                 handle = (self.common / "ai-shuffle-worktrees.lock").open("a+b")
                 try:
-                    if os.name == "nt":
-                        import msvcrt
-                        handle.seek(0)
-                        # LK_LOCK gives up after ten retries. Implement actual
-                        # blocking semantics ourselves, retrying contention only.
-                        while True:
-                            try:
-                                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                                break
-                            except OSError as exc:
-                                if not blocking or not _lock_contention(exc):
-                                    raise
-                                time.sleep(.1)
-                    else:
-                        import fcntl
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-                except OSError as exc:
+                    def try_os_lock():
+                        if os.name == "nt":
+                            import msvcrt
+                            handle.seek(0)
+                            # LK_LOCK has an implicit ten-retry limit. Never use
+                            # a blocking OS primitive: cancellation/deadline must
+                            # be checked between attempts on every platform.
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        else:
+                            import fcntl
+                            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return True
+
+                    if not _wait_for_lock(try_os_lock, blocking=blocking, deadline=deadline):
+                        handle.close()
+                        self.thread_lock.release()
+                        return False
+                except BaseException:
                     handle.close()
-                    if blocking or not _lock_contention(exc):
-                        raise
-                    self.thread_lock.release()
-                    return False
+                    raise
                 self.file = handle
             self.depth += 1
             return True
@@ -120,10 +166,6 @@ def repo_worktree_lock(main_dir: str) -> _RepositoryLock:
         if lock is None:
             lock = _REPO_LOCKS[key] = _RepositoryLock(common)
         return lock
-
-
-class WorktreeAddError(RuntimeError):
-    """Git attempted a checkout and failed, rather than a missing base/branch."""
 
 
 def _is_lfs_failure(stderr: str) -> bool:

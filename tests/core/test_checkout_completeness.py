@@ -833,7 +833,9 @@ def test_windows_repository_lock_waits_past_ten_seconds(base_checkout, monkeypat
 
     monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_LOCK=1, LK_NBLCK=2, locking=locking))
     monkeypatch.setattr(ops, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(ops, "time", SimpleNamespace(sleep=lambda seconds: elapsed.append(seconds)))
+    monkeypatch.setattr(ops, "time", SimpleNamespace(
+        monotonic=lambda: sum(elapsed), sleep=lambda seconds: elapsed.append(seconds),
+    ))
     assert lock.acquire(blocking=blocking) is blocking
     if blocking:
         assert sum(elapsed) > 10
@@ -897,7 +899,9 @@ def test_windows_repository_lock_does_not_retry_noncontention(base_checkout, mon
 
     monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_NBLCK=2, locking=broken))
     monkeypatch.setattr(ops, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(ops, "time", SimpleNamespace(sleep=lambda _: pytest.fail("retried a permanent lock error")))
+    monkeypatch.setattr(ops, "time", SimpleNamespace(
+        monotonic=lambda: 0, sleep=lambda _: pytest.fail("retried a permanent lock error"),
+    ))
     with pytest.raises(OSError, match="not a contention error"):
         lock.acquire(blocking=blocking)
     assert lock.depth == 0 and lock.file is None
@@ -936,3 +940,288 @@ def test_handoff_export_and_worker_restore_refuse_failed_existing_directory(
         assert not ready, "existing-directory shortcut accepted an unfinished checkout"
     assert _snapshot(path) == before
     assert _materializing_marker(base_checkout, path).is_file()
+
+
+@pytest.mark.parametrize("previously_materialized", [False, True])
+@pytest.mark.parametrize("edit", ["delete", "rename"])
+def test_overlapping_resolvers_recheck_publication_before_add(
+    project, base_checkout, workspace_root, monkeypatch, previously_materialized, edit,
+):
+    branch = "fix/overlapping-resolvers"
+    _git(base_checkout, "branch", branch)
+    path = checkout_manager._branch_checkout_path(str(base_checkout), branch)
+    if previously_materialized:
+        assert _resolve(project, branch) == str(path)
+        _git(base_checkout, "worktree", "remove", str(path))
+    ready, release = threading.Event(), threading.Event()
+    original_plan = checkout_manager._branch_plan
+    results, errors = [], []
+
+    def paused_plan(*args, **kwargs):
+        plan = original_plan(*args, **kwargs)
+        if threading.current_thread().name == "slow-resolver":
+            ready.set()
+            assert release.wait(5), "fast resolver did not release the slow resolver"
+        return plan
+
+    def resolve_slowly():
+        try:
+            results.append(_resolve(project, branch, raise_add_errors=True))
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(checkout_manager, "_branch_plan", paused_plan)
+    slow = threading.Thread(target=resolve_slowly, name="slow-resolver")
+    slow.start()
+    try:
+        assert ready.wait(5), errors
+        assert _resolve(project, branch, raise_add_errors=True) == str(path)
+        if edit == "delete":
+            (path / "README.md").unlink()
+        else:
+            _git(path, "mv", "README.md", "RENAMED.md")
+        before = _snapshot(path)
+        published = checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)
+        assert published["status"] == "active"
+    finally:
+        release.set()
+        slow.join(5)
+    assert not slow.is_alive() and not errors, errors
+    assert results == [str(path)]
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch) == published
+    assert _resolve(project, branch, raise_add_errors=True) == str(path)
+    assert _snapshot(path) == before
+    assert not _materializing_marker(base_checkout, path).exists()
+    assert not _failure_marker(path).exists()
+
+
+@pytest.mark.parametrize("stage", ["thread", "windows", "posix"])
+@pytest.mark.parametrize("tracking", ["none", "same-loop", "foreign-loop", "parent-loop"])
+def test_repository_lock_wait_cancelled_without_releasing_owner(
+    base_checkout, monkeypatch, stage, tracking,
+):
+    import asyncio
+    import errno
+    from types import SimpleNamespace
+    from app.core import git_worktree_ops as ops
+    from app.db.async_database import TurnWork, bind_turn_work, run_sync, unbind_turn_work
+
+    if stage == "posix" and os.name == "nt":
+        pytest.skip("native POSIX byte-lock contention; Windows is covered separately")
+    lock = ops._RepositoryLock(base_checkout / ".git")
+    held, release, entered, finished = (threading.Event() for _ in range(4))
+    accepted, cancelled = [], []
+    owner = None
+
+    if stage == "windows":
+        def contended(*args):
+            entered.set()
+            if not release.is_set():
+                raise OSError(errno.EACCES, "another process holds the byte lock")
+
+        monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_NBLCK=2, locking=contended))
+        monkeypatch.setattr(ops, "os", SimpleNamespace(name="nt"))
+    else:
+        owner_lock = lock if stage == "thread" else ops._RepositoryLock(base_checkout / ".git")
+
+        def hold():
+            with owner_lock:
+                held.set()
+                assert release.wait(5), "test failed to release the owner"
+
+        owner = threading.Thread(target=hold)
+        owner.start()
+        assert held.wait(2)
+        if stage == "posix":
+            import fcntl
+            original_flock = fcntl.flock
+
+            def observed_flock(*args):
+                try:
+                    return original_flock(*args)
+                except OSError:
+                    entered.set()
+                    raise
+
+            monkeypatch.setattr(fcntl, "flock", observed_flock)
+        else:
+            original_wait = ops._wait_for_lock
+
+            def observed_wait(*args, **kwargs):
+                entered.set()
+                return original_wait(*args, **kwargs)
+
+            monkeypatch.setattr(ops, "_wait_for_lock", observed_wait)
+
+    def wait():
+        try:
+            with lock:
+                accepted.append(True)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+        finally:
+            finished.set()
+
+    async def cancel_wait():
+        try:
+            # Parent cancellation must reach a nested run_sync on a foreign
+            # loop too, not only the directly-awaited executor function.
+            dispatch = (lambda: asyncio.run(run_sync(wait))) if tracking == "parent-loop" else wait
+            task = asyncio.create_task(run_sync(dispatch))
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            # Cancellation must end the executor work itself, not merely its
+            # awaiter. Keep the live/hung owner locked throughout this assertion.
+            assert finished.wait(.5), "executor waiter survived cancellation"
+            assert cancelled == [True] and not accepted
+            assert not release.is_set()
+        finally:
+            release.set()  # Baseline failures must not hang executor shutdown.
+
+    async def exercise():
+        work = TurnWork() if tracking != "none" else None
+        if work:
+            bind_turn_work(work)
+        try:
+            if tracking == "foreign-loop":
+                await run_sync(lambda: asyncio.run(cancel_wait()))
+            else:
+                await cancel_wait()
+            if work:
+                await asyncio.wait_for(work.drain(), 1)
+                assert not work.pending
+        finally:
+            if work:
+                unbind_turn_work(work)
+
+    try:
+        asyncio.run(exercise())  # Also proves executor shutdown returns.
+    finally:
+        release.set()
+        if owner:
+            owner.join(2)
+            assert not owner.is_alive()
+    assert lock.depth == 0 and lock.file is None
+    assert lock.thread_lock.acquire(blocking=False)
+    lock.thread_lock.release()
+
+
+@pytest.mark.parametrize("stage", ["thread", "windows", "posix"])
+def test_repository_lock_deadline_is_shared_and_typed(base_checkout, monkeypatch, stage):
+    import errno
+    from types import SimpleNamespace
+    from app.core import git_worktree_ops as ops
+    from app.core.worktree_manager import WorktreeError
+
+    if stage == "posix" and os.name == "nt":
+        pytest.skip("POSIX lock implementation")
+    elapsed, released = [], []
+    lock = ops._RepositoryLock(base_checkout / ".git")
+    # Spend half the budget in local contention, then the rest at the OS lock.
+    class LocalContention:
+        def acquire(self, *, blocking):
+            assert not blocking
+            return sum(elapsed) >= .2 if stage != "thread" else False
+
+        def release(self):
+            released.append(True)
+
+    lock.thread_lock = LocalContention()
+    monkeypatch.setattr(ops, "WORKTREE_LOCK_TIMEOUT", .4)
+    monkeypatch.setattr(ops, "time", SimpleNamespace(
+        monotonic=lambda: sum(elapsed), sleep=lambda seconds: elapsed.append(seconds),
+    ))
+
+    def contended(*args):
+        raise OSError(errno.EACCES, "lock held by a live process")
+
+    if stage == "windows":
+        monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_NBLCK=2, locking=contended))
+        monkeypatch.setattr(ops, "os", SimpleNamespace(name="nt"))
+    elif stage == "posix":
+        import fcntl
+        monkeypatch.setattr(fcntl, "flock", contended)
+    with pytest.raises(ops.WorktreeLockError, match="Timed out waiting for the checkout lock") as error:
+        lock.acquire()
+    assert isinstance(error.value, WorktreeAddError)
+    assert isinstance(error.value, WorktreeError) and isinstance(error.value, ValueError)
+    assert sum(elapsed) == pytest.approx(.4), "OS wait reset the local wait's deadline"
+    assert released == ([] if stage == "thread" else [True])
+    assert lock.depth == 0 and lock.file is None
+
+
+def test_checkout_lock_timeout_does_not_invalidate_published_row(
+    project, base_checkout, workspace_root, monkeypatch,
+):
+    from types import SimpleNamespace
+    from app.core import git_worktree_ops as ops
+
+    branch = "fix/lock-timeout"
+    _git(base_checkout, "branch", branch)
+    path = Path(_resolve(project, branch))
+    (path / "README.md").unlink()
+    before, row = _snapshot(path), checkouts_db.get_checkout(project["id"], RUNNER, branch=branch)
+    lock = ops.repo_worktree_lock(str(base_checkout))
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with lock:
+            held.set()
+            assert release.wait(5)
+
+    owner = threading.Thread(target=hold)
+    owner.start()
+    try:
+        assert held.wait(2)
+        elapsed = []
+        monkeypatch.setattr(ops, "WORKTREE_LOCK_TIMEOUT", .2)
+        monkeypatch.setattr(ops, "time", SimpleNamespace(
+            monotonic=lambda: sum(elapsed), sleep=lambda seconds: elapsed.append(seconds),
+        ))
+        assert _resolve(project, branch) is None
+        with pytest.raises(ops.WorktreeLockError, match="checkout lock"):
+            _resolve(project, branch, raise_add_errors=True)
+    finally:
+        release.set()
+        owner.join(2)
+    assert not owner.is_alive()
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch=branch) == row
+    assert _snapshot(path) == before
+
+
+def test_cancellation_does_not_interrupt_nested_checkout_critical_section(base_checkout):
+    import asyncio
+    from app.core import git_worktree_ops as ops
+    from app.db.async_database import run_sync
+
+    lock = ops._RepositoryLock(base_checkout / ".git")
+    held, release, finished = threading.Event(), threading.Event(), threading.Event()
+    completed = []
+
+    def write():
+        try:
+            with lock:
+                held.set()
+                assert release.wait(2)
+                with lock:
+                    completed.append(True)
+        finally:
+            finished.set()
+
+    async def exercise():
+        task = asyncio.create_task(run_sync(write))
+        try:
+            assert await asyncio.to_thread(held.wait, 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+        assert finished.wait(1)
+
+    asyncio.run(exercise())
+    assert completed == [True]
+    assert lock.depth == 0 and lock.file is None
