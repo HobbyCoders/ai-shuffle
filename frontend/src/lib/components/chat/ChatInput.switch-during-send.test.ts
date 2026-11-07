@@ -337,6 +337,46 @@ describe('New chat right after Send (#1077)', () => {
 		});
 	});
 
+	// PR #1212 review S5: leaving New chat for another chat is a leave, even
+	// after a send made in some other chat. Only New chat taking the id its own
+	// send created is not. Uses the real switchSession and newChat callers.
+	describe.each([
+		['while a send from chat A is held', 'held'],
+		['after a send from chat A went out', 'sent'],
+		['with no send at all', 'none'],
+	] as const)('a quick draft in New chat survives opening chat B %s', (_when, send) => {
+		it('and comes back when New chat is opened again', async () => {
+			const view = render(ChatInput);
+			const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: Editor };
+			await waitFor(() => expect(editor.textContent).toBe(TEXT));
+			if (send !== 'none') {
+				await fireEvent.submit(view.container.querySelector('form')!);
+				await waitFor(() => expect(gate.release).toBeTruthy());
+				if (send === 'sent') {
+					gate.release!();
+					await waitFor(() => expect(sends).toHaveBeenCalledTimes(1));
+				}
+			}
+			activeSession.newChat();
+			await waitFor(() => expect(editor.textContent).toBe(''));
+			editor.editor.commands.insertContent('my separate new chat draft');
+			await waitFor(() => expect(editor.textContent).toBe('my separate new chat draft'));
+			// Inside the 100 ms save delay.
+			activeSession.switchSession('chat-b');
+			await waitFor(() => expect(editor.textContent).toBe(''));
+			if (send === 'held') gate.release!();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			expect(readDraft(null) ?? '').toContain('my separate new chat draft');
+			activeSession.newChat();
+			await waitFor(() => expect(editor.textContent).toBe('my separate new chat draft'));
+			if (send === 'held') {
+				expect(sends).not.toHaveBeenCalled();
+				expect(readDraft('chat-a') ?? '').toContain(TEXT);
+				expect(readDraft(null) ?? '').not.toContain(TEXT);
+			}
+		});
+	});
+
 	// Review S3: an editor first mounted in New chat, later moved to chat A.
 	it('leaves a New chat draft typed during the wait in place', async () => {
 		activeSession.newChat();

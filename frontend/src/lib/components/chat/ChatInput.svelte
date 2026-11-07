@@ -198,6 +198,10 @@
 	// Flag to prevent onDestroy from overwriting draft after we've already cleared it.
 	// Using plain variable (not $state) to avoid reactivity issues with onDestroy capture.
 	let messageSent = false;
+	// The navigation count when this composer last sent from New chat, or null
+	// when its last send was to an existing chat: the session that send creates
+	// is adopted by New chat, which is not leaving it (switch effect below).
+	let newChatSendNavigation: number | null = null;
 	// A new chat's remembered project and branch resolve against the project
 	// catalog. A send before it answers is held with the text in place (#1636).
 	let heldForCatalog = $state(false);
@@ -456,10 +460,14 @@
 			// the editor at once, so it can only hold what was typed or deleted
 			// since. A send held for this chat puts its words back in front of
 			// this draft later (send-destination.ts), so nothing here overwrites
-			// that. The one exception is New chat after its first send: that is
-			// the new chat adopting its id, not a leave, and the send has already
-			// emptied the New chat slot (PR #1212 review S2, S4).
-			if (editorRef && !(messageSent && prevSessionId === null)) {
+			// that. The one exception is New chat taking the id its own send
+			// created, with no navigation since: that is not a leave, and the send
+			// has already emptied the New chat slot. New chat and every chat
+			// switch move the navigation count on, so leaving New chat for another
+			// chat is always saved, whatever was sent elsewhere (PR #1212 review
+			// S2, S4, S5).
+			const adoptingOwnSend = prevSessionId === null && newChatSendNavigation === getInitGeneration();
+			if (editorRef && !adoptingOwnSend) {
 				const leavingDraft = getDraftJSON();
 				activeSession.saveDraftForSession(prevSessionId, leavingDraft);
 				// Keep the persisted mirror aligned with the ephemeral cache so the
@@ -1225,6 +1233,7 @@
 		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
 		// This is critical for the first message when the component gets destroyed/recreated
 		messageSent = true;
+		newChatSendNavigation = destination.chat === null ? destination.navigation : null;
 
 		// Collect the staged upload paths this message references, BEFORE the
 		// composer state is cleared below. Two consumers, both server-side:
