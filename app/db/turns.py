@@ -1659,6 +1659,11 @@ def remove_queued_turn(
         owner_send = bool(target and target["source"] in _OWNER_SEND_SOURCES and target["command_id"])
         if target and (keep_unsent_words or owner_send or target["source"] == "agent_message"):
             _lock_for_event_write(cursor, target["session_id"])
+        if owner_send:
+            # Chat delete takes the same lock: a row whose chat is gone has no
+            # log and no page to tell, so it is withdrawn without a receipt.
+            cursor.execute("SELECT 1 FROM sessions WHERE id=%s", (target["session_id"],))
+            owner_send = cursor.fetchone() is not None
         cursor.execute(
             "UPDATE turns SET state='aborted', stop_reason=%s, "
             "ended_at=NOW() "
