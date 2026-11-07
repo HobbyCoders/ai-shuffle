@@ -138,9 +138,12 @@ await runJourney({
 				await mark('attach a file');
 				await page.locator('input[type="file"]').setInputFiles({ name: state.file, mimeType: 'text/plain', buffer: Buffer.from('rewind me\n') });
 				await box.locator('[data-file-chip]').first().waitFor({ timeout: 20_000 });
-				await box.click();
-				await page.keyboard.press('End');
+				// Focus without clicking: at phone width the chip fills the middle row,
+				// so a centre click selects the chip and the typed words replace it.
+				await box.focus();
+				await page.keyboard.press('ControlOrMeta+End');
 				await box.pressSequentially(` ${state.words} ${fakeAiTag(variant)}`.trimEnd());
+				expect(await box.locator('[data-file-chip]').count() === 1, 'the chip is still in the composer when sending');
 				await page.getByRole('button', { name: 'Send', exact: true }).click();
 				await waitTurnSettled(page, { messagesAtLeast: 4, text: `You said:` });
 				await mark('rewind the message with the attachment');
