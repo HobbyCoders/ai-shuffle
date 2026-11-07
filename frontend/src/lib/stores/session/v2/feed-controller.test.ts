@@ -2734,6 +2734,36 @@ describe('feedController turn-error banner (#1082, #1175, #1238)', () => {
 		expect(live(success('t2', 3))).toEqual(['shown', 'cleared']);
 	});
 
+	// Round 5 S7: a voice tool result persists through a synthetic `voice-tool-*`
+	// turn whose lifecycle the reducer ignores; its turn.completed is no successor.
+	const voiceTool = (seq: number) => [
+		logged('turn.started', seq, { turn_id: 'voice-tool-call' }),
+		logged('tool.use', seq + 1, { turn_id: 'voice-tool-call', tool_use_id: 'call', name: 'WebSearch', input: {} }),
+		logged('tool.result', seq + 2, { turn_id: 'voice-tool-call', tool_use_id: 'call', is_error: true, content_preview: 'search failed' }),
+		logged('turn.completed', seq + 3, { turn_id: 'voice-tool-call', stop_reason: 'tool_result' }),
+	];
+
+	it('round 5 S7: a timely frame survives a voice tool\'s synthetic turn finishing, then clears on a real successor', () => {
+		const { raise, live } = chat(failure('t1', 1));
+		raise('t1');
+		expect(live(voiceTool(3))).toEqual(['shown', 'shown', 'shown', 'shown']);
+		expect(live(success('t2', 7))).toEqual(['shown', 'cleared']);
+	});
+
+	it('round 5 S7: a frame raised before its failure is logged survives a voice tool turn ending first', () => {
+		const { raise, live } = chat([logged('turn.started', 1, { turn_id: 't1' })]);
+		raise('t1');
+		expect(live([...voiceTool(2), logged('turn.aborted', 6, { turn_id: 't1', reason: 'error', message: FAILED }), ...success('t2', 7)]))
+			.toEqual(['shown', 'shown', 'shown', 'shown', 'shown', 'shown', 'cleared']);
+	});
+
+	it('round 5 S7: a late frame, with the voice tool turn already logged, shows and then clears on a real successor', () => {
+		const { deps, raise, live } = chat([...failure('t1', 1), ...voiceTool(3)]);
+		raise('t1');
+		expect(deps.state.error).toBe(FAILED);
+		expect(live(success('t2', 7))).toEqual(['shown', 'cleared']);
+	});
+
 	it('a frame naming no turn (older worker) stays through a reconnect gap and later outcomes until sent', () => {
 		const { deps, raise, live } = chat(success('t0', 1));
 		hoisted.onOpen!();

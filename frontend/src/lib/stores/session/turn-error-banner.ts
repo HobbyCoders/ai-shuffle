@@ -42,6 +42,7 @@
 import {
 	completedCleanly,
 	failureOutlived,
+	isTranscriptOnlyTurn,
 	NO_TURN_OUTCOMES,
 	type TurnOutcomes,
 	type WireEvent,
@@ -60,6 +61,9 @@ export interface TurnErrorAnchor {
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+/** The lifecycle events the reducer ignores for a transcript-only turn. */
+const TURN_LIFECYCLE = new Set(['turn.started', 'turn.completed', 'turn.aborted']);
 
 /**
  * Tie a banner the socket just raised to its failed turn. Null when there is
@@ -82,6 +86,9 @@ export function followTurnError(anchor: TurnErrorAnchor, event: WireEvent): Turn
 	if (anchor.outlived) return anchor;
 	const seq = typeof event.seq === 'number' ? event.seq : null;
 	if (seq === null) return anchor;
+	// A voice transcript or brief persists through a synthetic turn whose
+	// lifecycle the reducer ignores; it is no successor and no end of a turn.
+	if (TURN_LIFECYCLE.has(event.type) && isTranscriptOnlyTurn(str(event.turn_id))) return anchor;
 	if (!anchor.failure) {
 		const ended = event.type === 'turn.aborted' || event.type === 'turn.completed';
 		return ended && str(event.turn_id) === anchor.turnId ? { ...anchor, failure: { seq, turnId: anchor.turnId } } : anchor;
