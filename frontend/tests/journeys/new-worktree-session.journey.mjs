@@ -20,6 +20,8 @@
 //   existing-branch an existing branch from the branch menu → createWorktree
 //   main-checkout   control: the plain new-chat send in the main checkout
 //                   → WebSocket query path
+//   narrow-chips-*  Auto with long names in a 480/600px desktop chat column:
+//                   the staged chip row stays usable and inside the composer
 import { fakeAiTag, runJourney } from './runner.mjs';
 import { pick, withChatSetup } from './lib/app.mjs';
 import { expectComposerPositions } from './lib/timeline.mjs';
@@ -229,6 +231,111 @@ async function verifyNewMirror({ page, recording }) {
 	if (!seen?.emptyReplays || seen.syncPolls < 2 || !seen.targetedPeer) throw new Error(`mirror startup not exercised: ${JSON.stringify(seen)}`);
 }
 
+/** Names long enough that the staged chip row cannot fit a narrow composer. */
+const LONG = {
+	agent: 'Engineering agent for production',
+	worker: 'Very long worker display name for production',
+	repo: 'long-repository-name-council-scrim'
+};
+
+/**
+ * Long agent, worker, repository and generated branch names, and a frame-by-
+ * frame check of the staged chip row (Send until the session binds): every
+ * chip keeps a usable width, stays inside the composer, is the element at its
+ * own centre (nothing covers it) and overlaps no other chip; the row keeps one
+ * height while it shows. The worktree POST waits until a few frames of the
+ * generated branch name were checked, so the check never misses that state.
+ */
+async function longNamesAndChipProbe(page) {
+	await page.addInitScript(([long, branch]) => {
+		const probe = { frames: 0, generated: 0, heights: [], problems: [] };
+		window.__chipProbe = probe;
+		const check = () => {
+			const bar = [...document.querySelectorAll('.context-pill-bar:not(.sheet-mode)')].find((el) => el.querySelector('.mode-bar-row'));
+			const island = document.querySelector('.chat-island');
+			if (bar && island) {
+				const clip = island.getBoundingClientRect();
+				const chips = [
+					['agent', '.selector-wrapper > button'],
+					['runner', '.mode-trigger'],
+					['repo', '.repo-chip'],
+					['branch', '.branch-trigger'],
+					['worktree', '.wt-chip']
+				].map(([name, selector]) => ({ name, el: bar.querySelector(selector) })).filter((c) => c.el)
+					.map((c) => ({ ...c, r: c.el.getBoundingClientRect() }));
+				const problems = [];
+				for (const c of chips) {
+					const hit = document.elementFromPoint(c.r.left + c.r.width / 2, c.r.top + c.r.height / 2);
+					if (c.r.width < 40) problems.push(`${c.name} is ${Math.round(c.r.width)}px wide`);
+					if (c.r.left < clip.left - 0.5 || c.r.right > clip.right + 0.5) problems.push(`${c.name} leaves the composer`);
+					if (!hit || !(hit === c.el || c.el.contains(hit))) problems.push(`${c.name} is covered at its centre`);
+				}
+				for (let i = 0; i < chips.length; i++) for (let j = i + 1; j < chips.length; j++) {
+					const a = chips[i].r, b = chips[j].r;
+					if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.5)
+						problems.push(`${chips[i].name} overlaps ${chips[j].name}`);
+				}
+				probe.frames++;
+				if (bar.querySelector('.branch-trigger')?.textContent.includes(branch)) probe.generated++;
+				const h = Math.round(bar.querySelector('.mode-bar-row').getBoundingClientRect().height);
+				if (!probe.heights.includes(h)) probe.heights.push(h);
+				for (const p of problems) if (!probe.problems.includes(p)) probe.problems.push(p);
+			}
+			requestAnimationFrame(check);
+		};
+		requestAnimationFrame(check);
+
+		const original = window.fetch.bind(window);
+		const json = (body, response) => new Response(JSON.stringify(body), {
+			status: response?.status || 200,
+			headers: response?.headers || { 'content-type': 'application/json' }
+		});
+		window.fetch = async (input, init) => {
+			const method = (init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			if (method === 'POST' && url.pathname.endsWith('/git/generate-branch-name')) return json({ branch_name: branch });
+			if (method === 'POST' && url.pathname === '/api/v1/sessions/with-worktree') {
+				const until = Date.now() + 5000;
+				while (probe.generated < 5 && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 16));
+			}
+			const response = await original(input, init);
+			if (method !== 'GET' || !response.ok || !(response.headers.get('content-type') || '').includes('application/json')) return response;
+			let text = await response.text();
+			text = text.replaceAll('"Dev agent"', JSON.stringify(long.agent)).replaceAll('"Dev sandbox"', JSON.stringify(long.repo));
+			let body = JSON.parse(text);
+			for (const row of body?.installs || []) if (row.is_self) row.device_name = long.worker;
+			return json(body, response);
+		};
+	}, [LONG, `fix/long-staged-branch-generated-from-message-${uniq()}`]);
+}
+
+/** A desktop window whose chat column (beside the open sidebar) is `chat` px wide. */
+function narrowChips(chat) {
+	return {
+		name: `narrow-chips-${chat}`,
+		viewports: ['desktop'],
+		throttles: ['fast'],
+		setup: settled(async (ctx) => {
+			const { page } = ctx;
+			await longNamesAndChipProbe(page);
+			await page.setViewportSize({ width: chat + 320, height: 900 });
+			const hero = await openNewChat(ctx, LONG.agent);
+			const item = page.getByRole('button', { name: LONG.repo, exact: true });
+			await pick(hero.getByRole('button', { name: /^No project/ }), item, item, hero.getByRole('button', { name: `Workspace folders: ${LONG.repo}` }));
+			await worktreeOn(page, hero);
+			const column = await page.evaluate(() => Math.round(document.querySelector('[data-ui-state="chat"]').getBoundingClientRect().width));
+			if (Math.abs(column - chat) > 24) throw new Error(`chat column is ${column}px, wanted about ${chat}px (sidebar closed?)`);
+		}),
+		act: (ctx) => sendFirstMessage(ctx, `narrow-chips-${chat}`),
+		verify: async ({ page }) => {
+			const probe = await page.evaluate(() => window.__chipProbe);
+			if (probe.generated < 5) throw new Error(`the staged row with the generated branch was checked in ${probe.generated} frames`);
+			if (probe.problems.length) throw new Error(`staged chip row: ${probe.problems.join('; ')}`);
+			if (probe.heights.length !== 1) throw new Error(`staged chip row changed height across Send: ${probe.heights.join(' → ')}px`);
+		}
+	};
+}
+
 /**
  * Let the staged composer settle before recording, the way a user's typing
  * would: the picks start their own loads (branches, git status of the staged
@@ -326,7 +433,11 @@ await runJourney({
 				await pickProject(ctx.page, hero);
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'main-checkout')
-		}
+		},
+		// The staged chip row in a narrow desktop composer, with long names: it
+		// may wrap, but no chip collapses, overlaps another or leaves the box.
+		narrowChips(480),
+		narrowChips(600)
 	],
 	allow: [
 		{

@@ -862,22 +862,49 @@
 		margin-top: 6px;
 	}
 
-	/* One line, like the bound chat's chip row that replaces it. Between Send
-	   and the session binding, Auto turns into the generated branch name; a
-	   wrapping row then dropped Worktree to a second line and lifted the whole
-	   composer 34px for that moment. The branch chip gives way instead: its
-	   name ellipsizes (full name in its title). */
+	/* The chip row names give way before the row wraps.
+
+	   The repository and branch chips line up at a fixed floor (flex-basis)
+	   and grow toward their full name (max-width: max-content), so where the
+	   row breaks depends only on that floor, never on how long a name is.
+	   Between Send and the session binding, Auto turns into the generated
+	   branch name; when line breaks followed name length, that pushed Worktree
+	   to a second line and lifted the composer 34px for that moment. Now the
+	   longer name only ellipsizes (full name in its title), so the row keeps
+	   its lines across Send. A composer too narrow for the floors still wraps,
+	   and each chip keeps at least its floor (icon, a few characters, chevron),
+	   so nothing collapses or overlaps.
+
+	   The runner and Worktree keep their width. Each is capped at the row, so
+	   one alone on a line never pokes out of it. The phone sheet's rows
+	   (`display: contents`) lay out on their own grid, so this stays off it. */
 	.mode-bar-row {
+		--chip-floor: 96px;
 		display: flex;
-		flex-wrap: nowrap;
+		flex-wrap: wrap;
 		align-items: center;
 		gap: 6px;
 		min-width: 0;
 		max-width: 100%;
 	}
 
-	.mode-bar-row .wt-chip {
-		flex-shrink: 0;
+	.execution-mode-bar:not(.sheet-mode) .mode-bar-row :global(.workspace-selector),
+	.execution-mode-bar:not(.sheet-mode) .mode-bar-row :global(.branch-selector) {
+		display: flex;
+		flex: 1 0 var(--chip-floor);
+		min-width: 0;
+		max-width: max-content;
+	}
+
+	.execution-mode-bar:not(.sheet-mode) .mode-bar-row :global(.workspace-selector > .ctx-chip),
+	.execution-mode-bar:not(.sheet-mode) .mode-bar-row :global(.branch-selector > .ctx-chip) {
+		flex: 1 1 auto;
+		min-width: 0;
+	}
+
+	.execution-mode-bar:not(.sheet-mode) .mode-bar-row .wt-chip {
+		flex: none;
+		max-width: 100%;
 	}
 
 	/* Runner chip — `.ctx-chip` (app.css) carries the look. */
@@ -885,6 +912,7 @@
 		position: relative;
 		flex-shrink: 0;
 		min-width: 0;
+		max-width: 100%;
 	}
 
 	.mode-trigger :global(svg) {

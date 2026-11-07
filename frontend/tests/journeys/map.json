@@ -439,6 +439,8 @@
 			"why": "a new worktree chat with the native harness or Claude Code, including delegated CLI startup and session binding",
 			"journeys": ["new-worktree-session"],
 			"globs": [
+				"frontend/tests/journeys/new-worktree-session.journey.mjs",
+				"frontend/src/lib/components/layout/ExecutionModeBar.svelte",
 				"frontend/src/lib/components/layout/WorkspaceSelector*",
 				"frontend/src/lib/components/chat/BranchSelector*",
 				"frontend/src/lib/stores/git*",
