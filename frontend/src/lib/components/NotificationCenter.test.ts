@@ -121,6 +121,37 @@ describe('NotificationCenter', () => {
 			await vi.waitFor(() => expect(observers).toHaveLength(0));
 		});
 
+		it('follows a destination column mounted while the panel stays open', async () => {
+			// Narrow window, 440px Chats list docked over the page.
+			const geometry = { aside: 56, col: 440 };
+			mountSidebar(geometry);
+			await fireEvent.click(screen.getByRole('button', { name: /Notifications/ }));
+			expect(scrim()).toBeNull();
+
+			// Ctrl+, opens Settings: the list collapses (Chats column hidden) and a
+			// new destination column mounts, collapsed too.
+			geometry.col = 0;
+			const settings = { right: 0 };
+			const page = document.createElement('div');
+			page.className = 'col page-panel';
+			page.getBoundingClientRect = () => (settings.right > 0
+				? { right: settings.right, width: settings.right - 56, height: 800 }
+				: { right: 0, width: 0, height: 0 }) as DOMRect;
+			document.querySelector('.panel-plane')!.prepend(page);
+			await vi.waitFor(() => expect(observed).toContain(page));
+			await vi.waitFor(() => expect(scrim()).not.toBeNull());
+
+			// Ctrl+B reopens the Settings list: only the new column grows.
+			settings.right = 440;
+			reMeasure();
+			await vi.waitFor(() => expect(scrim()).toBeNull());
+
+			// A synced width then shrinks it.
+			settings.right = 200;
+			reMeasure();
+			await vi.waitFor(() => expect(scrim()).not.toBeNull());
+		});
+
 		it('measures the floating list, not the rail-wide aside, in a narrow window', async () => {
 			// Narrow window: the aside stays 56px and the list plane floats out to 440.
 			const geometry = { aside: 56, col: 440 };

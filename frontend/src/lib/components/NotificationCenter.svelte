@@ -144,15 +144,33 @@
 	// window resize (a width or collapse synced from another device), which moves
 	// the page under the panel. Watch the aside and each list column (a column
 	// that stops rendering reports a zero box) and re-measure, so the scrim never
-	// goes stale in either direction.
+	// goes stale in either direction. Opening a destination (Ctrl+, for
+	// Settings) mounts a new column while the panel stays open, so also watch
+	// the plane's children and re-target the observer when the column set changes.
 	$effect(() => {
 		if (!rail || !showPanel || !bellRef) return;
 		const aside = bellRef.closest('aside');
 		if (!aside || typeof ResizeObserver === 'undefined') return;
 		const observer = new ResizeObserver(() => positionPanel());
-		observer.observe(aside);
-		for (const col of listColumns()) observer.observe(col);
-		return () => observer.disconnect();
+		const watch = () => {
+			observer.disconnect();
+			observer.observe(aside);
+			for (const col of listColumns()) observer.observe(col);
+		};
+		watch();
+		const plane = aside.querySelector(':scope > .panel-plane');
+		const columnsChanged =
+			plane && typeof MutationObserver !== 'undefined'
+				? new MutationObserver(() => {
+						watch();
+						positionPanel();
+					})
+				: null;
+		if (plane) columnsChanged?.observe(plane, { childList: true });
+		return () => {
+			columnsChanged?.disconnect();
+			observer.disconnect();
+		};
 	});
 
 	let panelRef = $state<HTMLDivElement | null>(null);
