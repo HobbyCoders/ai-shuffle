@@ -590,8 +590,11 @@ parent lease is the driver), waits for the ready line and `status`, runs the
 journeys, then `down`. With one shard it runs
 `frontend/tests/journeys/run-all.mjs` when there is one, else every
 `*.journey.mjs`; with N shards it splits the journey files by measured
-hosted runtime from `scripts/devloop/journey_weights.json`. Unmeasured files
-use their `--list` case count times the measured median seconds per case.
+hosted runtime from `scripts/devloop/journey_weights.json` when the current
+`--list` case count matches the recorded inventory. Unmeasured files or changed
+case counts automatically use a conservative case-count estimate (global median
+plus explicit floors, and at least the old runtime scaled up for case growth).
+Historical rows remain unchanged; feature PRs do not need a pre-merge measurement.
 `python -m scripts.devloop.ci plan --shards N` prints the JSON split, with
 estimated minutes in stderr and `$GITHUB_STEP_SUMMARY`. Refresh the medians
 with `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]` using
