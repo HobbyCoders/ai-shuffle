@@ -43,6 +43,9 @@ async def _collect_raw(agen, n, timeout=5.0):
 
 
 async def test_backfill_frames_arrive_in_order(mock_db, gw):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-a')
     se.append_events("sess-a", [
         {"type": "turn.started"},
         {"type": "assistant.text_delta", "payload": {"text": "hello"}},
@@ -68,6 +71,9 @@ async def test_backfill_frames_arrive_in_order(mock_db, gw):
 
 
 async def test_from_seq_skips_already_seen(mock_db, gw):
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sess-b")
     se.append_events("sess-b", [
         {"type": "turn.started"},
         {"type": "turn.completed"},
@@ -86,6 +92,9 @@ async def test_from_seq_skips_already_seen(mock_db, gw):
 
 async def test_poll_fallback_delivers_without_dispatch(mock_db, gw, monkeypatch):
     """A new event must arrive via the keepalive poll even with NO notify."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-c')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.05)
     se.append_events("sess-c", [{"type": "turn.started"}])
 
@@ -104,6 +113,9 @@ async def test_poll_fallback_delivers_without_dispatch(mock_db, gw, monkeypatch)
 
 async def test_notify_wakes_stream_before_poll(mock_db, gw, monkeypatch):
     """A gateway dispatch must deliver promptly even with the poll far away."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sess-d")
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-d", [{"type": "turn.started"}])
 
@@ -124,6 +136,9 @@ async def test_caught_up_sentinel_after_backfill(mock_db, gw, monkeypatch):
     """The catch-up sentinel is emitted once, right after the last backfill frame,
     carries the backfill cursor as ``seq``, and has no ``id:`` line (so it does not
     advance the reconnect cursor)."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-cu')
     # Keep the live poll far away so the sentinel is the 3rd frame, not a live one.
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-cu", [
@@ -149,6 +164,9 @@ async def test_caught_up_sentinel_after_backfill(mock_db, gw, monkeypatch):
 async def test_caught_up_precedes_live_frames(mock_db, gw, monkeypatch):
     """The sentinel is emitted BEFORE any live-tail frame, so the client can fold
     the whole history in one batch before switching to incremental live paint."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-cu2')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.05)
     se.append_events("sess-cu2", [{"type": "turn.started"}])
 
@@ -172,6 +190,9 @@ async def test_caught_up_emitted_on_empty_backfill(mock_db, gw, monkeypatch):
     """Even when ``from_seq`` is past the log tail (empty backfill — e.g. a
     reconnect), the sentinel is still emitted so the client's batch flag re-arms
     and folds once."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-cu3')
     monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 30.0)
     se.append_events("sess-cu3", [{"type": "turn.started"}])
 
@@ -220,6 +241,9 @@ async def test_replay_after_clear_is_empty(mock_db, gw, monkeypatch):
 
 
 async def test_close_unsubscribes(mock_db, gw):
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-e')
     se.append_events("sess-e", [{"type": "turn.started"}])
 
     agen = event_stream("sess-e", 0)
@@ -243,6 +267,9 @@ async def test_close_unsubscribes(mock_db, gw):
 
 async def test_client_disconnect_cancellederror_ends_cleanly(mock_db, gw):
     """A plain CancelledError (client disconnect) ends the stream, not raises."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-cd')
     se.append_events("sess-cd", [{"type": "turn.started"}])
     agen = event_stream("sess-cd", 0)
     await collect_frames(agen, 1)  # drain backfill -> generator parked mid-stream
@@ -257,6 +284,9 @@ async def test_client_disconnect_cancellederror_ends_cleanly(mock_db, gw):
 
 async def test_client_disconnect_exceptiongroup_ends_cleanly(mock_db, gw):
     """The anyio ExceptionGroup-wrapped cancellation is handled the same way."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session("sess-eg")
     se.append_events("sess-eg", [{"type": "turn.started"}])
     agen = event_stream("sess-eg", 0)
     await collect_frames(agen, 1)
@@ -271,6 +301,9 @@ async def test_client_disconnect_exceptiongroup_ends_cleanly(mock_db, gw):
 
 async def test_client_disconnect_clientdisconnect_ends_cleanly(mock_db, gw):
     """A starlette ClientDisconnect thrown into the stream also ends cleanly."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-cld')
     se.append_events("sess-cld", [{"type": "turn.started"}])
     agen = event_stream("sess-cld", 0)
     await collect_frames(agen, 1)
@@ -283,6 +316,9 @@ async def test_client_disconnect_clientdisconnect_ends_cleanly(mock_db, gw):
 
 async def test_real_error_still_propagates(mock_db, gw):
     """A genuine mid-stream error is NOT swallowed — it must still surface."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-err')
     se.append_events("sess-err", [{"type": "turn.started"}])
     agen = event_stream("sess-err", 0)
     await collect_frames(agen, 1)
@@ -296,6 +332,9 @@ async def test_real_error_still_propagates(mock_db, gw):
 
 async def test_exceptiongroup_with_real_error_propagates(mock_db, gw):
     """An ExceptionGroup carrying a real error is re-raised, not swallowed."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session('sess-egr')
     se.append_events("sess-egr", [{"type": "turn.started"}])
     agen = event_stream("sess-egr", 0)
     await collect_frames(agen, 1)

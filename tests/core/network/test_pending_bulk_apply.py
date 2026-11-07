@@ -51,10 +51,11 @@ def test_buffer_phase_uses_one_stream_read_and_insert_per_chunk(pg_workers, monk
     assert len(transactions) == chunks
     assert sum(t["ops"] for t in transactions) == len(ops) - 1
     assert max(t["ops"] for t in transactions) <= engine.APPLY_CHUNK
-    # One clock lock/update, highest incarnation, watermark, pending count and
-    # multi-row insert per chunk. No per-row SQL or savepoints in this phase.
-    assert sum(profile.values()) <= chunks * 5
-    assert profile["SELECT/sync_watermarks"] == chunks * 2
+    # One clock lock/update, combined stream metadata read and multi-row insert
+    # per chunk. The profiler attributes that read to its first FROM clause,
+    # the pending-count subquery; no separate watermark reads remain.
+    assert sum(profile.values()) <= chunks * 3
+    assert profile["SELECT/sync_watermarks"] == 0
     assert profile["SELECT/sync_pending"] == profile["INSERT/sync_pending"] == chunks
     assert profile["SAVEPOINT/transaction"] == profile["RELEASE/transaction"] == 0
     with b.active(), store.get_db() as conn:

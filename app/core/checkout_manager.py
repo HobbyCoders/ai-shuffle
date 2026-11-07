@@ -50,6 +50,7 @@ from fluid.tools.child_env import scrub_child_env
 
 from app.core.config import settings
 from app.core.git_service import git_service
+from app.core.git_worktree_ops import WorktreeAddError, worktree_error_detail
 from app.core.project_links import auto_link_group_id
 from app.core.worktree_manager import (
     WorktreeError,
@@ -742,7 +743,9 @@ def _ensure_branch_checkout(
             dest_str,
             err,
         )
-        return None
+        raise WorktreeAddError(
+            f"Git worktree add failed for branch '{branch}': {worktree_error_detail(err)}"
+        )
 
     # Verify the materialization too: a successful add must not bind a checkout
     # that changed HEAD before it reached the session/checkout registry.
@@ -1598,6 +1601,7 @@ def ensure_checkout(
     base_branch: Optional[str] = None,
     create_new_branch: bool = False,
     provision_runtime: bool = True,
+    raise_add_errors: bool = False,
 ) -> Optional[str]:
     """Lazily materialize (or resolve) a checkout for a project_v2 on this runner.
 
@@ -1614,11 +1618,12 @@ def ensure_checkout(
             not-materializable rather than fabricated.
         provision_runtime: when False, do not share dependencies or built assets
             from the base checkout. Coding workers need independent runtimes.
+        raise_add_errors: opt session setup into WorktreeAddError with Git's
+            diagnostic when an attempted checkout fails. Defaults to False.
 
     Returns the absolute checkout path, or ``None`` when it is not materializable
-    on this device (no base checkout here and none self-seeded, or a branch that
-    exists nowhere and was not requested as new). Idempotent and safe to call on
-    every send.
+    on this device or Git refuses the checkout. Detailed add errors are raised
+    only when explicitly requested. Idempotent and safe to call on every send.
     """
     if not project_v2_row:
         return None
@@ -1644,6 +1649,10 @@ def ensure_checkout(
             create_new_branch=create_new_branch,
             provision_runtime=provision_runtime,
         )
+    except WorktreeAddError:
+        if raise_add_errors:
+            raise
+        return None
     except WorktreeError as e:
         logger.warning("checkout_manager: refusing checkout for branch %r: %s", branch, e)
         return None

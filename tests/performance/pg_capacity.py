@@ -151,7 +151,7 @@ def child(payload):
 
 async def workload(p, base):
     from app.core.turn_recorder import TurnRecorder
-    from app.db import runs, session_events as events
+    from app.db import runs, sessions, session_events as events
     asyncio.get_running_loop().set_default_executor(
         ThreadPoolExecutor(max_workers=min(128, p["turns"] * 2 + 8)))
     start = time.monotonic()
@@ -212,6 +212,7 @@ async def workload(p, base):
         if p["launch"] == "staggered":
             await asyncio.sleep(i * p["stagger_ms"] / 1000)
         sid = f"capacity-{p['index']}-{i}"
+        await asyncio.to_thread(sessions.create_session, sid, None)
         run = await asyncio.to_thread(runs.claim_run, sid, "capacity", 30)
         if not run:
             raise RuntimeError("claim rejected")
@@ -338,12 +339,15 @@ async def workload(p, base):
 
 async def fault_checks(base, Recorder, events, original):
     """Expected degradation must be visible, followed by a successful DB write."""
+    from app.db import sessions
+
     results = {}
     for scenario in ("slow_database_timeout", "pool_saturation", "broken_connection"):
         held = []
         observed = []
         old_wait = base._POOL_ACQUIRE_MAX_WAIT_SECONDS
         rec = Recorder("fault-" + uuid.uuid4().hex, None, None, None, "capacity")
+        await asyncio.to_thread(sessions.create_session, rec.session_id, None)
         rec._owns_lease = False
         notified = []
         rec.on_recording_failed = lambda: notified.append(True)
@@ -379,6 +383,7 @@ async def fault_checks(base, Recorder, events, original):
         await rec.close()
         rows = await asyncio.to_thread(events.get_events, rec.session_id)
         recovery_sid = "recovery-" + uuid.uuid4().hex
+        await asyncio.to_thread(sessions.create_session, recovery_sid, None)
         recovery = await asyncio.to_thread(original, recovery_sid,
                                            [{"type": "system.note", "payload": {}}])
         stats = base.pool_stats()

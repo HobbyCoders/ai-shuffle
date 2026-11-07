@@ -10,7 +10,8 @@ not here: what a route does with a lease is in ``test_sse_interrupt_lifecycle`` 
 The rules, each named where a broken one is raised:
 
 - ``stop-reached``: a turn holds a Stop if and only if that Stop arrived while it
-  waited and could reach it, so never one from before it arrived, and it uses it once.
+  waited or held the chat and could reach it, even before an engine exists, so
+  never one from before it arrived, and it uses it once.
 - ``answer``: what ``interrupt_session`` says is what it did, and a Stop kept for a
   waiting turn leaves the engine alone.
 - ``limit-overrun`` and ``limit-short``: a waiter is refused at its limit, counted from
@@ -262,8 +263,9 @@ class _Chat:
         waiters = [r for r in self._waiting_turns() if r.stoppable]
         kept = False
         if running is not None and running.stoppable:
-            expected = engine is not None
-            running.given_stop = running.given_stop or expected
+            # Admission owns this Stop before connecting/creating its engine.
+            expected = True
+            running.given_stop = True
         elif waiters:
             expected = kept = True
             for waiter in waiters:

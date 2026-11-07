@@ -732,6 +732,10 @@ async def persist_turn_error_message(
 # SessionRuntime
 # ---------------------------------------------------------------------------
 
+class _FinalizationReplaced(Exception):
+    """A completed rewind revoked this runtime's session-wide cleanup rights."""
+
+
 class SessionRuntime:
     """Executes one ``turns`` row end-to-end (see module docstring)."""
 
@@ -773,6 +777,8 @@ class SessionRuntime:
         # In-flight pump task — interrupt() escalation cancels it: the pump
         # holds the reader token, so nothing else can read until it is gone.
         self._pump_task: Optional[asyncio.Task] = None
+        # Session-wide cleanup is part of this turn, not of its engine iterator.
+        self._admission_lease = None
         # Set by interrupt()'s escalation-keep branch: execute() must run the
         # drain reader (under its still-live lease) instead of finalizing.
         self._drain_after_cancel = False
@@ -1084,6 +1090,14 @@ class SessionRuntime:
         outcome: Optional[str] = None
         settled_here = False
         try:
+            from app.core.provider import session_admission
+
+            try:
+                self._admission_lease = await session_admission.acquire(sid)
+            except session_admission.SessionBusyError:
+                # A direct API turn owns this chat. Leave our input queued and
+                # do not run session-wide cleanup against that turn's workers.
+                return None
             if self._stop_applies() or await asyncio.to_thread(turns_db.wake_cancelled_by_stop, self.turn):
                 await asyncio.to_thread(turns_db.remove_queued_turn, tid, keep_unsent_words=True)
                 return None
@@ -1362,6 +1376,7 @@ class SessionRuntime:
             if (
                 self._pending_done is not None
                 and self._abort_reason != "recording_failed"
+                and self._owns_admission()
             ):
                 # The pump ending does not prove the session is finished: the
                 # park gate above may still find background work. Deliver the
@@ -1385,13 +1400,24 @@ class SessionRuntime:
                 _live_runtimes.pop(sid, None)
                 # End the persistent desktop indicator and release held input.
                 # Invalidate workers that outlived cancellation before re-arming.
-                from app.mcp.computer_use import abort as cu_abort
-                cu_abort.request_stop(sid, reason="completed")
+                if self._owns_admission():
+                    from app.mcp.computer_use import abort as cu_abort
+                    cu_abort.request_stop(sid, reason="completed")
             # Cancelling execute() must not cancel this, and neither may it hurry
             # it: a write still being re-sent needs the lease it was fenced on.
-            await asyncio.shield(start_detached(
-                self._release_lease_after_writes(recorder, renew_task, run_id, fence_token)
-            ))
+            async def release() -> None:
+                try:
+                    await self._release_lease_after_writes(recorder, renew_task, run_id, fence_token)
+                finally:
+                    from app.core.provider import session_admission
+
+                    if self._admission_lease is not None:
+                        # Raw executor calls in finalization join the same
+                        # tracker too. Settlement callbacks must not run before
+                        # its release owner has proved those writes settled.
+                        await session_admission.close_and_wait(self._admission_lease)
+
+            await asyncio.shield(start_detached(release()))
 
         # 8. Settlement callback (the scheduler seam) — after the lease is free,
         #    and ONLY when finalize actually performed the DB transition. A racer
@@ -1664,6 +1690,7 @@ class SessionRuntime:
                 # keeps the row when it holds the turn for confirmation.
                 turn_source=self.source,
                 loop_guard_turn=self.turn,
+                admission_lease=self._admission_lease,
                 # Who sent a connector message, for the owner's-subscription
                 # check. Only a connector turn carries one.
                 connector_sender=(
@@ -2715,10 +2742,52 @@ class SessionRuntime:
     # finalize — always runs; decides completed | aborted | parked
     # ------------------------------------------------------------------
 
+    def _owns_admission(self) -> bool:
+        from app.core.provider import session_admission
+
+        lease = self._admission_lease
+        return lease is not None and session_admission.is_current(lease)
+
+    def _check_finalization(self) -> None:
+        from app.core.provider import session_admission
+
+        lease = self._admission_lease
+        if lease is not None and not session_admission.holds_chat(lease):
+            raise _FinalizationReplaced
+
+    async def _await_finalization(self, work: Awaitable[Any]) -> Any:
+        # Even a failed awaited operation may have outlasted the rewind. Do not
+        # continue into session-wide cleanup, reconciliation or park reads.
+        try:
+            return await work
+        finally:
+            self._check_finalization()
+
     async def _finalize(
         self, sid: str, tid: str, *, recorder: Optional[TurnRecorder] = None,
     ) -> "tuple[str, bool]":
-        """Settle or park the turn. ALWAYS runs (called from the pump ``finally``).
+        """Only the originating chat generation may finalize session-wide state."""
+        try:
+            self._check_finalization()
+            return await self._finalize_owned(sid, tid, recorder=recorder)
+        except _FinalizationReplaced:
+            # The rewind may have timed out waiting for us and admitted a new
+            # direct-API turn. Only this turn's run-fenced row is ours now.
+            self._lease_finalizing = True
+            try:
+                settled = await asyncio.to_thread(
+                    turns_db.settle_turn, tid, "aborted", "session_replaced",
+                    run_id=self._run_id,
+                )
+            except Exception:
+                logger.warning("SessionRuntime: replaced turn settlement failed for %s", tid, exc_info=True)
+                settled = None
+            return "aborted", settled is not None
+
+    async def _finalize_owned(
+        self, sid: str, tid: str, *, recorder: Optional[TurnRecorder] = None,
+    ) -> "tuple[str, bool]":
+        """Settle or park while the originating admission generation is current.
 
         Returns ``(outcome, settled_here)``. ``settled_here`` is True only when
         THIS call actually performed the DB transition — a racer (interrupt
@@ -2733,7 +2802,7 @@ class SessionRuntime:
         # A close whose caller was cancelled may still be writing, and how that
         # write ends decides this turn's outcome.
         if recorder is not None:
-            await recorder.writes_settled()
+            await self._await_finalization(recorder.writes_settled())
         # The turn is over, so nothing is steerable into it any more. Anything
         # this runtime submitted but never saw receipted was dropped by the
         # engine at turn end; its row is still ``queued`` and the settle-drain
@@ -2745,7 +2814,7 @@ class SessionRuntime:
         # so an undelivered one has to be handed back to the scheduler or the
         # completion is lost. Before the park gate, so a wake enqueued here is
         # already in the queue when the settle-drain looks.
-        await self._strand_task_steers()
+        await self._await_finalization(self._strand_task_steers())
 
         # turn_finalize.persist_turn_end_state: durable parked marker, branch
         # resync, summary flush.
@@ -2753,9 +2822,11 @@ class SessionRuntime:
             from app.core.turn_finalize import persist_turn_end_state
 
             if self._resync_branch:
-                await persist_turn_end_state(sid)
+                await self._await_finalization(persist_turn_end_state(sid))
             else:
-                await persist_turn_end_state(sid, resync_branch=False)
+                await self._await_finalization(persist_turn_end_state(sid, resync_branch=False))
+        except _FinalizationReplaced:
+            raise
         except Exception:
             logger.debug("SessionRuntime: persist_turn_end_state failed for %s", sid, exc_info=True)
 
@@ -2775,7 +2846,9 @@ class SessionRuntime:
         try:
             from app.core import provider_agent_supervisor
 
-            await provider_agent_supervisor.teardown_workers(sid)
+            await self._await_finalization(provider_agent_supervisor.teardown_workers(sid))
+        except _FinalizationReplaced:
+            raise
         except Exception:
             logger.warning(
                 "SessionRuntime: ProviderAgent worker teardown failed for %s",
@@ -2792,7 +2865,9 @@ class SessionRuntime:
         try:
             from app.core import pending_reconcile
 
-            await pending_reconcile.reconcile_engine_pending(sid)
+            await self._await_finalization(pending_reconcile.reconcile_engine_pending(sid))
+        except _FinalizationReplaced:
+            raise
         except Exception:
             logger.debug(
                 "SessionRuntime: engine pending reconcile failed for %s", sid,
@@ -2831,14 +2906,16 @@ class SessionRuntime:
             try:
                 from app.core import pending_reconcile
 
-                durable_agent_ids = await asyncio.to_thread(
+                durable_agent_ids = await self._await_finalization(asyncio.to_thread(
                     pending_reconcile.nonterminal_agent_task_ids, sid
-                )
+                ))
                 if durable_agent_ids:
                     logger.info(
                         "SessionRuntime: parking %s on durable sub-agent work "
                         "the registry did not report: %s", sid, durable_agent_ids,
                     )
+            except _FinalizationReplaced:
+                raise
             except Exception:
                 logger.debug(
                     "SessionRuntime: durable park-gate read failed for %s", sid,
@@ -2858,9 +2935,9 @@ class SessionRuntime:
             try:
                 from app.core import pending_reconcile
 
-                settled_ids = await asyncio.to_thread(
+                settled_ids = await self._await_finalization(asyncio.to_thread(
                     pending_reconcile.settled_task_ids, sid, list(task_ids)
-                )
+                ))
                 if settled_ids:
                     task_ids = [t for t in task_ids if t not in settled_ids]
                     logger.info(
@@ -2868,6 +2945,8 @@ class SessionRuntime:
                         "from the park for %s: %s",
                         len(settled_ids), sid, sorted(settled_ids),
                     )
+            except _FinalizationReplaced:
+                raise
             except Exception:
                 logger.debug(
                     "SessionRuntime: park settle re-check failed for %s", sid,
@@ -2896,10 +2975,12 @@ class SessionRuntime:
                 # The pump is finished. A parked/terminal row intentionally
                 # rejects renewals, including one already in flight.
                 self._lease_finalizing = True
-                parked = await asyncio.to_thread(
+                parked = await self._await_finalization(asyncio.to_thread(
                     turns_db.park_turn, tid, task_ids, usage=usage, run_id=self._run_id,
                     error=self._failure_text(),
-                )
+                ))
+            except _FinalizationReplaced:
+                raise
             except Exception:
                 logger.warning("SessionRuntime: park_turn failed for %s", tid, exc_info=True)
             if parked is not None:
@@ -2908,27 +2989,29 @@ class SessionRuntime:
                 # re-check AFTER it so we never leave an unwakeable park.
                 from app.core.task_registry import task_registry, user_stop_holds
 
-                if (await user_stop_holds(sid) or any(
+                if (await self._await_finalization(user_stop_holds(sid)) or any(
                     task_registry.is_wake_suppressed(sid, task_id)
                     for task_id in task_ids
                 )):
                     from app.core.turn_finalize import settle_stopped_monitor_parks
 
-                    settled_by_stop = await settle_stopped_monitor_parks(sid)
+                    settled_by_stop = await self._await_finalization(settle_stopped_monitor_parks(sid))
                     if not settled_by_stop:
-                        row = await asyncio.to_thread(turns_db.get_turn, tid)
+                        row = await self._await_finalization(asyncio.to_thread(turns_db.get_turn, tid))
                         settled_by_stop = bool(row and row.get("state") == "completed")
                     if settled_by_stop:
                         # Settled, not parked: finish like any other ended
                         # turn — an interrupted or errored one gives back the
                         # steer it swallowed, and the working set is synced.
                         if self._terminal != "done":
-                            await self._requeue_stranded_steers(sid)
-                        await self._snapshot_working_set(sid)
+                            await self._await_finalization(self._requeue_stranded_steers(sid))
+                        await self._await_finalization(self._snapshot_working_set(sid))
                         return "completed", True
                 # turn.parked event — only when the park actually happened.
                 try:
-                    await record_parked(sid, task_ids, turn_id=tid, usage=usage)
+                    await self._await_finalization(record_parked(sid, task_ids, turn_id=tid, usage=usage))
+                except _FinalizationReplaced:
+                    raise
                 except Exception:
                     logger.debug("SessionRuntime: record_parked failed for %s", sid, exc_info=True)
             if self._terminal != "done":
@@ -2937,7 +3020,7 @@ class SessionRuntime:
                 # put it back so it runs next (a queued turn starts while a
                 # prior one is parked) rather than sitting unanswered until
                 # the background work finishes.
-                await self._requeue_stranded_steers(sid)
+                await self._await_finalization(self._requeue_stranded_steers(sid))
             return "parked", parked is not None
 
         # A runner that lost its lease settles the row only while it is still
@@ -2952,10 +3035,12 @@ class SessionRuntime:
             # Resolve older, incompatible parked turns before this completion,
             # so terminal readers still see the current turn last.
             try:
-                await asyncio.to_thread(turns_db.settle_parked_turns, sid, tid)
+                await self._await_finalization(asyncio.to_thread(turns_db.settle_parked_turns, sid, tid))
+            except _FinalizationReplaced:
+                raise
             except Exception:
                 logger.warning("SessionRuntime: resolved park cleanup failed for %s", sid, exc_info=True)
-            await recorder.settle("completed", (self.turn.get("payload") or {}).get("parked_usage", {}))
+            await self._await_finalization(recorder.settle("completed", (self.turn.get("payload") or {}).get("parked_usage", {})))
         # Fence settlement even if a finalizing renewal exited quietly and the
         # reap sweep requeued the row before this write reached the database.
         owned_run = self._run_id
@@ -2970,10 +3055,12 @@ class SessionRuntime:
                 # carries the provider's own message) — a bare
                 # stop_reason='error' with error=NULL would make every abort
                 # undiagnosable from the turns table alone.
-                settled = await asyncio.to_thread(
+                settled = await self._await_finalization(asyncio.to_thread(
                     turns_db.settle_turn, tid, "aborted", stop_reason,
                     self._terminal_error, run_id=owned_run,
-                )
+                ))
+            except _FinalizationReplaced:
+                raise
             except Exception:
                 logger.warning("SessionRuntime: settle_turn(aborted) failed for %s", tid, exc_info=True)
             # A turn that died on a provider error has to leave a DURABLE trace.
@@ -2982,24 +3069,26 @@ class SessionRuntime:
             # and then nothing at all. Worker failures already write a system
             # row; turn failures do too.
             if self._terminal == "error":
-                await persist_turn_error_message(
+                await self._await_finalization(persist_turn_error_message(
                     sid, tid, self._terminal_error, source=self.source,
-                )
+                ))
             # A message this dying turn swallowed on its way out goes back on
             # the queue — BEFORE the scheduler seam fires, so it runs as the
             # very next turn.
-            await self._requeue_stranded_steers(sid)
+            await self._await_finalization(self._requeue_stranded_steers(sid))
             # Working-set snapshot: a turn that ended (even
             # aborted) may leave in-progress edits the next runner needs. NEVER
             # on the parked arm above (the session is still working here).
-            await self._snapshot_working_set(sid)
+            await self._await_finalization(self._snapshot_working_set(sid))
             return "aborted", settled is not None
 
         settled = None
         try:
-            settled = await asyncio.to_thread(
+            settled = await self._await_finalization(asyncio.to_thread(
                 turns_db.settle_turn, tid, "completed", error=self._failure_text(), run_id=owned_run,
-            )
+            ))
+        except _FinalizationReplaced:
+            raise
         except Exception:
             logger.warning("SessionRuntime: settle_turn(completed) failed for %s", tid, exc_info=True)
         if settled is not None:
@@ -3008,12 +3097,14 @@ class SessionRuntime:
             # work finishes DURING this wake, the park gate above is now empty:
             # close the resolved predecessors here, not only at the next start.
             try:
-                await asyncio.to_thread(turns_db.settle_parked_turns, sid, tid)
+                await self._await_finalization(asyncio.to_thread(turns_db.settle_parked_turns, sid, tid))
+            except _FinalizationReplaced:
+                raise
             except Exception:
                 logger.warning(
                     "SessionRuntime: resolved park cleanup failed for %s", sid, exc_info=True,
                 )
-        await self._snapshot_working_set(sid)
+        await self._await_finalization(self._snapshot_working_set(sid))
         return "completed", settled is not None
 
     def _failure_text(self) -> Optional[str]:
