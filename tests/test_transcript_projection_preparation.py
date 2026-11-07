@@ -16,9 +16,10 @@ from app.core.transcript_views.preparation import (
 
 
 def blocked(entered, release, worker_failure=False):
-    marker = Path(entered).with_suffix('.tmp')
-    marker.write_text(str(os.getpid()))
-    marker.replace(entered)  # Publish completion, never an observable empty file.
+    entered = Path(entered)
+    entered.mkdir()
+    # Publish the PID atomically in a new name; neither side opens marker files.
+    (entered/str(os.getpid())).mkdir()
     deadline = time.monotonic() + 10
     while not Path(release).exists():
         if time.monotonic() > deadline:
@@ -31,10 +32,25 @@ def blocked(entered, release, worker_failure=False):
 
 async def entered_worker(path):
     async def wait():
-        while not path.exists():
+        while True:
+            for marker in path.glob('*'):
+                return int(marker.name)
             await asyncio.sleep(.005)
-        return int(path.read_text())
     return await asyncio.wait_for(wait(), 10)
+
+
+@pytest.mark.asyncio
+async def test_worker_handshake_never_opens_marker_files(tmp_path, monkeypatch):
+    entered, release = tmp_path/'entered', tmp_path/'release'
+    release.touch()
+
+    def reject_open(*args, **kwargs):
+        raise AssertionError('the worker handshake must not open marker files')
+
+    monkeypatch.setattr(Path, 'open', reject_open)
+    pid = blocked(entered, release)
+    assert pid == os.getpid()
+    assert await entered_worker(entered) == pid
 
 
 @pytest.mark.asyncio
