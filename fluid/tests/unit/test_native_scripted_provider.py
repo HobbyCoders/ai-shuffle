@@ -245,6 +245,10 @@ async def test_oversized_read_and_persisted_resume(
     from fluid.tools.builtins import register_builtins
     from fluid.tools import images
 
+    # Each parameter models a fresh worker. A previous healthy worker's memo
+    # must not bypass this one's deliberately missing decoder in legacy mode.
+    monkeypatch.setattr(images, "_cache", images.OrderedDict())
+    monkeypatch.setattr(images, "_cache_bytes", 0)
     attachment = tmp_path / "attachment.webp"
     attachment.write_bytes(oversized_webp)
     registry = ToolRegistry()

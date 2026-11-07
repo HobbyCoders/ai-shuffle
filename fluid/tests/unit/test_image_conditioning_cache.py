@@ -61,6 +61,23 @@ def test_kept_original_is_encoded_only_once(screenshot, encoder_threads):
     assert len(encoder_threads) == 1
 
 
+@pytest.mark.parametrize("failure", ["decode", "encode"])
+def test_failed_conditioning_remains_retryable(failure, screenshot, encoder_threads, monkeypatch):
+    def broken(*args, **kwargs):
+        raise OSError("temporary image processing failure")
+
+    with monkeypatch.context() as failing:
+        if failure == "decode":
+            failing.setattr(images, "_open_image", broken)
+        else:
+            failing.setattr(PILImage.Image, "save", broken)
+        assert images.condition_image("image/png", screenshot) == ("image/png", screenshot)
+        assert not images._cache
+    assert images.condition_image("image/png", screenshot) == ("image/png", screenshot)
+    assert images.condition_image("image/png", screenshot) == ("image/png", screenshot)
+    assert len(encoder_threads) == 1
+
+
 def test_repeated_request_serialization_and_checkpoints_reuse_image(screenshot, encoder_threads):
     from fluid.context.cache_probe import fingerprint_responses_request
 

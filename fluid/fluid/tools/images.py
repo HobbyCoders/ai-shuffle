@@ -75,6 +75,10 @@ def condition_image(media_type: str, data_b64: str) -> tuple[str, str]:
             _cache.move_to_end(key)
             return _cache[key][0]
         result = _condition_image(media_type, data_b64)
+        if result is None:
+            # A missing decoder or transient encode failure must remain
+            # retryable; only successful conditioning outcomes are memoized.
+            return media_type, data_b64
         size = _cache_entry_bytes(key, result)
         if size <= _CACHE_MAX_BYTES:
             while _cache_bytes + size > _CACHE_MAX_BYTES:
@@ -85,12 +89,13 @@ def condition_image(media_type: str, data_b64: str) -> tuple[str, str]:
         return result
 
 
-def _condition_image(media_type: str, data_b64: str) -> tuple[str, str]:
+def _condition_image(media_type: str, data_b64: str) -> tuple[str, str] | None:
     """Downscale/re-encode one base64 image to the model-facing budget.
 
     Returns ``(media_type, base64)`` — possibly identical to the input when the
-    image is already within budget (including when a re-encode is no smaller)
-    or cannot be processed. A successful resize always wins over byte size.
+    image is already within budget (including when a re-encode is no smaller).
+    A successful resize always wins over byte size. None means processing failed
+    and the caller should pass through without memoizing the failure.
     """
     try:
         raw = base64.b64decode(data_b64, validate=False)
@@ -133,7 +138,7 @@ def _condition_image(media_type: str, data_b64: str) -> tuple[str, str]:
         return out_type, encoded
     except Exception:
         # No Pillow, undecodable bytes, or any encode failure: pass through.
-        return media_type, data_b64
+        return None
 
 
 def _resampling():
