@@ -774,6 +774,9 @@ class TestNonblockingQuestions(TestUserQuestionHandler):
         assert len(interactions.get_pending_interactions("s1")) == 1
 
     async def test_answer_acceptance_enqueues_once_and_replay_stays_closed(self, handler, mock_broadcast):
+        from tests.shared_fixtures import seed_session
+
+        seed_session('s1')
         from app.db import turns, interactions
         kwargs = dict(request_id="durable-q", tool_use_id="tu", session_id="s1",
                       questions=[{"question": "Color?"}], broadcast_func=mock_broadcast)
@@ -825,6 +828,9 @@ class TestNonblockingQuestions(TestUserQuestionHandler):
         assert turns.get_turn(answer["id"])["state"] == "running"
 
     async def test_concurrent_answers_accept_only_one(self, handler, mock_broadcast):
+        from tests.shared_fixtures import seed_session
+
+        seed_session("s1")
         from app.db import turns
         await handler.post_question(request_id="q-race", tool_use_id="tu", session_id="s1",
                                     questions=[{"question": "Color?"}], broadcast_func=mock_broadcast)
@@ -836,6 +842,9 @@ class TestNonblockingQuestions(TestUserQuestionHandler):
         assert len(turns.get_queued_turns("s1")) == 1
 
     async def test_enqueue_failure_rolls_back_answer(self, handler, mock_broadcast):
+        from tests.shared_fixtures import seed_session
+
+        seed_session("s1")
         from app.db import turns, interactions
         await handler.post_question(request_id="q", tool_use_id="tu", session_id="s1",
                                     questions=[{"question": "Color?"}], broadcast_func=mock_broadcast)
@@ -1336,6 +1345,9 @@ class TestQuestionTimeoutRetiresTheRow:
         assert emit.await_args.kwargs["push"] is True
 
     async def test_timeout_emits_a_durable_expired_event(self, handler, mock_db):
+        from tests.shared_fixtures import seed_session
+
+        seed_session('s-expired')
         from app.db import session_events as se_db
 
         broadcast = AsyncMock(return_value=True)
