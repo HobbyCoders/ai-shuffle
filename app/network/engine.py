@@ -2313,14 +2313,16 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                 store.observe_clock(cursor, seen)
             else:
                 store.lock_state(cursor)
-            _lock_mirror_event_counters(cursor, (data.get("record_id") for data in chunk
-                                                if isinstance(data, Mapping)
-                                                and data.get("collection") == "session_events"))
             bulk_pending = os.environ.get("AI_SHUFFLE_PERF_BULK_PENDING", "").strip().lower() not in (
                 "0", "false", "off", "no")
             stream = _wire_stream(cursor, chunk, ctx) if bulk_pending else None
             appended = (stream is not None and _buffer_pending_chunk(cursor, chunk, ctx, part, stream))
             if not appended:
+                # Pure gap buffering never touches an event row or its counter.
+                # Otherwise reserve the whole chunk before any materialization.
+                _lock_mirror_event_counters(cursor, (data.get("record_id") for data in chunk
+                                                    if isinstance(data, Mapping)
+                                                    and data.get("collection") == "session_events"))
                 appended = _apply_event_append(cursor, chunk, ctx, part, _stream=stream)
             for data in (() if appended else chunk):
                 if savepoints:
