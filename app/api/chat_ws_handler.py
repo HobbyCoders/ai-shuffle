@@ -1415,12 +1415,13 @@ class ChatWebSocketHandler:
         target_instance_id = (data.get("target_instance_id") or "").strip() or None
         if session_id or target_instance_id == settings.effective_instance_id:
             target_instance_id = None
-        # Staged upload paths referenced by this prompt. They are absolute
-        # paths on THIS install's disk, so they only need carrying when the turn
-        # ends up running somewhere else; a local turn ignores them entirely.
-        upload_paths = [
-            p for p in (data.get("upload_paths") or []) if isinstance(p, str) and p
-        ]
+        # Explicit attachment provenance, never inferred from prompt text. Local
+        # turns need it too, so a sent-message rewind can restore upload chips.
+        raw_upload_paths = data.get("upload_paths")
+        upload_paths = (
+            [p for p in raw_upload_paths if isinstance(p, str) and p]
+            if isinstance(raw_upload_paths, list) else []
+        )
         # Sidepanel mode for a NEW session (code / chat / voice). Creation-time
         # only: an existing session's mode is settled on its row, so re-sending
         # it here could never move a session between surfaces. The frontend
@@ -1749,6 +1750,18 @@ class ChatWebSocketHandler:
             await run_sync(turns_db.get_live_turn, session_id) is not None
         )
 
+        if upload_paths:
+            from app.core import upload_transfer
+            try:
+                upload_session = await run_sync(database.get_session, session_id)
+                await run_sync(upload_transfer.validate_upload_paths, upload_paths, upload_session)
+            except (upload_transfer.UploadLiftError, OSError, ValueError, RuntimeError):
+                await self.send_json({
+                    "type": "error", "session_id": session_id,
+                    "message": "Attachment path is outside this session's upload area.",
+                })
+                return
+
         # Persist + broadcast the user message (the session_messages dual-write
         # survives — the recorder also logs ``message.user`` to the event
         # feed). New sessions persisted their first message atomically at
@@ -1771,7 +1784,7 @@ class ChatWebSocketHandler:
         held_for_move = session_handoff.holds(session_id)
         # A correlated existing-session send may still be cancelled at its
         # durable admission gate. Never dual-write it into history before then.
-        defer_record = had_live or held_for_move or (bool(client_message_id) and not is_new_session)
+        defer_record = had_live or held_for_move or placed_remote or (bool(client_message_id) and not is_new_session)
         if not defer_record and not compact_first:
             try:
                 if not is_new_session:
@@ -1811,8 +1824,8 @@ class ChatWebSocketHandler:
         if compact_first:
             payload["compact_first"] = True
             payload["deferred_user_record"] = True
-            if upload_paths:
-                payload["upload_paths"] = upload_paths
+        if upload_paths:
+            payload["upload_paths"] = upload_paths
         if request_id and is_new_session:
             payload["request_id"] = request_id
         if defer_record:

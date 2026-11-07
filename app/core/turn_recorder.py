@@ -821,6 +821,7 @@ class TurnRecorder:
         source: str | None = None,
         continued: bool = False,
         accepted_input_id: str | None = None,
+        upload_paths: list[str] | None = None,
     ) -> None:
         """Append ``turn.started`` then ``message.user``.
 
@@ -849,6 +850,7 @@ class TurnRecorder:
                     extra_payload={
                         **({"source": source} if source is not None else {}),
                         **({"accepted_input_id": accepted_input_id} if accepted_input_id else {}),
+                        **({"upload_paths": upload_paths} if upload_paths else {}),
                     } or None,
                 ))
             await self._append(events)
@@ -857,6 +859,21 @@ class TurnRecorder:
                 "[TurnRecorder] start failed for %s", self.session_id,
                 exc_info=True,
             )
+
+    async def record_user_message(
+        self, content: str, *, profile_id: str | None = None,
+        source: str | None = None, upload_paths: list[str] | None = None,
+        accepted_input_id: str | None = None,
+    ) -> None:
+        """Record an opening prompt after remote uploads acquire local paths."""
+        await self._append([self._event(
+            contract.MessageUser, content=content, profile_id=profile_id,
+            extra_payload={
+                **({"source": source} if source is not None else {}),
+                **({"upload_paths": upload_paths} if upload_paths else {}),
+                **({"accepted_input_id": accepted_input_id} if accepted_input_id else {}),
+            } or None,
+        )])
 
     async def record_steered_user_message(
         self,
@@ -867,6 +884,7 @@ class TurnRecorder:
         queued_turn_id: str | None = None,
         checkpoint_backed: bool | None = None,
         source: str | None = None,
+        upload_paths: list[str] | None = None,
     ) -> bool:
         """Append a ``message.user`` for a message steered into the LIVE turn.
 
@@ -899,7 +917,10 @@ class TurnRecorder:
                     profile_id=profile_id,
                     queued_turn_id=queued_turn_id,
                     checkpoint_backed=False,
-                    extra_payload={"source": source} if source is not None else None,
+                    extra_payload={
+                        **({"source": source} if source is not None else {}),
+                        **({"upload_paths": upload_paths} if upload_paths else {}),
+                    } or None,
                 ))
                 await self._append(events)
             return not (self._recording_failed or self._superseded)

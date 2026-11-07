@@ -1240,6 +1240,7 @@ function reduceInternal(state, event, observe) {
       const stamp = stampTs(event, createdAt);
       const senderProfileId = str(event.profile_id) || (idx >= 0 ? state.messages[idx].profileId : "") || state.liveTurnProfileId || "";
       const turnId2 = str(event.turn_id);
+      const uploadPaths = Array.isArray(event.upload_paths) && event.upload_paths.length > 0 && event.upload_paths.every((path) => typeof path === "string" && path.length > 0) ? event.upload_paths : null;
       const userMsg = (id) => ({
         id,
         role: "user",
@@ -1247,14 +1248,14 @@ function reduceInternal(state, event, observe) {
         content,
         timestamp: stamp || void 0,
         ...turnId2 ? { turnId: turnId2 } : {},
-        ...startsAgentTurn || event.not_sent ? { metadata: {
+        ...startsAgentTurn || event.not_sent || uploadPaths ? { metadata: {
           ...startsAgentTurn ? { agent_wake: true } : {},
+          ...uploadPaths ? { upload_paths: uploadPaths } : {},
           ...event.not_sent ? {
             not_sent: true,
             not_sent_id: event.id,
             // The turn still running when Stop wrote this row (see not-sent-hold).
-            ...state.liveTurnId ? { not_sent_during_turn: state.liveTurnId } : {},
-            ...Array.isArray(event.upload_paths) && event.upload_paths.length ? { upload_paths: event.upload_paths } : {}
+            ...state.liveTurnId ? { not_sent_during_turn: state.liveTurnId } : {}
           } : {}
         } } : {},
         ...typeof event.queued_turn_id === "string" ? { queuedTurnId: event.queued_turn_id } : {},
@@ -2357,7 +2358,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "ccc10cf9661d34ce3cd9bcadcebd4bcd62cb08d38de6ff8e8cd08d7912a7c2f7";
+var REDUCER_FINGERPRINT = "4612c6d6c43875223a2c1787df48a95fa5412a37527ed1b50099bdabb05be2bf";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

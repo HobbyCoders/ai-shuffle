@@ -501,9 +501,12 @@ def _resolve_rewind_from_seq(
     target_uuid: str,
     include_response: bool,
     target_role: str,
+    restored_upload_paths: Optional[List[str]] = None,
 ) -> tuple[Optional[int], Optional[str]]:
     """Resolve the event-log seq a chat rewind truncates from. FAIL CLOSED.
 
+    ``restored_upload_paths`` collects the target's explicit attachment paths
+    only when removing that user message, never for a kept response/assistant.
     Returns ``(from_seq, error)``:
     - ``(seq, None)``   — append ``transcript.rewound(from_seq=seq)`` on success.
     - ``(None, None)``  — the target is already the transcript tail (nothing
@@ -580,6 +583,10 @@ def _resolve_rewind_from_seq(
             if payload.get("kind") == "command" or payload.get("checkpoint_backed") is not False:
                 return int(row["seq"]), None
         return None, None  # already the tail — nothing to drop
+    if restored_upload_paths is not None:
+        paths = (events[target_idx].get("payload") or {}).get("upload_paths")
+        if isinstance(paths, list):
+            restored_upload_paths.extend(p for p in paths if isinstance(p, str) and p)
     return int(events[target_idx]["seq"]), None
 
 
@@ -760,6 +767,7 @@ async def _execute_rewind(
     # the log, we refuse the whole rewind rather than desync the two stores.
     v2_session = bool(session.get("v2_stream"))
     rewound_from_seq: Optional[int] = None
+    restored_upload_paths: List[str] = []
     if v2_session and request.restore_chat:
         from app.core.history_backfill import ensure_backfilled
         await ensure_backfilled(session_id)
@@ -792,6 +800,7 @@ async def _execute_rewind(
             _resolve_rewind_from_seq,
             session_id, sdk_session_id, working_dir,
             request.target_uuid, request.include_response, request.target_role,
+            restored_upload_paths,
         )
         if resolve_err is not None:
             return RewindResponseV2(
@@ -1283,7 +1292,8 @@ async def _execute_rewind(
         messages_removed=messages_removed,
         error="; ".join(errors) if errors else None,
         partial_success=partial_success,
-        warning=warning
+        warning=warning,
+        restored_upload_paths=restored_upload_paths if chat_rewound else [],
     )
 
 

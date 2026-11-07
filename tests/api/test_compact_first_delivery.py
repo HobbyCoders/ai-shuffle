@@ -2,7 +2,7 @@
 import time
 import pytest
 
-from tests.api.test_compact_first import compact_chat, send
+from tests.api.test_compact_first import compact_chat, compact_upload, send
 from app.core import query_session_lifecycle, session_handoff, turn_manager
 from app.core.task_registry import task_registry
 from app.db import database, session_events, session_moves, turns
@@ -40,8 +40,8 @@ def test_lost_response_retry_admits_only_one_pair(compact_chat, terminal):
 
 
 @pytest.mark.parametrize("compact_started", [False, True])
-async def test_stop_keeps_followup_as_durable_unsent_message(compact_chat, compact_started):
-    payload = {"then_send": query(upload_paths=["/uploads/proof.png"])}
+async def test_stop_keeps_followup_as_durable_unsent_message(compact_chat, compact_upload, compact_started):
+    payload = {"then_send": query(upload_paths=[compact_upload])}
     pair = send(compact_chat, payload).json()
     if compact_started:
         assert turns.start_turn(pair["turn_id"])
@@ -52,14 +52,14 @@ async def test_stop_keeps_followup_as_durable_unsent_message(compact_chat, compa
     assert turns.pop_ready("compact-chat") is None
     messages = database.get_session_messages("compact-chat")
     assert [m["content"] for m in messages] == ["Keep these exact words"]
-    assert messages[0]["metadata"]["upload_paths"] == ["/uploads/proof.png"]
-    assert row["payload"]["upload_paths"] == ["/uploads/proof.png"]
+    assert messages[0]["metadata"]["upload_paths"] == [compact_upload]
+    assert row["payload"]["upload_paths"] == [compact_upload]
     events = session_events.get_events("compact-chat")
     unsent = [e for e in events if e["event_type"] == "message.user"]
     assert len(unsent) == 1
     assert unsent[0]["payload"]["content"] == messages[0]["content"]
     assert unsent[0]["payload"]["not_sent"] is True
-    assert unsent[0]["payload"]["upload_paths"] == ["/uploads/proof.png"]
+    assert unsent[0]["payload"]["upload_paths"] == [compact_upload]
     # A second Stop/reload/lost-ack retry cannot duplicate the transcript or
     # resume the stopped message. Every client replays this same durable event.
     await query_session_lifecycle.enter_user_stop("compact-chat")

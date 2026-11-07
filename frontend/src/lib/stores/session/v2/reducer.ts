@@ -1936,6 +1936,10 @@ function reduceInternal(
 			// turn's id rather than opening one of its own, which is how the
 			// transcript tells a mid-turn prompt from a turn-initiating one.
 			const turnId = str(event.turn_id);
+			const uploadPaths = Array.isArray(event.upload_paths)
+				&& event.upload_paths.length > 0
+				&& event.upload_paths.every((path) => typeof path === 'string' && path.length > 0)
+				? event.upload_paths : null;
 			const userMsg = (id: string): ChatMessage => ({
 				id,
 				role: 'user',
@@ -1943,13 +1947,13 @@ function reduceInternal(
 				content,
 				timestamp: stamp || undefined,
 				...(turnId ? { turnId } : {}),
-				...((startsAgentTurn || event.not_sent) ? { metadata: {
+				...((startsAgentTurn || event.not_sent || uploadPaths) ? { metadata: {
 					...(startsAgentTurn ? { agent_wake: true } : {}),
+					...(uploadPaths ? { upload_paths: uploadPaths } : {}),
 					...(event.not_sent ? {
 						not_sent: true, not_sent_id: event.id,
 						// The turn still running when Stop wrote this row (see not-sent-hold).
 						...(state.liveTurnId ? { not_sent_during_turn: state.liveTurnId } : {}),
-						...(Array.isArray(event.upload_paths) && event.upload_paths.length ? { upload_paths: event.upload_paths } : {}),
 					} : {}),
 				} } : {}),
 				...(typeof event.queued_turn_id === 'string' ? { queuedTurnId: event.queued_turn_id } : {}),
