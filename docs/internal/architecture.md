@@ -120,9 +120,13 @@ Recording failure first commits a run-id-guarded, row-only `draining` marker
 with a stable terminal intent in the existing Stop notice outbox. This does not
 need the transcript counter. The marker excludes the already-executed prompt
 from reaping/requeue and holds its live slot until the receipt commits, preventing
-a delayed close from closing a successor's stream. Delivery atomically aborts
-the marked turn, appends its terminal receipt and acknowledges the outbox using
-the shared run/counter/session/turn lock order and the captured run-id guard.
+a delayed close from closing a successor's stream. Orphan Stop and parking also
+leave failure-owned rows to this intent: neither may erase its marker. A Stop
+for that draining turn returns promptly without a new contended append or a
+false "nothing stopped" response; its page waits for the durable close. Delivery
+atomically aborts the marked turn, appends its terminal receipt and acknowledges
+the outbox using the shared run/counter/session/turn lock order and the captured
+run-id guard.
 Only confirmed lock-timeout rollbacks get immediate bounded retries. If they
 exhaust, the existing pending-notice observer finishes delivery after contention
 clears, including after restart; it never replays the prompt, failed recorder

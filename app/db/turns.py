@@ -1251,7 +1251,8 @@ def stop_orphaned_turns(
     """Stop stranded live turns, never a session with a valid execution lease.
 
     The lease guard is part of the UPDATE, not an earlier read. A late Stop
-    remains bound to its original turn and cannot stop a successor.
+    remains bound to its original turn and cannot stop a successor. A durable
+    recording-failure intent already owns its close: leave its marker intact.
     """
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
@@ -1274,6 +1275,7 @@ def stop_orphaned_turns(
             "UPDATE turns SET state='aborted', stop_reason='interrupted', "
             "interrupt_mode='stop', stop_background=%s, ended_at=NOW() "
             "WHERE session_id=%s AND state IN ('running','interrupting','draining') "
+            "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') "
             "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.session_id=turns.session_id "
             "AND r.state='active' AND r.lease_expires_at >= NOW())"
         )
@@ -1906,6 +1908,7 @@ def park_turn(
     runtime cannot park a turn that was requeued and started by a new owner.
     ``error`` is what went wrong when the foreground stream ended in a failure:
     the row stays parked on its background work, and still failed once that ends.
+    A recording-failure intent already owns its terminal; it must not be parked.
     """
     task_ids = list(task_ids or [])
     with get_db() as conn:
@@ -1921,6 +1924,7 @@ def park_turn(
         sql = (
             "UPDATE turns SET state='parked', payload=%s, error=%s, ended_at=NOW() "
             "WHERE id=%s AND state IN ('running','interrupting','draining') "
+            "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') "
         )
         params: tuple = (json.dumps(payload), error, turn_id)
         if run_id is not None:

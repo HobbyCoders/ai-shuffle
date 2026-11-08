@@ -1,6 +1,6 @@
 """Recovery covers standalone writers without replaying uncertain commits."""
 import asyncio
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import psycopg2
 import pytest
@@ -135,6 +135,8 @@ def test_exhausted_terminal_recovery_persists_nonreplayable_intent(monkeypatch, 
     assert turns.reap_expired() == []
     assert turns.requeue_turn(turn["id"]) is None
     assert turns.settle_turn(turn["id"], "completed") is None
+    assert turns.park_turn(turn["id"]) is None
+    assert turns.stop_orphaned_turns("recovery-chat", turn["id"]) == []
     assert turns.start_turn(turn["id"], "replacement-run", "replacement") is None
     successor = turns.enqueue_turn("recovery-chat", "user", prompt="a new message")
     assert turns.start_turn(successor["id"], "replacement-run", "replacement") is None
@@ -147,6 +149,38 @@ def test_exhausted_terminal_recovery_persists_nonreplayable_intent(monkeypatch, 
     assert len(rows) == 1 and rows[0]["event_type"] == "turn.aborted"
     assert turns.get_turn(turn["id"])["state"] == "aborted"
     assert turns.start_turn(successor["id"], "replacement-run", "replacement")
+
+
+async def test_websocket_stop_leaves_failure_owned_close_pending_without_false_error(monkeypatch):
+    from app.api.chat_ws_handler import ChatWebSocketHandler
+    from app.core.scoped_remote_stop import retry_incomplete_notes
+    from app.db import stop_notices
+
+    turn = turns.enqueue_turn("recovery-chat", "user", prompt="already ran")
+    turns.start_turn(turn["id"], None, "runner")
+    append = events.append_events
+    blocked = Mock(side_effect=LockNotAvailable())
+    monkeypatch.setattr(events, "append_events", blocked)
+    assert turns.settle_turn(turn["id"], "aborted", "recording_failed")
+    handler = ChatWebSocketHandler(
+        websocket=MagicMock(), device_id="device", user_id="admin", api_user_id=None,
+    )
+    # Auth and routing only: the actual WS Stop, interrupt and row predicates run.
+    handler._may_act_on_session = AsyncMock(return_value=True)
+    handler._network_owner = AsyncMock(return_value=None)
+    handler.send_json = AsyncMock()
+    await asyncio.wait_for(handler.handle_stop({
+        "session_id": "recovery-chat", "turn_id": turn["id"],
+    }), 1)
+    handler.send_json.assert_not_awaited()  # no false error / "nothing stopped"
+    assert blocked.call_count == 3  # Stop did not start another counter write
+    row = turns.get_turn(turn["id"])
+    assert (row["state"], row["stop_reason"]) == ("draining", "recording_failed")
+    assert stop_notices.pending() == ["recording-failed:" + turn["id"]]
+    monkeypatch.setattr(events, "append_events", append)
+    await retry_incomplete_notes()
+    assert stop_notices.pending() == []
+    assert [r["event_type"] for r in events.get_events("recovery-chat")] == ["turn.aborted"]
 
 
 @pytest.mark.parametrize("error", [psycopg2.OperationalError(), psycopg2.errors.QueryCanceled()])

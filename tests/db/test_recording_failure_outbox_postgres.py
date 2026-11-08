@@ -77,7 +77,10 @@ async def _child(script, cluster, tmp_path, *args):
 
 
 @pytest.mark.parametrize('source', ['user', 'queue'])
-async def test_exhaustion_restart_recovers_receipt_without_reexecution(cluster, connect, session_id, tmp_path, source):
+@pytest.mark.parametrize('late_stop', [False, True], ids=['restart', 'stop-then-restart'])
+async def test_exhaustion_restart_recovers_receipt_without_reexecution(
+    cluster, connect, session_id, tmp_path, source, late_stop, monkeypatch,
+):
     holder = connect()
     holder.cursor().execute(
         'INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0)', (session_id,),
@@ -102,6 +105,21 @@ async def test_exhaustion_restart_recovers_receipt_without_reexecution(cluster, 
         runs.release_run(replacement['id'], replacement['fence_token'])
         assert session_events.get_events(session_id) == []
         assert stop_notices.pending() == ['recording-failed:' + turn_id]
+        stop_error = None
+        if late_stop:
+            from app.core import turn_manager
+            from psycopg2.errors import LockNotAvailable
+
+            # The counter remains locked AFTER lease release. Before the fix,
+            # Stop overwrites the marker and its own close exhausts as well.
+            # Catch that confirmed rollback to exercise the eventual recovery.
+            monkeypatch.setattr(session_events, 'LOCK_RETRY_DELAYS_SECONDS', (0,))
+            try:
+                await asyncio.wait_for(turn_manager.interrupt_async(
+                    session_id, 'stop', stop_background=True, turn_id=turn_id,
+                ), 6)
+            except LockNotAvailable as exc:
+                stop_error = exc
     finally:
         holder.rollback()
     # Fresh interpreter, real persisted outbox, actual recovery consumer. No
@@ -114,6 +132,8 @@ async def test_exhaustion_restart_recovers_receipt_without_reexecution(cluster, 
     assert len(rows) == 1 and rows[0]['id'] == 'recording-failed:' + turn_id
     assert rows[0]['event_type'] == 'turn.aborted'
     assert rows[0]['turn_id'] == turn_id
+    assert rows[0]['payload']['stop_reason'] == 'recording_failed'
+    assert stop_error is None  # marked Stop must not try a contended append
     assert turns.start_turn(successor['id'], 'next-run', 'replacement-owner')
     assert turns.settle_turn(successor['id'], 'completed', run_id='next-run')
 
