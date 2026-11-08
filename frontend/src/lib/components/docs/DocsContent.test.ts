@@ -6,6 +6,16 @@ import DocsContent from './DocsContent.svelte';
 
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
+describe('DocsContent headings', () => {
+	it('renders inline code in a heading and keeps its anchor (#1220)', () => {
+		const { container } = render(DocsContent, { content: '## Scripts and `curl`' });
+		const heading = container.querySelector('h2')!;
+		expect(heading.textContent).toBe('Scripts and curl');
+		expect(heading.querySelector('code')?.textContent).toBe('curl');
+		expect(heading.id).toBe('scripts-and-curl');
+	});
+});
+
 describe('DocsContent code copy', () => {
 	it('keeps native keyboard semantics and handles a keyboard-originated click once', async () => {
 		const writeText = vi.fn().mockResolvedValue(undefined);

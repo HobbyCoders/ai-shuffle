@@ -18,6 +18,7 @@
 	let { headings, scrollContainer = null, showTitle = true, onSelect }: Props = $props();
 
 	let activeId = $state('');
+	let chosenUntil = 0;
 
 	// Scroll-spy via IntersectionObserver
 	let observer: IntersectionObserver | null = null;
@@ -32,6 +33,9 @@
 		observer?.disconnect();
 
 		if (headings.length === 0) return;
+		let onScroll: (() => void) | undefined;
+		let removeScroll: (() => void) | undefined;
+		let resize: ResizeObserver | undefined;
 
 		// Small delay to let DOM update
 		const timer = setTimeout(() => {
@@ -57,11 +61,32 @@
 				const el = document.getElementById(heading.id);
 				if (el) observer.observe(el);
 			}
+
+			// The last heading can never reach the observer's band on a page
+			// that ends right under it, so the end of the page selects it.
+			onScroll = () => {
+				if (performance.now() < chosenUntil) return;
+				if (root.scrollHeight - root.scrollTop - root.clientHeight < 8) activeId = headings[headings.length - 1].id;
+			};
+			root.addEventListener('scroll', onScroll, { passive: true });
+			removeScroll = () => root.removeEventListener('scroll', onScroll!);
+			onScroll(); // The reader may already be at the end when this list starts.
+
+			// A new width reflows the text: keep the current heading in view.
+			let width = root.clientWidth;
+			resize = new ResizeObserver(() => {
+				if (root.clientWidth === width) return;
+				width = root.clientWidth;
+				if (activeId && root.scrollTop > 0) document.getElementById(activeId)?.scrollIntoView({ block: 'start' });
+			});
+			resize.observe(root);
 		}, 100);
 
 		return () => {
 			clearTimeout(timer);
 			observer?.disconnect();
+			resize?.disconnect();
+			removeScroll?.();
 		};
 	});
 
@@ -72,6 +97,7 @@
 		if (!el) return;
 		el.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
 		activeId = id;
+		chosenUntil = performance.now() + 1000; // A chosen heading outlasts its own smooth scroll.
 	}
 </script>
 

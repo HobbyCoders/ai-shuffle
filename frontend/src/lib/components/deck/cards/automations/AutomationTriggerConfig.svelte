@@ -233,7 +233,7 @@
   {#if expandedTriggers.has(trigIdx)}
    <!-- Direct card children reuse the shared SettingRow dividers. -->
     <SettingRow label="Trigger type" stackOnPhone>
-     <Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Schedule'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} />
+     <span class="trigger-type"><Segmented label="Trigger type" value={trigger.type} options={[{value:'cron',label:'Schedule'},{value:'interval',label:'Interval'},{value:'connector_event',label:'Event'},{value:'connector_trigger',label:'Connector'},{value:'webhook',label:'Webhook'}]} onchange={(value) => updateTriggerType(trigIdx,value)} /></span>
     </SettingRow>
     {#if trigger.type === 'cron'}
      <!-- The type reads "Schedule" (stored as cron); presets or a custom timing sit under it. -->
@@ -285,6 +285,12 @@
 {/each}
 <button class="st-btn" onclick={addTrigger}><Plus size={14} />Add trigger</button>
 <style>
+	/* Five types do not fit one phone line: three over two, so none sits alone. */
+	.trigger-type { display: contents; }
+	@media (max-width: 600px) {
+		.trigger-type :global(.st-seg) { flex-wrap: wrap; }
+		.trigger-type :global(.st-seg button) { flex: 1 1 30%; }
+	}
  .trigger-card { margin-bottom: 12px; overflow: hidden; }
  .trigger-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; }
  .trigger-header:has(+ :global(.st-row)) { border-bottom: 1px solid var(--st-border); }

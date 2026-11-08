@@ -293,6 +293,9 @@
 	height: 15px;
 }
 
+/* A refused field names itself, not only the banner above the form. */
+.settings-shell input[aria-invalid='true'] { border-color: var(--st-destructive); }
+
 /* Phone geometry belongs to the kit, not individual destination overrides.
    data-stacked also covers the native shell on a wide/foldable viewport. */
 .settings-shell[data-stacked] :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink, .st-help),
@@ -324,13 +327,14 @@
  .settings-shell button.st-vbtn svg.lucide { width: 16px; height: 16px; flex: none; }
 }
 
-/* Draw the control at desktop density; reserve a full 44px phone touch pitch. */
+/* Draw the control at desktop density; reserve a full 44px phone touch pitch.
+   An absolute child measures from inside the 1px border, hence 7px and not 6. */
 .settings-shell[data-stacked] .st-btn { height: 32px; min-height: 32px; margin-block: 6px; }
-.settings-shell[data-stacked] .st-btn::after { content: ''; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }
+.settings-shell[data-stacked] .st-btn::after { content: ''; position: absolute; inset: -7px min(0px, calc((100% - 44px) / 2)); }
 .settings-shell[data-stacked] .st-btn.icon { min-width: 32px; margin-inline: 6px; }
 @media (max-width: 600px), (pointer: coarse) {
  .settings-shell .st-btn { height: 32px; min-height: 32px; margin-block: 6px; }
- .settings-shell .st-btn::after { content: ''; position: absolute; inset: -6px min(0px, calc((100% - 44px) / 2)); }
+ .settings-shell .st-btn::after { content: ''; position: absolute; inset: -7px min(0px, calc((100% - 44px) / 2)); }
  .settings-shell .st-btn.icon { min-width: 32px; margin-inline: 6px; }
  .settings-shell .st-page-title .st-btn { margin-block: 0; }
  .settings-shell .st-lhead { gap: 0; }

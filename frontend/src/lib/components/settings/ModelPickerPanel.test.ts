@@ -186,6 +186,26 @@ describe('ModelPickerPanel', () => {
 		expect(on.querySelector('svg')?.getAttribute('width')).toBe('16');
 	});
 
+	it('names the highlighted row for screen readers while arrowing (#1220)', async () => {
+		render(ModelPickerPanel, { props: { groups, options, value: options[0].value, onSelect: vi.fn() } });
+		const search = screen.getByRole('textbox', { name: 'Search models' });
+		expect(search.getAttribute('aria-activedescendant')).toBeNull();
+		await fireEvent.keyDown(search, { key: 'ArrowDown' });
+		await tick();
+		const row = document.getElementById(search.getAttribute('aria-activedescendant')!);
+		expect(row?.dataset.value).toBe(options[1].value);
+	});
+
+	it('keeps focus on the star when a row moves into Favorites (#1220)', async () => {
+		render(ModelPickerPanel, { props: { groups, options, value: 'sonnet', onSelect: vi.fn() } });
+		const star = screen.getByRole('button', { name: /add opus to favorites/i });
+		star.focus();
+		await fireEvent.click(star);
+		await tick();
+		await tick();
+		expect(document.activeElement).toBe(screen.getByRole('button', { name: /remove opus from favorites/i }));
+	});
+
 	it('moves through every provider from the search box with the arrow keys', async () => {
 		const onSelect = vi.fn();
 		render(ModelPickerPanel, { props: { groups, options, value: options[0].value, onSelect } });

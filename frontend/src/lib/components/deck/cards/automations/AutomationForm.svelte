@@ -307,6 +307,8 @@ import AutomationModelError from './AutomationModelError.svelte';
  const tabs = [{id:'setup',label:'Setup'},{id:'generation',label:'Media generation'},{id:'budget',label:'Budget & limits'}];
 </script>
 <style>
+	/* The select is the row's flex item, so it can fill the phone row. */
+	.agent-picker { display: contents; }
  .notice-actions { display: inline-flex; align-items: center; gap: 8px; vertical-align: middle; }
  .notice-link { padding: 0; border: 0; border-radius: var(--st-radius-sm); background: none; color: var(--st-fg); font: inherit; text-decoration: underline; text-underline-offset: 3px; }
  .notice-link:hover { color: var(--st-primary); }
@@ -403,7 +405,7 @@ import AutomationModelError from './AutomationModelError.svelte';
  <RowGroup title="Configuration">
   <SettingRow label="Agent" hint="The agent this automation runs under.">
    {#if !profiles.length}<button class="st-btn" onclick={() => layout.openFeaturePage('profile')}>No agents yet — create one first</button>
-   {:else}<span data-agent-picker><SelectField label="Agent" value={formProfileId} options={[{value:'',label:'Select an agent…'},...profiles.map(p => ({value:p.id,label:p.name}))]} onchange={onUpdateFormProfileId} /></span>{/if}
+   {:else}<span data-agent-picker class="agent-picker"><SelectField label="Agent" value={formProfileId} options={[{value:'',label:'Select an agent…'},...profiles.map(p => ({value:p.id,label:p.name}))]} onchange={onUpdateFormProfileId} /></span>{/if}
   </SettingRow>
   <div data-testid="automation-model-row"><SettingRow label="Reasoning model" hint={modelHintIsError ? undefined : modelHint}>
    {#if modelHintIsError}<p class="text-sm text-destructive model-error" role="alert"><AutomationModelError error={modelHint} providerId={savedAutomation?.effective_provider_id} modelId={savedAutomation?.effective_model} /></p>{/if}

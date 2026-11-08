@@ -209,6 +209,10 @@
   await tick();
   const target = contentEl?.querySelector(`[data-section="${id}"]`) ?? contentEl?.querySelector('[data-section="empty"]');
   target?.scrollIntoView({behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block:'start'});
+  // A short page may not scroll at all: mark where the jump landed.
+  target?.classList.remove('stats-jumped');
+  void (target as HTMLElement | null)?.offsetWidth;
+  target?.classList.add('stats-jumped');
  }
 </script>
 
@@ -396,7 +400,7 @@
 						{/if}
 
 						<!-- Top chats by cost -->
-						{#if topSessions.length === 0}{@render emptyRow('chats', 'Top chats by cost', 'No chats')}
+						{#if topSessions.length === 0}{@render emptyRow('chats', 'Top chats by cost', 'No chat costs in this range')}
 						{:else}
 						<section class="stats-section" data-section="chats" aria-labelledby="stats-chats">
 							<h3 id="stats-chats">Top chats by cost</h3>
@@ -421,6 +425,10 @@
  {/snippet}
 </ViewShell>
 <style>
+	/* Where a Jump to landed, for a short page that had nowhere to scroll. */
+	:global(.stats-jumped) { animation: stats-jumped 1100ms ease-out; border-radius: var(--radius-control); }
+	@keyframes stats-jumped { from { background: var(--hover-overlay); } to { background: transparent; } }
+	@media (prefers-reduced-motion: reduce) { :global(.stats-jumped) { animation: none; } }
  .stats-controls { display: flex; align-items: center; gap: 4px; margin-bottom: 24px; flex-wrap: wrap; }
  .stats-controls :global(.st-seg) { margin-right: auto; }
  .stats-controls :global(.st-seg button) { min-height: 44px; padding-inline: 10px; }
