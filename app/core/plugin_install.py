@@ -10,6 +10,7 @@ import re
 import shutil
 import stat
 import subprocess
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -340,13 +341,37 @@ def _resolve_implicit_component_dir(root: Path, component: str) -> Optional[Path
     return None
 
 
+@contextmanager
+def _plugin_entries(src: Path, root: Path):
+    """Enumerate a pinned directory; name resolution alone never authorizes IO.
+
+    Sync and install run on independent request threads. File-write locks do not
+    cover source traversal, so every enumeration and file read must be confined.
+    Reuse the upload reader's no-follow openat/Windows directory-pin primitives.
+    """
+    from app.core import chat_files, confined_files
+
+    root = Path(os.path.abspath(root))
+    relative = src.resolve(strict=True).relative_to(root)
+    names = confined_files._relative(relative.as_posix(), empty=True) if relative.parts else []
+    with ExitStack() as stack:
+        if os.name == "nt":
+            parent = stack.enter_context(confined_files._windows_directory(root, names))
+        else:
+            fd = stack.enter_context(confined_files._linux_root(root))
+            parent = stack.enter_context(chat_files.directory(fd, names))
+        with os.scandir(parent) as entries:
+            yield (src / entry.name for entry in entries)
+
+
 def _skills_dir_has_skill(skills_dir: Path, root: Path) -> bool:
     """True iff a confined <name>/SKILL.md exists."""
     try:
-        for child in skills_dir.iterdir():
-            if (_is_within(child, root) and child.is_dir()
-                    and _is_within(child / "SKILL.md", root) and (child / "SKILL.md").exists()):
-                return True
+        with _plugin_entries(skills_dir, root) as entries:
+            for child in entries:
+                if (_is_within(child, root) and child.is_dir()
+                        and _is_within(child / "SKILL.md", root) and (child / "SKILL.md").exists()):
+                    return True
     except OSError:
         pass
     return False
@@ -355,7 +380,15 @@ def _skills_dir_has_skill(skills_dir: Path, root: Path) -> bool:
 def _dir_has_markdown(md_dir: Path, root: Path) -> bool:
     """True iff md_dir contains at least one confined *.md file."""
     try:
-        return any(_is_within(path, root) for path in md_dir.glob("**/*.md"))
+        with _plugin_entries(md_dir, root) as entries:
+            for path in entries:
+                if not _is_within(path, root):
+                    continue
+                if path.is_dir() and not path.is_symlink() and _dir_has_markdown(path, root):
+                    return True
+                if path.is_file() and path.suffix == ".md":
+                    return True
+        return False
     except OSError:
         return False
 
@@ -414,22 +447,27 @@ def _copy_tree_resolving_symlinks(
     active.add(real_src)
     try:
         dst.mkdir(parents=True, exist_ok=True)
-        for entry in src.iterdir():
-            if skip_git and entry.name == ".git":
-                continue
-            target = dst / entry.name
-            if entry.is_symlink():
-                if not entry.exists():
-                    continue  # genuinely dangling link -- skip
-                if not _is_within(entry, root):
-                    logger.warning("Skipping plugin symlink that points outside the plugin: %s", entry)
+        with _plugin_entries(src, root) as entries:
+            for entry in entries:
+                if skip_git and entry.name == ".git":
                     continue
-                if entry.is_dir() and entry.resolve() in active:
-                    continue  # link to an ancestor -- would recurse forever
-            if entry.is_dir():  # follows symlinks to directories
-                _copy_tree_resolving_symlinks(entry, target, root, active, skip_git=skip_git)
-            else:
-                shutil.copy2(entry, target)  # follows symlinks to real files
+                target = dst / entry.name
+                if entry.is_symlink():
+                    if not entry.exists():
+                        continue  # genuinely dangling link -- skip
+                    if not _is_within(entry, root):
+                        logger.warning("Skipping plugin symlink that points outside the plugin: %s", entry)
+                        continue
+                    if entry.is_dir() and entry.resolve() in active:
+                        continue  # link to an ancestor -- would recurse forever
+                if entry.is_dir():
+                    _copy_tree_resolving_symlinks(entry, target, root, active, skip_git=skip_git)
+                else:
+                    from app.core.confined_files import open_attachment
+
+                    with open_attachment(root, entry) as source, target.open("wb") as output:
+                        shutil.copyfileobj(source, output)
+                        target.chmod(stat.S_IMODE(os.fstat(source.fileno()).st_mode))
     finally:
         active.discard(real_src)
 
