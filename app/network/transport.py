@@ -1629,6 +1629,9 @@ async def prune_loop() -> None:
                     # not 30 days of superseded copies (#1167).
                     pruned += await asyncio.to_thread(store.compact_memory_ops, ctx.device_id,
                                                      observations, stop=stop, _heads=heads)
+                    # Same for the session catalog and runtime rows each change republishes.
+                    pruned += await asyncio.to_thread(store.compact_session_ops, ctx.device_id,
+                                                     observations, stop=stop, _heads=heads)
                 # Shrink append-only history before the legacy superseded-record
                 # scan; otherwise millions of unique event ids can exhaust its
                 # statement budget before transcript retention gets a turn.

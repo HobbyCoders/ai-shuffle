@@ -44,7 +44,15 @@ The existing daily maintenance loop (five-minute startup delay) runs the new
 transcript pass before the generic superseded-op scan, so millions of unique
 ids cannot starve it. For each origin/incarnation it deletes only operations:
 
-1. In `session_events`, received/created locally more than 30 days ago.
+1. In `session_events`, received/created locally more than an hour ago
+   (`AI_SHUFFLE_SYNC_TRANSCRIPT_OP_MIN_AGE_HOURS`, default **1**, hours; a
+   negative, infinite, oversized or unreadable value skips this pass only;
+   the rest of the maintenance round still runs). This was 30 days until the
+   1.6-million-ops-a-week field report (see below). Rule 2 is what protects an
+   offline peer, not the age, so the floor only keeps ops for a peer that has
+   just joined and not yet advertised a frontier. The one-hour floor applies
+   only to ops every **member** has acknowledged (see "Member pins" below);
+   any other op keeps main's 30-day age.
 2. At or below the minimum **actually advertised** frontier of every recent,
    active **worker** peer; absent streams/frontiers mean zero. Consumers (phones
    and browsers) are not database replicas and do not pin it.
@@ -52,6 +60,15 @@ ids cannot starve it. For each origin/incarnation it deletes only operations:
 4. With a materialized sync version at least as new as the operation, and either
    its canonical event row/order_seq or a deletion tombstone still present.
    Damaged/incomplete materializations are kept, not assumed disposable.
+   Idle delta compaction (`compact_session_deltas`) merges a run of delta rows
+   into its last row and deletes the rest, so their `order_seq` points at a
+   missing row and their envelopes are never retired by this pass. That is a
+   known leak, left as it is: retiring them makes a known recovery bug more
+   likely (issue 1278). A worker that holds only the start of a merged run and
+   later takes a state copy collides with the merged row's reused event id, and
+   its transcript fill fails on every retry. The shorter floor does not make it
+   more likely: an op a member has not acknowledged keeps main's 30-day age, so
+   a peer only meets a pruned gap when it would on main too.
 
 Recent means a successful authenticated sync observation within
 `AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS` (default **30**, positive integer days).
@@ -61,6 +78,38 @@ When it returns behind the retained interval it automatically takes a current
 state copy and fills its transcripts, then resumes ordinary operation sync.
 The trade-off is a full catch-up copy for a long-offline peer instead of an
 unbounded second copy of all history on every worker.
+
+### Member pins
+
+Contact grace alone is not enough to shorten retention. Direct contact can lapse
+while a peer still syncs through another worker: A and B have not exchanged
+directly for 31 days, but B received the start of A's reply through C two hours
+ago. If A pruned to C's frontier it would delete what B still lacks, and B
+would have to take a state copy where main lets it catch up by ops. The same
+happens with a short configured grace (1 day) and a 2-day absence.
+
+Nothing local proves such a peer is gone. Presence is not a heartbeat: the
+five-minute republish emits no op when nothing changed (`updated_at` is not a
+hashed field), so a relayed peer can look 31 days stale to A while it syncs
+every hour. So the new passes infer no liveness at all.
+
+Both new passes (the one-hour transcript floor and session op compaction) pin
+for **every active worker member**, however long ago it was in contact
+(`_member_frontiers`). The authority is `network_members` with
+`status = 'active'` and `kind = 'worker'`: it is the signed membership this
+worker verifies ops against, a signed revocation flips the row to `revoked`,
+and leaving the network clears it. `sync_peers` is not used for this: it holds
+only peers this worker contacted directly. A member pins at its last
+authenticated advertised frontier, or at zero when this worker has none (after
+a restart, say). An op any member has not acknowledged is left to main's rules:
+the transcript pass applies the 30-day age to it (independent of the configured
+grace), and session compaction leaves it to the legacy 30-day prune.
+
+The cost: **a stale member blocks the savings** for everything it has not
+acknowledged, until it catches up or is removed (revoked) from the network. A
+member that is gone for good is no worse than main: its unacknowledged ops age
+out at 30 days. With every member online and acknowledging, nothing changes and
+the full saving applies.
 
 Only the signed/local membership's active workers count; signed revocation
 unpins immediately. Never-contacted peers receive a one-time grace baseline.
@@ -183,6 +232,45 @@ with no state copy. A lagging recent peer pins what it lacks, the kill switch
 holds everything, and an expired peer recovers through a state copy to the same
 records and facts.
 
+## Session catalog and runtime op compaction
+
+The same field report counted 88,258 `session_runtime` ops for 1,147 records
+and 16,648 `sessions` ops for 1,952 records in one week. Both collections are
+whole-row records too: each state change (working, idle, parked) or catalog
+change (title, pin, project) republishes the full row, and a receiver applies
+only the current materialized row. `compact_session_ops` runs right after
+`compact_memory_ops` with the same three rules (a newer envelope of the record
+exists, at or below every recent peer's frontier, below the stream head), the
+same peer grace and the same fail-closed behaviour. Unlike memory compaction it
+also pins for every active member past its grace (see "Member pins"). It deletes in committed
+batches of 1,000 rows (`SESSION_COMPACTION_BATCH`; these envelopes are a few
+kB). Each pass logs `Session sync operation compaction`. Disable it with
+`AI_SHUFFLE_SYNC_SESSION_OP_COMPACTION=0` (`false`/`off` also work).
+
+`tests/core/network/test_sync_log_bounds_postgres.py` covers the one-hour
+floor and session compaction with real PostgreSQL
+workers and signed exchange: an offline peer inside its grace pins what it
+lacks and then catches up by ordinary op sync with no state copy, a peer past
+its grace that syncs through a relay (or with a 1-day grace and a 2-day absence)
+keeps every op it lacks, a peer unseen for 31 days stops pinning, a lagging
+peer pins superseded catalog ops, the kill switch holds everything, a bad,
+infinite or oversized floor skips only transcript retention while the rest of
+the maintenance pass still runs, and event rows plus `sync_records` stay
+unchanged. Issue 1278's recovery case is kept there as an expected failure. A local lab (not
+committed) with 4 chats, 60 streamed answers, runtime toggles and retitles,
+both peers caught up, measured:
+
+| Case | main | this change |
+| --- | --- | --- |
+| A week of ops, ages spread over 0–167 hours | 1,803 ops, 2,279 kB | 22 ops, 32 kB |
+
+The 22 left are the last hour of transcript ops plus the stream head, and one
+catalog and one runtime envelope per chat. The lab had no idle delta
+compaction; ops of merged runs stay as on main (see rule 4). This is a count lab, not a field
+measurement; the space already held on disk only returns after a one-time
+`VACUUM FULL sync_ops` with the app stopped (the daily `VACUUM ANALYZE` reuses
+freed space but does not shrink the file).
+
 ## A peer that holds part of a merged delta run (#1278)
 
 Delta compaction on the owner merges a run of streamed fragments into one row
@@ -296,7 +384,7 @@ the merged row's own seq queues the reinstall; if that fragment never arrives
 the session stays as it is. Runs compacted after this change carry
 `merged_from_seq` and do not have this window.
 
-## Transcript op volume: findings only
+## Transcript op volume
 
 The second half of the same report (about 1.1 million `session_events` ops a
 week) is one op per saved transcript event. The turn recorder saves streamed
@@ -311,9 +399,22 @@ events. 1.1 million a week is about 1.8 ops per second around the clock, about
 seven hours of streaming a day across all chats. That fits several agents
 running in parallel. It grows with use, not because of a bug.
 
-These ops are already retired after 30 days by the transcript pass above, so
-their total is bounded at about four weeks of activity. Options to lower the
-rate, none changed here:
+A later report measured 1.6 million a week (1,600,239 upserts across 1,599,901
+records, so re-upserts are 0.02%). With a 30-day floor that kept about four
+weeks of activity, 3.65 million envelopes. The floor is now one hour, so with
+every peer online a worker keeps about an hour of ops plus whatever a peer has
+not received yet. A member that is behind keeps what it has not acknowledged
+for up to 30 days, as before, until it catches up or is revoked.
+
+One producer is not coalesced: delegated Claude CLI sub-agents. Each streamed
+`text_delta` becomes its own `subagent_chunk` progress event, and the finished
+text block is logged again as one more chunk (`app/core/query_engine.py`, the
+`content_block_delta` and `TextBlock` branches). The turn recorder saves each as
+a transcript event, so sub-agent text is roughly per token. This is a likely
+large share of the volume but is not confirmed on a field worker; the query
+below would show it as `subagent.progress` rows. Coalescing it is a follow-up.
+
+Options to lower the rate, none changed here:
 
 - Publish deltas coalesced: merge consecutive delta rows of one turn into one
   envelope at publish time. That needs a mirror format for merged runs (the
