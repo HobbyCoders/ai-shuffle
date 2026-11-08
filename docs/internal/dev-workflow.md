@@ -32,7 +32,9 @@ allows finite requests to finish before retiring remaining raw query engine
 reads. The default ten-second stop budget allows 6.5 seconds for that drain,
 then a shared 1.5-second query-settlement reserve and two seconds for lifespan.
 The Python container supervisor passes its unchanged 30-second stop budget as
-`SHUFFLE_SUPERVISOR_STOP_SECONDS`, so its finite drain is 26.5 seconds instead.
+`SHUFFLE_SUPERVISOR_STOP_SECONDS`, giving it a 23.5-second finite drain and a
+4.5-second settlement reserve instead. Settlement retains its 15% share of the
+supplied budget; the two-second lifespan reservation stays fixed.
 This is deployment metadata, not a user setting; absent, invalid or out-of-range
 values retain the 6.5-second default. The Windows desktop pre-stop route also
 settles headless API queries, which do not belong to the session pool.
@@ -42,10 +44,20 @@ settles headless API queries, which do not belong to the session pool.
 5 seconds, so a slow database write or stalled disconnect can exceed the
 reserve. This is not worst-case cancellation-safe settlement. An idle full-app
 shutdown measured 0.282 seconds and a delayed real query settled/exited in
-6.856 seconds, but a controlled two-second memory-publication tail exceeded the
-1.5-second reserve and was cancelled. The shared coordinator and launcher-budget
-work is tracked in [#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305);
-launcher stop budgets are unchanged here.
+6.856 seconds, but on the ten-second budget a controlled two-second
+memory-publication tail exceeded the 1.5-second reserve and was cancelled: the
+terminal turn was persisted and lifespan reached, but the HTTP request failed
+and memory replication was unpublished. The already-written local memory file
+remains durable. `push_memory` is legacy native per-project file replication,
+not the durable `Remember` fact store: the next qualifying native/project turn
+reconciles without overwriting local-only/newer files, then its end-of-turn push
+uploads them. App startup alone does not retry that push; sync must be enabled
+and the original files still present. Already-issued `run_sync` writes may also
+finish after their awaiter is cancelled. The larger Docker settlement reserve
+allows the controlled two-second tail to finish before the 30-second stop.
+The shared coordinator and launcher-budget work is tracked in
+[#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305); launcher stop
+budgets are unchanged here.
 
 ## The loop
 

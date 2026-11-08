@@ -49,8 +49,8 @@ confirms no finite request remains. The normal app ends passive event
 subscriptions immediately and allows 6.5 seconds by default for finite requests
 and active query streams. The Python container supervisor passes its unchanged
 30-second stop budget through `SHUFFLE_SUPERVISOR_STOP_SECONDS`; that makes the
-finite drain 26.5 seconds, leaving the same 1.5-second query-settlement reserve
-and two seconds for lifespan. Missing, invalid or outside-10-to-30-second budget
+finite drain 23.5 seconds and the query-settlement reserve 4.5 seconds, keeping
+its 15% share of the supplied budget and leaving two seconds for lifespan. Missing, invalid or outside-10-to-30-second budget
 metadata retains the safe default. At the drain deadline only raw query engine
 reads are retired, allowing interrupted queries to save terminal turns and
 publish memory before lifespan teardown. The dev-only timeout remains a
@@ -61,10 +61,19 @@ fallback after admission is closed, not permission to cancel request-owned work.
 5 seconds, so a slow database write or stalled disconnect can exceed the
 reserve. This is not worst-case cancellation-safe settlement. An idle full-app
 shutdown measured 0.282 seconds and the delayed real-query check settled/exited
-in 6.856 seconds; a controlled two-second memory-publication tail exceeded the
-1.5-second reserve and was cancelled. Coordinator and launcher-budget work is
-tracked in [#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305), not
-implemented here. Forced disposable dev-loop teardown still has its separate
+in 6.856 seconds. On the ten-second budget, a controlled two-second
+memory-publication tail exceeds the 1.5-second reserve: terminal history is
+persisted and lifespan reached, but the HTTP request fails and replication is
+unpublished. Already-written local legacy memory files remain durable. The next
+qualifying native/project turn preserves local-only/newer files in reconcile
+and uploads them in its end-of-turn push; app startup alone does not retry it.
+This requires sync to be enabled and the original files still present. The
+separate durable `Remember` fact store is not this legacy replication tail;
+already-issued `run_sync` writes may finish after awaiter cancellation. Docker's
+larger reserve lets the controlled two-second tail finish within its 30 seconds.
+Coordinator and launcher-budget work is tracked in
+[#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305), not implemented
+here. Forced disposable dev-loop teardown still has its separate
 four-second budget; it is not the normal app's graceful-stop guarantee.
 
 It tracks unknown

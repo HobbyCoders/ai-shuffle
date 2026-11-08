@@ -10,6 +10,7 @@ from app.core import query_shutdown as shutdown
 
 @pytest.fixture(autouse=True)
 def fresh_shutdown(monkeypatch):
+    monkeypatch.delenv("SHUFFLE_SUPERVISOR_STOP_SECONDS", raising=False)
     monkeypatch.setattr(shutdown, "_closing_loop", None)
     monkeypatch.setattr(shutdown, "_turns", set())
     monkeypatch.setattr(shutdown, "_retired", set())
@@ -150,12 +151,15 @@ async def test_windows_pre_stop_also_settles_unpooled_queries(monkeypatch):
 
 
 @pytest.mark.parametrize("value,expected", [
-    (None, 6.5), ("30", 26.5), ("15", 11.5), ("10", 6.5),
+    (None, 6.5), ("30", 23.5), ("15", 10.75), ("10", 6.5),
     ("bad", 6.5), ("nan", 6.5), ("inf", 6.5), ("0", 6.5), ("31", 6.5),
 ])
-def test_supervisor_budget_scales_only_the_finite_drain(value, expected):
+def test_supervisor_budget_scales_the_finite_drain_and_settlement(value, expected):
     environ = {} if value is None else {"SHUFFLE_SUPERVISOR_STOP_SECONDS": value}
     assert shutdown.configured_grace_seconds(environ) == expected
+    reserve = shutdown.configured_settle_seconds(environ)
+    assert reserve == pytest.approx(4.5 if value == "30" else 2.25 if value == "15" else 1.5)
+    assert expected + reserve + shutdown.CLEANUP_RESERVE_SECONDS == shutdown.configured_stop_budget(environ)
 
 
 async def test_windows_does_not_acknowledge_clean_stop_with_unfinished_writes(monkeypatch):
