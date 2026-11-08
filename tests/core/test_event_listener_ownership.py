@@ -100,6 +100,36 @@ def test_parent_death_kills_the_real_listener_even_when_interpreter_suspended(tm
             process.wait(timeout=3)
 
 
+
+
+def test_windows_admission_attaches_both_pinned_handles_before_opening_gate(monkeypatch):
+    from contextlib import contextmanager
+    from app.core.transcript_views import child_process, windows_process
+
+    memory = mmap.mmap(-1, listener._SIZE)
+    child = object.__new__(listener.NotificationListener)
+    child._memory, child._child, child._jobs = memory, Mock(pid=123), []
+    child._child.poll.return_value = None
+    api = Mock()
+    api.assign_kill_on_close_job_handle.side_effect = [101, 102]
+    monkeypatch.setattr(child_process, "_job_object", lambda: api)
+
+    @contextmanager
+    def pinned(launcher_pid, runtime_pid):
+        assert (launcher_pid, runtime_pid) == (123, 456)
+        yield [(123, 111), (456, 222)]
+        assert listener._number(memory, 32) == 1
+
+    monkeypatch.setattr(windows_process, "pinned_processes", pinned)
+    try:
+        listener._store(memory, 24, 456)
+        child._admit_windows()
+        assert child._jobs == [101, 102]
+        assert api.assign_kill_on_close_job_handle.call_args_list == [((111,),), ((222,),)]
+    finally:
+        memory.close()
+
+
 def test_concurrent_writer_lapping_a_reader_never_publishes_torn_payload(monkeypatch):
     memory = mmap.mmap(-1, listener._SIZE)
     child = object.__new__(listener.NotificationListener)

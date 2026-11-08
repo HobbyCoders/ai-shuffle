@@ -89,7 +89,7 @@ class NotificationListener:
         # redirectors. Parent-only handles let the kernel kill even a frozen
         # interpreter when this worker dies, without a child-side Python check.
         from app.core.transcript_views.child_process import _job_object
-        from app.core.transcript_views.windows_process import _pinned_windows_processes
+        from app.core.transcript_views.windows_process import pinned_processes
 
         deadline = time.monotonic() + 5
         while not (runtime_pid := _number(self._memory, 24)):
@@ -97,7 +97,7 @@ class NotificationListener:
                 raise RuntimeError("LISTEN child admission failed")
             time.sleep(.01)
         self._job_api = _job_object()
-        with _pinned_windows_processes(self._child.pid, runtime_pid) as targets:
+        with pinned_processes(self._child.pid, runtime_pid) as targets:
             for _, handle in targets:
                 job = self._job_api.assign_kill_on_close_job_handle(handle)
                 if job is None:
