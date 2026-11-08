@@ -69,6 +69,7 @@
 	let seenFocus = settingsNav.focusRequest?.n ?? 0;
 	onDestroy(() => {
 		settingsNav.mounted -= 1;
+		settingsNav.forgetPlace();
 		saveStatus.reset();
 	});
 
@@ -92,9 +93,11 @@
 		untrack(() => {
 			settingsNav.stacked = s;
 			if (s && !stackStarted) {
-				// Start at the index so a pending target builds every Back step.
+				// A pending target builds every Back step from the index; otherwise
+				// the page the reader was on stays open (#1043).
 				stackStarted = true;
-				if (!targetLanded) settingsNav.resetStack('index');
+				if (initialItemId) settingsNav.resetStack('index');
+				else if (!targetLanded) settingsNav.startStack(page.state as SettingsHistoryState);
 			} else if (!s) {
 				stackStarted = false;
 				settingsNav.depth = 0;

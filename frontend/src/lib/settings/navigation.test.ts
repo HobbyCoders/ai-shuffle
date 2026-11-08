@@ -162,6 +162,63 @@ describe('settings navigation state', () => {
 	});
 });
 
+describe('keeping the reader\'s place in one pane (#1043)', () => {
+	it('keeps a chosen page when the shell becomes one pane, with Back to the index', () => {
+		settingsNav.selectCategory('security');
+		settingsNav.stacked = true;
+		settingsNav.startStack();
+		expect(settingsNav.view).toBe('page');
+		expect(settingsNav.category).toBe('security');
+		expect(settingsNav.depth).toBe(1);
+		settingsNav.followHistory({});
+		expect(settingsNav.view).toBe('index');
+	});
+
+	it('builds both Back steps for a chosen detail', () => {
+		settingsNav.selectItem('thing', 'providers');
+		settingsNav.stacked = true;
+		settingsNav.startStack();
+		expect(settingsNav.view).toBe('detail');
+		expect(settingsNav.depth).toBe(2);
+	});
+
+	it('starts at the index when no page was chosen', () => {
+		settingsNav.stacked = true;
+		settingsNav.startStack();
+		expect(settingsNav.view).toBe('index');
+		expect(settingsNav.depth).toBe(0);
+	});
+
+	it('restores a chosen page after a reload without a second Back step', () => {
+		settingsNav.selectCategory('security');
+		const reloaded = new SettingsNavigation();
+		reloaded.stacked = true;
+		reloaded.startStack({ settingsView: 'page', settingsDepth: 1, settingsCategory: 'security' });
+		expect(reloaded.view).toBe('page');
+		expect(reloaded.category).toBe('security');
+		expect(reloaded.depth).toBe(1);
+	});
+
+	it('does not reopen a page after the reader went back to the index, or left Settings', () => {
+		settingsNav.selectCategory('security');
+		settingsNav.stacked = true;
+		settingsNav.startStack();
+		settingsNav.followHistory({});
+		expect(new SettingsNavigation().view).toBe('page');
+		const backed = new SettingsNavigation();
+		backed.stacked = true;
+		backed.startStack();
+		expect(backed.view).toBe('index');
+
+		settingsNav.selectCategory('security');
+		settingsNav.forgetPlace();
+		const reopened = new SettingsNavigation();
+		reopened.stacked = true;
+		reopened.startStack();
+		expect(reopened.view).toBe('index');
+	});
+});
+
 describe('stacked (phone) history', () => {
 	beforeEach(() => {
 		settingsNav.stacked = true;

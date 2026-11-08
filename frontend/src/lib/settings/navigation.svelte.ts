@@ -125,6 +125,7 @@ interface Persisted {
 	category?: string;
 	selected?: Record<string, string>;
 	tabs?: Record<string, string>;
+	view?: SettingsView;
 }
 
 function tabKey(category: CategoryId, item: string): string {
@@ -151,6 +152,8 @@ export class SettingsNavigation {
 	searchFocusRequest = $state(0);
 	/** History entries pushed for the current stack (stacked mode only). */
 	depth = 0;
+	/** The reader chose a page here: a reload or a shrink to one pane keeps it (#1043). */
+	private hasPlace = false;
 	/** Mounted SettingsShell count; `openSettings` updates in place when > 0. */
 	mounted = 0;
 	/** On-screen SettingsShell count: while > 0, Ctrl+K focuses Settings search. */
@@ -196,6 +199,7 @@ export class SettingsNavigation {
 	/** Index click: show a category. */
 	selectCategory(category: CategoryId): void {
 		this.category = category;
+		this.hasPlace = true;
 		this.pendingAnchor = null;
 		this.pendingItem = null;
 		this.pendingOpen = null;
@@ -207,6 +211,7 @@ export class SettingsNavigation {
 	/** List click: select an item in the current (or given) collection. */
 	selectItem(item: string, category: CategoryId = this.category): void {
 		this.category = category;
+		this.hasPlace = true;
 		this.selected[category] = item;
 		this.moveTo('detail');
 		if (this.stacked) this.requestFocus('detail');
@@ -225,6 +230,7 @@ export class SettingsNavigation {
 		const target = redirectTarget(requested);
 		const { category } = target;
 		this.category = category;
+		this.hasPlace = true;
 		if (target.item) {
 			this.selected[category] = target.item;
 			if (target.tab) this.tabs[tabKey(category, target.item)] = target.tab;
@@ -246,6 +252,7 @@ export class SettingsNavigation {
 			return;
 		}
 		this.view = this.view === 'detail' ? 'page' : 'index';
+		this.notePlace();
 	}
 
 	/** Return to the index (stacked mode), e.g. before focusing search. */
@@ -256,6 +263,7 @@ export class SettingsNavigation {
 			return;
 		}
 		this.view = 'index';
+		this.notePlace();
 	}
 
 	/** Called by SettingsShell whenever `page.state` changes (Back/Forward). */
@@ -268,12 +276,36 @@ export class SettingsNavigation {
 			if (state.settingsItem) this.selected[state.settingsCategory] = state.settingsItem;
 		}
 		this.view = view;
+		this.notePlace();
 	}
 
 	/** Put the stack at its start (shell mount in stacked mode, no target). */
 	resetStack(view: SettingsView = 'index'): void {
 		this.view = view;
 		this.depth = 0;
+	}
+
+	/**
+	 * The shell just became one pane. Open the page the reader was on, else the
+	 * index. `state` is the history entry a reload came back to: its Back steps
+	 * already exist, so only a place with no entry yet pushes one.
+	 */
+	startStack(state?: SettingsHistoryState | null): void {
+		const place: SettingsView = this.hasPlace && this.view !== 'index' ? this.view : 'index';
+		if (place !== 'index' && state?.settingsView && state.settingsView !== 'index') {
+			this.followHistory(state);
+			return;
+		}
+		this.resetStack('index');
+		if (place === 'index') return;
+		this.moveTo('page');
+		if (place === 'detail' && this.selected[this.category]) this.moveTo('detail');
+	}
+
+	/** Settings closed: the next visit starts at the index again. */
+	forgetPlace(): void {
+		this.hasPlace = false;
+		this.persist();
 	}
 
 	consumeAnchor(): string | null {
@@ -308,6 +340,7 @@ export class SettingsNavigation {
 		this.focusRequest = null;
 		this.searchFocusRequest = 0;
 		this.depth = 0;
+		this.hasPlace = false;
 	}
 
 	requestSearchFocus(): void {
@@ -340,9 +373,17 @@ export class SettingsNavigation {
 		this.view = view;
 	}
 
+	private notePlace(): void {
+		this.hasPlace = this.view !== 'index';
+		this.persist();
+	}
+
 	private persist(): void {
 		try {
-			const data: Persisted = { category: this.category, selected: { ...this.selected }, tabs: { ...this.tabs } };
+			const data: Persisted = {
+				category: this.category, selected: { ...this.selected }, tabs: { ...this.tabs },
+				...(this.hasPlace ? { view: this.view } : {})
+			};
 			sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 		} catch {
 			// Storage blocked: last place is not remembered.
@@ -355,6 +396,10 @@ export class SettingsNavigation {
 			if (!raw) return;
 			const data = JSON.parse(raw) as Persisted;
 			if (isCategoryId(data.category)) this.category = data.category;
+			if (data.view === 'page' || data.view === 'detail') {
+				this.view = data.view;
+				this.hasPlace = isCategoryId(data.category);
+			}
 			const selected: Partial<Record<CategoryId, string>> = {};
 			for (const [k, v] of Object.entries(data.selected ?? {})) {
 				if (isCategoryId(k) && typeof v === 'string') selected[k] = v;
