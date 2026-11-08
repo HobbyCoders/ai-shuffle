@@ -254,7 +254,7 @@ def record_context_delivery(session_id: str, note: str, turn_id: str) -> None:
     # late replay append its old mode after the owner-back cancellation.
     from app.db import session_events
 
-    session_events.append_events(session_id, [{
+    session_events.append_events_with_lock_retry(session_id, [{
         "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"away-context:{session_id}:{turn_id}")),
         "type": _CONTEXT_EVENT,
         "turn_id": turn_id,

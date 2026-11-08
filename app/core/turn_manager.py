@@ -750,9 +750,9 @@ def _interrupt_turn(session_id, mode, stop_background=False, turn_id=None, sourc
     if mode == "stop":
         recovered = turns.stop_orphaned_turns(session_id, turn_id)
         if recovered:
-            from app.db.session_events import append_events
+            from app.db.session_events import append_events_with_lock_retry
 
-            append_events(session_id, [
+            append_events_with_lock_retry(session_id, [
                 {"type": "turn.aborted", "turn_id": row["id"],
                  "payload": {"reason": "interrupt", "message": "Session stopped"}}
                 for row in recovered

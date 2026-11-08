@@ -1512,6 +1512,10 @@ def settle_turn(
     recorded its message: the queue sweep can no longer see it, so its words
     become a "Not sent" row here, as in ``remove_queued_turn``.
 
+    A ``recording_failed`` abort commits a stable terminal event in this same
+    transaction, independently of the failed recorder. It takes the shared
+    run/counter/session lock prefix before the turn lock, as Stop does.
+
     Returns the settled turn row on the transition that actually settles it.
     """
     if outcome not in ("completed", "aborted"):
@@ -1529,7 +1533,8 @@ def settle_turn(
     with get_db() as conn:
         cursor = conn.cursor()
         queued_peer = False
-        if keep_unsent_words:
+        recording_failed = outcome == "aborted" and stop_reason == "recording_failed"
+        if keep_unsent_words or recording_failed:
             cursor.execute("SELECT session_id FROM turns WHERE id=%s", (turn_id,))
             target = cursor.fetchone()
             if target:
@@ -1553,8 +1558,24 @@ def settle_turn(
             row = cursor.fetchone()
             if row and keep_unsent_words:
                 kept_words = _keep_unsent_words(cursor, conn, _row(row))
+            if row and recording_failed:
+                from app.db import session_events
+
+                # The failed recorder cannot write its close. This is a NEW,
+                # stable terminal receipt, not a replay of the uncertain batch.
+                # Commit it with the guarded row transition: never leave a
+                # durably aborted turn whose transcript still looks streaming.
+                session_events.append_events(row["session_id"], [{
+                    "id": "recording-failed:" + turn_id,
+                    "type": "turn.aborted", "turn_id": turn_id,
+                    "payload": {
+                        "reason": "error", "stop_reason": "recording_failed",
+                        "message": "The reply stopped because a database write failed. "
+                                   "You can send another message to continue.",
+                    },
+                }], _conn=conn)
     result = _row(row)
-    if cancelled_peer or kept_words:
+    if cancelled_peer or kept_words or (result and recording_failed):
         from app.db import session_events
         session_events.notify_session_write(result["session_id"], "session_events")
     # A queued row settled without ever starting has no interval to bank.
