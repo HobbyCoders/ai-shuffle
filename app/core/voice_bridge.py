@@ -1637,7 +1637,7 @@ class VoiceBridge:
             return text
         try:
             row = await run_sync(database.get_session, self.session_id)
-            await run_sync(upload_transfer.validate_upload_paths, paths, row)
+            await run_sync(upload_transfer.validate_turn_uploads, {"upload_paths": paths}, row)
         except (upload_transfer.UploadLiftError, OSError, ValueError, RuntimeError) as exc:
             logger.warning("Voice: typed attachments on %s are not recorded: %s", self.session_id, exc)
             return text

@@ -28,7 +28,7 @@ from app.core.slash_commands import (
 )
 # Legacy JSONL fallback and checkpoint-backed rewind services.
 from app.core.jsonl_rewind import jsonl_rewind_service
-from app.core.voice_prompts import typed_request_text
+from app.core.voice_prompts import LIVE_CONTEXT_OPENER, typed_request_text
 from app.core.pg_session_store import (
     RewindTargetNotFound,
     main_transcript_is_empty,
@@ -456,11 +456,44 @@ def _is_prompt_event(row: dict) -> bool:
     return True
 
 
+def _user_checkpoint_identities(user_cps: list, events: List[dict]) -> List[str]:
+    """The recorded prompt text each user checkpoint stands for, in order.
+
+    Normally that is the checkpoint's own text. A message typed into a voice
+    call is recorded as the words alone while its checkpoint wraps them, so a
+    wrapped checkpoint stands for those words. Pasted text can look just like
+    the wrapping, so the wrapping only counts when the event log agrees: text
+    recorded verbatim as a prompt is that prompt, and a call's context block
+    needs a typed call message with those words. Both rewind resolvers use this
+    one answer, or the model's transcript and the visible history would be cut
+    at different messages.
+    """
+    recorded: set[str] = set()
+    typed: set[str] = set()
+    for row in events:
+        if not _is_prompt_event(row):
+            continue
+        payload = row.get("payload") or {}
+        content = (payload.get("content") or "").strip()
+        recorded.add(content)
+        if payload.get("source") == "typed":
+            typed.add(content)
+    identities: List[str] = []
+    for cp in user_cps:
+        text = (cp.full_message or "").strip()
+        words = typed_request_text(text)
+        vouched = typed if text.startswith(LIVE_CONTEXT_OPENER) else recorded
+        identities.append(words if text not in recorded and words in vouched else text)
+    return identities
+
+
 def _resolve_checkpoint_uuid_from_content(
     sdk_session_id: str,
     working_dir: str,
     target_content: Optional[str],
     target_occurrence: int,
+    *,
+    session_id: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Resolve a checkpoint uuid from the target prompt's content.
 
@@ -472,6 +505,7 @@ def _resolve_checkpoint_uuid_from_content(
     prompts retained after an empty-turn discard), so global positions skew
     in any session that has seen an interrupt — but those lines never equal
     a real prompt's text. FAILS CLOSED when nothing matches (content guard).
+    ``session_id`` names the event log that vouches for voice-typed messages.
     """
     want = (target_content or "").strip()
     if not want:
@@ -479,11 +513,9 @@ def _resolve_checkpoint_uuid_from_content(
             "Rewind refused: no target content supplied to resolve against "
             "(content guard)"
         )
-    checkpoints = _get_checkpoints(sdk_session_id, working_dir)
-    matches = [
-        cp for cp in checkpoints
-        if cp.role == "user" and typed_request_text(cp.full_message or "") == want
-    ]
+    user_cps = [cp for cp in _get_checkpoints(sdk_session_id, working_dir) if cp.role == "user"]
+    identities = _user_checkpoint_identities(user_cps, _load_message_events(session_id) if session_id else [])
+    matches = [cp for cp, identity in zip(user_cps, identities) if identity == want]
     if target_occurrence < 0 or target_occurrence >= len(matches):
         return None, (
             f"Rewind refused: transcript has {len(matches)} user prompt(s) "
@@ -556,11 +588,9 @@ def _resolve_rewind_from_seq(
                 f"Rewind refused: target {target_uuid} not found among the "
                 f"transcript's user prompts"
             )
-        want = typed_request_text(user_cps[pos].full_message or "")
-        occurrence = sum(
-            1 for cp in user_cps[:pos]
-            if typed_request_text(cp.full_message or "") == want
-        )
+        identities = _user_checkpoint_identities(user_cps, events)
+        want = identities[pos]
+        occurrence = identities[:pos].count(want)
         prompts = [
             (i, row) for i, row in enumerate(events)
             if _is_prompt_event(row)
@@ -796,6 +826,7 @@ async def _execute_rewind(
                 _resolve_checkpoint_uuid_from_content,
                 sdk_session_id, working_dir,
                 request.target_content, request.target_occurrence,
+                session_id=session_id,
             )
             if resolved_uuid is None:
                 return RewindResponseV2(

@@ -882,7 +882,11 @@ async def test_health_tells_the_browser_its_microphone_age_and_warns_once(monkey
 
 
 def _upload_row(monkeypatch, row=None):
+    from app.core import upload_transfer
     monkeypatch.setattr(voice_stream.database, "get_session", lambda session_id: row or {"id": session_id, "mode": "chat"})
+    # The disk checks; a test about them restores or replaces these.
+    monkeypatch.setattr(upload_transfer, "resolve_upload_references", lambda payload, session: payload)
+    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", lambda payload, session: None)
 
 
 @pytest.mark.asyncio
@@ -966,6 +970,69 @@ async def test_typed_attachments_travel_as_files_to_the_worker_running_the_chat(
         "upload_paths": ["/up/a.pdf", "/up/old.pdf"], "upload_references": [reference], "upload_blob_ids": ["blob-1"],
     }
     assert delegate.await_args.kwargs["spoken"] == "Read @/up/a.pdf"
+
+
+@pytest.mark.asyncio
+async def test_a_typed_attachment_past_the_caption_limit_keeps_its_typed_record(monkeypatch):
+    """The length flush inside ``caption`` stores this message, so it must carry the files."""
+    from app.core import turn_recorder, upload_transfer
+    call = stream()
+    call.upstream = Upstream([])
+    _upload_row(monkeypatch)
+    monkeypatch.setattr(upload_transfer, "partition_upload_paths", lambda paths, session, references=None: (paths, []))
+    record, delegate = AsyncMock(), AsyncMock(return_value="Read.")
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    words = "x" * 2000 + " @/up/a.pdf"
+    await call.receive_text(json.dumps({"type": "input_text", "id": "a", "text": words, "upload_paths": ["/up/a.pdf"]}))
+    await call.delegation_task
+    record.assert_awaited_once()
+    assert record.await_args.args[1] == words
+    assert record.await_args.kwargs["user_source"] == "typed"
+    assert record.await_args.kwargs["upload_paths"] == ["/up/a.pdf"]
+    assert (call.pending_typed, call.pending_uploads) == (False, [])
+
+
+@pytest.mark.asyncio
+async def test_a_typed_chip_whose_file_is_gone_is_refused_with_the_draft_kept(monkeypatch, tmp_path):
+    """Allowed location, missing file: only the turn's own check can tell."""
+    from app.core import turn_recorder, upload_transfer
+    call = stream()
+    call.upstream = Upstream([])
+    gone = str(tmp_path / "gone.pdf")
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda session_id: {"id": session_id, "mode": "chat"})
+    # The file is in an allowed place; the real availability check decides.
+    monkeypatch.setattr(upload_transfer, "validate_upload_paths", lambda paths, session: None)
+    record, delegate = AsyncMock(), AsyncMock(return_value="Read.")
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    await call.receive_text(json.dumps({"type": "input_text", "id": "a", "text": "Read this", "upload_paths": [gone]}))
+    events = [c.args[0] for c in call.websocket.send_json.await_args_list if str(c.args[0].get("type")).startswith("text.")]
+    assert [e["type"] for e in events] == ["text.rejected"]
+    assert "draft has been kept" in events[0]["message"]
+    record.assert_not_awaited()
+    delegate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_local_typed_send_gives_the_turn_the_fields_a_chat_send_would(monkeypatch):
+    from app.core import turn_recorder, upload_transfer
+    call = stream()
+    call.upstream = Upstream([])
+    _upload_row(monkeypatch)
+    reference = {"owner_id": "w", "event_id": "e", "index": 0, "path": "/up/old.pdf"}
+    monkeypatch.setattr(upload_transfer, "partition_upload_paths", lambda paths, session, references=None: (paths, references))
+    resolved = []
+    monkeypatch.setattr(upload_transfer, "resolve_upload_references", lambda payload, session: resolved.append(payload) or {"upload_paths": payload["upload_paths"]})
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", AsyncMock())
+    delegate = AsyncMock(return_value="Read.")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    await call.receive_text(json.dumps({"type": "input_text", "id": "a", "text": "Read @/up/a.pdf", "upload_paths": ["/up/a.pdf"],
+                                        "upload_references": [reference]}))
+    await call.delegation_task
+    fields = {"upload_paths": ["/up/a.pdf", "/up/old.pdf"], "upload_references": [reference]}
+    assert resolved == [fields]
+    assert delegate.await_args.kwargs["uploads"] == fields
 
 
 def test_typed_request_text_unwraps_only_a_call_prompt():

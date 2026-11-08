@@ -90,10 +90,12 @@ def typed_request_text(checkpoint_text: str) -> str:
     A message typed into a call is recorded as the words alone, but the chat
     agent's transcript holds them with the turn's voice note and, on the worker
     running the call, inside the call context. A rewind pairs the two by text,
-    so it needs the words back out of that wrapping.
+    so it needs the words back out of that wrapping. Text can merely look like
+    that wrapping, so a caller must check the words against what was recorded
+    (``commands._user_checkpoint_identities``) before believing them.
     """
     text = checkpoint_text.strip().partition(_VOICE_NOTE_OPENING)[0].strip()
     at = text.find(TYPED_MESSAGE_PREFIX) if text.startswith(LIVE_CONTEXT_OPENER) else -1
     if at == -1:
         return text
-    return text[at + len(TYPED_MESSAGE_PREFIX):].partition("\n\n" + ATTACHMENT_NOTE_OPENER)[0].strip()
+    return split_attachment_note(text[at + len(TYPED_MESSAGE_PREFIX):])[0].strip()

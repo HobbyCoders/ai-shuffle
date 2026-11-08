@@ -2973,7 +2973,7 @@ async def test_typed_attachment_note_becomes_recorded_paths(mock_db, fake_socket
     _mk_session()
     bridge = await _bridge(fake_sockets)
     checked = []
-    monkeypatch.setattr(upload_transfer, "validate_upload_paths", lambda paths, session: checked.append(paths))
+    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", lambda payload, session: checked.append(payload["upload_paths"]))
     text = "Read @/up/a.pdf" + attachment_note(["/up/a.pdf"])
     await bridge._handle_event({"type": "conversation.item.created", "item": {
         "id": "typed-1", "role": "user", "content": [{"type": "input_text", "text": text}]}})
@@ -2990,9 +2990,9 @@ async def test_typed_attachment_note_that_fails_the_check_stays_text(mock_db, fa
     _mk_session()
     bridge = await _bridge(fake_sockets)
 
-    def refuse(paths, session):
+    def refuse(payload, session):
         raise upload_transfer.UploadLiftError("outside")
-    monkeypatch.setattr(upload_transfer, "validate_upload_paths", refuse)
+    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", refuse)
     text = "Read" + attachment_note(["/etc/passwd"])
     await bridge._handle_event({"type": "conversation.item.created", "item": {
         "id": "typed-1", "role": "user", "content": [{"type": "input_text", "text": text}]}})

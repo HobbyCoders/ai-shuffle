@@ -27,6 +27,7 @@ from app.api.commands import (
 from app.core.jsonl_rewind import Checkpoint, RewindResult
 from app.db import session_events as se
 from tests.rewind_helpers import execute_rewind_and_wait
+from tests.shared_fixtures import seed_session
 
 SID = "sess-rewind"
 SDK = "sdk-rewind"
@@ -1125,3 +1126,45 @@ async def test_real_standalone_peer_rewind_native_and_logical_boundaries(
     assert [m["content"] for m in native if m["role"] == "assistant"] == [f"Reply {i+1}" for i in range(retained)]
     kept = [row for row in se.get_events(sid) if row["seq"] < cut]
     assert "".join(row["payload"]["text"] for row in kept if row["event_type"] == "assistant.text_delta") == "".join(f"Reply {i+1}" for i in range(retained))
+
+
+def _wrapped(words):
+    from app.core.voice_prompts import LIVE_CONTEXT_OPENER, TYPED_MESSAGE_PREFIX, voice_turn_note
+    return f"{LIVE_CONTEXT_OPENER}user: {TYPED_MESSAGE_PREFIX}{words}\n\n{voice_turn_note('')}"
+
+
+async def test_ordinary_text_shaped_like_a_call_prompt_stays_its_own_message(mock_db, monkeypatch):
+    """Both resolvers must cut at the second message, not the look-alike before it."""
+    from app.core.voice_prompts import LIVE_CONTEXT_OPENER, TYPED_MESSAGE_PREFIX
+    look_alike = f"{LIVE_CONTEXT_OPENER}user: {TYPED_MESSAGE_PREFIX}hello"
+    seed_session(SID)
+    se.append_events(SID, [_user_ev(look_alike), _asst_ev("a1", uuid="a1"), _user_ev("hello"), _asst_ev("a2", uuid="a2")])
+    _patch_checkpoints(monkeypatch, [_cp("first", look_alike), _cp("second", "hello", index=1)])
+
+    resolved, error = _resolve_checkpoint_uuid_from_content(SDK, WD, "hello", 0, session_id=SID)
+    assert (resolved, error) == ("second", None)
+    from_seq, error = _resolve_rewind_from_seq(SID, SDK, WD, "second", False, "user")
+    second = [row["seq"] for row in _load_message_events(SID) if _is_prompt_event(row)][1]
+    assert (from_seq, error) == (second, None)
+
+
+async def test_a_genuine_typed_call_message_still_anchors_to_its_wrapped_checkpoint(mock_db, monkeypatch):
+    seed_session(SID)
+    row = _user_ev("hello")
+    row["payload"]["source"] = "typed"
+    se.append_events(SID, [_user_ev("hi"), _asst_ev("a1", uuid="a1"), row, _asst_ev("a2", uuid="a2")])
+    _patch_checkpoints(monkeypatch, [_cp("first", "hi"), _cp("second", _wrapped("hello"), index=1)])
+
+    resolved, error = _resolve_checkpoint_uuid_from_content(SDK, WD, "hello", 0, session_id=SID)
+    assert (resolved, error) == ("second", None)
+    from_seq, error = _resolve_rewind_from_seq(SID, SDK, WD, "second", False, "user")
+    second = [row["seq"] for row in _load_message_events(SID) if _is_prompt_event(row)][1]
+    assert (from_seq, error) == (second, None)
+
+
+async def test_a_call_shaped_checkpoint_without_a_typed_record_is_not_unwrapped(mock_db, monkeypatch):
+    """Same words spoken as an ordinary prompt do not vouch for the wrapper."""
+    seed_session(SID)
+    se.append_events(SID, [_user_ev("hello"), _asst_ev("a1", uuid="a1")])
+    _patch_checkpoints(monkeypatch, [_cp("wrapped", _wrapped("hello"))])
+    assert _resolve_checkpoint_uuid_from_content(SDK, WD, "hello", 0, session_id=SID)[0] is None

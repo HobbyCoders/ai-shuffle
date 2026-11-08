@@ -250,8 +250,8 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     call itself. It is stamped on the turn as a typed send's is (#654); None
     stamps it unknown, which keeps the no-project ceiling.
 
-    ``uploads`` are the attachment fields of a request forwarded to another
-    worker. A local request needs none: the files are already on this disk.
+    ``uploads`` are the attachment fields a chat send's turn carries, so the
+    turn validates them when it runs, here or on the worker it is forwarded to.
 
     Returns "" when the request went through (with ``on_submitted``), else
     the note the voice should hear; a non-empty answer is an error to the
@@ -323,7 +323,7 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     # turn_manager skips it, and spoken approvals are decided from the caller's
     # audio transcript by app.core.voice_approval instead.
     payload: dict = {"user_message_already_recorded": True, turn_manager.VOICE_DELEGATION: True,
-                     VOICE_INSTRUCTIONS: instructions}
+                     VOICE_INSTRUCTIONS: instructions, **(uploads or {})}
     # The delegated turn runs as the key that owns the session, never as the
     # owner (a key may open the audio socket on its own session).
     api_user_id = await run_sync(api_user_scope.session_api_user_id, row)
@@ -832,10 +832,13 @@ class VoiceStream:
             await self.send({"type": "session.commentary.append", "delegation_id": delegation_id, "content": content})
 
     async def caption(self, role: str, delta: str, offset: int = 0, *, start_ms: float | None = None,
-                      response_id: str | None = None, item_id: str | None = None):
+                      response_id: str | None = None, item_id: str | None = None,
+                      typed_uploads: list[str] | None = None):
         """One transcript fragment. ``start_ms`` is where it starts on the
         provider session's timeline (GPT Live), None when unknown. Provider
-        response/item ids distinguish new assistant utterances from word pieces."""
+        response/item ids distinguish new assistant utterances from word pieces.
+        ``typed_uploads`` (even empty) marks ``delta`` as text typed into the
+        call, with the files it carries."""
         if not delta:
             return
         if role == "assistant" and self.last_caption_role == "user" and self.approval_waiting():
@@ -892,6 +895,10 @@ class VoiceStream:
                 self.reply_timed = False
             else:
                 self.reply_starts.append((start_ms, len(self.pending["assistant"])))
+        if typed_uploads is not None:
+            # Set with the words, after any flush above and before the length
+            # flush below: whichever flush stores these words carries them.
+            self.pending_typed, self.pending_uploads = True, typed_uploads
         self.pending[role] += delta
         self.last_caption_at = time.monotonic()
         if role == "user":
@@ -1112,8 +1119,9 @@ class VoiceStream:
         """Check typed attachments as a chat send's are; raises to refuse the send.
 
         Returns the paths to record, a note naming any file the words do not
-        mention (the chat agent still has to be told), and the fields that
-        carry them to the worker running this conversation, if another does.
+        mention (the chat agent still has to be told), and the turn fields a
+        chat send would carry for them, so the turn runs the same checks and
+        another worker running this conversation gets the files.
         """
         from app.core import upload_transfer
 
@@ -1127,12 +1135,16 @@ class VoiceStream:
         row = await run_sync(database.get_session, self.session_id)
         local, references = await run_sync(upload_transfer.partition_upload_paths, paths, row, references=references)
         recorded = local + [reference["path"] for reference in references]
-        if not self.remote_owner:
-            unmentioned = [path for path in recorded if "@" + path not in text]
-            return recorded, attachment_note(unmentioned) if unmentioned else "", None
         uploads: dict = {"upload_paths": recorded}
         if references:
             uploads["upload_references"] = references
+        if not self.remote_owner:
+            # As the turn itself will: the send is refused here, with the draft
+            # kept, instead of being accepted and failing or losing the file.
+            resolved = await run_sync(upload_transfer.resolve_upload_references, uploads, row)
+            await run_sync(upload_transfer.validate_turn_uploads, resolved, row)
+            unmentioned = [path for path in recorded if "@" + path not in text]
+            return recorded, attachment_note(unmentioned) if unmentioned else "", uploads
         if local:
             uploads["upload_blob_ids"] = await run_sync(
                 upload_transfer.lift_send_uploads, local, row.get("project_id"), self.session_id)
@@ -1185,9 +1197,7 @@ class VoiceStream:
             # Typed requests reuse the existing same-session delegation
             # path, not a guessed provider text event or a second conversation.
             await self.flush()
-            await self.caption("user", "\n\n" + TYPED_MESSAGE_PREFIX + text)
-            self.pending_typed = True  # Stored as typed text, not as speech.
-            self.pending_uploads = recorded
+            await self.caption("user", "\n\n" + TYPED_MESSAGE_PREFIX + text, typed_uploads=recorded)
             # Before the flush can yield: the typed words stay last in this
             # request, which is how a rewind finds them in the transcript.
             entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
