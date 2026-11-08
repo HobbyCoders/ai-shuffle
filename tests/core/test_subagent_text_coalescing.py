@@ -1,27 +1,26 @@
-"""Delegated child text is live immediately but persisted in bounded batches."""
+"""Legacy child-frame batching; current provider messages do not use that lane."""
 import asyncio
-from contextlib import ExitStack
 from unittest.mock import AsyncMock
 
-from app.core import query_engine as qe, turn_recorder as tr
-from app.core.provider.events import AssistantMessage, TextBlock
-from tests.core.engine_harness import StubPool, collect
-from tests.core.test_cross_turn_background_subagent_routing import (
-    _chat_patches, _fake_state, _stream_text_delta,
-)
+from fluid.events import BlockStop, TextDelta
+
+from app.core import turn_recorder as tr
+from app.core.provider.events import AssistantMessage
+from app.core.provider.factory import make_adapter
+from app.core.provider.types import SessionOptions
 
 
-async def test_final_child_block_does_not_repeat_streamed_text():
-    messages = [_stream_text_delta("child", "hello "), _stream_text_delta("child", "world")]
-    messages += [AssistantMessage(content=[TextBlock(text="hello world")],
-                                  model="claude", parent_tool_use_id="child")]
-    # A later message without partials must still use the fallback.
-    messages += [AssistantMessage(content=[TextBlock(text="next")],
-                                  model="claude", parent_tool_use_id="child")]
-    with ExitStack() as stack:
-        _chat_patches(stack, StubPool(_fake_state(messages)))
-        frames = await collect(qe._stream_to_websocket_impl("prompt", "coalesce-child", "claude-code"))
-    assert [f["content"] for f in frames if f["type"] == "subagent_chunk"] == ["hello ", "world", "next"]
+def test_current_producer_does_not_emit_legacy_child_messages():
+    adapter = make_adapter()
+    adapter._options = SessionOptions(model="fake", include_partial_messages=True)
+    delta = adapter._translate(TextDelta(session_id="worker", index=1, text="hello"))
+    completed = adapter._translate(BlockStop(session_id="worker", index=1))
+    final = next(event for event in completed if isinstance(event, AssistantMessage))
+    assert delta[0].event["index"] == 1
+    assert final.content[0].text == "hello"
+    # Even worker-session events have no parent tool id. Real worker progress
+    # uses WorkerFeed -> record_drained_event, not this legacy query-engine lane.
+    assert all(event.parent_tool_use_id is None for event in delta + completed)
 
 
 def _recorder():
