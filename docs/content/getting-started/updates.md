@@ -31,6 +31,8 @@ If a chat is still working, or a service it started (such as a preview server) i
 
 On a Docker worker, a downloaded update that is waiting for **Update and restart** does not hide a newer release. Checking for updates still reads the feed: when a newer release is out, the button offers it, and **Download update** replaces the waiting one and removes its files. If that download fails, the earlier update stays ready to install. Nothing is replaced while an update is installing or starting. If a successful signed check instead offers the running version or an older release, a verified download that was never selected to install is no longer selected; its files are retained, but it is not offered for restart. Failed, starting and recovery-protected builds are kept.
 
+Docker update commands are also serviced during startup once the app can accept them; they do not wait for the supervisor's first periodic readiness check. Commands keep their ten-second validity and are never replayed after expiry. Automatic background checks still wait for readiness.
+
 **Settings → System → Updates → Allow updates** turns in-app updates on or off for every worker on your account.
 
 Docker source updates reuse third-party Python dependencies only when the signed lockfiles, optional-dependency installer, installation recipe and selected Python runtime (including pip/ensurepip versions) match. Each revision still installs its own current Fluid code separately. Node dependencies are reused only when the Node/npm versions, platform/ABI, package manifest and lockfile match; source builds still run. Incomplete installs are never reused.

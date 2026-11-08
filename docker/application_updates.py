@@ -1831,7 +1831,7 @@ class ContainerUpdates:
         self.prune_dependencies()
         self.publish("ready", "Update ready. Choose Update and restart.")
 
-    def service(self):
+    def service(self, requested_only=False):
         try:
             action = None
             try:
@@ -1851,7 +1851,7 @@ class ContainerUpdates:
                     raise UpdateError("No application update is ready")
                 self.install_requested.set()
                 return
-            if action in ("check", "download") or time.monotonic() >= self.next_check:
+            if action in ("check", "download") or (not requested_only and time.monotonic() >= self.next_check):
                 self.next_check = time.monotonic() + CHECK_INTERVAL_SECONDS
                 if self.allowed():
                     self.check(download=action == "download")
@@ -1859,9 +1859,10 @@ class ContainerUpdates:
             self.publish("ready" if self.state.get("pending") else "error",
                          error=str(exc) if isinstance(exc, UpdateError) else "Application update failed; current version is unchanged")
 
-    def tick(self):
+    def tick(self, requested_only=False):
         if not self.thread or not self.thread.is_alive():
-            self.thread = threading.Thread(target=self.service, daemon=True, name="application-updates")
+            self.thread = threading.Thread(target=self.service, args=(requested_only,),
+                                           daemon=True, name="application-updates")
             self.thread.start()
 
     def close(self):

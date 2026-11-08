@@ -1703,6 +1703,11 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=No
                                       "version it was running. Try again later.")
             elif monitor.ever_ready and monitor.failures == 0:
                 updates.tick()
+            elif updates.request_path.exists():
+                # HTTP readiness can precede our first periodic probe. Service
+                # explicit commands within their TTL, but do not begin automatic
+                # checks yet. Install still validates live lifecycle preflight.
+                updates.tick(requested_only=True)
         if failure is not None:
             if probe_failure:
                 log(f"{failure}; capturing diagnostics before stopping it")
