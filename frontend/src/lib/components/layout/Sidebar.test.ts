@@ -159,6 +159,9 @@ vi.mock('$lib/components/deck/lazy/panels', async (importOriginal) => {
 });
 
 import { tick } from 'svelte';
+
+// jsdom has no Web Animations, and Svelte asks an `animate:` block's leaving rows about theirs.
+Element.prototype.getAnimations ??= () => [];
 import { sessionTimestamp } from './session-card-data';
 // Not mocked: the lane partition IS what the mode tests assert, so they drive
 // the real store. It is a module singleton, hence the reset in beforeEach.
@@ -219,6 +222,81 @@ describe('Archived sessions', () => {
 		render(Sidebar, sidebarProps);
 		expect(screen.queryByText('Archived work')).toBeTruthy();
 		expect(screen.queryByRole('button', { name: /^Archived$/ })).toBeNull();
+	});
+});
+
+describe('A new chat changing the order of the project groups (#1307)', () => {
+	const row = (id: string, title: string, project: string | null, minute: number) =>
+		session(id, title, project, true, false, { updated_at: `2026-08-20T12:${minute}:00Z` });
+	const projectChat = row('project', 'Project chat', 'visible-project', 20);
+	const looseChat = row('loose', 'Loose chat', null, 10);
+	const newLooseChat = row('new', 'New loose chat', null, 30);
+
+	/** Lets the groups have a place on the page, and records what asks to move. */
+	function watchMotion(reducedMotion = false) {
+		const proto = Element.prototype as unknown as { animate?: unknown; };
+		const moved: { el: Element; frames: Keyframe[] }[] = [];
+		proto.animate = vi.fn(function (this: Element, frames: Keyframe[]) {
+			if (frames.length) moved.push({ el: this, frames });
+			const animation = { cancel() {}, finish() {}, onfinish: null as null | (() => void) };
+			queueMicrotask(() => animation.onfinish?.());
+			return animation;
+		});
+		const rects = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+			const place = Array.from(this.parentElement?.children ?? []).indexOf(this);
+			return new DOMRect(0, place * 400, 240, 400);
+		});
+		vi.stubGlobal('matchMedia', () => ({ matches: reducedMotion }));
+		onTestFinished(() => {
+			delete proto.animate;
+			rects.mockRestore();
+			vi.unstubAllGlobals();
+		});
+		return moved;
+	}
+
+	it('keeps the rows on the page when a second project joins the lane', async () => {
+		mocks.sessions.set([projectChat]);
+		render(Sidebar, sidebarProps);
+		const before = cardFrame('Project chat');
+
+		mocks.sessions.set([newLooseChat, projectChat]);
+		await tick();
+
+		expect(cardFrame('Project chat')).toBe(before);
+		expect(cardIds()).toEqual(['new', 'project']);
+	});
+
+	it('slides the groups a new chat reorders instead of jumping them', async () => {
+		const moved = watchMotion();
+		mocks.sessions.set([projectChat, looseChat]);
+		render(Sidebar, sidebarProps);
+		expect(cardIds()).toEqual(['project', 'loose']);
+
+		mocks.sessions.set([newLooseChat, projectChat, looseChat]);
+		await tick();
+		// Svelte first holds each group where it was, then plays the glide.
+		const glides = () => moved.filter(({ frames }) => frames.length > 2);
+		await vi.waitFor(() => expect(glides().length).toBe(2));
+
+		expect(cardIds()).toEqual(['new', 'loose', 'project']);
+		for (const { el, frames } of glides()) {
+			expect(el.classList.contains('proj-group')).toBe(true);
+			expect(String(frames[0].transform)).toMatch(/translateY\(-?[1-9]/);
+			expect(String(frames.at(-1)?.transform)).toBe('translateY(0px)');
+		}
+	});
+
+	it('puts the groups straight in place for reduced motion', async () => {
+		const moved = watchMotion(true);
+		mocks.sessions.set([projectChat, looseChat]);
+		render(Sidebar, sidebarProps);
+
+		mocks.sessions.set([newLooseChat, projectChat, looseChat]);
+		await tick();
+
+		expect(cardIds()).toEqual(['new', 'loose', 'project']);
+		expect(moved).toEqual([]);
 	});
 });
 

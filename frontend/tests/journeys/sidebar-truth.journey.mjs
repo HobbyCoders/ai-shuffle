@@ -25,6 +25,10 @@
 //   stopped           the user's own Stop is not a failure
 //   project-choice-survives  choosing a project and a branch holds while it gains a remote (#1078)
 //   project-once      a project is listed once after its first worktree chat
+//   new-chat-from-elsewhere  a chat arriving from another tab or device lifts its
+//                     project to the top of a crowded lane, and the rest of the
+//                     lane slides out of the way instead of jumping (#1307)
+//   new-chat-first-send  the same when this page's own first send brings the row
 //
 // Hosted journeys build only the shared desktop UI and run it at desktop and
 // phone widths. `--mobile-shell` opens the phone variants of the failed-* cases
@@ -36,7 +40,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runJourney } from './runner.mjs';
 import {
-	api, chatIdByToken, chatState, expect, openNewChat, pick, pickAccess, pickProject, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
+	api, chatIdByToken, chatState, expect, openNewChat, pick, pickAccess, pickProject, PROJECT, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
 	waitChat, waitTurnSettled, withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -670,8 +674,68 @@ const PROJECT_ONCE = {
 	}
 };
 
+const FIRST_ROW = '[data-group="active"] .scard-frame';
+const activeHeads = (page) => page.locator('[data-group="active"] .proj-head').allInnerTexts();
+
+/**
+ * A lane crowded enough that its project groups swapping places moves most of
+ * what is on screen: rows in no project, then rows of a project, which leaves the
+ * project on top and "No project" under it. The hosted failure of #1307 needed an
+ * instance earlier journeys had filled the same way; this states that on its own.
+ */
+async function crowdedProjects(ctx) {
+	const { page } = ctx;
+	await openNewChat(ctx);
+	const dev = (await api(page, 'GET', '/projects')).find((p) => p.name === PROJECT);
+	expect(dev, `the seeded project ${PROJECT} exists`);
+	const create = (body, n) => Promise.all(Array.from({ length: n }, () => api(page, 'POST', '/sessions', body)));
+	await create({}, 13);
+	const newest = await create({ project_id: dev.id }, 13);
+	await showSidebar(page);
+	await page.locator(CARD(newest[0].session_id)).waitFor({ state: 'attached', timeout: 30_000 });
+	await page.waitForFunction(() => document.querySelector('[data-group="active"] .proj-head')?.textContent?.trim() === 'Dev sandbox', null, { timeout: 30_000 });
+	await page.waitForTimeout(1200);
+}
+
+/** The new row leads the lane, under its own project, above the project that led it. */
+async function expectLiftedToTop(page, id) {
+	const heads = await activeHeads(page);
+	expect(heads[0] === 'No project' && heads.includes(PROJECT), `the new chat's project leads the lane: ${JSON.stringify(heads)}`);
+	const first = await page.locator(FIRST_ROW).first().getAttribute('data-session-card');
+	expect(first === id, `the new chat is the lane's first row (found ${first})`);
+}
+
+const NEW_CHAT_FROM_ELSEWHERE = {
+	name: 'new-chat-from-elsewhere',
+	setup: crowdedProjects,
+	async act({ page, mark }) {
+		await mark('a chat with no project starts in another tab');
+		// Answered to the journey alone: this page learns of it by its push, as it
+		// would for another tab or device, with no click of its own nearby to
+		// excuse a jump.
+		const { session_id: id } = await api(page, 'POST', '/sessions', {});
+		await page.locator(CARD(id)).waitFor({ state: 'attached', timeout: 30_000 });
+		await page.waitForTimeout(1000);
+		await expectLiftedToTop(page, id);
+	}
+};
+
+const NEW_CHAT_FIRST_SEND = {
+	name: 'new-chat-first-send',
+	viewports: ['desktop'],
+	setup: crowdedProjects,
+	async act({ page, mark, variant }) {
+		await page.waitForTimeout(800);
+		await mark('first send of a chat with no project');
+		const token = `first-send-${uniq()}`;
+		await typeAndSend(page, `${token} ${scriptTag(variant, 'default', { latency_ms: 1500 })}`);
+		await waitTurnSettled(page, { text: `You said: “${token}`, timeout: 120_000 });
+		await expectLiftedToTop(page, await chatIdByToken(page, token));
+	}
+};
+
 await runJourney({
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND]
 });

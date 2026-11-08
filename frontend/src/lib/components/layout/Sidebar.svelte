@@ -17,6 +17,8 @@
 	 * phone they ride with the drawer and on desktop they never cover the chat.
 	 */
 	import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
+	import type { AnimationConfig } from 'svelte/animate';
+	import { cubicOut } from 'svelte/easing';
 	import { refreshAgentIdentities } from '$lib/stores/agent-identities';
 	import {
 		Search,
@@ -590,7 +592,9 @@
 			if (group) group.push(row);
 			else groups.set(key, [row]);
 		}
-		if (groups.size < 2) return [{ key: 'all', label: null, rows: laneRows }];
+		// Keyed by its project even with no header, so a second project arriving
+		// moves this group instead of rebuilding every row in it.
+		if (groups.size < 2) return [{ key: [...groups.keys()][0] ?? 'all', label: null, rows: laneRows }];
 		const recency = (key: string) => projectRecency.get(key) ?? 0;
 		return [...groups]
 			.sort(([a], [b]) => recency(b) - recency(a))
@@ -599,6 +603,19 @@
 				label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
 				rows
 			}));
+	}
+	// A project's place is its newest chat, so a chat starting in a project lower
+	// down lifts that whole group over the ones above it (#1307). That is a
+	// screenful of rows changing place with nothing the user touched, so they
+	// glide there. Position only: a group growing by a row must not stretch.
+	function slideGroup(_node: HTMLElement, { from, to }: { from: DOMRect; to: DOMRect }): AnimationConfig {
+		const dy = from.top - to.top;
+		const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+		if (!dy || reduced) return { duration: 0 };
+		// The rising group passes over the rest on the panel's own colour, so two
+		// lists of rows never read through each other on the way.
+		const over = dy > 0 ? ' z-index: 1; background: var(--sidebar);' : '';
+		return { duration: 240, easing: cubicOut, css: (_t, u) => `transform: translateY(${u * dy}px);${over}` };
 	}
 	// A lane with no project headers still needs its rows to say where they
 	// belong, unless the whole list is one project and it goes without saying.
@@ -766,12 +783,14 @@
 
 {#snippet laneRows(groups: { key: string; label: string | null; rows: CardRow[] }[], compact = false)}
 	{#each groups as group (group.key)}
-		{#if group.label}
-			<div class="proj-head" title={group.label}>{group.label}</div>
-		{/if}
-		{#each group.rows as row (row.session.id)}
-			{@render card(row, compact, !group.label && spansProjects)}
-		{/each}
+		<div class="proj-group" animate:slideGroup>
+			{#if group.label}
+				<div class="proj-head" title={group.label}>{group.label}</div>
+			{/if}
+			{#each group.rows as row (row.session.id)}
+				{@render card(row, compact, !group.label && spansProjects)}
+			{/each}
+		</div>
 	{/each}
 {/snippet}
 
@@ -1199,7 +1218,7 @@
 	   touch area. The left edge needs no guard: the icon rail already keeps
 	   the rows, and the start of a right (archive) swipe, clear of it. */
 	.list.edge-guard { padding-right: 24px; }
-	.cards { display: flex; flex-direction: column; gap: 2px; }
+	.cards, .proj-group { display: flex; flex-direction: column; gap: 2px; }
 	/* Tiers: the lane label, then this quieter project label, then its rows. */
 	.proj-head {
 		padding: 16px 8px 4px 12px;
@@ -1210,7 +1229,7 @@
 		font-weight: 500;
 		color: var(--subtle-foreground);
 	}
-	.proj-head:first-child { padding-top: 4px; }
+	.proj-group:first-child .proj-head { padding-top: 4px; }
 
 	.sect {
 		position: sticky;
