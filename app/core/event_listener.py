@@ -22,7 +22,7 @@ import time
 
 _SLOTS = 128
 _SLOT_BYTES = 8208
-_HEADER_BYTES = 24
+_HEADER_BYTES = 40  # Published sequence, heartbeats, Windows runtime PID/admission.
 _SIZE = _HEADER_BYTES + _SLOTS * _SLOT_BYTES
 _CHILD = Path(__file__).resolve()
 _HEARTBEAT_SECONDS = 10.0
@@ -36,16 +36,25 @@ def _store(memory, offset, value):
     memory[offset:offset + 8] = struct.pack("=Q", value)
 
 
+def _environment():
+    # Credentials arrive only through the private request, never libpq's PG*
+    # variables or provider/application settings inherited from the worker.
+    allowed = {"PATH", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "TMP", "TEMP", "TMPDIR", "LD_LIBRARY_PATH"}
+    return {key: value for key, value in os.environ.items() if key.upper() in allowed}
+
+
 class NotificationListener:
     """Owned by the gateway thread; read() never calls the driver or blocks on IO."""
 
     def __init__(self, kwargs):
-        from app.db.backend_probe import _environment, _interpreter
+        from app.db.backend_probe import _interpreter
         import psycopg2
 
         self._directory = tempfile.TemporaryDirectory(prefix="event-listener-")
         self._memory = None
         self._child = None
+        self._jobs = []
+        self._job_api = None
         self._seen = 0
         self._started = time.monotonic()
         directory = Path(self._directory.name)
@@ -68,9 +77,33 @@ class NotificationListener:
                 [_interpreter(), "-I", "-S", str(_CHILD), str(request), str(reply)],
                 close_fds=False, env=_environment(), stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **options)
+            if os.name == "nt":
+                self._admit_windows()
         except BaseException:
             self.close()
             raise
+
+    def _admit_windows(self):
+        # Reuse the projection child's pinned identity / Job helpers. Both the
+        # launcher and actual runtime are inert until admission, including venv
+        # redirectors. Parent-only handles let the kernel kill even a frozen
+        # interpreter when this worker dies, without a child-side Python check.
+        from app.core.transcript_views.child_process import _job_object
+        from app.core.transcript_views.windows_process import _pinned_windows_processes
+
+        deadline = time.monotonic() + 5
+        while not (runtime_pid := _number(self._memory, 24)):
+            if self._child.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError("LISTEN child admission failed")
+            time.sleep(.01)
+        self._job_api = _job_object()
+        with _pinned_windows_processes(self._child.pid, runtime_pid) as targets:
+            for _, handle in targets:
+                job = self._job_api.assign_kill_on_close_job_handle(handle)
+                if job is None:
+                    raise RuntimeError("LISTEN child ownership failed")
+                self._jobs.append(job)
+            _store(self._memory, 32, 1)
 
     @property
     def connected(self):
@@ -121,6 +154,9 @@ class NotificationListener:
                     child.kill()
                 child.wait(timeout=2)
         finally:
+            for job in self._jobs:
+                self._job_api.close_job(job)
+            self._jobs.clear()
             if self._memory is not None:
                 self._memory.close()
                 self._memory = None
@@ -168,6 +204,13 @@ def _main():
         request = json.load(stream)
     sys.path.extend(request["path"])
     with open(sys.argv[2], "r+b") as stream, mmap.mmap(stream.fileno(), _SIZE) as memory:
+        if os.name == "nt":
+            _store(memory, 24, os.getpid())
+            deadline = time.monotonic() + 5
+            while not _number(memory, 32):
+                if time.monotonic() >= deadline:
+                    return  # Parent died before admission; never enter the driver.
+                time.sleep(.01)
         _listen(request["kwargs"], memory)
 
 
