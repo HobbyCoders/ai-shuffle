@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+# Acceptance-only older patch. Never change the production Dockerfile or locks.
+env:
+  ACCEPTANCE_BASE: python:3.12.15-slim-trixie@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+
 concurrency:
   group: runtime-overlay-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -54,11 +58,25 @@ jobs:
             "$OVERLAY_URL" -o "$RUNNER_TEMP/overlay-input/python.tar.gz"
           test "$(stat -c %s "$RUNNER_TEMP/overlay-input/python.tar.gz")" = "$OVERLAY_SIZE"
           printf '%s  %s\n' "$OVERLAY_SHA256" "$RUNNER_TEMP/overlay-input/python.tar.gz" | sha256sum --check
+      - name: Pin the disposable image to the older Python patch
+        run: |
+          python3 - "$RUNNER_TEMP/overlay-input/Dockerfile" <<'PY'
+          import os
+          from pathlib import Path
+          import sys
+
+          source = Path("Dockerfile").read_text()
+          original = "FROM python:3.12-slim-trixie\n"
+          if source.count(original) != 1:
+              raise SystemExit("Review the acceptance base: production Dockerfile changed")
+          Path(sys.argv[1]).write_text(source.replace(original, "FROM " + os.environ["ACCEPTANCE_BASE"] + "\n"))
+          PY
       - uses: docker/setup-buildx-action@v3
       - name: Build disposable image from this revision
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ runner.temp }}/overlay-input/Dockerfile
           platforms: linux/${{ matrix.arch }}
           tags: ai-shuffle:overlay-acceptance
           load: true
@@ -68,7 +86,10 @@ jobs:
           build-args: GIT_SHA=${{ github.sha }}
       - name: Record the baked runtime
         run: |
-          docker run --rm --user appuser --entrypoint python3 ai-shuffle:overlay-acceptance             -c 'import json, platform, sys; print(json.dumps({"version": sys.version, "machine": platform.machine()}))'             > "$RUNNER_TEMP/overlay-evidence/baked-runtime.json"
+          docker run --rm --user appuser --entrypoint python3 --env ACCEPTANCE_BASE \
+            ai-shuffle:overlay-acceptance \
+            -c 'import json, os, platform, sys; assert sys.version_info[:3] == (3, 12, 15); print(json.dumps({"base": os.environ["ACCEPTANCE_BASE"], "version": sys.version, "machine": platform.machine()}))' \
+            > "$RUNNER_TEMP/overlay-evidence/baked-runtime.json"
       - name: Signed activation, cold restart, rollback and refusals
         run: |
           docker run --rm --user appuser --entrypoint python3 \

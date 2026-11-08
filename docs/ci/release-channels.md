@@ -360,7 +360,11 @@ is published. Its three paths run on one install:
 
 The non-publishing `runtime-overlay-acceptance.yml` workflow builds disposable
 images from its checkout on standard `ubuntu-24.04` and `ubuntu-24.04-arm`
-runners. It checks pinned Python 3.12.16 archives, runs all three harness paths
+runners. An acceptance-only copy of the Dockerfile pins its Python base to
+`python:3.12.15-slim-trixie@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704`.
+The production Dockerfile and dependency locks are untouched. The job checks
+that the baked interpreter is 3.12.15, then checks pinned standalone Python
+3.12.16 archives and runs all three harness paths
 as appuser against each image's baked updater, and separately installs the
 real hash-locked application dependencies and Fluid on the candidate runtime.
 The JSON acceptance report and dependency log are kept for three days. It uses

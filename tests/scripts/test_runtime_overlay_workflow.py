@@ -1,6 +1,11 @@
 """Keep the Docker overlay acceptance isolated, native and non-publishing."""
 from pathlib import Path
+import os
 import re
+import subprocess
+import sys
+
+import pytest
 
 import yaml
 
@@ -33,6 +38,11 @@ def test_native_overlay_acceptance_checks_both_reviewed_candidates_without_secre
     build = next(s["with"] for s in steps if s.get("uses", "").startswith("docker/build-push-action@"))
     assert build["load"] == "true" and build["push"] == "false"
     assert build["platforms"] == "linux/${{ matrix.arch }}"
+    assert build["file"] == "${{ runner.temp }}/overlay-input/Dockerfile"
+    assert workflow["env"]["ACCEPTANCE_BASE"] == (
+        "python:3.12.15-slim-trixie@sha256:"
+        "a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704"
+    )
     run = next(s["run"] for s in steps if s.get("name", "").startswith("Signed activation"))
     assert "--rm --user appuser" in run
     assert "-I /app/scripts/release/overlay_acceptance.py" in run
@@ -49,3 +59,27 @@ def test_native_overlay_acceptance_checks_both_reviewed_candidates_without_secre
     evidence = steps[-1]
     assert evidence["if"] == "always()"
     assert evidence["with"]["retention-days"] == "3"
+
+
+@pytest.mark.parametrize("base_count", [0, 1, 2])
+def test_acceptance_base_is_pinned_without_editing_the_production_recipe(tmp_path, base_count):
+    workflow = yaml.load((ROOT / ".github/workflows/runtime-overlay-acceptance.yml").read_text(),
+                         Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["acceptance"]["steps"]
+    command = next(s["run"] for s in steps if s.get("name", "").startswith("Pin the disposable"))
+    script = command.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    original = "FROM node:22-slim AS frontend-builder\n" + "FROM python:3.12-slim-trixie\n" * base_count
+    recipe = tmp_path / "Dockerfile"
+    recipe.write_text(original)
+    output = tmp_path / "AcceptanceDockerfile"
+    result = subprocess.run([sys.executable, "-", str(output)], input=script, text=True,
+                            cwd=tmp_path, env={**os.environ, **workflow["env"]}, capture_output=True)
+    assert recipe.read_text() == original
+    if base_count == 1:
+        assert result.returncode == 0, result.stderr
+        assert output.read_text() == original.replace("FROM python:3.12-slim-trixie\n",
+            "FROM " + workflow["env"]["ACCEPTANCE_BASE"] + "\n")
+    else:
+        assert result.returncode != 0
+        assert "Review the acceptance base" in result.stderr
+        assert not output.exists()
