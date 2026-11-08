@@ -70,6 +70,13 @@
    */
   const DEFAULT_SCOPE_FIELDS = ['path', 'session'];
 
+  /**
+   * Fields that count something in the chat on screen. Two chats' counts are
+   * different quantities, so each chat keeps its own history: 2 -> 4 in chat A
+   * then 2 in chat B is not chat A going backwards, however fast the switch was.
+   */
+  const DEFAULT_PER_CHAT_FIELDS = ['messages'];
+
   const DEFAULT_THRESHOLDS = {
     /** One layout shift at or above this is flagged. */
     layoutShiftEntry: 0.05,
@@ -147,9 +154,10 @@
     const cyclic = cyclicSet(recording, options);
     const scopeFields = scopeFieldsOf(recording, options);
     const flashMs = { ...DEFAULT_THRESHOLDS, ...(options.thresholds || {}) }.scopeFlashMs;
+    const perChat = new Set(Array.isArray(options.perChat) ? options.perChat : DEFAULT_PER_CHAT_FIELDS);
     const anomalies = [];
     let current = {};
-    // field -> runs of distinct values in the current step
+    // field (and, for a per-chat field, its chat) -> runs of distinct values in the current step
     let runs = new Map();
     // field -> anomaly already raised in this step
     let raised = new Map();
@@ -161,12 +169,20 @@
       return scope;
     }
 
-    function runsFor(field, before) {
-      let list = runs.get(field);
+    function sessionOf(state) {
+      return 'session' in state ? state.session : null;
+    }
+
+    function runsFor(field, before, after) {
+      const key = perChat.has(field) ? `${field}\0${shown(sessionOf(after))}` : field;
+      let list = runs.get(key);
       if (!list) {
-        const value = field in before ? before[field] : null;
-        list = [{ value, index: null, t: null, scope: scopeOf(before, field) }];
-        runs.set(field, list);
+        // A chat seen for the first time starts from its own value, never the
+        // previous chat's.
+        const state = perChat.has(field) && sessionOf(before) !== sessionOf(after) ? after : before;
+        const value = field in state ? state[field] : null;
+        list = [{ value, index: null, t: null, scope: scopeOf(state, field) }];
+        runs.set(key, list);
       }
       return list;
     }
@@ -187,7 +203,7 @@
       for (const [field, raw] of Object.entries(entry.changes)) current[field] = raw === undefined ? null : raw;
       for (const field of Object.keys(entry.changes)) {
         const value = current[field];
-        const list = runsFor(field, before);
+        const list = runsFor(field, before, current);
         if (cyclic.has(field)) continue;
         const last = list[list.length - 1];
         if (last.value === value) continue;
@@ -639,7 +655,7 @@
       + (stats.maxFrameGapMs ? `, longest frame gap ${ms(stats.maxFrameGapMs)}` : '');
     return `${head}\n${formatTimeline(recording, { ...options, anomalies })}\n\nanomalies:\n${formatAnomalies(anomalies)}`;
   }
-  return { ANALYZER_VERSION, DEFAULT_CYCLIC_FIELDS, DEFAULT_SCOPE_FIELDS, DEFAULT_THRESHOLDS, foldStates, detectReversals, detectRemounts, detectLayoutShift, detectErrors, detectFailedRequests, detectDuplicateRows, detectRecordingGaps, analyzeRecording, formatTimeline, formatAnomalies, formatReport };
+  return { ANALYZER_VERSION, DEFAULT_CYCLIC_FIELDS, DEFAULT_SCOPE_FIELDS, DEFAULT_PER_CHAT_FIELDS, DEFAULT_THRESHOLDS, foldStates, detectReversals, detectRemounts, detectLayoutShift, detectErrors, detectFailedRequests, detectDuplicateRows, detectRecordingGaps, analyzeRecording, formatTimeline, formatAnomalies, formatReport };
   })();
   /* @generated-end analyze.js */
 
