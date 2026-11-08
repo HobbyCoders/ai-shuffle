@@ -1074,6 +1074,8 @@ def _run_column_migrations(cursor: Any) -> None:
     # Additive account-hub migration, included in this module's fingerprint.
     from app.db.mobile_hub import create_schema as create_mobile_hub_schema
     create_mobile_hub_schema(cursor)
+    from app.db.terminal_device_links import create_schema as create_terminal_device_links_schema
+    create_terminal_device_links_schema(cursor)
 
     # v78 controller pairing. These blocks run on every boot so an interrupted
     # rolling upgrade cannot leave the new version without its security tables.
@@ -3653,7 +3655,7 @@ def migrations_fingerprint() -> str:
     from app.db import (
         schema_postgres, mobile_hub, network, owner_state, working_record, watches, watch_delivery,
         session_mode_migration, session_archive_migration, model_provider_slots, project_setup, stop_notices,
-        project_catalog_aliases,
+        project_catalog_aliases, terminal_device_links,
     )
     from app.core import owner_auth
 
@@ -3664,7 +3666,7 @@ def migrations_fingerprint() -> str:
     for module in (
         sys.modules[__name__], schema_postgres, mobile_hub, owner_auth, network, owner_state,
         working_record, watches, watch_delivery, session_mode_migration, session_archive_migration, model_provider_slots,
-        project_setup, stop_notices, project_catalog_aliases,
+        project_setup, stop_notices, project_catalog_aliases, terminal_device_links,
     ):
         path = getattr(module, "__file__", None)
         if not path:

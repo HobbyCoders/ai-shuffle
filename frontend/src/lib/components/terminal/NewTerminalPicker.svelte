@@ -1,16 +1,17 @@
 <script lang="ts">
 	/** Folder and shell for a new terminal. Used as the "+" popover and as the empty state. */
 	import { tick } from 'svelte';
-	import { Folder, TerminalSquare, ShieldCheck, LoaderCircle, TriangleAlert } from 'lucide-svelte';
+	import { Folder, TerminalSquare, TriangleAlert } from 'lucide-svelte';
 	import { cwdProblem, type ProbeState } from '$lib/terminal/gating';
 	import type { CreateTerminal, TerminalTarget } from '$lib/api/terminals';
-	import { APPROVAL_REQUIRED, PENDING_SECONDS, isPeerTarget, localWorkerId, openErrorMessage, peerRow, selectable, type OpenResult } from '$lib/terminal/peer';
+	import { ACTION_OPEN, isPeerTarget, localWorkerId, openErrorMessage, peerRow, selectable, type OpenResult } from '$lib/terminal/peer';
 	import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
-	import PeerCode from './PeerCode.svelte';
+	import PeerLinkCard from './PeerLinkCard.svelte';
 	import { SelectField, Segmented } from '$lib/components/layout/view';
 
 	let {
 		probe,
+		chatId = null,
 		busy = false,
 		disabledReason = null,
 		inline = false,
@@ -18,8 +19,11 @@
 		onOpen,
 		onCancel,
 		onTargetsChanged,
+		linkCardShownFor = null,
 	}: {
 		probe: Extract<ProbeState, { status: 'ready' }>;
+		/** The chat this terminal belongs to, if any: signed so its own worker opens in its folder. */
+		chatId?: string | null;
 		busy?: boolean;
 		/** The cap is reached: say why instead of opening. */
 		disabledReason?: string | null;
@@ -28,8 +32,10 @@
 		blurb?: string;
 		onOpen: (choice: CreateTerminal & { cwd: string | null; shell: string | null }) => void | Promise<OpenResult | void>;
 		onCancel?: () => void;
-		/** Ask for fresh targets (after a revoke), so the rows show what the worker now reports. */
+		/** Ask for fresh targets, so the rows show what the worker now reports. */
 		onTargetsChanged?: () => void;
+		/** The worker whose link card the panel already shows, so the code appears once. */
+		linkCardShownFor?: string | null;
 	} = $props();
 
 	const SOURCE: Record<string, string> = {
@@ -39,30 +45,29 @@
 		home: 'Home folder',
 	};
 
+	const targetKey = (target: TerminalTarget) => `${target.kind}:${target.worker_id ?? target.grant_id}`;
+	// Reopening the popover returns to a peer whose request is still in flight;
+	// otherwise a chat on another worker starts on that worker.
+	// svelte-ignore state_referenced_locally
+	const startingPeer = (() => {
+		const local = localWorkerId(probe.targets);
+		const candidates = (probe.targets ?? []).filter((target, index) => index > 0 && isPeerTarget(target, local));
+		return candidates.find((target) => !!peerTerminals.flow(target.worker_id) && peerTerminals.flow(target.worker_id)?.phase !== 'ended')
+			?? candidates.find((target) => target.worker_id === probe.chatWorkerId);
+	})();
+	let selected = $state(startingPeer ? targetKey(startingPeer) : '');
 	// Seeded once from the probe; the owner edits from there.
 	// svelte-ignore state_referenced_locally
-	let folder = $state(probe.folder ?? '');
+	let folder = $state(startingPeer ? '' : probe.folder ?? '');
 	// svelte-ignore state_referenced_locally
 	let shell = $state(probe.defaultShell ?? probe.shells[0] ?? '');
-	const targetKey = (target: TerminalTarget) => `${target.kind}:${target.worker_id ?? target.grant_id}`;
-	// Reopening the popover returns to a peer whose request is still in flight.
-	// svelte-ignore state_referenced_locally
-	let selected = $state((() => {
-		const local = localWorkerId(probe.targets);
-		const waiting = (probe.targets ?? []).find((target, index) => index > 0 && isPeerTarget(target, local)
-			&& !!peerTerminals.flow(target.worker_id) && peerTerminals.flow(target.worker_id)?.phase !== 'ended');
-		return waiting ? targetKey(waiting) : '';
-	})());
-	// A lease revoked here stays out of the row until the targets are probed again.
-	const masked = (target: TerminalTarget): TerminalTarget => target.authorization_id && peerTerminals.isRevoked(target.authorization_id)
-		? { ...target, available: false, authorization_id: undefined, reason_code: APPROVAL_REQUIRED, reason: null } : target;
-	const destinations = $derived((probe.targets ?? []).map(masked));
+	const destinations = $derived(probe.targets ?? []);
 	const destination = $derived(selected ? destinations.find((target) => targetKey(target) === selected) : destinations[0]);
 	const remote = $derived(!!selected);
 	const unavailable = $derived(destination?.available === false || (remote && !destination));
 	const ssh = $derived(destination?.kind === 'ssh');
 	let input = $state<HTMLInputElement>();
-	/** The peer refused the folder (`bad_folder`). The approval is kept: fix it and open again. */
+	/** The peer refused the folder (`bad_folder`): fix it and open again. */
 	let remoteFolder = $state<{ folder: string; message: string } | null>(null);
 	const folderError = $derived(folder.trim() ? cwdProblem(folder.trim()) ?? '' : '');
 	const remoteFolderError = $derived(remoteFolder && remoteFolder.folder === folder ? remoteFolder.message : '');
@@ -72,16 +77,12 @@
 	const peers = $derived(destinations.some((target) => isPeerTarget(target, localId)));
 	const peer = $derived(isPeerTarget(destination, localId) ? destination : undefined);
 	const flow = $derived(peer ? peerTerminals.flow(peer.worker_id) : null);
-	/** The approval this picker would open with: the live flow's, else one the worker reports for this owner. */
-	const authorizationId = $derived(flow?.phase === 'approved' ? flow.authorizationId
-		: !flow && peer?.available ? peer.authorization_id : undefined);
+	const keyProblem = $derived(probe.deviceKeyProblem ?? null);
 	const stage = $derived.by(() => {
 		if (!peer) return null;
-		if (flow?.phase === 'requesting' || flow?.phase === 'pending' || flow?.phase === 'ended') return flow.phase;
-		if (authorizationId) return 'approved';
-		return selectable(peer) ? 'request' : 'blocked';
+		if (flow?.phase === 'linking' || flow?.phase === 'ended') return flow.phase;
+		return selectable(peer, keyProblem) ? 'open' : 'blocked';
 	});
-	const left = (expiresAt: number) => Math.max(0, (expiresAt - peerTerminals.now) / 1000);
 	let opening = $state(false);
 	const peerKey = (target: TerminalTarget) => `peer-reason-${(target.worker_id ?? target.grant_id ?? '').replace(/[^a-z0-9_-]/gi, '_')}`;
 	const kindLabel = (target: TerminalTarget, index: number) =>
@@ -94,45 +95,38 @@
 		folder = selected ? '' : probe.folder ?? '';
 	}
 
-	function requestApproval() {
-		if (!peer?.worker_id || busy || disabledReason) return;
-		void peerTerminals.request(peer.worker_id, peer.name);
-	}
-
 	async function openPeer() {
-		if (!peer?.worker_id || !authorizationId || opening) return;
+		if (!peer?.worker_id || opening) return;
 		const workerId = peer.worker_id;
 		const name = peer.name;
+		const tried = folder;
+		const cwd = folder.trim() || null;
 		opening = true;
 		try {
-			const tried = folder;
-			const result = await onOpen({ cwd: folder.trim() || null, shell: null,
-				target: { kind: 'worker', worker_id: workerId, authorization_id: authorizationId } });
+			// Only the chat's own worker knows the chat; any other worker opens in its default folder.
+			const sessionId = probe.chatWorkerId === workerId ? chatId : null;
+			const proof = await peerTerminals.authorize(workerId, name, ACTION_OPEN, { session_id: sessionId, cwd, shell: null });
+			if (!proof) return;
+			const result = await onOpen({ cwd, shell: null, target: { kind: 'worker', worker_id: workerId, proof } });
 			remoteFolder = null;
 			if (result && !result.ok && result.code === 'bad_folder') {
-				// Nothing was spent on either worker: correct the folder and open again.
 				remoteFolder = { folder: tried, message: `${name}: ${result.message || "that folder doesn't exist."}` };
 				await tick();
 				input?.focus();
-			} else if (result && !result.ok) peerTerminals.fail(workerId, name, `The shell on ${name} didn't open`, openErrorMessage(result.code, result.message, name));
-			else peerTerminals.clear(workerId);
+			} else if (result && !result.ok) {
+				peerTerminals.fail(workerId, name, `The shell on ${name} didn't open`, openErrorMessage(result.code, result.message, name));
+				onTargetsChanged?.();
+			}
 		} finally {
 			opening = false;
 		}
-	}
-
-	async function revoke() {
-		if (!peer?.worker_id) return;
-		await peerTerminals.cancel(peer.worker_id, authorizationId);
-		onTargetsChanged?.();
 	}
 
 	function submit(event: SubmitEvent) {
 		event.preventDefault();
 		if (busy || disabledReason || folderError) return;
 		if (peer) {
-			if (stage === 'approved') void openPeer();
-			else if (stage === 'request' || (stage === 'ended' && flow?.phase === 'ended' && flow.retry && selectable(peer))) requestApproval();
+			if (stage === 'open' || (flow?.phase === 'ended' && flow.retry && selectable(peer, keyProblem))) void openPeer();
 			return;
 		}
 		if (unavailable) return;
@@ -161,11 +155,12 @@
 			<div class="targets">
 				{#each destinations as target, index (targetKey(target))}
 					{@const value = index === 0 ? '' : targetKey(target)}
-					{@const row = isPeerTarget(target, localId) ? peerRow(target, peerTerminals.flow(target.worker_id)?.phase) : null}
+					{@const row = isPeerTarget(target, localId) ? peerRow(target, peerTerminals.flow(target.worker_id)?.phase, keyProblem) : null}
 					{@const chip = row ? row.chip : target.available ? null : { label: 'Unavailable', tone: 'off' }}
 					{@const reason = row?.reason ?? null}
-					<label class="target" class:on={selected === value} class:off={!selectable(target)}>
-						<input type="radio" name="terminal-target" {value} checked={selected === value} disabled={!selectable(target)}
+					{@const pickable = index === 0 ? target.available : selectable(target, keyProblem)}
+					<label class="target" class:on={selected === value} class:off={!pickable}>
+						<input type="radio" name="terminal-target" {value} checked={selected === value} disabled={!pickable}
 							aria-label={[target.name, kindLabel(target, index), chip?.label].filter(Boolean).join(', ')}
 							aria-describedby={reason ? peerKey(target) : undefined} onchange={() => pick(value)} />
 						<span class="t-text">
@@ -184,31 +179,24 @@
   </div>
 	{/if}
 	{#if peer}
-		{#if stage === 'request' || stage === 'requesting'}
-			<p class="note peer-note">{peer.name} must approve this shell on {peer.name} itself. You'll both see the same six-character code to compare first.</p>
-		{:else if stage === 'pending' && flow?.phase === 'pending'}
-			<div class="pending" role="status" aria-live="polite">
-				<p class="p-title"><LoaderCircle size={14} class="p-spin" aria-hidden="true" />Waiting for approval on {flow.name}</p>
-				<PeerCode code={flow.code} left={left(flow.expiresAt)} total={PENDING_SECONDS} label={`Code for ${flow.name}`} />
-				<p class="note">On <strong>{flow.name}</strong>, open Terminal and approve the request only if it shows this same code.</p>
-				{#if flow.unreachable}<p class="note warn">Can't reach {flow.name} right now. Still waiting…</p>{/if}
+		{#if flow?.phase === 'linking'}
+			{#if flow.workerId !== linkCardShownFor}<PeerLinkCard {flow} />{/if}
+		{:else if flow?.phase === 'ended'}
+			<div class="ended" role="alert">
+				<p class="p-title"><TriangleAlert size={14} aria-hidden="true" />{flow.title}</p>
+				<p class="note">{flow.message}</p>
 			</div>
-		{:else if stage === 'approved'}
-			<p class="approved" role="status"><ShieldCheck size={15} aria-hidden="true" /><span>Approved on {peer.name} for one shell{#if flow?.phase === 'approved'}{' · '}<span class="left"><time>{Math.ceil(left(flow.expiresAt) / 60)} min</time> left</span>{/if}</span></p>
+		{/if}
+		{#if stage === 'open' || flow?.phase === 'ended'}
 			<label class="field">
 				<span class="label">Folder</span>
 				<span class="input-wrap" class:invalid={!!folderError || !!remoteFolderError}>
 					<Folder size={14} aria-hidden="true" />
 					<input bind:this={input} bind:value={folder} spellcheck="false" autocomplete="off" autocapitalize="off"
-						placeholder={`Default folder on ${peer.name}`} aria-describedby="terminal-folder-note" aria-invalid={!!folderError || !!remoteFolderError} />
+						placeholder={probe.chatWorkerId === peer.worker_id ? "This chat's folder" : `Default folder on ${peer.name}`} aria-describedby="terminal-folder-note" aria-invalid={!!folderError || !!remoteFolderError} />
 				</span>
-				<span class="note" id="terminal-folder-note" role={remoteFolderError ? 'alert' : undefined}>{#if folderError}{folderError}{:else if remoteFolderError}{remoteFolderError} Fix the folder, or leave it empty for {peer.name}'s default; the approval still stands.{:else}A full path on {peer.name}, or empty for its default.{/if}</span>
+				<span class="note" id="terminal-folder-note" role={remoteFolderError ? 'alert' : undefined}>{#if folderError}{folderError}{:else if remoteFolderError}{remoteFolderError} Fix the folder, then open again.{:else}On {peer.name}. Leave blank for the default.{/if}</span>
 			</label>
-		{:else if stage === 'ended' && flow?.phase === 'ended'}
-			<div class="ended" role="alert">
-				<p class="p-title"><TriangleAlert size={14} aria-hidden="true" />{flow.title}</p>
-				<p class="note">{flow.message}</p>
-			</div>
 		{/if}
 	{:else if ssh}<p class="note">Uses this chat's approved SSH grant, login shell and home folder. Revoking the grant closes the terminal.</p>{:else}
 	<label class="field">
@@ -231,20 +219,10 @@
 	{/if}
 	{#if disabledReason}<p class="cap" role="alert">{disabledReason}</p>{/if}
 	<div class="actions">
-		{#if onCancel}<button type="button" class="st-btn" onclick={onCancel}>{stage === 'pending' ? 'Hide' : 'Cancel'}</button>{/if}
+		{#if onCancel}<button type="button" class="st-btn" onclick={onCancel}>{stage === 'linking' ? 'Hide' : 'Cancel'}</button>{/if}
 		{#if peer}
-			{#if stage === 'pending' || stage === 'approved'}
-				<button type="button" class="st-btn danger" onclick={revoke}
-					disabled={opening} aria-label={stage === 'pending' ? `Cancel the request to ${peer.name}` : `Revoke the approval on ${peer.name}`}>
-					{stage === 'pending' ? 'Cancel request' : 'Revoke'}
-				</button>
-			{/if}
-			{#if stage === 'approved'}
-				<button type="submit" class="st-btn primary" disabled={busy || opening || !!disabledReason || !!folderError || !!remoteFolderError}>{busy || opening ? 'Opening…' : 'Open terminal'}</button>
-			{:else if stage !== 'pending'}
-				<button type="submit" class="st-btn primary" disabled={busy || !!disabledReason || stage === 'requesting' || stage === 'blocked' || (flow?.phase === 'ended' && (!flow.retry || !selectable(peer)))}>
-					{stage === 'requesting' ? 'Requesting…' : stage === 'ended' ? 'Request again' : 'Request approval'}
-				</button>
+			{#if stage !== 'linking'}
+				<button type="submit" class="st-btn primary" disabled={busy || opening || !!disabledReason || !!folderError || !!remoteFolderError || stage === 'blocked' || (flow?.phase === 'ended' && (!flow.retry || !selectable(peer, keyProblem)))}>{busy || opening ? 'Opening…' : flow?.phase === 'ended' ? 'Try again' : 'Open terminal'}</button>
 			{/if}
 		{:else}
 		<button type="submit" class="st-btn primary" disabled={busy || !!disabledReason || !!folderError || unavailable}>
@@ -303,23 +281,14 @@
 	.chip[data-tone='wait'] { color:var(--muted-foreground); background:var(--muted); }
 	.chip[data-tone='warn'] { color: var(--warning); background: color-mix(in oklch, var(--warning) 13%, transparent); }
 	.chip[data-tone='off']::before { background: var(--subtle-foreground); }
-	.peer-note { margin: 0; line-height: 1.45; }
-	.pending, .ended { display: grid; gap: 10px; padding: 12px; border-radius: calc(var(--radius) - 4px);
+	.ended { display: grid; gap: 10px; padding: 12px; border-radius: calc(var(--radius) - 4px);
 		border:1px solid var(--border); background:var(--muted);
 		animation: drop 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
 	.ended { border-style: solid; border-color: color-mix(in oklab, var(--warning) 40%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, transparent); }
-	.pending p, .ended p { margin: 0; line-height: 1.45; }
+	.ended p { margin: 0; line-height: 1.45; }
 	.p-title { display: flex; align-items: center; gap: 7px; font: 600 12.5px var(--font-sans); color: var(--foreground); }
 	.ended .p-title { color: var(--warning); }
-	.pending :global(.p-spin) { color: var(--primary); animation: p-spin 1s linear infinite; }
-	.note strong { color: var(--foreground); font-weight: 600; }
-	.note.warn { color: var(--warning); }
-	.approved { display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 10px; border-radius: calc(var(--radius) - 4px);
-		font-size: 12px; color: var(--success); background: color-mix(in oklch, var(--success) 10%, transparent); }
-	.approved time { font-variant-numeric: tabular-nums; }
-	.approved .left { white-space: nowrap; }
-	@keyframes p-spin { to { transform: rotate(360deg); } }
 	@keyframes drop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
 	@media (max-width: 700px) { button, .input-wrap { min-height:44px; } input:not([type='radio']) { font-size:16px; } .target { min-height: 44px; } }
-	@media (prefers-reduced-motion: reduce) { .picker:not(.inline), .pending, .ended, .pending :global(.p-spin) { animation: none; } }
+	@media (prefers-reduced-motion: reduce) { .picker:not(.inline), .ended { animation: none; } }
 </style>
