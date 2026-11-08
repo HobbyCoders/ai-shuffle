@@ -1067,8 +1067,9 @@ def after_commit(conn, callback):
     """Queue a notification for the owning get_db/transaction, never a rollback."""
     # resource_sync's observing connection delegates to the physical connection.
     connection = getattr(conn, "_connection", conn)
+    physical = getattr(connection, "_conn", connection)
     for owner, callbacks in reversed(_commit_callbacks.get()):
-        if owner is connection:
+        if owner is connection or getattr(owner, "_conn", owner) is physical:
             callbacks.append(callback)
             return
     raise RuntimeError("after_commit requires an app-managed transaction")
