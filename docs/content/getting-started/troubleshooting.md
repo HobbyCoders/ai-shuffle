@@ -75,6 +75,14 @@ The message in the app says which of these it is.
 - **An automation or background agent waits for confirmation.** The loop guard held it. Confirm it under **Settings → Providers → Claude subscription → Policy**, raise the budget there, or use an API key for unattended work.
 - **A background agent stopped after an hour.** The loop guard's time limit ended it. Change **Unattended worker limit** on the same page, or use an API key.
 
+## Compaction kept more tokens than its goal
+
+Claude Code compaction's computed size target (for example, 30,000 tokens) is a
+soft goal, not a hard limit. Recent tool results, the newest instructions and
+recovery information may keep the result above it. An informational log with a
+kept-size breakdown is not a failure; you do not need to discard recent work.
+A warning at the selected context window still needs investigation.
+
 ## Tool calls are denied
 
 **"Permission request timed out":** in Ask mode, a tool prompt nobody answers within 5 minutes is denied. Answer sooner, or pick another permission mode in the composer. See [Permission modes](/docs/features/profiles#permission-modes).
