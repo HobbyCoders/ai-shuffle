@@ -969,10 +969,10 @@
 		gap: 8px;
 		margin: 8px 12px;
 		padding: 8px 6px 8px 10px;
-		border: 1px solid color-mix(in oklch, var(--destructive) 40%, var(--border));
+		border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border));
 		border-left-width: 3px;
 		border-radius: calc(var(--radius) - 2px);
-		background: color-mix(in oklch, var(--destructive) 8%, var(--background));
+		background: color-mix(in oklab, var(--destructive) 8%, var(--background));
 		color: var(--destructive);
 		flex-shrink: 0;
 		animation: action-error-in 180ms ease-out;
