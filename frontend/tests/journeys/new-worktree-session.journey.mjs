@@ -417,6 +417,12 @@ function narrowChips(chat) {
 		name: `narrow-chips-${chat}`,
 		viewports: ['desktop'],
 		throttles: ['fast'],
+		// This window is narrow, so the open sidebar is a large share of it.
+		allow: [{
+			kind: 'layout_shift',
+			message: /moved: div\.scard-frame/,
+			reason: 'the first send adds this chat to the open sidebar, pushing the rows below it down; the chip row is what this case judges, and a larger move of it is named instead'
+		}],
 		setup: settled(async (ctx) => {
 			await chipProbe(ctx.page, `fix/long-staged-branch-generated-from-message-${uniq()}`);
 			await stageNames(ctx, chat + 320);
