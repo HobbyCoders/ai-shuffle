@@ -1,0 +1,174 @@
+# ruff: noqa: F811
+"""The sync log keeps acknowledged transcript and session ops for hours, not 30 days (#1167).
+
+Real PostgreSQL, independent worker schemas, the real event and catalog
+producers, signed exchange through the actual peer router and the scheduled
+maintenance loop. Never the configured application database.
+"""
+from app.db import database
+from app.db import network as store
+from app.db import session_events as events_db
+from app.network import catalog, engine
+from tests.core.network.test_transcript_op_retention_postgres import (  # noqa: F401
+    admit,
+    cluster,
+    op_count,
+    pg_workers,
+    protected_rows,
+    prune_once,
+    publish,
+    sync,
+    transcript,
+)
+from tests.core.network.test_transport import ServedBy
+
+
+def age_ops(worker, hours):
+    """Make every logged op look ``hours`` old: older than the new floor, far below 30 days."""
+    worker.sql("UPDATE sync_ops SET created_at = NOW() - make_interval(hours => %s)", (hours,))
+
+
+def ops_of(worker, collection):
+    return worker.sql("SELECT record_id, seq, pg_column_size(envelope) AS bytes FROM sync_ops "
+                      "WHERE collection = %s ORDER BY ingest_id", (collection,))
+
+
+def report(label, worker):
+    rows = worker.sql("SELECT collection, COUNT(*) AS n, SUM(pg_column_size(envelope)) AS bytes "
+                      "FROM sync_ops GROUP BY collection ORDER BY collection")
+    print(f"sync_log_bounds {label} " + " ".join(f"{r['collection']}={r['n']}/{r['bytes']}B" for r in rows))
+    return {r["collection"]: r["n"] for r in rows}
+
+
+def stream_answer(worker, chunks):
+    """A streamed answer as the turn recorder saves it: one delta row per flush, then the message."""
+    with worker.active():
+        events_db.append_events("chat", [
+            {"type": "assistant.text_delta", "payload": {"text": f"chunk {n} "}} for n in range(chunks)])
+        events_db.append_events("chat", [{"type": "message.assistant", "payload": {"content": "done"}}])
+        catalog.publish_owned()
+
+
+def retitle(worker, n):
+    with worker.active():
+        database.update_session("chat", title=f"Chat {n}")
+        catalog.publish_owned()
+
+
+async def test_acknowledged_transcript_and_session_ops_drop_within_hours(pg_workers, monkeypatch):
+    """A busy chat's log shrinks to its anchors once both peers hold it; the offline one still catches up."""
+    source, online, offline = (pg_workers(name) for name in ("source", "online", "offline"))
+    with source.active():
+        engine.create_network("Bounds")
+    publish(source, 3, create=True)
+    admit(source, online)
+    admit(source, offline)
+    served = ServedBy(source, "https://source.example.com")
+    await sync(online, served)
+    await sync(offline, served)
+    offline_prefix = len(transcript(offline))
+
+    # A realistic slice of work: several streamed answers and catalog updates.
+    for n in range(8):
+        stream_answer(source, 20)
+        retitle(source, n)
+    await sync(online, served)
+    await sync(online, served)  # the next request advertises the committed frontier
+    age_ops(source, 2)
+    before = report("before", source)
+    assert before["session_events"] > 160 and before["sessions"] >= 9
+    content = protected_rows(source)
+
+    # The offline peer is inside its contact grace: it pins everything it lacks.
+    await prune_once(source, monkeypatch)
+    pinned = report("offline-pinned", source)
+    assert pinned["session_events"] >= before["session_events"] - offline_prefix
+    served.requests.clear()
+    caught_up = await sync(offline, served)
+    assert not caught_up.get("snapshot_required")  # ordinary op catch-up, no state copy
+    assert not any(path.endswith("/state") for _, path in served.requests)
+    assert transcript(offline) == transcript(source)
+    await sync(offline, served)  # advertise the new frontier
+
+    # Every recent peer now holds the log: a 2-hour-old prefix is no longer kept for 30 days.
+    await prune_once(source, monkeypatch)
+    after = report("after", source)
+    assert after.get("session_events", 0) <= 1  # at most the stream head anchor
+    assert after["sessions"] == 1  # the newest catalog version of the one chat
+    assert protected_rows(source) == content  # rows and sync_records untouched
+
+    # Later writes still flow by ops to both peers.
+    served.requests.clear()
+    stream_answer(source, 3)
+    retitle(source, 99)
+    for peer in (online, offline):
+        assert not (await sync(peer, served)).get("snapshot_required")
+        assert transcript(peer) == transcript(source)
+        assert peer.sql("SELECT title FROM sessions WHERE id = 'chat'") == [{"title": "Chat 99"}]
+    assert not any(path.endswith("/state") for _, path in served.requests)
+
+
+async def test_fresh_ops_stay_and_floor_is_configurable(pg_workers, monkeypatch):
+    source = pg_workers("source")
+    with source.active():
+        engine.create_network("Bounds")
+    publish(source, 6, create=True)
+    await prune_once(source, monkeypatch)
+    assert op_count(source) == 6  # younger than the 1-hour floor
+    age_ops(source, 2)
+    monkeypatch.setenv(store.TRANSCRIPT_OP_MIN_AGE_HOURS_ENV, "3")
+    await prune_once(source, monkeypatch)
+    assert op_count(source) == 6
+    monkeypatch.setenv(store.TRANSCRIPT_OP_MIN_AGE_HOURS_ENV, "not-a-number")
+    await prune_once(source, monkeypatch)
+    assert op_count(source) == 6  # misconfiguration fails closed
+    monkeypatch.delenv(store.TRANSCRIPT_OP_MIN_AGE_HOURS_ENV)
+    await prune_once(source, monkeypatch)
+    assert op_count(source) == 1
+
+
+def test_ops_of_compacted_delta_runs_are_retired(pg_workers):
+    """Idle delta compaction merges rows away; their envelopes must not be kept forever."""
+    source = pg_workers("source")
+    with source.active():
+        engine.create_network("Bounds")
+    publish(source, 1, create=True)
+    stream_answer(source, 30)
+    publish(source, 1)  # the stream head is not part of the run
+    with source.active():
+        runs, merged = events_db.compact_session_deltas("chat", keep_tail_events=0)
+    assert (runs, merged) == (1, 29)
+    content = protected_rows(source)
+    age_ops(source, 2)
+    with source.active():
+        deleted = store.prune_transcript_ops(source.device_id, {})
+    # 33 events, 29 rows merged away: every envelope but the stream head goes.
+    assert (deleted, op_count(source)) == (32, 1)
+    assert protected_rows(source) == content
+
+
+async def test_superseded_session_ops_pin_for_a_lagging_peer_and_honour_kill_switch(pg_workers, monkeypatch):
+    source, peer = pg_workers("source"), pg_workers("peer")
+    with source.active():
+        engine.create_network("Bounds")
+    publish(source, 1, create=True)
+    admit(source, peer)
+    served = ServedBy(source, "https://source.example.com")
+    await sync(peer, served)
+    await sync(peer, served)
+    for n in range(5):
+        retitle(source, n)
+    held = ops_of(source, "sessions")
+    assert len(held) >= 6
+    # The peer has not received the retitles: it pins them; only copies it holds may go.
+    await prune_once(source, monkeypatch)
+    assert ops_of(source, "sessions")[-5:] == held[-5:]
+    await sync(peer, served)
+    await sync(peer, served)  # advertise the new frontier
+    monkeypatch.setenv(store.SESSION_OP_COMPACTION_ENV, "off")
+    await prune_once(source, monkeypatch)
+    assert ops_of(source, "sessions")[-5:] == held[-5:]
+    monkeypatch.delenv(store.SESSION_OP_COMPACTION_ENV)
+    await prune_once(source, monkeypatch)
+    assert [row["seq"] for row in ops_of(source, "sessions")] == [held[-1]["seq"]]
+    assert peer.sql("SELECT title FROM sessions WHERE id = 'chat'") == [{"title": "Chat 4"}]

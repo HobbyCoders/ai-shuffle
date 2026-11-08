@@ -44,14 +44,24 @@ The existing daily maintenance loop (five-minute startup delay) runs the new
 transcript pass before the generic superseded-op scan, so millions of unique
 ids cannot starve it. For each origin/incarnation it deletes only operations:
 
-1. In `session_events`, received/created locally more than 30 days ago.
+1. In `session_events`, received/created locally more than an hour ago
+   (`AI_SHUFFLE_SYNC_TRANSCRIPT_OP_MIN_AGE_HOURS`, default **1**, hours; a
+   negative or unreadable value fails closed). This was 30 days until the
+   1.6-million-ops-a-week field report (see below). Rule 2 is what protects an
+   offline peer, not the age, so the floor only keeps ops for a peer that has
+   just joined and not yet advertised a frontier.
 2. At or below the minimum **actually advertised** frontier of every recent,
    active **worker** peer; absent streams/frontiers mean zero. Consumers (phones
    and browsers) are not database replicas and do not pin it.
 3. Strictly below the stream's retained head (including old incarnations).
 4. With a materialized sync version at least as new as the operation, and either
    its canonical event row/order_seq or a deletion tombstone still present.
-   Damaged/incomplete materializations are kept, not assumed disposable.
+   Idle delta compaction (`compact_session_deltas`) merges a run of delta rows
+   into its last row and deletes the rest, so their `order_seq` points at a
+   missing row. Those count as materialized when the next surviving row of the
+   session is a delta row (the run's survivor); otherwise their envelopes would
+   never be retired. Damaged/incomplete materializations are kept, not assumed
+   disposable.
 
 Recent means a successful authenticated sync observation within
 `AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS` (default **30**, positive integer days).
@@ -183,7 +193,41 @@ with no state copy. A lagging recent peer pins what it lacks, the kill switch
 holds everything, and an expired peer recovers through a state copy to the same
 records and facts.
 
-## Transcript op volume: findings only
+## Session catalog and runtime op compaction
+
+The same field report counted 88,258 `session_runtime` ops for 1,147 records
+and 16,648 `sessions` ops for 1,952 records in one week. Both collections are
+whole-row records too: each state change (working, idle, parked) or catalog
+change (title, pin, project) republishes the full row, and a receiver applies
+only the current materialized row. `compact_session_ops` runs right after
+`compact_memory_ops` with the same three rules (a newer envelope of the record
+exists, at or below every recent peer's frontier, below the stream head), the
+same peer grace and the same fail-closed behaviour. It deletes in committed
+batches of 1,000 rows (`SESSION_COMPACTION_BATCH`; these envelopes are a few
+kB). Each pass logs `Session sync operation compaction`. Disable it with
+`AI_SHUFFLE_SYNC_SESSION_OP_COMPACTION=0` (`false`/`off` also work).
+
+`tests/core/network/test_sync_log_bounds_postgres.py` covers the one-hour
+floor, the compacted delta runs and session compaction with real PostgreSQL
+workers and signed exchange: an offline peer inside its grace pins what it
+lacks and then catches up by ordinary op sync with no state copy, a lagging
+peer pins superseded catalog ops, the kill switch and a bad floor value hold
+everything, and event rows plus `sync_records` stay unchanged. A local lab (not
+committed) with 4 chats, 60 streamed answers, runtime toggles and retitles,
+both peers caught up, measured:
+
+| Case | main | this change |
+| --- | --- | --- |
+| A week of ops, ages spread over 0–167 hours | 1,803 ops, 2,279 kB | 22 ops, 32 kB |
+| Ops 40 days old after idle delta compaction | 1,452 ops, 1,789 kB | 12 ops, 18 kB |
+
+The 22 left are the last hour of transcript ops plus the stream head, and one
+catalog and one runtime envelope per chat. This is a count lab, not a field
+measurement; the space already held on disk only returns after a one-time
+`VACUUM FULL sync_ops` with the app stopped (the daily `VACUUM ANALYZE` reuses
+freed space but does not shrink the file).
+
+## Transcript op volume
 
 The second half of the same report (about 1.1 million `session_events` ops a
 week) is one op per saved transcript event. The turn recorder saves streamed
@@ -198,9 +242,20 @@ events. 1.1 million a week is about 1.8 ops per second around the clock, about
 seven hours of streaming a day across all chats. That fits several agents
 running in parallel. It grows with use, not because of a bug.
 
-These ops are already retired after 30 days by the transcript pass above, so
-their total is bounded at about four weeks of activity. Options to lower the
-rate, none changed here:
+A later report measured 1.6 million a week (1,600,239 upserts across 1,599,901
+records, so re-upserts are 0.02%). With a 30-day floor that kept about four
+weeks of activity, 3.65 million envelopes. The floor is now one hour, so a
+worker keeps about an hour of ops plus whatever a recent peer has not received.
+
+One producer is not coalesced: delegated Claude CLI sub-agents. Each streamed
+`text_delta` becomes its own `subagent_chunk` progress event, and the finished
+text block is logged again as one more chunk (`app/core/query_engine.py`, the
+`content_block_delta` and `TextBlock` branches). The turn recorder saves each as
+a transcript event, so sub-agent text is roughly per token. This is a likely
+large share of the volume but is not confirmed on a field worker; the query
+below would show it as `subagent.progress` rows. Coalescing it is a follow-up.
+
+Options to lower the rate, none changed here:
 
 - Publish deltas coalesced: merge consecutive delta rows of one turn into one
   envelope at publish time. That needs a mirror format for merged runs (the

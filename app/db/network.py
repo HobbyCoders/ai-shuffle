@@ -885,6 +885,24 @@ def prune_ops(*, keep_days: int = 30, _conn=None, stop=None, _heads: Optional[Li
 
 TRANSCRIPT_OP_RETENTION_ENV = "AI_SHUFFLE_PERF_TRANSCRIPT_OP_RETENTION"
 PEER_GRACE_DAYS_ENV = "AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS"
+# How old a transcript envelope must be before the transcript pass may drop it.
+# Peer frontiers are what make a drop safe; this floor only keeps the newest
+# writes out of a pass that races them. It used to be 30 days, which kept a
+# second copy of every transcript event for a month (#1167).
+TRANSCRIPT_OP_MIN_AGE_HOURS_ENV = "AI_SHUFFLE_SYNC_TRANSCRIPT_OP_MIN_AGE_HOURS"
+DEFAULT_TRANSCRIPT_OP_MIN_AGE_HOURS = 1.0
+
+
+def _transcript_op_min_age_hours() -> Optional[float]:
+    """The transcript pass's age floor in hours, or None (fail closed) when misconfigured."""
+    try:
+        hours = float(os.environ.get(TRANSCRIPT_OP_MIN_AGE_HOURS_ENV, DEFAULT_TRANSCRIPT_OP_MIN_AGE_HOURS))
+        if not hours >= 0:  # also rejects NaN
+            raise ValueError("age floor must not be negative")
+    except ValueError:
+        logger.warning("Skipping transcript op retention: invalid %s", TRANSCRIPT_OP_MIN_AGE_HOURS_ENV)
+        return None
+    return hours
 
 
 def _peer_grace_days(purpose: str) -> Optional[int]:
@@ -941,7 +959,8 @@ def _stream_frontier(origin: str, incarnation: int, head: int, peers: Dict[str, 
 
 
 def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
-                         keep_days: int = 30, _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
+                         min_age_hours: Optional[float] = None, _conn=None, stop=None,
+                         _heads: Optional[List[dict]] = None) -> int:
     """Retire redundant transcript envelopes, never transcript/record rows.
 
     Recent active workers pin at their last authenticated committed frontier;
@@ -949,6 +968,11 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
     contact grace they recover through exchange's existing state-copy path.
     Only maintenance persists contact times, avoiding SQL on every exchange.
     Keep each stream's head: sequence allocation and rollback proof need it.
+
+    Below every recent peer's frontier an envelope serves no reader: state
+    copies and transcript backfill read rows plus sync_records, and hand-off
+    ships its own history. So the age floor is short (``min_age_hours``,
+    default :data:`DEFAULT_TRANSCRIPT_OP_MIN_AGE_HOURS`), not 30 days.
     """
     if os.environ.get(TRANSCRIPT_OP_RETENTION_ENV, "").strip().lower() in ("0", "false", "off"):
         return 0
@@ -959,14 +983,22 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
     grace_days = _peer_grace_days("transcript op retention")
     if grace_days is None:
         return 0
+    if min_age_hours is None:
+        min_age_hours = _transcript_op_min_age_hours()
+        if min_age_hours is None:
+            return 0
     now = datetime.now(timezone.utc)
-    cutoff = (now - timedelta(days=keep_days)).isoformat()
+    cutoff = (now - timedelta(hours=min_age_hours)).isoformat()
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cur = conn.cursor()
         set_timeout(cur)
         peers, expired = _recent_peers(cur, local_device_id, peer_observations, now=now, grace_days=grace_days)
         heads = _log_heads(cur) if _heads is None else _heads
 
+    from app.db.session_events import COMPACTABLE_DELTA_TYPES
+
+    # Module constants, never input; quoted for the IN list below.
+    delta_types = ", ".join("'" + t.replace("'", "''") + "'" for t in COMPACTABLE_DELTA_TYPES)
     total = bytes_estimate = 0
     frontiers = {}
     for stream in heads:
@@ -977,7 +1009,11 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
             continue
         # Keyset-page the stream's UNIQUE(origin, incarnation, seq) index. Never
         # repeatedly sort/rescan the whole retained log. A materialized version
-        # (or tombstone) must still exist for the ordinary snapshot path.
+        # (or tombstone) must still exist for the ordinary snapshot path: the
+        # row at order_seq, or, when idle delta compaction merged the record's
+        # run, the run's survivor (the next row, a delta carrying the merged
+        # text). Requiring the exact seq kept every merged delta's envelope
+        # forever, since no newer op of that record ever follows.
         sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                      SELECT o.ingest_id FROM sync_ops o
                      WHERE o.origin_device_id = %s AND o.incarnation = %s
@@ -985,9 +1021,11 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
                        AND o.collection = 'session_events' AND EXISTS (
                            SELECT 1 FROM sync_records r WHERE r.collection = o.collection
                              AND r.record_id = o.record_id AND r.clock >= o.clock
-                             AND (r.deleted OR EXISTS (
-                                 SELECT 1 FROM session_events e
-                                 WHERE e.session_id = split_part(r.record_id, '|', 1) AND e.seq = r.order_seq)))
+                             AND (r.deleted OR (
+                                 SELECT e.seq = r.order_seq OR e.event_type IN (""" + delta_types + """)
+                                 FROM session_events e
+                                 WHERE e.session_id = split_part(r.record_id, '|', 1) AND e.seq >= r.order_seq
+                                 ORDER BY e.seq LIMIT 1)))
                      ORDER BY o.seq LIMIT %s)
                  RETURNING seq, pg_column_size(envelope) AS bytes_estimate"""
 
@@ -1000,7 +1038,7 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
         total += delete_batches(sql, (origin, incarnation, cutoff, 0, head, frontier, BATCH_SIZE),
                                 advance=advance, stop=stop, cursor=_conn.cursor() if _conn is not None else None)
     logger.info("Transcript sync operation retention %s", _json({
-        "deleted_ops": total, "bytes_estimate": bytes_estimate,
+        "deleted_ops": total, "bytes_estimate": bytes_estimate, "min_age_hours": min_age_hours,
         "peer_grace_days": grace_days, "peer_frontiers": peers,
         "expired_peers": expired, "retained_frontiers": frontiers}))
     return total
@@ -1010,29 +1048,33 @@ MEMORY_OP_COMPACTION_ENV = "AI_SHUFFLE_SYNC_MEMORY_OP_COMPACTION"
 # A memory envelope carries a whole store (hundreds of kB); keep each
 # committed delete small so it finishes well inside the statement deadline.
 MEMORY_COMPACTION_BATCH = 100
+SESSION_OP_COMPACTION_ENV = "AI_SHUFFLE_SYNC_SESSION_OP_COMPACTION"
+# Last-writer-wins session catalog rows the owner republishes on every change
+# (title, status, cost, runtime state): many superseded copies, few records.
+SESSION_COMPACTION_COLLECTIONS = ("sessions", "session_runtime")
+# Session envelopes are a few kB each.
+SESSION_COMPACTION_BATCH = 1000
 
 
-def compact_memory_ops(local_device_id: str, peer_observations: dict, *,
-                       _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
-    """Drop superseded ``memory`` envelopes every recent peer already holds.
+def _compact_superseded_ops(collections: Tuple[str, ...], *, label: str, kill_switch_env: str, batch: int,
+                            local_device_id: str, peer_observations: dict,
+                            _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
+    """Drop superseded envelopes of whole-state records that every recent peer holds.
 
-    A memory record (``memory-v2:<device>:<owner>``, a skill, a draft) is a
-    whole-state record: receivers apply only its current materialized row, and
-    state copies read sync_records, so an older envelope of the same record
-    carries nothing a peer still needs once a newer one (higher clock) is in
-    the log. Unlike the 30-day passes this has no age floor; it never deletes
+    Shared by :func:`compact_memory_ops` and :func:`compact_session_ops`; see
+    those for why each collection qualifies. No age floor. It never deletes
     the newest envelope of a record, any stream's head, or anything above the
     minimum frontier of the recent active worker peers (the same pins as
     :func:`prune_transcript_ops`), so no online peer meets a gap. A peer past
     the contact grace recovers through the existing state copy.
     """
-    if os.environ.get(MEMORY_OP_COMPACTION_ENV, "").strip().lower() in ("0", "false", "off"):
+    if os.environ.get(kill_switch_env, "").strip().lower() in ("0", "false", "off"):
         return 0
     from app.db.retention import delete_batches, set_timeout
 
     if stop is not None and stop.is_set():
         return 0
-    grace_days = _peer_grace_days("memory op compaction")
+    grace_days = _peer_grace_days(label.lower())
     if grace_days is None:
         return 0
     now = datetime.now(timezone.utc)
@@ -1051,13 +1093,14 @@ def compact_memory_ops(local_device_id: str, peer_observations: dict, *,
     if bounds:
         values = ", ".join("(%s, %s, %s, %s)" for _ in bounds)
         flat = tuple(value for bound in bounds for value in bound)
-        # Driven by the (collection, record_id, ingest_id) index: only memory
-        # rows are visited, never the whole stream's transcript backlog.
+        names = ", ".join("%s" for _ in collections)
+        # Driven by the (collection, record_id, ingest_id) index: only rows of
+        # these collections are visited, never a stream's transcript backlog.
         sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                      SELECT o.ingest_id FROM sync_ops o
                      JOIN (VALUES """ + values + """) AS f(origin_device_id, incarnation, frontier, head)
                        ON o.origin_device_id = f.origin_device_id AND o.incarnation = f.incarnation
-                     WHERE o.collection = 'memory' AND o.ingest_id > %s
+                     WHERE o.collection IN (""" + names + """) AND o.ingest_id > %s
                        AND o.seq <= f.frontier AND o.seq < f.head
                        AND EXISTS (
                            SELECT 1 FROM sync_ops n
@@ -1070,15 +1113,48 @@ def compact_memory_ops(local_device_id: str, peer_observations: dict, *,
             nonlocal bytes_estimate
             rows = cursor.fetchall()
             bytes_estimate += sum(int(row["bytes_estimate"]) for row in rows)
-            return (*flat, max((row["ingest_id"] for row in rows), default=0), MEMORY_COMPACTION_BATCH)
+            return (*flat, *collections, max((row["ingest_id"] for row in rows), default=0), batch)
 
-        total = delete_batches(sql, (*flat, 0, MEMORY_COMPACTION_BATCH), advance=advance, stop=stop,
+        total = delete_batches(sql, (*flat, *collections, 0, batch), advance=advance, stop=stop,
                                cursor=_conn.cursor() if _conn is not None else None,
-                               batch_size=MEMORY_COMPACTION_BATCH)
-    logger.info("Memory sync operation compaction %s", _json({
+                               batch_size=batch)
+    logger.info("%s %s", label, _json({
         "deleted_ops": total, "bytes_estimate": bytes_estimate,
         "peer_grace_days": grace_days, "peer_frontiers": peers, "expired_peers": expired}))
     return total
+
+
+def compact_memory_ops(local_device_id: str, peer_observations: dict, *,
+                       _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
+    """Drop superseded ``memory`` envelopes every recent peer already holds.
+
+    A memory record (``memory-v2:<device>:<owner>``, a skill, a draft) is a
+    whole-state record: receivers apply only its current materialized row, and
+    state copies read sync_records, so an older envelope of the same record
+    carries nothing a peer still needs once a newer one (higher clock) is in
+    the log. Rules and pins: :func:`_compact_superseded_ops`.
+    """
+    return _compact_superseded_ops(("memory",), label="Memory sync operation compaction",
+                                   kill_switch_env=MEMORY_OP_COMPACTION_ENV, batch=MEMORY_COMPACTION_BATCH,
+                                   local_device_id=local_device_id, peer_observations=peer_observations,
+                                   _conn=_conn, stop=stop, _heads=_heads)
+
+
+def compact_session_ops(local_device_id: str, peer_observations: dict, *,
+                        _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
+    """Drop superseded ``sessions`` / ``session_runtime`` envelopes every recent peer holds.
+
+    Both are owner-ordered, last-writer-wins rows keyed by session: each
+    envelope carries the whole row, receivers keep only the newest version
+    (``sync_records``), and state copies read that version plus the row. A
+    busy session republishes them on every title, status, cost or runtime
+    change, so the generic 30-day pass kept tens of copies per record (#1167).
+    Rules and pins: :func:`_compact_superseded_ops`.
+    """
+    return _compact_superseded_ops(SESSION_COMPACTION_COLLECTIONS, label="Session sync operation compaction",
+                                   kill_switch_env=SESSION_OP_COMPACTION_ENV, batch=SESSION_COMPACTION_BATCH,
+                                   local_device_id=local_device_id, peer_observations=peer_observations,
+                                   _conn=_conn, stop=stop, _heads=_heads)
 
 
 # ---------------------------------------------------------------------------
