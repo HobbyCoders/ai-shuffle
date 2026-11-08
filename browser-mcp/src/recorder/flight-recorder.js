@@ -844,6 +844,8 @@
     + 'overflow:hidden!important;visibility:hidden!important;pointer-events:none!important;contain:strict!important;'
     + 'display:block!important;margin:0!important;padding:0!important;border:0!important;z-index:-2147483647!important;';
 
+  var strayProbes = [];
+
   function installProbe(recording) {
     if (!isActive(recording) || recording.probe === false || recording.probe || typeof ResizeObserver !== 'function') return;
     var doc = root.document;
@@ -875,20 +877,43 @@
     } finally { transitioning = previousTransition; }
   }
 
+  // Each step runs on its own: a page that breaks one must not strand the other.
+  function releaseProbe(probe, recording) {
+    var released = true;
+    if (probe.observer) {
+      try {
+        probe.observer.disconnect();
+        probe.observer = null;
+      } catch (error) { note(error, recording); released = false; }
+    }
+    try {
+      if (probe.host.parentNode) probe.host.parentNode.removeChild(probe.host);
+    } catch (error) { note(error, recording); released = false; }
+    return released;
+  }
+
   function removeProbe(recording) {
     var probe = recording && recording.probe;
     if (!probe) return true;
     var previousTransition = transitioning;
     transitioning = true;
     try {
-      probe.observer.disconnect();
-      if (probe.host.parentNode) probe.host.parentNode.removeChild(probe.host);
-      if (recording.probe === probe) recording.probe = null;
-      return true;
-    } catch (error) {
+      if (releaseProbe(probe, recording)) {
+        if (recording.probe === probe) recording.probe = null;
+        return true;
+      }
       // Retain ownership until removal succeeds; never overwrite it with false.
-      note(error, recording);
+      // stop() discards the recording, so the next start() retries this one.
+      if (strayProbes.indexOf(probe) < 0) strayProbes.push(probe);
       return false;
+    } finally { transitioning = previousTransition; }
+  }
+
+  function sweepStrayProbes(recording) {
+    var previousTransition = transitioning;
+    transitioning = true;
+    try {
+      strayProbes = strayProbes.filter(function (probe) { return !releaseProbe(probe, recording); });
     } finally { transitioning = previousTransition; }
   }
 
@@ -1520,14 +1545,28 @@
         };
         var wrappedSend = function send() {
           var recording = S;
+          var claimed = null;
+          var previousOwner = null;
           try {
             var state = h.xhr.get(this);
             if (state && h.active && isActive(recording) && recording.opts.network) {
-              if (state.request) state.request.recording = recording;
+              if (state.request) {
+                claimed = state.request;
+                previousOwner = claimed.recording;
+                claimed.recording = recording;
+              }
               if (!state.hooked) hookXhr(this, state);
             }
           } catch (error) { note(error, recording); }
-          return originalSend.apply(this, arguments);
+          try {
+            return originalSend.apply(this, arguments);
+          } catch (error) {
+            // A refused send() leaves the request with whoever owned it. A
+            // synchronous request that failed has already ended under its new
+            // owner, so there is nothing to hand back.
+            if (claimed && !claimed.ended) claimed.recording = previousOwner;
+            throw error;
+          }
         };
         proto.open = wrappedOpen;
         proto.send = wrappedSend;
@@ -1702,6 +1741,7 @@
     recording.duplicates = recording.duplicates || {};
     recording.lastFrameEpoch = 0;
     recording.probe = null;
+    sweepStrayProbes(recording);
     installHooks(recording);
     try {
       recording.observer = new MutationObserver(owned(recording, onMutations));
