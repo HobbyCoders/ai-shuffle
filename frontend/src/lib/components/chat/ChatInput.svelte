@@ -982,6 +982,15 @@
 		};
 	});
 
+	/** A keystroke took attachments out of the draft; they stay one tap away (#1263). */
+	function offerChipUndo(filenames: string[], undo: () => void): () => void {
+		const what = filenames.length === 1 ? filenames[0] : `${filenames.length} attachments`;
+		const id = notify.banner(`Removed ${what}.`, {
+			severity: 'info', persist: false, duration_ms: 8000, action: { label: 'Undo', onClick: undo }
+		});
+		return () => notify.dismissLive(id);
+	}
+
 	// Click-to-focus: the input area is taller than one text line, and clicks
 	// landing on its padding (or the textarea wrapper) used to be dead. Any
 	// click not already consumed by a real control focuses the editor, so the
@@ -1857,6 +1866,7 @@
 							onUserInput={() => { composerSuggestion.invalidate(); recall.reset(); }}
 							onKeyDown={handleKeyDown}
 							onLargePaste={handleLargePaste}
+							onChipsRemoved={offerChipUndo}
 							onFocusChange={(focused) => {
 								composerFocused = focused;
 								if (focused) keepMobileComposerExpanded();

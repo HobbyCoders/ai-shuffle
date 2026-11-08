@@ -118,7 +118,9 @@ function serializeNode(node: JSONContent): string {
 	} else if (node.type === 'paragraph') {
 		// Process paragraph content
 		if (node.content) {
-			result += node.content.map(serializeNode).join('');
+			result += node.content
+				.map((child, index) => serializeNode(child) + chipSeparator(child, node.content?.[index + 1]))
+				.join('');
 		}
 		// Add newline after paragraph (except for last one)
 		result += '\n';
@@ -135,6 +137,13 @@ function serializeNode(node: JSONContent): string {
 	}
 
 	return result;
+}
+
+/** A word typed straight after a chip must not join its @path. */
+function chipSeparator(node: JSONContent, next: JSONContent | undefined): string {
+	if (node.type !== 'fileChip' || !next) return '';
+	if (next.type === 'fileChip') return ' ';
+	return next.type === 'text' && !/^\s/.test(next.text || '') ? ' ' : '';
 }
 
 /**
