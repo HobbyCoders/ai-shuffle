@@ -437,6 +437,28 @@ function narrowChips(chat) {
 			if (auto.length !== 1 || generated.length !== 1 || auto[0] !== generated[0]) {
 				throw new Error(`staged chip row geometry changed across Send:\n  Auto: ${auto.join('\n        ')}\n  generated: ${generated.join('\n             ')}`);
 			}
+			// Once bound, the same long names sit in the session's own chip row (#1228).
+			await page.locator('.context-pill-bar:not(.sheet-mode) .ctx-chip.runner').waitFor({ timeout: 30000 });
+			await page.waitForTimeout(800);
+			const bound = await page.evaluate(() => {
+				const bar = document.querySelector('.context-pill-bar:not(.sheet-mode)');
+				const clip = document.querySelector('.chat-island').getBoundingClientRect();
+				const out = [];
+				const chips = [...bar.querySelectorAll('.ctx-chip')].filter((el) => el.offsetParent && !el.closest('[role="menu"]'));
+				for (const el of chips) {
+					const r = el.getBoundingClientRect();
+					const name = el.textContent.trim().slice(0, 20);
+					const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+					if (r.width < 40) out.push(`${name} is ${Math.round(r.width)}px wide`);
+					if (r.left < clip.left - 0.5 || r.right > clip.right + 0.5) out.push(`${name} leaves the composer`);
+					if (!hit || !(hit === el || el.contains(hit))) out.push(`${name} is covered at its centre by ${hit?.tagName}.${hit?.className}`);
+				}
+				const tops = new Set(chips.map((el) => Math.round(el.getBoundingClientRect().top)));
+				if (tops.size > 1) out.push(`the row wrapped onto ${tops.size} lines`);
+				return { out, count: chips.length, widths: chips.map((el) => `${el.className.toString().replace(/svelte-\w+/g, '').trim()}:${Math.round(el.getBoundingClientRect().left)}+${Math.round(el.getBoundingClientRect().width)}`) };
+			});
+			if (bound.count < 3) throw new Error(`the bound row showed ${bound.count} chips`);
+			if (bound.out.length) throw new Error(`bound chip row: ${bound.out.join('; ')} (widths ${bound.widths.join(', ')})`);
 		}
 	};
 }

@@ -810,9 +810,17 @@
 	}
 
 	/* Who shrinks on a narrow row: the repository and branch names first, the
-	   agent's name less, the runner ("Local" or the worker's name) not at all. */
+	   agent's name less, the runner ("Local" or the worker's name) barely. Each
+	   keeps a reachable width: a row of long names used to run past the composer
+	   and squeeze the repository to a sliver (#1228). */
 	.context-pill-bar:not(.sheet-mode) > .runner-badge-wrap {
-		flex-shrink: 0;
+		flex-shrink: 0.08;
+	}
+
+	.context-pill-bar:not(.sheet-mode) :global(.ctx-chip),
+	.context-pill-bar:not(.sheet-mode) :global(.workspace-selector),
+	.context-pill-bar:not(.sheet-mode) .branch-wt-row > :global(.branch-selector) {
+		min-width: 44px;
 	}
 
 	.context-pill-bar:not(.sheet-mode) > :global(.selector-wrapper) {
