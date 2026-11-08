@@ -233,6 +233,16 @@
 			]
 		},
 		{
+			"why": "the browser makes its own ids on a plain-HTTP address, where it has no crypto.randomUUID",
+			"journeys": ["insecure-context-ids"],
+			"globs": [
+				"frontend/tests/journeys/insecure-context-ids.journey.mjs",
+				"frontend/src/routes/pair/+page.svelte",
+				"frontend/src/lib/services/first-agent-run.ts",
+				"frontend/src/lib/utils/id.ts"
+			]
+		},
+		{
 			"why": "an agent's edits save through the preview cookie a dev instance is reached with, and read back after a reload",
 			"journeys": ["agent-model-pin"],
 			"globs": [
