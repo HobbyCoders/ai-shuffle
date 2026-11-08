@@ -1283,12 +1283,12 @@ def _history_conflict(table: str, columns: tuple[str, ...], deferred: bool = Fal
             ", ".join(f"EXCLUDED.{c}" for c in changed) + ")")
 
 
-def _message_signature(values):
-    """Portable legacy-message identity; local BIGSERIAL ids are not exported."""
+def _history_row_signature(values, columns):
+    """Portable row identity, normalizing JSON and timestamp representations."""
     from datetime import datetime, timezone
 
     normalized = []
-    for column, value in zip(TABLES["session_messages"], values):
+    for column, value in zip(columns, values):
         if column in JSON_COLUMNS and isinstance(value, str):
             value = json.loads(value)
         if column == "created_at" and value is not None:
@@ -1309,23 +1309,23 @@ def _reconcile_app_rows(cur, sid, table, snapshot):
     from collections import Counter
 
     columns = TABLES[table]
-    selected = ("id", *columns) if table == "session_messages" else (("id", "seq") if table == "session_events" else ("id",))
+    selected = ("id", *columns) if table == "session_messages" else (columns if table == "session_events" else ("id",))
     cur.execute(f"SELECT {', '.join(selected)} FROM {table} WHERE session_id=%s" +
                 _TRANSFER_FILTERS.get(table, ""), (sid,))
     existing = cur.fetchall()
     stale = []
     if table == "session_messages":
-        available = Counter(_message_signature(values) for values in snapshot)
+        available = Counter(_history_row_signature(values, columns) for values in snapshot)
         kept = Counter()
         for row in existing:
-            signature = _message_signature([row[c] for c in columns])
+            signature = _history_row_signature([row[c] for c in columns], columns)
             if kept[signature] < available[signature]:
                 kept[signature] += 1
             else:
                 stale.append(row["id"])
         missing = []
         for values in snapshot:
-            signature = _message_signature(values)
+            signature = _history_row_signature(values, columns)
             if kept[signature]:
                 kept[signature] -= 1
             else:
@@ -1336,12 +1336,21 @@ def _reconcile_app_rows(cur, sid, table, snapshot):
         stale = [row["id"] for row in existing
                  if ((row["id"], row["seq"]) if table == "session_events" else row["id"]) not in keys]
         if table == "session_events":
-            # Pruned or filled beneath rows that survive: a client resting on
-            # one must reload. A client on a removed row is reset already, so
-            # no statement unless that really happened.
+            # A correction under the same keys also changes replay, even at
+            # the last surviving row. Normalize dates/JSON exactly as for the
+            # portable legacy rows, so identical imports do not reset readers.
+            held_rows = {row["seq"]: row for row in existing}
             held = {(row["id"], row["seq"]) for row in existing}
+            changed = any(
+                (row := held_rows.get(values[1])) is not None
+                and _history_row_signature([row[c] for c in columns[:len(values)]], columns)
+                    != _history_row_signature(values, columns)
+                for values in snapshot
+            )
+            # A client on a removed row is reset already; inserts/removals
+            # matter here only when they are beneath a surviving cursor.
             top = max((key[1] for key in held if key in keys), default=None)
-            if top is not None and any(key[1] < top for key in held ^ keys):
+            if changed or (top is not None and any(key[1] < top for key in held ^ keys)):
                 from app.db.session_events import mark_log_rewritten
                 mark_log_rewritten(cur, sid)
     for start in range(0, len(stale), 200):
