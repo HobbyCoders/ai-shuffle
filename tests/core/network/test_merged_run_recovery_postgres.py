@@ -701,5 +701,11 @@ def test_a_hand_off_import_resets_readers_only_when_it_rewrites_beneath_them(pg_
             assert events_db.get_reader_epoch("chat") == epoch
         with get_db() as conn:
             handoff._reconcile_app_rows(conn.cursor(), "chat", "session_events", beneath)
-        assert events_db.get_reader_epoch("chat") != epoch
+        rewritten = events_db.get_reader_epoch("chat")
+        assert rewritten != epoch
         assert events_db.get_log_epoch("chat") == first
+        # A rewind leaves nothing above the survivors: a cursor on the removed
+        # row is already reset for its row being gone.
+        with get_db() as conn:
+            handoff._reconcile_app_rows(conn.cursor(), "chat", "session_events", [(first, 1)])
+        assert events_db.get_reader_epoch("chat") == rewritten
