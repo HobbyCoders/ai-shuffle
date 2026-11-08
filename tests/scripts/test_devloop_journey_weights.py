@@ -82,6 +82,22 @@ def test_checked_in_hosted_plan_leaves_retry_headroom():
                for bucket in buckets)
 
 
+def test_checked_in_plan_preserves_reserves_at_the_calibration_error_bound():
+    # A point estimate can be green while the actual first pass consumes retry
+    # time. The independent hosted calibration below explicitly allows 120s of
+    # error, so that uncertainty must fit WITHOUT borrowing either full reserve.
+    weights = ci.estimated_seconds()
+    loads = [sum(weights[name] for name in bucket) for bucket in ci.plan(ci.HOSTED_SHARDS)]
+    assert ci.CALIBRATION_ERROR_SECONDS == 120
+    assert max(ci.planning_budget_seconds(load) for load in loads) <= journey_retry.STEP_SECONDS
+
+
+def test_planning_budget_keeps_uncertainty_separate_from_operational_reserves():
+    assert ci.planning_budget_seconds(0) == 0
+    assert ci.planning_budget_seconds(990) == journey_retry.STEP_SECONDS
+    assert ci.planning_budget_seconds(1110) == journey_retry.STEP_SECONDS + 120
+
+
 def test_step_budget_includes_setup_and_full_retry_teardown():
     assert ci.SETUP_SECONDS == 30
     assert ci.shard_budget_seconds(1000) == 1390
@@ -338,7 +354,7 @@ def test_plan_stdout_stays_json_and_loads_reach_log_and_summary(tmp_path, monkey
     assert ci.main(["plan", "--shards", "3"]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out) == [["a.journey.mjs"], ["b.journey.mjs"], []]
-    for index, (runtime, step, budget) in enumerate([(90, 120, 480), (30, 60, 420), (0, 0, 0)], 1):
+    for index, (runtime, step, budget) in enumerate([(90, 120, 600), (30, 60, 540), (0, 0, 0)], 1):
         headroom = 1500 - budget
         assert f"planned shard {index}/3: {step / 60:.1f} estimated step minutes" in captured.err
         assert f"{budget / 60:.1f}m with retry/reserves, {headroom}s headroom" in captured.err
@@ -346,6 +362,7 @@ def test_plan_stdout_stays_json_and_loads_reach_log_and_summary(tmp_path, monkey
                 f"{budget / 60:.1f} | {headroom} |") in summary.read_text()
     assert "30s setup/normal teardown" in summary.read_text()
     assert "180s retry phase and 180s teardown" in summary.read_text()
+    assert "120s for the calibration's allowed estimate error" in summary.read_text()
     assert "25 minutes" in summary.read_text()
 
 
