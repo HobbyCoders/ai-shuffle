@@ -82,16 +82,17 @@ def _savepoint(cursor, name: str):
         except _DB_ERRORS:
             pass
     """
+    from app.db.base import execute_savepoint
     _validate_identifier(name, "savepoint name")
-    cursor.execute(f"SAVEPOINT {name}")
+    execute_savepoint(cursor, f"SAVEPOINT {name}")
     try:
         yield
     except BaseException:
-        cursor.execute(f"ROLLBACK TO SAVEPOINT {name}")
-        cursor.execute(f"RELEASE SAVEPOINT {name}")
+        execute_savepoint(cursor, f"ROLLBACK TO SAVEPOINT {name}")
+        execute_savepoint(cursor, f"RELEASE SAVEPOINT {name}")
         raise
     else:
-        cursor.execute(f"RELEASE SAVEPOINT {name}")
+        execute_savepoint(cursor, f"RELEASE SAVEPOINT {name}")
 
 
 # ============================================================================

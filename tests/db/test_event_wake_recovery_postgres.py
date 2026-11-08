@@ -167,3 +167,67 @@ def test_retry_batch_is_bounded_and_coalesces_recheck_hints(monkeypatch):
     for n in range(1100):
         session_events._retry_wake(f"chat-{n}", n, False)
     assert len(session_events._wake_retries) == 1024
+
+
+@pytest.mark.parametrize("boundary", ["apply_op", "apply_envelope", "pending_append", "pending_envelope"])
+def test_savepoint_rollback_drops_only_the_abandoned_mirror_wake(session_id, monkeypatch, boundary):
+    from app.network import engine
+
+    calls = []
+    monkeypatch.setattr(session_events, "send_wake", lambda *a, **k: calls.append(a))
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        catalog.after_event_mirrored(cur, {"session_id": session_id, "seq": 7})
+        engine._savepoint(cur, f"SAVEPOINT {boundary}")
+        catalog.after_event_mirrored(cur, {"session_id": session_id, "seq": 8})
+        engine._savepoint(cur, f"ROLLBACK TO SAVEPOINT {boundary}")
+        engine._savepoint(cur, f"RELEASE SAVEPOINT {boundary}")
+        catalog.after_event_mirrored(cur, {"session_id": session_id, "seq": 9})
+    assert calls == [(session_id, 7), (session_id, 9)]
+
+
+def test_rejected_mirror_envelope_does_not_wake_when_the_next_one_commits(session_id, monkeypatch):
+    from app.network import engine
+
+    calls = []
+    monkeypatch.setattr(session_events, "send_wake", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(engine.store, "lock_state", lambda cur: None)
+    monkeypatch.setattr(engine, "_wire_stream", lambda *a: None)
+    monkeypatch.setattr(engine, "_apply_event_append", lambda *a, **k: False)
+    monkeypatch.setattr(engine, "_lock_deleted_session_handoffs", lambda *a: None)
+    monkeypatch.setattr(engine, "_lock_mirror_event_counters", lambda *a: None)
+
+    def apply(cur, data, **kwargs):
+        catalog.after_event_mirrored(cur, {"session_id": session_id, "seq": data["seq"]})
+        cur.execute("UPDATE sessions SET title=%s WHERE id=%s", (str(data["seq"]), session_id))
+        if data["seq"] == 8:
+            raise engine.ApplyError("rejected after materialization")
+        return "applied"
+
+    monkeypatch.setattr(engine, "apply_envelope", apply)
+    assert engine._apply_chunk([{"seq": 8}, {"seq": 9}], None, engine.ApplyResult())
+    assert calls == [(session_id, 9)]
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT title FROM sessions WHERE id=%s", (session_id,))
+        assert cur.fetchone()["title"] == "9"
+
+
+@pytest.mark.parametrize("context", [base.get_db, base.transaction])
+@pytest.mark.parametrize("inner_name", ["sp_inner", "sp_outer"])
+def test_released_nested_savepoint_callbacks_still_belong_to_outer(session_id, monkeypatch, context, inner_name):
+    from app.db import database
+
+    calls = []
+    monkeypatch.setattr(session_events, "send_wake", lambda *a, **k: calls.append(a))
+    with context() as conn:
+        cur = conn.cursor()
+        catalog.after_event_mirrored(cur, {"session_id": session_id, "seq": 7})
+        with pytest.raises(ValueError):
+            with database._savepoint(cur, "sp_outer"):
+                catalog.after_event_mirrored(cur, {"session_id": session_id, "seq": 8})
+                with database._savepoint(cur, inner_name):
+                    catalog.after_event_mirrored(cur, {"session_id": session_id, "seq": 9})
+                raise ValueError("roll back released inner callbacks as well")
+        catalog.after_event_mirrored(cur, {"session_id": session_id, "seq": 10})
+    assert calls == [(session_id, 7), (session_id, 10)]

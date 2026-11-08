@@ -975,6 +975,12 @@ def _rollback_quietly(conn) -> None:
         )
 
 
+class _CommitCallbacks(list):
+    def __init__(self):
+        super().__init__()
+        self.savepoints = []
+
+
 _commit_callbacks = ContextVar("db_commit_callbacks", default=())
 _lease_checkout = ContextVar("db_lease_checkout", default=False)
 _lease_timeouts = ContextVar("db_lease_timeouts", default=(500, 1500))
@@ -1063,16 +1069,49 @@ def get_lease_db(*, lock_timeout_ms=500, statement_timeout_ms=1500):
         _lease_checkout.reset(token)
 
 
-def after_commit(conn, callback):
-    """Queue a notification for the owning get_db/transaction, never a rollback."""
+def _callbacks_for_connection(conn):
     # resource_sync's observing connection delegates to the physical connection.
     connection = getattr(conn, "_connection", conn)
     physical = getattr(connection, "_conn", connection)
     for owner, callbacks in reversed(_commit_callbacks.get()):
         if owner is connection or getattr(owner, "_conn", owner) is physical:
-            callbacks.append(callback)
+            return callbacks
+    return None
+
+
+def after_commit(conn, callback):
+    """Queue a notification for the owning get_db/transaction, never a rollback."""
+    callbacks = _callbacks_for_connection(conn)
+    if callbacks is None:
+        raise RuntimeError("after_commit requires an app-managed transaction")
+    callbacks.append(callback)
+
+
+def execute_savepoint(cursor, statement):
+    """Keep callback checkpoints aligned with SQL savepoints, including nesting.
+
+    All application savepoint paths use this boundary. A rollback discards only
+    callbacks created inside that savepoint; release retains them for commit.
+    Unmanaged boot/schema connections have no callbacks to checkpoint.
+    """
+    cursor.execute(statement)
+    callbacks = _callbacks_for_connection(getattr(cursor, "connection", None))
+    if callbacks is None:
+        return
+    words = statement.split()
+    action, name = words[0].upper(), words[-1].rstrip(";")
+    if action == "SAVEPOINT":
+        callbacks.savepoints.append((name, len(callbacks)))
+        return
+    for index in range(len(callbacks.savepoints) - 1, -1, -1):
+        saved_name, checkpoint = callbacks.savepoints[index]
+        if saved_name == name:
+            if action == "ROLLBACK":
+                del callbacks[checkpoint:]
+                del callbacks.savepoints[index + 1:]
+            elif action == "RELEASE":
+                del callbacks.savepoints[index:]
             return
-    raise RuntimeError("after_commit requires an app-managed transaction")
 
 
 def _warn_slow_hold(started):
@@ -1094,7 +1133,7 @@ def get_db():
     """
     conn = get_connection()
     started = time.monotonic()
-    callbacks = []
+    callbacks = _CommitCallbacks()
     token = _commit_callbacks.set((*_commit_callbacks.get(), (conn, callbacks)))
     try:
         yield conn
@@ -1136,7 +1175,7 @@ def transaction():
     """
     conn = get_connection()
     started = time.monotonic()
-    callbacks = []
+    callbacks = _CommitCallbacks()
     token = _commit_callbacks.set((*_commit_callbacks.get(), (conn, callbacks)))
     try:
         yield conn
