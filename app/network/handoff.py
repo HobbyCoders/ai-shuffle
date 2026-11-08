@@ -1283,20 +1283,38 @@ def _history_conflict(table: str, columns: tuple[str, ...], deferred: bool = Fal
             ", ".join(f"EXCLUDED.{c}" for c in changed) + ")")
 
 
+def _jsonb_identity(value):
+    """Hashable JSONB equality: numeric scale is immaterial, boolean type is not."""
+    from decimal import Decimal
+
+    if isinstance(value, dict):
+        return ("object", tuple(sorted((key, _jsonb_identity(item)) for key, item in value.items())))
+    if isinstance(value, (list, tuple)):
+        return ("array", tuple(_jsonb_identity(item) for item in value))
+    if isinstance(value, bool):
+        return ("boolean", value)
+    if isinstance(value, (int, float, Decimal)):
+        return ("number", Decimal(str(value)))
+    return ("scalar", value)
+
+
 def _history_row_signature(values, columns):
-    """Portable row identity, normalizing JSON and timestamp representations."""
+    """Portable row identity, using JSONB numeric and timestamp equality."""
     from datetime import datetime, timezone
+    from decimal import Decimal
 
     normalized = []
     for column, value in zip(columns, values):
-        if column in JSON_COLUMNS and isinstance(value, str):
-            value = json.loads(value)
+        if column in JSON_COLUMNS:
+            if isinstance(value, str):
+                value = json.loads(value, parse_float=Decimal)
+            value = _jsonb_identity(value)
         if column == "created_at" and value is not None:
             if isinstance(value, str):
                 value = datetime.fromisoformat(value.replace("Z", "+00:00"))
             value = value.replace(tzinfo=value.tzinfo or timezone.utc).astimezone(timezone.utc).isoformat()
         normalized.append(value)
-    return json.dumps(normalized, sort_keys=True, default=str, separators=(",", ":"))
+    return tuple(normalized)
 
 
 def _reconcile_app_rows(cur, sid, table, snapshot):
@@ -1310,7 +1328,9 @@ def _reconcile_app_rows(cur, sid, table, snapshot):
 
     columns = TABLES[table]
     selected = ("id", *columns) if table == "session_messages" else (columns if table == "session_events" else ("id",))
-    cur.execute(f"SELECT {', '.join(selected)} FROM {table} WHERE session_id=%s" +
+    # Text preserves JSONB decimals instead of psycopg's lossy float decode.
+    selected_sql = ", ".join(f"{col}::text AS {col}" if col in JSON_COLUMNS else col for col in selected)
+    cur.execute(f"SELECT {selected_sql} FROM {table} WHERE session_id=%s" +
                 _TRANSFER_FILTERS.get(table, ""), (sid,))
     existing = cur.fetchall()
     stale = []

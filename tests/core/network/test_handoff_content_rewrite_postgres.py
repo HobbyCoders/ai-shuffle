@@ -60,3 +60,26 @@ def test_same_key_replay_metadata_corrections_reset_even_at_the_last_row(pg_work
         handoff.install_history("chat", {"history": history}, str(tmp_path))
         current, reason = _resume_check("chat", 1, before)
         assert reason == "epoch" and current != before
+
+
+@pytest.mark.parametrize("old,new,unchanged", [
+    ({"n": 1.0, "nested": [-0.0, {"x": 2.0}]}, {"nested": [0, {"x": 2}], "n": 1}, True),
+    ({"n": True}, {"n": 1}, False),
+    ({"n": False}, {"n": 0}, False),
+])
+def test_repeated_jsonb_equivalent_imports_do_not_reset(pg_workers, tmp_path, old, new, unchanged):
+    worker = pg_workers("mirror")
+    with worker.active():
+        database.create_session(session_id="chat", profile_id="default", project_id=None, title="Chat")
+        events.append_events("chat", [{"type": "message.assistant", "payload": old}])
+        before = events.get_reader_epoch("chat")
+        history = handoff._history({"id": "chat"})
+        history["session_events"][0]["payload"] = new
+        handoff.install_history("chat", {"history": history}, str(tmp_path))
+        first = events.get_reader_epoch("chat")
+        assert (first == before) is unchanged
+        handoff.install_history("chat", {"history": history}, str(tmp_path))
+        assert events.get_reader_epoch("chat") == first
+        payload = events.get_events("chat")[0]["payload"]
+        assert payload == new
+        assert type(payload["n"]) is type((old if unchanged else new)["n"])
