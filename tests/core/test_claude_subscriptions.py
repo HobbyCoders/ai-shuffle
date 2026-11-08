@@ -7,7 +7,9 @@ folder, the worker-local setting lives in a dict, and every folder is under
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -259,6 +261,77 @@ def test_payload_refreshes_expired_credentials_and_invalidates_on_relogin(world,
     world.signed[folder] = "saved@example.com"
     subs.invalidate_identity()
     assert subs.payload()["subscription"][0]["needs_sign_in"] is False
+
+
+@pytest.mark.parametrize("signed_in", [False, True])
+@pytest.mark.parametrize("active", [False, True])
+def test_indeterminate_identity_keeps_last_readable_authentication(world, monkeypatch, signed_in, active):
+    account_id = _add(world, "saved@example.com")
+    if not signed_in:
+        world.signed.pop(str(world.root / account_id))
+    monkeypatch.setattr(subs.time, "time", lambda: 123.0)
+    # Produce the stored auth state through the real activation/refresh path,
+    # rather than seeding the state that the listing will consume.
+    subs.change(account_id, "activate")
+    if not active:
+        _add(world, "other@example.com")
+    subs.invalidate_identity()
+    monkeypatch.setattr(subs, "_probe", lambda _: cs.ClaudeCliStatus(
+        installed=True, signed_in=None, error="timeout"))
+
+    listing = subs.payload()
+    row = next(row for row in listing["subscription"] if row["id"] == account_id)
+    assert row["signed_in"] is signed_in
+    assert row["needs_sign_in"] is (not signed_in)
+    assert row["checked_at"] == 123.0
+    assert row["email"] == "saved@example.com"
+    assert listing["recovery_required"] is (active and not signed_in)
+
+
+@pytest.mark.parametrize("reader", ["payload", "activate"])
+def test_login_completion_rejects_an_inflight_identity_probe(world, monkeypatch, reader):
+    account_id = _add(world, "before@example.com")
+    subs.invalidate_identity()
+    probe_started, release_probe = Event(), Event()
+    probes = []
+
+    def probe(_):
+        probes.append(1)
+        if len(probes) == 1:
+            probe_started.set()
+            assert release_probe.wait(5), "the old identity probe was not released"
+            email = "before@example.com"
+        else:
+            email = "after@example.com"
+        return cs.ClaudeCliStatus(installed=True, signed_in=True, email=email)
+
+    monkeypatch.setattr(subs, "_probe", probe)
+    # Complete the real terminal reader path while the listing/activation holds
+    # the subscription lock. The terminal must not acquire that lock to invalidate.
+    terminal = claude_cli_login.LoginTerminal()
+    terminal._proc = SimpleNamespace(take_output=lambda: b"", running=False,
+                                     wait=lambda _: None, exit_code=0)
+
+    def read_identity():
+        with subs._lock:
+            return subs.payload() if reader == "payload" else subs.change(account_id, "activate")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        inflight = pool.submit(read_identity)
+        try:
+            assert probe_started.wait(5), "the old identity probe did not start"
+            completed = pool.submit(terminal.read)
+            assert completed.result(timeout=5)["succeeded"] is True
+        finally:
+            release_probe.set()
+        result = inflight.result(timeout=5)
+        if reader == "payload":
+            assert result["subscription"][0]["email"] == "after@example.com"
+
+    row = subs.payload()["subscription"][0]
+    assert row["email"] == "after@example.com"
+    assert subs._identity_cache[account_id][1].email == "after@example.com"
+    assert len(probes) == 2
 
 
 def test_inactive_saved_login_commands_never_switch_accounts(world):

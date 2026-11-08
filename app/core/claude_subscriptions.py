@@ -52,6 +52,11 @@ _lock = threading.RLock()
 _folder_lock = threading.Lock()
 _verified: dict[str, float] = {}
 _identity_cache: dict[Optional[str], tuple[float, Any]] = {}
+# Independent of the subscription/terminal locks. Never hold this across a
+# probe, database operation or terminal read: login completion takes it while
+# holding the terminal lock, whereas payload() holds the subscription lock.
+_identity_lock = threading.Lock()
+_identity_generation = 0
 _last_pending_probe = 0.0
 # Set when the active folder changes; the API then retires idle pooled CLIs.
 _reap_due = False
@@ -181,22 +186,37 @@ def _probe(account_id: Optional[str]):
 
 def invalidate_identity() -> None:
     """A login/switch ended: never serve the prior per-folder auth result."""
+    global _identity_generation
     # Also called while the login terminal holds its own lock. Do not acquire
     # _lock here: payload() holds it while reading the terminal's state.
-    _identity_cache.clear()
+    with _identity_lock:
+        _identity_generation += 1
+        _identity_cache.clear()
 
 
-def _current_identity(account: dict):
+def _current_identity(account: dict, *, force: bool = False):
     account_id = account["id"] if account["kind"] == KIND_SAVED else None
-    now = time.monotonic()
-    cached = _identity_cache.get(account_id)
-    if cached is None or now - cached[0] >= _VERIFY_INTERVAL_SECONDS:
-        cached = (now, _probe(account_id))
-        _identity_cache[account_id] = cached
-    return cached[1]
+    while True:
+        with _identity_lock:
+            cached = _identity_cache.get(account_id)
+            if not force and cached is not None and time.monotonic() - cached[0] < _VERIFY_INTERVAL_SECONDS:
+                return cached[1]
+            generation = _identity_generation
+        status = _probe(account_id)
+        with _identity_lock:
+            if generation != _identity_generation:
+                # Login completed while the CLI was reading the old identity.
+                # Reject it for both this response and subsequent cached reads.
+                continue
+            _identity_cache[account_id] = (time.monotonic(), status)
+            return status
 
 
 def _record_identity(account: dict, status) -> None:
+    # A timeout or unreadable CLI result says nothing about authentication.
+    # Keep the last readable state, including a known need to sign in again.
+    if status.signed_in is None:
+        return
     account["signed_in"] = status.signed_in
     account["checked_at"] = time.time()
     if status.signed_in:
@@ -409,9 +429,7 @@ def _refresh_quietly(account_id: str) -> None:
         account = _find(_load(), account_id)
         if account is None:
             return
-        home_id = account["id"] if account["kind"] == KIND_SAVED else None
-        status = _probe(home_id)
-        _identity_cache[home_id] = (time.monotonic(), status)
+        status = _current_identity(account, force=True)
         if status.signed_in is None:
             return
         state = _load()
