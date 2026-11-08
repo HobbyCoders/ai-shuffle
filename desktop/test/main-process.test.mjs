@@ -651,6 +651,27 @@ test('an update\'s first start gives its worker 10 minutes to become ready; othe
 	}
 });
 
+test('a healthy start removes update dependency folders no kept version uses (#1275)', async () => {
+	const { promises: fs } = await import('node:fs');
+	const os = await import('node:os');
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-healthy-cleanup-'));
+	try {
+		const orphan = path.join(root, 'dependencies', '5'.repeat(24));
+		await fs.mkdir(path.join(orphan, 'python'), { recursive: true });
+		await fs.writeFile(path.join(root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: 'a'.repeat(40) }));
+		await fs.mkdir(path.join(root, 'versions', 'a'.repeat(40)), { recursive: true });
+		await fs.writeFile(path.join(root, 'versions', 'a'.repeat(40), 'build.json'), JSON.stringify({ revision: 'a'.repeat(40), runtimeKey: '1'.repeat(64), pythonKey: null, layout: 2,
+			electron: path.join(root, 'dependencies', 'node', 'desktop', '1'.repeat(24), 'node_modules', 'electron', 'dist', 'electron.exe') }));
+		const updates = { options: { root }, async requireRestorePoint() {}, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {}, async load() {} };
+		const application = { revision: 'a'.repeat(40), resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
+		const main = await launch({ managed: { root, application, updates, host: null } });
+		assert.deepEqual(main.errors, []);
+		for (let i = 0; i < 200; i++) { try { await fs.access(orphan); } catch { break; } await new Promise(resolve => setTimeout(resolve, 10)); }
+		await assert.rejects(fs.access(orphan), { code: 'ENOENT' });
+		await assert.rejects(fs.access(path.join(root, 'update.lock')), { code: 'ENOENT' });
+	} finally { await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
 for (const launcher of ['4', '5', '6', '7', '8', '9', '10']) test(`restarting with launcher ${launcher} copies the database for its restore point with the window saying so`, async () => {
 	const R = 'b'.repeat(40);
 	const application = { revision: R, resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };

@@ -109,7 +109,8 @@ test('installed-entry factory fully hashes a real ready journal before selection
    assert.equal(copy.validate, ColdClusterCopy.prototype.validate);
    let retained;
    if (cached) {
-    await copy.snapshot(); await copy.discard();
+    // A cache an older build kept (#1275: discard() no longer keeps one).
+    await copy.snapshot(); await fs.rename(path.join(cluster, 'update-snapshot'), path.join(cluster, 'update-copy-cache'));
     retained = await fs.stat(path.join(cluster, 'update-copy-cache', 'data', 'global', 'pg_control'));
    }
    await u.prepareRollback(async () => copy);

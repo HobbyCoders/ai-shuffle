@@ -31,6 +31,7 @@ import { Updater } from './updater';
 import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
 import { checkRestorePointStructure, launcherValidatedRestorePoint, RESTORE_POINT_VALIDATING_LAUNCHERS, HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError } from './update-restore-point';
 import { IncrementalClusterCopy } from './incremental-restore-point';
+import { pruneDependencies } from './dependency-cleanup';
 import { launcherImage, launchUpdateSplash } from './update-splash';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
@@ -382,6 +383,8 @@ async function main(): Promise<void> {
 			// The initial timer may have fired while this revision was still booting.
 			void applications.healthy().then(async () => {
 				if (postgres) await applications.finishRollback(async () => new IncrementalClusterCopy(path.join(userData, 'postgres'), async () => { throw new Error('Healthy cleanup must not stop or restore the database'); }));
+				// Never throws; keeps everything when anything it needs cannot be read.
+				if (updateRoot) await pruneDependencies(updateRoot, managed?.application?.revision ?? applications.version);
 				replaceLauncher(); return updater.check();
 			}).catch(error => console.error('Could not record healthy application', error));
 		}
