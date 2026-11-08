@@ -424,7 +424,7 @@ async def check_for_updates(token: str = Depends(require_auth)):
     """Check all installed plugins for available updates"""
     async with api_error_handler("check for updates"):
         service = get_plugin_service()
-        updates = service.check_for_updates()
+        updates = await run_sync(service.check_for_updates)
         return [
             PluginUpdateInfoResponse(
                 plugin_id=u.plugin_id,
@@ -436,6 +436,14 @@ async def check_for_updates(token: str = Depends(require_auth)):
             )
             for u in updates
         ]
+
+
+@router.post("/updates/check", response_model=List[PluginUpdateInfoResponse])
+async def refresh_plugin_updates(token: str = Depends(require_admin)):
+    """Refresh installed sources and check their content. Owner-only mutation."""
+    async with api_error_handler("refresh plugin updates"):
+        updates = await run_sync(get_plugin_service().check_for_updates, True)
+        return [PluginUpdateInfoResponse(**u.to_dict()) for u in updates]
 
 
 @router.post("/update", response_model=PluginResponse, status_code=status.HTTP_200_OK)

@@ -41,7 +41,11 @@ Their slash commands and user-invocable skills appear in the composer's **/** me
 
 ## Updates
 
-**Settings → Plugins** shows plugins with a newer version. Update them one by one or all at once. You can also turn on automatic updates and pick how often they run. Automatic updates never install an older version.
+**Settings → Plugins → Sources and updates → Check for updates** refreshes the sources of installed plugins, then checks for new releases or changed content. Repositories without a marketplace catalog and plugins whose version string has not changed are included. A same-version update shows a short content identifier after `+`.
+
+Update plugins one by one or all at once. A manual Update refreshes its source first and keeps the plugin's enabled state. Git sources follow their configured branch or tag; an exact commit pin stays pinned until the source entry changes. Local-directory sources use the files already on disk. A folder imported as an agent-authored draft is a reviewed snapshot, not a tracked upstream: import a new draft to change it.
+
+You can turn on automatic updates and pick how often they run. The `auto_sync_marketplaces` setting controls refreshing marketplace checkouts; **Install updates** controls applying detected changes. External git plugins check their own repository, not just the marketplace's version label. Automatic updates never install an older release. New chats load the installed revision, even when older commit hashes remain in the cache.
 
 ## Plugins made in a chat
 

@@ -53,6 +53,7 @@ never takes the rest of discovery down with it (CE11).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Mapping
@@ -194,6 +195,23 @@ def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None
         return None
 
     cache = home / "cache" / marketplace / name
+    # Hashes are not ordered versions. Follow the installer's current record,
+    # rather than picking an older hash that happens to sort last in the cache.
+    # Authored drafts keep their separate latest-version + approval rule.
+    if marketplace.casefold().rstrip(". ") != AUTHORED_SOURCE:
+        try:
+            installed = json.loads((home / "installed_plugins.json").read_text(encoding="utf-8"))
+            records = installed.get("plugins", {}).get(f"{name}@{marketplace}")
+            record = records[0] if isinstance(records, list) and records else records
+            if isinstance(record, dict):
+                raw = record.get("installPath")
+                path = Path(raw) if isinstance(raw, str) and raw else None
+                if path and path.is_dir() and path.resolve().parent == cache.resolve():
+                    return path, record.get("version") or path.name
+                log.warning("installed plugin %s@%s has no confined cache path", name, marketplace)
+                return None
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass  # Older/CLI-only installs may have only the cache layout.
     if cache.is_dir():
         version_dir = _latest_version_dir(cache)
         if version_dir is not None:

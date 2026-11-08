@@ -283,6 +283,7 @@ describe('PluginsModel', () => {
 		expect(m.updateAllPlugins).toHaveBeenCalled();
 		m.checkForUpdates.mockResolvedValueOnce([]);
 		await model.checkUpdates();
+		expect(m.checkForUpdates).toHaveBeenLastCalledWith(true);
 		expect(model.updates).toEqual([]);
 
 		m.addMarketplace.mockResolvedValueOnce({ id: 'more', url: 'https://x/more.git', last_updated: null });

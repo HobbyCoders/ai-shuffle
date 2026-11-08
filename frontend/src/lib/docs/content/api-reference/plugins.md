@@ -273,7 +273,7 @@ For a connector plugin, returns `409` if it is not installed or saved connection
 
 ### GET /api/v1/plugins/updates
 
-Compare installed marketplace plugins with their marketplaces and list the ones with a newer version. Sync the marketplace first to see its latest plugins.
+List installed plugins with a newer release or changed source content, including repositories without a marketplace catalog. Marketplace checkouts are not synced by this read; external git sources are checked at their configured ref. Equal-version content changes have a short content identifier appended to `available_version` after `+`. Exact commit pins do not follow newer branch commits.
 
 **Auth:** Required
 
@@ -298,9 +298,17 @@ curl http://localhost:8000/api/v1/plugins/updates \
 
 `is_local` is `true` when the plugin's files live inside the marketplace repository and `false` when the marketplace points to another source.
 
+### POST /api/v1/plugins/updates/check
+
+Refresh sources with installed plugins, then return the same update list as the GET route. This is the **Check for updates** action in Settings. A source refresh failure is reported rather than treated as an empty update list. Local-directory sources are read in place, never re-cloned.
+
+**Auth:** Owner only
+
+No request fields are required.
+
 ### POST /api/v1/plugins/update
 
-Update one installed plugin to the marketplace's current version. Its scope and enabled state are kept. For a connector plugin, this installs the release shipped with this AI Shuffle version.
+Refresh the source and reinstall one installed plugin at its configured ref. Its scope and enabled state are kept. For a connector plugin, this installs the release shipped with this AI Shuffle version.
 
 **Auth:** Owner only
 
@@ -317,7 +325,7 @@ Returns the updated plugin (same fields as the installed list), or `400` if the 
 
 ### POST /api/v1/plugins/update/all
 
-Update every plugin that [GET /api/v1/plugins/updates](#get-apiv1pluginsupdates) lists. Plugins that fail to update are skipped. Returns the list of updated plugins.
+Refresh installed sources, then update every plugin that [GET /api/v1/plugins/updates](#get-apiv1pluginsupdates) lists. Plugins that fail to update are skipped. Returns the list of updated plugins.
 
 **Auth:** Owner only
 

@@ -19,10 +19,10 @@ import type {
 	PluginInfo
 } from './plugins';
 
-const post = vi.hoisted(() => vi.fn());
-vi.mock('./client', () => ({ api: { post, get: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
+const { post, get } = vi.hoisted(() => ({ post: vi.fn(), get: vi.fn() }));
+vi.mock('./client', () => ({ api: { post, get, put: vi.fn(), delete: vi.fn() } }));
 
-import { syncMarketplace } from './plugins';
+import { checkForUpdates, syncMarketplace } from './plugins';
 
 type Missing<T, K extends readonly PropertyKey[]> = Exclude<keyof T, K[number]>;
 
@@ -64,6 +64,15 @@ const agents: FileBasedAgent[] = fixture.file_based_agents;
 const sortedKeys = (o: object) => Object.keys(o).sort();
 
 describe('plugin API types match backend payloads', () => {
+	it('only explicit update checks request an owner-only source refresh', async () => {
+		get.mockResolvedValueOnce([]);
+		await checkForUpdates();
+		expect(get).toHaveBeenCalledWith('/plugins/updates');
+		post.mockResolvedValueOnce([]);
+		await checkForUpdates(true);
+		expect(post).toHaveBeenCalledWith('/plugins/updates/check', {});
+	});
+
 	it('marketplace sync returns { status, marketplace_id }', async () => {
 		expect(sortedKeys(fixture.marketplace_sync)).toEqual(SYNC_KEYS);
 		post.mockResolvedValueOnce(fixture.marketplace_sync);

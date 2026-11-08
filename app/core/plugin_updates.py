@@ -137,9 +137,9 @@ def check_for_updates(svc) -> List[PluginUpdateInfo]:
     """
     Check all installed plugins for available updates.
 
-    Compares the installed version (git hash or semver) against the
-    current marketplace HEAD. For local-source plugins, a version
-    mismatch means the marketplace has been updated since install.
+    Compare release labels first, then installable content for sources whose
+    release labels are unchanged or absent. This read does not sync marketplace
+    checkouts; an explicit owner check refreshes those before calling here.
 
     Args:
         svc: PluginService instance
@@ -167,9 +167,8 @@ def check_for_updates(svc) -> List[PluginUpdateInfo]:
             if not install:
                 continue
 
-        # Implicit plugins (marketplace-less repos installed as a single plugin)
-        # have no manifest entry to diff against -- skip update checks entirely,
-        # else they would report a spurious update every cycle.
+        # Implicit plugins have no release entry; compare their installed
+        # components with the source in the content pass below.
         if isinstance(install, dict) and install.get("implicit"):
             continue
 
@@ -313,10 +312,32 @@ def check_for_updates(svc) -> List[PluginUpdateInfo]:
                                     is_local=False
                                 ))
 
+    # Versions are release labels, not a complete identity. This pass covers
+    # implicit repositories and commits published without a version bump.
+    from app.core.plugin_update_content import content_update
+
+    offered = {u.plugin_id for u in updates}
+    for plugin_id, records in installed_data.get("plugins", {}).items():
+        if plugin_id in offered or "@" not in plugin_id or not records:
+            continue
+        install = records[0] if isinstance(records, list) else records
+        marketplace = marketplaces.get(plugin_id.rsplit("@", 1)[1], {})
+        update = content_update(svc, plugin_id, install, marketplace)
+        if update:
+            updates.append(update)
     return updates
 
 
-def update_plugin(svc, plugin_id: str) -> PluginInfo:
+def refresh_update_sources(svc) -> None:
+    """Refresh only sources with installed plugins, for an explicit owner check."""
+    installed = svc._read_json_file(svc.INSTALLED_FILE, {"plugins": {}})
+    marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
+    ids = {p.rsplit("@", 1)[1] for p in installed.get("plugins", {}) if "@" in p}
+    for marketplace_id in sorted(ids & marketplaces.keys()):
+        svc.sync_marketplace(marketplace_id)
+
+
+def update_plugin(svc, plugin_id: str, refresh_source: bool = True) -> PluginInfo:
     """
     Update a single installed plugin to the latest version.
 
@@ -347,8 +368,11 @@ def update_plugin(svc, plugin_id: str) -> PluginInfo:
     settings = svc._read_json_file(svc.SETTINGS_FILE, {}, for_update=True)
     was_enabled = settings.get("enabledPlugins", {}).get(plugin_id, False)
 
-    # Re-install (this overwrites the cache and updates installed_plugins.json)
-    result = svc.install_plugin(plugin_id, scope)
+    # A manual update must not reinstall yesterday's marketplace checkout.
+    # Scheduled updates control source syncing through their own setting.
+    if refresh_source:
+        svc.sync_marketplace(plugin_id.rsplit("@", 1)[1])
+    result = svc.install_plugin(plugin_id, scope, enable=was_enabled)
 
     # Restore enabled state
     if was_enabled:
@@ -370,12 +394,13 @@ def update_all_plugins(svc) -> List[PluginInfo]:
     Returns:
         List of updated PluginInfo objects
     """
+    refresh_update_sources(svc)
     updates = svc.check_for_updates()
     results: List[PluginInfo] = []
 
     for update in updates:
         try:
-            result = svc.update_plugin(update.plugin_id)
+            result = svc.update_plugin(update.plugin_id, refresh_source=False)
             results.append(result)
         except Exception as e:
             logger.error(f"Failed to update plugin {update.plugin_id}: {e}")
@@ -422,7 +447,7 @@ def run_auto_update(svc) -> Dict[str, Any]:
     if au_settings.auto_update_plugins and updates:
         for update in updates:
             try:
-                result = svc.update_plugin(update.plugin_id)
+                result = svc.update_plugin(update.plugin_id, refresh_source=False)
                 summary["updated_plugins"].append(result.to_dict())
             except Exception as e:
                 error_msg = f"Failed to update {update.plugin_id}: {e}"

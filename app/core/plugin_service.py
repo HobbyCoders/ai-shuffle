@@ -966,11 +966,11 @@ class PluginService:
         """Find a plugin entry in a marketplace's marketplace.json."""
         return _inst_mod._find_plugin_in_manifest(self, marketplace_id, plugin_name)
 
-    def _clone_plugin_source(self, source: Dict[str, Any], dest: Path) -> None:
+    def _clone_plugin_source(self, source: Dict[str, Any], dest: Path) -> Optional[str]:
         """Clone an external plugin source to a destination directory."""
         return _inst_mod._clone_plugin_source(self, source, dest)
 
-    def _clone_git_subdir_source(self, source: Dict[str, Any], dest: Path) -> None:
+    def _clone_git_subdir_source(self, source: Dict[str, Any], dest: Path) -> Optional[str]:
         """Clone a git repo and extract a specific subdirectory."""
         return _inst_mod._clone_git_subdir_source(self, source, dest)
 
@@ -1296,16 +1296,18 @@ class PluginService:
         """Read a plugin's version from its .claude-plugin/plugin.json manifest."""
         return _inst_mod._get_plugin_manifest_version(self, local_dir)
 
-    def check_for_updates(self) -> List[PluginUpdateInfo]:
+    def check_for_updates(self, refresh_sources: bool = False) -> List[PluginUpdateInfo]:
         """
         Check all installed plugins for available updates.
 
         Returns:
             List of plugins with available updates
         """
+        if refresh_sources:
+            _upd_mod.refresh_update_sources(self)
         return _upd_mod.check_for_updates(self)
 
-    def update_plugin(self, plugin_id: str) -> PluginInfo:
+    def update_plugin(self, plugin_id: str, refresh_source: bool = True) -> PluginInfo:
         """
         Update a single installed plugin to the latest version.
 
@@ -1319,7 +1321,7 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.install(kind)
-        return _upd_mod.update_plugin(self, plugin_id)
+        return _upd_mod.update_plugin(self, plugin_id, refresh_source=refresh_source)
 
     def update_all_plugins(self) -> List[PluginInfo]:
         """

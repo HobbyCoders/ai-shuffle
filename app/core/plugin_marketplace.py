@@ -333,6 +333,9 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
                 f"GCS marketplace {marketplace_id} exists but has no valid manifest. "
                 f"It may need to be reinstalled via Claude CLI."
             )
+    elif data[marketplace_id].get("source", {}).get("source") == "directory":
+        # A local-path source is edited in place, not replaced with a clone.
+        pass
     elif not git_dir.exists():
         # Non-git, non-GCS directory -- attempt re-clone from source
         logger.warning(f"Marketplace directory exists but is not a git repo: {install_location}. Re-cloning...")

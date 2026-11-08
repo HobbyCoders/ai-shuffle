@@ -97,7 +97,7 @@ def _find_plugin_in_manifest(svc, marketplace_id: str, plugin_name: str) -> Opti
     return None
 
 
-def _clone_plugin_source(svc, source: Dict[str, Any], dest: Path) -> None:
+def _clone_plugin_source(svc, source: Dict[str, Any], dest: Path) -> Optional[str]:
     """Clone an external plugin source to a destination directory.
 
     Supported source types:
@@ -109,8 +109,7 @@ def _clone_plugin_source(svc, source: Dict[str, Any], dest: Path) -> None:
     ref = source.get("ref")
 
     if source_type == "git-subdir":
-        _clone_git_subdir_source(svc, source, dest)
-        return
+        return _clone_git_subdir_source(svc, source, dest)
 
     if source_type == "github":
         repo = source.get("repo", "")
@@ -140,6 +139,16 @@ def _clone_plugin_source(svc, source: Dict[str, Any], dest: Path) -> None:
         raise RuntimeError(f"Failed to clone plugin: {_git_error_text(result.stderr)}")
     _checkout_pinned_sha(dest, source.get("sha"))
     _prune_escaping_symlinks(dest)
+    return _git_revision(dest)
+
+
+def _git_revision(repo: Path) -> Optional[str]:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, timeout=10, env=child_env(),
+    )
+    revision = result.stdout.strip()
+    return revision if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{40,64}", revision) else None
 
 
 # Transports a marketplace entry may clone from. Anything else (file://, a bare
@@ -186,7 +195,7 @@ def _checkout_pinned_sha(repo_dir: Path, sha: Any) -> None:
         raise RuntimeError(f"Plugin source does not match its pinned sha {sha[:12]}")
 
 
-def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
+def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> Optional[str]:
     """Clone a git repo and extract a specific subdirectory.
 
     Handles the "git-subdir" source type from marketplace.json:
@@ -241,6 +250,7 @@ def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
         if dest.exists():
             shutil.rmtree(dest)
         _copy_tree_resolving_symlinks(extracted, dest, root=tmp_dir)
+        return _git_revision(tmp_dir)
 
     finally:
         # Clean up the full clone
@@ -377,7 +387,8 @@ def discover_implicit_components(svc, root: Path) -> Dict[str, Any]:
 
 
 def _copy_tree_resolving_symlinks(
-    src: Path, dst: Path, root: Optional[Path] = None, _active: Optional[set] = None
+    src: Path, dst: Path, root: Optional[Path] = None, _active: Optional[set] = None,
+    *, skip_git: bool = False,
 ) -> None:
     """Copy `src` into `dst`, materializing symlinks as real files.
 
@@ -399,6 +410,8 @@ def _copy_tree_resolving_symlinks(
     try:
         dst.mkdir(parents=True, exist_ok=True)
         for entry in src.iterdir():
+            if skip_git and entry.name == ".git":
+                continue
             target = dst / entry.name
             if entry.is_symlink():
                 if not entry.exists():
@@ -409,7 +422,7 @@ def _copy_tree_resolving_symlinks(
                 if entry.is_dir() and entry.resolve() in active:
                     continue  # link to an ancestor -- would recurse forever
             if entry.is_dir():  # follows symlinks to directories
-                _copy_tree_resolving_symlinks(entry, target, root, active)
+                _copy_tree_resolving_symlinks(entry, target, root, active, skip_git=skip_git)
             else:
                 shutil.copy2(entry, target)  # follows symlinks to real files
     finally:
@@ -481,7 +494,7 @@ def _install_implicit_plugin(
         "lastUpdated": now,
         "isLocal": True,
         # Marks a repo installed as an implicit plugin (no marketplace.json entry).
-        # Update checks skip these; see plugin_updates.check_for_updates.
+        # Update checks compare the materialized components with the source.
         "implicit": True,
         **review,
     }]
@@ -561,6 +574,7 @@ def install_plugin(
         raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
 
     source = entry.get("source", "")
+    source_revision = None
     # Version priority: plugin manifest > entry.version > source.sha (short) > "1.0.0"
     version = entry.get("version", "1.0.0")
     if version == "1.0.0" and isinstance(source, dict) and source.get("sha"):
@@ -603,7 +617,7 @@ def install_plugin(
             _force_rmtree(cache_path)
 
         try:
-            svc._clone_plugin_source(source, cache_path)
+            source_revision = svc._clone_plugin_source(source, cache_path)
         except Exception:
             # Leave no half-fetched (or unverified) files in the cache.
             if cache_path.exists():
@@ -666,6 +680,8 @@ def install_plugin(
     # against the marketplace entry's SHA without cloning.
     if isinstance(source, dict) and source.get("sha"):
         install_record["sourceSha"] = source["sha"][:7]
+    if source_revision:
+        install_record["sourceRevision"] = source_revision
     review = _agent_request(installed["plugins"].get(plugin_id), requested_by)
     install_record.update(review)
     installed["plugins"][plugin_id] = [install_record]

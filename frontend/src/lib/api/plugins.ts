@@ -292,8 +292,10 @@ export async function getFileBasedAgents(): Promise<FileBasedAgent[]> {
 /**
  * Check all installed plugins for available updates
  */
-export async function checkForUpdates(): Promise<PluginUpdateInfo[]> {
-	return api.get<PluginUpdateInfo[]>('/plugins/updates');
+export async function checkForUpdates(refreshSources = false): Promise<PluginUpdateInfo[]> {
+	return refreshSources
+		? api.post<PluginUpdateInfo[]>('/plugins/updates/check', {})
+		: api.get<PluginUpdateInfo[]>('/plugins/updates');
 }
 
 /**

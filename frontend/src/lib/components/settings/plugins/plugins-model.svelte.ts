@@ -444,7 +444,7 @@ export class PluginsModel {
 		this.checking = true;
 		this.actionError = '';
 		try {
-			this.updates = await pluginsApi.checkForUpdates();
+			this.updates = await pluginsApi.checkForUpdates(true);
 		} catch (err) {
 			this.actionError = errorText(err, 'Could not check for updates.');
 		} finally {
