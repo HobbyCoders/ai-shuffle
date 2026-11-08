@@ -331,3 +331,206 @@ async def test_peer_merging_its_held_prefix_still_reaches_the_owner_text(pg_work
     third.sql("DELETE FROM sync_records WHERE collection = 'session_events' AND record_id NOT IN ('chat|1', 'chat|2')")
     apply_items(third, copy_items(peer, after=2, held=2))
     assert frames(third) == frames(source)
+
+
+# ---------------------------------------------------------------------------
+# Coverage that cannot be proven: nothing deleted, whole-log reinstall (#1278)
+# ---------------------------------------------------------------------------
+
+def delta_row(seq, row_id, text, first=None):
+    payload = {"text": text}
+    if first is not None:
+        payload[events_db.MERGED_FROM_KEY] = first
+    return {"id": row_id, "session_id": "chat", "seq": seq, "event_type": "assistant.text_delta",
+            "turn_id": None, "run_id": None, "payload": payload}
+
+
+def lone_worker(pg_workers):
+    worker = pg_workers("lone")
+    with worker.active():
+        engine.create_network("Lone")
+    publish(worker, 1, create=True)
+    return worker
+
+
+def plant(worker, *rows):
+    """Replace the chat's rows above its first with exactly these."""
+    worker.sql("DELETE FROM session_events WHERE session_id = 'chat' AND seq > 1")
+    for row in rows:
+        worker.sql("INSERT INTO session_events (id, session_id, seq, event_type, payload) "
+                   "VALUES (%s, 'chat', %s, 'assistant.text_delta', %s::jsonb)",
+                   (row["id"], row["seq"], json.dumps(row["payload"])))
+
+
+def apply_fitted(worker, record):
+    """One mirrored write, fitted and upserted the way ``materialize`` does it."""
+    with worker.active(), get_db() as conn:
+        cursor = conn.cursor()
+        fitted = events_db.fit_mirrored_delta(cursor, "chat", record["seq"], record)
+        if fitted is None:
+            return None
+        cursor.execute("INSERT INTO session_events (id, session_id, seq, event_type, payload) "
+                       "VALUES (%s, 'chat', %s, 'assistant.text_delta', %s::jsonb) "
+                       "ON CONFLICT (session_id, seq) DO UPDATE SET id = EXCLUDED.id, payload = EXCLUDED.payload",
+                       (fitted["id"], fitted["seq"], json.dumps(fitted["payload"])))
+        return fitted
+
+
+def held(worker):
+    return [(row["seq"], row["id"], row["payload"].get("text"), row["payload"].get(events_db.MERGED_FROM_KEY))
+            for row in transcript(worker) if row["seq"] > 1]
+
+
+def queued(worker):
+    return [row["session_id"] for row in worker.sql("SELECT session_id FROM network_transcript_repairs")]
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+async def test_partly_overlapping_merged_runs_keep_the_held_text(pg_workers, stamped):
+    # S4: the held ABC ends inside the incoming CDEF but starts before it. An
+    # unstamped held row looks like a fragment; its text does not fit either.
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(4, "A", "ABC", 2 if stamped else None))
+    assert apply_fitted(worker, delta_row(7, "C", "CDEF", 4)) is None
+    assert held(worker) == [(4, "A", "ABC", 2 if stamped else None)]
+    assert queued(worker) == ["chat"]
+
+
+async def test_held_merged_run_starting_earlier_is_kept_even_when_its_text_fits(pg_workers):
+    # A repeating reply: the held "ha" does appear in "hahaha", but it stands
+    # for seqs before the incoming run, so the incoming row does not cover it.
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(4, "A", "ha", 2))
+    assert apply_fitted(worker, delta_row(7, "C", "hahaha", 4)) is None
+    assert held(worker) == [(4, "A", "ha", 2)]
+    assert queued(worker) == ["chat"]
+
+
+async def test_merged_row_starting_inside_a_held_merged_run_is_queued(pg_workers):
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(7, "D", "DEFG", 5))
+    assert apply_fitted(worker, delta_row(6, "B", "BCDE", 3)) is None
+    assert held(worker) == [(7, "D", "DEFG", 5)]
+    assert queued(worker) == ["chat"]
+
+
+async def test_row_of_another_kind_inside_a_merged_run_is_not_replaced(pg_workers):
+    # The owner only merges unbroken runs: this worker's log is not that run.
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(2, "A", "A"), delta_row(3, "B", "B"))
+    worker.sql("UPDATE session_events SET event_type = 'message.assistant' WHERE session_id = 'chat' AND seq = 3")
+    assert apply_fitted(worker, delta_row(7, "A", "ABCDEF", 2)) is None
+    assert [row[0] for row in held(worker)] == [2, 3]
+    assert queued(worker) == ["chat"]
+
+
+async def test_merged_row_covered_by_a_held_merged_run_is_skipped(pg_workers):
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(7, "A", "ABCDEF", 2))
+    assert apply_fitted(worker, delta_row(4, "B", "BC", 3)) is None
+    assert held(worker) == [(7, "A", "ABCDEF", 2)]
+    assert queued(worker) == []
+
+
+async def test_disjoint_merged_runs_both_stay(pg_workers):
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(4, "A", "ABC", 2))
+    assert apply_fitted(worker, delta_row(7, "D", "DEF", 5)) is not None
+    assert [row[2] for row in held(worker)] == ["ABC", "DEF"]
+    assert queued(worker) == []
+
+
+async def test_unstamped_merge_keeps_the_known_start_of_its_run(pg_workers):
+    # S6: stamped ABC from 2, then an older worker's ABCDEF with the same head.
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(4, "A", "ABC", 2))
+    apply_fitted(worker, delta_row(7, "A", "ABCDEF"))
+    assert held(worker) == [(7, "A", "ABCDEF", 2)]
+    for seq, char in enumerate("ABCDEF", 2):
+        assert apply_fitted(worker, delta_row(seq, char, char)) is None
+    assert held(worker) == [(7, "A", "ABCDEF", 2)]
+    assert queued(worker) == []
+
+
+async def test_first_fragment_widens_a_start_that_was_inferred_too_late(pg_workers):
+    # ABC at 4 was merged before runs named their start, so 4 is all we could say.
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(4, "A", "ABC"))
+    apply_fitted(worker, delta_row(7, "A", "ABCDEF"))
+    assert held(worker) == [(7, "A", "ABCDEF", 4)]
+    assert apply_fitted(worker, delta_row(2, "A", "A")) is None
+    assert held(worker) == [(7, "A", "ABCDEF", 2)]
+    for seq, char in zip((3, 4, 5, 6, 7), "BCDEF"):
+        assert apply_fitted(worker, delta_row(seq, char, char)) is None
+    assert held(worker) == [(7, "A", "ABCDEF", 2)]
+
+
+async def test_merged_row_of_unknown_start_does_not_replace_held_fragments(pg_workers):
+    # Held D/E/F and no A: nothing says where the unstamped merged row starts.
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(5, "D", "D"), delta_row(6, "E", "E"), delta_row(7, "F", "F"))
+    assert apply_fitted(worker, delta_row(7, "A", "ABCDEF")) is None
+    assert [row[2] for row in held(worker)] == ["D", "E", "F"]
+    assert queued(worker) == ["chat"]
+
+
+async def test_fragments_written_beneath_an_unstamped_merged_row_are_queued(pg_workers):
+    # A copy captured mid-run got the merged row, then only D/E/F as operations.
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(7, "A", "ABCDEF"))
+    apply_fitted(worker, delta_row(5, "D", "D"))
+    apply_fitted(worker, delta_row(6, "E", "E"))
+    assert queued(worker) == []
+    assert apply_fitted(worker, delta_row(7, "F", "F")) is None
+    assert queued(worker) == ["chat"]
+
+
+async def test_owner_log_replaces_a_queued_transcript_and_resets_readers(pg_workers, monkeypatch):
+    source, peer, served = await merged_source(pg_workers, 3)
+    peer.sql("UPDATE sessions SET owner_device_id = %s WHERE id = 'chat'", (source.device_id,))
+    plant(peer, delta_row(4, "held-head", "ABC", 2))
+    peer.sql("DELETE FROM sync_records WHERE collection = 'session_events' AND record_id <> 'chat|1'")
+    peer.sql("INSERT INTO network_transcript_repairs (session_id, reason) VALUES ('chat', 'test')")
+    resets = []
+    monkeypatch.setattr("app.api.events.reset_session_readers", lambda sid, epoch: resets.append((sid, epoch)))
+    monkeypatch.setattr(transcripts, "_link", lambda device_id: transport.PeerLink(device_id, [served.base_url]))
+    with peer.active():
+        async with httpx.AsyncClient(transport=served.transport()) as client:
+            await transcripts.repair_queued(client)
+    assert [(r["seq"], r["id"], r["payload"]) for r in transcript(peer)] == [
+        (r["seq"], r["id"], r["payload"]) for r in transcript(source)]
+    assert queued(peer) == []
+    assert resets == [("chat", transcript(source)[0]["id"])]
+
+
+async def test_unreachable_owner_keeps_the_held_rows_and_does_not_raise(pg_workers, monkeypatch):
+    source, peer, served = await merged_source(pg_workers, 3)
+    peer.sql("UPDATE sessions SET owner_device_id = %s WHERE id = 'chat'", (source.device_id,))
+    plant(peer, delta_row(4, "held-head", "ABC", 2))
+    peer.sql("INSERT INTO network_transcript_repairs (session_id, reason) VALUES ('chat', 'test')")
+    monkeypatch.setattr(transcripts, "_link", lambda device_id: transport.PeerLink(device_id, []))
+    with peer.active():
+        async with httpx.AsyncClient(transport=served.transport()) as client:
+            await transcripts.repair_queued(client)
+    assert held(peer) == [(4, "held-head", "ABC", 2)]
+    assert queued(peer) == ["chat"]
+    assert transcripts._repair_backoff["chat"][0] == 1
+
+
+async def test_a_session_that_changed_owner_is_not_installed_over(pg_workers):
+    source, peer, _served = await merged_source(pg_workers, 3)
+    peer.sql("UPDATE sessions SET owner_device_id = %s WHERE id = 'chat'", ("someone-else",))
+    plant(peer, delta_row(4, "held-head", "ABC", 2))
+    peer.sql("INSERT INTO network_transcript_repairs (session_id, reason) VALUES ('chat', 'test')")
+    items = copy_items(source, after=0, held=8)
+    with peer.active():
+        assert transcripts.install_owner_log("chat", source.device_id, items, 8, engine.context()) is None
+    assert held(peer) == [(4, "held-head", "ABC", 2)]
+
+
+def test_a_run_the_owner_merged_between_two_pages_is_not_installed_twice():
+    def item(seq, text, first=None):
+        return {"record_id": f"chat|{seq}", "deleted": False, "record": {**delta_row(seq, text, text, first)}}
+    kept = transcripts._without_merged_duplicates(
+        [item(2, "A"), item(3, "B"), item(7, "ABCDEF", 2), item(9, "G")])
+    assert [row["record"]["seq"] for row in kept] == [7, 9]

@@ -339,6 +339,15 @@ def create_schema(cursor) -> None:
             CHECK (id = 1)
         )
     """)
+    # Mirrored transcripts the merged-delta rule could not reconcile (#1278):
+    # the held rows are kept until the owner's whole log replaces them.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS network_transcript_repairs (
+            session_id TEXT PRIMARY KEY,
+            reason TEXT NOT NULL DEFAULT '',
+            marked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_blobs (
             hash TEXT PRIMARY KEY,
@@ -1744,6 +1753,33 @@ def backfill_session_pending(session_id: str) -> bool:
         cursor.execute("SELECT 1 FROM network_transcript_backfill WHERE session_id = %s AND done = FALSE",
                        (session_id,))
         return cursor.fetchone() is not None
+
+
+def transcript_repairs(limit: int = 100) -> List[str]:
+    """Sessions waiting for a whole-log reinstall from their owner, oldest first."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT session_id FROM network_transcript_repairs ORDER BY marked_at, session_id LIMIT %s",
+                       (limit,))
+        return [row["session_id"] for row in cursor.fetchall()]
+
+
+def transcript_repair_queued(cursor, session_id: str) -> bool:
+    cursor.execute("SELECT 1 FROM network_transcript_repairs WHERE session_id = %s", (session_id,))
+    return cursor.fetchone() is not None
+
+
+def clear_transcript_repair(cursor, session_id: str) -> None:
+    cursor.execute("DELETE FROM network_transcript_repairs WHERE session_id = %s", (session_id,))
+
+
+def max_event_seq(session_id: str) -> int:
+    """The highest seq this worker holds for a session (0 for none)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(seq) AS s FROM session_events WHERE session_id = %s", (session_id,))
+        row = cursor.fetchone()
+        return int(row["s"] or 0) if row else 0
 
 
 def finish_backfill(generation: int, _conn=None) -> bool:

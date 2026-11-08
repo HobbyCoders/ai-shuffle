@@ -111,3 +111,86 @@ async def test_reader_past_the_merged_run_is_not_reset(mock_db, gw, monkeypatch)
         assert (frame["event"], frame["data"]["content"]) == ("message.assistant", "done")
     finally:
         await stream.aclose()
+
+
+async def test_merge_committed_between_the_check_and_the_read_resets_the_reader(mock_db, gw, monkeypatch):
+    # S5: the probe sees the cursor row, the merge commits, the read finds ABCDEF.
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(events_mod, "_push_delivery_healthy", lambda tail: True)
+    sid = "merged-mid-check"
+    database.create_session(sid, "default", title="Disposable merged run")
+    se.append_events(sid, [{"type": "message.user", "payload": {"content": "hi"}}])
+    se.append_events(sid, [{"type": "assistant.text_delta", "payload": {"text": t}} for t in ("A", "B", "C")])
+    epoch = se.get_log_epoch(sid)
+    stream, caught, _ = await _connect(sid)
+    assert caught["seq"] == 4
+    await asyncio.sleep(0.05)
+    real = events_mod.get_log_check
+
+    def racing_check(session_id, seq):
+        result = real(session_id, seq)
+        _mirror_merged_run(sid, 2, 7, "ABCDEF")
+        return result
+
+    monkeypatch.setattr(events_mod, "get_log_check", racing_check)
+    try:
+        gw._handle_payload(json.dumps({"session_id": sid, "max_seq": 7, "recheck_log": True}))
+        frame = (await collect_frames(stream, 1, timeout=1.0))[0]
+        assert frame["event"] == "reset" and frame["data"] == {"reason": "cursor", "epoch": epoch}
+    finally:
+        await stream.aclose()
+
+
+async def test_resume_racing_a_merge_resets_instead_of_replaying_it(mock_db, gw, monkeypatch):
+    sid = "merged-mid-resume"
+    database.create_session(sid, "default", title="Disposable merged run")
+    se.append_events(sid, [{"type": "message.user", "payload": {"content": "hi"}}])
+    se.append_events(sid, [{"type": "assistant.text_delta", "payload": {"text": t}} for t in ("A", "B", "C")])
+    epoch = se.get_log_epoch(sid)
+    real = events_mod._resume_check
+
+    def racing_check(session_id, from_seq, sent_epoch):
+        result = real(session_id, from_seq, sent_epoch)
+        _mirror_merged_run(sid, 2, 7, "ABCDEF")
+        return result
+
+    monkeypatch.setattr(events_mod, "_resume_check", racing_check)
+    stream = event_stream(sid, 4, epoch)
+    try:
+        frame = parse_frame(await anext(stream))
+        assert frame["event"] == "reset" and frame["data"] == {"reason": "cursor", "epoch": epoch}
+    finally:
+        await stream.aclose()
+
+
+async def test_reconciling_client_does_not_get_a_merged_row_over_its_own_text(mock_db):
+    sid = "merged-mid-reconcile"
+    database.create_session(sid, "default", title="Disposable merged run")
+    se.append_events(sid, [{"type": "message.user", "payload": {"content": "hi"}}])
+    se.append_events(sid, [{"type": "assistant.text_delta", "payload": {"text": t}} for t in ("A", "B", "C")])
+    _mirror_merged_run(sid, 2, 7, "ABCDEF")
+    with pytest.raises(events_mod._CursorCrossed):
+        async for _ in events_mod._tail_from_db(sid, 4):
+            pass
+    # From the top nothing was sent yet, so the merged row is the text.
+    assert [seq async for seq, _, _ in events_mod._tail_from_db(sid, 0)] == [1, 7]
+
+
+async def test_reinstalled_log_resets_connected_readers(mock_db, gw, monkeypatch):
+    # A reinstall can rewrite rows behind a cursor whose own row survives.
+    monkeypatch.setattr(events_mod, "KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(events_mod, "_push_delivery_healthy", lambda tail: True)
+    sid = "reinstalled-under-reader"
+    database.create_session(sid, "default", title="Disposable reinstall")
+    se.append_events(sid, [{"type": "message.user", "payload": {"content": "hi"}}])
+    epoch = se.get_log_epoch(sid)
+    stream, caught, _ = await _connect(sid)
+    assert caught["seq"] == 1
+    await asyncio.sleep(0.05)
+    try:
+        events_mod.reset_session_readers(sid, epoch)
+        frame = (await collect_frames(stream, 1, timeout=1.0))[0]
+        assert frame["event"] == "reset" and frame["data"] == {"reason": "cursor", "epoch": epoch}
+    finally:
+        await stream.aclose()
+    events_mod.reset_session_readers(sid, epoch)  # no reader left: nothing to do

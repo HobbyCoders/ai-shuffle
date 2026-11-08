@@ -200,29 +200,56 @@ backfill) calls one helper, `session_events.fit_mirrored_delta`, before the
 write. The bulk append and bulk snapshot fast paths first ask
 `delta_rows_need_fitting` and send the rows through the per-record path when a
 row is merged, shares its id with a held row, or falls inside a merged run held
-here. The rule:
+here. The helper has three outcomes and never deletes text the incoming row
+does not prove it covers:
 
-- a merged row replaces the held fragments of its run in the same transaction;
-- an original fragment of a run held merged is not written;
-- a merged row from before `merged_from_seq` existed names its first seq only by
-  its id (a held row with that id at a lower or higher seq). The first time a
-  worker sees both, it records the seq on the row and removes any fragment of
-  the run it wrote in between.
+- **Covered.** Every held row in the run's range belongs to the run, starts no
+  earlier than the merged row does, and has its text inside the merged text in
+  order. Those rows are replaced in the same transaction.
+- **Skipped.** A merged row held here already stands for the incoming row.
+- **Unproven.** Anything else: two merged runs that only partly overlap, a
+  merged row from before `merged_from_seq` existed whose start cannot be shown,
+  fragments written beneath such a row, or a row of another kind inside the
+  range. The held rows stay as they are, the incoming row is not written, and
+  the session goes into `network_transcript_repairs`.
 
-The result does not depend on what a worker held or on which worker sent the
-row, so a recovered mirror is as good a backfill source as the owner, and a
-peer holding the merged row can still take original fragments from a mirror
-that kept them. Replacing held rows keeps the log epoch (its first row), so the
-shared SSE reader (`app.api.events`) also checks, on every `recheck_log` wake
-that mirror writes send, that the row at its cursor still exists
-(`get_log_check`). If it is gone, every client gets `reset` with reason
-`cursor` and replays the run once. `merged_from_seq` never reaches clients:
+A merged row from before `merged_from_seq` existed names its first seq only by
+its id: a held row with that id at a lower seq proves where the run starts, and
+the earliest start known for a run is kept when an older worker sends the same
+run without one.
+
+The transcript loop (`transcripts.repair_queued`) works through that queue a
+few sessions at a time. It fetches the session's whole log from the session's
+owner and replaces this worker's rows up to the last seq it fetched, in one
+transaction (`install_owner_log`); newer rows stay. Every connected reader is
+then reset once. Only the owner is asked, because only its log settles which
+copy is right. While the owner is unreachable, or if the log is over 256 MiB,
+the held rows stay, the session retries with backoff (up to an hour), and
+everything else keeps syncing; later rows of that session still apply. A worker
+that becomes the owner, or a session that is deleted, drops the entry.
+
+The result does not depend on which worker sent the row, so a recovered mirror
+is as good a backfill source as the owner, and a peer holding the merged row
+can still take original fragments from a mirror that kept them.
+
+Replacing held rows keeps the log epoch (its first row), so an epoch check
+alone cannot tell a reader anything happened. The shared SSE reader
+(`app.api.events`) therefore does two things. On a `recheck_log` wake it checks
+that the row at its cursor still exists (`get_log_check`). And it looks at the
+rows it is about to deliver, in the same read: a merged row whose
+`merged_from_seq` is at or below the cursor would repeat text the client already
+has, so `merged_row_crosses_cursor` turns it into a `reset` with reason `cursor`
+instead, however late the merge committed. Resume and replay make the same
+check on each page they read. `merged_from_seq` never reaches clients:
 `transcript_replay._wire` drops it. Hand-off (`install_history`) makes the log
 exactly the old owner's and is unchanged.
 
-One case stays temporary: with a merged row from before this change, original
-fragments that arrive before the run's first fragment are written until that
-first fragment arrives, which then removes them.
+A merged row from before this change that reaches a worker with no held row of
+its run looks like any other row. If fragments of that run were then written
+beneath it, the transcript can show repeated text until the fragment landing on
+the merged row's own seq queues the reinstall; if that fragment never arrives
+the session stays as it is. Runs compacted after this change carry
+`merged_from_seq` and do not have this window.
 
 ## Transcript op volume: findings only
 

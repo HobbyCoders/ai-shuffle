@@ -119,6 +119,7 @@ from app.db.session_events import (
     get_tool_use_seqs,
     get_user_seq_for_turn,
     has_event_at,
+    merged_row_crosses_cursor,
 )
 
 logger = logging.getLogger(__name__)
@@ -451,6 +452,11 @@ class _SessionTail:
             rows = await asyncio.to_thread(get_events, self.session_id, cursor, _PAGE)
             if not rows:
                 return
+            if merged_row_crosses_cursor(rows, cursor):
+                # Same read as the rows below: a merge that landed after the
+                # last check still cannot be sent on top of its own fragments.
+                self.reset_clients(self._epoch or EMPTY_LOG_EPOCH)
+                return
             frames = tuple(
                 (row["seq"], _frame(row)) for row in rows if row["seq"] > cursor
             )
@@ -464,6 +470,11 @@ class _SessionTail:
             self._publish(_TailBatch(cursor, frames[-1][0], frames, self._epoch))
             if len(rows) < _PAGE:
                 return
+
+    def reset_clients(self, epoch: str) -> None:
+        """The rows behind every client's cursor changed: all of them reload."""
+        self._publish(_TailLogCheck(epoch, "cursor"))
+        self.close()
 
     def _publish(self, batch: Optional[Union[_TailBatch, _TailLogCheck]]) -> None:
         for sub in list(self._subs):
@@ -497,12 +508,27 @@ def _acquire_tail(session_id: str) -> _SessionTail:
     return tail
 
 
+def reset_session_readers(session_id: str, epoch: str) -> None:
+    """Reload every connected client of a session whose log was reinstalled.
+
+    Call on the event loop. A reinstall can rewrite rows behind a cursor whose
+    own row survives, which no cursor or epoch check can see.
+    """
+    tail = _tails.get(session_id)
+    if tail is not None and not tail.closed:
+        tail.reset_clients(epoch)
+
+
 def _push_delivery_healthy(tail: _SessionTail) -> bool:
     """True when live delivery can be trusted without a per-tick DB read."""
     try:
         return tail.alive and not tail.closed and get_gateway().is_connected()
     except Exception:  # noqa: BLE001
         return False
+
+
+class _CursorCrossed(Exception):
+    """A merged row just read restates text this client was already sent."""
 
 
 async def _replay_from(
@@ -522,6 +548,8 @@ async def _replay_from(
     page_from = from_seq
     while True:
         page = await asyncio.to_thread(get_events, session_id, page_from, _PAGE)
+        if merged_row_crosses_cursor(page, page_from):
+            raise _CursorCrossed
         if tool_uses is None:
             first_delta = next(
                 (r["seq"] for r in page if r.get("event_type") == _TOOL_INPUT_DELTA),
@@ -563,6 +591,8 @@ async def _tail_from_db(
         page = await asyncio.to_thread(get_events, session_id, cursor, _PAGE)
         if not page:
             return
+        if merged_row_crosses_cursor(page, cursor):
+            raise _CursorCrossed
         for row in page:
             if row["seq"] > cursor:
                 yield row["seq"], _frame(row), str(row["id"])
@@ -813,6 +843,9 @@ async def event_stream(
             resync_at = time.monotonic() + LIVE_RESYNC_SECONDS
             if timed_out and not wrote:
                 yield ": keepalive\n\n"
+    except _CursorCrossed:
+        # The resume/replay half of the reader's check: the client reloads.
+        yield _reset_frame("cursor", log_epoch)
     except (asyncio.CancelledError, ClientDisconnect, BaseExceptionGroup) as exc:
         # A normal SSE client disconnect must end the stream cleanly, NOT bubble
         # a cancellation out of the generator where it collapses into an anyio

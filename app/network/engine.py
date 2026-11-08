@@ -435,7 +435,8 @@ def leave_network() -> dict:
         for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
                       "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
                       "network_joins", "network_member_names", "network_instance_aliases", "network_members",
-                      "network_transcript_backfill", "network_transcript_backfill_state"):
+                      "network_transcript_backfill", "network_transcript_backfill_state",
+                      "network_transcript_repairs"):
             cursor.execute(f"DELETE FROM {table}")
         cursor.execute("DELETE FROM sync_blobs WHERE present = FALSE")
         store.delete_state(_conn=conn)

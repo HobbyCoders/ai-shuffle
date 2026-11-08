@@ -135,6 +135,7 @@ def forget() -> None:
     with _lock:
         _wanted.clear()
         _progress.clear()
+        _repair_backoff.clear()
 
 
 def reset_for_tests() -> None:
@@ -410,6 +411,22 @@ def _runs_here(session: Any, ctx: engine.NetworkContext) -> bool:
     return owner == ctx.device_id or (not owner and (session["instance_id"] or "") == catalog._my_instance_id())
 
 
+def _open_part(part: dict, asked: Dict[str, int], source: str, ctx: engine.NetworkContext,
+               coll: policy.Collection) -> Tuple[str, int, int, bool, dict]:
+    """One reply part, checked against the request: ``(session, after, next, more, body)``."""
+    session_id, after, last, more = part.get("session_id"), part.get("after"), part.get("next"), part.get("more")
+    if (not isinstance(session_id, str) or asked.get(session_id) != after or type(last) is not int
+            or last < after or not isinstance(more, bool) or (more and last == after)):
+        raise ValueError("Transcript reply does not answer the request")
+    body = engine.open_snapshot_chunk(part.get("chunk") or {}, ctx=ctx)
+    prefix = session_id + "|"
+    if (body.get("collection") != coll.name or body.get("device_id") != source or body.get("offset") != after
+            or body.get("more") != more
+            or any(not str(item.get("record_id", "")).startswith(prefix) for item in body["items"])):
+        raise ValueError("Transcript reply does not answer the request")
+    return session_id, after, last, more, body
+
+
 def apply_reply(reply: Any, source: str, asked: Dict[str, int], *, generation: int,
                 ctx: Optional[engine.NetworkContext] = None, relaxed: bool = False) -> dict:
     """Apply a source's reply, one transaction per session part. Returns counts.
@@ -428,16 +445,7 @@ def apply_reply(reply: Any, source: str, asked: Dict[str, int], *, generation: i
     for part in parts:
         if not isinstance(part, dict):
             raise ValueError("Malformed transcript reply")
-        session_id, after, last, more = part.get("session_id"), part.get("after"), part.get("next"), part.get("more")
-        if (not isinstance(session_id, str) or asked.get(session_id) != after or type(last) is not int
-                or last < after or not isinstance(more, bool) or (more and last == after)):
-            raise ValueError("Transcript reply does not answer the request")
-        body = engine.open_snapshot_chunk(part.get("chunk") or {}, ctx=ctx)
-        prefix = session_id + "|"
-        if (body.get("collection") != coll.name or body.get("device_id") != source or body.get("offset") != after
-                or body.get("more") != more
-                or any(not str(item.get("record_id", "")).startswith(prefix) for item in body["items"])):
-            raise ValueError("Transcript reply does not answer the request")
+        session_id, after, last, more, body = _open_part(part, asked, source, ctx, coll)
         touched: list = []
         with get_db() as conn:
             cursor = conn.cursor()
@@ -589,6 +597,155 @@ async def run_once(client: httpx.AsyncClient) -> Optional[bool]:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Reinstalling a transcript the merged-delta rule could not reconcile (#1278)
+# ---------------------------------------------------------------------------
+#
+# ``fit_mirrored_delta`` never deletes text it cannot prove covered: it keeps
+# the held rows and queues the session here. The owner's log is the only copy
+# that settles it, so the whole of it replaces this worker's in one
+# transaction. Until then (owner offline, say) the session keeps what it had
+# and sync carries on; a reinstall is retried, never a reason to fail a sync.
+
+#: Sessions reinstalled in one pass of the loop.
+REPAIR_SESSIONS = 4
+#: A session with more event bytes than this waits for a hand-off instead.
+REPAIR_MAX_BYTES = 256 * 1024 * 1024
+REPAIR_RETRY_MAX_SECONDS = 3600.0
+# Failed sessions by id: ``(attempts, not before)``. Only pacing, so not stored.
+_repair_backoff: Dict[str, Tuple[int, float]] = {}
+
+
+def _repair_owner(session_id: str, ctx: engine.NetworkContext) -> Optional[str]:
+    """The session's owner to reinstall from; None when nothing is left to do here."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT owner_device_id, instance_id FROM sessions WHERE id = %s", (session_id,))
+        session = cursor.fetchone()
+        if session is None or _runs_here(session, ctx):
+            # Deleted, or this worker runs it now: its log is the authoritative one.
+            store.clear_transcript_repair(cursor, session_id)
+            return None
+        if not session["owner_device_id"]:
+            raise ValueError("The session has no known owner")
+        return session["owner_device_id"]
+
+
+def _without_merged_duplicates(items: List[dict]) -> List[dict]:
+    """Drop rows of a run the owner merged between two pages of this fetch."""
+    from app.db.session_events import _merged_from, _run_key
+    kept: List[dict] = []
+    for item in items:
+        record = item.get("record")
+        if isinstance(record, dict) and not item.get("deleted"):
+            first = _merged_from(record)
+            if first is not None:
+                while kept and kept[-1].get("record") and kept[-1]["record"]["seq"] >= first \
+                        and _run_key(kept[-1]["record"]) == _run_key(record):
+                    kept.pop()
+        kept.append(item)
+    return kept
+
+
+def install_owner_log(session_id: str, owner: str, items: List[dict], last: int,
+                      ctx: engine.NetworkContext) -> Optional[str]:
+    """Make this worker's log up to ``last`` exactly the owner's. Returns the log's epoch.
+
+    One transaction, so a reader sees the old log or the new one. Rows past
+    ``last`` arrived after the owner read its log and stay. Returns None, with
+    nothing changed, when the session is no longer the owner's or no longer queued.
+    """
+    from app.db.session_events import get_log_epoch
+    coll = policy.collection("session_events")
+    touched: list = []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        store.lock_state(cursor)
+        if not store.transcript_repair_queued(cursor, session_id):
+            return None
+        cursor.execute("SELECT owner_device_id FROM sessions WHERE id = %s", (session_id,))
+        session = cursor.fetchone()
+        if session is None or session["owner_device_id"] != owner:
+            return None
+        cursor.execute("INSERT INTO session_event_counters (session_id, next_seq) VALUES (%s, 0) "
+                       "ON CONFLICT (session_id) DO UPDATE SET next_seq = session_event_counters.next_seq",
+                       (session_id,))
+        cursor.execute("DELETE FROM session_events WHERE session_id = %s AND seq <= %s", (session_id, last))
+        ids = [item["record_id"] for item in items]
+        for start in range(0, len(ids), engine.SNAPSHOT_SQL_BATCH):
+            part = ids[start:start + engine.SNAPSHOT_SQL_BATCH]
+            cursor.execute("DELETE FROM sync_records WHERE collection = %s AND record_id IN ("
+                           + ", ".join(["%s"] * len(part)) + ")", (coll.name, *part))
+        _, touched = engine.apply_snapshot_items(cursor, coll, items, ctx=ctx, existed=[session_id])
+        store.clear_transcript_repair(cursor, session_id)
+    if touched:
+        engine._notify(touched)
+    return get_log_epoch(session_id)
+
+
+async def _repair_session(client: httpx.AsyncClient, ctx: engine.NetworkContext, session_id: str) -> None:
+    coll = policy.collection("session_events")
+    owner = await asyncio.to_thread(_repair_owner, session_id, ctx)
+    if owner is None:
+        return
+    member = ctx.member(owner)
+    if member is None or member.status != membership.STATUS_ACTIVE:
+        raise ValueError("The session's owner is not an active member")
+    link = await asyncio.to_thread(_link, owner)
+    if not link.endpoints and not link.lan_endpoints:
+        raise ValueError("The session's owner has no known address")
+    held = await asyncio.to_thread(store.max_event_seq, session_id)
+    items: List[dict] = []
+    size = 0
+    after = 0
+    await link.open(client, ctx)
+    while True:
+        reply = await link.call(client, ctx, "POST", PATH, json_body={
+            "sessions": [{"id": session_id, "after": after, "held": held}], "max_bytes": REPLY_BYTES},
+            timeout=REQUEST_TIMEOUT)
+        parts = _verify_reply(reply, owner, ctx, {})
+        if len(parts) != 1 or not isinstance(parts[0], dict):
+            raise ValueError("Transcript reply does not answer the request")
+        _, _, last, more, body = _open_part(parts[0], {session_id: after}, owner, ctx, coll)
+        items.extend(body["items"])
+        size += sum(len(envelope_mod.record_bytes(item["record"])) for item in body["items"]
+                    if item.get("record") is not None)
+        if size > REPAIR_MAX_BYTES:
+            raise ValueError("The session's transcript is too large to reinstall")
+        after = last
+        if not more:
+            break
+    epoch = await asyncio.to_thread(install_owner_log, session_id, owner,
+                                    _without_merged_duplicates(items), after, ctx)
+    if epoch is not None:
+        from app.api.events import reset_session_readers
+        reset_session_readers(session_id, epoch)
+        logger.info("Reinstalled the transcript of session %s from its owner", session_id)
+
+
+async def repair_queued(client: httpx.AsyncClient) -> None:
+    """Reinstall transcripts queued by the merged-delta rule, a few per pass."""
+    from app.network import transport
+    ctx = engine.context()
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        return
+    if await asyncio.to_thread(pending):
+        return  # The first copy's transcripts may still settle them.
+    now = time.monotonic()
+    queued = await asyncio.to_thread(store.transcript_repairs)
+    for session_id in [sid for sid in queued if _repair_backoff.get(sid, (0, 0.0))[1] <= now][:REPAIR_SESSIONS]:
+        try:
+            await _repair_session(client, ctx, session_id)
+            _repair_backoff.pop(session_id, None)
+        except asyncio.CancelledError:
+            raise
+        except (httpx.HTTPError, transport.PeerError, ValueError, engine.ApplyError) as exc:
+            attempts = _repair_backoff.get(session_id, (0, 0.0))[0] + 1
+            delay = min(REPAIR_RETRY_MAX_SECONDS, 60.0 * 2 ** min(attempts, 7))
+            _repair_backoff[session_id] = (attempts, time.monotonic() + delay)
+            logger.info("Transcript reinstall of %s is waiting: %s", session_id, f"{exc}".strip() or type(exc).__name__)
+
+
 async def loop() -> None:
     """Copy pending transcripts in the background; wake on a new copy or an opened session."""
     global _wake, _loop
@@ -607,6 +764,7 @@ async def loop() -> None:
                         failures += 1
                         delay = min(RETRY_MAX_SECONDS, 2.0 ** min(failures, 7))
                     # None: not ready yet; ``finish_bootstrap`` wakes the loop.
+                await repair_queued(client)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
