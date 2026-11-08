@@ -358,8 +358,19 @@ is published. Its three paths run on one install:
   `runtime-overlays-v1` are all refused before activation, with the user's
   message, and the running release keeps answering.
 
-Run it as appuser in a disposable container of the image under test (for
-arm64 on an x86-64 host, an `--platform linux/arm64` container through QEMU).
+The non-publishing `runtime-overlay-acceptance.yml` workflow builds disposable
+images from its checkout on standard `ubuntu-24.04` and `ubuntu-24.04-arm`
+runners. It checks pinned Python 3.13.17 archives, runs all three harness paths
+as appuser against each image's baked updater, and separately installs the
+real hash-locked application dependencies and Fluid on the candidate runtime.
+The JSON acceptance report and dependency log are kept for three days. It uses
+no publisher credentials and does not enable `OVERLAYS` or publish an image.
+It runs for changes to the workflow, harness or runtime contract and can also
+be dispatched manually. A passing run uses a throwaway signing key, not the
+production publisher identity; release signing remains publisher-only.
+
+For a manual run, use appuser in a disposable container of the image under
+test (for arm64 on an x86-64 host, an `--platform linux/arm64` container through QEMU).
 Mount the harness and the candidate archive, for example a relocatable
 python-build-standalone `install_only` build for that architecture:
 
