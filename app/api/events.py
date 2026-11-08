@@ -79,6 +79,9 @@ from app.core.transcript_replay import (
     _delta_field as _delta_field,
 )
 from app.core.transcript_replay import (
+    merged_row_crosses_cursor,
+)
+from app.core.transcript_replay import (
     _delta_key as _delta_key,
 )
 from app.core.transcript_replay import (
@@ -119,7 +122,6 @@ from app.db.session_events import (
     get_tool_use_seqs,
     get_user_seq_for_turn,
     has_event_at,
-    merged_row_crosses_cursor,
 )
 
 logger = logging.getLogger(__name__)

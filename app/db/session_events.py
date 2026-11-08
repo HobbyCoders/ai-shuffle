@@ -1122,7 +1122,7 @@ def _compact_session_deltas(
 #
 # A connected reader sitting inside a replaced run is reset by the SSE reader
 # (``app.api.events``). It checks the rows it is about to deliver, in the same
-# read, with :func:`merged_row_crosses_cursor`. Hand-off is not covered here:
+# read, with ``transcript_replay.merged_row_crosses_cursor``. Hand-off is not covered here:
 # its import makes the log exactly the old owner's (``handoff``).
 
 MERGED_FROM_KEY = "merged_from_seq"
@@ -1144,21 +1144,6 @@ def _with_merged_from(record: Dict[str, Any], first_seq: int) -> Dict[str, Any]:
 
 def _delta_text(row: Dict[str, Any]) -> str:
     return _parse_payload(row.get("payload")).get("text") or ""
-
-
-def merged_row_crosses_cursor(rows: Sequence[Dict[str, Any]], cursor: int) -> bool:
-    """Whether a merged row among ``rows`` repeats text a reader at ``cursor`` was sent.
-
-    ``rows`` are the rows just read past ``cursor``, so the answer describes
-    exactly what would be delivered: a merge committing after any earlier
-    check cannot slip past it.
-    """
-    if cursor <= 0:
-        return False
-    return any(
-        row.get("event_type") in COMPACTABLE_DELTA_TYPES and (_merged_from(row) or cursor + 1) <= cursor
-        for row in rows
-    )
 
 
 def _covered_seqs(

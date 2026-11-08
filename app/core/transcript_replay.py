@@ -286,6 +286,23 @@ def _flush_pending_progress(
         yield _merged_progress_row(run)
 
 
+def merged_row_crosses_cursor(rows: Sequence[Dict[str, Any]], cursor: int) -> bool:
+    """Whether a merged delta among ``rows`` repeats text a reader at ``cursor`` was sent.
+
+    Called on the rows just read past ``cursor``, so the answer describes
+    exactly what would be delivered: a merge committing after any earlier
+    check cannot slip past it.
+    """
+    if cursor <= 0:
+        return False
+    for row in rows:
+        first = (row.get("payload") or {}).get("merged_from_seq")
+        if (row.get("event_type") in _COALESCE_TYPES and row["seq"] > cursor
+                and type(first) is int and 0 < first <= cursor):
+            return True
+    return False
+
+
 def _wire(row: Dict[str, Any]) -> Dict[str, Any]:
     """Merge a DB row's payload with its envelope (envelope keys win)."""
     payload = row.get("payload") or {}
