@@ -571,6 +571,63 @@ async def test_frontier_of_a_peer_with_newer_membership_keeps_what_a_new_member_
         assert transport._peer_watermark_binding[c.device_id]["incarnation"] == 1
 
 
+def forget_acknowledgements():
+    """What a restart leaves: no frontier or binding in memory for any peer."""
+    for cache in (transport._peer_watermarks, transport._peer_watermark_at, transport._peer_watermark_binding):
+        cache.clear()
+
+
+def speak_as_older_worker(scoped):
+    """Outgoing exchanges carry no ``generation``; their responses lose only the new marker."""
+    real = transport.PeerLink.call
+
+    async def call(self, client, ctx, method, path, **kwargs):
+        if not path.endswith("/peer/exchange"):
+            return await real(self, client, ctx, method, path, **kwargs)
+        body = {name: value for name, value in kwargs.pop("json_body").items() if name != "generation"}
+        reply = await real(self, client, ctx, method, path, json_body=body, **kwargs)
+        # What the handler returned before this change: both fields are still there.
+        assert reply.pop("retention_ack") == transport.RETENTION_ACK
+        assert reply["generation"] >= 1 and reply["incarnation"] >= 1
+        return reply
+
+    scoped.setattr(transport.PeerLink, "call", call)
+
+
+@pytest.mark.parametrize("older_peer", [False, True], ids=["updated_peer", "older_peer"])
+@pytest.mark.parametrize("peer_calls", [True, False], ids=["peer_calls_in", "worker_calls_out"])
+async def test_only_an_updated_peer_releases_ops_early(pg_workers, monkeypatch, peer_calls, older_peer):
+    """After a restart either direction alone refills a usable acknowledgement, and only from an updated peer."""
+    worker, peer = pg_workers("worker"), pg_workers("peer")
+    with worker.active():
+        engine.create_network("Bounds")
+    publish(worker, 1, create=True)
+    admit(worker, peer)
+    served_worker, served_peer = ServedBy(worker, "https://worker.example.com"), ServedBy(peer, "https://peer.example.com")
+    await sync(peer, served_worker)
+    publish(worker, 4)
+    retitle(worker, 1)
+    retitle(worker, 2)
+    await sync(peer, served_worker)  # the peer holds everything; only its acknowledgement is in question
+    forget_acknowledgements()
+    with monkeypatch.context() as scoped:
+        if older_peer:
+            speak_as_older_worker(scoped)
+        for _ in range(2):  # the second exchange advertises the committed frontier
+            await (sync(peer, served_worker) if peer_calls else sync(worker, served_peer))
+    binding = transport._peer_watermark_binding[peer.device_id]
+    assert (binding["generation"] is None) == older_peer
+    before = {name: ops_of(worker, name) for name in ("session_events", "sessions")}
+    age_ops(worker, 2)
+    await prune_once(worker, monkeypatch)
+    after = {name: ops_of(worker, name) for name in before}
+    if older_peer:
+        assert after == before
+    else:
+        assert len(after["session_events"]) <= 1 < len(before["session_events"])
+        assert len(after["sessions"]) == 1 < len(before["sessions"])
+
+
 def store_marks(worker):
     with worker.active():
         return store.local_watermarks()

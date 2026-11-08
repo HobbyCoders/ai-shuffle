@@ -116,9 +116,14 @@ member pins at zero until it acknowledges afresh when:
 - its certificate generation changed (it was revoked and re-admitted);
 - it reported a membership generation newer than this worker holds, or none at
   all. A frontier from a peer that has applied membership this worker has not
-  yet applied may leave out a member that is still missing here. Peers on older
-  versions send no generation when they call this worker, so they fail closed
-  to the 30-day age until both sides are updated.
+  yet applied may leave out a member that is still missing here.
+
+An older worker's frontier never releases anything early, in either direction,
+so its ops keep the 30-day age until both sides are updated. When it calls this
+worker its request has no `generation`, a field older workers never send. When
+this worker calls it, its response has a generation and an incarnation like any
+other, so those prove nothing: only the `retention_ack` marker in the exchange
+response (`transport.RETENTION_ACK`) makes the reported generation count.
 
 Each early delete also re-checks the membership generation, read before the
 members were, so a pass stops deleting early as soon as an admission or
@@ -279,7 +284,8 @@ floor and session compaction with real PostgreSQL
 workers and signed exchange: an offline peer inside its grace pins what it
 lacks and then catches up by ordinary op sync with no state copy, a peer past
 its grace that syncs through a relay (or with a 1-day grace and a 2-day absence)
-keeps every op it lacks, a peer unseen for 31 days stops pinning, a lagging
+keeps every op it lacks, a member with no trace for 31 days keeps blocking the
+early rules until it acknowledges or is revoked, a lagging
 peer pins superseded catalog ops, the kill switch holds everything, a bad,
 infinite or oversized floor skips only transcript retention while the rest of
 the maintenance pass still runs, and event rows plus `sync_records` stay

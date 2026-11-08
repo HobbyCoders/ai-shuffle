@@ -104,6 +104,10 @@ _peer_watermarks: Dict[str, dict] = {}
 _peer_watermark_at: Dict[str, float] = {}
 # What each frontier above was acknowledged under (:func:`acknowledgement_binding`).
 _peer_watermark_binding: Dict[str, dict] = {}
+# Sent as ``retention_ack`` in an exchange response. Older workers return the
+# generation and incarnation as well, so only this says the responder's frontier
+# may release ops early; without it they keep the 30-day age.
+RETENTION_ACK = 1
 _snapshot_peers: set[str] = set()
 _peer_catalog_backlog: Dict[str, bool] = {}
 # Only viewed chats request transcript heads. Bound memory and exchange work;
@@ -734,9 +738,9 @@ class PeerLink:
             })
             note_session_watermarks(self.device_id, session_ids, exchange.get("session_watermarks"))
             theirs = exchange.get("watermarks") or {}
+            reported = exchange.get("generation") if exchange.get("retention_ack") == RETENTION_ACK else None
             note_watermarks(self.device_id, theirs, catalog_backlog=bool(exchange.get("catalog_backlog")),
-                            binding=acknowledgement_binding(ctx, self.device_id, exchange.get("incarnation"),
-                                                            exchange.get("generation")))
+                            binding=acknowledgement_binding(ctx, self.device_id, exchange.get("incarnation"), reported))
             if not exchange.get("snapshot_required"):
                 _snapshot_peers.discard(self.device_id)
             if catch_up and target is None and not exchange.get("flushed"):

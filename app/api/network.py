@@ -612,7 +612,7 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
                     "key_version": ctx.key_version, "incarnation": ctx.identity.incarnation,
                     "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
                     "version": settings.version, "snapshot_required": snapshot,
-                    "peer_state": 1, "flushed": body.flush,
+                    "peer_state": 1, "retention_ack": transport.RETENTION_ACK, "flushed": body.flush,
                     **({"token_binding_proof": tokens.binding_support_proof(ctx)}
                        if settings.network_token_binding_enabled else {}),
                     "session_watermarks": catalog.transcript_watermarks(body.session_ids, ctx=ctx),
