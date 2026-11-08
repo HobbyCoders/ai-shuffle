@@ -422,6 +422,7 @@ class TestControllableAnnotation:
         sessions = [
             {"id": "s-mine", "instance_id": "me-install", "owner_device_id": "dev-me"},
             {"id": "s-theirs", "instance_id": "me-install", "owner_device_id": "dev-b"},
+            {"id": "s-legacy", "instance_id": "me-install"},
         ]
         with patch("app.network.runners.self_device_id", return_value=None), \
                 patch("app.network.identity.load", return_value=SimpleNamespace(device_id="dev-me")), \
@@ -433,7 +434,9 @@ class TestControllableAnnotation:
         assert sessions[0]["controllable"] is True
         assert "remote_runtime_state" not in sessions[0]
         assert sessions[1]["is_remote"] is True
-        # Only the other device's chat needs a runtime summary.
+        assert sessions[2]["is_remote"] is False
+        # Only the other device's chat needs a runtime summary. A row with no
+        # owner must not cost a read: session detail has a query budget.
         assert runtime.call_args.args[0] == ["s-theirs"]
 
     def test_is_pinned_from_runner_placement(self):

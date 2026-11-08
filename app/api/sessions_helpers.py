@@ -752,7 +752,11 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     except Exception:  # noqa: BLE001
         my_device = None
     from app.network.session_runtime import for_sessions, STATES
-    runtime = for_sessions([s["id"] for s in sessions if s.get("owner_device_id") != my_device])
+    # A summary is matched against the row's owner, so a row with no owner has none to read.
+    runtime = for_sessions([
+        s["id"] for s in sessions
+        if s.get("owner_device_id") and s["owner_device_id"] != my_device
+    ])
     for session in sessions:
         owner_device = session.get("owner_device_id")
         # The owner decides, and only rows with no owner read instance_id.
