@@ -801,6 +801,20 @@ def _is_interactive_run(
     return (row.get("mode") or "") != "voice"
 
 
+def _generation_is_interactive(
+    overrides: Dict[str, Any], session_row: Optional[Dict[str, Any]]
+) -> bool:
+    """Whether generation in this run treats the owner as present.
+
+    As :func:`_is_interactive_run`, plus the wake that carries the owner's
+    Approve of a generation (``continues_approved_generation``), in a chat
+    that would be interactive for a typed turn.
+    """
+    if overrides.get("continues_approved_generation"):
+        overrides = {**overrides, "turn_source": "user"}
+    return _is_interactive_run(overrides, session_row)
+
+
 def _generation_choices(ai_tools_config, session_row, api_user_id) -> dict:
     """Remembered generation choices of the account behind this run.
 
@@ -1770,7 +1784,7 @@ def build_options_from_profile(
     ai_tools_server_config = ai_tools_config_from_names(ai_tool_names)
     generation_context = _generation_context(
         ai_tools_server_config, session_row, api_user_id, session_id=session_id,
-        unattended=not _is_interactive_run(overrides, session_row),
+        unattended=not _generation_is_interactive(overrides, session_row),
         turn_source=(overrides or {}).get("turn_source"),
         chat_mode=session_mode == "chat",
         native_generation=any(

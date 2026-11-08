@@ -1516,11 +1516,16 @@ class SessionRuntime:
         # adapter maps this app source onto fluid's vocabulary. A failover
         # retry records the source of the turn it retries, so a retried wake
         # still counts as a wake.
+        from app.core.generation_resolver import continues_approved_generation
         from app.core.provider.harness_adapter import fluid_turn_source
         from app.core.turn_scheduler import effective_turn_source
 
         app_source = await asyncio.to_thread(effective_turn_source, self.turn)
         turn_overrides["turn_source"] = app_source
+        # Host-set on every turn, so nothing a client sends can claim it.
+        turn_overrides["continues_approved_generation"] = continues_approved_generation(
+            self.turn.get("payload")
+        )
         # The scheduler's emergency compaction for a turn the context limit
         # cut off: Claude Code's summarizer may stand in if Fluid has nothing.
         turn_overrides["emergency_compaction"] = bool(

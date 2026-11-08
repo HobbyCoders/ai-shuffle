@@ -282,6 +282,12 @@ def _pass_of(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return granted if isinstance(granted, dict) else None
 
 
+def approved_tool(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The tool whose one call the pass in ``payload`` admits, if it carries one."""
+    granted = _pass_of(payload)
+    return (granted.get("tool_name") or None) if granted else None
+
+
 def arm_pass(session_id: Optional[str], payload: Optional[Dict[str, Any]],
              turn_id: Optional[str]) -> bool:
     """Arm the pass ``payload`` carries for ``turn_id``, until it is spent.

@@ -66,6 +66,21 @@ def is_generation_tool(tool_name) -> bool:
     return canonical(tool_name) in (ADMISSION_GATED_TOOLS | READ_ONLY_GENERATION_TOOLS)
 
 
+def continues_approved_generation(payload) -> bool:
+    """Whether a turn carries the owner's Approve of a generation.
+
+    A prompt can outlive its turn (#523): the owner sends another message, that
+    turn ends, and Approve then queues a wake holding a one-use pass for the
+    call. The wake is the owner's own decision, so it may finish that call.
+    A wake holding no such pass stays unattended.
+    """
+    from app.core.generation_confirmations import SPEND_TOOL
+    from app.core.owner_confirm import approved_tool
+
+    tool_name = approved_tool(payload)
+    return bool(tool_name) and (tool_name == SPEND_TOOL or is_generation_tool(tool_name))
+
+
 def admission_gates_unattended(tool_name, context, *, session_id=None) -> bool:
     """Whether admission replaces Ask: unattended with no person-present source
     or voice-mode session. Unknown/new sources default to admission, not a wait.
