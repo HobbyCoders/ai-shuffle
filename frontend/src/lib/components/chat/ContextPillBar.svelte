@@ -304,7 +304,9 @@
 	const readOnlyOwner = $derived.by((): { name: string; online: boolean | null } | null => {
 		if (!readOnlyRemote) return null;
 		const name = sessionRow?.device_name ?? $activeSession.ownerDeviceName ?? null;
-		const live = presenceOf($workerInstalls, [ownerWorkerId], name);
+		// A name only stands in until the row says who owns the chat. Once it does,
+		// a cached name could match a different worker that happens to share it.
+		const live = presenceOf($workerInstalls, [ownerWorkerId], ownerWorkerId ? null : name);
 		const fromRow = typeof sessionRow?.device_online === 'boolean' ? sessionRow.device_online : null;
 		return { name: name || 'Another worker', online: live ?? fromRow };
 	});

@@ -838,6 +838,31 @@ describe('the read-only runner chip of a subagent’s chat', () => {
 		expect(chip(view.container)?.textContent).toContain(name ?? 'Another worker');
 	});
 
+	it('does not borrow another worker\'s presence through a cached name once the owner is gone', async () => {
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		subagentChats.mark(base.sessionId, true);
+		session.store.set({ ...base, projectV2Id: 'pv2-project', isRemote: true, ownerDeviceName: 'Laptop' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'worker-gone', owner_device_id: 'worker-gone',
+			device_name: null, device_online: false, is_remote: true, controllable: false }]);
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'worker-b', online: true, device_name: 'Laptop' }] });
+		const view = render(ContextPillBar);
+		await waitFor(() => expect(listInstallsMock).toHaveBeenCalled());
+		await tick();
+		expect(dotOf(chip(view.container))).toBe('offline');
+		expect(chip(view.container)?.textContent).toContain('Laptop');
+	});
+
+	it('still finds a remote owner by name before its row has arrived', async () => {
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		subagentChats.mark(base.sessionId, true);
+		session.store.set({ ...base, projectV2Id: 'pv2-project', isRemote: true, ownerDeviceName: 'Laptop' });
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'worker-c', online: true, device_name: 'Laptop' }] });
+		const view = render(ContextPillBar);
+		await waitFor(() => expect(listInstallsMock).toHaveBeenCalled());
+		await tick();
+		expect(dotOf(chip(view.container))).toBe('online');
+	});
+
 	it('follows the owner\'s live presence while the chat is open', async () => {
 		const { subagentChats } = await import('$lib/stores/subagent-chats');
 		subagentChats.mark(base.sessionId, true);
