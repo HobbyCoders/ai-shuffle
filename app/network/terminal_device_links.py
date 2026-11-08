@@ -9,8 +9,6 @@ single-use challenge this worker issued, so freshness needs no client clock.
 The approval code is derived from the key, and is never shown on this worker:
 the owner reads it on the device and types it here. A key an agent submitted
 has a different code, so it cannot be approved by clicking the wrong row.
-
-Contract: ``docs/internal/terminals.md``.
 """
 from __future__ import annotations
 

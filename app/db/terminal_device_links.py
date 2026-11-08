@@ -1,7 +1,7 @@
 """Devices the owner linked to this worker for peer terminals (#674).
 
 Local to this worker: nothing here is synced, because a link is this worker's
-own record of which key it trusts. Contract: ``docs/internal/terminals.md``.
+own record of which key it trusts.
 """
 from __future__ import annotations
 
