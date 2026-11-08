@@ -163,13 +163,13 @@ async def test_one_epoch_check_resets_all_attached_clients(mock_db, gw, monkeypa
             assert parse_frame(await anext(stream))["event"] == "caught_up"
             streams.append(stream)
         epoch_reads = []
-        real_epoch = events_mod.get_log_epoch
+        real_check = events_mod.get_log_check
 
-        def count_epoch(session_id):
+        def count_check(session_id, seq):
             epoch_reads.append(session_id)
-            return real_epoch(session_id)
+            return real_check(session_id, seq)
 
-        monkeypatch.setattr(events_mod, "get_log_epoch", count_epoch)
+        monkeypatch.setattr(events_mod, "get_log_check", count_check)
         for payload in mirror_rows("mirror-fanout-rewrite", 1, replace=True):
             gw._handle_payload(payload)
         results = await asyncio.gather(*(collect_frames(stream, 1) for stream in streams))
@@ -262,10 +262,10 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
         return result
 
     monkeypatch.setattr(events_mod, "_resume_check", check_then_replace)
-    real_epoch = events_mod.get_log_epoch
+    real_log_check = events_mod.get_log_check
 
-    def probe_then_replace(session_id):
-        epoch = real_epoch(session_id)
+    def probe_then_replace(session_id, seq):
+        epoch, present = real_log_check(session_id, seq)
         if (delivery == "mirror-notified-race" and not raced
                 and epoch != events_mod.EMPTY_LOG_EPOCH):
             # A commits and notifies. The probe sees A, then B commits before
@@ -273,9 +273,9 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
             raced.append(epoch)
             for payload in mirror_rows(session_id, 1, replace=True):
                 gw._handle_payload(payload)
-        return epoch
+        return epoch, present
 
-    monkeypatch.setattr(events_mod, "get_log_epoch", probe_then_replace)
+    monkeypatch.setattr(events_mod, "get_log_check", probe_then_replace)
     try:
         assert parse_frame(await anext(stream)) == {
             "event": "caught_up", "data": {"seq": 0, "epoch": events_mod.EMPTY_LOG_EPOCH}}

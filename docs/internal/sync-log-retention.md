@@ -183,6 +183,119 @@ with no state copy. A lagging recent peer pins what it lacks, the kill switch
 holds everything, and an expired peer recovers through a state copy to the same
 records and facts.
 
+## A peer that holds part of a merged delta run (#1278)
+
+Delta compaction on the owner merges a run of streamed fragments into one row
+at the run's last seq, under the first fragment's id. A peer that synced only
+the first fragments before the merge receives that merged row later, from a
+state copy or the transcript backfill. Inserting it as is fails on the held
+first fragment's id, and before this fix the backfill transaction failed on
+every attempt.
+
+The merged row is now canonical: compaction stores the run's first seq in its
+payload as `merged_from_seq`, so any worker can tell that the row stands for
+every seq of its run from `merged_from_seq` to its own seq. Every path that
+writes a mirrored transcript row (ordinary sync, state copy, transcript
+backfill) calls one helper, `session_events.fit_mirrored_delta`, before the
+write. The bulk append and bulk snapshot fast paths first ask
+`delta_rows_need_fitting` and send the rows through the per-record path when a
+row is merged, shares its id with a held row, or falls inside a merged run held
+here. The helper has three outcomes and never deletes text the incoming row
+does not prove it covers:
+
+- **Covered.** Identity proves it. The run's id is its first fragment's, so a
+  held row with that id anchors where the run starts, and the held rows after it
+  must follow without a gap. Those rows are replaced in the same transaction.
+  Text is only a veto: the same fragment repeated sits inside any longer string
+  of itself, so matching text proves nothing.
+- **Skipped.** A merged row held here already stands for the incoming row.
+- **Unproven.** Anything else: two merged runs that only partly overlap, a held
+  row with no anchor to the incoming run's first fragment (a merged row from
+  before `merged_from_seq` existed is one), fragments written beneath such a
+  row, or a row of another kind inside the range. The held rows stay as they
+  are, the incoming row is not written, and the session goes into
+  `network_transcript_repairs`.
+
+A merged row from before `merged_from_seq` existed names its first seq only by
+its id: a held row with that id at a lower seq proves where the run starts, and
+the earliest start known for a run is kept when an older worker sends the same
+run without one.
+
+The transcript loop (`transcripts.repair_queued`) works through that queue a
+few sessions at a time, oldest retry time first, so entries that keep failing
+cannot hide one whose owner is reachable. It fetches the session's whole log
+from the owner and replaces this worker's rows up to the last seq it fetched, in
+one transaction (`install_owner_log`); newer rows stay. Only the owner is asked,
+because only its log settles which copy is right. While the owner is
+unreachable, or if the log is over 256 MiB, the held rows stay, the session
+retries with backoff (up to an hour), and everything else keeps syncing. A worker
+that becomes the owner, or a session that is deleted, drops the entry.
+
+The fetch takes time and the install must not act on a copy that has gone stale,
+so the install revalidates everything under locks, in one place, and changes
+nothing if a check fails:
+
+- under `network_state` (sync, state copies and leaving the network take it):
+  the same network, no first copy in progress, and the queue entry still has the
+  token it had when the fetch began. Marking a session again issues a new token,
+  so a row refused during the fetch forces another fetch instead of being lost
+  behind the sync watermark;
+- under the runtime locks, run, counter and session (hand-off publication and
+  local writes take those and never `network_state`): the session exists and is
+  still the fetched owner's, read after waiting. A hand-off that won the counter
+  is seen here and its log is left alone. Local delta compaction takes the
+  counter too, before it reads the rows it writes back (`SKIP LOCKED`: a busy
+  session waits for the next maintenance pass), so it can never restore the
+  damaged text over a repair that committed while it was working;
+- against the records: no record of the session, tombstones included, is newer
+  than its version in the copy. A clear or delete that synced during the fetch
+  fails this, and the repair fetches again, so a cleared chat cannot come back.
+  Only records the copy supersedes or equals are ever replaced.
+
+Replacing held rows keeps the first row, and the epoch mirrors compare with each
+other must stay that row's id. So what tells readers is separate and local:
+`session_event_counters.rewrite_token`, set in the transaction that rewrites rows
+beneath surviving ones (repair, a merged row covering held fragments, a hand-off
+import that pruned or filled rows). SSE readers compare `reader_epoch`, the first
+row's id plus that token. It is durable, so a client resuming at a cursor that
+survived is reset even after a disconnect or restart; a `recheck_log` wake sends
+connected readers to compare it on commit, and the periodic reconcile covers a
+lost wake. A log never rewritten keeps its plain epoch, so nothing changes for
+it, and clients only echo the value back, so older tabs work unchanged. Views
+built from the log (`transcript_views`) key on the same reader epoch.
+
+A hand-off import compares only the ids and seqs of the rows. If it corrects a
+row's text under the same id and seq, the token stays put and a client resuming
+above that row keeps the old text until it reloads. That was already so before
+the token existed; it is tracked in
+[#1281](https://github.com/HobbyCoders/ai-shuffle/issues/1281).
+
+A connection that started with no epoch honours a `reset` once it holds rows, and
+a first load is told the epoch in an `X-Log-Epoch` response header, so a load
+that drops before `caught_up` resumes under a named log like any other.
+
+The result does not depend on which worker sent the row, so a recovered mirror
+is as good a backfill source as the owner, and a peer holding the merged row
+can still take original fragments from a mirror that kept them.
+
+The shared SSE reader (`app.api.events`) also guards the moment of the merge
+itself. On a `recheck_log` wake it checks the row at its cursor still exists
+(`get_log_check`). And it looks at the rows it is about to deliver, in the same read: a merged row whose
+`merged_from_seq` is at or below the cursor would repeat text the client already
+has, so `merged_row_crosses_cursor` turns it into a `reset` with reason `cursor`
+instead, however late the merge committed. Resume and replay make the same
+check on each page they read. `merged_from_seq` never reaches clients:
+`transcript_replay._wire` drops it. Hand-off (`install_history`) makes the log
+exactly the old owner's; its only change is setting the rewrite token when that
+pruned or filled rows beneath others.
+
+A merged row from before this change that reaches a worker with no held row of
+its run looks like any other row. If fragments of that run were then written
+beneath it, the transcript can show repeated text until the fragment landing on
+the merged row's own seq queues the reinstall; if that fragment never arrives
+the session stays as it is. Runs compacted after this change carry
+`merged_from_seq` and do not have this window.
+
 ## Transcript op volume: findings only
 
 The second half of the same report (about 1.1 million `session_events` ops a

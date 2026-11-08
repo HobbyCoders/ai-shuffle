@@ -290,7 +290,7 @@ def translate_sql(sql: str) -> str:
     # Row-lock clauses (`FOR SHARE` / `FOR UPDATE`) — no-ops on SQLite's single
     # writer; strip them so the SELECT parses.
     s = re.sub(r"\bFOR\s+SHARE\b", "", s, flags=re.I)
-    s = re.sub(r"\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b", "", s, flags=re.I)
+    s = re.sub(r"\bFOR\s+(?:NO\s+KEY\s+)?UPDATE(?:\s+SKIP\s+LOCKED)?\b", "", s, flags=re.I)
     # PostgreSQL groups JSON integers/reals as "number" and true/false as
     # "boolean"; SQLite's json_type distinguishes them. Keep numeric guards
     # faithful so tests execute the same real-call predicate as PostgreSQL.

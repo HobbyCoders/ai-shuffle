@@ -42,6 +42,7 @@ from app.db.base import get_db, get_event_db, rows_to_list
 # own JSON boundary — see the comment block above ``_PG_ILLEGAL_RE`` there for
 # why NUL and lone surrogates have to go before an INSERT sees them.
 from app.core.pg_session_store import _scrub_pg_illegal
+from app.core.transcript_replay import reader_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -660,6 +661,68 @@ def get_log_epoch(session_id: str) -> str:
     return str(row["id"]) if row else EMPTY_LOG_EPOCH
 
 
+# A worker's log can be rewritten beneath rows that survive: repair fills a gap
+# under a terminal row a client is resting on, so neither the first row's id nor
+# the cursor changes. Mirrors must agree on the first row's id (the network
+# compares it between workers), so what tells a resuming client is separate and
+# local: a token this worker sets when that happens. Clients echo the reader
+# epoch back whole, so a log that was never rewritten looks exactly as it did.
+def get_rewrite_token(session_id: str) -> Optional[str]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT rewrite_token FROM session_event_counters WHERE session_id = %s",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    return row["rewrite_token"] if row else None
+
+
+def get_reader_epoch(session_id: str) -> str:
+    """:func:`get_log_epoch` plus the rewrite token, in one statement. For resuming readers."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT (SELECT id FROM session_events WHERE session_id = %s "
+            "ORDER BY seq ASC LIMIT 1) AS epoch, "
+            "(SELECT rewrite_token FROM session_event_counters WHERE session_id = %s) AS token",
+            (session_id, session_id),
+        )
+        row = cursor.fetchone()
+    if row is None or row["epoch"] is None:
+        return EMPTY_LOG_EPOCH
+    return reader_epoch(str(row["epoch"]), row["token"])
+
+
+def mark_log_rewritten(cur: Any, session_id: str) -> None:
+    """Record, durably and in the rewrite's transaction, that rows beneath readers changed.
+
+    A client resuming later, even across a restart, sees the new token. A
+    connected reader finds it at its next check; the periodic reconcile is
+    what guarantees there is one.
+    """
+    cur.execute(
+        "INSERT INTO session_event_counters (session_id, next_seq, rewrite_token) VALUES (%s, 0, %s) "
+        "ON CONFLICT (session_id) DO UPDATE SET rewrite_token = EXCLUDED.rewrite_token",
+        (session_id, uuid.uuid4().hex[:12]),
+    )
+
+
+def note_log_rewritten(cur: Any, session_id: str) -> None:
+    """:func:`mark_log_rewritten`, and send connected readers to check it on commit."""
+    mark_log_rewritten(cur, session_id)
+    notify_log_recheck(cur, session_id, 0)
+
+
+def notify_log_recheck(cur: Any, session_id: str, max_seq: int) -> None:
+    """Send readers to re-validate this log when the mirror write commits."""
+    try:
+        cur.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, json.dumps({
+            "session_id": session_id, "max_seq": max_seq, "recheck_log": True})))
+    except Exception:  # noqa: BLE001 — absent on the SQLite shim; the gateway also polls
+        pass
+
+
 def has_event_at(session_id: str, seq: int) -> bool:
     """True if the log still holds a row at exactly ``seq``."""
     with get_db() as conn:
@@ -669,6 +732,28 @@ def has_event_at(session_id: str, seq: int) -> bool:
             (session_id, seq),
         )
         return cursor.fetchone() is not None
+
+
+def get_log_check(session_id: str, seq: int) -> Tuple[str, bool]:
+    """``(get_reader_epoch, has_event_at(seq))`` in one statement.
+
+    The live SSE reader's probe after a mirror write: a mirror replacing the
+    held fragments of a merged run (:func:`fit_mirrored_delta`) keeps the
+    epoch but removes rows a reader may sit on.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT (SELECT id FROM session_events WHERE session_id = %s "
+            "ORDER BY seq ASC LIMIT 1) AS epoch, "
+            "(SELECT rewrite_token FROM session_event_counters WHERE session_id = %s) AS token, "
+            "(SELECT 1 FROM session_events WHERE session_id = %s AND seq = %s) AS present",
+            (session_id, session_id, session_id, seq),
+        )
+        row = cursor.fetchone()
+    if row is None or row["epoch"] is None:
+        return EMPTY_LOG_EPOCH, False
+    return reader_epoch(str(row["epoch"]), row["token"]), row["present"] is not None
 
 
 def get_tool_use_seqs(
@@ -722,6 +807,19 @@ def get_watermark(session_id: str, *, at_seq: Optional[int] = None) -> Optional[
         )
         row = cursor.fetchone()
     return {"seq": int(row["seq"]), "epoch": str(row["epoch"]), "tail_id": str(row["tail_id"])} if row else None
+
+
+def get_reader_watermark(session_id: str, *, at_seq: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """:func:`get_watermark` with the reader epoch, for views built from the log.
+
+    The token is read first: a rewrite between the two reads then costs one
+    extra rebuild, where the other order would keep a view of the old log.
+    """
+    token = get_rewrite_token(session_id)
+    watermark = get_watermark(session_id, at_seq=at_seq)
+    if watermark is not None:
+        watermark["epoch"] = reader_epoch(watermark["epoch"], token)
+    return watermark
 
 
 def get_max_seq(session_id: str) -> int:
@@ -1005,8 +1103,13 @@ def _compact_session_deltas(
     max_runs: int,
     dry_run: bool,
 ) -> Tuple[int, int]:
+    # The counter row is the fence for rewriting this log. Compaction writes back
+    # what it read, so it holds the fence from before the read until commit, or a
+    # transcript repair committing in between is overwritten with the old text.
+    # Maintenance never queues for it: a busy session waits for the next pass.
     cur.execute(
-        "SELECT next_seq FROM session_event_counters WHERE session_id = %s",
+        "SELECT next_seq FROM session_event_counters WHERE session_id = %s"
+        + ("" if dry_run else " FOR UPDATE SKIP LOCKED"),
         (session_id,),
     )
     row = cur.fetchone()
@@ -1043,6 +1146,10 @@ def _compact_session_deltas(
         )
         payload = dict(_parse_payload(head.get("payload")))
         payload["text"] = text
+        # Say which seqs the survivor stands for, so a mirror holding some of
+        # them can tell (:func:`fit_mirrored_delta`). A head merged before
+        # already names its run's first seq.
+        payload[MERGED_FROM_KEY] = _merged_from(head) or int(head["seq"])
         compacted += 1
         deleted += len(members) - 1
         if dry_run:
@@ -1067,6 +1174,287 @@ def _compact_session_deltas(
             ),
         )
     return compacted, deleted
+
+
+# ----------------------------------------------------------------------
+# Mirrors: one rule for merged delta runs on every apply path (#1278)
+# ----------------------------------------------------------------------
+#
+# The owner's compaction replaces a run of fragments with ONE row: the first
+# fragment's id at the last fragment's seq, carrying ``merged_from_seq`` (the
+# run's first seq). A worker may hold any prefix of the original fragments, a
+# merged row, or both, arriving in any order, from the owner or another mirror.
+# Every path that writes a mirrored transcript row (ordinary sync, state copy,
+# transcript backfill) goes through :func:`fit_mirrored_delta` before writing,
+# and the bulk paths fall back to it whenever :func:`delta_rows_need_fitting`
+# says so. It has exactly three outcomes:
+#
+# * **covered**: every held row the incoming merged row replaces is proven to
+#   be inside it, so they are replaced in this transaction. Identity is the
+#   proof, never the text: the run's id is its first fragment's, so a held row
+#   with that id anchors the run's start, and rows contiguous after it are the
+#   fragments that followed. A merged row with no anchor proves nothing about
+#   rows it does not name;
+# * **skipped**: a merged row held here already stands for the incoming row;
+# * **unproven**: anything else (two merged runs that only partly overlap, a
+#   held row with no anchor to the incoming run's first fragment). Nothing is
+#   deleted and nothing is guessed: the held rows stay and the session is
+#   queued for a whole-log reinstall from its owner (:mod:`app.network.transcripts`).
+#
+# Text is still compared, but only as a veto: one fragment repeated ("ha") sits
+# inside any other string of it, so a match cannot show two rows are the same.
+#
+# A merged row from before ``merged_from_seq`` names its first seq only by its
+# id: the row holding that id at a lower seq proves where the run starts.
+#
+# A connected reader sitting inside a replaced run is reset by the SSE reader
+# (``app.api.events``). It checks the rows it is about to deliver, in the same
+# read, with ``transcript_replay.merged_row_crosses_cursor``. A reader resting
+# on a row above the run has no row of its own to miss, so a rewrite beneath
+# surviving rows also calls :func:`note_log_rewritten`. Hand-off is not covered
+# here: its import makes the log exactly the old owner's (``handoff``).
+
+MERGED_FROM_KEY = "merged_from_seq"
+
+
+def _merged_from(row: Dict[str, Any]) -> Optional[int]:
+    """First seq a merged delta row stands for, or None for an original fragment."""
+    value = _parse_payload(row.get("payload")).get(MERGED_FROM_KEY)
+    if type(value) is int and 0 < value < int(row["seq"]):
+        return value
+    return None
+
+
+def _with_merged_from(record: Dict[str, Any], first_seq: int) -> Dict[str, Any]:
+    payload = dict(_parse_payload(record.get("payload")))
+    payload[MERGED_FROM_KEY] = int(first_seq)
+    return {**record, "payload": payload}
+
+
+def _delta_text(row: Dict[str, Any]) -> str:
+    return _parse_payload(row.get("payload")).get("text") or ""
+
+
+def _held_rows(cur: Any, session_id: str, low: int, high: int) -> List[Dict[str, Any]]:
+    cur.execute(
+        "SELECT id, seq, event_type, turn_id, run_id, payload FROM session_events "
+        "WHERE session_id = %s AND seq >= %s AND seq <= %s ORDER BY seq ASC",
+        (session_id, int(low), int(high)),
+    )
+    return rows_to_list(cur.fetchall())
+
+
+def _contiguous_run(rows: Sequence[Dict[str, Any]], key: Tuple[Any, Any, Any], expected: int) -> bool:
+    """Rows of this run, each starting exactly where the previous one ended."""
+    for row in rows:
+        if _run_key(row) != key or (_merged_from(row) or int(row["seq"])) != expected:
+            return False
+        expected = int(row["seq"]) + 1
+    return True
+
+
+def _covered_from_head(
+    cur: Any, session_id: str, key: Tuple[Any, Any, Any], head_id: Any, low: int, high: int, text: str
+) -> Optional[List[int]]:
+    """Held seqs in ``[low, high]`` proven inside a merged run headed by ``head_id``.
+
+    None when they are not. Proof starts at the run's first fragment: the first
+    row held here must be that id, and the rest must follow it without a gap.
+    A row before the head, or no head at all, has nothing tying it to this run.
+    """
+    rows = _held_rows(cur, session_id, low, high)
+    if not rows:
+        return []
+    head = rows[0]
+    if head["id"] != head_id or _run_key(head) != key:
+        return None
+    if not _contiguous_run(rows[1:], key, int(head["seq"]) + 1):
+        return None
+    if not text.startswith("".join(_delta_text(row) for row in rows)):
+        return None
+    return [int(row["seq"]) for row in rows]
+
+
+def _covered_under_held_merge(
+    cur: Any, session_id: str, key: Tuple[Any, Any, Any],
+    head_seq: int, start: int, held_seq: int, record_text: str, held_text: str,
+) -> Optional[List[int]]:
+    """Held seqs between an arriving head at ``head_seq`` and its merged row at ``held_seq``."""
+    rows = _held_rows(cur, session_id, start, held_seq - 1)
+    if not rows:
+        return []
+    if int(rows[0]["seq"]) <= head_seq or not _contiguous_run(rows, key, head_seq + 1):
+        return None
+    if not held_text.startswith(record_text + "".join(_delta_text(row) for row in rows)):
+        return None
+    return [int(row["seq"]) for row in rows]
+
+
+def _delete_seqs(cur: Any, session_id: str, seqs: Sequence[int]) -> None:
+    for start in range(0, len(seqs), 500):
+        part = seqs[start:start + 500]
+        cur.execute(
+            "DELETE FROM session_events WHERE session_id = %s AND seq IN ("
+            + ", ".join(["%s"] * len(part)) + ")",
+            (session_id, *part),
+        )
+
+
+def _queue_reinstall(cur: Any, session_id: str, seq: int, reason: str) -> None:
+    """Leave the log as it is and ask for the owner's copy of the whole of it."""
+    logger.warning(
+        "Session %s: cannot reconcile the mirrored delta at seq %s (%s); "
+        "keeping the held rows and queueing a reinstall from the owner",
+        session_id, seq, reason)
+    cur.execute(
+        "INSERT INTO network_transcript_repairs (session_id, reason, token) VALUES (%s, %s, %s) "
+        "ON CONFLICT (session_id) DO UPDATE SET token = EXCLUDED.token",
+        (session_id, reason, uuid.uuid4().hex),
+    )
+
+
+def fit_mirrored_delta(
+    cur: Any, session_id: str, seq: int, record: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Apply the merged-run rule to a mirrored row about to be written here.
+
+    Returns the record to write, or None when the caller keeps what it holds.
+    Writing a merged row first removes the held rows it is proven to cover.
+    Call it inside the write's transaction, after last-writer-wins chose to
+    write. Two indexed queries for an ordinary fragment; other rows are
+    returned unchanged.
+    """
+    if record.get("event_type") not in COMPACTABLE_DELTA_TYPES:
+        return record
+    seq = int(seq)
+    key = _run_key(record)
+    text = _delta_text(record)
+    incoming_first = _merged_from(record)
+    cur.execute(
+        "SELECT id, session_id, seq, event_type, turn_id, run_id, payload FROM session_events "
+        "WHERE id = %s",
+        (record.get("id"),),
+    )
+    same_id = next((dict(row) for row in cur.fetchall()
+                    if row["session_id"] == session_id and _run_key(row) == key), None)
+    if same_id is not None and int(same_id["seq"]) > seq:
+        # The head of a run held merged. A run's id is its first fragment's,
+        # so this seq is where the held row starts, whatever it says so far.
+        held_seq = int(same_id["seq"])
+        start = incoming_first or seq
+        held_first = _merged_from(same_id)
+        if held_first is None or held_first > start:
+            seqs = _covered_under_held_merge(
+                cur, session_id, key, seq, start, held_seq, text, _delta_text(same_id))
+            if seqs is not None:
+                _delete_seqs(cur, session_id, seqs)
+                if seqs:
+                    note_log_rewritten(cur, session_id)
+                cur.execute(
+                    "UPDATE session_events SET payload = %s WHERE session_id = %s AND seq = %s",
+                    (json.dumps(_scrub_pg_illegal(_with_merged_from(same_id, start)["payload"])),
+                     session_id, held_seq),
+                )
+            else:
+                _queue_reinstall(cur, session_id, seq, "held rows outside a merged run")
+        return None
+
+    first = incoming_first
+    if same_id is not None:
+        # The same run under the same head: its earliest known start holds.
+        known = [first, _merged_from(same_id)]
+        if int(same_id["seq"]) < seq:
+            known.append(int(same_id["seq"]))
+        first = min((value for value in known if value is not None), default=None)
+
+    cur.execute(
+        "SELECT id, seq, event_type, turn_id, run_id, payload FROM session_events "
+        "WHERE session_id = %s AND seq >= %s ORDER BY seq ASC LIMIT 1",
+        (session_id, seq),
+    )
+    above = cur.fetchone()
+    if above is not None:
+        above = dict(above)
+        if (above.get("event_type") in COMPACTABLE_DELTA_TYPES and _run_key(above) == key
+                and above["id"] != record.get("id")):
+            held_first = _merged_from(above)
+            if held_first is not None and held_first <= seq:
+                if held_first > (first or seq):
+                    _queue_reinstall(cur, session_id, seq, "merged runs partly overlap")
+                return None
+            if int(above["seq"]) == seq and first is None:
+                # Another row of this run under another id at this very seq:
+                # one of the two is a merge from before runs named their first
+                # seq. Keep the held row; ask for the owner's copy unless it
+                # plainly contains this one and nothing was written beneath it.
+                cur.execute(
+                    "SELECT event_type, turn_id, run_id FROM session_events "
+                    "WHERE session_id = %s AND seq < %s ORDER BY seq DESC LIMIT 1",
+                    (session_id, seq),
+                )
+                below = cur.fetchone()
+                if text not in _delta_text(above):
+                    _queue_reinstall(cur, session_id, seq, "merged run of unknown start")
+                elif below is not None and below["event_type"] in COMPACTABLE_DELTA_TYPES \
+                        and _run_key(below) == key:
+                    _queue_reinstall(cur, session_id, seq, "fragments beneath a merged run")
+                return None
+    if first is None:
+        return record
+    seqs = _covered_from_head(cur, session_id, key, record.get("id"), first, seq, text)
+    if seqs is None:
+        _queue_reinstall(cur, session_id, seq, "held rows without a proven place in the run")
+        return None
+    _delete_seqs(cur, session_id, [held for held in seqs if held != seq])
+    cur.execute("SELECT 1 FROM session_events WHERE session_id = %s AND seq > %s LIMIT 1", (session_id, seq))
+    if cur.fetchone() is not None:
+        note_log_rewritten(cur, session_id)
+    return record if incoming_first == first else _with_merged_from(record, first)
+
+
+def delta_rows_need_fitting(cur: Any, records: Sequence[Dict[str, Any]]) -> bool:
+    """Whether a bulk insert of these mirrored rows must take the per-record path.
+
+    True when one of them is a merged row, shares its id with a held row, or
+    falls inside a merged run held here: :func:`fit_mirrored_delta` must see
+    those. Cheap for the common case, an append past everything held.
+    """
+    deltas = [r for r in records if r.get("event_type") in COMPACTABLE_DELTA_TYPES]
+    if not deltas:
+        return False
+    if any(_merged_from(r) is not None for r in deltas):
+        return True
+    ids = [r.get("id") for r in deltas]
+    for start in range(0, len(ids), 500):
+        part = ids[start:start + 500]
+        cur.execute("SELECT 1 FROM session_events WHERE id IN (" + ", ".join(["%s"] * len(part))
+                    + ") LIMIT 1", tuple(part))
+        if cur.fetchone() is not None:
+            return True
+    by_session: Dict[str, List[int]] = {}
+    for r in deltas:
+        by_session.setdefault(r["session_id"], []).append(int(r["seq"]))
+    types = ", ".join(["%s"] * len(COMPACTABLE_DELTA_TYPES))
+    for session_id, seqs in by_session.items():
+        low, high = min(seqs), max(seqs)
+        # A merged row covering seq s is the first row held at or above s.
+        cur.execute(
+            "SELECT seq, payload FROM session_events WHERE session_id = %s AND seq >= %s "
+            f"AND seq <= %s AND event_type IN ({types})",
+            (session_id, low, high, *COMPACTABLE_DELTA_TYPES),
+        )
+        rows = rows_to_list(cur.fetchall())
+        cur.execute(
+            "SELECT seq, event_type, payload FROM session_events WHERE session_id = %s AND seq > %s "
+            "ORDER BY seq ASC LIMIT 1",
+            (session_id, high),
+        )
+        after = cur.fetchone()
+        if after is not None and after["event_type"] in COMPACTABLE_DELTA_TYPES:
+            rows.append(dict(after))
+        if any((_merged_from(row) or high + 1) <= high for row in rows):
+            return True
+    return False
 
 
 def compact_idle_session_deltas(

@@ -487,6 +487,66 @@ describe('createSseFeed log epoch', () => {
 		feed.stop();
 	});
 
+	it('a first load that drops before caught_up resumes under the epoch the response named', async () => {
+		const urls: string[] = [];
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string) => {
+				urls.push(url);
+				return {
+					ok: true,
+					status: 200,
+					headers: new Headers({ 'x-log-epoch': 'ep-1~rabc' }),
+					body: streamThenPending(urls.length === 1 ? ['id: 3\ndata: {"seq":3}\n\n'] : [])
+				};
+			})
+		);
+		const feed = createSseFeed('sess-1', { onEvent: () => {} });
+		await tick();
+		expect(feed.epoch).toBe('ep-1~rabc');
+		feed.revive();
+		await tick();
+		expect(urls[1]).toContain('from_seq=3&epoch=ep-1~rabc');
+		feed.stop();
+	});
+
+	it('delivers a live reset on a fresh load once it has rows, and restarts the cursor', async () => {
+		// A repair can rewrite the log under this fresh connection after its first
+		// catch-up. The connection sent no epoch, but it holds rows from the old log.
+		const urls = serve([
+			[
+				'id: 1\ndata: {"seq":1}\n\n',
+				'id: 8\ndata: {"seq":8}\n\n',
+				'event: caught_up\ndata: {"seq":8,"epoch":"ep-1"}\n\n',
+				'event: reset\ndata: {"reason":"epoch","epoch":"ep-1~rabc"}\n\n',
+			],
+		]);
+		const events: Record<string, unknown>[] = [];
+		const feed = createSseFeed('sess-1', { onEvent: (e) => events.push(e) });
+		await tick();
+		expect(events.at(-1)).toMatchObject({ type: 'reset', epoch: 'ep-1~rabc' });
+		expect(feed.lastSeq).toBe(0);
+		expect(feed.epoch).toBe('ep-1~rabc');
+
+		feed.revive();
+		await tick();
+		expect(urls[1]).toContain('from_seq=0');
+		feed.stop();
+	});
+
+	it('delivers a reset that arrives during a fresh load, after its first rows', async () => {
+		// A merged row crossed the cursor while the first load was still paging.
+		serve([
+			['id: 3\ndata: {"seq":3}\n\n', 'event: reset\ndata: {"reason":"cursor","epoch":"ep-1"}\n\n'],
+		]);
+		const events: Record<string, unknown>[] = [];
+		const feed = createSseFeed('sess-1', { onEvent: (e) => events.push(e) });
+		await tick();
+		expect(events.at(-1)).toMatchObject({ type: 'reset', reason: 'cursor' });
+		expect(feed.lastSeq).toBe(0);
+		feed.stop();
+	});
+
 	it('ignores a reset on a request that sent no epoch', async () => {
 		serve([['event: reset\ndata: {"reason":"epoch","epoch":"ep-2"}\n\n', 'id: 1\ndata: {"seq":1}\n\n']]);
 		const events: Record<string, unknown>[] = [];

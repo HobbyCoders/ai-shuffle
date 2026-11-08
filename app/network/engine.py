@@ -435,7 +435,8 @@ def leave_network() -> dict:
         for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
                       "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
                       "network_joins", "network_member_names", "network_instance_aliases", "network_members",
-                      "network_transcript_backfill", "network_transcript_backfill_state"):
+                      "network_transcript_backfill", "network_transcript_backfill_state",
+                      "network_transcript_repairs"):
             cursor.execute(f"DELETE FROM {table}")
         cursor.execute("DELETE FROM sync_blobs WHERE present = FALSE")
         store.delete_state(_conn=conn)
@@ -730,6 +731,13 @@ def materialize(
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
     record = dict(record)
+    if coll.name == "session_events":
+        # One rule for merged delta runs on every apply path (#1278).
+        from app.db.session_events import fit_mirrored_delta
+        fitted = fit_mirrored_delta(cursor, keys[0], keys[1], record)
+        if fitted is None:
+            raise _KeepObservation  # a merged row held here already stands for it
+        record = fitted
     if coll.name == "system_settings" and record_id.startswith("provider_observation:"):
         from app.core.provider_observations import _number
         existing = _read_row(cursor, coll, record_id)
@@ -2454,15 +2462,21 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
     owners = {row["id"]: row["owner_device_id"] for row in cursor.fetchall()}
     if any(owners.get(sid) != origin for sid in sessions):
         return False
+    # ``owners`` read these sessions in this transaction: one missing at
+    # reservation was deleted in between, not "not arrived yet" (#1222).
+    # Reserved before the rows are read: compaction rewrites a run under these
+    # counters, so a fragment judged not to need fitting cannot land beneath a
+    # run merged after that judgement.
+    deleted = _lock_mirror_event_counters(cursor, ids, existed=owners)
     # A journal row without a sync record is a local/legacy write, not a fresh append.
     clauses = " OR ".join(["(session_id = %s AND seq = %s)"] * len(rows))
     cursor.execute(f"SELECT 1 FROM session_events WHERE {clauses} LIMIT 1",
                    tuple(value for row in rows for value in (row["session_id"], row["seq"])))
     if cursor.fetchone() is not None:
         return False
-    # ``owners`` read these sessions in this transaction: one missing at
-    # reservation was deleted in between, not "not arrived yet" (#1222).
-    deleted = _lock_mirror_event_counters(cursor, ids, existed=owners)
+    from app.db.session_events import delta_rows_need_fitting
+    if delta_rows_need_fitting(cursor, rows):
+        return False  # a merged run is involved: the per-op path applies its rule (#1278)
     last_seq = envs[-1].origin_seq
     if deleted:
         # Chats deleted while we waited: consume their ops, store nothing.
@@ -3104,6 +3118,7 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
         candidates[index] = record
     if not candidates:
         return set()
+    from app.db import session_events as events_db
     by_session: Dict[str, List[int]] = {}
     for index, record in candidates.items():
         by_session.setdefault(record["session_id"], []).append(index)
@@ -3115,6 +3130,12 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
         for index in indexes:
             if candidates[index]["seq"] in held:
                 del candidates[index]
+        # A merged delta run is involved: the per-record path applies its rule (#1278).
+        if events_db.delta_rows_need_fitting(
+                cursor, [candidates[index] for index in indexes if index in candidates]):
+            for index in indexes:
+                if index in candidates and candidates[index]["event_type"] in events_db.COMPACTABLE_DELTA_TYPES:
+                    del candidates[index]
     event_ids = [record["id"] for record in candidates.values()]
     taken: set = set()
     for start in range(0, len(event_ids), SNAPSHOT_SQL_BATCH):

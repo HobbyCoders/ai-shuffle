@@ -1335,6 +1335,15 @@ def _reconcile_app_rows(cur, sid, table, snapshot):
         keys = {(values[0], values[1]) if table == "session_events" else values[0] for values in snapshot}
         stale = [row["id"] for row in existing
                  if ((row["id"], row["seq"]) if table == "session_events" else row["id"]) not in keys]
+        if table == "session_events":
+            # Pruned or filled beneath rows that survive: a client resting on
+            # one must reload. A client on a removed row is reset already, so
+            # no statement unless that really happened.
+            held = {(row["id"], row["seq"]) for row in existing}
+            top = max((key[1] for key in held if key in keys), default=None)
+            if top is not None and any(key[1] < top for key in held ^ keys):
+                from app.db.session_events import mark_log_rewritten
+                mark_log_rewritten(cur, sid)
     for start in range(0, len(stale), 200):
         part = stale[start:start + 200]
         cur.execute(f"DELETE FROM {table} WHERE session_id=%s AND id IN (" +

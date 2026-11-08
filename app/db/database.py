@@ -1773,6 +1773,10 @@ def _run_column_migrations(cursor: Any) -> None:
             )
         """)
         migrations_applied.append("session_event_counters")
+    # Set when a mirror's log was rewritten beneath rows that survive
+    # (``session_events.reader_epoch``). NULL for every log never rewritten.
+    if not column_exists(cursor, "session_event_counters", "rewrite_token"):
+        cursor.execute("ALTER TABLE session_event_counters ADD COLUMN rewrite_token TEXT")
 
     if not table_exists(cursor, "runs"):
         cursor.execute("""

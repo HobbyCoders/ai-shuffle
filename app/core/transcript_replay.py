@@ -21,6 +21,16 @@ _COMPACT_CONTEXT_KEYS = (
 _COMPACT_CATEGORY_KEYS = ("name", "tokens", "color", "isDeferred")
 
 
+# Joins a log's epoch to this worker's last rewrite of it. Clients echo the whole
+# string back, so the format is private to the server.
+_REWRITE_SEPARATOR = "~r"
+
+
+def reader_epoch(log_epoch: str, rewrite_token: Optional[str]) -> str:
+    """The epoch SSE readers compare: the log's, plus this worker's last rewrite of it."""
+    return f"{log_epoch}{_REWRITE_SEPARATOR}{rewrite_token}" if rewrite_token else log_epoch
+
+
 def compact_context_usage(snapshot: Any) -> Any:
     """The part of a context-usage snapshot the usage bar reads.
 
@@ -286,9 +296,31 @@ def _flush_pending_progress(
         yield _merged_progress_row(run)
 
 
+def merged_row_crosses_cursor(rows: Sequence[Dict[str, Any]], cursor: int) -> bool:
+    """Whether a merged delta among ``rows`` repeats text a reader at ``cursor`` was sent.
+
+    Called on the rows just read past ``cursor``, so the answer describes
+    exactly what would be delivered: a merge committing after any earlier
+    check cannot slip past it.
+    """
+    if cursor <= 0:
+        return False
+    for row in rows:
+        first = (row.get("payload") or {}).get("merged_from_seq")
+        if (row.get("event_type") in _COALESCE_TYPES and row["seq"] > cursor
+                and type(first) is int and 0 < first <= cursor):
+            return True
+    return False
+
+
 def _wire(row: Dict[str, Any]) -> Dict[str, Any]:
     """Merge a DB row's payload with its envelope (envelope keys win)."""
     payload = row.get("payload") or {}
+    if "merged_from_seq" in payload:
+        # Storage bookkeeping of a compacted delta run (session_events
+        # MERGED_FROM_KEY): never on the wire, so a compacted run replays
+        # byte-identically to the coalesced fragments.
+        payload = {k: v for k, v in payload.items() if k != "merged_from_seq"}
     if row.get("event_type") == "turn.usage" and _perf_switch_on(_SLIM_USAGE_ENV):
         # Old rows (and rows mirrored from older workers) carry the full
         # context snapshot twice; send one compact copy.
