@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   acceptance:
-    name: Python 3.13 overlay (${{ matrix.arch }})
+    name: Python 3.12 overlay (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
@@ -28,15 +28,15 @@ jobs:
           - arch: amd64
             runner: ubuntu-24.04
             machine: x86_64
-            url: https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-x86_64-unknown-linux-gnu-install_only.tar.gz
-            sha256: cbda6f7767884fc456860b11fd184391a9320cae00a86c0f49a1c7ac6e236f7a
-            size: 76891798
+            url: https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only.tar.gz
+            sha256: 6a79e922e50006b601f29e688407659da1c2b86ebcd4e9c7254cf234be8b89de
+            size: 67921566
           - arch: arm64
             runner: ubuntu-24.04-arm
             machine: aarch64
-            url: https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.13.17%2B20261021-aarch64-unknown-linux-gnu-install_only.tar.gz
-            sha256: 616ab0a31b2a3f28119582f4d1943e342f13bac2ec5a8dfe8572c3c0bcadb95a
-            size: 58800287
+            url: https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-aarch64-unknown-linux-gnu-install_only.tar.gz
+            sha256: a945427411dc6851a1393533b74a4a1ac434321ae397f2ec69897a9b4fde032b
+            size: 53051192
     steps:
       - uses: actions/checkout@v4
       - name: Verify native runner architecture
@@ -66,12 +66,15 @@ jobs:
           cache-from: type=gha,scope=overlay-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=overlay-${{ matrix.arch }}
           build-args: GIT_SHA=${{ github.sha }}
+      - name: Record the baked runtime
+        run: |
+          docker run --rm --user appuser --entrypoint python3 ai-shuffle:overlay-acceptance             -c 'import json, platform, sys; print(json.dumps({"version": sys.version, "machine": platform.machine()}))'             > "$RUNNER_TEMP/overlay-evidence/baked-runtime.json"
       - name: Signed activation, cold restart, rollback and refusals
         run: |
           docker run --rm --user appuser --entrypoint python3 \
             --mount "type=bind,src=$RUNNER_TEMP/overlay-input,dst=/harness,readonly" \
             ai-shuffle:overlay-acceptance -I /app/scripts/release/overlay_acceptance.py \
-            --overlay /harness/python.tar.gz --capability python-3.13 \
+            --overlay /harness/python.tar.gz --capability python-3.12 \
             --executable python/bin/python3 \
             > "$RUNNER_TEMP/overlay-evidence/acceptance.json"
       # The signed harness uses a stand-in app. Test the real locked dependencies
@@ -89,7 +92,7 @@ jobs:
               "$python" -m pip install --only-binary=:all: --require-hashes --no-deps -r /app/requirements-voice.lock
               "$python" -m pip install --no-deps --no-build-isolation /opt/fluid
               "$python" -m pip check
-              "$python" -c "import fluid, fastapi, psycopg, cryptography; import sys; print(sys.version)"
+              "$python" -c "import fluid, fastapi, psycopg2, cryptography; import sys; print(sys.version)"
             ' > "$RUNNER_TEMP/overlay-evidence/dependencies.log" 2>&1
       - name: Upload acceptance evidence
         if: always()

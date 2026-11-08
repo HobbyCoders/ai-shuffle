@@ -25,7 +25,7 @@ def test_native_overlay_acceptance_checks_both_reviewed_candidates_without_secre
     for candidate in candidates:
         assert re.fullmatch(r"[0-9a-f]{64}", candidate["sha256"])
         assert int(candidate["size"]) > 0
-        assert candidate["url"].startswith("https://github.com/astral-sh/python-build-standalone/releases/download/20261021/")
+        assert candidate["url"].startswith("https://github.com/astral-sh/python-build-standalone/releases/download/20261026/")
         assert f"-{candidate['machine']}-unknown-linux-gnu-install_only.tar.gz" in candidate["url"]
     steps = job["steps"]
     fetch = next(s["run"] for s in steps if s.get("name") == "Fetch the pinned candidate runtime")
@@ -43,6 +43,9 @@ def test_native_overlay_acceptance_checks_both_reviewed_candidates_without_secre
     assert "--require-hashes -r /app/requirements.lock" in deps
     assert "--no-deps --no-build-isolation /opt/fluid" in deps
     assert '"$python" -m pip check' in deps
+    assert "psycopg2" in deps
+    assert "--capability python-3.12" in run
+    assert any(s.get("name") == "Record the baked runtime" for s in steps)
     evidence = steps[-1]
     assert evidence["if"] == "always()"
     assert evidence["with"]["retention-days"] == "3"
