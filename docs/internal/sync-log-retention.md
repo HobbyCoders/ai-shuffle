@@ -50,7 +50,9 @@ ids cannot starve it. For each origin/incarnation it deletes only operations:
    the rest of the maintenance round still runs). This was 30 days until the
    1.6-million-ops-a-week field report (see below). Rule 2 is what protects an
    offline peer, not the age, so the floor only keeps ops for a peer that has
-   just joined and not yet advertised a frontier.
+   just joined and not yet advertised a frontier. The one-hour floor applies
+   only to ops every **known** peer holds (see "Known peers" below); any other
+   op keeps main's 30-day age.
 2. At or below the minimum **actually advertised** frontier of every recent,
    active **worker** peer; absent streams/frontiers mean zero. Consumers (phones
    and browsers) are not database replicas and do not pin it.
@@ -64,10 +66,9 @@ ids cannot starve it. For each origin/incarnation it deletes only operations:
    known leak, left as it is: retiring them makes a known recovery bug more
    likely (issue 1278). A worker that holds only the start of a merged run and
    later takes a state copy collides with the merged row's reused event id, and
-   its transcript fill fails on every retry. That needs a worker past its
-   contact window, so the shorter floor does not change how often it happens:
-   the ops such a worker lacks start with the rest of the run, written right
-   after its last contact, so they are already older than 30 days.
+   its transcript fill fails on every retry. The shorter floor does not make it
+   more likely: an op a known peer lacks keeps main's 30-day age, so a peer only
+   meets a pruned gap when it would on main too.
 
 Recent means a successful authenticated sync observation within
 `AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS` (default **30**, positive integer days).
@@ -77,6 +78,33 @@ When it returns behind the retained interval it automatically takes a current
 state copy and fills its transcripts, then resumes ordinary operation sync.
 The trade-off is a full catch-up copy for a long-offline peer instead of an
 unbounded second copy of all history on every worker.
+
+### Known peers
+
+Contact grace alone is not enough to shorten retention. Direct contact can lapse
+while a peer still syncs through another worker: A and B have not exchanged
+directly for 31 days, but B received the start of A's reply through C two hours
+ago. If A pruned to C's frontier it would delete what B still lacks, and B
+would have to take a state copy where main lets it catch up by ops. The same
+happens with a short configured grace (1 day) and a 2-day absence.
+
+So both new passes (the one-hour transcript floor and session op compaction)
+also pin for every active worker peer that is past its grace but was **seen in
+the last 30 days by any route** (`_known_stale_peers`). Seen means the latest of
+its direct contact, its grace baseline and the local time this worker last
+applied its `presence` record. Every running worker republishes presence every
+five minutes, and that record travels through relays like any other op. A known
+peer pins at its last directly advertised frontier, or at zero when this worker
+has none. An op such a peer may lack is left to main's rules: the transcript
+pass applies the 30-day age to it (independent of the configured grace), and
+session compaction leaves it to the legacy 30-day prune. Peers not seen for 30
+days pin nothing, as on main. `network_members.last_seen` is still not used:
+hub directory refreshes touch it for every listed member.
+
+The cost: a known peer that is behind (offline for days, or syncing only
+through a relay) delays the savings until it catches up directly or ages out at
+30 days. With every peer online and exchanging directly, nothing changes and
+the full saving applies. Each pass logs `known_stale_peers`.
 
 Only the signed/local membership's active workers count; signed revocation
 unpins immediately. Never-contacted peers receive a one-time grace baseline.
@@ -208,7 +236,8 @@ change (title, pin, project) republishes the full row, and a receiver applies
 only the current materialized row. `compact_session_ops` runs right after
 `compact_memory_ops` with the same three rules (a newer envelope of the record
 exists, at or below every recent peer's frontier, below the stream head), the
-same peer grace and the same fail-closed behaviour. It deletes in committed
+same peer grace and the same fail-closed behaviour. Unlike memory compaction it
+also pins for known peers past their grace (see "Known peers"). It deletes in committed
 batches of 1,000 rows (`SESSION_COMPACTION_BATCH`; these envelopes are a few
 kB). Each pass logs `Session sync operation compaction`. Disable it with
 `AI_SHUFFLE_SYNC_SESSION_OP_COMPACTION=0` (`false`/`off` also work).
@@ -216,7 +245,9 @@ kB). Each pass logs `Session sync operation compaction`. Disable it with
 `tests/core/network/test_sync_log_bounds_postgres.py` covers the one-hour
 floor and session compaction with real PostgreSQL
 workers and signed exchange: an offline peer inside its grace pins what it
-lacks and then catches up by ordinary op sync with no state copy, a lagging
+lacks and then catches up by ordinary op sync with no state copy, a peer past
+its grace that syncs through a relay (or with a 1-day grace and a 2-day absence)
+keeps every op it lacks, a peer unseen for 31 days stops pinning, a lagging
 peer pins superseded catalog ops, the kill switch holds everything, a bad,
 infinite or oversized floor skips only transcript retention while the rest of
 the maintenance pass still runs, and event rows plus `sync_records` stay
@@ -252,8 +283,10 @@ running in parallel. It grows with use, not because of a bug.
 
 A later report measured 1.6 million a week (1,600,239 upserts across 1,599,901
 records, so re-upserts are 0.02%). With a 30-day floor that kept about four
-weeks of activity, 3.65 million envelopes. The floor is now one hour, so a
-worker keeps about an hour of ops plus whatever a recent peer has not received.
+weeks of activity, 3.65 million envelopes. The floor is now one hour, so with
+every peer online a worker keeps about an hour of ops plus whatever a peer has
+not received yet. A known peer that is behind keeps what it lacks for up to 30
+days, as before.
 
 One producer is not coalesced: delegated Claude CLI sub-agents. Each streamed
 `text_delta` becomes its own `subagent_chunk` progress event, and the finished

@@ -213,7 +213,9 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   state copy instead). Transcript event envelopes go after an hour once every
   recent peer holds them, and superseded `memory`, `sessions` and
   `session_runtime` envelopes (each one a whole record) are dropped at the
-  daily maintenance pass once every recent peer holds them; see
+  daily maintenance pass once every recent peer holds them (for transcripts and
+  sessions, also every peer seen in the last 30 days, even through a relay;
+  otherwise they keep the 30 days); see
   [sync-log retention](../internal/sync-log-retention.md).
 
 ## Deviations from the plan

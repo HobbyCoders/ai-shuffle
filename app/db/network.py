@@ -969,6 +969,39 @@ def _recent_peers(cur, local_device_id: str, peer_observations: dict, *, now: da
     return peers, expired
 
 
+# Main's transcript age and the legacy prune's: what a peer outside the contact
+# grace but still known (see _known_stale_peers) keeps for ordinary catch-up.
+KNOWN_PEER_DAYS = 30
+
+
+def _known_stale_peers(cur, expired: List[str], peer_observations: dict, *, now: datetime) -> Dict[str, dict]:
+    """Peers past the contact grace that were still seen in the last 30 days, by any route.
+
+    Direct contact is not the only sign of life: a peer that syncs through
+    another worker still publishes its presence row every few minutes, and
+    that row reaches this worker through the relay. ``sync_records.updated_at``
+    is the local time this worker applied it. Such a peer may still catch up
+    by ordinary op sync, so the short-retention passes keep what it has not
+    acknowledged on main's 30-day rule, whatever the configured grace. Maps
+    each to its last authenticated frontier (``{}`` when none: pins at zero).
+    """
+    if not expired:
+        return {}
+    cutoff = now - timedelta(days=KNOWN_PEER_DAYS)
+    marks = ", ".join("%s" for _ in expired)
+    cur.execute("SELECT p.device_id, GREATEST(p.last_contact, p.updated_at, r.updated_at) AS seen "
+                "FROM sync_peers p LEFT JOIN sync_records r ON r.collection = 'presence' "
+                "AND r.record_id = p.device_id WHERE p.device_id IN (" + marks + ")", tuple(expired))
+    known: Dict[str, dict] = {}
+    for row in cur.fetchall():
+        seen = row["seen"]
+        if isinstance(seen, str):
+            seen = datetime.fromisoformat(seen)
+        if seen is not None and seen >= cutoff:
+            known[row["device_id"]] = (peer_observations.get(row["device_id"]) or {}).get("watermarks") or {}
+    return known
+
+
 def _stream_frontier(origin: str, incarnation: int, head: int, peers: Dict[str, dict]) -> int:
     """Highest seq of a stream that every recent peer already holds (<= head)."""
     return min([head, *(int((marks.get(origin) or {}).get(str(incarnation), 0)) for marks in peers.values())])
@@ -989,6 +1022,11 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
     copies and transcript backfill read rows plus sync_records, and hand-off
     ships its own history. So the age floor is short (``min_age_hours``,
     default :data:`DEFAULT_TRANSCRIPT_OP_MIN_AGE_HOURS`), not 30 days.
+
+    The short floor holds only below the frontier of every peer seen in the
+    last 30 days (:func:`_known_stale_peers`). Above it an op keeps main's
+    30-day age: a peer past the contact grace may still be syncing through
+    another worker, and deleting what it lacks would force it into a state copy.
     """
     if os.environ.get(TRANSCRIPT_OP_RETENTION_ENV, "").strip().lower() in ("0", "false", "off"):
         return 0
@@ -1011,13 +1049,17 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
         cur = conn.cursor()
         set_timeout(cur)
         peers, expired = _recent_peers(cur, local_device_id, peer_observations, now=now, grace_days=grace_days)
+        known = _known_stale_peers(cur, expired, peer_observations, now=now)
         heads = _log_heads(cur) if _heads is None else _heads
+    legacy_cutoff = (now - timedelta(days=KNOWN_PEER_DAYS)).isoformat()
 
     total = bytes_estimate = 0
     frontiers = {}
     for stream in heads:
         origin, incarnation, head = stream["origin_device_id"], int(stream["incarnation"]), int(stream["s"])
         frontier = _stream_frontier(origin, incarnation, head, peers)
+        # Ops every known peer holds take the short floor; the rest main's 30 days.
+        short = _stream_frontier(origin, incarnation, frontier, known)
         frontiers.setdefault(origin, {})[str(incarnation)] = frontier
         if frontier <= 0:
             continue
@@ -1027,7 +1069,8 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
         sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                      SELECT o.ingest_id FROM sync_ops o
                      WHERE o.origin_device_id = %s AND o.incarnation = %s
-                       AND o.created_at < %s AND o.seq > %s AND o.seq < %s AND o.seq <= %s
+                       AND o.created_at < CASE WHEN o.seq <= %s THEN %s::timestamptz ELSE %s::timestamptz END
+                       AND o.seq > %s AND o.seq < %s AND o.seq <= %s
                        AND o.collection = 'session_events' AND EXISTS (
                            SELECT 1 FROM sync_records r WHERE r.collection = o.collection
                              AND r.record_id = o.record_id AND r.clock >= o.clock
@@ -1041,14 +1084,16 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
             nonlocal bytes_estimate
             rows = cursor.fetchall()
             bytes_estimate += sum(int(row["bytes_estimate"]) for row in rows)
-            return origin, incarnation, cutoff, max((row["seq"] for row in rows), default=0), head, frontier, BATCH_SIZE
+            return (origin, incarnation, short, cutoff, legacy_cutoff,
+                    max((row["seq"] for row in rows), default=0), head, frontier, BATCH_SIZE)
 
-        total += delete_batches(sql, (origin, incarnation, cutoff, 0, head, frontier, BATCH_SIZE),
+        total += delete_batches(sql, (origin, incarnation, short, cutoff, legacy_cutoff, 0, head, frontier,
+                                      BATCH_SIZE),
                                 advance=advance, stop=stop, cursor=_conn.cursor() if _conn is not None else None)
     logger.info("Transcript sync operation retention %s", _json({
         "deleted_ops": total, "bytes_estimate": bytes_estimate, "min_age_hours": min_age_hours,
-        "peer_grace_days": grace_days, "peer_frontiers": peers,
-        "expired_peers": expired, "retained_frontiers": frontiers}))
+        "peer_grace_days": grace_days, "peer_frontiers": peers, "expired_peers": expired,
+        "known_stale_peers": sorted(known), "retained_frontiers": frontiers}))
     return total
 
 
@@ -1065,7 +1110,7 @@ SESSION_COMPACTION_BATCH = 1000
 
 
 def _compact_superseded_ops(collections: Tuple[str, ...], *, label: str, kill_switch_env: str, batch: int,
-                            local_device_id: str, peer_observations: dict,
+                            local_device_id: str, peer_observations: dict, pin_known_peers: bool = False,
                             _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
     """Drop superseded envelopes of whole-state records that every recent peer holds.
 
@@ -1074,7 +1119,10 @@ def _compact_superseded_ops(collections: Tuple[str, ...], *, label: str, kill_sw
     the newest envelope of a record, any stream's head, or anything above the
     minimum frontier of the recent active worker peers (the same pins as
     :func:`prune_transcript_ops`), so no online peer meets a gap. A peer past
-    the contact grace recovers through the existing state copy.
+    the contact grace recovers through the existing state copy. With
+    ``pin_known_peers`` a peer past the grace but seen in the last 30 days
+    (:func:`_known_stale_peers`) pins too; what it lacks is left to the legacy
+    30-day prune, as on main.
     """
     if os.environ.get(kill_switch_env, "").strip().lower() in ("0", "false", "off"):
         return 0
@@ -1090,11 +1138,12 @@ def _compact_superseded_ops(collections: Tuple[str, ...], *, label: str, kill_sw
         cur = conn.cursor()
         set_timeout(cur)
         peers, expired = _recent_peers(cur, local_device_id, peer_observations, now=now, grace_days=grace_days)
+        known = _known_stale_peers(cur, expired, peer_observations, now=now) if pin_known_peers else {}
         heads = _log_heads(cur) if _heads is None else _heads
     bounds = []
     for stream in heads:
         origin, incarnation, head = stream["origin_device_id"], int(stream["incarnation"]), int(stream["s"])
-        frontier = _stream_frontier(origin, incarnation, head, peers)
+        frontier = _stream_frontier(origin, incarnation, head, {**known, **peers})
         if frontier > 0:
             bounds.append((origin, incarnation, frontier, head))
     total = bytes_estimate = 0
@@ -1128,7 +1177,8 @@ def _compact_superseded_ops(collections: Tuple[str, ...], *, label: str, kill_sw
                                batch_size=batch)
     logger.info("%s %s", label, _json({
         "deleted_ops": total, "bytes_estimate": bytes_estimate,
-        "peer_grace_days": grace_days, "peer_frontiers": peers, "expired_peers": expired}))
+        "peer_grace_days": grace_days, "peer_frontiers": peers, "expired_peers": expired,
+        "known_stale_peers": sorted(known)}))
     return total
 
 
@@ -1157,11 +1207,13 @@ def compact_session_ops(local_device_id: str, peer_observations: dict, *,
     (``sync_records``), and state copies read that version plus the row. A
     busy session republishes them on every title, status, cost or runtime
     change, so the generic 30-day pass kept tens of copies per record (#1167).
-    Rules and pins: :func:`_compact_superseded_ops`.
+    Rules and pins: :func:`_compact_superseded_ops`; a peer seen in the last 30
+    days by any route pins too, so nothing it lacks goes earlier than on main.
     """
     return _compact_superseded_ops(SESSION_COMPACTION_COLLECTIONS, label="Session sync operation compaction",
                                    kill_switch_env=SESSION_OP_COMPACTION_ENV, batch=SESSION_COMPACTION_BATCH,
                                    local_device_id=local_device_id, peer_observations=peer_observations,
+                                   pin_known_peers=True,
                                    _conn=_conn, stop=stop, _heads=_heads)
 
 
