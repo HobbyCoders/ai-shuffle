@@ -15,7 +15,6 @@ Transcripts older than ``HISTORY_DAYS`` are published on demand only
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -550,14 +549,10 @@ def after_event_mirrored(cursor, record: Dict[str, Any]) -> None:
         # publishes from here on instead of re-sending what the network has.
         if store.catalog_cursor(cursor, session_id) < seq:
             store.set_catalog_cursor(cursor, session_id, seq)
-    try:
-        from app.db.session_events import NOTIFY_CHANNEL
-        # Mirroring can replace old seqs, not just append above a reader's cursor.
-        # The shared SSE reader must validate its epoch even when max_seq falls.
-        cursor.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, json.dumps({
-            "session_id": session_id, "max_seq": seq, "recheck_log": True})))
-    except Exception:  # noqa: BLE001 — absent on the SQLite shim; the gateway also polls
-        pass
+    from app.db.session_events import notify_log_recheck
+    # Mirroring can replace old seqs, not just append above a reader's cursor.
+    # The shared SSE reader must validate its epoch even when max_seq falls.
+    notify_log_recheck(cursor, session_id, seq)
 
 
 def transcript_text(session_id: str, *, limit: int = 400) -> str:

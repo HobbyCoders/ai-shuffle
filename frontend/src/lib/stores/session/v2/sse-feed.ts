@@ -375,6 +375,11 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 				throw new Error(`SSE feed HTTP ${res.status}`);
 			}
 
+			// A first load can drop before caught_up; the server names the log on
+			// the response so resuming it is still checked. Absent on older servers.
+			const namedEpoch = from === 0 ? res.headers?.get('x-log-epoch') : null;
+			if (namedEpoch) epoch = namedEpoch;
+
 			// A successful connect resets the backoff clock.
 			backoff = BACKOFF_MIN_MS;
 			// Signal the fresh connection so the consumer can re-arm per-connect
@@ -437,9 +442,10 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 								// reset as if the log had been cleared.
 								epoch = payload.id;
 							} else if (payload.type === 'reset') {
-								// A reset only answers the epoch this request sent; one without
-								// it has nothing to invalidate.
-								if (!sentEpoch) continue;
+								// With no epoch sent and nothing received yet there is nothing
+								// to invalidate. Once rows have arrived, a reset means the log
+								// changed beneath them, even on a connection that began fresh.
+								if (!sentEpoch && lastSeq === 0) continue;
 								// The server continues with a full load of the new log, so
 								// the old cursor is meaningless from here on.
 								lastSeq = 0;

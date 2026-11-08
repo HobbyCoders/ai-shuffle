@@ -345,6 +345,9 @@ def create_schema(cursor) -> None:
         CREATE TABLE IF NOT EXISTS network_transcript_repairs (
             session_id TEXT PRIMARY KEY,
             reason TEXT NOT NULL DEFAULT '',
+            token TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            not_before BIGINT NOT NULL DEFAULT 0,
             marked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
@@ -1755,18 +1758,39 @@ def backfill_session_pending(session_id: str) -> bool:
         return cursor.fetchone() is not None
 
 
-def transcript_repairs(limit: int = 100) -> List[str]:
-    """Sessions waiting for a whole-log reinstall from their owner, oldest first."""
+def transcript_repairs_due(limit: int, now: int) -> List[str]:
+    """Sessions whose whole-log reinstall may be tried now, least recently tried first.
+
+    Eligibility is in the query, so sessions that keep failing cannot fill the
+    page and hide one whose owner is reachable.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT session_id FROM network_transcript_repairs ORDER BY marked_at, session_id LIMIT %s",
-                       (limit,))
+        cursor.execute("SELECT session_id FROM network_transcript_repairs WHERE not_before <= %s "
+                       "ORDER BY not_before, session_id LIMIT %s", (now, limit))
         return [row["session_id"] for row in cursor.fetchall()]
 
 
-def transcript_repair_queued(cursor, session_id: str) -> bool:
-    cursor.execute("SELECT 1 FROM network_transcript_repairs WHERE session_id = %s", (session_id,))
-    return cursor.fetchone() is not None
+def transcript_repair_token(cursor, session_id: str) -> Optional[str]:
+    """The queue entry's token, new each time the session is marked; None when not queued."""
+    cursor.execute("SELECT token FROM network_transcript_repairs WHERE session_id = %s", (session_id,))
+    row = cursor.fetchone()
+    return None if row is None else str(row["token"])
+
+
+def defer_transcript_repair(session_id: str, *, now: int, base: float, ceiling: float) -> None:
+    """Try this reinstall again later: ``base`` seconds, doubling up to ``ceiling``."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT attempts FROM network_transcript_repairs WHERE session_id = %s FOR UPDATE",
+                       (session_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return
+        attempts = int(row["attempts"]) + 1
+        delay = min(ceiling, base * 2 ** min(attempts - 1, 16))
+        cursor.execute("UPDATE network_transcript_repairs SET attempts = %s, not_before = %s WHERE session_id = %s",
+                       (attempts, now + int(delay), session_id))
 
 
 def clear_transcript_repair(cursor, session_id: str) -> None:

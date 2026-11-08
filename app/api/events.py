@@ -82,6 +82,9 @@ from app.core.transcript_replay import (
     merged_row_crosses_cursor,
 )
 from app.core.transcript_replay import (
+    reader_epoch,
+)
+from app.core.transcript_replay import (
     _delta_key as _delta_key,
 )
 from app.core.transcript_replay import (
@@ -117,7 +120,8 @@ from app.db.session_events import (
     get_compaction_events_before,
     get_events,
     get_log_check,
-    get_log_epoch,
+    get_reader_epoch,
+    get_rewrite_token,
     get_max_seq,
     get_tool_use_seqs,
     get_user_seq_for_turn,
@@ -451,6 +455,9 @@ class _SessionTail:
         """ONE read + ONE serialization per batch, fanned out to every client."""
         while True:
             cursor = int(self._cursor or 0)
+            # Before the rows: a rewrite between the reads then costs a reload,
+            # where the other order would name the old log as rewritten.
+            token = await asyncio.to_thread(get_rewrite_token, self.session_id) if cursor == 0 else None
             rows = await asyncio.to_thread(get_events, self.session_id, cursor, _PAGE)
             if not rows:
                 return
@@ -467,7 +474,7 @@ class _SessionTail:
             if cursor == 0:
                 # The prefix batch itself establishes identity, never a probe
                 # from before or after this read.
-                self._epoch = str(rows[0]["id"])
+                self._epoch = reader_epoch(str(rows[0]["id"]), token)
             self._cursor = frames[-1][0]
             self._publish(_TailBatch(cursor, frames[-1][0], frames, self._epoch))
             if len(rows) < _PAGE:
@@ -508,17 +515,6 @@ def _acquire_tail(session_id: str) -> _SessionTail:
         tail = _SessionTail(session_id, loop)
         _tails[session_id] = tail
     return tail
-
-
-def reset_session_readers(session_id: str, epoch: str) -> None:
-    """Reload every connected client of a session whose log was reinstalled.
-
-    Call on the event loop. A reinstall can rewrite rows behind a cursor whose
-    own row survives, which no cursor or epoch check can see.
-    """
-    tail = _tails.get(session_id)
-    if tail is not None and not tail.closed:
-        tail.reset_clients(epoch)
 
 
 def _push_delivery_healthy(tail: _SessionTail) -> bool:
@@ -614,7 +610,7 @@ def _resume_check(
     merged the run the cursor sat inside, so resuming would repeat text).
     Without an epoch the caller is an older client and is served as before.
     """
-    current = get_log_epoch(session_id)
+    current = get_reader_epoch(session_id)
     if from_seq > 0 and epoch:
         if epoch != current:
             return current, "epoch"
@@ -729,7 +725,7 @@ async def event_stream(
             # The log was empty when we looked and has rows now (a first turn,
             # or the legacy seed above). Every row sent belongs to the new log,
             # so name it; otherwise the next resume would be reset for nothing.
-            log_epoch = await asyncio.to_thread(get_log_epoch, session_id)
+            log_epoch = await asyncio.to_thread(get_reader_epoch, session_id)
         tail.note_cursor(cursor, log_epoch)
 
         # 1b. Catch-up sentinel: mark the history/live boundary so the client can
@@ -918,12 +914,20 @@ async def stream_session_events(
     # Opened before its transcript arrived on a worker that just joined a
     # network: copy it next. Its events stream in as they are applied.
     await asyncio.to_thread(transcripts.prioritise, session_id)
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    if from_seq == 0:
+        # A first load can drop before its caught_up. Naming the log here lets
+        # that resume be checked like any other. A log rewritten before the
+        # first row is read costs one extra reload, never a missed reset.
+        named = await asyncio.to_thread(get_reader_epoch, session_id)
+        if named.isascii():
+            headers["X-Log-Epoch"] = named
     return StreamingResponse(
         _batch_backfill(event_stream(session_id, from_seq, epoch)),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=headers,
     )

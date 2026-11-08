@@ -135,7 +135,6 @@ def forget() -> None:
     with _lock:
         _wanted.clear()
         _progress.clear()
-        _repair_backoff.clear()
 
 
 def reset_for_tests() -> None:
@@ -612,14 +611,22 @@ REPAIR_SESSIONS = 4
 #: A session with more event bytes than this waits for a hand-off instead.
 REPAIR_MAX_BYTES = 256 * 1024 * 1024
 REPAIR_RETRY_MAX_SECONDS = 3600.0
-# Failed sessions by id: ``(attempts, not before)``. Only pacing, so not stored.
-_repair_backoff: Dict[str, Tuple[int, float]] = {}
+REPAIR_RETRY_SECONDS = 60.0
+#: After the log moved on while its copy was being fetched: fetch again soon.
+REPAIR_RACED_SECONDS = 5.0
 
 
-def _repair_owner(session_id: str, ctx: engine.NetworkContext) -> Optional[str]:
-    """The session's owner to reinstall from; None when nothing is left to do here."""
+class _RepairOvertaken(Exception):
+    """The log moved on while its copy was being fetched; nothing was changed."""
+
+
+def _repair_owner(session_id: str, ctx: engine.NetworkContext) -> Optional[Tuple[str, str]]:
+    """``(owner, queue token)`` to reinstall from; None when nothing is left to do here."""
     with get_db() as conn:
         cursor = conn.cursor()
+        token = store.transcript_repair_token(cursor, session_id)
+        if token is None:
+            return None
         cursor.execute("SELECT owner_device_id, instance_id FROM sessions WHERE id = %s", (session_id,))
         session = cursor.fetchone()
         if session is None or _runs_here(session, ctx):
@@ -628,7 +635,7 @@ def _repair_owner(session_id: str, ctx: engine.NetworkContext) -> Optional[str]:
             return None
         if not session["owner_device_id"]:
             raise ValueError("The session has no known owner")
-        return session["owner_device_id"]
+        return session["owner_device_id"], token
 
 
 def _without_merged_duplicates(items: List[dict]) -> List[dict]:
@@ -647,29 +654,62 @@ def _without_merged_duplicates(items: List[dict]) -> List[dict]:
     return kept
 
 
+def _newer_than_snapshot(cursor, session_id: str, coll: policy.Collection, items: List[dict],
+                         through: int) -> bool:
+    """Whether this worker holds any version of the log the fetched copy has not seen.
+
+    Every record of the session up to ``through``, tombstones included: a clear
+    reuses seqs, so a tombstone can be all that is left of a newer log.
+    """
+    snapshot = {item["record_id"]: item for item in items}
+    newest = max(((int(item["clock"]), str(item["origin_device_id"])) for item in items), default=None)
+    for record_id, held in store.records_with_prefixes(cursor, coll.name, [f"{session_id}|"]).items():
+        if int(record_id.rsplit("|", 1)[1]) > through:
+            continue  # Arrived after the fetch began: it stays, and installing leaves it alone.
+        copied = snapshot.get(record_id)
+        base = (int(copied["clock"]), str(copied["origin_device_id"])) if copied else newest
+        if base is None or envelope_mod.compare(int(held["clock"]), str(held["origin_device_id"]), *base) > 0:
+            return True
+    return False
+
+
 def install_owner_log(session_id: str, owner: str, items: List[dict], last: int,
-                      ctx: engine.NetworkContext) -> Optional[str]:
+                      ctx: engine.NetworkContext, *, token: Optional[str] = None,
+                      held: int = 0) -> Optional[str]:
     """Make this worker's log up to ``last`` exactly the owner's. Returns the log's epoch.
 
     One transaction, so a reader sees the old log or the new one. Rows past
     ``last`` arrived after the owner read its log and stay. Returns None, with
-    nothing changed, when the session is no longer the owner's or no longer queued.
+    nothing changed, unless the fetched copy is still the truth: every check
+    is made under the locks that stop what it checks from changing.
+
+    * network_state (taken by sync, state copies and leaving the network): this
+      is still the same network, not mid-copy, and the session still queued with
+      the ``token`` it had when the fetch began, so a row refused meanwhile is
+      not lost behind the sync watermark.
+    * runtime locks (taken by hand-off publication and local writes, which never
+      take network_state): the session still exists and is still the owner's.
+      Read after waiting for them, not before.
+    * the records themselves: nothing here is newer than its copy. That is what
+      keeps a clear or delete that synced during the fetch from being undone.
     """
-    from app.db.session_events import get_log_epoch
+    from app.db.session_events import get_log_epoch, note_log_rewritten
+    from app.db.session_locks import lock_session_runtime
     coll = policy.collection("session_events")
     touched: list = []
     with get_db() as conn:
         cursor = conn.cursor()
-        store.lock_state(cursor)
-        if not store.transcript_repair_queued(cursor, session_id):
+        state = store.lock_state(cursor)
+        queued = store.transcript_repair_token(cursor, session_id)
+        if queued is None or (token is not None and queued != token):
             return None
-        cursor.execute("SELECT owner_device_id FROM sessions WHERE id = %s", (session_id,))
-        session = cursor.fetchone()
-        if session is None or session["owner_device_id"] != owner:
+        if state is None or state["network_id"] != ctx.network_id or store.backfill_state(conn) is not None:
             return None
-        cursor.execute("INSERT INTO session_event_counters (session_id, next_seq) VALUES (%s, 0) "
-                       "ON CONFLICT (session_id) DO UPDATE SET next_seq = session_event_counters.next_seq",
-                       (session_id,))
+        session = lock_session_runtime(cursor, session_id)
+        if session is None or session["owner_device_id"] != owner or _runs_here(session, ctx):
+            return None
+        if _newer_than_snapshot(cursor, session_id, coll, items, max(last, held)):
+            return None
         cursor.execute("DELETE FROM session_events WHERE session_id = %s AND seq <= %s", (session_id, last))
         ids = [item["record_id"] for item in items]
         for start in range(0, len(ids), engine.SNAPSHOT_SQL_BATCH):
@@ -677,7 +717,10 @@ def install_owner_log(session_id: str, owner: str, items: List[dict], last: int,
             cursor.execute("DELETE FROM sync_records WHERE collection = %s AND record_id IN ("
                            + ", ".join(["%s"] * len(part)) + ")", (coll.name, *part))
         _, touched = engine.apply_snapshot_items(cursor, coll, items, ctx=ctx, existed=[session_id])
-        store.clear_transcript_repair(cursor, session_id)
+        note_log_rewritten(cursor, session_id)
+        if store.transcript_repair_token(cursor, session_id) == queued:
+            # A row of this copy the merged-run rule still refused keeps the entry.
+            store.clear_transcript_repair(cursor, session_id)
     if touched:
         engine._notify(touched)
     return get_log_epoch(session_id)
@@ -685,9 +728,10 @@ def install_owner_log(session_id: str, owner: str, items: List[dict], last: int,
 
 async def _repair_session(client: httpx.AsyncClient, ctx: engine.NetworkContext, session_id: str) -> None:
     coll = policy.collection("session_events")
-    owner = await asyncio.to_thread(_repair_owner, session_id, ctx)
-    if owner is None:
+    target = await asyncio.to_thread(_repair_owner, session_id, ctx)
+    if target is None:
         return
+    owner, token = target
     member = ctx.member(owner)
     if member is None or member.status != membership.STATUS_ACTIVE:
         raise ValueError("The session's owner is not an active member")
@@ -715,34 +759,31 @@ async def _repair_session(client: httpx.AsyncClient, ctx: engine.NetworkContext,
         after = last
         if not more:
             break
-    epoch = await asyncio.to_thread(install_owner_log, session_id, owner,
-                                    _without_merged_duplicates(items), after, ctx)
-    if epoch is not None:
-        from app.api.events import reset_session_readers
-        reset_session_readers(session_id, epoch)
-        logger.info("Reinstalled the transcript of session %s from its owner", session_id)
+    epoch = await asyncio.to_thread(install_owner_log, session_id, owner, _without_merged_duplicates(items),
+                                    after, ctx, token=token, held=held)
+    if epoch is None:
+        raise _RepairOvertaken
+    logger.info("Reinstalled the transcript of session %s from its owner", session_id)
 
 
 async def repair_queued(client: httpx.AsyncClient) -> None:
     """Reinstall transcripts queued by the merged-delta rule, a few per pass."""
-    from app.network import transport
     ctx = engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return
     if await asyncio.to_thread(pending):
         return  # The first copy's transcripts may still settle them.
-    now = time.monotonic()
-    queued = await asyncio.to_thread(store.transcript_repairs)
-    for session_id in [sid for sid in queued if _repair_backoff.get(sid, (0, 0.0))[1] <= now][:REPAIR_SESSIONS]:
+    for session_id in await asyncio.to_thread(store.transcript_repairs_due, REPAIR_SESSIONS, int(time.time())):
         try:
             await _repair_session(client, ctx, session_id)
-            _repair_backoff.pop(session_id, None)
         except asyncio.CancelledError:
             raise
-        except (httpx.HTTPError, transport.PeerError, ValueError, engine.ApplyError) as exc:
-            attempts = _repair_backoff.get(session_id, (0, 0.0))[0] + 1
-            delay = min(REPAIR_RETRY_MAX_SECONDS, 60.0 * 2 ** min(attempts, 7))
-            _repair_backoff[session_id] = (attempts, time.monotonic() + delay)
+        except _RepairOvertaken:
+            await asyncio.to_thread(store.defer_transcript_repair, session_id, now=int(time.time()),
+                                    base=REPAIR_RACED_SECONDS, ceiling=REPAIR_RETRY_MAX_SECONDS)
+        except Exception as exc:  # noqa: BLE001 — one session's failure must not stop the others
+            await asyncio.to_thread(store.defer_transcript_repair, session_id, now=int(time.time()),
+                                    base=REPAIR_RETRY_SECONDS, ceiling=REPAIR_RETRY_MAX_SECONDS)
             logger.info("Transcript reinstall of %s is waiting: %s", session_id, f"{exc}".strip() or type(exc).__name__)
 
 

@@ -15,13 +15,19 @@ Real PostgreSQL, independent worker schemas, the real event and catalog
 producers, signed exchange through the actual peer router and the scheduled
 maintenance loop. Never the configured application database.
 """
+import asyncio
 import json
+import threading
+import time
+from contextlib import contextmanager
+from unittest.mock import patch
 
 import httpx
 import pytest
 
 from app.api.events import _resume_check
 from app.core.transcript_replay import _coalesce_deltas, _flush_pending
+from app.db import base, sessions
 from app.db import network as store
 from app.db import session_events as events_db
 from app.db.base import get_db
@@ -149,10 +155,13 @@ async def test_expired_peer_holding_part_of_a_merged_run_recovers(pg_workers, mo
     assert transcript(peer) == transcript(source)
     assert merged_row(peer)["payload"][events_db.MERGED_FROM_KEY] == 2
     # A reader that showed the held fragments sits on a replaced row: it is
-    # reset (same log, cursor gone) and replays, never sent the run twice.
+    # reset (rows rewritten beneath the terminal one) and replays, never sent
+    # the run twice. Workers still compare the plain first-row id.
     with peer.active():
-        assert _resume_check("chat", 1 + held, epoch) == (epoch, "cursor")
-        assert events_db.get_log_check("chat", 1 + held) == (epoch, False)
+        current = events_db.get_reader_epoch("chat")
+        assert current != epoch and events_db.get_log_epoch("chat") == epoch
+        assert _resume_check("chat", 1 + held, epoch) == (current, "epoch")
+        assert events_db.get_log_check("chat", 1 + held) == (current, False)
     # Later writes still flow by ops.
     publish(source, 1)
     assert not (await sync(peer, served)).get("snapshot_required")
@@ -182,15 +191,15 @@ async def test_ordinary_sync_split_before_the_last_fragment_never_shows_wrong_te
     # batch carrying D/E but not F would have no sync record of its own to
     # push it off the fast path, so the guard must see the merged row.
     source, peer, _served = await merged_source(pg_workers, 3)
-    with peer.active():
-        epoch = events_db.get_log_epoch("chat")
     reader = 4  # a connected reader has been sent message 1 and A, B, C
     apply_items(peer, copy_items(source, after=4, held=4))
     with peer.active():
         # The shared SSE reader's probe after the mirror write: reset.
-        assert events_db.get_log_check("chat", reader) == (epoch, False)
+        assert events_db.get_log_check("chat", reader) == (events_db.get_reader_epoch("chat"), False)
     assert frames(peer) == frames(source)
     reader = 8  # it replayed the whole log
+    with peer.active():
+        replayed_epoch = events_db.get_reader_epoch("chat")
     guarded = []
     real = events_db.delta_rows_need_fitting
 
@@ -208,7 +217,7 @@ async def test_ordinary_sync_split_before_the_last_fragment_never_shows_wrong_te
         assert frames(peer, after=reader) == []
         assert frames(peer) == frames(source)
         with peer.active():
-            assert events_db.get_log_check("chat", reader) == (epoch, True)
+            assert events_db.get_log_check("chat", reader) == (replayed_epoch, True)  # reset once only
     assert ([5, 6], True) in guarded  # the D/E batch reached the bulk guard
     assert transcript(peer) == transcript(source)
 
@@ -491,8 +500,6 @@ async def test_owner_log_replaces_a_queued_transcript_and_resets_readers(pg_work
     plant(peer, delta_row(4, "held-head", "ABC", 2))
     peer.sql("DELETE FROM sync_records WHERE collection = 'session_events' AND record_id <> 'chat|1'")
     peer.sql("INSERT INTO network_transcript_repairs (session_id, reason) VALUES ('chat', 'test')")
-    resets = []
-    monkeypatch.setattr("app.api.events.reset_session_readers", lambda sid, epoch: resets.append((sid, epoch)))
     monkeypatch.setattr(transcripts, "_link", lambda device_id: transport.PeerLink(device_id, [served.base_url]))
     with peer.active():
         async with httpx.AsyncClient(transport=served.transport()) as client:
@@ -500,7 +507,8 @@ async def test_owner_log_replaces_a_queued_transcript_and_resets_readers(pg_work
     assert [(r["seq"], r["id"], r["payload"]) for r in transcript(peer)] == [
         (r["seq"], r["id"], r["payload"]) for r in transcript(source)]
     assert queued(peer) == []
-    assert resets == [("chat", transcript(source)[0]["id"])]
+    counter = peer.sql("SELECT next_seq, rewrite_token FROM session_event_counters WHERE session_id = 'chat'")[0]
+    assert counter["rewrite_token"] and counter["next_seq"] >= transcript(peer)[-1]["seq"]
 
 
 async def test_unreachable_owner_keeps_the_held_rows_and_does_not_raise(pg_workers, monkeypatch):
@@ -514,7 +522,8 @@ async def test_unreachable_owner_keeps_the_held_rows_and_does_not_raise(pg_worke
             await transcripts.repair_queued(client)
     assert held(peer) == [(4, "held-head", "ABC", 2)]
     assert queued(peer) == ["chat"]
-    assert transcripts._repair_backoff["chat"][0] == 1
+    entry = peer.sql("SELECT attempts, not_before FROM network_transcript_repairs WHERE session_id = 'chat'")[0]
+    assert entry["attempts"] == 1 and entry["not_before"] > time.time()
 
 
 async def test_a_session_that_changed_owner_is_not_installed_over(pg_workers):
@@ -534,3 +543,144 @@ def test_a_run_the_owner_merged_between_two_pages_is_not_installed_twice():
     kept = transcripts._without_merged_duplicates(
         [item(2, "A"), item(3, "B"), item(7, "ABCDEF", 2), item(9, "G")])
     assert [row["record"]["seq"] for row in kept] == [7, 9]
+
+
+def test_repeated_text_does_not_prove_an_unstamped_held_run(pg_workers):
+    # Held "ha"x3 really covers 2-4; the incoming "ha"x4 covers 4-7. One sits
+    # inside the other, but that says nothing: the first is not part of the second.
+    worker = lone_worker(pg_workers)
+    with worker.active():
+        events_db.append_events("chat", [{"type": "assistant.text_delta", "payload": {"text": "ha"}} for _ in range(3)])
+        originals = events_db.get_events("chat")[1:]
+        events_db.compact_session_deltas("chat", keep_tail_events=0)
+    worker.sql("UPDATE session_events SET payload = payload - 'merged_from_seq' WHERE seq = 4")
+    before = held(worker)
+    apply_fitted(worker, delta_row(7, originals[2]["id"], "ha" * 4, 4))
+    assert held(worker) == before
+    assert queued(worker) == ["chat"]
+
+
+async def test_a_fetched_log_never_replaces_a_clear_that_synced_meanwhile(pg_workers):
+    source, peer, served = await merged_source(pg_workers, 3)
+    peer.sql("UPDATE sessions SET owner_device_id = %s WHERE id = 'chat'", (source.device_id,))
+    peer.sql("INSERT INTO network_transcript_repairs (session_id, reason) VALUES ('chat', 'test')")
+    fetched = copy_items(source, after=0, held=8)
+    with source.active():
+        sessions.clear_session_conversation("chat")
+        catalog.publish_owned()
+    await sync(peer, served)
+    cleared = transcript(peer)
+    assert len(cleared) == len(transcript(source))
+    with peer.active():
+        assert transcripts.install_owner_log("chat", source.device_id, fetched, 8, engine.context()) is None
+    assert transcript(peer) == cleared
+    assert queued(peer) == ["chat"]  # Fetched again, from the log as it is now.
+
+
+async def test_a_hand_off_that_won_the_counter_is_not_replaced_by_the_repair(pg_workers):
+    # Hand-off holds the counter, publishes and takes ownership without network_state.
+    source, peer, _served = await merged_source(pg_workers, 3)
+    peer.sql("UPDATE sessions SET owner_device_id = %s WHERE id = 'chat'", (source.device_id,))
+    peer.sql("INSERT INTO network_transcript_repairs (session_id, reason) VALUES ('chat', 'test')")
+    items = copy_items(source, after=0, held=8)
+    entered = threading.Event()
+
+    @contextmanager
+    def hooked_db():
+        with base.get_db() as conn:
+            class Cursor:
+                def __init__(self):
+                    self.real = conn.cursor()
+
+                def execute(self, sql, params=()):
+                    if sql.startswith("INSERT INTO session_event_counters"):
+                        entered.set()
+                    return self.real.execute(sql, params)
+
+                def __getattr__(self, name):
+                    return getattr(self.real, name)
+
+            class Conn:
+                def cursor(self):
+                    return Cursor()
+            yield Conn()
+
+    with peer.active():
+        hand = peer.connect()
+        cur = hand.cursor()
+        cur.execute("SELECT * FROM session_event_counters WHERE session_id = 'chat' FOR UPDATE")
+        cur.execute("UPDATE sessions SET owner_device_id = %s WHERE id = 'chat'", (peer.device_id,))
+        cur.execute("UPDATE session_events SET payload = %s::jsonb WHERE session_id = 'chat' AND seq = 4",
+                    (json.dumps({"text": "LOCAL-AUTHORITATIVE"}),))
+        with patch.object(transcripts, "get_db", hooked_db):
+            install = asyncio.create_task(asyncio.to_thread(
+                transcripts.install_owner_log, "chat", source.device_id, items, 8, engine.context()))
+            assert await asyncio.to_thread(entered.wait, 5)
+            hand.commit()
+            hand.close()
+            assert await install is None
+    row = peer.sql("SELECT payload FROM session_events WHERE session_id = 'chat' AND seq = 4")[0]
+    assert row["payload"] == {"text": "LOCAL-AUTHORITATIVE"}
+
+
+async def test_a_row_refused_during_the_fetch_makes_the_repair_fetch_again(pg_workers):
+    source, peer, _served = await merged_source(pg_workers, 3)
+    peer.sql("UPDATE sessions SET owner_device_id = %s WHERE id = 'chat'", (source.device_id,))
+    plant(peer, delta_row(4, "held-head", "ABC", 2))
+    peer.sql("DELETE FROM sync_records WHERE collection = 'session_events' AND record_id <> 'chat|1'")
+    peer.sql("INSERT INTO network_transcript_repairs (session_id, reason, token) VALUES ('chat', 'test', 'before')")
+    items = copy_items(source, after=0, held=8)
+    peer.sql("UPDATE network_transcript_repairs SET token = 'after' WHERE session_id = 'chat'")
+    with peer.active():
+        assert transcripts.install_owner_log(
+            "chat", source.device_id, items, 8, engine.context(), token="before") is None
+        assert held(peer) == [(4, "held-head", "ABC", 2)]
+        assert transcripts.install_owner_log(
+            "chat", source.device_id, items, 8, engine.context(), token="after") is not None
+    assert queued(peer) == []
+
+
+async def test_resume_at_a_cursor_that_survived_the_repair_is_reset(pg_workers):
+    source, peer, _served = await merged_source(pg_workers, 3)
+    peer.sql("UPDATE sessions SET owner_device_id = %s WHERE id = 'chat'", (source.device_id,))
+    with peer.active():
+        events_db.append_events("chat", [{"type": "message.assistant", "payload": {"content": "done"}}])
+    peer.sql("UPDATE session_events SET seq = 8, id = %s WHERE session_id = 'chat' AND seq = 5",
+             (transcript(source)[-1]["id"],))
+    peer.sql("DELETE FROM sync_records WHERE collection = 'session_events' AND record_id <> 'chat|1'")
+    peer.sql("UPDATE session_event_counters SET next_seq = 8 WHERE session_id = 'chat'")
+    peer.sql("INSERT INTO network_transcript_repairs (session_id, reason) VALUES ('chat', 'test')")
+    items = copy_items(source, after=0, held=8)
+    with peer.active():
+        old_epoch = events_db.get_reader_epoch("chat")
+        assert events_db.has_event_at("chat", 8)
+        assert transcripts.install_owner_log("chat", source.device_id, items, 8, engine.context()) == old_epoch
+        assert events_db.has_event_at("chat", 8)
+        current, reason = _resume_check("chat", 8, old_epoch)
+        assert reason == "epoch" and current != old_epoch
+        assert _resume_check("chat", 8, current) == (current, None)
+        # Workers still compare the plain first-row id with each other.
+        assert events_db.get_watermark("chat")["epoch"] == old_epoch
+
+
+async def test_failing_repairs_rotate_and_do_not_hide_a_reachable_owner(pg_workers, monkeypatch):
+    peer = lone_worker(pg_workers)
+    sessions_queued = [f"fail-{index:03d}" for index in range(100)] + ["zz-reachable"]
+    for session_id in sessions_queued:
+        peer.sql("INSERT INTO network_transcript_repairs (session_id, reason) VALUES (%s, 'test')", (session_id,))
+    tried: list = []
+
+    async def fake_repair(client, ctx, session_id):
+        tried.append(session_id)
+        if session_id != "zz-reachable":
+            raise ValueError("owner offline")
+        peer.sql("DELETE FROM network_transcript_repairs WHERE session_id = %s", (session_id,))
+
+    monkeypatch.setattr(transcripts, "_repair_session", fake_repair)
+    with peer.active():
+        passes = len(sessions_queued) // transcripts.REPAIR_SESSIONS + 1
+        for _ in range(passes):
+            await transcripts.repair_queued(None)
+    assert set(tried) == set(sessions_queued)
+    assert len(tried) == len(sessions_queued)  # A deferred entry is not retried ahead of its turn.
+    assert "zz-reachable" not in queued(peer)

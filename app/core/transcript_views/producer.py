@@ -65,12 +65,12 @@ class ProjectionActor:
         return True
 
     async def _witness(self, state, *, cursor: int = 0, identity: str | None = None):
-        watermark = await database(source.get_watermark, state.session_id, at_seq=state.target_seq)
+        watermark = await database(source.get_reader_watermark, state.session_id, at_seq=state.target_seq)
         if (not watermark or watermark['epoch'] != state.epoch or
                 watermark['seq'] < state.target_seq or watermark['tail_id'] != state.target_id):
             raise SourceChanged()
         if cursor and cursor != state.target_seq:
-            seen = await database(source.get_watermark, state.session_id, at_seq=cursor)
+            seen = await database(source.get_reader_watermark, state.session_id, at_seq=cursor)
             if not seen or seen['epoch'] != state.epoch or seen['tail_id'] != identity:
                 raise SourceChanged()
         return watermark
@@ -78,7 +78,7 @@ class ProjectionActor:
     async def process(self, session_id: str, *, recheck: bool = False) -> bool:
         """One finite quantum; True requests another fair, bounded queue turn."""
         previous = await database(store.load, session_id)
-        watermark = await database(source.get_watermark, session_id)
+        watermark = await database(source.get_reader_watermark, session_id)
         if watermark is None:
             if previous is not None:
                 await database(work.retire_missing, previous)
@@ -114,7 +114,7 @@ class ProjectionActor:
                 return False
             return await self._fold(state, previous)
         except SourceChanged:
-            latest = await database(source.get_watermark, session_id)
+            latest = await database(source.get_reader_watermark, session_id)
             if latest is None:
                 await database(work.retire_missing, previous)
                 return False

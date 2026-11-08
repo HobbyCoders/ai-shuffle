@@ -21,6 +21,16 @@ _COMPACT_CONTEXT_KEYS = (
 _COMPACT_CATEGORY_KEYS = ("name", "tokens", "color", "isDeferred")
 
 
+# Joins a log's epoch to this worker's last rewrite of it. Clients echo the whole
+# string back, so the format is private to the server.
+_REWRITE_SEPARATOR = "~r"
+
+
+def reader_epoch(log_epoch: str, rewrite_token: Optional[str]) -> str:
+    """The epoch SSE readers compare: the log's, plus this worker's last rewrite of it."""
+    return f"{log_epoch}{_REWRITE_SEPARATOR}{rewrite_token}" if rewrite_token else log_epoch
+
+
 def compact_context_usage(snapshot: Any) -> Any:
     """The part of a context-usage snapshot the usage bar reads.
 

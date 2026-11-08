@@ -185,12 +185,47 @@ async def test_reinstalled_log_resets_connected_readers(mock_db, gw, monkeypatch
     se.append_events(sid, [{"type": "message.user", "payload": {"content": "hi"}}])
     epoch = se.get_log_epoch(sid)
     stream, caught, _ = await _connect(sid)
-    assert caught["seq"] == 1
+    assert caught["seq"] == 1 and caught["epoch"] == epoch
     await asyncio.sleep(0.05)
     try:
-        events_mod.reset_session_readers(sid, epoch)
+        with get_db() as conn:
+            se.note_log_rewritten(conn.cursor(), sid)
+        rewritten = se.get_reader_epoch(sid)
+        gw._handle_payload(json.dumps({"session_id": sid, "max_seq": 0, "recheck_log": True}))
         frame = (await collect_frames(stream, 1, timeout=1.0))[0]
-        assert frame["event"] == "reset" and frame["data"] == {"reason": "cursor", "epoch": epoch}
+        assert frame["event"] == "reset" and frame["data"] == {"reason": "epoch", "epoch": rewritten}
     finally:
         await stream.aclose()
-    events_mod.reset_session_readers(sid, epoch)  # no reader left: nothing to do
+    # Mirrors compare the first row's id with each other: the token stays local.
+    assert se.get_log_epoch(sid) == epoch != rewritten
+
+
+async def test_resume_at_a_surviving_cursor_is_reset_after_a_rewrite(mock_db):
+    sid = "rewritten-under-cursor"
+    database.create_session(sid, "default", title="Disposable resume")
+    se.append_events(sid, [{"type": "message.user", "payload": {"content": "hi"}}])
+    epoch = se.get_log_epoch(sid)
+    assert events_mod._resume_check(sid, 1, epoch) == (epoch, None)
+    with get_db() as conn:
+        se.note_log_rewritten(conn.cursor(), sid)
+    current, reason = events_mod._resume_check(sid, 1, epoch)
+    assert reason == "epoch" and current == se.get_reader_epoch(sid) != epoch
+    # The client now holds the new log: it resumes normally, however often it reconnects.
+    assert events_mod._resume_check(sid, 1, current) == (current, None)
+    assert se.get_reader_watermark(sid)["epoch"] == current
+    assert se.get_watermark(sid)["epoch"] == epoch
+
+
+async def test_a_first_load_names_its_log_for_an_interrupted_resume(mock_db, monkeypatch):
+    sid = "named-on-first-load"
+    database.create_session(sid, "default", title="Disposable first load")
+    se.append_events(sid, [{"type": "message.user", "payload": {"content": "hi"}}])
+
+    async def allowed(request, session_id):
+        return None
+
+    monkeypatch.setattr(events_mod, "require_transcript_session", allowed)
+    first = await events_mod.stream_session_events(request=None, session_id=sid, from_seq=0, epoch=None, token="t")
+    assert first.headers["x-log-epoch"] == se.get_reader_epoch(sid)
+    resumed = await events_mod.stream_session_events(request=None, session_id=sid, from_seq=1, epoch=None, token="t")
+    assert "x-log-epoch" not in resumed.headers

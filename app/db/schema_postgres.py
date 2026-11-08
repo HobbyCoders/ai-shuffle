@@ -1892,7 +1892,8 @@ def create_postgres_schema(cursor: Any) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS session_event_counters (
             session_id TEXT PRIMARY KEY,
-            next_seq BIGINT NOT NULL DEFAULT 0
+            next_seq BIGINT NOT NULL DEFAULT 0,
+            rewrite_token TEXT
         )
     """)
 
