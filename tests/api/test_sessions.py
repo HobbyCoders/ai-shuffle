@@ -376,6 +376,27 @@ class TestControllableAnnotation:
         assert "remote_runtime_state" not in sessions[0]
         assert sessions[1]["is_remote"] is True
 
+    def test_owner_names_the_worker_when_instance_is_out_of_date(self):
+        """instance_id is per worker and not synced, so after a chat is passed
+        on it can name a worker that no longer has it. The owner decides both
+        which side the row is on and whose name it carries."""
+        installs = {
+            "dev-b": {"online": True, "device_name": "Office PC", "base_url": None},
+            "dev-c": {"online": False, "device_name": "Laptop", "base_url": None},
+        }
+        sessions = [
+            {"id": "s-passed-on", "instance_id": "dev-b", "owner_device_id": "dev-c"},
+            {"id": "s-names-me", "instance_id": "dev-me", "owner_device_id": "dev-b"},
+        ]
+        with patch("app.network.runners.self_device_id", return_value="dev-me"), \
+                patch("app.network.session_runtime.for_sessions", return_value={}):
+            self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is True
+        assert sessions[0]["device_name"] == "Laptop"
+        assert sessions[0]["device_online"] is False
+        assert sessions[1]["is_remote"] is True
+        assert sessions[1]["device_name"] == "Office PC"
+
     def test_is_pinned_from_runner_placement(self):
         """``is_pinned`` is true only for an explicit runner:<id> placement."""
         installs = {"me-install": {"online": True, "device_name": "Primary"}}
