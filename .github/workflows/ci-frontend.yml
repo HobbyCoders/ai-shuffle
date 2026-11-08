@@ -252,7 +252,7 @@ jobs:
         run: timeout --kill-after=10s 60s node --test tests/journeys/lib/*.test.mjs tests/journeys/runner.test.mjs
 
   journeys:
-    name: UI journeys (${{ matrix.shard }}/11)
+    name: UI journeys (${{ matrix.shard }}/12)
     # Real app, real PostgreSQL 16, fake AI, real Chromium: every
     # frontend/tests/journeys/*.journey.mjs against a fresh dev instance
     # (python -m scripts.devloop up --ci). Shards split the journey files by
@@ -260,7 +260,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -268,10 +268,10 @@ jobs:
       - name: Plan this shard
         id: plan
         run: |
-          plan=$(python3 -m scripts.devloop.ci plan --shards 11)
+          plan=$(python3 -m scripts.devloop.ci plan --shards 12)
           files=$(python3 -c 'import json, sys; print(" ".join(json.loads(sys.argv[1])[int(sys.argv[2]) - 1]))' "$plan" "${{ matrix.shard }}")
           echo "files=$files" >> "$GITHUB_OUTPUT"
-          echo "UI journeys shard ${{ matrix.shard }}/11: ${files:-no journey files} (plan: $plan)" >> "$GITHUB_STEP_SUMMARY"
+          echo "UI journeys shard ${{ matrix.shard }}/12: ${files:-no journey files} (plan: $plan)" >> "$GITHUB_STEP_SUMMARY"
       - if: steps.plan.outputs.files != ''
         uses: actions/setup-python@v5
         with:
@@ -337,7 +337,7 @@ jobs:
           # The runner's preinstalled, stopped PostgreSQL 16 binaries; the dev
           # instance initializes its own throwaway cluster on a free port.
           export PATH="/usr/lib/postgresql/16/bin:$PATH"
-          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/11" --out "$RUNNER_TEMP/ui-journeys" --retry-failures
+          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/12" --out "$RUNNER_TEMP/ui-journeys" --retry-failures
       - name: Upload journey timelines
         # A green retry is still a bug signal: retain both attempts.
         if: failure() || steps.journeys.outputs.retried == 'true'
