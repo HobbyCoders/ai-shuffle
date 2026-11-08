@@ -748,7 +748,7 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     my_install = installs_map.get(me)
     try:
         from app.network import runners as _runners
-        my_device = _runners.self_device_id()
+        my_device = _runners.own_device_id()
     except Exception:  # noqa: BLE001
         my_device = None
     from app.network.session_runtime import for_sessions, STATES

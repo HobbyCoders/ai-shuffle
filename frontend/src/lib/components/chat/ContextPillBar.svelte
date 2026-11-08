@@ -280,9 +280,12 @@
 	);
 
 	const sessionHasProject = $derived(!!(sessionRow?.project_id || sessionRow?.project_v2_id));
+	// The owner decides, as on the sidepanel row. instance_id is per worker and
+	// can name a former worker, so it only counts on a row with no owner.
+	const ownerWorkerId = $derived(sessionRow?.owner_device_id || sessionRow?.instance_id || null);
 	const runnerMenu = $derived(
 		runnerBadgeMenuItems({
-			ownerId: sessionRow?.instance_id ?? null,
+			ownerId: ownerWorkerId,
 			isRemote: sessionRow?.is_remote ?? $activeSession.isRemote ?? false,
 			installs: runnerInstalls,
 			eligibility: runnerEligibility,
@@ -301,7 +304,7 @@
 	const readOnlyOwner = $derived.by((): { name: string; online: boolean | null } | null => {
 		if (!readOnlyRemote) return null;
 		const name = sessionRow?.device_name ?? $activeSession.ownerDeviceName ?? null;
-		const live = presenceOf($workerInstalls, [sessionRow?.owner_device_id, sessionRow?.instance_id], name);
+		const live = presenceOf($workerInstalls, [ownerWorkerId], name);
 		const fromRow = typeof sessionRow?.device_online === 'boolean' ? sessionRow.device_online : null;
 		return { name: name || 'Another worker', online: live ?? fromRow };
 	});

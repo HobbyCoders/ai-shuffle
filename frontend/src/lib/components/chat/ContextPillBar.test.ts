@@ -760,6 +760,42 @@ describe('the active runner menu lists the current worker like the new-chat pick
 		expect(getQueuedMove).not.toHaveBeenCalled();
 		expect(view.queryByRole('dialog')).toBeNull();
 	});
+
+	// After A to B to C, A holds instance_id=B and owner_device_id=C.
+	const passedOn = { id: 'remote', project_v2_id: 'pv2-project', instance_id: 'worker-b', is_remote: true };
+	const openMenuRows = async () => {
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project' });
+		getClusterGitStateMock.mockResolvedValue(null);
+		const view = render(ContextPillBar);
+		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
+		await view.findByRole('menuitemradio', { name: 'Continue here' });
+		return view.getAllByRole('menuitemradio');
+	};
+	const namesOf = (rows: HTMLElement[]) => rows.map((r) => r.querySelector('.worker-row-name')?.textContent);
+
+	it('marks the owner as current and offers the former worker as a destination', async () => {
+		appSessions.store.set([{ ...passedOn, owner_device_id: 'worker-c', device_name: 'Laptop', device_online: true, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
+			{ id: 'worker-b', is_self: false, online: true, device_name: 'Office PC' },
+			{ id: 'worker-c', is_self: false, online: true, device_name: 'Laptop' }
+		] });
+		const rows = await openMenuRows();
+		expect(namesOf(rows)).toEqual(['Laptop', 'Continue here', 'Office PC']);
+		expect(rows.map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
+	});
+
+	it('does not read a former worker as the current one when the owner is unknown here', async () => {
+		appSessions.store.set([{ ...passedOn, owner_device_id: 'worker-gone', device_name: null, device_online: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
+			{ id: 'worker-b', is_self: false, online: true, device_name: 'Office PC' }
+		] });
+		const rows = await openMenuRows();
+		expect(namesOf(rows)).toEqual(['Another worker', 'Continue here', 'Office PC']);
+		expect(rows[0].getAttribute('aria-checked')).toBe('true');
+		expect(rows[0].textContent).toContain('offline');
+	});
 });
 
 describe('the read-only runner chip of a subagent’s chat', () => {
@@ -783,6 +819,23 @@ describe('the read-only runner chip of a subagent’s chat', () => {
 		expect(el?.textContent).not.toContain('Local');
 		expect(el?.textContent).toContain('(offline)');
 		expect(el?.getAttribute('title')).toBe('Runs on ServerWorker, which is offline');
+	});
+
+	it.each([
+		['known and offline', 'worker-c', 'Laptop', [{ id: 'worker-c', online: false, device_name: 'Laptop' }]],
+		['unknown here', 'worker-gone', null, []]
+	])('reads the owner\'s presence, never a former worker\'s, when the owner is %s', async (_label, owner, name, known) => {
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		subagentChats.mark(base.sessionId, true);
+		session.store.set({ ...base, projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'worker-b', owner_device_id: owner,
+			device_name: name, device_online: false, is_remote: true, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'worker-b', online: true, device_name: 'Office PC' }, ...known] });
+		const view = render(ContextPillBar);
+		await waitFor(() => expect(listInstallsMock).toHaveBeenCalled());
+		await tick();
+		expect(dotOf(chip(view.container))).toBe('offline');
+		expect(chip(view.container)?.textContent).toContain(name ?? 'Another worker');
 	});
 
 	it('follows the owner\'s live presence while the chat is open', async () => {
