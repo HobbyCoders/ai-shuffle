@@ -16,7 +16,7 @@ In development since January 2026 and open-sourced in October 2026.
 - **Runs on your hardware.** Code, chats and keys stay on your machines. No account needed.
 - **Mix models freely.** Any signed-in model can hand work to any other. A Claude session can delegate to a ChatGPT model, or the other way round.
 - **All your machines, one app.** Connect your desktop, laptop and server, move chats between them, and check in from the Android app.
-- **All your usage in one place.** See what's left on every plan, with reset times, without visiting each provider's site.
+- **All your usage in one place.** See what's left on your Claude, ChatGPT and SuperGrok plans, with reset times, without visiting each provider's site. Kimi, MiniMax and OpenCode plans don't have usage meters yet.
 - **A smarter harness.** Every session runs on [Fluid](#fluid-our-own-agent-harness), our own agent engine: compaction that forgets nothing, memory that learns, and batched tool calls.
 - **Free and open source.** AGPL-3.0, with no license key, trial or usage cap.
 
@@ -71,7 +71,7 @@ Fluid is the engine that runs your agents: it talks to the model, runs tools, as
 
 **Why not just wrap each provider's agent?** Claude Code, Codex and the rest each have their own tools, permissions, memory and limits. Wrapping them would mean features that differ by provider and bugs we can't fix. With Fluid, an agent works the same way whichever model you pick.
 
-**The exception: Claude.** Anthropic only allows Claude Pro and Max subscriptions through its own Claude Code, so Fluid drives the official Claude Code CLI for those and never reuses your sign-in elsewhere. The app runs Claude on an Anthropic API key, Amazon Bedrock, Google Vertex AI or Microsoft Foundry the same way. These sessions keep AI Shuffle's tools, connectors, memory and skill learning, and they use Fluid's compaction by default (Claude Code 2.1.287 or newer; switch it off with **Smarter compaction** in Settings). Claude Code's own summary only steps in if a session hits the context limit with nothing left for Fluid to trim. Tool calling stays Claude Code's own, so batched tool calls are not available there. For Claude models fully inside Fluid, reach them through OpenRouter or a custom gateway, or run the standalone [`fluid`](fluid/README.md) command line with an Anthropic API key.
+**The exception: Claude.** Anthropic only allows Claude Pro and Max subscriptions through its own Claude Code, so Fluid drives the official Claude Code CLI for those and never reuses your sign-in elsewhere. By default the app runs Claude on an Anthropic API key, Amazon Bedrock, Google Vertex AI or Microsoft Foundry the same way. These sessions keep AI Shuffle's tools, connectors and memory, and they use Fluid's compaction by default (Claude Code 2.1.287 or newer; switch it off with **Smarter compaction** in Settings). Claude Code's own summary only steps in when an automatic compaction can't free enough room or can't reach Fluid. Turning repeated work into skills needs a signed-in ChatGPT or SuperGrok account to do the learning. Tool calling stays Claude Code's own, so batched tool calls are not available there. For Claude models fully inside Fluid, reach them through OpenRouter or a custom gateway, or run the standalone [`fluid`](fluid/README.md) command line with an Anthropic API key.
 
 <details>
 <summary>How each provider runs</summary>
