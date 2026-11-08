@@ -56,9 +56,10 @@ _unmerged_at: float | None = 0.0
 # Imports running right now: a single table's publish can outlast the quiet time.
 _active_imports = 0
 _imports_lock = threading.Lock()
-# An import that takes a list past its limit merges the whole list itself, which
-# can outlast the ordinary 30s. It blocks only that import: live writes use other
-# indexes. Without this, a list left unmerged would make the next long move fail.
+# An import that takes a list past its limit merges the whole list itself. It
+# blocks only that import: live writes use other indexes. So give it longer than
+# the ordinary 30s and the memory the background cleaner gets (PostgreSQL's inline
+# merge uses work_mem, which took over 10 minutes where the cleaner took under one).
 IMPORT_STATEMENT_TIMEOUT = "10min"
 # A rebuild retains the original index until it is finished, and WAL-logs the copy.
 BUILD_RESERVE_BYTES = 1024 ** 3
@@ -114,14 +115,16 @@ def importing(cursor: Any, table: str) -> Iterator[bool]:
     previous = None
     try:
         if active:
-            # OFFSET keeps the old limit's read ahead of the set_config calls.
+            # OFFSET keeps the old values' read ahead of the set_config calls.
             cursor.execute(
-                "SELECT old.value AS previous, set_config(%s, %s, true), "
-                "set_config('statement_timeout', %s, true) FROM "
-                "(SELECT current_setting('statement_timeout') AS value OFFSET 0) old",
+                "SELECT old.timeout, old.memory, set_config(%s, %s, true), "
+                "set_config('statement_timeout', %s, true), "
+                "set_config('work_mem', current_setting('maintenance_work_mem'), true) FROM "
+                "(SELECT current_setting('statement_timeout') AS timeout, "
+                "current_setting('work_mem') AS memory OFFSET 0) old",
                 (SETTING, IMPORT_STATE, IMPORT_STATEMENT_TIMEOUT),
             )
-            previous = cursor.fetchone()["previous"]
+            previous = cursor.fetchone()
         yield active
     finally:
         if active:
@@ -134,7 +137,9 @@ def importing(cursor: Any, table: str) -> Iterator[bool]:
             import sys
             if sys.exc_info()[0] is None:
                 cursor.execute("SELECT set_config(%s, '0', true), "
-                               "set_config('statement_timeout', %s, true)", (SETTING, previous))
+                               "set_config('statement_timeout', %s, true), "
+                               "set_config('work_mem', %s, true)",
+                               (SETTING, previous["timeout"], previous["memory"]))
 
 
 def _valid(cursor: Any, name: str) -> bool:
@@ -496,11 +501,7 @@ def run_pass(
         cur.execute("SELECT 1 FROM system_settings WHERE key=%s "
                     "AND value IN ('building','ready')", (KEY,))
         if not cur.fetchone():
-            from app.db import session_recall
-            if not session_recall.ready(cur):
-                return True  # The migration splits the projection's indexes.
-            cur.execute("INSERT INTO system_settings(key,value) VALUES (%s,'building') "
-                        "ON CONFLICT (key) DO NOTHING", (KEY,))
+            return True  # Experimental: no online DDL or deferral without opt-in.
     try:
         if not can_work() or not migrate():
             return False

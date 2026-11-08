@@ -387,7 +387,7 @@ def test_catchup_yields_before_migration_and_between_batches(
 
 
 @pytest.mark.parametrize("opted_in", [False, True])
-def test_projection_rebuild_rebuilds_indexes_and_starts_workers_without_a_marker(
+def test_projection_rebuild_preserves_opt_in_and_resumes_pending_imports(
     opted_in: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.db import sessions
@@ -440,12 +440,12 @@ def test_projection_rebuild_rebuilds_indexes_and_starts_workers_without_a_marker
         marker = cur.fetchone()
         assert marker == ({"value": "building"} if opted_in else None)
 
-    # No direct migrator call may mask a worker that never starts by itself.
+    # Opt-in survives the rebuild; without it the worker must start nothing.
     for _ in range(20):
         if hi.run_pass(seconds=1, pause=0):
             break
     else:
-        pytest.fail("automatic history catch-up did not finish after projection repair")
+        pytest.fail("history catch-up did not finish after projection repair")
     assert any(row["id"] == sid for row in sessions.search_sessions(needle))
     paginated, total = sessions.search_sessions_paginated(needle)
     assert any(row["id"] == sid for row in paginated)
@@ -456,7 +456,7 @@ def test_projection_rebuild_rebuilds_indexes_and_starts_workers_without_a_marker
                     "WHERE session_id=%s", (sdk,))
         assert cur.fetchone()["state"] == (2 if opted_in else 0)
         cur.execute("SELECT value FROM system_settings WHERE key=%s", (hi.KEY,))
-        assert cur.fetchone() == {"value": "ready"}
+        assert cur.fetchone() == ({"value": "ready"} if opted_in else None)
 
 
 def test_promotion_visits_bounded_window_in_heap_order(legacy_pending: None) -> None:
@@ -764,13 +764,17 @@ def test_overflow_promotion_yields_to_a_foreground_turn(imported_overflow: list[
 def test_import_scope_allows_an_inline_merge_and_restores_the_limit() -> None:
     finish_migration()
 
-    def limit(cur: Any) -> str:
-        cur.execute("SHOW statement_timeout")
-        return cur.fetchone()["statement_timeout"]
+    def limits(cur: Any) -> tuple[str, str]:
+        cur.execute("SELECT current_setting('statement_timeout') AS timeout, "
+                    "current_setting('work_mem') AS memory")
+        row = cur.fetchone()
+        return row["timeout"], row["memory"]
 
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("SET LOCAL statement_timeout = '30s'")
+        cur.execute("SET LOCAL work_mem = '5MB'")
+        cur.execute("SET LOCAL maintenance_work_mem = '70MB'")
         with hi.importing(cur, "session_events"):
-            assert limit(cur) == hi.IMPORT_STATEMENT_TIMEOUT
-        assert limit(cur) == "30s"
+            assert limits(cur) == (hi.IMPORT_STATEMENT_TIMEOUT, "70MB")
+        assert limits(cur) == ("30s", "5MB")

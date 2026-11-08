@@ -39,29 +39,48 @@ def test_migration_stamp_is_worker_local() -> None:
     assert not is_shared_setting_key(hi.KEY)
 
 
-@pytest.mark.parametrize("recall_ready", [True, False])
-def test_background_indexing_starts_itself_after_recall_is_ready(
-    mock_db: Any, monkeypatch: pytest.MonkeyPatch, recall_ready: bool,
+def test_background_indexing_is_off_without_opt_in(
+    mock_db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.db import session_recall
+    def forbidden_migration() -> bool:
+        pytest.fail("experimental migration ran without opt-in")
 
-    migrations: list[int] = []
-
-    def migrate() -> bool:
-        migrations.append(1)
-        return False
-
-    monkeypatch.setattr(session_recall, "ready", lambda _: recall_ready)
-    monkeypatch.setattr(hi, "migrate", migrate)
-    assert hi.run_pass() is not recall_ready
-    assert len(migrations) == int(recall_ready)
+    monkeypatch.setattr(hi, "migrate", forbidden_migration)
+    assert hi.run_pass()
     with hi.get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT value FROM system_settings WHERE key=%s", (hi.KEY,))
-        marker = cur.fetchone()
-        assert marker == ({"value": "building"} if recall_ready else None)
-        # Building is not ready: imports stay synchronous until the swap finishes.
+        assert cur.fetchone() is None
+
+
+def test_cli_without_apply_never_opens_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.db import base
+    from app.maintenance.history_indexing import main
+
+    def forbidden_init(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("CLI opened a database without --apply")
+
+    monkeypatch.setattr(base, "init_pool", forbidden_init)
+    assert main([]) == 0
+
+
+def test_cli_requests_restart_safe_worker_local_migration(
+    mock_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db import base, session_recall
+    from app.maintenance.history_indexing import main
+
+    monkeypatch.setattr(base, "init_pool", lambda **kwargs: None)
+    monkeypatch.setattr(base, "close_pool", lambda: None)
+    monkeypatch.setattr(session_recall, "ready", lambda _: True)
+    assert main(["--apply"]) == 0
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM system_settings WHERE key=%s", (hi.KEY,))
+        assert cur.fetchone()["value"] == "building"
         assert not hi.enabled(cur)
+    monkeypatch.setattr(hi, "migrate", lambda: False)
+    assert not hi.run_pass()
 
 
 @pytest.mark.parametrize(

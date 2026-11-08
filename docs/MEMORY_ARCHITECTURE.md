@@ -299,26 +299,32 @@ rebuilds and refills it. A term matching more than a couple of thousand pieces
 is read newest-first, so a very common word ranks recent sessions rather than
 scanning the whole history.
 
-Hand-off imports keep GIN merging out of the move. Once the projection is
-ready, background maintenance starts the online upgrade by itself on every
-worker; its worker-local migration stamp resumes interrupted work after restart.
+Deferred history indexing, which keeps GIN merging out of hand-off imports, is
+experimental and off by default pending latency acceptance.
+`python -m app.maintenance.history_indexing --apply` requests the online upgrade
+on a disposable candidate; its worker-local migration stamp resumes interrupted
+work after restart. No migration or deferral runs without that explicit opt-in.
 The upgrade replaces transcript and recall GIN indexes with disjoint live/history
 partial indexes. Existing rows remain live-indexed, adding the state columns is
 metadata-only, and indexes are built and retired concurrently with a 250 ms
-lock-acquisition limit. Before the migration completes, imports use the original
-synchronous path.
+lock-acquisition limit that covers only the metadata lock: a build then waits for
+overlapping writers and old snapshots as long as it needs. A build needs room for
+its copy and that copy's WAL on the data and WAL volumes plus a 1 GiB reserve; when
+short it logs why and retries. Before the migration completes, imports use the
+original synchronous path.
 
 Imported rows are written as `history_index_state = 2`, ordinary writes as 0.
 Search prefilters use UNION ALL over those states so each arm can use its partial
 GIN index, and imported text is searchable at once. Each history GIN has a
 pending list of just under 2 GiB, the most Windows PostgreSQL allows, so an import
 only appends to it and never pays for a merge. A list that does fill is merged
-by the importer that filled it. Live inserts and edits always enter state 0, so
+by the importer that filled it, with the background cleaner's memory and a
+ten-minute limit instead of the ordinary thirty seconds. Live inserts and edits always enter state 0, so
 they cannot inherit a history pending-list flush. Live GIN settings and the
 global pending-list limit are unchanged.
 
 A background `gin_clean_pending_list` then merges each history list, five seconds
-after the last import and only while no foreground turn is running or waiting to
+after the last import has ended and only while no foreground turn is running or waiting to
 start. A watcher cancels the statement within about a second of a turn appearing,
 including one still held in the database-busy queue. A cancelled merge keeps the
 pages it finished, the rest stays searchable in the list, and the next pass
