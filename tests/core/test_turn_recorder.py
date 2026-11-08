@@ -294,6 +294,11 @@ async def test_subagent_progress_kinds(mock_db, pump_type, kind):
         "type": pump_type, "agent_id": "task_1", "content": "inner",
         "name": "Read",
     })
+    if pump_type == "subagent_chunk":
+        # Child text now shares the main-text durability timer; tool events
+        # remain immediate. Verify the delayed write, not per-token saving.
+        assert not _rows()
+        await asyncio.wait_for(rec._flush_task, 1)
     row = _rows()[-1]
     assert row["event_type"] == "subagent.progress"
     assert row["payload"]["task_id"] == "task_1"
