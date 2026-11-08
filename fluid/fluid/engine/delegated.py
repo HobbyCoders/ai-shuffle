@@ -789,6 +789,8 @@ def _with_forced_env(settings: dict[str, Any]) -> dict[str, Any]:
 _GROUP_TERM_GRACE_S = 2.0
 #: How long the CLI gets to exit once its stdin closes.
 _CLI_EXIT_GRACE_S = 5.0
+# A close may not wait on a CLI that stopped reading its input pipe.
+_CLI_CLOSE_INTERRUPT_S = 0.5
 #: The same, when the close has no time left or the session was given up on.
 _CANCELLED_EXIT_GRACE_S = 1.0
 # How long a cancelled close waits to reap the CLI after killing its tree.
@@ -1595,6 +1597,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         request_id=request_id, ok=False, error="engine closed",
                     ))
             if self._turn_task and not self._turn_task.done():
+                # EOF closes input, not an in-flight provider reply. Cancelling
+                # our stdout reader alone left the CLI working until the outer
+                # engine-close deadline killed it. Ask it to abort before EOF,
+                # without letting a blocked stdin consume that same deadline.
+                try:
+                    await asyncio.wait_for(self._send_interrupt(), timeout=_CLI_CLOSE_INTERRUPT_S)
+                except Exception:
+                    logger.debug("interrupting the closing claude CLI failed", exc_info=True)
                 self._turn_task.cancel()
                 await await_cancelled_child(self._turn_task)
             await self._emit_session_end()
