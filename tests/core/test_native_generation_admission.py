@@ -12,7 +12,14 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
-from app.core import generation_budget, generation_choices, generation_resolver, model_effort, query_options
+from app.core import (
+    generation_budget,
+    generation_choices,
+    generation_confirmations,
+    generation_resolver,
+    model_effort,
+    query_options,
+)
 from app.core.generation_resolver import (
     INCLUDED_PRICE,
     UNKNOWN_PRICE,
@@ -253,18 +260,43 @@ async def test_above_threshold_requires_admission_before_reserve_or_transport(
         })
 
     monkeypatch.setattr(Sources, "prepare", prepare)
+    asked = AsyncMock(return_value=None)
+    monkeypatch.setattr(generation_confirmations, "ask_on_prompt", asked)
     current = context(unattended=unattended, kind=kind if unattended else None)
     args = {} if unattended else {"source": "plan-a"}
     output = await call(await probe.registry(current), name, args)
-    assert output["status"] == ("skipped" if unattended else "needs-confirmation"), output
-    probe.no_submission()
     if unattended:
+        assert output["status"] == "skipped", output
         assert output["reason"] == "needs_confirmation" and "confirmation_token" not in output
+        asked.assert_not_awaited()
+        probe.no_submission()
     else:
-        # The card's exact approved retry survives the next turn's registry rebuild.
-        output = await call(await probe.registry(current), name, output["retry"])
-        assert output["status"] == "completed"
+        # The owner answered the regular permission prompt, so it ran once.
+        asked.assert_awaited_once()
+        assert output["status"] == "completed", output
         probe.submitted_once(kind)
+
+
+@pytest.mark.parametrize("name,kind", KINDS)
+async def test_a_declined_spend_prompt_never_reaches_reserve_or_transport(
+    probe: Probe, monkeypatch: pytest.MonkeyPatch, name: str, kind: str,
+) -> None:
+    original = Sources.prepare
+
+    async def prepare(
+        self: Sources, candidate: Candidate, options: dict[str, Any], prompt: str,
+    ) -> Candidate:
+        prepared = await original(self, candidate, options, prompt)
+        return replace(prepared, price={
+            "currency": "USD", "unit": "item", "amount": "0.60", "total": "0.60",
+            "status": "estimated",
+        })
+
+    monkeypatch.setattr(Sources, "prepare", prepare)
+    monkeypatch.setattr(generation_confirmations, "ask_on_prompt", AsyncMock(return_value="No thanks"))
+    output = await call(await probe.registry(context(unattended=False)), name, {"source": "plan-a"})
+    assert output["status"] == "refused" and output["reason"] == "declined", output
+    probe.no_submission()
 
 
 @pytest.mark.parametrize("name,kind", KINDS)
