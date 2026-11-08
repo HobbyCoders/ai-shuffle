@@ -29,7 +29,10 @@ async function measure(name, copy) {
   await new ColdClusterCopy(root, stop).validate();
   const launcherMs = performance.now() - start;
   start = performance.now();
-  await copy.discard();
+  // discard() keeps no cache since #1275. Leave an incremental point where older builds
+  // kept it, so the later phases still measure reuse of such a leftover cache.
+  if (copy instanceof IncrementalClusterCopy) await fs.rename(path.join(root, 'update-snapshot'), path.join(root, 'update-copy-cache'));
+  else await copy.discard();
   const cleanupMs = performance.now() - start;
   result.phases.push({ name, appMs, launcherMs, totalBeforeSelectMs: appMs + launcherMs, cleanupMs });
 }
@@ -44,8 +47,8 @@ try {
     await write(path.join(root, 'data/base/1', String(i)), size); remaining -= size;
   }
   await measure('before: single-pass app + full launcher validation', new SinglePassClusterCopy(root, stop));
-  await measure('after: first incremental point (cold cache)', new IncrementalClusterCopy(root, stop));
-  await measure('after: unchanged cluster (warm cache)', new IncrementalClusterCopy(root, stop));
+  await measure('after: first incremental point (no cache)', new IncrementalClusterCopy(root, stop));
+  await measure('after: unchanged cluster (cache left by an older build)', new IncrementalClusterCopy(root, stop));
   await write(path.join(root, 'data/base/1/0'), 64);
   await write(path.join(root, 'data/pg_wal/new-wal'), 16);
   await measure('after: 64 MiB relation changed + 16 MiB new WAL', new IncrementalClusterCopy(root, stop));

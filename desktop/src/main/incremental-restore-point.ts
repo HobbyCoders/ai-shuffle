@@ -26,8 +26,9 @@ async function shape(root: string): Promise<Shape> {
 }
 
 /**
- * A successful update retains one private, immutable cold copy as a disposable cache.
- * Never link it to the live cluster. Move it back under the journal's snapshot path,
+ * Builds before #1275 retained one private, immutable cold copy as a disposable cache
+ * after a successful update; discard() now deletes it. If one is still present, it is
+ * never linked to the live cluster. Move it back under the journal's snapshot path,
  * replace changed files, and emit the legacy SHA manifest. The installed launcher
  * MUST fully validate that manifest before selecting code (including cached files).
  * Recovery uses ColdClusterCopy's full hash checks and restartable copy/rename path.
@@ -101,15 +102,16 @@ export class IncrementalClusterCopy extends ColdClusterCopy {
     console.log(`[${new Date().toISOString()}] database restore point: copied ${copied} files (${bytes} bytes), reused ${reused} after ${((Date.now() - started) / 1000).toFixed(3)}s; launcher validation required`);
   }
 
+  /**
+   * Keeps nothing (#1275). Earlier builds moved a finished point to update-copy-cache
+   * so the next update copied only changed files, but that kept a second full copy of
+   * the database between updates (36 GB on a 36 GB cluster). Disk space now outranks
+   * update speed: the point and any cache an older build left are deleted. A cache
+   * that is still present when the next point is taken is reused once by snapshot().
+   * fs.rm removes a linked cache root as a link, without following it.
+   */
   override async discard(): Promise<void> {
-    const snapshot = path.join(this.cluster, 'update-snapshot'), cache = path.join(this.cluster, 'update-copy-cache');
-    let complete = false;
-    try { await fs.access(path.join(snapshot, 'incremental.json')); complete = true; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (complete) {
-      await fs.rm(cache, { recursive: true, force: true });
-      await durableRename(snapshot, cache);
-    }
+    await fs.rm(path.join(this.cluster, 'update-copy-cache'), { recursive: true, force: true });
     await super.discard();
   }
 }

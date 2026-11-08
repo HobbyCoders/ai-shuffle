@@ -30,13 +30,16 @@ function reads(t, root) {
   return files;
 }
 const legacy = root => new ColdClusterCopy(root, async () => {});
+// What builds before #1275 left after a healthy update. discard() no longer keeps it,
+// but snapshot() still reuses one that is present (the first update after upgrading).
+const leaveLegacyCache = root => fs.rename(path.join(root, 'update-snapshot'), path.join(root, 'update-copy-cache'));
 
-test('first point produces the legacy manifest; next point reads only changed files and retains empty folders', async t => {
+test('first point produces the legacy manifest; a point after a cache left by an older build reads only changed files and retains empty folders', async t => {
   const { root, copy, calls } = await cluster(t), files = reads(t, root);
   await copy.snapshot();
   assert.equal(files.length, 4);
   await legacy(root).validate(); // real installed launcher consumer
-  await copy.discard();
+  await leaveLegacyCache(root);
   files.length = 0;
   await fs.writeFile(path.join(root, 'data/base/1/rows'), 'updated rows');
   await fs.writeFile(path.join(root, 'data/new'), 'new');
@@ -55,7 +58,7 @@ test('first point produces the legacy manifest; next point reads only changed fi
 
 test('an unchanged multi-file cluster is not copied or hashed in the app', async t => {
   const { root, copy } = await cluster(t);
-  await copy.snapshot(); await legacy(root).validate(); await copy.discard();
+  await copy.snapshot(); await legacy(root).validate(); await leaveLegacyCache(root);
   const files = reads(t, root);
   await copy.snapshot();
   assert.deepEqual(files, []);
@@ -69,7 +72,7 @@ test('an unchanged multi-file cluster is not copied or hashed in the app', async
 
 test('same-size source edits with a restored mtime are not reused', async t => {
   const { root, copy } = await cluster(t);
-  await copy.snapshot(); await copy.discard();
+  await copy.snapshot(); await leaveLegacyCache(root);
   const file = path.join(root, 'data/base/1/rows'), before = await fs.stat(file);
   await fs.writeFile(file, 'modified rows');
   await fs.utimes(file, before.atime, before.mtime);
@@ -82,12 +85,12 @@ test('same-size source edits with a restored mtime are not reused', async t => {
 
 test('damaged cached contents are recopied, and a damaged receipt falls back to a complete copy', async t => {
   const { root, copy } = await cluster(t);
-  await copy.snapshot(); await copy.discard();
+  await copy.snapshot(); await leaveLegacyCache(root);
   await fs.writeFile(path.join(root, 'update-copy-cache/data/base/1/rows'), 'corrupt!');
   const files = reads(t, root);
   await copy.snapshot();
   assert.deepEqual(files, [path.join('base', '1', 'rows')]);
-  await legacy(root).validate(); await copy.discard();
+  await legacy(root).validate(); await leaveLegacyCache(root);
   await fs.writeFile(path.join(root, 'update-copy-cache/incremental.json'), '{');
   files.length = 0;
   await copy.snapshot(); assert.equal(files.length, 4); await legacy(root).validate();
@@ -95,7 +98,7 @@ test('damaged cached contents are recopied, and a damaged receipt falls back to 
 
 test('removals and file/directory type changes are reflected exactly', async t => {
   const { root, copy } = await cluster(t);
-  await copy.snapshot(); await copy.discard();
+  await copy.snapshot(); await leaveLegacyCache(root);
   await fs.rm(path.join(root, 'data/base/1/rows'));
   await fs.mkdir(path.join(root, 'data/base/1/rows'));
   await fs.writeFile(path.join(root, 'data/base/1/rows/child'), 'child');
@@ -119,7 +122,7 @@ test('live pid, links and an existing point fail closed', async t => {
 
 test('an interrupted copy cannot be retained or selected, and retry makes a complete point', async t => {
   const { root, copy } = await cluster(t);
-  await copy.snapshot(); await copy.discard();
+  await copy.snapshot(); await leaveLegacyCache(root);
   await fs.writeFile(path.join(root, 'data/base/1/rows'), 'changed');
   const open = fs.open;
   t.mock.method(fs, 'open', async (file, ...args) => {
@@ -129,22 +132,22 @@ test('an interrupted copy cannot be retained or selected, and retry makes a comp
   await assert.rejects(copy.snapshot(), /disk full/);
   await assert.rejects(legacy(root).validate());
   await copy.discard();
+  for (const name of ['update-snapshot', 'update-copy-cache']) await assert.rejects(fs.stat(path.join(root, name)), { code: 'ENOENT' });
   t.mock.restoreAll();
   await copy.snapshot(); await legacy(root).validate();
 });
 
 
-for (const boundary of ['update-copy-cache', 'update-snapshot']) test(`cache rename interrupted after ${boundary} is disposable and retryable`, async t => {
+test('cache rename interrupted after update-copy-cache is disposable and retryable', async t => {
   const { root, copy } = await cluster(t);
-  await copy.snapshot(); await copy.discard();
-  if (boundary === 'update-snapshot') await copy.snapshot();
+  await copy.snapshot(); await leaveLegacyCache(root);
   const storage = require('../dist/main/database-restore.js'), rename = storage.durableRename;
   t.mock.method(storage, 'durableRename', async (from, to) => {
     await rename(from, to); // perform the real OS write-through rename, then interrupt the caller
-    if (from === path.join(root, boundary)) throw Error('synthetic power loss');
+    if (from === path.join(root, 'update-copy-cache')) throw Error('synthetic power loss');
   });
   try {
-    await assert.rejects(boundary === 'update-copy-cache' ? copy.snapshot() : copy.discard(), /synthetic power loss/);
+    await assert.rejects(copy.snapshot(), /synthetic power loss/);
   } finally { t.mock.restoreAll(); }
   await copy.discard(); // preparing/committed cleanup is restartable
   await copy.snapshot(); await legacy(root).validate();
@@ -156,11 +159,15 @@ test('a linked cache root is discarded without following it', async t => {
   await fs.symlink(outside, path.join(root, 'update-copy-cache'), process.platform === 'win32' ? 'junction' : 'dir');
   await copy.snapshot(); await legacy(root).validate();
   assert.equal(await fs.readFile(path.join(outside, 'sentinel'), 'utf8'), 'do not touch');
+  await fs.symlink(outside, path.join(root, 'update-copy-cache'), process.platform === 'win32' ? 'junction' : 'dir');
+  await copy.discard();
+  await assert.rejects(fs.lstat(path.join(root, 'update-copy-cache')), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(path.join(outside, 'sentinel'), 'utf8'), 'do not touch');
 });
 
 test('app producer, installed launcher preflight and failed-start recovery preserve the journal and floor', async t => {
   const { root, copy } = await cluster(t), { f, u } = await rollbackFixture(t);
-  await copy.snapshot(); await copy.discard(); // seed the cache through the real producer
+  await copy.snapshot(); await leaveLegacyCache(root); // a cache an older build left behind
   await u.prepareRollback(async () => copy);
   const launcher = f.create(); await launcher.load();
   await launcher.prepareRollback(async () => legacy(root));
@@ -176,17 +183,18 @@ test('app producer, installed launcher preflight and failed-start recovery prese
 });
 
 
-test('healthy completion retains the producer cache for the next real update journal', async t => {
+test('healthy completion keeps no copy of the database, and the next update still takes a full restore point', async t => {
   const { root, copy } = await cluster(t), { f, u } = await rollbackFixture(t);
+  await copy.snapshot(); await leaveLegacyCache(root); // an older build's cache is cleared too
   await u.prepareRollback(async () => copy);
   await u.select(); await u.databaseStarting(); await u.healthy();
   await u.finishRollback(async () => copy);
   await assert.rejects(fs.stat(path.join(f.root, 'restore-point.json')), { code: 'ENOENT' });
-  assert.ok(await fs.stat(path.join(root, 'update-copy-cache/incremental.json')));
+  for (const name of ['update-snapshot', 'update-copy-cache']) await assert.rejects(fs.stat(path.join(root, name)), { code: 'ENOENT' });
   await f.release(C); await u.download();
   const files = reads(t, root);
   await u.prepareRollback(async () => copy);
-  assert.deepEqual(files, []);
+  assert.equal(files.length, 4); // nothing cached: every file is read again
   const launcher = f.create(); await launcher.load();
   await launcher.prepareRollback(async () => legacy(root));
   assert.equal((await launcher.select()).revision, C);
@@ -207,7 +215,7 @@ test('a source that changes during the copy never completes a point', async t =>
 
 test('launcher full validation rejects same-size corruption even when a cache receipt claimed a hit', async t => {
   const { root, copy } = await cluster(t), { f, u } = await rollbackFixture(t);
-  await copy.snapshot(); await copy.discard();
+  await copy.snapshot(); await leaveLegacyCache(root);
   await u.prepareRollback(async () => copy);
   await fs.writeFile(path.join(root, 'update-snapshot/data/base/1/rows'), 'corruptedrows');
   const launcher = f.create(); await launcher.load();
