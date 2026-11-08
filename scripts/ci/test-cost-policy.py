@@ -7,6 +7,7 @@ runs path-filtered unsigned native checks; its release-only steps stay owner-gat
 from pathlib import Path
 import json
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -231,12 +232,31 @@ class CostPolicyTests(unittest.TestCase):
                         else:
                             self.assertIn("fromJSON((github.event_name == 'pull_request' || inputs.main_suite == true)", matrix)
                     elif runner == "${{ matrix.runner }}":
-                        entries = job["strategy"]["matrix"]["include"]
+                        matrix = job["strategy"]["matrix"]
+                        self.assertEqual(set(matrix), {"include"},
+                                         "matrix.runner support is include-only; axes create extra jobs")
+                        entries = matrix["include"]
                         self.assertTrue(entries)
                         for entry in entries:
                             self.assertIn(entry["runner"], allowed)
                     else:
                         self.assertIn(runner, allowed)
+
+    def test_runner_axis_cannot_hide_a_paid_job_behind_free_include_entries(self):
+        config = workflow("runtime-overlay-acceptance.yml")
+        config["jobs"]["acceptance"]["strategy"]["matrix"]["runner"] = ["macos-latest-xlarge"]
+        original_workflow = workflow
+
+        def mixed_matrix(name):
+            return config if name == "runtime-overlay-acceptance.yml" else original_workflow(name)
+
+        result = unittest.TestResult()
+        guard = CostPolicyTests("test_public_app_workflows_use_standard_hosted_runners")
+        with patch(f"{__name__}.workflow", side_effect=mixed_matrix):
+            guard.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertFalse(result.errors)
+        self.assertEqual(len(result.failures), 1, "Paid runner axis escaped the free-runner guard")
 
     def test_runtime_overlay_acceptance_is_path_scoped_and_non_publishing(self):
         config = workflow("runtime-overlay-acceptance.yml")
