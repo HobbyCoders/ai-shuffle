@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from app.core import plugin_install, plugin_updates
+from app.core.chat_files import AccessDenied
 from app.core.plugin_models import PluginScope
 from app.core.plugin_service import PluginService
 
@@ -205,14 +206,17 @@ def test_relative_source_cannot_escape_marketplace(svc, tmp_path, source, metada
     assert listed["p@mp"].marketplace_path != str(outside)
 
 
-def test_relative_source_escape_guard_bites(svc, monkeypatch):
+def test_copy_confinement_survives_relaxed_source_resolver_guard(svc, monkeypatch):
     outside = svc.MARKETPLACES_DIR.parent / "outside"
     _plugin_dir(outside.parent, "outside", files={"secret.txt": "s3cret"})
     (_marketplace(svc, plugins=[{"name": "p", "source": "./plugins/../../../outside"}])
      / "plugins").mkdir()
     monkeypatch.setattr(plugin_install, "_is_within", lambda *_a: True)
-    svc.install_plugin("p@mp")
-    assert any(b"s3cret" in v for v in _tree(svc.CACHE_DIR).values())
+    # The resolver's advisory path check is no longer the IO boundary. Even if
+    # it is bypassed, pinned traversal independently refuses an outside root.
+    with pytest.raises(ValueError):
+        svc.install_plugin("p@mp")
+    assert not any(b"s3cret" in v for v in _tree(svc.CACHE_DIR).values())
 
 
 def test_project_install_rejects_traversal_name(svc, tmp_path):
@@ -298,13 +302,15 @@ def test_symlinks_outside_repo_are_not_copied(svc, tmp_path):
 
 
 @symlinks
-def test_symlink_guard_bites(svc, tmp_path, monkeypatch):
+def test_io_confinement_survives_relaxed_symlink_guard(svc, tmp_path, monkeypatch):
     real = plugin_install._is_within
-    # Disable only the "outside the repo" check; keep loop protection working.
+    # Disable the advisory link check; actual traversal/read confinement must
+    # still refuse either an outside directory or file, regardless of ordering.
     monkeypatch.setattr(plugin_install, "_is_within",
                         lambda p, root: True if p.is_symlink() else real(p, root))
-    info = _symlink_plugin(svc, tmp_path)
-    assert any(b"PRIVATE KEY" in v for v in _tree(Path(info.install_path)).values())
+    with pytest.raises((AccessDenied, ValueError)):
+        _symlink_plugin(svc, tmp_path)
+    assert not any(b"PRIVATE KEY" in v for v in _tree(svc.CACHE_DIR).values())
 
 
 @symlinks
@@ -507,7 +513,8 @@ def test_auto_update_never_downgrades(svc):
 
 
 def test_downgrade_guard_bites(svc, monkeypatch):
-    monkeypatch.setattr(plugin_updates, "_is_update", lambda i, a: i != a)
+    # Discovery and installation now share the same precedence boundary.
+    monkeypatch.setattr(plugin_updates, "_compare_versions", lambda i, a: int(i != a))
     _installed_local(svc, "1.5.0", "1.4.0")
     _run_auto_update(svc)
     assert _installed(svc)["p@mp"][0]["version"] == "1.4.0"
