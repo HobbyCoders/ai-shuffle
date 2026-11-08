@@ -21,6 +21,7 @@
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { whenEscapeUnclaimed } from '$lib/utils/escape-layers';
 	import { notify } from '$lib/stores/notifications';
+	import { getErrorMessage } from '$lib/api/client';
 
 	interface Props {
 		projectId: string;
@@ -75,6 +76,20 @@
 		const next = new Set(inFlightFiles);
 		next.delete(file);
 		inFlightFiles = next;
+	}
+
+	// ── Action failures ─────────────────────────────────────────────────
+	// A refused stage/unstage/discard (e.g. `.git/index.lock` held by another
+	// git process) shows here, in the panel the user acted in. The bell only
+	// keeps history: on its own it made a failed Accept look like nothing
+	// happened. Cleared when the next action starts or on Dismiss.
+	let actionError = $state<string | null>(null);
+
+	function reportFailure(what: string, e: unknown) {
+		const detail = getErrorMessage(e, '').trim();
+		const message = detail ? `${what}: ${detail}` : what;
+		actionError = message;
+		notify(message, { severity: 'error' });
 	}
 
 	// ── Discard / delete confirmation (shared modal) ────────────────────
@@ -152,16 +167,18 @@
 	async function reviewAccept() {
 		if (!reviewSelectedFile || reviewActionInFlight) return;
 		reviewActionInFlight = true;
+		actionError = null;
+		const unstaging = reviewSelectedFile.category === 'staged';
 		try {
-			if (reviewSelectedFile.category === 'staged') {
+			if (unstaging) {
 				await git.unstageFiles([reviewSelectedFile.file]);
 			} else {
 				await git.stageFiles([reviewSelectedFile.file]);
 			}
 			await git.refreshChangedFiles();
 			advanceReviewFile();
-		} catch {
-			notify('Failed to update file', { severity: 'error' });
+		} catch (e) {
+			reportFailure(unstaging ? "Couldn't unstage the file" : "Couldn't stage the file", e);
 		} finally {
 			reviewActionInFlight = false;
 		}
@@ -170,6 +187,7 @@
 	async function reviewDecline() {
 		if (!reviewSelectedFile || reviewActionInFlight) return;
 		reviewActionInFlight = true;
+		actionError = null;
 		try {
 			await git.discardChanges(
 				[reviewSelectedFile.file],
@@ -177,8 +195,8 @@
 			);
 			await git.refreshChangedFiles();
 			advanceReviewFile();
-		} catch {
-			notify('Failed to discard changes', { severity: 'error' });
+		} catch (e) {
+			reportFailure("Couldn't discard the changes", e);
 		} finally {
 			reviewActionInFlight = false;
 		}
@@ -201,10 +219,11 @@
 
 	async function stageFile(file: FileChangeInfo) {
 		markInFlight(file.file);
+		actionError = null;
 		try {
 			await git.stageFiles([file.file]);
-		} catch {
-			notify('Failed to stage file', { severity: 'error' });
+		} catch (e) {
+			reportFailure("Couldn't stage the file", e);
 		} finally {
 			clearInFlight(file.file);
 		}
@@ -212,10 +231,11 @@
 
 	async function unstageFile(file: FileChangeInfo) {
 		markInFlight(file.file);
+		actionError = null;
 		try {
 			await git.unstageFiles([file.file]);
-		} catch {
-			notify('Failed to unstage file', { severity: 'error' });
+		} catch (e) {
+			reportFailure("Couldn't unstage the file", e);
 		} finally {
 			clearInFlight(file.file);
 		}
@@ -223,10 +243,11 @@
 
 	async function discardFile(file: FileChangeInfo) {
 		markInFlight(file.file);
+		actionError = null;
 		try {
 			await git.discardChanges([file.file], { [file.file]: file.category });
-		} catch {
-			notify('Failed to discard changes', { severity: 'error' });
+		} catch (e) {
+			reportFailure("Couldn't discard the changes", e);
 		} finally {
 			clearInFlight(file.file);
 		}
@@ -235,10 +256,11 @@
 	async function stageAll(files: FileChangeInfo[]) {
 		const paths = files.map(f => f.file);
 		for (const p of paths) markInFlight(p);
+		actionError = null;
 		try {
 			await git.stageFiles(paths);
-		} catch {
-			notify('Failed to stage files', { severity: 'error' });
+		} catch (e) {
+			reportFailure("Couldn't stage the files", e);
 		} finally {
 			for (const p of paths) clearInFlight(p);
 		}
@@ -247,10 +269,11 @@
 	async function unstageAll(files: FileChangeInfo[]) {
 		const paths = files.map(f => f.file);
 		for (const p of paths) markInFlight(p);
+		actionError = null;
 		try {
 			await git.unstageFiles(paths);
-		} catch {
-			notify('Failed to unstage files', { severity: 'error' });
+		} catch (e) {
+			reportFailure("Couldn't unstage the files", e);
 		} finally {
 			for (const p of paths) clearInFlight(p);
 		}
@@ -259,13 +282,14 @@
 	async function discardAll(files: FileChangeInfo[]) {
 		const paths = files.map(f => f.file);
 		for (const p of paths) markInFlight(p);
+		actionError = null;
 		try {
 			await git.discardChanges(
 				paths,
 				Object.fromEntries(files.map(f => [f.file, f.category]))
 			);
-		} catch {
-			notify('Failed to discard changes', { severity: 'error' });
+		} catch (e) {
+			reportFailure("Couldn't discard the changes", e);
 		} finally {
 			for (const p of paths) clearInFlight(p);
 		}
@@ -569,6 +593,18 @@
      ═══════════════════════════════════════════════════════════════════ -->
 
 
+{#snippet actionErrorStrip()}
+	{#if actionError}
+		<div class="action-error" role="alert">
+			<AlertTriangle size={14} strokeWidth={2} aria-hidden="true" />
+			<p class="action-error-text">{actionError}</p>
+			<button type="button" class="action-error-dismiss" onclick={() => { actionError = null; }} aria-label="Dismiss error">
+				<X size={14} strokeWidth={2} />
+			</button>
+		</div>
+	{/if}
+{/snippet}
+
 {#snippet fileListContent()}
 	{#if $changedFilesLoading && totalCount === 0}
 		<div class="loading-skeleton">
@@ -691,6 +727,8 @@
 				onScopeChange={(next) => { reviewScope = next; }}
 			/>
 
+			{@render actionErrorStrip()}
+
 			<!-- Accept / Decline footer -->
 			{#if reviewSelectedFile && reviewScope === 'working'}
 				<div class="review-footer">
@@ -723,6 +761,7 @@
 			{/if}
 		{:else}
 			<!-- ═══ Classic file list layout ═══ -->
+			{@render actionErrorStrip()}
 			<div class="panel-content">
 				{@render fileListContent()}
 			</div>
@@ -922,6 +961,54 @@
 
 	/* ─── Review footer (Accept / Decline) ─────────────────────────── */
 	@container (max-width: 420px) { .review-footer { flex-wrap: wrap; gap: 6px; padding: 8px; } .review-footer-info { flex-basis: 100%; } }
+
+	/* A refused file action, in the panel it happened in (not only the bell). */
+	.action-error {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		margin: 8px 12px;
+		padding: 8px 6px 8px 10px;
+		border: 1px solid color-mix(in oklch, var(--destructive) 40%, var(--border));
+		border-left-width: 3px;
+		border-radius: calc(var(--radius) - 2px);
+		background: color-mix(in oklch, var(--destructive) 8%, var(--background));
+		color: var(--destructive);
+		flex-shrink: 0;
+		animation: action-error-in 180ms ease-out;
+	}
+	.action-error > :global(svg) { flex-shrink: 0; margin-top: 2px; }
+	.action-error-text {
+		flex: 1;
+		min-width: 0;
+		margin: 0;
+		font-size: 0.75rem;
+		line-height: 1.4;
+		color: var(--foreground);
+		overflow-wrap: anywhere;
+	}
+	.action-error-dismiss {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		width: 28px;
+		height: 28px;
+		margin: -4px 0;
+		border: none;
+		border-radius: calc(var(--radius) - 4px);
+		background: transparent;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: background 120ms ease, color 120ms ease;
+	}
+	.action-error-dismiss:hover { background: var(--hover-overlay); color: var(--foreground); }
+	.action-error-dismiss:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+	@media (max-width: 639px), (pointer: coarse) {
+		.action-error-dismiss { width: 44px; height: 44px; margin: -12px -4px -12px 0; }
+	}
+	@keyframes action-error-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+	@media (prefers-reduced-motion: reduce) { .action-error { animation: none; } }
 
 	.review-footer {
 		display: flex;

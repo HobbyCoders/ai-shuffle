@@ -105,6 +105,9 @@
 				</button>
 			</div>
 			{#each actions as action (action.id)}
+				{#if action.note}
+					<p class="gp-note">{action.label}: {action.note}</p>
+				{/if}
 				{#if action.disabledReason}
 					<p class="gp-why" id="{uid}-{action.id}-why">{action.label}: {action.disabledReason}</p>
 				{/if}
@@ -292,6 +295,15 @@
 		font-size: 0.6875rem;
 		color: var(--muted-foreground);
 		text-align: right;
+	}
+
+	/* The last attempt failed; the button stays usable for the retry. */
+	.gp-note {
+		margin: 6px 0 0;
+		font-size: 0.6875rem;
+		color: var(--destructive);
+		text-align: right;
+		word-break: break-word;
 	}
 
 	.gp-dismiss {

@@ -50,6 +50,7 @@
 	import ChatExportMenu from './ChatExportMenu.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { pullConflicts, pullNotification, resolveConflictsPrompt, resolveWithAgentReason } from './git-pull-notification';
+	import { createResolveWithAgent, RESOLVE_AGENT_ACTION } from './git-resolve-with-agent';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 	import SessionSidePanel from './SessionSidePanel.svelte';
@@ -379,7 +380,7 @@
 		untrack(() => {
 			gitOperations.setAction('pull-first', { disabledReason: followUp });
 			gitOperations.setAction('stash-pull', { disabledReason: followUp });
-			gitOperations.setAction('resolve-agent', { disabledReason: agent });
+			gitOperations.setAction(RESOLVE_AGENT_ACTION, { disabledReason: agent });
 		});
 	});
 	// Adoption refreshes the session list, not the tab's initial snapshot.
@@ -767,6 +768,7 @@
 		});
 		if (plan.blocked) {
 			gitOperations.report('Commit', plan.blocked);
+			notify(plan.blocked, { severity: 'warning' }); // bell history only
 			return;
 		}
 		const nextStep: CommitNextStep = plan.nextStep;
@@ -842,6 +844,7 @@
 		} catch (e) {
 			const detail = errText(e);
 			const behind = !force && isNonFastForward(detail);
+			notify(detail, { severity: 'error' }); // bell history; the panel shows the outcome
 			gitOperations.fail(detail, {
 				stepId: 'push',
 				actions: behind ? [gitFollowUp('pull-first', 'Pull first', guardRetry, () => { void handlePull(); })] : []
@@ -860,23 +863,17 @@
 		};
 	}
 
-	/** Hand a stopped pull's conflicts to this chat's agent. */
-	async function resolvePullWithAgent(sessionId: string | null, prompt: string) {
-		// Re-check at click time: the chat, its live session or its stream may
-		// have changed since the button was drawn.
-		const reason = resolveAgentReasonFor(sessionId);
-		if (reason) {
-			gitOperations.setAction('resolve-agent', { disabledReason: reason });
-			return;
-		}
-		gitOperations.setAction('resolve-agent', { disabledReason: 'Sending…' });
-		const sent = await activeSession.sendMessage(prompt);
-		if (sent) {
-			gitOperations.clear();
-			openHeaderDropdown.update((cur) => (cur && cur.startsWith('git-') ? null : cur));
-		} else {
-			gitOperations.setAction('resolve-agent', { disabledReason: resolveAgentReasonFor(sessionId) ?? "The message wasn't sent. Try again." });
-		}
+	/** Hand a stopped pull's conflicts to the chat the sync ran in. */
+	function resolvePullWithAgent(sessionId: string | null, prompt: string): () => Promise<void> {
+		return createResolveWithAgent({
+			// Re-checked at click time and again after the sender's restore /
+			// reconnect wait: the chat, its live session or its stream may have
+			// changed since the button was drawn.
+			reason: () => resolveAgentReasonFor(sessionId),
+			send: (text, options) => activeSession.sendMessage(text, options),
+			operations: gitOperations,
+			onSent: () => openHeaderDropdown.update((cur) => (cur && cur.startsWith('git-') ? null : cur))
+		}, prompt);
 	}
 
 	async function handlePull(opts: PullOptions = {}) {
@@ -904,16 +901,16 @@
 					return;
 				}
 				conflictSessionId = sessionId;
-				const prompt = resolveConflictsPrompt({ target: res.target, branch: target.head, conflicts });
+				const resolve = resolvePullWithAgent(sessionId, resolveConflictsPrompt({ target: res.target, branch: target.head, conflicts }));
 				gitOperations.fail(notification.message, {
 					stepId: 'pull',
 					files: conflicts.length > 0 ? { label: 'Conflicting files', paths: conflicts } : null,
 					actions: [{
-						id: 'resolve-agent',
+						id: RESOLVE_AGENT_ACTION,
 						label: 'Resolve with agent',
 						primary: true,
 						disabledReason: resolveAgentReasonFor(sessionId),
-						onClick: () => { void resolvePullWithAgent(sessionId, prompt); }
+						onClick: () => { void resolve(); }
 					}]
 				});
 				return;
@@ -927,7 +924,9 @@
 			// Dirty working tree without auto-stash → 409. Offer a stash retry
 			// (mirrors the branch-checkout 409 → "Stash & switch" pattern).
 			const dirty = !autoStash && isApiError(e) && e.status === 409;
-			gitOperations.fail(errText(e), {
+			const detail = errText(e);
+			notify(detail, { severity: 'error' }); // bell history; the panel shows the outcome
+			gitOperations.fail(detail, {
 				stepId: 'pull',
 				actions: dirty ? [gitFollowUp('stash-pull', 'Stash & pull', guardRetry, () => { void handlePull({ strategy, autoStash: true }); })] : []
 			});
@@ -963,7 +962,9 @@
 	async function handleShipIt(opts: ShipItOptions = {}) {
 		if (gitActionsBlocked()) return;
 		if (selectedWorkerTarget) {
-			gitOperations.report('Ship It', 'Create a session on the selected worker before shipping changes');
+			const refusal = 'Create a session on the selected worker before shipping changes';
+			gitOperations.report('Ship It', refusal);
+			notify(refusal, { severity: 'error' }); // bell history only
 			return;
 		}
 		markGitActivity(); // user git action → responsive poll cadence

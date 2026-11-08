@@ -53,6 +53,21 @@ describe('GitProgressPopover outcomes', () => {
 		expect(screen.queryByText(/Available when the current reply finishes/)).toBeNull();
 	});
 
+	it('shows a failed attempt as a note while the button stays usable for the retry', async () => {
+		const resolve = vi.fn();
+		render(GitProgressPopover);
+		gitOperations.report('Pull', 'Pull stopped on conflicts.', {
+			actions: [{ id: 'resolve-agent', label: 'Resolve with agent', onClick: resolve }]
+		});
+		gitOperations.setAction('resolve-agent', { disabledReason: null, note: "The message wasn't sent. Try again." });
+		const button = await screen.findByRole('button', { name: 'Resolve with agent' });
+		await vi.waitFor(() => expect(screen.getByText(/The message wasn't sent/)).toBeTruthy());
+		expect((button as HTMLButtonElement).disabled).toBe(false);
+		expect(button.getAttribute('aria-describedby')).toBeNull();
+		await fireEvent.click(button);
+		expect(resolve).toHaveBeenCalledTimes(1);
+	});
+
 	it('offers "Pull first" with a rejected push and dismisses cleanly', async () => {
 		const pull = vi.fn();
 		render(GitProgressPopover);

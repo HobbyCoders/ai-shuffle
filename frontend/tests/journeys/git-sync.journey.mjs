@@ -19,8 +19,9 @@
 //                  jumps the phone sheet) until the panel is closed
 //   dirty          diverged with an uncommitted edit: Sync is refused, the
 //                  panel offers "Stash & pull", which then succeeds
-//   push-rejected  the remote refuses the push: the panel shows why and offers
-//                  "Pull first"
+//   push-rejected  the remote refuses the push: the panel shows why, the bell
+//                  keeps a history entry for it, and "Pull first" then brings
+//                  in the upstream commit
 //
 //   node tests/journeys/git-sync.journey.mjs [--case=conflict@phone-slow] [--list]
 import { execFileSync } from 'node:child_process';
@@ -29,7 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runJourney } from './runner.mjs';
-import { expect, openNewChat, scriptTag, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
+import { api, expect, openNewChat, scriptTag, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const PROJECT_ID = 'dev-other';
@@ -121,10 +122,14 @@ const STAGES = {
 		const { repo } = repoPaths(status);
 		writeFileSync(join(repo, 'README.md'), readFileSync(join(repo, 'README.md'), 'utf8') + '\nAn uncommitted note.\n');
 	},
-	'push-rejected'(status) {
+	'push-rejected'(status, ctx) {
+		// Ahead only: the app fetches on its own and disables Push once it knows
+		// the branch is behind, so the upstream commit lands later (in the act).
 		commitLocal(status, 'LOCAL.md', 'from this branch\n', 'Local adds a file');
+		// A token in the refusal finds this run's entry in the bell's history.
+		ctx.rejectToken = uniq();
 		const hook = join(repoPaths(status).remote, 'hooks', 'pre-receive');
-		writeFileSync(hook, '#!/bin/sh\necho "! [rejected] main -> main (fetch first)" >&2\nexit 1\n');
+		writeFileSync(hook, `#!/bin/sh\necho "! [rejected] main -> main (fetch first) ${ctx.rejectToken}" >&2\nexit 1\n`);
 		chmodSync(hook, 0o755);
 	}
 };
@@ -134,7 +139,7 @@ function setupFor(stage) {
 	return async (ctx) => {
 		const { page, status, variant } = ctx;
 		restoreRepo(status);
-		STAGES[stage](status);
+		STAGES[stage](status, ctx);
 		ctx.headBefore = git(repoPaths(status).repo, 'rev-parse', 'HEAD');
 		await openNewChat(ctx, { project: PROJECT_NAME });
 		await typeAndSend(page, `${scriptTag(variant, 'default')} git sync ${uniq()}`);
@@ -258,7 +263,7 @@ await runJourney({
 			name: 'push-rejected',
 			setup: setupFor('push-rejected'),
 			allow: [{ kind: 'failed_requests', status: 400, url: /\/git\/push(\?|$)/, reason: 'the case installs a remote hook that refuses the push on purpose' }],
-			act: restoring(async ({ page, mark, panel, row }) => {
+			act: restoring(async ({ page, mark, panel, row, status, rejectToken }) => {
 				await mark('press Push');
 				await row.click();
 				const surface = outcome(panel);
@@ -270,6 +275,24 @@ await runJourney({
 				await surface.getByText(/rejected/i).first().waitFor({ timeout: 5000 });
 				await page.waitForTimeout(1500);
 				expect(await panel.getByRole('button', { name: 'Pull first' }).isVisible(), 'the rejection stays on screen until dismissed');
+				// The panel shows the outcome; the bell still keeps it in history
+				// (the next Git action replaces the panel's outcome).
+				const history = await api(page, 'GET', '/notifications?limit=50');
+				expect(history.notifications.some((n) => String(n.message ?? '').includes(rejectToken)), 'the bell keeps a history entry for the rejected push');
+
+				// Someone else's push is what the remote was guarding; let it in so
+				// "Pull first" has something to bring down.
+				unlinkSync(join(repoPaths(status).remote, 'hooks', 'pre-receive'));
+				commitUpstream(status, 'UPSTREAM.md', 'from upstream\n', 'Upstream adds a file');
+
+				await mark('press Pull first');
+				await surface.getByRole('button', { name: 'Pull first' }).click();
+				try {
+					await outcome(panel).getByText(/Pulled from origin\/main/i).waitFor({ timeout: 20_000 });
+				} catch {
+					throw new Error('"Pull first" did not report a pull in the Git panel');
+				}
+				expect(git(repoPaths(status).repo, 'rev-list', '--count', 'HEAD..origin/main') === '0', '"Pull first" brought in origin/main');
 			})
 		}
 	],

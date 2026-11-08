@@ -1604,61 +1604,46 @@ export const git = {
 	async stageFiles(files: string[]) {
 		if (!_state.projectId) return;
 
-		try {
-			const response = await gitApi.stageFiles(
-				_state.projectId,
-				files,
-				_state.worktreeId ?? undefined,
-				_state.sessionId ?? _state.workerTarget ?? undefined
-			);
-			_applyMutationPayload(response.status, response.diff_stats);
-			await git.refreshChangedFiles();
-		} catch (e) {
-			const error = e as { detail?: string };
-			_update((s) => ({ ...s, error: error.detail || 'Failed to stage files' }));
-			throw e;
-		}
+		// No catch: a refused stage/unstage/discard is not "Git unavailable".
+		// The Changes panel reports it next to the file; setting the shared
+		// error here flipped the Git header to "Git unavailable" instead.
+		const response = await gitApi.stageFiles(
+			_state.projectId,
+			files,
+			_state.worktreeId ?? undefined,
+			_state.sessionId ?? _state.workerTarget ?? undefined
+		);
+		_applyMutationPayload(response.status, response.diff_stats);
+		await git.refreshChangedFiles();
 	},
 
-	/** @see stageFiles — same inline-payload + changed-files reconcile. */
+	/** @see stageFiles — same inline-payload + changed-files reconcile, same error rule. */
 	async unstageFiles(files: string[]) {
 		if (!_state.projectId) return;
 
-		try {
-			const response = await gitApi.unstageFiles(
-				_state.projectId,
-				files,
-				_state.worktreeId ?? undefined,
-				_state.sessionId ?? _state.workerTarget ?? undefined
-			);
-			_applyMutationPayload(response.status, response.diff_stats);
-			await git.refreshChangedFiles();
-		} catch (e) {
-			const error = e as { detail?: string };
-			_update((s) => ({ ...s, error: error.detail || 'Failed to unstage files' }));
-			throw e;
-		}
+		const response = await gitApi.unstageFiles(
+			_state.projectId,
+			files,
+			_state.worktreeId ?? undefined,
+			_state.sessionId ?? _state.workerTarget ?? undefined
+		);
+		_applyMutationPayload(response.status, response.diff_stats);
+		await git.refreshChangedFiles();
 	},
 
-	/** @see stageFiles — same inline-payload + changed-files reconcile. */
+	/** @see stageFiles — same inline-payload + changed-files reconcile, same error rule. */
 	async discardChanges(files: string[], fileStatuses: Record<string, string>) {
 		if (!_state.projectId) return;
 
-		try {
-			const response = await gitApi.discardChanges(
-				_state.projectId,
-				files,
-				fileStatuses,
-				_state.worktreeId ?? undefined,
-				_state.sessionId ?? _state.workerTarget ?? undefined
-			);
-			_applyMutationPayload(response.status, response.diff_stats);
-			await git.refreshChangedFiles();
-		} catch (e) {
-			const error = e as { detail?: string };
-			_update((s) => ({ ...s, error: error.detail || 'Failed to discard changes' }));
-			throw e;
-		}
+		const response = await gitApi.discardChanges(
+			_state.projectId,
+			files,
+			fileStatuses,
+			_state.worktreeId ?? undefined,
+			_state.sessionId ?? _state.workerTarget ?? undefined
+		);
+		_applyMutationPayload(response.status, response.diff_stats);
+		await git.refreshChangedFiles();
 	},
 
 	clearError() {

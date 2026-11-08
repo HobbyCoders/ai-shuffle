@@ -46,6 +46,12 @@ export interface GitOperationAction {
 	onClick: () => void;
 	primary?: boolean;
 	disabledReason?: string | null;
+	/**
+	 * What happened the last time it was pressed ("The message wasn't sent"),
+	 * shown under the buttons. Unlike `disabledReason` it leaves the button
+	 * usable, so a failed attempt never blocks its own retry.
+	 */
+	note?: string | null;
 }
 
 /** Files the outcome names, e.g. the conflicting files of a stopped pull. */
@@ -267,6 +273,20 @@ async function _pollToTerminal(
 export const gitOperations = {
 	get current() {
 		return _state;
+	},
+
+	/**
+	 * The token of the operation on screen. Work that outlives a click (a
+	 * follow-up that waits on the network) checks {@link isCurrent} with it
+	 * before touching the outcome, so it never clears or edits a newer one.
+	 */
+	get token(): number {
+		return _opToken;
+	},
+
+	/** Whether `token` still names the operation on screen (not dismissed or replaced). */
+	isCurrent(token: number): boolean {
+		return _opToken === token;
 	},
 
 	subscribe,

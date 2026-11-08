@@ -35,7 +35,9 @@ const mocks = vi.hoisted(() => ({
 	commitChanges: vi.fn(),
 	pushCommits: vi.fn(),
 	pullFromRemote: vi.fn(),
-	stageFiles: vi.fn()
+	stageFiles: vi.fn(),
+	unstageFiles: vi.fn(),
+	discardChanges: vi.fn()
 }));
 
 vi.mock('$lib/api/git', async (importOriginal) => {
@@ -181,6 +183,21 @@ describe('git store — a failed panel action is not "Git unavailable"', () => {
 		await expect(git.commitChanges('msg')).rejects.toBeTruthy();
 		// The Git panel reports these itself; a shared error would swap the
 		// whole panel for "Git unavailable · Retry" and hide that report.
+		expect(git.current.error).toBeNull();
+	});
+
+	it('leaves the shared error alone when stage, unstage or discard is refused', async () => {
+		mocks.getGitStatus.mockResolvedValue(status());
+		await git.loadRepository('review-failures');
+		const locked = { status: 500, detail: "fatal: Unable to create '.git/index.lock': File exists." };
+		mocks.stageFiles.mockRejectedValueOnce(locked);
+		await expect(git.stageFiles(['a.ts'])).rejects.toBe(locked);
+		mocks.unstageFiles.mockRejectedValueOnce(locked);
+		await expect(git.unstageFiles(['a.ts'])).rejects.toBe(locked);
+		mocks.discardChanges.mockRejectedValueOnce(locked);
+		await expect(git.discardChanges(['a.ts'], { 'a.ts': 'modified' })).rejects.toBe(locked);
+		// The Changes panel reports these; the Git header must not flip to
+		// "Git unavailable" over a single refused file action.
 		expect(git.current.error).toBeNull();
 	});
 });

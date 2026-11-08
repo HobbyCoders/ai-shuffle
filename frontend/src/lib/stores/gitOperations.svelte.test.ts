@@ -340,4 +340,15 @@ describe('gitOperations — server-polled operations', () => {
 		expect(mergeStep?.detail).toBe('file.ts');
 		expect(git.operationInProgress).toBe(false);
 	});
+
+	it('tells a delayed follow-up whether its operation is still on screen', () => {
+		gitOperations.report('Pull', 'Pull stopped on conflicts.');
+		const token = gitOperations.token;
+		expect(gitOperations.isCurrent(token)).toBe(true);
+		gitOperations.dismiss();
+		expect(gitOperations.isCurrent(token)).toBe(false);
+		gitOperations.begin('Push', []);
+		expect(gitOperations.isCurrent(token)).toBe(false);
+		gitOperations.clear();
+	});
 });
