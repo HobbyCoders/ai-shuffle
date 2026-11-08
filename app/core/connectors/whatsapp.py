@@ -20,6 +20,7 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     TriggerDef,
     chunk_text,
+    sent_at_seconds,
 )
 from app.core.connectors import whatsapp_actions
 
@@ -396,6 +397,7 @@ class WhatsAppConnector(BaseConnector):
                 platform_user_name=contact,
                 text=text_body,
                 platform_message_id=msg_data.get("id"),
+                sent_at=sent_at_seconds(msg_data.get("timestamp")),
             )
             await self._on_incoming_message(msg)
 

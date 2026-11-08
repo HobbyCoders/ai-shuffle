@@ -21,6 +21,20 @@ def _fake_instance(sent=True):
     return inst
 
 
+@pytest.mark.parametrize("value,expected", [
+    ("1800000000", 1_800_000_000.0),  # WhatsApp
+    ("1800000000.000100", 1_800_000_000.0001),  # Slack
+    (1_800_000_000_000, 1_800_000_000.0),  # Signal, LINE, BlueBubbles
+    ("2027-01-15T08:00:00.1234567Z", 1_800_000_000.123456),  # Teams
+    (None, None), ("", None), ("not a time", None), (float("inf"), None), (0, None),
+])
+def test_sent_at_seconds_reads_each_platforms_format(value, expected):
+    from app.core.connectors.base import sent_at_seconds
+
+    got = sent_at_seconds(value)
+    assert got == pytest.approx(expected) if expected is not None else got is None
+
+
 # =============================================================================
 # deliver_permission_prompt
 # =============================================================================
@@ -158,18 +172,22 @@ class TestDeliverPermissionPrompt:
 # =============================================================================
 
 
-def _chat_message(text="yes", user="owner-account", attachments=None, message_id=None, chat="chan-9"):
+_NOW = object()
+
+
+def _chat_message(text="yes", user="owner-account", attachments=None, message_id=None, chat="chan-9", sent_at=_NOW):
     from app.core.connectors.base import IncomingMessage
 
     return IncomingMessage(
         connector_id="c1", platform_chat_id=chat, platform_user_id=user,
         platform_user_name="Someone", text=text, attachments=attachments or [],
         platform_message_id=uuid.uuid4().hex if message_id is None else message_id,
+        sent_at=time.time() if sent_at is _NOW else sent_at,
     )
 
 
-def _open_request(tool="Bash", tool_input=None, kind="permission", request_id="req-1"):
-    return {"kind": kind, "payload": {
+def _open_request(tool="Bash", tool_input=None, kind="permission", request_id="req-1", created_at=None):
+    return {"kind": kind, "created_at": time.time() - 60 if created_at is None else created_at, "payload": {
         "request_id": request_id, "tool_name": tool, "tool_input": tool_input or {"command": "ls"},
     }}
 
@@ -214,6 +232,30 @@ class TestAnswerFromChat:
         channel["respond"].assert_awaited_once_with("req-a", "sess-1", "allow")
 
     @pytest.mark.asyncio
+    async def test_a_redelivery_after_a_handoff_never_approves_the_new_owners_request(self, channel, mock_db):
+        """Claims stay on the worker that made them, so the new owner has none."""
+        from app.core.connector_permissions import answer_from_chat
+        from app.db import connectors as connectors_db
+        from app.db.base import get_db
+
+        now = time.time()
+        reply = _chat_message(message_id="wamid.handoff")
+        reply.sent_at = now - 600
+        channel["pending"].return_value = [_open_request(request_id="req-a", created_at=now - 700)]
+        assert await answer_from_chat(reply) is True  # worker A consumes it
+
+        with get_db() as conn:  # the connector moves to worker B, with its own database
+            conn.cursor().execute("DELETE FROM system_settings WHERE key LIKE %s",
+                                  (connectors_db.ANSWER_CLAIM_PREFIX + "%",))
+        channel["pending"].return_value = [_open_request(request_id="req-b", created_at=now - 60)]
+        channel["instance"].send_message.reset_mock()
+
+        assert await answer_from_chat(reply) is True  # used up here too, never an agent turn
+        channel["respond"].assert_awaited_once_with("req-a", "sess-1", "allow")
+        note = channel["instance"].send_message.await_args.args[0]
+        assert "before this request" in note.text
+
+    @pytest.mark.asyncio
     async def test_concurrent_deliveries_approve_at_most_once(self, channel, mock_db):
         from app.core.connector_permissions import answer_from_chat
 
@@ -252,6 +294,24 @@ class TestAnswerFromChat:
 
         assert await answer_from_chat(_chat_message(message_id=message_id)) is False
         channel["respond"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_message_with_no_send_time_cannot_approve(self, channel, mock_db):
+        """Nothing shows it was sent after the request, so it stays an ordinary message."""
+        from app.core.connector_permissions import answer_from_chat
+
+        assert await answer_from_chat(_chat_message(sent_at=None)) is False
+        channel["respond"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_reply_in_the_second_the_request_opened_still_answers(self, channel, mock_db):
+        """Telegram and WhatsApp report whole seconds."""
+        from app.core.connector_permissions import answer_from_chat
+
+        opened = 1_800_000_000.75
+        channel["pending"].return_value = [_open_request(created_at=opened)]
+        assert await answer_from_chat(_chat_message(sent_at=1_800_000_000.0)) is True
+        channel["respond"].assert_awaited_once_with("req-1", "sess-1", "allow")
 
     @pytest.mark.asyncio
     async def test_the_same_id_in_another_chat_is_another_message(self, channel, mock_db):

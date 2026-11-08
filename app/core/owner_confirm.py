@@ -328,6 +328,18 @@ def drop_passes(session_id: Optional[str], turn_id: Optional[str] = None) -> Non
         _passes.pop(session_id or "", None)
 
 
+def approved_inputs(session_id: Optional[str], tool_name: str) -> List[Any]:
+    """The input of each unspent, armed pass for ``tool_name``. Spends nothing."""
+    return [json.loads(entry["input"]) for entry in _passes.get(session_id or "", ())
+            if entry["tool_name"] == tool_name]
+
+
+def is_approved_call(session_id: Optional[str], tool_name: str, tool_input: Any) -> bool:
+    """Whether :func:`take_approved_once` would admit this call. Spends nothing."""
+    key = (tool_name, _canonical(tool_input))
+    return any((entry["tool_name"], entry["input"]) == key for entry in _passes.get(session_id or "", ()))
+
+
 def take_approved_once(session_id: Optional[str], tool_name: str, tool_input: Any) -> bool:
     """Spend the owner's yes on this call, if it is exactly the approved one.
 

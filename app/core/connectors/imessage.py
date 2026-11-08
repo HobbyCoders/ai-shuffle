@@ -18,6 +18,7 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     ToolDef,
     TriggerDef,
+    sent_at_seconds,
 )
 from app.core.detached_tasks import spawn_detached
 
@@ -286,6 +287,7 @@ class IMessageConnector(BaseConnector):
                 platform_user_name=params.get("sender_name", sender),
                 text=text,
                 platform_message_id=params.get("guid") or params.get("id"),
+                sent_at=sent_at_seconds(params.get("created_at") or params.get("date")),
                 metadata={
                     "service": params.get("service"),
                     "is_group": params.get("is_group", False),

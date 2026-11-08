@@ -20,6 +20,7 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     TriggerDef,
     chunk_text,
+    sent_at_seconds,
 )
 from app.core.connectors import signal_actions
 from app.core.detached_tasks import spawn_detached
@@ -259,6 +260,7 @@ class SignalConnector(BaseConnector):
             platform_user_name=sender_name,
             text=text or "",
             platform_message_id=str(timestamp) if timestamp else None,
+            sent_at=sent_at_seconds(timestamp),
             metadata={
                 "group_id": group_info.get("groupId") if group_info else None,
                 "group_name": group_name,

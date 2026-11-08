@@ -7,8 +7,10 @@ inherit from BaseConnector and implement the abstract methods.
 
 import asyncio
 import logging
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
@@ -20,6 +22,20 @@ class ConnectorStatus(str, Enum):
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
     ERROR = "error"
+
+
+def sent_at_seconds(value: Any) -> Optional[float]:
+    """A timestamp as epoch seconds, from a datetime, an ISO string, or a number
+    in seconds or milliseconds. None when it cannot be read."""
+    try:
+        if isinstance(value, str) and not value.replace(".", "", 1).isdigit():
+            value = datetime.fromisoformat(value)
+        number = value.timestamp() if isinstance(value, datetime) else float(value)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number / 1000 if number > 1e11 else number
 
 
 @dataclass
@@ -34,6 +50,8 @@ class IncomingMessage:
     reply_to_message_id: Optional[str] = None
     attachments: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    #: When the platform says it was sent (epoch seconds). None when it did not say.
+    sent_at: Optional[float] = None
 
 
 @dataclass

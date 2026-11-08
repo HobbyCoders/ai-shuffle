@@ -18,6 +18,7 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     TriggerDef,
     chunk_text,
+    sent_at_seconds,
 )
 from app.core.connectors import telegram_actions
 
@@ -194,6 +195,7 @@ class TelegramConnector(BaseConnector):
             platform_user_name=user.full_name if user else "Unknown",
             text=message.text or "",
             platform_message_id=str(message.message_id),
+            sent_at=sent_at_seconds(message.date),
             metadata={"chat_type": message.chat.type},
         )
         await self.emit_durable_trigger("watch_message_received", {

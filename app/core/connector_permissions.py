@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 #: What :func:`_request_to_answer` returns for a reply already delivered once.
 _REPEAT_DELIVERY: Tuple[str, str, Dict[str, Any]] = ("", "", {})
+_SENT_BEFORE_REQUEST: Tuple[str, str, Dict[str, Any]] = ("", "", {})
 
 
 async def deliver_permission_prompt(
@@ -115,9 +116,11 @@ def _prompt_text(connector_session: Dict[str, Any], tool_name: str, tool_input: 
 def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]]:
     """``(session id, request id, payload)`` of the oldest request this sender
     may answer in this chat, else None. Any doubt is None. A repeat of a reply
-    is :data:`_REPEAT_DELIVERY`. Blocking (DB)."""
+    is :data:`_REPEAT_DELIVERY`; one sent before the request opened,
+    :data:`_SENT_BEFORE_REQUEST`. Blocking (DB)."""
     from app.core import owner_confirm
     from app.core.connector_service import sender_is_owner
+    from app.core.connectors.base import sent_at_seconds
     from app.core.permission_handler import PERMISSION_KIND
     from app.db import connectors as connectors_db
     from app.db import database, interactions
@@ -128,7 +131,7 @@ def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]
     if ownership.enrolled() and not ownership.owns(database.get_connector(message.connector_id)):
         return None
     message_id = str(message.platform_message_id or "").strip()
-    if not message_id:
+    if not message_id or message.sent_at is None:
         return None
     # Claimed before anything is looked up: a yes first delivered with nothing
     # open was an ordinary message, and its repeat must not answer a later request.
@@ -143,6 +146,12 @@ def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]
         if row.get("kind") != PERMISSION_KIND or not payload.get("request_id"):
             continue
         if owner_confirm.is_owner_approval(payload.get("tool_name"), payload.get("tool_input")):
+            # A reply cannot answer a question not yet asked. Claims stay on the
+            # worker that made them, so this is what stops a reply another worker
+            # already counted from answering here after the connector moved.
+            opened = sent_at_seconds(row.get("created_at"))
+            if opened is None or message.sent_at < int(opened):
+                return _SENT_BEFORE_REQUEST
             return session_id, payload["request_id"], payload
     return None
 
@@ -150,14 +159,13 @@ def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]
 async def answer_from_chat(message: Any) -> bool:
     """Answer the chat's oldest open request from the owner's plain-text reply.
 
-    True when ``message`` was that answer, or a repeat delivery of a reply
-    already counted, and needs no agent turn. False leaves it an ordinary
-    message: another sender, nothing open, not a firm yes or no, or no platform
-    message ID. Runs ahead of the per-chat message lock, because that lock is held by
+    True when ``message`` was that answer, a repeat delivery of a reply already
+    counted, or sent before the request opened (the owner is told), and needs
+    no agent turn. False leaves it an ordinary message: another sender, nothing
+    open, not a firm yes or no, or no platform message ID or send time. Runs ahead of the per-chat message lock, because that lock is held by
     the very turn waiting for this answer. Never raises.
     """
     from app.core import owner_confirm
-    from app.core.connectors.base import OutgoingMessage
 
     try:
         verdict = owner_confirm.classify(message.text)
@@ -167,6 +175,10 @@ async def answer_from_chat(message: Any) -> bool:
         if found is None:
             return False
         if found is _REPEAT_DELIVERY:
+            return True
+        if found is _SENT_BEFORE_REQUEST:
+            await _tell_chat(message, "That reply was sent before this request opened, so it did not "
+                                      "answer it. Reply yes or no again to answer.")
             return True
         session_id, request_id, payload = found
         from app.core.permission_handler import permission_handler
@@ -178,18 +190,23 @@ async def answer_from_chat(message: Any) -> bool:
     except Exception:  # noqa: BLE001 — unanswered is safe; the TTL denies it
         logger.warning("connector_permissions: text answer failed", exc_info=True)
         return False
-    try:
-        from app.core.connectors.manager import connector_manager
+    done = "Approved" if allow else "Declined"
+    action = owner_confirm.describe(payload.get("tool_name") or "", payload.get("tool_input"))
+    await _tell_chat(message, f"{done}: {action}.")
+    return True
 
+
+async def _tell_chat(message: Any, text: str) -> None:
+    """Best-effort reply in the chat ``message`` came from."""
+    from app.core.connectors.base import OutgoingMessage
+    from app.core.connectors.manager import connector_manager
+
+    try:
         instance = connector_manager.get_running_instance(message.connector_id)
         if instance is not None:
-            done = "Approved" if allow else "Declined"
-            action = owner_confirm.describe(payload.get("tool_name") or "", payload.get("tool_input"))
-            await instance.send_message(OutgoingMessage(
-                platform_chat_id=message.platform_chat_id, text=f"{done}: {action}."))
-    except Exception:  # noqa: BLE001 — the answer already stands
-        logger.debug("connector_permissions: acknowledgement failed", exc_info=True)
-    return True
+            await instance.send_message(OutgoingMessage(platform_chat_id=message.platform_chat_id, text=text))
+    except Exception:  # noqa: BLE001 — what it reports already stands
+        logger.debug("connector_permissions: chat reply failed", exc_info=True)
 
 
 def _lookup_connector_sessions(session_id):

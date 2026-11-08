@@ -18,6 +18,7 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     TriggerDef,
     chunk_text,
+    sent_at_seconds,
 )
 from app.core.connectors import slack_actions
 
@@ -251,6 +252,7 @@ class SlackConnector(BaseConnector):
                 platform_user_name=user_name,
                 text=text,
                 platform_message_id=event.get("ts", ""),
+                sent_at=sent_at_seconds(event.get("ts")),
                 reply_to_message_id=thread_ts,
                 metadata={
                     "thread_ts": thread_ts,

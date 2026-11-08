@@ -25,6 +25,14 @@ def _expired(value, now):
         return True
 
 
+def spend_request(kind, candidate, prompt) -> dict:
+    """The request the owner approves, which also identifies its retry (#523)."""
+    price = candidate.price or {}
+    return {"kind": kind, "prompt": prompt, "model": candidate.model, "account": candidate.account,
+            "worker": candidate.worker, "options": candidate.options,
+            "price": str(price.get("total") or price.get("amount") or "?")}
+
+
 async def ask_on_prompt(session_id, profile_id, kind, candidate, prompt):
     """Ask on the regular permission prompt. None when approved, else why not.
 
@@ -38,7 +46,8 @@ async def ask_on_prompt(session_id, profile_id, kind, candidate, prompt):
         pass  # permission_handler also broadcasts to the authenticated owner.
 
     price = candidate.price or {}
-    amount = str(price.get("total") or price.get("amount") or "?")
+    tool_input = spend_request(kind, candidate, prompt)
+    amount = tool_input["price"]
     cost = f"${amount}" if price.get("currency") == "USD" else f"{amount} {price.get('currency') or ''}".strip()
     question = f"Spend about {cost} to generate this {kind} with {candidate.model}?"
     decision = await provider_agent_approvals.route_permission({
@@ -46,8 +55,7 @@ async def ask_on_prompt(session_id, profile_id, kind, candidate, prompt):
         "session_id": session_id,
         "profile_id": profile_id or "",
         "tool_name": SPEND_TOOL,
-        "tool_input": {"kind": kind, "prompt": prompt, "model": candidate.model, "account": candidate.account,
-                       "worker": candidate.worker, "options": candidate.options, "price": amount},
+        "tool_input": tool_input,
         "broadcast_func": no_origin_socket,
         "title": question,
         "display_name": "Approve spend",

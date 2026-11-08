@@ -71,14 +71,14 @@ def continues_approved_generation(payload) -> bool:
 
     A prompt can outlive its turn (#523): the owner sends another message, that
     turn ends, and Approve then queues a wake holding a one-use pass for the
-    call. The wake is the owner's own decision, so it may finish that call.
-    A wake holding no such pass stays unattended.
+    spend. The wake stays unattended, except that it may finish that one call
+    (``Resolver.generate``). Only a spend approval names the resolved call
+    exactly; a wake holding any other pass stays wholly unattended.
     """
     from app.core.generation_confirmations import SPEND_TOOL
     from app.core.owner_confirm import approved_tool
 
-    tool_name = approved_tool(payload)
-    return bool(tool_name) and (tool_name == SPEND_TOOL or is_generation_tool(tool_name))
+    return approved_tool(payload) == SPEND_TOOL
 
 
 def admission_gates_unattended(tool_name, context, *, session_id=None) -> bool:
@@ -129,6 +129,11 @@ class RunContext:
     # Where the person has the app's permission prompt: asks it about a spend
     # above the threshold. None where there is no prompt to press.
     spend_prompt: Callable | None = field(default=None, compare=False, repr=False)
+    # A wake carrying the owner's Approve of one spend (#523): the spend prompt
+    # for that one call. Every other call in the wake stays unattended.
+    approved_wake_prompt: Callable | None = field(default=None, compare=False, repr=False)
+    # Set while that call runs: what to do if it resolves to anything else.
+    not_the_approved_call: Callable | None = field(default=None, compare=False, repr=False)
     # False only for the fail-closed context of an idle pooled tool server.
     active_turn: bool = True
 
@@ -352,6 +357,32 @@ class Resolver:
             return False
         return True
 
+    async def _generate_on_approved_wake(self, kind, args, context, exclude_sources) -> dict:
+        """A call on a wake carrying the owner's Approve of one spend (#523).
+
+        Only that exact call runs as the owner's own, re-resolved to the account
+        and options approved and checked once resolved. Any other call, and that
+        one once its pass is spent, keeps unattended admission.
+        """
+        from dataclasses import replace as _replace
+
+        from app.core import owner_confirm
+        from app.core.generation_confirmations import SPEND_TOOL
+
+        unattended = _replace(context, approved_wake_prompt=None)
+
+        async def as_unattended():
+            return await self.generate(kind, args, unattended, exclude_sources=exclude_sources)
+
+        for approved in owner_confirm.approved_inputs(context.session_id, SPEND_TOOL):
+            if approved.get("kind") == kind and approved.get("prompt") == args.get("prompt"):
+                named = {"source": approved.get("account"), "model": approved.get("model"),
+                         "worker": approved.get("worker"), "options": approved.get("options")}
+                owner_present = _replace(unattended, unattended=False, spend_prompt=context.approved_wake_prompt,
+                                         not_the_approved_call=as_unattended)
+                return await self.generate(kind, {**named, **args}, owner_present, exclude_sources=exclude_sources)
+        return await as_unattended()
+
     async def generate(self, kind: str, args: dict, context: RunContext, *, exclude_sources=()) -> dict:
         """``exclude_sources``: sources the caller's policy forbids for this call."""
         if not context.active_turn:
@@ -361,6 +392,8 @@ class Resolver:
         prompt = args.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32000:
             return result("refused", error="A nonempty prompt of at most 32000 characters is required.")
+        if context.approved_wake_prompt is not None:
+            return await self._generate_on_approved_wake(kind, args, context, exclude_sources)
         remembered = context.remembered_for(kind)
         job = context.job_choice or (context.job_choices or {}).get(kind)
         stored = job or remembered
@@ -438,6 +471,8 @@ class Resolver:
                 return result("skipped", reason="stored_choice_ambiguous", kind=kind,
                               message="Generation skipped: the stored choice does not identify one account/model binding.")
             if (not stored and not explicit) or len(candidates) != 1:
+                if context.not_the_approved_call is not None:
+                    return await context.not_the_approved_call()
                 last = context.last_for(kind)
                 if last and follow_account:
                     last = await follow_account(last)
@@ -505,6 +540,13 @@ class Resolver:
             if total is None:
                 return result("refused", price=candidate.price, reason="price_unavailable",
                               error="A reliable price is unavailable; generation was not submitted.", choice=candidate.choice())
+            if context.not_the_approved_call is not None:
+                from app.core import owner_confirm
+                from app.core.generation_confirmations import SPEND_TOOL, spend_request
+
+                if not owner_confirm.is_approved_call(context.session_id, SPEND_TOOL,
+                                                      spend_request(kind, candidate, prompt)):
+                    return await context.not_the_approved_call()
             fingerprint = hashlib.sha256(json.dumps(
                 [kind, prompt, context.session_id, candidate.choice(), candidate.price],
                 sort_keys=True, separators=(",", ":")).encode()).hexdigest()
