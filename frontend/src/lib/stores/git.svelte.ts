@@ -1320,32 +1320,26 @@ export const git = {
 	): Promise<gitApi.PullResponse> {
 		if (!_state.projectId) throw new Error('No project selected');
 
-		try {
-			const response = await gitApi.pullFromRemote(
-				target.projectId,
-				{ strategy, auto_stash: autoStash },
-				target.worktreeId,
-				target.sessionId ?? target.workerTarget
-			);
+		// No catch: an action failure is not "Git unavailable". The Git panel's
+		// handler reports it in the panel; setting the shared error here swapped
+		// the whole panel for a Retry button and hid that report.
+		const response = await gitApi.pullFromRemote(
+			target.projectId,
+			{ strategy, auto_stash: autoStash },
+			target.worktreeId,
+			target.sessionId ?? target.workerTarget
+		);
 
-			if (!_targetIsCurrent(target)) return response;
-			_applyMutationPayload(response.status, response.diff_stats);
+		if (!_targetIsCurrent(target)) return response;
+		_applyMutationPayload(response.status, response.diff_stats);
 
-			await Promise.all([
-				git.loadBranches(),
-				git.loadGraph(),
-				git.refreshPrState(true).catch(() => {})
-			]);
+		await Promise.all([
+			git.loadBranches(),
+			git.loadGraph(),
+			git.refreshPrState(true).catch(() => {})
+		]);
 
-			return response;
-		} catch (e) {
-			const error = e as { detail?: string };
-			_update((s) => ({
-				...s,
-				error: error.detail || 'Failed to pull'
-			}));
-			throw e;
-		}
+		return response;
 	},
 
 	async forgetWorktree(worktreeId: string) {
@@ -1507,31 +1501,25 @@ export const git = {
 		newBranch?: string
 	): Promise<gitApi.CommitResponse> {
 
-		try {
-			const response = await gitApi.commitChanges(
-				target.projectId,
-				{
-					message,
-					include_unstaged: includeUnstaged,
-					...(newBranch ? { new_branch: newBranch } : {})
-				},
-				target.worktreeId,
-				target.sessionId ?? target.workerTarget
-			);
+		// No catch: an action failure is not "Git unavailable". The Git panel's
+		// handler reports it in the panel; setting the shared error here swapped
+		// the whole panel for a Retry button and hid that report.
+		const response = await gitApi.commitChanges(
+			target.projectId,
+			{
+				message,
+				include_unstaged: includeUnstaged,
+				...(newBranch ? { new_branch: newBranch } : {})
+			},
+			target.worktreeId,
+			target.sessionId ?? target.workerTarget
+		);
 
-			if (!_targetIsCurrent(target)) return response;
-			_applyMutationPayload(response.status, response.diff_stats);
-			await git.loadBranches();
+		if (!_targetIsCurrent(target)) return response;
+		_applyMutationPayload(response.status, response.diff_stats);
+		await git.loadBranches();
 
-			return response;
-		} catch (e) {
-			const error = e as { detail?: string };
-			if (_targetIsCurrent(target)) _update((s) => ({
-				...s,
-				error: error.detail || 'Failed to commit changes'
-			}));
-			throw e;
-		}
+		return response;
 	},
 
 	/**
@@ -1548,35 +1536,29 @@ export const git = {
 		target: GitActionTarget = git.captureTarget()
 	): Promise<gitApi.OperationResponse> {
 
-		try {
-			const response = await gitApi.pushCommits(
-				target.projectId,
-				{
-					branch,
-					set_upstream: setUpstream,
-					force
-				},
-				target.worktreeId,
-				target.sessionId ?? target.workerTarget
-			);
+		// No catch: an action failure is not "Git unavailable". The Git panel's
+		// handler reports it in the panel; setting the shared error here swapped
+		// the whole panel for a Retry button and hid that report.
+		const response = await gitApi.pushCommits(
+			target.projectId,
+			{
+				branch,
+				set_upstream: setUpstream,
+				force
+			},
+			target.worktreeId,
+			target.sessionId ?? target.workerTarget
+		);
 
-			if (!_targetIsCurrent(target)) return response;
-			_applyMutationPayload(response.status, response.diff_stats);
+		if (!_targetIsCurrent(target)) return response;
+		_applyMutationPayload(response.status, response.diff_stats);
 
-			await Promise.all([
-				git.loadBranches(),
-				git.refreshPrState(true).catch(() => {})
-			]);
+		await Promise.all([
+			git.loadBranches(),
+			git.refreshPrState(true).catch(() => {})
+		]);
 
-			return response;
-		} catch (e) {
-			const error = e as { detail?: string };
-			if (_targetIsCurrent(target)) _update((s) => ({
-				...s,
-				error: error.detail || 'Failed to push commits'
-			}));
-			throw e;
-		}
+		return response;
 	},
 
 	async refreshChangedFiles() {
@@ -1622,61 +1604,46 @@ export const git = {
 	async stageFiles(files: string[]) {
 		if (!_state.projectId) return;
 
-		try {
-			const response = await gitApi.stageFiles(
-				_state.projectId,
-				files,
-				_state.worktreeId ?? undefined,
-				_state.sessionId ?? _state.workerTarget ?? undefined
-			);
-			_applyMutationPayload(response.status, response.diff_stats);
-			await git.refreshChangedFiles();
-		} catch (e) {
-			const error = e as { detail?: string };
-			_update((s) => ({ ...s, error: error.detail || 'Failed to stage files' }));
-			throw e;
-		}
+		// No catch: a refused stage/unstage/discard is not "Git unavailable".
+		// The Changes panel reports it next to the file; setting the shared
+		// error here flipped the Git header to "Git unavailable" instead.
+		const response = await gitApi.stageFiles(
+			_state.projectId,
+			files,
+			_state.worktreeId ?? undefined,
+			_state.sessionId ?? _state.workerTarget ?? undefined
+		);
+		_applyMutationPayload(response.status, response.diff_stats);
+		await git.refreshChangedFiles();
 	},
 
-	/** @see stageFiles — same inline-payload + changed-files reconcile. */
+	/** @see stageFiles — same inline-payload + changed-files reconcile, same error rule. */
 	async unstageFiles(files: string[]) {
 		if (!_state.projectId) return;
 
-		try {
-			const response = await gitApi.unstageFiles(
-				_state.projectId,
-				files,
-				_state.worktreeId ?? undefined,
-				_state.sessionId ?? _state.workerTarget ?? undefined
-			);
-			_applyMutationPayload(response.status, response.diff_stats);
-			await git.refreshChangedFiles();
-		} catch (e) {
-			const error = e as { detail?: string };
-			_update((s) => ({ ...s, error: error.detail || 'Failed to unstage files' }));
-			throw e;
-		}
+		const response = await gitApi.unstageFiles(
+			_state.projectId,
+			files,
+			_state.worktreeId ?? undefined,
+			_state.sessionId ?? _state.workerTarget ?? undefined
+		);
+		_applyMutationPayload(response.status, response.diff_stats);
+		await git.refreshChangedFiles();
 	},
 
-	/** @see stageFiles — same inline-payload + changed-files reconcile. */
+	/** @see stageFiles — same inline-payload + changed-files reconcile, same error rule. */
 	async discardChanges(files: string[], fileStatuses: Record<string, string>) {
 		if (!_state.projectId) return;
 
-		try {
-			const response = await gitApi.discardChanges(
-				_state.projectId,
-				files,
-				fileStatuses,
-				_state.worktreeId ?? undefined,
-				_state.sessionId ?? _state.workerTarget ?? undefined
-			);
-			_applyMutationPayload(response.status, response.diff_stats);
-			await git.refreshChangedFiles();
-		} catch (e) {
-			const error = e as { detail?: string };
-			_update((s) => ({ ...s, error: error.detail || 'Failed to discard changes' }));
-			throw e;
-		}
+		const response = await gitApi.discardChanges(
+			_state.projectId,
+			files,
+			fileStatuses,
+			_state.worktreeId ?? undefined,
+			_state.sessionId ?? _state.workerTarget ?? undefined
+		);
+		_applyMutationPayload(response.status, response.diff_stats);
+		await git.refreshChangedFiles();
 	},
 
 	clearError() {

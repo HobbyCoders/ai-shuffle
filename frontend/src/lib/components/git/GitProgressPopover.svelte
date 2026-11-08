@@ -2,22 +2,28 @@
 	/**
 	 * GitProgressPopover — compact step-list panel for the active git operation.
 	 *
-	 * Auto-shows while an operation is active (Commit / Create PR chains and the
-	 * server-polled Finish / Ship It operations). Each step carries a spinner /
-	 * check / warning / error icon. On success the store collapses it back to
-	 * idle after a couple of seconds (the success itself is announced via a
-	 * toast). On error it stays open, pinning the failing step's detail with a
-	 * Dismiss button.
+	 * Auto-shows while an operation is active (Commit / Push / Pull / Create PR
+	 * chains and the server-polled Finish / Ship It operations). Each step
+	 * carries a spinner / check / warning / error icon. On success the store
+	 * collapses it back to idle after a couple of seconds. On error (or a pinned
+	 * success that needs attention) it stays open until Dismiss, with the files
+	 * the outcome names (a stopped pull's conflicts) and its follow-up buttons
+	 * ("Pull first", "Stash & pull", "Resolve with agent"). This is where a Git
+	 * panel action reports back; the notification bell only keeps history.
 	 *
 	 * Styled after GitHeaderActions' .branch-dropdown, including its mobile
 	 * position:fixed escape hatch so it isn't clipped by the header's horizontal
 	 * scroll rail.
 	 */
-	import { Loader2, Check, X, AlertTriangle, Minus, Circle } from 'lucide-svelte';
+	import { Loader2, Check, X, AlertTriangle, Minus, Circle, FileWarning } from 'lucide-svelte';
 	import { gitOperationState, gitOperations } from '$lib/stores/gitOperations.svelte';
 
 	const state = $derived($gitOperationState);
 	const visible = $derived(state.active);
+	const settled = $derived(state.status === 'error' || (state.status === 'done' && state.pinned));
+	const uid = $props.id();
+	// Older snapshots (and test fixtures) may carry no follow-ups at all.
+	const actions = $derived(state.actions ?? []);
 </script>
 
 {#if visible}
@@ -72,11 +78,40 @@
 			{#if state.error && !state.steps.some((s) => s.status === 'error' && s.error === state.error)}
 				<p class="gp-error-msg">{state.error}</p>
 			{/if}
+		{/if}
+
+		{#if settled}
+			{#if state.files && state.files.paths.length > 0}
+				<div class="gp-files">
+					<span class="gp-files-label" id="{uid}-files">{state.files.label}</span>
+					<ul aria-labelledby="{uid}-files">
+						{#each state.files.paths as path (path)}
+							<li><FileWarning size={12} strokeWidth={1.8} class="warned" aria-hidden="true" /><span class="gp-path" title={path}>{path}</span></li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
 			<div class="gp-foot">
+				{#each actions as action (action.id)}
+					<button type="button" class="gp-action" class:primary={action.primary}
+						disabled={!!action.disabledReason}
+						aria-describedby={action.disabledReason ? `${uid}-${action.id}-why` : undefined}
+						onclick={() => action.onClick()}>
+						{action.label}
+					</button>
+				{/each}
 				<button type="button" class="gp-dismiss" onclick={() => gitOperations.dismiss()}>
 					Dismiss
 				</button>
 			</div>
+			{#each actions as action (action.id)}
+				{#if action.note}
+					<p class="gp-note">{action.label}: {action.note}</p>
+				{/if}
+				{#if action.disabledReason}
+					<p class="gp-why" id="{uid}-{action.id}-why">{action.label}: {action.disabledReason}</p>
+				{/if}
+			{/each}
 		{/if}
 	</div>
 {/if}
@@ -167,10 +202,108 @@
 		word-break: break-word;
 	}
 
+	.gp-files {
+		margin-top: 8px;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.gp-files-label {
+		font-size: 0.6875rem;
+		font-weight: 600;
+		color: var(--muted-foreground);
+	}
+
+	.gp-files ul {
+		list-style: none;
+		margin: 0;
+		padding: 6px 8px;
+		max-height: 9rem;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		background: color-mix(in oklch, var(--background) 60%, transparent);
+	}
+
+	.gp-files li {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.gp-path {
+		min-width: 0;
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		color: var(--foreground);
+		overflow-wrap: anywhere;
+	}
+
 	.gp-foot {
 		display: flex;
+		flex-wrap: wrap;
 		justify-content: flex-end;
+		gap: 6px;
 		margin-top: 8px;
+	}
+
+	.gp-action {
+		min-height: 36px;
+		padding: 0 12px;
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		color: var(--foreground);
+		font-size: 0.6875rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background 150ms ease, border-color 150ms ease, opacity 150ms ease;
+	}
+
+	.gp-action.primary {
+		background: var(--primary);
+		border-color: var(--primary);
+		color: var(--primary-foreground);
+	}
+
+	.gp-action:hover:not(:disabled) {
+		background: var(--hover-overlay);
+	}
+
+	.gp-action.primary:hover:not(:disabled) {
+		background: color-mix(in oklab, var(--primary) 88%, var(--foreground));
+	}
+
+	.gp-action:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.gp-action:focus-visible,
+	.gp-dismiss:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	.gp-why {
+		margin: 6px 0 0;
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
+		text-align: right;
+	}
+
+	/* The last attempt failed; the button stays usable for the retry. */
+	.gp-note {
+		margin: 6px 0 0;
+		font-size: 0.6875rem;
+		color: var(--destructive);
+		text-align: right;
+		word-break: break-word;
 	}
 
 	.gp-dismiss {
@@ -192,7 +325,8 @@
 	}
 
 	/* Icon colors */
-	:global(.sheet-layout) .gp-dismiss { min-height: 44px; }
+	:global(.sheet-layout) .gp-dismiss,
+	:global(.sheet-layout) .gp-action { min-height: 44px; }
 
 	.git-progress :global(.running) { color: var(--primary); }
 	.git-progress :global(.done) { color: var(--success); }

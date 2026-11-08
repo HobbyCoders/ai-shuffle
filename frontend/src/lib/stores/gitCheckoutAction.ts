@@ -16,16 +16,23 @@ import { git } from '$lib/stores/git.svelte';
 import { isApiError } from '$lib/api/client';
 import { notify } from '$lib/stores/notifications';
 
-/** A persistent bell action must never operate on a newly selected checkout. */
-export function captureGitRetryGuard(): (retry: () => void) => void {
+export const GIT_RETRY_ELSEWHERE = 'This Git action belongs to another checkout or branch. Return there and retry the operation.';
+
+/**
+ * A persistent follow-up (a bell action, a button in the Git panel) must never
+ * operate on a newly selected checkout. `onRefused` lets an on-screen button
+ * say so in place; without it the refusal goes to the notification bell.
+ */
+export function captureGitRetryGuard(): (retry: () => void, onRefused?: (reason: string) => void) => void {
 	const identity = () => JSON.stringify([
 		git.current.projectId, git.current.worktreeId, git.current.sessionId,
 		git.current.contextKey, git.current.status?.current_branch
 	]);
 	const origin = identity();
-	return (retry) => {
+	return (retry, onRefused) => {
 		if (origin !== identity()) {
-			notify('This Git action belongs to another checkout or branch. Return there and retry the operation.', { severity: 'warning' });
+			if (onRefused) onRefused(GIT_RETRY_ELSEWHERE);
+			else notify(GIT_RETRY_ELSEWHERE, { severity: 'warning' });
 			return;
 		}
 		retry();

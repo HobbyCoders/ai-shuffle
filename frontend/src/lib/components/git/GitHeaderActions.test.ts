@@ -29,6 +29,7 @@ import { resolve } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
 import { flushSync, tick } from 'svelte';
+import { get } from 'svelte/store';
 import { exportSession } from '$lib/api/sessions';
 vi.mock('$lib/api/sessions', () => ({ exportSession: vi.fn() }));
 
@@ -1232,6 +1233,25 @@ describe('GitHeaderActions panel and popover open/close', () => {
 			// The failure is still there when the user opens the panel.
 			await openPanel();
 			expect(within(panel()).getByText('Fixture failure')).toBeTruthy();
+		});
+
+		it('keeps a held success while the panel is open and clears it when the panel closes', async () => {
+			dirtyFeatureBranch();
+			renderHeader();
+			await tick();
+			mocks.gitOperationState.set(running);
+			await tick();
+			const done = { active: true, status: 'done', title: 'Pull', pinned: false, steps: [{ id: 'pull', label: 'Pull from upstream', status: 'done', detail: 'Pulled from origin/main using rebase' }] };
+			mocks.gitOperationState.set(done as never);
+			await tick();
+			expect(within(panel()).getByText('Pulled from origin/main using rebase')).toBeTruthy();
+			await fireEvent.click(screen.getByRole('button', { name: 'Close Git panel' }));
+			await tick();
+			expect(get(mocks.gitOperationState)).toEqual(expect.objectContaining({ active: false }));
+			// A pinned outcome (needs attention) survives the close.
+			mocks.gitOperationState.set({ ...done, pinned: true } as never);
+			await tick();
+			expect(get(mocks.gitOperationState)).toEqual(expect.objectContaining({ active: true, pinned: true }));
 		});
 
 		it('opens when an operation starts after mount, including after a dismissed failure', async () => {

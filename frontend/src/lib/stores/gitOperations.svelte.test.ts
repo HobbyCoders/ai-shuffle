@@ -99,6 +99,62 @@ describe('gitOperations — client-side coupling', () => {
 	});
 });
 
+describe('gitOperations — outcomes shown in the Git panel', () => {
+	it('keeps a failure\'s files and follow-ups until dismissed, and a new operation drops them', () => {
+		const onClick = vi.fn();
+		gitOperations.begin('Pull', [{ id: 'pull', label: 'Pull from upstream' }]);
+		gitOperations.setStep('pull', 'running');
+		gitOperations.fail('stopped', {
+			stepId: 'pull',
+			files: { label: 'Conflicting files', paths: ['README.md'] },
+			actions: [{ id: 'resolve-agent', label: 'Resolve with agent', onClick }]
+		});
+		vi.advanceTimersByTime(60_000);
+		expect(gitOperations.current.status).toBe('error');
+		expect(gitOperations.current.pinned).toBe(true);
+		expect(gitOperations.current.files?.paths).toEqual(['README.md']);
+		expect(gitOperations.current.actions.map((a) => a.id)).toEqual(['resolve-agent']);
+		expect(git.operationInProgress).toBe(false);
+
+		gitOperations.begin('Push', []);
+		expect(gitOperations.current.actions).toEqual([]);
+		expect(gitOperations.current.files).toBeNull();
+		expect(gitOperations.current.pinned).toBe(false);
+	});
+
+	it('updates one follow-up in place and ignores unknown ids', () => {
+		gitOperations.report('Push', 'rejected', { actions: [{ id: 'pull-first', label: 'Pull first', onClick: () => {} }] });
+		gitOperations.setAction('pull-first', { disabledReason: 'busy' });
+		gitOperations.setAction('missing', { disabledReason: 'x' });
+		expect(gitOperations.current.actions).toEqual([expect.objectContaining({ id: 'pull-first', disabledReason: 'busy' })]);
+	});
+
+	it('reports a refusal that never ran as a pinned error', () => {
+		gitOperations.report('Commit', 'You are on the default branch.');
+		expect(gitOperations.current).toEqual(expect.objectContaining({ active: true, status: 'error', title: 'Commit', error: 'You are on the default branch.', pinned: true }));
+		expect(git.operationInProgress).toBe(false);
+	});
+
+	it('holds a success without a timer and without asking for Dismiss', () => {
+		gitOperations.begin('Pull', [{ id: 'pull', label: 'Pull' }]);
+		gitOperations.setStep('pull', 'done');
+		gitOperations.succeed(null, { hold: true });
+		vi.advanceTimersByTime(60_000);
+		expect(gitOperations.current).toEqual(expect.objectContaining({ active: true, status: 'done', pinned: false }));
+		expect(git.operationInProgress).toBe(false);
+	});
+
+	it('pins a success that needs attention instead of collapsing it', () => {
+		gitOperations.begin('Pull', [{ id: 'pull', label: 'Pull' }]);
+		gitOperations.setStep('pull', 'warning');
+		gitOperations.succeed(null, { pin: true });
+		vi.advanceTimersByTime(60_000);
+		expect(gitOperations.current).toEqual(expect.objectContaining({ active: true, status: 'done', pinned: true }));
+		gitOperations.dismiss();
+		expect(gitOperations.current.active).toBe(false);
+	});
+});
+
 describe('gitOperations — server-polled operations', () => {
 	it('mirrors poll snapshots through running → done and captures the result', async () => {
 		mocks.getGitOperation
@@ -283,5 +339,16 @@ describe('gitOperations — server-polled operations', () => {
 		expect(mergeStep?.status).toBe('error');
 		expect(mergeStep?.detail).toBe('file.ts');
 		expect(git.operationInProgress).toBe(false);
+	});
+
+	it('tells a delayed follow-up whether its operation is still on screen', () => {
+		gitOperations.report('Pull', 'Pull stopped on conflicts.');
+		const token = gitOperations.token;
+		expect(gitOperations.isCurrent(token)).toBe(true);
+		gitOperations.dismiss();
+		expect(gitOperations.isCurrent(token)).toBe(false);
+		gitOperations.begin('Push', []);
+		expect(gitOperations.isCurrent(token)).toBe(false);
+		gitOperations.clear();
 	});
 });

@@ -26,7 +26,7 @@
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import GitProgressPopover from './GitProgressPopover.svelte';
-	import { gitOperationState } from '$lib/stores/gitOperations.svelte';
+	import { gitOperationState, gitOperations } from '$lib/stores/gitOperations.svelte';
 	import ChatExportActions from '../layout/ChatExportActions.svelte';
 	import { buildShell } from '$lib/utils/platform';
 	import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ArrowDownToLine, ArrowUpFromLine, Rocket, TriangleAlert, ExternalLink, X, GitMerge } from 'lucide-svelte';
@@ -155,7 +155,7 @@
 	// mount would pop the panel (a sheet over the chat on mobile) every time the
 	// header remounts or the page reloads.
 	let lastProgressActive: boolean | null = null;
-	// An operation started from outside the panel (a toast's "Pull first") opens
+	// An operation started from outside the panel (a notification's action) opens
 	// it during that click, before the window click listener runs. This marks
 	// that event turn so handleClickOutside doesn't close what was just opened.
 	let openedByOperation = false;
@@ -171,6 +171,13 @@
 			}
 			openDropdown('git-panel');
 		});
+	});
+	// A finished, unpinned outcome (a held Push/Pull success) belongs to the
+	// panel it was shown in: closing the panel clears it, so the next open
+	// starts clean and nothing collapses while the sheet is up.
+	$effect(() => {
+		const op = $gitOperationState;
+		if (!panelOpen && op.active && op.status === 'done' && !op.pinned) untrack(() => gitOperations.dismiss());
 	});
 	const commitOptsOpen = $derived($openHeaderDropdown === 'git-commit');
 	const pushOptsOpen = $derived($openHeaderDropdown === 'git-push');
