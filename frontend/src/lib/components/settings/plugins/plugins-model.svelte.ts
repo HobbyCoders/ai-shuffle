@@ -138,6 +138,17 @@ export class PluginsModel {
 	connections = $state<Connector[]>([]);
 	marketplaces = $state<MarketplaceInfo[]>([]);
 	updates = $state<PluginUpdateInfo[]>([]);
+	updateChecks = $state<pluginsApi.PluginUpdateCheck[]>([]);
+	updateCheckError = $state('');
+	updateSummary = $derived.by(() => {
+		const failed = !!this.updateCheckError || this.updateChecks.some((check) => check.status === 'failed');
+		const unchecked = !this.updateChecks.length || this.updateChecks.some((check) => check.status === 'unchecked');
+		if (this.updates.length) {
+			return `${this.updates.length} available${failed ? ' · Check failed' : unchecked ? ' · Some not checked' : ''}`;
+		}
+		return failed ? 'Check failed' : unchecked ? 'Not checked' : 'Up to date';
+	});
+	lastUpdateCheck = $derived(this.updateChecks.map((check) => check.checked_at).filter(Boolean).sort().at(-1));
 	autoUpdate = $state<AutoUpdateSettings | null>(null);
 
 	details = $state<Record<string, PluginDetails>>({});
@@ -282,15 +293,22 @@ export class PluginsModel {
 		}
 	}
 
-	/** Sources, updates and auto-update (owner only). Failures leave them empty. */
+	/** Sources, update outcomes and auto-update (owner only). Retain last-known results. */
 	async loadManagement(): Promise<void> {
-		const [marketplaces, updates, autoUpdate] = await Promise.all([
+		const [marketplaces, report, autoUpdate] = await Promise.all([
 			pluginsApi.getMarketplaces().catch(() => this.marketplaces),
-			pluginsApi.checkForUpdates().catch(() => this.updates),
+			pluginsApi.getUpdateReport().catch((err) => {
+				this.updateCheckError = errorText(err, 'Could not read update-check status.');
+				return null;
+			}),
 			pluginsApi.getAutoUpdateSettings().catch(() => this.autoUpdate)
 		]);
 		this.marketplaces = marketplaces ?? [];
-		this.updates = updates ?? [];
+		if (report) {
+			this.updates = report.updates;
+			this.updateChecks = report.checks;
+			this.updateCheckError = '';
+		}
 		this.autoUpdate = autoUpdate ?? null;
 	}
 
@@ -444,9 +462,12 @@ export class PluginsModel {
 		this.checking = true;
 		this.actionError = '';
 		try {
-			this.updates = await pluginsApi.checkForUpdates(true);
+			const report = await pluginsApi.getUpdateReport(true);
+			this.updates = report.updates;
+			this.updateChecks = report.checks;
+			this.updateCheckError = '';
 		} catch (err) {
-			this.actionError = errorText(err, 'Could not check for updates.');
+			this.updateCheckError = errorText(err, 'Could not check for updates.');
 		} finally {
 			this.checking = false;
 		}

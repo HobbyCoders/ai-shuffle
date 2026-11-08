@@ -43,9 +43,13 @@ Their slash commands and user-invocable skills appear in the composer's **/** me
 
 **Settings → Plugins → Sources and updates → Check for updates** refreshes the sources of installed plugins, then checks for new releases or changed content. Repositories without a marketplace catalog and plugins whose version string has not changed are included. A same-version update shows a short content identifier after `+`.
 
+Before an external source has been checked, Settings says **Not checked**, not **Up to date**. A failed check is shown by name and keeps the last-known update results; healthy plugins can still be updated. **Up to date** means the tracked plugins were successfully checked. A missing installed folder is offered as an update or repair, even at an unchanged commit pin.
+
 Update plugins one by one or all at once. A manual Update refreshes its source first and keeps the plugin's enabled state. Git sources follow their configured branch or tag; an exact commit pin stays pinned until the source entry changes. Local-directory sources use the files already on disk. A folder imported as an agent-authored draft is a reviewed snapshot, not a tracked upstream: import a new draft to change it.
 
 You can turn on automatic updates and pick how often they run. The `auto_sync_marketplaces` setting controls refreshing marketplace checkouts and checking external git sources; **Install updates** controls applying detected changes. Opening Settings does not contact external plugin repositories: it shows cached checks until the owner checks again or automatic source sync runs. The candidate plugin manifest is canonical, with the catalog version used only as a fallback. Updates never install an older release, including when a commit pin changes. Updating a catalog-free repository preserves its passive skills/commands/agents-only type; adopting newly published hooks or MCP servers requires a fresh owner install. New chats load the applicable user/global installed revision, even when older commit hashes or project records remain in the cache.
+
+**Not checked** means no external check has run for this install; only a successful comparison can say **Up to date**. If a source check fails, Settings names the failing plugin and keeps the last-known result alongside healthy updates. A missing installed cache can be repaired through Check, Update all or opted-in automatic updates, even when its release or commit pin has not changed.
 
 ## Plugins made in a chat
 

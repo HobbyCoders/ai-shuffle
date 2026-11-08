@@ -300,11 +300,23 @@ curl http://localhost:8000/api/v1/plugins/updates \
 
 ### POST /api/v1/plugins/updates/check
 
-Refresh sources with installed plugins and check external repositories at their configured refs, then cache and return the update list. This is the owner-only **Check for updates** action in Settings. A source or plugin comparison failure is logged and isolated so healthy plugins still report updates. Local-directory sources are read in place, never re-cloned.
+Refresh sources with installed plugins and check external repositories at their configured refs, then cache and return the update list. This is the legacy list-only refresh; Settings uses the status-report action below. A source or plugin comparison failure is logged and isolated so healthy plugins still report updates. Local-directory sources are read in place, never re-cloned.
 
 **Auth:** Owner only
 
 No request fields are required.
+
+### GET /api/v1/plugins/updates/status
+
+Return `{ "updates": [...], "checks": [...] }` without contacting external sources. `updates` has the same shape as the legacy update-list endpoint; `checks` includes each tracked plugin's `plugin_id`, `name`, `status` (`unchecked`, `current`, `update` or `failed`), `checked_at` (last successful comparison, or `null`) and `error` (safe failure text, or `null`). A failed check retains its last-known update result, so one unavailable source does not hide healthy updates. An empty legacy update list alone does **not** mean a check succeeded.
+
+**Auth:** Required
+
+### POST /api/v1/plugins/updates/status/check
+
+Owner-triggered source refresh returning the same report, including per-plugin failures. Settings uses this action for **Check**. No request fields are required. Missing installed trees are offered as repairs, including unchanged pinned revisions. Release precedence ignores a `v` prefix, omitted trailing zeros and build metadata, and orders prereleases before the corresponding release.
+
+**Auth:** Owner only
 
 ### POST /api/v1/plugins/update
 

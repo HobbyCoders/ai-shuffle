@@ -149,11 +149,16 @@ def _get_marketplace_head_version(svc, marketplace_id: str) -> Optional[str]:
 
 
 def check_for_updates(svc, *, allow_remote: bool = False) -> List[PluginUpdateInfo]:
-    """Compare local candidates; passive reads use cached external checks.
+    """Compatibility list; Settings uses the report so [] never implies current."""
+    return get_update_report(svc, allow_remote=allow_remote)["updates"]
 
-    A catalog label or SHA is not the candidate's canonical manifest version.
-    Every source goes through the same content/version guard before an update
-    is offered. A broken plugin is isolated from the rest of the list.
+
+def get_update_report(svc, *, allow_remote: bool = False,
+                      source_errors: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Per-plugin outcomes, with last-known results retained on transient errors.
+
+    Passive reads never contact external repositories. Unchecked and failed are
+    not successful empty checks, and one failed comparison cannot hide others.
     """
     import hashlib
     import json
@@ -163,8 +168,8 @@ def check_for_updates(svc, *, allow_remote: bool = False) -> List[PluginUpdateIn
     marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
     cache_path = svc.PLUGINS_DIR / "update_checks.json"
     cached = svc._read_json_file(cache_path, {})
-    refreshed = {}
-    updates = []
+    refreshed, updates, checks = {}, [], []
+    now = datetime.now(timezone.utc).isoformat()
     for plugin_id, records in installed.get("plugins", {}).items():
         if "@" not in plugin_id or not records:
             continue
@@ -174,38 +179,54 @@ def check_for_updates(svc, *, allow_remote: bool = False) -> List[PluginUpdateIn
         name, marketplace_id = plugin_id.rsplit("@", 1)
         marketplace = marketplaces.get(marketplace_id, {})
         entry = svc._find_plugin_in_manifest(marketplace_id, name) or {}
+        if not entry and not install.get("implicit"):
+            continue  # Authored/project folders have no tracked upstream.
         external = not install.get("implicit") and isinstance(entry.get("source"), dict)
+        tree_exists = bool(install.get("installPath") and Path(install["installPath"]).is_dir())
         key = hashlib.sha256(json.dumps(
-            [install, entry, marketplace], sort_keys=True,
+            [install, entry, marketplace.get("installLocation"), marketplace.get("source"), tree_exists],
+            sort_keys=True,
         ).encode()).hexdigest()
+        previous = cached.get(plugin_id, {})
+        previous = previous if previous.get("key") == key else {}
+        result = {"key": key, "status": "unchecked", "update": None, "checked_at": None}
         try:
-            if external and not allow_remote:
-                previous = cached.get(plugin_id, {})
-                data = previous.get("update") if previous.get("key") == key else None
-                update = PluginUpdateInfo(**data) if data else None
+            if not allow_remote and (external or previous.get("status") == "failed"):
+                if previous:
+                    result = previous
             else:
+                if marketplace_id in (source_errors or {}):
+                    raise RuntimeError("Plugin source refresh failed")
                 update = content_update(svc, plugin_id, install, marketplace)
-            if update:
-                updates.append(update)
-            if external and allow_remote:
-                refreshed[plugin_id] = {"key": key, "update": update.to_dict() if update else None}
+                result = {"key": key, "status": "update" if update else "current",
+                          "update": update.to_dict() if update else None, "checked_at": now}
         except Exception as exc:
             logger.warning("Cannot compare plugin %s: %s", plugin_id, exc)
+            result = {**result, **previous, "status": "failed",
+                      "error": "Could not check this plugin's source. Try Check again."}
+        if result.get("update"):
+            updates.append(PluginUpdateInfo(**result["update"]))
+        refreshed[plugin_id] = result
+        checks.append({"plugin_id": plugin_id, "name": name, "status": result["status"],
+                       "checked_at": result.get("checked_at"), "error": result.get("error")})
     if allow_remote:
         svc._write_json_file(cache_path, refreshed)
-    return updates
+    return {"updates": updates, "checks": checks}
 
 
-def refresh_update_sources(svc) -> None:
-    """Refresh only sources with installed plugins, for an explicit owner check."""
+def refresh_update_sources(svc) -> Dict[str, str]:
+    """Refresh installed sources; propagate failures into each plugin's report."""
     installed = svc._read_json_file(svc.INSTALLED_FILE, {"plugins": {}})
     marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
     ids = {p.rsplit("@", 1)[1] for p in installed.get("plugins", {}) if "@" in p}
+    errors = {}
     for marketplace_id in sorted(ids & marketplaces.keys()):
         try:
             svc.sync_marketplace(marketplace_id)
         except Exception as exc:
             logger.warning("Cannot refresh plugin source %s: %s", marketplace_id, exc)
+            errors[marketplace_id] = "Plugin source refresh failed"
+    return errors
 
 
 def update_plugin(svc, plugin_id: str, refresh_source: bool = True) -> PluginInfo:

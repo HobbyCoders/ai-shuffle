@@ -1303,9 +1303,12 @@ class PluginService:
         Returns:
             List of plugins with available updates
         """
-        if refresh_sources:
-            _upd_mod.refresh_update_sources(self)
-        return _upd_mod.check_for_updates(self, allow_remote=refresh_sources)
+        return self.get_update_report(refresh_sources=refresh_sources)["updates"]
+
+    def get_update_report(self, refresh_sources: bool = False) -> Dict[str, Any]:
+        """Updates plus successful, unchecked and failed comparison outcomes."""
+        errors = _upd_mod.refresh_update_sources(self) if refresh_sources else None
+        return _upd_mod.get_update_report(self, allow_remote=refresh_sources, source_errors=errors)
 
     def update_plugin(self, plugin_id: str, refresh_source: bool = True) -> PluginInfo:
         """

@@ -22,7 +22,7 @@ import type {
 const { post, get } = vi.hoisted(() => ({ post: vi.fn(), get: vi.fn() }));
 vi.mock('./client', () => ({ api: { post, get, put: vi.fn(), delete: vi.fn() } }));
 
-import { checkForUpdates, syncMarketplace } from './plugins';
+import { checkForUpdates, getUpdateReport, syncMarketplace } from './plugins';
 
 type Missing<T, K extends readonly PropertyKey[]> = Exclude<keyof T, K[number]>;
 
@@ -71,6 +71,16 @@ describe('plugin API types match backend payloads', () => {
 		post.mockResolvedValueOnce([]);
 		await checkForUpdates(true);
 		expect(post).toHaveBeenCalledWith('/plugins/updates/check', {});
+	});
+
+	it('reads check outcomes passively and refreshes only on an owner action', async () => {
+		const report = { updates: [], checks: [{ plugin_id: 'sample@mp', status: 'unchecked' }] };
+		get.mockResolvedValueOnce(report);
+		expect(await getUpdateReport()).toBe(report);
+		expect(get).toHaveBeenCalledWith('/plugins/updates/status');
+		post.mockResolvedValueOnce(report);
+		expect(await getUpdateReport(true)).toBe(report);
+		expect(post).toHaveBeenCalledWith('/plugins/updates/status/check', {});
 	});
 
 	it('marketplace sync returns { status, marketplace_id }', async () => {

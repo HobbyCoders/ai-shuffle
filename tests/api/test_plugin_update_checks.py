@@ -31,7 +31,8 @@ async def test_update_checks_run_off_loop(monkeypatch, refresh):
     assert calls == [(True,)] if refresh else calls == [()]
 
 
-def test_refresh_does_not_accept_read_only_auth(monkeypatch):
+@pytest.mark.parametrize("path", ["updates/check", "updates/status/check"])
+def test_refresh_does_not_accept_read_only_auth(monkeypatch, path):
     app = FastAPI()
     app.include_router(plugins.router)
     app.dependency_overrides[require_auth] = lambda: "read-only"
@@ -42,9 +43,10 @@ def test_refresh_does_not_accept_read_only_auth(monkeypatch):
     app.dependency_overrides[require_admin] = refuse_admin
     service = MagicMock()
     monkeypatch.setattr(plugins, "get_plugin_service", lambda: service)
-    response = TestClient(app).post("/api/v1/plugins/updates/check", json={})
+    response = TestClient(app).post(f"/api/v1/plugins/{path}", json={})
     assert response.status_code == 403
     service.check_for_updates.assert_not_called()
+    service.get_update_report.assert_not_called()
 
 
 @pytest.mark.parametrize("kind", ["implicit", "url"])
@@ -68,9 +70,13 @@ def test_owner_route_updates_real_git_then_native_session_loads_that_revision(
     monkeypatch.setattr(plugins, "get_plugin_service", lambda: service)
     with TestClient(app) as client:
         assert client.get("/api/v1/plugins/updates").json() == []
-        checked = client.post("/api/v1/plugins/updates/check", json={})
+        unchecked = client.get("/api/v1/plugins/updates/status").json()
+        if kind == "url":
+            assert unchecked["checks"][0]["status"] == "unchecked"
+        checked = client.post("/api/v1/plugins/updates/status/check", json={})
         assert checked.status_code == 200
-        assert [p["plugin_id"] for p in checked.json()] == [installed.id]
+        assert [p["plugin_id"] for p in checked.json()["updates"]] == [installed.id]
+        assert checked.json()["checks"][0]["status"] == "update"
         updated = client.post("/api/v1/plugins/update", json={"plugin_id": installed.id})
         assert updated.status_code == 200, updated.text
         assert updated.json()["enabled"] is True

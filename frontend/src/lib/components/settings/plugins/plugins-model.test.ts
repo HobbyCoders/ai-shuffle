@@ -15,6 +15,7 @@ const m = vi.hoisted(() => ({
 	removeMarketplace: vi.fn(),
 	syncMarketplace: vi.fn(),
 	checkForUpdates: vi.fn(),
+	getUpdateReport: vi.fn(),
 	updatePlugin: vi.fn(),
 	updateAllPlugins: vi.fn(),
 	getAutoUpdateSettings: vi.fn(),
@@ -38,6 +39,7 @@ vi.mock('$lib/api/plugins', () => ({
 	removeMarketplace: m.removeMarketplace,
 	syncMarketplace: m.syncMarketplace,
 	checkForUpdates: m.checkForUpdates,
+	getUpdateReport: m.getUpdateReport,
 	updatePlugin: m.updatePlugin,
 	updateAllPlugins: m.updateAllPlugins,
 	getAutoUpdateSettings: m.getAutoUpdateSettings,
@@ -48,6 +50,39 @@ vi.mock('$lib/api/connectors', () => ({ getConnectors: m.getConnectors, getConne
 vi.mock('$lib/api/client', () => ({ api: { get: m.get, post: m.post } }));
 
 import { PluginsModel, parseItem, connectionItem, pluginItem } from './plugins-model.svelte';
+
+describe('honest update-check state', () => {
+	it('does not call an unperformed check up to date', () => {
+		const model = new PluginsModel();
+		expect(model.updateSummary).toBe('Not checked');
+	});
+
+	it('keeps healthy updates and exposes failed and unchecked checks', async () => {
+		const model = new PluginsModel();
+		m.getUpdateReport.mockResolvedValue({
+			updates: [{ plugin_id: 'toolkit@mp', name: 'toolkit' }],
+			checks: [{ plugin_id: 'other@mp', name: 'other', status: 'failed', error: 'Unavailable' }]
+		});
+		await model.checkUpdates();
+		expect(m.getUpdateReport).toHaveBeenCalledWith(true);
+		expect(model.updates).toHaveLength(1);
+		expect(model.updateSummary).toBe('1 available · Check failed');
+		m.getUpdateReport.mockRejectedValue(new Error('Offline'));
+		await model.checkUpdates();
+		expect(model.updates).toHaveLength(1);
+		expect(model.updateCheckError).toBe('Offline');
+		m.getUpdateReport.mockResolvedValue({
+			updates: [], checks: [{ plugin_id: 'other@mp', name: 'other', status: 'unchecked' }]
+		});
+		await model.checkUpdates();
+		expect(model.updateSummary).toBe('Not checked');
+		m.getUpdateReport.mockResolvedValue({
+			updates: [], checks: [{ plugin_id: 'other@mp', name: 'other', status: 'current' }]
+		});
+		await model.checkUpdates();
+		expect(model.updateSummary).toBe('Up to date');
+	});
+});
 import { pluginsLive, resetPluginsLive } from '$lib/settings/entries/plugins-live.svelte';
 import { searchSource, attention } from '$lib/settings/entries/plugins';
 
@@ -90,6 +125,9 @@ function forbidden() {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	m.getUpdateReport.mockImplementation(async (refresh?: boolean) => ({
+		updates: await m.checkForUpdates(refresh), checks: []
+	}));
 	resetPluginsLive();
 	m.getInstalledPlugins.mockResolvedValue([toolkit, draft]);
 	m.getAvailablePlugins.mockResolvedValue([

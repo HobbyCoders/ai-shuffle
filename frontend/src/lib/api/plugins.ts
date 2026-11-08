@@ -298,6 +298,26 @@ export async function checkForUpdates(refreshSources = false): Promise<PluginUpd
 		: api.get<PluginUpdateInfo[]>('/plugins/updates');
 }
 
+export interface PluginUpdateCheck {
+	plugin_id: string;
+	name: string;
+	status: 'unchecked' | 'current' | 'update' | 'failed';
+	checked_at: string | null;
+	error?: string | null;
+}
+
+export interface PluginUpdateReport {
+	updates: PluginUpdateInfo[];
+	checks: PluginUpdateCheck[];
+}
+
+/** Passive reads never reach external sources; only an owner's check may refresh. */
+export async function getUpdateReport(refreshSources = false): Promise<PluginUpdateReport> {
+	return refreshSources
+		? api.post<PluginUpdateReport>('/plugins/updates/status/check', {})
+		: api.get<PluginUpdateReport>('/plugins/updates/status');
+}
+
 /**
  * Update a specific plugin to the latest version
  */
