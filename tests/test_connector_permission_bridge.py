@@ -3,6 +3,10 @@ Tests for the connector permission funnel (app/core/connector_permissions.py)
 and the permission_handler hook that drives it.
 """
 
+import asyncio
+import time
+import uuid
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -154,18 +158,19 @@ class TestDeliverPermissionPrompt:
 # =============================================================================
 
 
-def _chat_message(text="yes", user="owner-account", attachments=None):
+def _chat_message(text="yes", user="owner-account", attachments=None, message_id=None, chat="chan-9"):
     from app.core.connectors.base import IncomingMessage
 
     return IncomingMessage(
-        connector_id="c1", platform_chat_id="chan-9", platform_user_id=user,
+        connector_id="c1", platform_chat_id=chat, platform_user_id=user,
         platform_user_name="Someone", text=text, attachments=attachments or [],
+        platform_message_id=uuid.uuid4().hex if message_id is None else message_id,
     )
 
 
-def _open_request(tool="Bash", tool_input=None, kind="permission"):
+def _open_request(tool="Bash", tool_input=None, kind="permission", request_id="req-1"):
     return {"kind": kind, "payload": {
-        "request_id": "req-1", "tool_name": tool, "tool_input": tool_input or {"command": "ls"},
+        "request_id": request_id, "tool_name": tool, "tool_input": tool_input or {"command": "ls"},
     }}
 
 
@@ -195,6 +200,104 @@ class TestAnswerFromChat:
         assert await answer_from_chat(_chat_message(text)) is True
         channel["respond"].assert_awaited_once_with("req-1", "sess-1", decision)
         channel["instance"].send_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_redelivered_answer_never_approves_the_next_request(self, channel, mock_db):
+        """The platform repeats the owner's yes after request A settled and B opened."""
+        from app.core.connector_permissions import answer_from_chat
+
+        channel["pending"].side_effect = [[_open_request(request_id="req-a")],
+                                          [_open_request(request_id="req-b")]]
+        reply = _chat_message(message_id="wamid.1")
+        assert await answer_from_chat(reply) is True
+        assert await answer_from_chat(reply) is True  # consumed, not an agent turn
+        channel["respond"].assert_awaited_once_with("req-a", "sess-1", "allow")
+
+    @pytest.mark.asyncio
+    async def test_concurrent_deliveries_approve_at_most_once(self, channel, mock_db):
+        from app.core.connector_permissions import answer_from_chat
+
+        reply = _chat_message(message_id="wamid.2")
+        results = await asyncio.gather(*(answer_from_chat(reply) for _ in range(8)))
+        assert results == [True] * 8
+        channel["respond"].assert_awaited_once_with("req-1", "sess-1", "allow")
+
+    @pytest.mark.asyncio
+    async def test_a_redelivered_answer_stays_consumed_with_nothing_open(self, channel, mock_db):
+        from app.core.connector_permissions import answer_from_chat
+
+        reply = _chat_message(message_id="wamid.3")
+        assert await answer_from_chat(reply) is True
+        channel["pending"].return_value = []
+        assert await answer_from_chat(reply) is True
+        channel["respond"].assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_redelivering_an_ordinary_yes_never_answers_a_later_request(self, channel, mock_db):
+        """Delivered when nothing was open, so it was a message; a retry is not an answer."""
+        from app.core.connector_permissions import answer_from_chat
+
+        channel["pending"].return_value = []
+        reply = _chat_message(message_id="wamid.4")
+        assert await answer_from_chat(reply) is False
+        channel["pending"].return_value = [_open_request()]
+        assert await answer_from_chat(reply) is True
+        channel["respond"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("message_id", ["", "   "])
+    async def test_a_message_with_no_platform_id_cannot_approve(self, channel, mock_db, message_id):
+        """Nothing identifies a repeat of it, so it stays an ordinary message."""
+        from app.core.connector_permissions import answer_from_chat
+
+        assert await answer_from_chat(_chat_message(message_id=message_id)) is False
+        channel["respond"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_same_id_in_another_chat_is_another_message(self, channel, mock_db):
+        """Telegram numbers messages per chat."""
+        from app.core.connector_permissions import answer_from_chat
+
+        assert await answer_from_chat(_chat_message(message_id="7", chat="chan-1")) is True
+        assert await answer_from_chat(_chat_message(message_id="7", chat="chan-2")) is True
+        assert channel["respond"].await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_consumed_redelivery_starts_no_agent_turn(self, channel, mock_db):
+        from app.core.connectors.manager import ConnectorManager
+
+        manager = ConnectorManager.__new__(ConnectorManager)
+        manager._message_locks = MagicMock()
+        reply = _chat_message(message_id="wamid.5")
+        await ConnectorManager.handle_incoming_message(manager, reply)
+        await ConnectorManager.handle_incoming_message(manager, reply)
+        manager._message_locks.get.assert_not_called()
+        channel["respond"].assert_awaited_once()
+
+    def test_claims_keep_no_platform_ids_and_stay_on_this_worker(self, mock_db):
+        from app.db import connectors as connectors_db
+        from app.db.base import get_db
+        from app.network.policy import is_shared_setting_key
+
+        assert connectors_db.claim_answer_message("c1", "+15550100", "wamid.6") is True
+        assert connectors_db.claim_answer_message("c1", "+15550100", "wamid.6") is False
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT key, value FROM system_settings WHERE key LIKE %s",
+                           (connectors_db.ANSWER_CLAIM_PREFIX + "%",))
+            rows = cursor.fetchall()
+        assert len(rows) == 1
+        assert "15550100" not in rows[0]["key"] and "wamid" not in rows[0]["key"]
+        assert not is_shared_setting_key(rows[0]["key"])
+
+    def test_old_claims_are_pruned(self, mock_db):
+        from app.db import connectors as connectors_db
+
+        assert connectors_db.claim_answer_message("c1", "chat", "old") is True
+        later = time.time() + connectors_db.ANSWER_CLAIM_TTL_SECONDS + 60
+        with patch("app.db.connectors.time.time", return_value=later):
+            assert connectors_db.claim_answer_message("c1", "chat", "new") is True
+        assert connectors_db.claim_answer_message("c1", "chat", "old") is True
 
     @pytest.mark.asyncio
     async def test_someone_else_saying_yes_is_an_ordinary_message(self, channel):

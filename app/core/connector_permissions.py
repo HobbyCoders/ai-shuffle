@@ -6,7 +6,9 @@ session, or in plain text from one of their own accounts on that connector
 (``connector_service.sender_is_owner``): a connector has no permission UI, so
 a firm yes or no is the control there. Nobody else in the chat can answer; for
 them the chat shows one line saying the agent is waiting, and their "yes" is
-an ordinary message.
+an ordinary message. Platforms can deliver a message twice, so each reply counts
+once, by its platform message ID. A reply with no ID cannot be told from a
+repeat, so it never approves anything and stays an ordinary message.
 
 The platform Approve/Deny buttons are not sent, and
 ``ConnectorManager.handle_permission_response`` ignores any left in old chat
@@ -22,6 +24,9 @@ import logging
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+#: What :func:`_request_to_answer` returns for a reply already delivered once.
+_REPEAT_DELIVERY: Tuple[str, str, Dict[str, Any]] = ("", "", {})
 
 
 async def deliver_permission_prompt(
@@ -109,10 +114,12 @@ def _prompt_text(connector_session: Dict[str, Any], tool_name: str, tool_input: 
 
 def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]]:
     """``(session id, request id, payload)`` of the oldest request this sender
-    may answer in this chat, else None. Any doubt is None. Blocking (DB read)."""
+    may answer in this chat, else None. Any doubt is None. A repeat of a reply
+    is :data:`_REPEAT_DELIVERY`. Blocking (DB)."""
     from app.core import owner_confirm
     from app.core.connector_service import sender_is_owner
     from app.core.permission_handler import PERMISSION_KIND
+    from app.db import connectors as connectors_db
     from app.db import database, interactions
     from app.network import ownership
 
@@ -120,6 +127,13 @@ def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]
         return None
     if ownership.enrolled() and not ownership.owns(database.get_connector(message.connector_id)):
         return None
+    message_id = str(message.platform_message_id or "").strip()
+    if not message_id:
+        return None
+    # Claimed before anything is looked up: a yes first delivered with nothing
+    # open was an ordinary message, and its repeat must not answer a later request.
+    if not connectors_db.claim_answer_message(message.connector_id, message.platform_chat_id, message_id):
+        return _REPEAT_DELIVERY
     linked = database.get_connector_session(message.connector_id, message.platform_chat_id)
     session_id = (linked or {}).get("session_id")
     if not session_id or not (linked or {}).get("is_active"):
@@ -136,9 +150,10 @@ def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]
 async def answer_from_chat(message: Any) -> bool:
     """Answer the chat's oldest open request from the owner's plain-text reply.
 
-    True when ``message`` was that answer and needs no agent turn. False leaves
-    it an ordinary message: another sender, nothing open, or not a firm yes or
-    no. Runs ahead of the per-chat message lock, because that lock is held by
+    True when ``message`` was that answer, or a repeat delivery of a reply
+    already counted, and needs no agent turn. False leaves it an ordinary
+    message: another sender, nothing open, not a firm yes or no, or no platform
+    message ID. Runs ahead of the per-chat message lock, because that lock is held by
     the very turn waiting for this answer. Never raises.
     """
     from app.core import owner_confirm
@@ -151,6 +166,8 @@ async def answer_from_chat(message: Any) -> bool:
         found = await asyncio.to_thread(_request_to_answer, message)
         if found is None:
             return False
+        if found is _REPEAT_DELIVERY:
+            return True
         session_id, request_id, payload = found
         from app.core.permission_handler import permission_handler
 

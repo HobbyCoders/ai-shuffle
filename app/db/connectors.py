@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
@@ -390,6 +392,35 @@ def update_connector_session_ai_session(
             "UPDATE connector_sessions SET session_id = %s, updated_at = %s WHERE id = %s",
             (ai_session_id, now, session_id)
         )
+
+
+#: ``system_settings`` keys recording a connector reply already counted. The
+#: ``network_`` prefix keeps them on this worker (``app.network.policy``).
+ANSWER_CLAIM_PREFIX = "network_connector_answer:"
+#: Longer than any platform keeps retrying a delivery (about a week at most).
+ANSWER_CLAIM_TTL_SECONDS = 30 * 24 * 3600
+
+
+def claim_answer_message(connector_id: str, platform_chat_id: str, platform_message_id: str) -> bool:
+    """True for the first delivery of this message, False for every repeat.
+
+    One insert decides, so concurrent deliveries cannot both win. Message IDs
+    are only unique per chat on some platforms, and a chat ID can be a phone
+    number, so the key is a digest of all three.
+    """
+    digest = hashlib.sha256(
+        "\0".join((connector_id, platform_chat_id, platform_message_id)).encode()
+    ).hexdigest()
+    now = int(time.time())
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Whole seconds as text: the same length for centuries, so text order is time order.
+        cursor.execute("DELETE FROM system_settings WHERE key LIKE %s AND value < %s",
+                       (ANSWER_CLAIM_PREFIX + "%", str(now - ANSWER_CLAIM_TTL_SECONDS)))
+        cursor.execute("INSERT INTO system_settings (key,value) VALUES (%s,%s) "
+                       "ON CONFLICT DO NOTHING RETURNING key",
+                       (ANSWER_CLAIM_PREFIX + digest, str(now)))
+        return cursor.fetchone() is not None
 
 
 from app.core.resource_sync import install_database_mutations as _install_resource_sync
