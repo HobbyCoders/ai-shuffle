@@ -183,6 +183,47 @@ with no state copy. A lagging recent peer pins what it lacks, the kill switch
 holds everything, and an expired peer recovers through a state copy to the same
 records and facts.
 
+## A peer that holds part of a merged delta run (#1278)
+
+Delta compaction on the owner merges a run of streamed fragments into one row
+at the run's last seq, under the first fragment's id. A peer that synced only
+the first fragments before the merge receives that merged row later, from a
+state copy or the transcript backfill. Inserting it as is fails on the held
+first fragment's id, and before this fix the backfill transaction failed on
+every attempt.
+
+The merged row is now canonical: compaction stores the run's first seq in its
+payload as `merged_from_seq`, so any worker can tell that the row stands for
+every seq of its run from `merged_from_seq` to its own seq. Every path that
+writes a mirrored transcript row (ordinary sync, state copy, transcript
+backfill) calls one helper, `session_events.fit_mirrored_delta`, before the
+write. The bulk append and bulk snapshot fast paths first ask
+`delta_rows_need_fitting` and send the rows through the per-record path when a
+row is merged, shares its id with a held row, or falls inside a merged run held
+here. The rule:
+
+- a merged row replaces the held fragments of its run in the same transaction;
+- an original fragment of a run held merged is not written;
+- a merged row from before `merged_from_seq` existed names its first seq only by
+  its id (a held row with that id at a lower or higher seq). The first time a
+  worker sees both, it records the seq on the row and removes any fragment of
+  the run it wrote in between.
+
+The result does not depend on what a worker held or on which worker sent the
+row, so a recovered mirror is as good a backfill source as the owner, and a
+peer holding the merged row can still take original fragments from a mirror
+that kept them. Replacing held rows keeps the log epoch (its first row), so the
+shared SSE reader (`app.api.events`) also checks, on every `recheck_log` wake
+that mirror writes send, that the row at its cursor still exists
+(`get_log_check`). If it is gone, every client gets `reset` with reason
+`cursor` and replays the run once. `merged_from_seq` never reaches clients:
+`transcript_replay._wire` drops it. Hand-off (`install_history`) makes the log
+exactly the old owner's and is unchanged.
+
+One case stays temporary: with a merged row from before this change, original
+fragments that arrive before the run's first fragment are written until that
+first fragment arrives, which then removes them.
+
 ## Transcript op volume: findings only
 
 The second half of the same report (about 1.1 million `session_events` ops a

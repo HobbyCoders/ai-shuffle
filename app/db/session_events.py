@@ -671,6 +671,27 @@ def has_event_at(session_id: str, seq: int) -> bool:
         return cursor.fetchone() is not None
 
 
+def get_log_check(session_id: str, seq: int) -> Tuple[str, bool]:
+    """``(get_log_epoch, has_event_at(seq))`` in one statement.
+
+    The live SSE reader's probe after a mirror write: a mirror replacing the
+    held fragments of a merged run (:func:`fit_mirrored_delta`) keeps the
+    epoch but removes rows a reader may sit on.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT (SELECT id FROM session_events WHERE session_id = %s "
+            "ORDER BY seq ASC LIMIT 1) AS epoch, "
+            "(SELECT 1 FROM session_events WHERE session_id = %s AND seq = %s) AS present",
+            (session_id, session_id, seq),
+        )
+        row = cursor.fetchone()
+    if row is None or row["epoch"] is None:
+        return EMPTY_LOG_EPOCH, False
+    return str(row["epoch"]), row["present"] is not None
+
+
 def get_tool_use_seqs(
     session_id: str, from_seq: int = 0
 ) -> Dict[Tuple[Optional[str], str], int]:
@@ -1043,6 +1064,10 @@ def _compact_session_deltas(
         )
         payload = dict(_parse_payload(head.get("payload")))
         payload["text"] = text
+        # Say which seqs the survivor stands for, so a mirror holding some of
+        # them can tell (:func:`fit_mirrored_delta`). A head merged before
+        # already names its run's first seq.
+        payload[MERGED_FROM_KEY] = _merged_from(head) or int(head["seq"])
         compacted += 1
         deleted += len(members) - 1
         if dry_run:
@@ -1067,6 +1092,185 @@ def _compact_session_deltas(
             ),
         )
     return compacted, deleted
+
+
+# ----------------------------------------------------------------------
+# Mirrors: one rule for merged delta runs on every apply path (#1278)
+# ----------------------------------------------------------------------
+#
+# The owner's compaction replaces a run of fragments with ONE row: the first
+# fragment's id at the last fragment's seq, carrying ``merged_from_seq`` (the
+# run's first seq). That row is canonical and means the same on every worker:
+# it stands for every seq in ``[merged_from_seq, seq]`` of its run. A worker
+# may hold any prefix of the original fragments, the merged row, or both
+# arriving in any order, from the owner or another mirror. Every path that
+# writes a mirrored transcript row (ordinary sync, state copy, transcript
+# backfill) goes through :func:`fit_mirrored_delta` before writing, and the
+# bulk paths fall back to it whenever :func:`delta_rows_need_fitting` says so:
+#
+# * a merged row replaces the held fragments of its run atomically;
+# * an original fragment of a run held merged is not written;
+# * a merged row that predates ``merged_from_seq`` names its first seq only by
+#   its id; the first time a worker sees both, it records the seq on the row
+#   and removes any fragment of the run it had written in between.
+#
+# A connected reader sitting on a removed row is reset by the shared SSE
+# reader (``app.api.events``): mirror writes wake it with ``recheck_log``,
+# and it checks that its cursor row still exists. Hand-off is not covered
+# here: its import makes the log exactly the old owner's (``handoff``).
+
+MERGED_FROM_KEY = "merged_from_seq"
+
+
+def _merged_from(row: Dict[str, Any]) -> Optional[int]:
+    """First seq a merged delta row stands for, or None for an original fragment."""
+    value = _parse_payload(row.get("payload")).get(MERGED_FROM_KEY)
+    if type(value) is int and 0 < value < int(row["seq"]):
+        return value
+    return None
+
+
+def _with_merged_from(record: Dict[str, Any], first_seq: int) -> Dict[str, Any]:
+    payload = dict(_parse_payload(record.get("payload")))
+    payload[MERGED_FROM_KEY] = int(first_seq)
+    return {**record, "payload": payload}
+
+
+def _remove_run_fragments(
+    cur: Any, session_id: str, key: Tuple[Any, Any, Any], low: int, high: int
+) -> int:
+    """Delete this run's rows with ``low <= seq < high``. Returns how many."""
+    cur.execute(
+        "SELECT seq, event_type, turn_id, run_id FROM session_events "
+        "WHERE session_id = %s AND seq >= %s AND seq < %s",
+        (session_id, int(low), int(high)),
+    )
+    rows = rows_to_list(cur.fetchall())
+    seqs = [int(row["seq"]) for row in rows if _run_key(row) == key]
+    if len(seqs) != len(rows):
+        # The owner's run held nothing else between these seqs.
+        logger.warning(
+            "Session %s: keeping %d row(s) of another kind inside merged run %s..%s",
+            session_id, len(rows) - len(seqs), low, high)
+    for start in range(0, len(seqs), 500):
+        part = seqs[start:start + 500]
+        cur.execute(
+            "DELETE FROM session_events WHERE session_id = %s AND seq IN ("
+            + ", ".join(["%s"] * len(part)) + ")",
+            (session_id, *part),
+        )
+    return len(seqs)
+
+
+def fit_mirrored_delta(
+    cur: Any, session_id: str, seq: int, record: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Apply the merged-run rule to a mirrored row about to be written here.
+
+    Returns the record to write, or None when a merged row held here already
+    stands for it (the caller keeps what it holds). Writing a merged row first
+    removes the fragments of its run held here. Call it inside the write's
+    transaction, after last-writer-wins chose to write. Two indexed queries
+    for an ordinary fragment; other rows are returned unchanged.
+    """
+    if record.get("event_type") not in COMPACTABLE_DELTA_TYPES:
+        return record
+    seq = int(seq)
+    key = _run_key(record)
+    cur.execute(
+        "SELECT id, session_id, seq, event_type, turn_id, run_id, payload FROM session_events "
+        "WHERE id = %s",
+        (record.get("id"),),
+    )
+    same_id = next((dict(row) for row in cur.fetchall()
+                    if row["session_id"] == session_id and _run_key(row) == key), None)
+    if same_id is not None and int(same_id["seq"]) > seq:
+        # This is the first fragment of a run held merged.
+        held_seq = int(same_id["seq"])
+        if _merged_from(same_id) is None:
+            # Merged before runs named their first seq: name it now, and drop
+            # what was written of the run before this fragment told us.
+            cur.execute(
+                "UPDATE session_events SET payload = %s WHERE session_id = %s AND seq = %s",
+                (json.dumps(_scrub_pg_illegal(_with_merged_from(same_id, seq)["payload"])),
+                 session_id, held_seq),
+            )
+            _remove_run_fragments(cur, session_id, key, seq + 1, held_seq)
+        return None
+    first = _merged_from(record)
+    if same_id is not None and int(same_id["seq"]) < seq:
+        # The id of a held row at a lower seq: this row is that run merged.
+        first = min(first or seq, int(same_id["seq"]))
+    elif same_id is not None and first is None:
+        # The same row again, from a worker that never learned its first seq.
+        first = _merged_from(same_id)
+    if first is not None:
+        _remove_run_fragments(cur, session_id, key, first, seq)
+        return record if _merged_from(record) == first else _with_merged_from(record, first)
+    cur.execute(
+        "SELECT id, seq, event_type, turn_id, run_id, payload FROM session_events "
+        "WHERE session_id = %s AND seq >= %s ORDER BY seq ASC LIMIT 1",
+        (session_id, seq),
+    )
+    above = cur.fetchone()
+    if above is not None:
+        above = dict(above)
+        if (above.get("event_type") in COMPACTABLE_DELTA_TYPES and _run_key(above) == key
+                and above["id"] != record.get("id")):
+            held_first = _merged_from(above)
+            if held_first is not None and held_first <= seq:
+                return None
+            if int(above["seq"]) == seq:
+                # Another fragment of this run under another id at this very
+                # seq: only a merge makes that (the run's last seq carrying its
+                # first id), even one from before runs named their first seq.
+                return None
+    return record
+
+
+def delta_rows_need_fitting(cur: Any, records: Sequence[Dict[str, Any]]) -> bool:
+    """Whether a bulk insert of these mirrored rows must take the per-record path.
+
+    True when one of them is a merged row, shares its id with a held row, or
+    falls inside a merged run held here: :func:`fit_mirrored_delta` must see
+    those. Cheap for the common case, an append past everything held.
+    """
+    deltas = [r for r in records if r.get("event_type") in COMPACTABLE_DELTA_TYPES]
+    if not deltas:
+        return False
+    if any(_merged_from(r) is not None for r in deltas):
+        return True
+    ids = [r.get("id") for r in deltas]
+    for start in range(0, len(ids), 500):
+        part = ids[start:start + 500]
+        cur.execute("SELECT 1 FROM session_events WHERE id IN (" + ", ".join(["%s"] * len(part))
+                    + ") LIMIT 1", tuple(part))
+        if cur.fetchone() is not None:
+            return True
+    by_session: Dict[str, List[int]] = {}
+    for r in deltas:
+        by_session.setdefault(r["session_id"], []).append(int(r["seq"]))
+    types = ", ".join(["%s"] * len(COMPACTABLE_DELTA_TYPES))
+    for session_id, seqs in by_session.items():
+        low, high = min(seqs), max(seqs)
+        # A merged row covering seq s is the first row held at or above s.
+        cur.execute(
+            "SELECT seq, payload FROM session_events WHERE session_id = %s AND seq >= %s "
+            f"AND seq <= %s AND event_type IN ({types})",
+            (session_id, low, high, *COMPACTABLE_DELTA_TYPES),
+        )
+        rows = rows_to_list(cur.fetchall())
+        cur.execute(
+            "SELECT seq, event_type, payload FROM session_events WHERE session_id = %s AND seq > %s "
+            "ORDER BY seq ASC LIMIT 1",
+            (session_id, high),
+        )
+        after = cur.fetchone()
+        if after is not None and after["event_type"] in COMPACTABLE_DELTA_TYPES:
+            rows.append(dict(after))
+        if any((_merged_from(row) or high + 1) <= high for row in rows):
+            return True
+    return False
 
 
 def compact_idle_session_deltas(

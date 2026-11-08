@@ -730,6 +730,13 @@ def materialize(
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
     record = dict(record)
+    if coll.name == "session_events":
+        # One rule for merged delta runs on every apply path (#1278).
+        from app.db.session_events import fit_mirrored_delta
+        fitted = fit_mirrored_delta(cursor, keys[0], keys[1], record)
+        if fitted is None:
+            raise _KeepObservation  # a merged row held here already stands for it
+        record = fitted
     if coll.name == "system_settings" and record_id.startswith("provider_observation:"):
         from app.core.provider_observations import _number
         existing = _read_row(cursor, coll, record_id)
@@ -2460,6 +2467,9 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
                    tuple(value for row in rows for value in (row["session_id"], row["seq"])))
     if cursor.fetchone() is not None:
         return False
+    from app.db.session_events import delta_rows_need_fitting
+    if delta_rows_need_fitting(cursor, rows):
+        return False  # a merged run is involved: the per-op path applies its rule (#1278)
     # ``owners`` read these sessions in this transaction: one missing at
     # reservation was deleted in between, not "not arrived yet" (#1222).
     deleted = _lock_mirror_event_counters(cursor, ids, existed=owners)
@@ -3104,6 +3114,7 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
         candidates[index] = record
     if not candidates:
         return set()
+    from app.db import session_events as events_db
     by_session: Dict[str, List[int]] = {}
     for index, record in candidates.items():
         by_session.setdefault(record["session_id"], []).append(index)
@@ -3115,6 +3126,12 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
         for index in indexes:
             if candidates[index]["seq"] in held:
                 del candidates[index]
+        # A merged delta run is involved: the per-record path applies its rule (#1278).
+        if events_db.delta_rows_need_fitting(
+                cursor, [candidates[index] for index in indexes if index in candidates]):
+            for index in indexes:
+                if index in candidates and candidates[index]["event_type"] in events_db.COMPACTABLE_DELTA_TYPES:
+                    del candidates[index]
     event_ids = [record["id"] for record in candidates.values()]
     taken: set = set()
     for start in range(0, len(event_ids), SNAPSHOT_SQL_BATCH):

@@ -113,6 +113,7 @@ from app.db.session_events import (
     can_backfill_events,
     get_compaction_events_before,
     get_events,
+    get_log_check,
     get_log_epoch,
     get_max_seq,
     get_tool_use_seqs,
@@ -275,6 +276,10 @@ _KICK = object()
 
 class _TailLogCheck(NamedTuple):
     epoch: str
+    # Set when the reader's cursor row is gone under an unchanged epoch: a
+    # mirror replaced the held fragments of a merged run (#1278). Every
+    # client reloads instead of being sent the merged row after them.
+    reset: Optional[str] = None
 
 
 class _TailSubscriber:
@@ -382,13 +387,16 @@ class _SessionTail:
                     # Keep hints received while the first client's backfill was
                     # still running; it has not seeded our cursor/epoch yet.
                     self._needs_log_check = False
-                    current_epoch = await asyncio.to_thread(get_log_epoch, self.session_id)
+                    current_epoch, present = await asyncio.to_thread(
+                        get_log_check, self.session_id, self._cursor)
                     if not (self._epoch == EMPTY_LOG_EPOCH and self._cursor == 0):
                         # Known prefixes must invalidate, even before seeding.
                         # An empty log stays provisional: this probe can race
                         # replacement before the first batch is actually read.
-                        self._publish(_TailLogCheck(current_epoch))
-                        if current_epoch != self._epoch:
+                        gone = (current_epoch == self._epoch and self._cursor > 0
+                                and not present)
+                        self._publish(_TailLogCheck(current_epoch, "cursor" if gone else None))
+                        if current_epoch != self._epoch or gone:
                             self.close()
                             return
                 elif not force and max_seq <= self._cursor:
@@ -733,6 +741,9 @@ async def event_stream(
                     continue
                 if item.epoch != log_epoch:
                     yield _reset_frame("epoch", item.epoch)
+                    return
+                if item.reset:
+                    yield _reset_frame(item.reset, item.epoch)
                     return
                 continue
             if isinstance(item, _TailBatch):

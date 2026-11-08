@@ -289,6 +289,11 @@ def _flush_pending_progress(
 def _wire(row: Dict[str, Any]) -> Dict[str, Any]:
     """Merge a DB row's payload with its envelope (envelope keys win)."""
     payload = row.get("payload") or {}
+    if "merged_from_seq" in payload:
+        # Storage bookkeeping of a compacted delta run (session_events
+        # MERGED_FROM_KEY): never on the wire, so a compacted run replays
+        # byte-identically to the coalesced fragments.
+        payload = {k: v for k, v in payload.items() if k != "merged_from_seq"}
     if row.get("event_type") == "turn.usage" and _perf_switch_on(_SLIM_USAGE_ENV):
         # Old rows (and rows mirrored from older workers) carry the full
         # context snapshot twice; send one compact copy.
