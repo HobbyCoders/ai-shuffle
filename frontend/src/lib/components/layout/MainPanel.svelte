@@ -49,12 +49,12 @@
 	import { isApiError } from '$lib/api/client';
 	import ChatExportMenu from './ChatExportMenu.svelte';
 	import { notify } from '$lib/stores/notifications';
-	import { pullNotification } from './git-pull-notification';
+	import { pullConflicts, pullNotification, resolveConflictsPrompt, resolveWithAgentReason } from './git-pull-notification';
 	import { browserPanel } from '$lib/stores/browser-panel.svelte';
 	import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 	import SessionSidePanel from './SessionSidePanel.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
-	import { gitOperations, gitOperationRunning } from '$lib/stores/gitOperations.svelte';
+	import { gitOperations, gitOperationRunning, type GitOperationAction } from '$lib/stores/gitOperations.svelte';
 	import ChatView from './ChatView.svelte';
 	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
 	import { subagentChats } from '$lib/stores/subagent-chats';
@@ -354,6 +354,34 @@
 	// A subagent's own chat (Task/Swarm child) is read and message only: no Git
 	// controls and no private access UI (its requests show in its main chat).
 	const activeIsSubagent = $derived(!!activeSessionId && $subagentChats.has(activeSessionId));
+	// Follow-up buttons in the Git panel's outcome ("Pull first", "Stash & pull",
+	// "Resolve with agent") stay on screen while their availability changes, so
+	// their disabled reasons are kept current here rather than fixed at render.
+	let conflictSessionId = $state<string | null>(null);
+	const gitFollowUpReason = $derived($gitControlsStreaming ? 'Available when the current reply finishes.' : null);
+	function resolveAgentReasonFor(sessionId: string | null): string | null {
+		return resolveWithAgentReason({
+			panelSessionId: sessionId,
+			liveSessionId: get(activeSession).sessionId,
+			isSubagent: activeIsSubagent,
+			streaming: gitControlsStreaming.current
+		});
+	}
+	const resolveAgentReason = $derived(resolveWithAgentReason({
+		panelSessionId: conflictSessionId,
+		liveSessionId: $activeSession.sessionId,
+		isSubagent: activeIsSubagent,
+		streaming: $gitControlsStreaming
+	}));
+	$effect(() => {
+		const followUp = gitFollowUpReason;
+		const agent = resolveAgentReason;
+		untrack(() => {
+			gitOperations.setAction('pull-first', { disabledReason: followUp });
+			gitOperations.setAction('stash-pull', { disabledReason: followUp });
+			gitOperations.setAction('resolve-agent', { disabledReason: agent });
+		});
+	});
 	// Adoption refreshes the session list, not the tab's initial snapshot.
 	const activeWorktreeDeleted = $derived(activeSessionRow?.worktree_deleted ?? activeTab?.worktreeDeleted ?? false);
 	// Keyed by value so the Git load effect below re-runs only when the
@@ -738,7 +766,7 @@
 			pushToDefaultBranch: opts.pushToDefaultBranch
 		});
 		if (plan.blocked) {
-			notify(plan.blocked, { severity: 'warning' });
+			gitOperations.report('Commit', plan.blocked);
 			return;
 		}
 		const nextStep: CommitNextStep = plan.nextStep;
@@ -804,19 +832,50 @@
 		const guardRetry = captureGitRetryGuard();
 		markGitActivity(); // user git action → responsive poll cadence
 		const force = opts.force ?? false;
-		gitOperations.begin(force ? 'Force push' : 'Push', []);
+		gitOperations.begin(force ? 'Force push' : 'Push', [{ id: 'push', label: force ? 'Force push to remote' : 'Push to remote' }]);
+		gitOperations.setStep('push', 'running');
 		try {
 			await git.pushCommits(undefined, true, force);
-			gitOperations.succeed();
+			gitOperations.setStep('push', 'done');
+			gitOperations.succeed(null, { hold: true });
 			notify('Pushed to remote', { severity: 'success' });
 		} catch (e) {
-			gitOperations.clear();
 			const detail = errText(e);
-			if (!force && isNonFastForward(detail)) {
-				notify(detail, { severity: 'error', action: { label: 'Pull first', onClick: () => guardRetry(() => { void handlePull(); }) } });
-			} else {
-				notify(detail, { severity: 'error' });
-			}
+			const behind = !force && isNonFastForward(detail);
+			gitOperations.fail(detail, {
+				stepId: 'push',
+				actions: behind ? [gitFollowUp('pull-first', 'Pull first', guardRetry, () => { void handlePull(); })] : []
+			});
+		}
+	}
+
+	/** A follow-up button for a Git panel outcome, refused in place if the checkout changed. */
+	function gitFollowUp(id: string, label: string, guardRetry: ReturnType<typeof captureGitRetryGuard>, run: () => void): GitOperationAction {
+		return {
+			id,
+			label,
+			primary: true,
+			disabledReason: gitFollowUpReason,
+			onClick: () => guardRetry(run, (reason) => gitOperations.setAction(id, { disabledReason: reason }))
+		};
+	}
+
+	/** Hand a stopped pull's conflicts to this chat's agent. */
+	async function resolvePullWithAgent(sessionId: string | null, prompt: string) {
+		// Re-check at click time: the chat, its live session or its stream may
+		// have changed since the button was drawn.
+		const reason = resolveAgentReasonFor(sessionId);
+		if (reason) {
+			gitOperations.setAction('resolve-agent', { disabledReason: reason });
+			return;
+		}
+		gitOperations.setAction('resolve-agent', { disabledReason: 'Sending…' });
+		const sent = await activeSession.sendMessage(prompt);
+		if (sent) {
+			gitOperations.clear();
+			openHeaderDropdown.update((cur) => (cur && cur.startsWith('git-') ? null : cur));
+		} else {
+			gitOperations.setAction('resolve-agent', { disabledReason: resolveAgentReasonFor(sessionId) ?? "The message wasn't sent. Try again." });
 		}
 	}
 
@@ -827,24 +886,51 @@
 		const prefs = gitActionPreferences.current;
 		const strategy = opts.strategy ?? prefs.pullStrategy;
 		const autoStash = opts.autoStash ?? prefs.autoStash;
-		gitOperations.begin('Pull', []);
+		const target = git.captureTarget();
+		const sessionId = activeSessionId;
+		// The outcome stays in the Git panel: a stopped pull used to go only to
+		// the notification bell, so pressing Sync looked like it did nothing.
+		gitOperations.begin('Pull', [{ id: 'pull', label: autoStash ? 'Stash, pull and restore changes' : 'Pull from upstream' }]);
+		gitOperations.setStep('pull', 'running');
 		try {
-			const res = await git.pull(strategy, autoStash);
+			const res = await git.pull(strategy, autoStash, target);
 			git.refreshPrState(true).catch(() => {});
-			gitOperations.clear();
 			const notification = pullNotification(res);
 			notify(notification.message, { severity: notification.severity });
+			if (!res.success) {
+				const conflicts = pullConflicts(res);
+				if (!conflicts) {
+					gitOperations.fail(notification.message, { stepId: 'pull' });
+					return;
+				}
+				conflictSessionId = sessionId;
+				const prompt = resolveConflictsPrompt({ target: res.target, branch: target.head, conflicts });
+				gitOperations.fail(notification.message, {
+					stepId: 'pull',
+					files: conflicts.length > 0 ? { label: 'Conflicting files', paths: conflicts } : null,
+					actions: [{
+						id: 'resolve-agent',
+						label: 'Resolve with agent',
+						primary: true,
+						disabledReason: resolveAgentReasonFor(sessionId),
+						onClick: () => { void resolvePullWithAgent(sessionId, prompt); }
+					}]
+				});
+				return;
+			}
+			const warned = notification.severity === 'warning';
+			gitOperations.setStep('pull', warned ? 'warning' : 'done', { detail: notification.message });
+			// A pull whose stashed changes did not come back stays until Dismiss;
+			// a plain success stays until the panel closes.
+			gitOperations.succeed(null, { pin: warned, hold: true });
 		} catch (e) {
-			gitOperations.clear();
 			// Dirty working tree without auto-stash → 409. Offer a stash retry
 			// (mirrors the branch-checkout 409 → "Stash & switch" pattern).
 			const dirty = !autoStash && isApiError(e) && e.status === 409;
-			const detail = errText(e);
-			if (dirty) {
-				notify(detail, { severity: 'error', action: { label: 'Stash & pull', onClick: () => guardRetry(() => { void handlePull({ strategy, autoStash: true }); }) } });
-			} else {
-				notify(detail, { severity: 'error' });
-			}
+			gitOperations.fail(errText(e), {
+				stepId: 'pull',
+				actions: dirty ? [gitFollowUp('stash-pull', 'Stash & pull', guardRetry, () => { void handlePull({ strategy, autoStash: true }); })] : []
+			});
 		}
 	}
 
@@ -877,7 +963,7 @@
 	async function handleShipIt(opts: ShipItOptions = {}) {
 		if (gitActionsBlocked()) return;
 		if (selectedWorkerTarget) {
-			notify('Create a session on the selected worker before shipping changes', { severity: 'error' });
+			gitOperations.report('Ship It', 'Create a session on the selected worker before shipping changes');
 			return;
 		}
 		markGitActivity(); // user git action → responsive poll cadence

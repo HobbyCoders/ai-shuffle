@@ -35,6 +35,31 @@ import { createSubscribers } from './store-utils';
 /** Popover-facing status. `idle` means no operation is active (popover hidden). */
 export type GitOperationsStatus = 'idle' | 'running' | 'done' | 'error';
 
+/**
+ * A follow-up the outcome offers as a button ("Pull first", "Stash & pull",
+ * "Resolve with agent"). `disabledReason` keeps it on screen but unusable,
+ * with the reason shown beside it.
+ */
+export interface GitOperationAction {
+	id: string;
+	label: string;
+	onClick: () => void;
+	primary?: boolean;
+	disabledReason?: string | null;
+}
+
+/** Files the outcome names, e.g. the conflicting files of a stopped pull. */
+export interface GitOperationFiles {
+	label: string;
+	paths: string[];
+}
+
+/** Extra outcome detail for {@link gitOperations.fail} and {@link gitOperations.succeed}. */
+export interface GitOperationOutcome {
+	actions?: GitOperationAction[];
+	files?: GitOperationFiles | null;
+}
+
 /** A step registered by a client-side chain before it starts running. */
 export interface StepInit {
 	id: string;
@@ -51,6 +76,12 @@ interface GitOperationsState {
 	/** Top-level error message when the operation fails. */
 	error: string | null;
 	result: gitApi.GitOperationResult | null;
+	/** Follow-up buttons offered with the outcome. */
+	actions: GitOperationAction[];
+	/** Files named by the outcome (conflicts). */
+	files: GitOperationFiles | null;
+	/** A finished operation that stays until Dismiss (a success needing attention). */
+	pinned: boolean;
 }
 
 const EMPTY_STATE: GitOperationsState = {
@@ -59,7 +90,10 @@ const EMPTY_STATE: GitOperationsState = {
 	title: null,
 	steps: [],
 	error: null,
-	result: null
+	result: null,
+	actions: [],
+	files: null,
+	pinned: false
 };
 
 // Delay before a successful operation collapses the popover back to idle.
@@ -256,7 +290,10 @@ export const gitOperations = {
 			title,
 			steps: steps.map((s) => ({ id: s.id, label: s.label, status: 'pending' as const })),
 			error: null,
-			result: null
+			result: null,
+			actions: [],
+			files: null,
+			pinned: false
 		});
 		return token;
 	},
@@ -283,17 +320,29 @@ export const gitOperations = {
 	/**
 	 * Mark the active operation as succeeded. The popover shows the completed
 	 * steps briefly, then collapses to idle. When there are no visible steps it
-	 * clears immediately (there's nothing to show).
+	 * clears immediately (there's nothing to show). `pin` keeps it on screen
+	 * until Dismiss instead: a success that still needs the user's attention
+	 * (a pull whose stashed changes did not come back). `hold` skips the
+	 * collapse timer: the Git panel clears the outcome when it closes, so a
+	 * bottom sheet never shrinks (and jumps) under the user's thumb.
 	 */
-	succeed(result?: gitApi.GitOperationResult | null): void {
+	succeed(result?: gitApi.GitOperationResult | null, opts?: GitOperationOutcome & { pin?: boolean; hold?: boolean }): void {
 		git.setOperationInProgress(false);
 		_clearPersistedOp();
 		const token = _opToken;
+		const pinned = !!opts?.pin;
 		_update((s) => ({
 			...s,
 			status: 'done',
-			result: result ?? s.result
+			result: result ?? s.result,
+			actions: opts?.actions ?? [],
+			files: opts?.files ?? null,
+			pinned
 		}));
+		if (pinned || opts?.hold) {
+			_cancelClearTimer();
+			return;
+		}
 		if (_state.steps.length === 0) {
 			gitOperations.clear();
 			return;
@@ -307,9 +356,10 @@ export const gitOperations = {
 
 	/**
 	 * Mark the active operation as failed. Pins the failing step (if any) with
-	 * the error detail and keeps the popover open until dismissed.
+	 * the error detail and keeps the popover open until dismissed. `actions`
+	 * and `files` ride along with the error (follow-up buttons, conflicts).
 	 */
-	fail(error: string, opts?: { stepId?: string; detail?: string }): void {
+	fail(error: string, opts?: { stepId?: string; detail?: string } & GitOperationOutcome): void {
 		git.setOperationInProgress(false);
 		_clearPersistedOp();
 		_cancelClearTimer();
@@ -317,6 +367,9 @@ export const gitOperations = {
 			...s,
 			status: 'error',
 			error,
+			actions: opts?.actions ?? [],
+			files: opts?.files ?? null,
+			pinned: true,
 			steps: opts?.stepId
 				? s.steps.map((step) =>
 						step.id === opts.stepId
@@ -337,6 +390,24 @@ export const gitOperations = {
 	 */
 	failCurrent(error: string, detail?: string): void {
 		gitOperations.fail(error, { detail });
+	},
+
+	/**
+	 * Show a failure that never got as far as running (a refused plan, an
+	 * action this worker cannot take) in the same place a running one would.
+	 */
+	report(title: string, error: string, opts?: GitOperationOutcome): void {
+		gitOperations.begin(title, []);
+		gitOperations.fail(error, opts);
+	},
+
+	/** Update one offered action in place (its availability can change while it is shown). */
+	setAction(id: string, patch: Partial<Omit<GitOperationAction, 'id'>>): void {
+		if (!_state.actions.some((a) => a.id === id)) return;
+		_update((s) => ({
+			...s,
+			actions: s.actions.map((a) => (a.id === id ? { ...a, ...patch } : a))
+		}));
 	},
 
 	/** Clear the operation immediately (success collapse or error dismiss). */

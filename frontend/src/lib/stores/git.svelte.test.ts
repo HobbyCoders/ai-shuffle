@@ -167,6 +167,24 @@ describe('git store — selected worker without a session', () => {
 	});
 });
 
+describe('git store — a failed panel action is not "Git unavailable"', () => {
+	it('leaves the shared error alone when pull, push or commit is refused', async () => {
+		mocks.getGitStatus.mockResolvedValue(status());
+		await git.loadRepository('action-failures');
+		expect(git.current.error).toBeNull();
+		const refusal = { status: 409, detail: 'Cannot pull: you have uncommitted changes.' };
+		mocks.pullFromRemote.mockRejectedValueOnce(refusal);
+		await expect(git.pull('merge', false)).rejects.toBe(refusal);
+		mocks.pushCommits.mockRejectedValueOnce({ status: 400, detail: '! [rejected] main -> main (fetch first)' });
+		await expect(git.pushCommits(undefined, true, false)).rejects.toBeTruthy();
+		mocks.commitChanges.mockRejectedValueOnce({ status: 400, detail: 'nothing to commit' });
+		await expect(git.commitChanges('msg')).rejects.toBeTruthy();
+		// The Git panel reports these itself; a shared error would swap the
+		// whole panel for "Git unavailable · Retry" and hide that report.
+		expect(git.current.error).toBeNull();
+	});
+});
+
 describe('git store — project isolation and positive non-repo cache', () => {
 	it.each([false, true])('never shows project A branches while B loads (restore=%s)', async (restore) => {
 		await git.loadRepository('git-A');

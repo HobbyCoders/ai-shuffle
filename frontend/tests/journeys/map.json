@@ -553,6 +553,18 @@
 			]
 		},
 		{
+			"why": "Git panel actions report their outcome in the panel: Sync/Pull (clean, conflicts with Resolve with agent, dirty tree with Stash & pull) and a rejected Push with Pull first",
+			"journeys": ["git-sync"],
+			"globs": [
+				"frontend/src/lib/components/git/GitHeaderActions*",
+				"frontend/src/lib/components/git/GitProgressPopover*",
+				"frontend/src/lib/components/layout/git-pull-notification*",
+				"frontend/src/lib/stores/git*",
+				"app/api/git.py",
+				"app/core/git_commit_ops.py"
+			]
+		},
+		{
 			"why": "a journey file itself",
 			"journeys": ["$self"],
 			"globs": ["frontend/tests/journeys/*.journey.mjs"]
