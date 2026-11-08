@@ -2778,6 +2778,14 @@ describe('ws-message-handlers', () => {
 			}
 		});
 
+		it('clears the attachments of a send queued in the deleted chat', () => {
+			pendingQueue.noteSendUploads('other-session', 'client-gone', ['/uploads/gone.pdf']);
+
+			handlers.handleMessage({ type: 'user_session_deleted', session_id: 'other-session' });
+
+			expect(pendingQueue.hasSendUploads('client-gone')).toBe(false);
+		});
+
 		it('stays put when a different session was deleted', () => {
 			handlers.handleMessage({ type: 'user_session_deleted', session_id: 'other-session' });
 

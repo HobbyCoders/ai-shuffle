@@ -118,6 +118,42 @@ await runJourney({
       expect(await page.locator('[data-ui-row]').filter({ hasText: text }).count() === 0, 'the cancelled command never reaches the transcript');
     }
   }, {
+    // Nothing proves the withdrawal happened, so the page must say so and allow a retry.
+    name: 'lost-cancel-request',
+    async setup(ctx) {
+      await openNewChat(ctx);
+      await typeAndSend(ctx.page, `working ${uniq()} [script:long tps=2 latency_ms=1500]`);
+      await waitChat(ctx.page, { streaming: 'true', messagesAtLeast: 2 });
+    },
+    async act({ page, mark }) {
+      const text = `cancel that never arrived ${uniq()}`;
+      await typeAndSend(page, text);
+      await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
+      await page.evaluate(() => {
+        const send = WebSocket.prototype.send;
+        WebSocket.prototype.send = function(frame) {
+          const data = typeof frame === 'string' ? JSON.parse(frame) : null;
+          if (data?.type === 'remove_queued_message') {
+            WebSocket.prototype.send = send;
+            return undefined; // Lost on the way out: the server never hears it.
+          }
+          return send.call(this, frame);
+        };
+      });
+      await mark('cancel but lose the request on the way out');
+      await page.getByRole('button', { name: 'Unsend message and edit it' }).last().click();
+      await page.getByText('Cancelling…', { exact: true }).waitFor();
+      await page.waitForFunction(() => document.body.innerText.includes('Cancellation was not confirmed'), null, { timeout: 15_000 });
+      const unsend = page.getByRole('button', { name: 'Unsend message and edit it' }).last();
+      expect(await unsend.isEnabled(), 'an unconfirmed cancellation can be retried');
+      await mark('retry the cancellation');
+      await unsend.click();
+      await page.locator('.pending-messages').waitFor({ state: 'hidden' });
+      expect((await composer(page).innerText()).includes(text), 'a retry recovers the cancelled words');
+    }
+  }, {
+    // The verdict is lost but the durable receipt arrives (#1273): the receipt
+    // proves the withdrawal, so the words come back with no error and no retry.
     name: 'lost-verdict',
     async setup(ctx) {
       await openNewChat(ctx);
@@ -128,6 +164,9 @@ await runJourney({
       const text = `cancel with lost reply ${uniq()}`;
       await typeAndSend(page, text);
       await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
+      // A receipt answers only a row queued before it, compared by server
+      // timestamp, so the two must not land on the same instant.
+      await page.waitForTimeout(1_100);
       await page.evaluate(() => {
         const send = WebSocket.prototype.send;
         WebSocket.prototype.send = function(frame) {
@@ -148,14 +187,9 @@ await runJourney({
       });
       await mark('cancel but lose the verdict on the way back');
       await page.getByRole('button', { name: 'Unsend message and edit it' }).last().click();
-      await page.getByText('Cancelling…', { exact: true }).waitFor();
-      await page.waitForFunction(() => document.body.innerText.includes('Cancellation was not confirmed'), null, { timeout: 15_000 });
-      const unsend = page.getByRole('button', { name: 'Unsend message and edit it' }).last();
-      expect(await unsend.isEnabled(), 'a lost verdict re-enables cancellation');
-      await mark('retry the cancellation');
-      await unsend.click();
-      await page.locator('.pending-messages').waitFor({ state: 'hidden' });
-      expect((await composer(page).innerText()).includes(text), 'a retry recovers the cancelled words');
+      await page.locator('.pending-messages').waitFor({ state: 'hidden', timeout: 8_000 });
+      await composer(page).getByText(text).waitFor({ timeout: 5_000 });
+      expect(!(await page.locator('body').innerText()).includes('Cancellation was not confirmed'), 'the receipt leaves no false error');
     }
   }, {
     name: 'touch-unsend-targets',

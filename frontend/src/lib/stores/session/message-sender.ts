@@ -633,7 +633,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// An unrelated snapshot cannot admit this newly minted command.
 				const optimisticQueuedId = queuedEcho ? clientMessageId : null;
 				// A confirmed withdrawal or refusal hands these back with the words.
-				pendingQueue.noteSendUploads(clientMessageId, options?.pendingUploadPaths, options?.pendingUploadReferences);
+				pendingQueue.noteSendUploads(_state.sessionId, clientMessageId, options?.pendingUploadPaths, options?.pendingUploadReferences);
 
 				// A fresh local send can clear an error without adding a transcript row
 				// (queued/authoritative/pre-appended paths). Publish that intent in the

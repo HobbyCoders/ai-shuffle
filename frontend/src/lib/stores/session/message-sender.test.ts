@@ -1870,6 +1870,34 @@ describe('Stop timeout recovery', () => {
 			expect(stopRecoveryAppliesToTurn(state.stopTimedOutTurnId, state.liveTurnId)).toBe(false);
 		});
 
+		// The socket verdict of a timed-out Unsend never came; the durable receipt did.
+		it('hands the words and files of a timed-out Unsend back on its withdrawal receipt', async () => {
+			const test = stopping(null);
+			feedController.start('sess-1');
+			feed.onEvent!({ type: 'caught_up', seq: 0 });
+			expect(await test.sender.sendMessage('A')).toBe(true);
+			const [a] = test.getState().localSendIntent?.commandIds ?? [];
+			event('turn.started', 'turn-a', 1);
+			event('message.user', 'turn-a', 2, { command_id: a, content: 'A' });
+			vi.advanceTimersByTime(300);
+			expect(await test.sender.sendMessage('B', { pendingUploadPaths: ['/uploads/b.pdf'] })).toBe(true);
+			const b = test.getState().localSendIntent!.commandIds!.at(-1)!;
+			vi.advanceTimersByTime(10000); // admission's own timeout, then the queue row is ours
+			const row = test.getState().queuedMessages.find(m => m.clientMessageId === b)!;
+			test.sender.removeQueuedMessage(row.id);
+			vi.advanceTimersByTime(10000);
+			expect(test.getState().error).toContain('has not been withdrawn');
+			expect(pendingQueue.hasSendUploads(b)).toBe(true);
+
+			event('queued_message.withdrawn', 'turn-queued-b', 3, { command_id: b, message_id: 'turn-queued-b' });
+			const state = test.getState();
+			expect(pendingQueue.hasSendUploads(b)).toBe(false);
+			expect(state.pendingRestorePrompt).toBe('B');
+			expect(state.pendingRestoreUploadPaths).toEqual(['/uploads/b.pdf']);
+			expect(state.queuedMessages.some(m => m.clientMessageId === b)).toBe(false);
+			expect(state.error).toBeNull();
+		});
+
 		// Review round 3 S5: a compact-and-send whose reply was lost may have been
 		// accepted, so it stays the next send to run; only a refusal retires it.
 		it.each([

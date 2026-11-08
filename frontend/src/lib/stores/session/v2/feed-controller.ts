@@ -33,7 +33,7 @@ import type { ActiveSessionState } from '../../active-session';
 import type { SdkContextUsage } from '$lib/api/sessions';
 import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
-import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages, restoredDraftFields } from '../pending-queue';
 import {
 	followTurnError,
 	raiseTurnError,
@@ -1195,9 +1195,18 @@ export const feedController: FeedController = {
 				// never run: it leaves this page's run of sends (send-run.ts).
 				if (ev.type === 'queued_message.withdrawn' && typeof ev.command_id === 'string' && ev.command_id) {
 					const withdrawn = ev.command_id;
-					pendingQueue.forgetSendUploads(withdrawn);
+					const settled = pendingQueue.settleWithdrawalReceipt(withdrawn,
+						typeof ev.created_at === 'string' ? ev.created_at : undefined, caughtUp);
 					deps?.update(s => retireSends(s, withdrawn));
 					feedController.settleRetiredSends(sessionId);
+					// This page's Unsend ended here, not on a socket verdict. Another
+					// chat keeps the draft for its next switch-in, as a verdict does.
+					if (settled && deps?.getState().sessionId === sessionId) {
+						const restored = pendingQueue.takeWithdrawnRestore(sessionId);
+						deps.update(s => ({ ...s, error: null,
+							queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
+							...restoredDraftFields(s, restored) }));
+					}
 				}
 				reducerState = reduce(reducerState, ev);
 				if (ev.type === 'turn.started') turnStartedSeq = reducerState.lastSeq;
