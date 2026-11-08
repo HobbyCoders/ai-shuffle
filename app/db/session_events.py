@@ -1103,8 +1103,13 @@ def _compact_session_deltas(
     max_runs: int,
     dry_run: bool,
 ) -> Tuple[int, int]:
+    # The counter row is the fence for rewriting this log. Compaction writes back
+    # what it read, so it holds the fence from before the read until commit, or a
+    # transcript repair committing in between is overwritten with the old text.
+    # Maintenance never queues for it: a busy session waits for the next pass.
     cur.execute(
-        "SELECT next_seq FROM session_event_counters WHERE session_id = %s",
+        "SELECT next_seq FROM session_event_counters WHERE session_id = %s"
+        + ("" if dry_run else " FOR UPDATE SKIP LOCKED"),
         (session_id,),
     )
     row = cur.fetchone()

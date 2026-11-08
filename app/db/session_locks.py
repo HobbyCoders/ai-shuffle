@@ -49,6 +49,9 @@ Who takes what (keep this table and the code in step):
     receive flow installs it and commits before acceptance can start.
   - transcript reinstall (``transcripts.install_owner_log``): N, then R, C, S
     (``lock_session_runtime``), and reads the owner only after S.
+  - delta compaction (``session_events._compact_session_deltas``): C alone,
+    ``SKIP LOCKED``, before it reads the rows it rewrites. Held to commit; a
+    session whose counter is busy waits for the next maintenance pass.
   - source commit (``handoff._commit``): N, then its lease and hold runs in
     one sorted lock (``lock_handoff_holds``), then S. Its retry of an already
     transferred move and the cleanup after a refused commit lock only the

@@ -2462,6 +2462,12 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
     owners = {row["id"]: row["owner_device_id"] for row in cursor.fetchall()}
     if any(owners.get(sid) != origin for sid in sessions):
         return False
+    # ``owners`` read these sessions in this transaction: one missing at
+    # reservation was deleted in between, not "not arrived yet" (#1222).
+    # Reserved before the rows are read: compaction rewrites a run under these
+    # counters, so a fragment judged not to need fitting cannot land beneath a
+    # run merged after that judgement.
+    deleted = _lock_mirror_event_counters(cursor, ids, existed=owners)
     # A journal row without a sync record is a local/legacy write, not a fresh append.
     clauses = " OR ".join(["(session_id = %s AND seq = %s)"] * len(rows))
     cursor.execute(f"SELECT 1 FROM session_events WHERE {clauses} LIMIT 1",
@@ -2471,9 +2477,6 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
     from app.db.session_events import delta_rows_need_fitting
     if delta_rows_need_fitting(cursor, rows):
         return False  # a merged run is involved: the per-op path applies its rule (#1278)
-    # ``owners`` read these sessions in this transaction: one missing at
-    # reservation was deleted in between, not "not arrived yet" (#1222).
-    deleted = _lock_mirror_event_counters(cursor, ids, existed=owners)
     last_seq = envs[-1].origin_seq
     if deleted:
         # Chats deleted while we waited: consume their ops, store nothing.

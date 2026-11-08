@@ -243,7 +243,10 @@ nothing if a check fails:
 - under the runtime locks, run, counter and session (hand-off publication and
   local writes take those and never `network_state`): the session exists and is
   still the fetched owner's, read after waiting. A hand-off that won the counter
-  is seen here and its log is left alone;
+  is seen here and its log is left alone. Local delta compaction takes the
+  counter too, before it reads the rows it writes back (`SKIP LOCKED`: a busy
+  session waits for the next maintenance pass), so it can never restore the
+  damaged text over a repair that committed while it was working;
 - against the records: no record of the session, tombstones included, is newer
   than its version in the copy. A clear or delete that synced during the fetch
   fails this, and the repair fetches again, so a cleared chat cannot come back.
@@ -260,6 +263,12 @@ connected readers to compare it on commit, and the periodic reconcile covers a
 lost wake. A log never rewritten keeps its plain epoch, so nothing changes for
 it, and clients only echo the value back, so older tabs work unchanged. Views
 built from the log (`transcript_views`) key on the same reader epoch.
+
+A hand-off import compares only the ids and seqs of the rows. If it corrects a
+row's text under the same id and seq, the token stays put and a client resuming
+above that row keeps the old text until it reloads. That was already so before
+the token existed; it is tracked in
+[#1281](https://github.com/HobbyCoders/ai-shuffle/issues/1281).
 
 A connection that started with no epoch honours a `reset` once it holds rows, and
 a first load is told the epoch in an `X-Log-Epoch` response header, so a load

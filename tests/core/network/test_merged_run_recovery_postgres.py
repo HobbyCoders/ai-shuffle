@@ -124,6 +124,20 @@ async def merged_source(pg_workers, held):
     return source, peer, served
 
 
+async def merged_source_unmerged(pg_workers):
+    """A source with fragments 0-3 and a peer synced through fragment 1: the next ops are a fast append."""
+    source, peer = pg_workers("source"), pg_workers("peer")
+    with source.active():
+        engine.create_network("Merged")
+    publish(source, 1, create=True)
+    admit(source, peer)
+    served = ServedBy(source, "https://source.example.com")
+    deltas(source, 2)
+    await sync(peer, served)
+    deltas(source, 2, start=2)
+    return source, peer, served
+
+
 def merged_row(worker):
     rows = [row for row in transcript(worker) if (row["payload"] or {}).get("text") == WHOLE]
     assert len(rows) == 1
@@ -621,6 +635,116 @@ async def test_a_hand_off_that_won_the_counter_is_not_replaced_by_the_repair(pg_
             assert await install is None
     row = peer.sql("SELECT payload FROM session_events WHERE session_id = 'chat' AND seq = 4")[0]
     assert row["payload"] == {"text": "LOCAL-AUTHORITATIVE"}
+
+
+async def mirror_queued_with_a_fragment_missing(pg_workers):
+    """An idle mirror holding A,C,D,E,F of a run whose owner holds ABCDEF, queued for repair."""
+    source, peer = pg_workers("source"), pg_workers("peer")
+    with source.active():
+        engine.create_network("Merged")
+    publish(source, 1, create=True)
+    admit(source, peer)
+    deltas(source, 6, finish=True)
+    await sync(peer, ServedBy(source, "https://source.example.com"))
+    peer.sql("DELETE FROM session_events WHERE session_id = 'chat' AND seq = 3")
+    with source.active():
+        events_db.compact_session_deltas("chat", keep_tail_events=0)
+    items = copy_items(source, after=0, held=8)
+    peer.sql("UPDATE sessions SET owner_device_id = %s WHERE id = 'chat'", (source.device_id,))
+    assert apply_fitted(peer, next(item["record"] for item in items if item["record"]["seq"] == 7)) is None
+    assert queued(peer) == ["chat"]
+    return source, peer, items
+
+
+async def test_compaction_that_read_the_damaged_rows_cannot_undo_the_repair(pg_workers):
+    # S11: compaction writes back what it read, so a repair committing between
+    # its read and its write would be overwritten with ACDEF, nothing queued.
+    source, peer, items = await mirror_queued_with_a_fragment_missing(pg_workers)
+    has_read, resume = threading.Event(), threading.Event()
+
+    def compact():
+        with base.get_db() as conn:
+            class Cursor:
+                def __init__(self):
+                    self.real, self.sql = conn.cursor(), ""
+
+                def execute(self, sql, params=()):
+                    self.sql = sql
+                    return self.real.execute(sql, params)
+
+                def fetchall(self):
+                    rows = self.real.fetchall()
+                    if self.sql.startswith("SELECT id, seq, payload, command_id, created_at FROM session_events"):
+                        has_read.set()
+                        assert resume.wait(20)
+                    return rows
+
+                def __getattr__(self, name):
+                    return getattr(self.real, name)
+
+            return events_db.compact_session_deltas("chat", keep_tail_events=0, cursor=Cursor())
+
+    with peer.active():
+        compacting = asyncio.create_task(asyncio.to_thread(compact))
+        try:
+            assert await asyncio.to_thread(has_read.wait, 5)
+            install = asyncio.create_task(asyncio.to_thread(
+                transcripts.install_owner_log, "chat", source.device_id, items, 8, engine.context()))
+            done, _ = await asyncio.wait({install}, timeout=1.5)
+            assert not done, "the repair must wait behind a compaction that has read the rows"
+        finally:
+            resume.set()
+        assert (await compacting)[0] == 1
+        assert await install is not None
+    assert frames(peer) == frames(source)
+    assert queued(peer) == []
+
+
+async def test_compaction_skips_a_session_whose_counter_is_held(pg_workers):
+    # Maintenance never queues behind a live turn or a long hand-off import.
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(2, "a", "a"), delta_row(3, "b", "b"))
+    worker.sql("UPDATE session_event_counters SET next_seq = 3 WHERE session_id = 'chat'")
+    holder = worker.connect()
+    holder.cursor().execute("SELECT 1 FROM session_event_counters WHERE session_id = 'chat' FOR UPDATE")
+    with worker.active():
+        try:
+            started = time.monotonic()
+            assert await asyncio.to_thread(events_db.compact_session_deltas, "chat", keep_tail_events=0) == (0, 0)
+            assert time.monotonic() - started < 2
+            assert [row[0] for row in held(worker)] == [2, 3]
+        finally:
+            holder.rollback()
+            holder.close()
+        assert await asyncio.to_thread(events_db.compact_session_deltas, "chat", keep_tail_events=0) == (1, 1)
+    assert [row[:3] for row in held(worker)] == [(3, "a", "ab")]
+
+
+async def test_fast_append_reserves_the_counter_before_judging_the_held_rows(pg_workers, monkeypatch):
+    # The same shape as compaction on the sync side: a fragment judged not to
+    # need fitting must not land beneath a run merged after that judgement.
+    source, peer, _served = await merged_source_unmerged(pg_workers)
+    judged = threading.Event()
+    real = events_db.delta_rows_need_fitting
+
+    def spy(cur, records):
+        judged.set()
+        return real(cur, records)
+
+    monkeypatch.setattr(events_db, "delta_rows_need_fitting", spy)
+    holder = peer.connect()
+    holder.cursor().execute("SELECT 1 FROM session_event_counters WHERE session_id = 'chat' FOR UPDATE")
+    with peer.active():
+        applying = asyncio.create_task(asyncio.to_thread(engine.apply_batch, ops_for(source, [4, 5])))
+        try:
+            assert not await asyncio.to_thread(judged.wait, 1.5), "judged the held rows outside the fence"
+        finally:
+            holder.rollback()
+            holder.close()
+        applied = await applying
+    assert judged.is_set()
+    assert applied.rejected == applied.pending == applied.retry == 0
+    assert frames(peer) == frames(source)
 
 
 async def test_a_row_refused_during_the_fetch_makes_the_repair_fetch_again(pg_workers):
