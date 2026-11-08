@@ -202,13 +202,17 @@ def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None
         try:
             installed = json.loads((home / "installed_plugins.json").read_text(encoding="utf-8"))
             records = installed.get("plugins", {}).get(f"{name}@{marketplace}")
-            record = records[0] if isinstance(records, list) and records else records
-            if isinstance(record, dict):
-                raw = record.get("installPath")
-                path = Path(raw) if isinstance(raw, str) and raw else None
-                if path and path.is_dir() and path.resolve().parent == cache.resolve():
-                    return path, record.get("version") or path.name
-                log.warning("installed plugin %s@%s has no confined cache path", name, marketplace)
+            if isinstance(records, dict):
+                records = [records]  # Legacy single-record registry.
+            if isinstance(records, list) and records:
+                for record in records:
+                    if not isinstance(record, dict) or record.get("scope") not in (None, "user", "global"):
+                        continue
+                    raw = record.get("installPath")
+                    path = Path(raw) if isinstance(raw, str) and raw else None
+                    if path and path.is_dir() and path.resolve().parent == cache.resolve():
+                        return path, record.get("version") or path.name
+                log.warning("installed plugin %s@%s has no applicable confined cache path", name, marketplace)
                 return None
         except (OSError, ValueError, TypeError, AttributeError):
             pass  # Older/CLI-only installs may have only the cache layout.

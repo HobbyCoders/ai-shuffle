@@ -133,198 +133,51 @@ def _get_marketplace_head_version(svc, marketplace_id: str) -> Optional[str]:
     return None
 
 
-def check_for_updates(svc) -> List[PluginUpdateInfo]:
+def check_for_updates(svc, *, allow_remote: bool = False) -> List[PluginUpdateInfo]:
+    """Compare local candidates; passive reads use cached external checks.
+
+    A catalog label or SHA is not the candidate's canonical manifest version.
+    Every source goes through the same content/version guard before an update
+    is offered. A broken plugin is isolated from the rest of the list.
     """
-    Check all installed plugins for available updates.
-
-    Compare release labels first, then installable content for sources whose
-    release labels are unchanged or absent. This read does not sync marketplace
-    checkouts; an explicit owner check refreshes those before calling here.
-
-    Args:
-        svc: PluginService instance
-
-    Returns:
-        List of plugins with available updates
-    """
-    installed_data = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}})
-    file_version = installed_data.get("version", 1)
-    updates: List[PluginUpdateInfo] = []
-
-    # Cache marketplace HEAD versions to avoid repeated git calls
-    mp_head_cache: Dict[str, Optional[str]] = {}
-    marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
-
-    for plugin_id, installation_data in installed_data.get("plugins", {}).items():
-        if not installation_data:
-            continue
-
-        # Handle both version 1 (single object) and version 2 (array) formats
-        if file_version == 1 or isinstance(installation_data, dict):
-            install = installation_data
-        else:
-            install = installation_data[0] if installation_data else None
-            if not install:
-                continue
-
-        # Implicit plugins have no release entry; compare their installed
-        # components with the source in the content pass below.
-        if isinstance(install, dict) and install.get("implicit"):
-            continue
-
-        parts = plugin_id.rsplit("@", 1)
-        if len(parts) != 2:
-            continue
-
-        plugin_name, marketplace_id = parts
-        installed_version = install.get("version", "unknown")
-
-        # Determine locality from marketplace entry, not just installed data.
-        # Old installs may lack the isLocal field entirely.
-        entry = svc._find_plugin_in_manifest(marketplace_id, plugin_name)
-        if entry:
-            source = entry.get("source", "")
-            is_local = isinstance(source, str)
-        else:
-            is_local = install.get("isLocal", True)
-
-        # For local-source plugins: read the plugin's own manifest version
-        # from the marketplace source directory.  This matches Claude Code's
-        # behaviour -- manifest.version is the canonical version, NOT the
-        # marketplace repo's git/gcs hash.
-        if is_local:
-            # Resolve the local source directory for this plugin
-            mp_data = marketplaces.get(marketplace_id, {})
-            mp_location = mp_data.get("installLocation")
-
-            available_version = None
-            if mp_location and entry:
-                mp_path = Path(mp_location)
-                mp_manifest = svc._get_marketplace_manifest(mp_path)
-                mp_plugin_root = (
-                    mp_manifest.get("metadata", {}).get("pluginRoot")
-                    if mp_manifest and isinstance(mp_manifest.get("metadata"), dict)
-                    else None
-                )
-                local_dir = svc._resolve_plugin_source(
-                    entry.get("source", ""), mp_path, mp_plugin_root
-                )
-                if local_dir:
-                    available_version = svc._get_plugin_manifest_version(local_dir)
-
-            # Fall back chain: entry.version -> marketplace HEAD hash.
-            # Track whether the version is from a "real" source (manifest/entry)
-            # vs a hash fallback, to avoid comparing apples to oranges.
-            version_from_manifest = available_version is not None
-            if not available_version:
-                available_version = entry.get("version") if entry else None
-                if available_version:
-                    version_from_manifest = True
-            if not available_version:
-                if marketplace_id not in mp_head_cache:
-                    mp_head_cache[marketplace_id] = svc._get_marketplace_head_version(marketplace_id)
-                available_version = mp_head_cache[marketplace_id]
-                # This is a repo-level hash, not a plugin manifest version
-
-            if not available_version:
-                continue
-
-            # Only compare versions from the same system.  If installed
-            # version is "unknown" (plugin has no manifest version) and
-            # available came from a repo hash, skip -- they're incomparable.
-            if not version_from_manifest and installed_version in ("unknown", "1.0.0"):
-                continue
-
-            if _is_update(installed_version, available_version):
-                updates.append(PluginUpdateInfo(
-                    plugin_id=plugin_id,
-                    name=plugin_name,
-                    marketplace=marketplace_id,
-                    installed_version=installed_version,
-                    available_version=available_version,
-                    is_local=True
-                ))
-        else:
-            # For external plugins: compare source SHAs when available.
-            # The marketplace entry's source.sha represents the latest
-            # pinned commit.  We stored the SHA at install time in
-            # install_record["sourceSha"].  If they differ, the plugin
-            # has been updated upstream.
-            if entry:
-                source = entry.get("source", {})
-                entry_version = entry.get("version", "")
-
-                if entry_version:
-                    # Explicit version in marketplace entry -- compare directly
-                    if _is_update(installed_version, entry_version):
-                        updates.append(PluginUpdateInfo(
-                            plugin_id=plugin_id,
-                            name=plugin_name,
-                            marketplace=marketplace_id,
-                            installed_version=installed_version,
-                            available_version=entry_version,
-                            is_local=False
-                        ))
-                elif isinstance(source, dict) and source.get("sha"):
-                    # No explicit version -- compare source SHAs
-                    available_sha = source["sha"][:7]
-                    installed_sha = install.get("sourceSha", "")
-                    if installed_sha:
-                        # We stored SHA at install time -- compare directly
-                        if available_sha != installed_sha:
-                            cache_dir = svc.CACHE_DIR / marketplace_id / plugin_name / available_sha
-                            cached_ver = svc._get_plugin_manifest_version(cache_dir)
-                            updates.append(PluginUpdateInfo(
-                                plugin_id=plugin_id,
-                                name=plugin_name,
-                                marketplace=marketplace_id,
-                                installed_version=installed_version,
-                                available_version=cached_ver or available_sha,
-                                is_local=False
-                            ))
-                    else:
-                        # Legacy install without sourceSha -- check cached
-                        # copy at new SHA for its manifest version
-                        cache_dir = svc.CACHE_DIR / marketplace_id / plugin_name / available_sha
-                        cached_ver = svc._get_plugin_manifest_version(cache_dir)
-                        if cached_ver and cached_ver != installed_version:
-                            updates.append(PluginUpdateInfo(
-                                plugin_id=plugin_id,
-                                name=plugin_name,
-                                marketplace=marketplace_id,
-                                installed_version=installed_version,
-                                available_version=cached_ver,
-                                is_local=False
-                            ))
-                        elif not cached_ver:
-                            # No cached copy -- only compare SHA-to-SHA
-                            _is_sha = (
-                                len(installed_version) == 7
-                                and all(c in "0123456789abcdef" for c in installed_version)
-                            )
-                            if _is_sha and installed_version != available_sha:
-                                updates.append(PluginUpdateInfo(
-                                    plugin_id=plugin_id,
-                                    name=plugin_name,
-                                    marketplace=marketplace_id,
-                                    installed_version=installed_version,
-                                    available_version=available_sha,
-                                    is_local=False
-                                ))
-
-    # Versions are release labels, not a complete identity. This pass covers
-    # implicit repositories and commits published without a version bump.
+    import hashlib
+    import json
     from app.core.plugin_update_content import content_update
 
-    offered = {u.plugin_id for u in updates}
-    for plugin_id, records in installed_data.get("plugins", {}).items():
-        if plugin_id in offered or "@" not in plugin_id or not records:
+    installed = svc._read_json_file(svc.INSTALLED_FILE, {"plugins": {}})
+    marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
+    cache_path = svc.PLUGINS_DIR / "update_checks.json"
+    cached = svc._read_json_file(cache_path, {})
+    refreshed = {}
+    updates = []
+    for plugin_id, records in installed.get("plugins", {}).items():
+        if "@" not in plugin_id or not records:
             continue
         install = records[0] if isinstance(records, list) else records
-        marketplace = marketplaces.get(plugin_id.rsplit("@", 1)[1], {})
-        update = content_update(svc, plugin_id, install, marketplace)
-        if update:
-            updates.append(update)
+        if not isinstance(install, dict):
+            continue
+        name, marketplace_id = plugin_id.rsplit("@", 1)
+        marketplace = marketplaces.get(marketplace_id, {})
+        entry = svc._find_plugin_in_manifest(marketplace_id, name) or {}
+        external = not install.get("implicit") and isinstance(entry.get("source"), dict)
+        key = hashlib.sha256(json.dumps(
+            [install, entry, marketplace], sort_keys=True,
+        ).encode()).hexdigest()
+        try:
+            if external and not allow_remote:
+                previous = cached.get(plugin_id, {})
+                data = previous.get("update") if previous.get("key") == key else None
+                update = PluginUpdateInfo(**data) if data else None
+            else:
+                update = content_update(svc, plugin_id, install, marketplace)
+            if update:
+                updates.append(update)
+            if external and allow_remote:
+                refreshed[plugin_id] = {"key": key, "update": update.to_dict() if update else None}
+        except Exception as exc:
+            logger.warning("Cannot compare plugin %s: %s", plugin_id, exc)
+    if allow_remote:
+        svc._write_json_file(cache_path, refreshed)
     return updates
 
 
@@ -334,7 +187,10 @@ def refresh_update_sources(svc) -> None:
     marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
     ids = {p.rsplit("@", 1)[1] for p in installed.get("plugins", {}) if "@" in p}
     for marketplace_id in sorted(ids & marketplaces.keys()):
-        svc.sync_marketplace(marketplace_id)
+        try:
+            svc.sync_marketplace(marketplace_id)
+        except Exception as exc:
+            logger.warning("Cannot refresh plugin source %s: %s", marketplace_id, exc)
 
 
 def update_plugin(svc, plugin_id: str, refresh_source: bool = True) -> PluginInfo:
@@ -372,7 +228,24 @@ def update_plugin(svc, plugin_id: str, refresh_source: bool = True) -> PluginInf
     # Scheduled updates control source syncing through their own setting.
     if refresh_source:
         svc.sync_marketplace(plugin_id.rsplit("@", 1)[1])
-    result = svc.install_plugin(plugin_id, scope, enable=was_enabled)
+    from app.core.plugin_install import _install_implicit_plugin, discover_implicit_components, install_plugin
+
+    if install.get("implicit"):
+        # Updates cannot promote a passive repo to a catalog's hooks/MCP.
+        # A fresh owner install is required to change package type.
+        marketplace_id = plugin_id.rsplit("@", 1)[1]
+        marketplace = svc._read_json_file(svc.MARKETPLACES_FILE, {})[marketplace_id]
+        root = Path(marketplace["installLocation"])
+        components = discover_implicit_components(svc, root)
+        if not components["any"]:
+            raise ValueError("Implicit plugin has no confined components")
+        result = _install_implicit_plugin(
+            svc, plugin_id, marketplace_id, root, components, scope, was_enabled,
+        )
+    else:
+        result = install_plugin(
+            svc, plugin_id, scope, enable=was_enabled, minimum_version=install.get("version"),
+        )
 
     # Restore enabled state
     if was_enabled:
@@ -394,8 +267,7 @@ def update_all_plugins(svc) -> List[PluginInfo]:
     Returns:
         List of updated PluginInfo objects
     """
-    refresh_update_sources(svc)
-    updates = svc.check_for_updates()
+    updates = svc.check_for_updates(refresh_sources=True)
     results: List[PluginInfo] = []
 
     for update in updates:
@@ -436,7 +308,7 @@ def run_auto_update(svc) -> Dict[str, Any]:
 
     # 2. Check for updates
     try:
-        updates = svc.check_for_updates()
+        updates = check_for_updates(svc, allow_remote=au_settings.auto_sync_marketplaces)
         summary["updates_available"] = [u.to_dict() for u in updates]
     except Exception as e:
         logger.error(f"Failed to check for updates: {e}")

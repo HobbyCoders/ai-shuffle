@@ -329,30 +329,33 @@ def _resolve_implicit_component_dir(root: Path, component: str) -> Optional[Path
         <root>/.claude/<component>   (project-style, e.g. .claude/skills)
         <root>/.agents/<component>   (multi-tool convention, e.g. remotion)
 
-    Returns the first existing directory, or None. is_dir() follows symlinks, so
-    a symlinked component dir resolves correctly.
+    Internal symlinks are supported, but a component root must remain inside
+    the checkout before discovery scans any of its children.
     """
     for candidate in (root / component, root / ".claude" / component, root / ".agents" / component):
         if candidate.is_dir():
+            if not _is_within(candidate, root):
+                raise ValueError(f"Plugin component directory points outside the checkout: {component}")
             return candidate
     return None
 
 
-def _skills_dir_has_skill(skills_dir: Path) -> bool:
-    """True iff skills_dir contains at least one <name>/SKILL.md."""
+def _skills_dir_has_skill(skills_dir: Path, root: Path) -> bool:
+    """True iff a confined <name>/SKILL.md exists."""
     try:
         for child in skills_dir.iterdir():
-            if child.is_dir() and (child / "SKILL.md").exists():
+            if (_is_within(child, root) and child.is_dir()
+                    and _is_within(child / "SKILL.md", root) and (child / "SKILL.md").exists()):
                 return True
     except OSError:
         pass
     return False
 
 
-def _dir_has_markdown(md_dir: Path) -> bool:
-    """True iff md_dir contains at least one *.md file (recursively)."""
+def _dir_has_markdown(md_dir: Path, root: Path) -> bool:
+    """True iff md_dir contains at least one confined *.md file."""
     try:
-        return next(md_dir.glob("**/*.md"), None) is not None
+        return any(_is_within(path, root) for path in md_dir.glob("**/*.md"))
     except OSError:
         return False
 
@@ -371,9 +374,9 @@ def discover_implicit_components(svc, root: Path) -> Dict[str, Any]:
     commands_dir = _resolve_implicit_component_dir(root, "commands")
     agents_dir = _resolve_implicit_component_dir(root, "agents")
 
-    has_skills = bool(skills_dir and _skills_dir_has_skill(skills_dir))
-    has_commands = bool(commands_dir and _dir_has_markdown(commands_dir))
-    has_agents = bool(agents_dir and _dir_has_markdown(agents_dir))
+    has_skills = bool(skills_dir and _skills_dir_has_skill(skills_dir, root))
+    has_commands = bool(commands_dir and _dir_has_markdown(commands_dir, root))
+    has_agents = bool(agents_dir and _dir_has_markdown(agents_dir, root))
 
     return {
         "skills_dir": skills_dir if has_skills else None,
@@ -404,6 +407,8 @@ def _copy_tree_resolving_symlinks(
     of its own ancestors is skipped instead of recursing forever.
     """
     root = root or src
+    if not _is_within(src, root):
+        raise ValueError("Plugin source directory points outside the checkout")
     active = set() if _active is None else _active
     real_src = src.resolve()
     active.add(real_src)
@@ -513,9 +518,16 @@ def _install_implicit_plugin(
     return svc.get_installed_plugins()[-1]
 
 
+def _check_update_version(installed, candidate):
+    from app.core.plugin_updates import _is_update
+
+    if installed and candidate != installed and not _is_update(installed, candidate):
+        raise ValueError("Plugin update would downgrade the installed release")
+
+
 def install_plugin(
     svc, plugin_id: str, scope: str = "user", enable: bool = True,
-    requested_by: Optional[Dict[str, Any]] = None,
+    requested_by: Optional[Dict[str, Any]] = None, *, minimum_version: Optional[str] = None,
 ) -> PluginInfo:
     """
     Install a plugin from a marketplace.
@@ -577,6 +589,8 @@ def install_plugin(
     source_revision = None
     # Version priority: plugin manifest > entry.version > source.sha (short) > "1.0.0"
     version = entry.get("version", "1.0.0")
+    if version is None:
+        version = "1.0.0"
     if version == "1.0.0" and isinstance(source, dict) and source.get("sha"):
         version = source["sha"][:7]
     manifest = svc._get_marketplace_manifest(mp_path)
@@ -598,6 +612,8 @@ def install_plugin(
             if resolved_version:
                 version = resolved_version
 
+        # Validate an update before replacing the currently installed tree.
+        _check_update_version(minimum_version, version)
         # Create cache directory and copy plugin
         _safe_path_component(version, "version")
         cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / version
@@ -608,40 +624,23 @@ def install_plugin(
         _copy_tree_resolving_symlinks(local_dir, cache_path, root=mp_path)
 
     elif isinstance(source, dict):
-        # External source - clone from remote
+        # Stage fetched content before touching the live cache. The canonical
+        # manifest, not a stale catalog label or changed SHA, decides whether
+        # an update would downgrade the installed release.
+        import tempfile
+
         _safe_path_component(version, "version")
-        cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / version
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if cache_path.exists():
-            _force_rmtree(cache_path)
-
-        try:
-            source_revision = svc._clone_plugin_source(source, cache_path)
-        except Exception:
-            # Leave no half-fetched (or unverified) files in the cache.
+        with tempfile.TemporaryDirectory(prefix="plugin-install-") as tmp:
+            candidate = Path(tmp) / "source"
+            source_revision = svc._clone_plugin_source(source, candidate)
+            version = svc._get_plugin_manifest_version(candidate) or version
+            _safe_path_component(version, "version")
+            _check_update_version(minimum_version, version)
+            cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / version
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
             if cache_path.exists():
                 _force_rmtree(cache_path)
-            raise
-
-        # After cloning, read the plugin's own manifest version -- it's the
-        # source of truth (matching Claude Code behaviour).
-        cloned_manifest_version = svc._get_plugin_manifest_version(cache_path)
-        if cloned_manifest_version and cloned_manifest_version != version:
-            try:
-                _safe_path_component(cloned_manifest_version, "version")
-            except ValueError:
-                _force_rmtree(cache_path)
-                raise
-            # Re-cache under the correct manifest version
-            new_cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / cloned_manifest_version
-            if new_cache_path != cache_path:
-                new_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                if new_cache_path.exists():
-                    _force_rmtree(new_cache_path)
-                shutil.move(str(cache_path), str(new_cache_path))
-                cache_path = new_cache_path
-            version = cloned_manifest_version
+            shutil.move(str(candidate), str(cache_path))
 
     else:
         # Better error: include resolved path for relative sources

@@ -33,7 +33,8 @@ def commit(repo):
 
 @pytest.fixture
 def sources(tmp_path, monkeypatch):
-    home = tmp_path / "fluid"
+    home = tmp_path / "home/.fluid"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home.parent))
     monkeypatch.setattr("app.core.plugin_service._get_fluid_dir", lambda: home)
     base = tmp_path / "repos"
     base.mkdir()
@@ -165,3 +166,24 @@ def test_automatic_update_respects_source_sync_off(sources):
     ))
     assert svc.run_auto_update()["updated_plugins"] == []
     assert "First revision" in runtime_text(svc)
+
+@pytest.mark.parametrize("component_root", ["skills", ".claude/skills", ".agents/skills"])
+def test_refreshed_implicit_component_root_cannot_read_outside_checkout(
+    sources, tmp_path, requires_symlinks, component_root,
+):
+    import shutil
+
+    svc, upstream, skill, info = setup(sources, "implicit")
+    outside = tmp_path / "outside"
+    write(outside / "leak/SKILL.md", "---\nname: leak\ndescription: Outside\n---\nPrivate outside content.\n")
+    shutil.rmtree(upstream / "skills")
+    link = upstream / component_root
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside, target_is_directory=True)
+    commit(upstream)
+
+    assert svc.check_for_updates(refresh_sources=True) == []
+    with pytest.raises(ValueError, match="outside"):
+        svc.update_plugin(info.id)
+    assert "First revision" in runtime_text(svc)
+    assert not list(Path(info.install_path).rglob("leak"))

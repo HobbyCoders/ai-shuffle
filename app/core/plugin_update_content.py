@@ -4,6 +4,7 @@ Snapshots use the installer's symlink confinement and implicit-component rules.
 They never enable plugins, change the registry, or execute plugin code.
 """
 
+import hashlib
 import re
 import subprocess
 import tempfile
@@ -49,9 +50,31 @@ def _remote_revision(source):
     return revision
 
 
+def _tree_digest(root):
+    """Hash an install snapshot without authored-approval size limits.
+
+    Snapshots have already materialized confined symlinks. Fail closed if one
+    appears while comparing, and stream file bodies instead of buffering them.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("Plugin comparison snapshot contains a symlink")
+        if path.is_file():
+            digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+            digest.update(str(path.stat().st_size).encode() + b"\0")
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+    return digest.hexdigest()
+
+
 def content_update(svc, plugin_id, install, marketplace):
-    """Fallback for equal/missing versions and marketplace-less installations."""
-    from fluid.context.plugin_formats import content_hash
+    """Compare a candidate's canonical manifest and installable content.
+
+    External sources may only reach this function during an explicit refresh
+    or opted-in source sync; passive reads use the cached result instead.
+    """
     from app.core.plugin_updates import _is_update
 
     name, mp_id = plugin_id.rsplit("@", 1)
@@ -61,17 +84,18 @@ def content_update(svc, plugin_id, install, marketplace):
         return None
     mp_path = Path(location)
     entry = svc._find_plugin_in_manifest(mp_id, name)
-    implicit = install.get("implicit") and not entry
+    implicit = bool(install.get("implicit"))
     if not entry and not implicit:
         return None  # Authored/project folders have no tracked upstream.
-    source = entry.get("source", "") if entry else ""
+    source = entry.get("source", "") if entry and not implicit else ""
     installed_version = install.get("version", "unknown")
-    entry_version = entry.get("version") if entry else None
-    if entry_version and entry_version != installed_version and not _is_update(installed_version, entry_version):
-        return None  # Preserve the release downgrade guard.
+    entry_version = entry.get("version") if entry and not implicit else None
     if isinstance(source, dict):
-        if source.get("sha") and install.get("sourceSha") == source["sha"][:7]:
-            return None  # An exact commit pin never follows the branch tip.
+        pin = source.get("sha")
+        installed_revision = install.get("sourceRevision")
+        if pin and ((installed_revision and installed_revision.startswith(pin))
+                    or (not installed_revision and install.get("sourceSha") == pin[:7])):
+            return None  # An unchanged exact pin never follows the branch tip.
         if not source.get("sha"):
             revision = _remote_revision(source)
             if revision and revision == install.get("sourceRevision"):
@@ -105,10 +129,10 @@ def content_update(svc, plugin_id, install, marketplace):
             return None
         current = tmp / "current"
         _copy_tree_resolving_symlinks(Path(installed_path), current, skip_git=True)
-        current_hash, available_hash = content_hash(current), content_hash(available)
-        if not current_hash or not available_hash:
-            raise RuntimeError(f"Cannot compare plugin content: {plugin_id}")
-        if current_hash == available_hash:
+        current_hash, available_hash = _tree_digest(current), _tree_digest(available)
+        pin_changed = (isinstance(source, dict) and source.get("sha")
+                       and install.get("sourceSha") != source["sha"][:7])
+        if current_hash == available_hash and version == installed_version and not pin_changed:
             return None
         # The API's version label also identifies same-version source revisions.
         label = version if version != installed_version else f"{version}+{available_hash[-7:]}"

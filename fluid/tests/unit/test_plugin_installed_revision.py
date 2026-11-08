@@ -35,3 +35,20 @@ def test_installed_path_cannot_escape_cache_or_load_an_old_revision(tmp_path, ba
         "plugins": {"sample@source": [{"installPath": str(path), "version": "current"}]},
     }))
     assert resolve_plugin_root("sample", "source", home=home) is None
+
+
+@pytest.mark.parametrize("scope", ["user", "global", None])
+def test_project_record_first_does_not_hide_applicable_user_revision(tmp_path, scope):
+    home = tmp_path / "plugins"
+    current = home / "cache/source/sample/0000000"
+    current.mkdir(parents=True)
+    project = tmp_path / "project/plugin"
+    project.mkdir(parents=True)
+    (home / "installed_plugins.json").write_text(json.dumps({
+        "version": 2,
+        "plugins": {"sample@source": [
+            {"scope": "project", "projectPath": str(project.parent), "installPath": str(project)},
+            {"scope": scope, "installPath": str(current), "version": "0000000"},
+        ]},
+    }))
+    assert resolve_plugin_root("sample", "source", home=home) == (current, "0000000")

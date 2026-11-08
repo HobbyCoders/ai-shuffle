@@ -57,10 +57,10 @@ def _marketplace(svc, name="mp", plugins=(), metadata=None, raw=None) -> Path:
     return root
 
 
-def _plugin_dir(root: Path, rel: str, version="1.2.0", files=None) -> Path:
+def _plugin_dir(root: Path, rel: str, version="1.2.0", files=None, name=None) -> Path:
     d = root / rel
     (d / ".claude-plugin").mkdir(parents=True, exist_ok=True)
-    manifest = {"name": d.name}
+    manifest = {"name": name or d.name}
     if version is not None:
         manifest["version"] = version
     (d / ".claude-plugin" / "plugin.json").write_text(json.dumps(manifest))
@@ -92,7 +92,7 @@ class FakeGit:
 
     def __init__(self, populate=None, head=TIP, fetch_ok=True):
         self.calls = []
-        self.populate = populate or (lambda dest: _plugin_dir(dest.parent, dest.name, "2.0.0"))
+        self.populate = populate or (lambda dest: _plugin_dir(dest.parent, dest.name, "2.0.0", name="x"))
         self.heads = {}
         self.default_head = head
         self.fetch_ok = fetch_ok
@@ -531,14 +531,18 @@ def test_auto_update_respects_update_plugins_off(svc):
     assert _installed(svc)["p@mp"][0]["version"] == "1.0.0"
 
 
-def test_external_entry_with_lower_version_is_not_an_update(svc, fake_git):
+def test_external_catalog_version_never_overrides_canonical_manifest(svc, fake_git, monkeypatch):
     _marketplace(svc, plugins=[{"name": "x", "version": "3.0.0",
                                 "source": {"source": "github", "repo": "o/x"}}])
     svc.install_plugin("x@mp")  # cloned manifest says 2.0.0 -> recorded as 2.0.0
     assert _installed(svc)["x@mp"][0]["version"] == "2.0.0"
-    assert [u.available_version for u in svc.check_for_updates()] == ["3.0.0"]
+    from app.core import plugin_update_content
+
+    monkeypatch.setattr(plugin_update_content, "_remote_revision", lambda source: "d" * 40)
+    assert plugin_updates.check_for_updates(svc, allow_remote=True) == []
     _marketplace(svc, plugins=[{"name": "x", "version": "1.9.0",
                                 "source": {"source": "github", "repo": "o/x"}}])
+    assert plugin_updates.check_for_updates(svc, allow_remote=True) == []
     assert svc.check_for_updates() == []
 
 
@@ -548,7 +552,10 @@ def test_external_pinned_sha_unchanged_is_not_an_update(svc, fake_git):
     svc.install_plugin("x@mp")
     assert svc.check_for_updates() == []
     _marketplace(svc, plugins=[{"name": "x", "source": {**src, "sha": "c" * 40}}])
-    assert [u.available_version for u in svc.check_for_updates()] == ["c" * 7]
+    assert svc.check_for_updates() == []  # Passive reads do not fetch the changed pin.
+    updates = plugin_updates.check_for_updates(svc, allow_remote=True)
+    assert [u.plugin_id for u in updates] == ["x@mp"]
+    assert updates[0].available_version.startswith("2.0.0+")
 
 
 # ── uninstall cleanup ───────────────────────────────────────────────────────

@@ -273,7 +273,7 @@ For a connector plugin, returns `409` if it is not installed or saved connection
 
 ### GET /api/v1/plugins/updates
 
-List installed plugins with a newer release or changed source content, including repositories without a marketplace catalog. Marketplace checkouts are not synced by this read; external git sources are checked at their configured ref. Equal-version content changes have a short content identifier appended to `available_version` after `+`. Exact commit pins do not follow newer branch commits.
+List installed plugins with a newer release or changed source content, including repositories without a marketplace catalog. This passive read never contacts external repositories or syncs marketplace checkouts: local files are compared in place, and external checks use cached results from the last owner refresh or opted-in automatic source sync. Equal-version content changes have a short content identifier appended to `available_version` after `+`. The candidate manifest version is canonical; the catalog version is only a fallback. Exact commit pins do not follow newer branch commits, and changing a pin cannot downgrade the installed release.
 
 **Auth:** Required
 
@@ -300,7 +300,7 @@ curl http://localhost:8000/api/v1/plugins/updates \
 
 ### POST /api/v1/plugins/updates/check
 
-Refresh sources with installed plugins, then return the same update list as the GET route. This is the **Check for updates** action in Settings. A source refresh failure is reported rather than treated as an empty update list. Local-directory sources are read in place, never re-cloned.
+Refresh sources with installed plugins and check external repositories at their configured refs, then cache and return the update list. This is the owner-only **Check for updates** action in Settings. A source or plugin comparison failure is logged and isolated so healthy plugins still report updates. Local-directory sources are read in place, never re-cloned.
 
 **Auth:** Owner only
 

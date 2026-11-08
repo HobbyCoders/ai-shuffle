@@ -1305,7 +1305,7 @@ class PluginService:
         """
         if refresh_sources:
             _upd_mod.refresh_update_sources(self)
-        return _upd_mod.check_for_updates(self)
+        return _upd_mod.check_for_updates(self, allow_remote=refresh_sources)
 
     def update_plugin(self, plugin_id: str, refresh_source: bool = True) -> PluginInfo:
         """
