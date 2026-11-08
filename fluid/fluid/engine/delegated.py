@@ -1587,6 +1587,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         try:
             self._peer_admission_open = False
             self._drop_pending_peers()
+            # Close wake admission before the interrupt's first await. Lifecycle
+            # cleanup cancels a question wake AND the turn it directly awaits,
+            # so the active-turn check and interrupt must precede that cleanup.
+            self._background_closed = True
+            if self._turn_task and not self._turn_task.done():
+                # EOF closes input, not an in-flight provider reply. Ask the CLI
+                # to abort without letting a blocked stdin hold up close.
+                try:
+                    await asyncio.wait_for(self._send_interrupt(), timeout=_CLI_CLOSE_INTERRUPT_S)
+                except Exception:
+                    logger.debug("interrupting the closing claude CLI failed", exc_info=True)
             await self._close_background_lifecycle()
             self._interrupted.set()
             # Settle anyone parked on a control reply: the CLI is going away, so
@@ -1597,14 +1608,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         request_id=request_id, ok=False, error="engine closed",
                     ))
             if self._turn_task and not self._turn_task.done():
-                # EOF closes input, not an in-flight provider reply. Cancelling
-                # our stdout reader alone left the CLI working until the outer
-                # engine-close deadline killed it. Ask it to abort before EOF,
-                # without letting a blocked stdin consume that same deadline.
-                try:
-                    await asyncio.wait_for(self._send_interrupt(), timeout=_CLI_CLOSE_INTERRUPT_S)
-                except Exception:
-                    logger.debug("interrupting the closing claude CLI failed", exc_info=True)
                 self._turn_task.cancel()
                 await await_cancelled_child(self._turn_task)
             await self._emit_session_end()
