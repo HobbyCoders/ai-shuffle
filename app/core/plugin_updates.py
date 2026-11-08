@@ -21,28 +21,43 @@ from app.core.process_tree import child_env
 logger = logging.getLogger(__name__)
 
 
-# At least one dot, so an all-digit short git hash is never read as a release.
-_RELEASE_VERSION = re.compile(r"v?(\d+(?:\.\d+){1,3})")
+# No version-parsing library is a declared runtime dependency. Keep the small
+# SemVer precedence rule here (including our existing 2/4-part release labels).
+# Require a dot so an all-digit git hash is never mistaken for a release.
+_RELEASE_VERSION = re.compile(
+    r"v?(\d+(?:\.\d+){1,3})(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+
+
+def _release_key(value):
+    match = _RELEASE_VERSION.fullmatch(str(value or ""))
+    if not match:
+        return None
+    release = tuple(int(part) for part in match[1].split("."))
+    prerelease = match[2]
+    identifiers = tuple((0, int(part)) if part.isdigit() else (1, part)
+                        for part in prerelease.split(".")) if prerelease else ()
+    return release + (0,) * (4 - len(release)), not prerelease, identifiers
+
+
+def _compare_versions(installed: str, available: str) -> Optional[int]:
+    """Candidate precedence: -1 lower, 0 equivalent, 1 higher; None for hashes.
+
+    Ignore build metadata; numeric prerelease identifiers precede text, and a
+    release follows all its prereleases. Prefixes and trailing zeros are aliases.
+    """
+    if installed == available:
+        return 0
+    current, candidate = _release_key(installed), _release_key(available)
+    if current is None or candidate is None:
+        return None
+    return (candidate > current) - (candidate < current)
 
 
 def _is_update(installed: str, available: str) -> bool:
-    """Whether ``available`` should be offered over ``installed``.
-
-    Plain release versions ("1.2.3", "v2.0") are compared numerically, so a
-    marketplace that lists an older or equal release never "updates" (i.e.
-    downgrades) an install. Anything else (hashes, pre-release tags) cannot be
-    ordered, so any difference counts, as before.
-    """
-    if installed == available:
-        return False
-    a = _RELEASE_VERSION.fullmatch(str(available or ""))
-    i = _RELEASE_VERSION.fullmatch(str(installed or ""))
-    if a and i:
-        def key(m):
-            parts = [int(x) for x in m.group(1).split(".")]
-            return parts + [0] * (4 - len(parts))
-        return key(a) > key(i)
-    return True
+    order = _compare_versions(installed, available)
+    return available != installed if order is None else order > 0
 
 
 # ─── Auto-update defaults ─────────────────────────────────────────────────

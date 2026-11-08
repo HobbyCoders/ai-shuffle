@@ -75,7 +75,7 @@ def content_update(svc, plugin_id, install, marketplace):
     External sources may only reach this function during an explicit refresh
     or opted-in source sync; passive reads use the cached result instead.
     """
-    from app.core.plugin_updates import _is_update
+    from app.core.plugin_updates import _compare_versions, _is_update
 
     name, mp_id = plugin_id.rsplit("@", 1)
     location = marketplace.get("installLocation")
@@ -125,7 +125,7 @@ def content_update(svc, plugin_id, install, marketplace):
                 return None
             _copy_tree_resolving_symlinks(local, available, root=mp_path, skip_git=True)
             version = svc._get_plugin_manifest_version(available) or entry_version or installed_version
-        if version != installed_version and not _is_update(installed_version, version):
+        if _compare_versions(installed_version, version) == -1:
             return None
         current = tmp / "current"
         _copy_tree_resolving_symlinks(Path(installed_path), current, skip_git=True)

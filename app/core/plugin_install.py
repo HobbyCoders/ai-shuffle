@@ -557,9 +557,9 @@ def _install_implicit_plugin(
 
 
 def _check_update_version(installed, candidate):
-    from app.core.plugin_updates import _is_update
+    from app.core.plugin_updates import _compare_versions
 
-    if installed and candidate != installed and not _is_update(installed, candidate):
+    if installed and _compare_versions(installed, candidate) == -1:
         raise ValueError("Plugin update would downgrade the installed release")
 
 
