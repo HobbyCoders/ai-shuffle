@@ -603,6 +603,18 @@ class ProviderAlive(Event):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ThinkingProgress(Event):
+    """The provider's live estimate of how much the model has thought so far.
+
+    The Claude CLI reports it during thinking that shows no text, so a host can
+    tell a long think from a hung call. It is progress only: nothing in a
+    transcript comes from it, and losing one costs nothing.
+    """
+
+    estimated_tokens: int
+
+
+@dataclass(frozen=True, kw_only=True)
 class ModelServed(Event):
     """Which model the provider says answered a main-lane model call.
 
@@ -962,7 +974,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, QuestionAnswered, QuestionDelivered, HandoffCreated,
         ContextCompaction, ContextCompacting, Usage, RateLimit, ProviderRetry, ProviderAlive,
-        ModelServed, GuardrailBlocked, AttemptDiscarded, FastModeOutcome,
+        ThinkingProgress, ModelServed, GuardrailBlocked, AttemptDiscarded, FastModeOutcome,
         SubagentEvent, HookEvent, AssistantTextSanitized,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, DelegatedDiagnostic, SwarmUpdated,

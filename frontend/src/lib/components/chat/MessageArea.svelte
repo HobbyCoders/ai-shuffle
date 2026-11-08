@@ -2692,7 +2692,7 @@
 				{#if (showGapIndicator || openRow?.start_queued) && !$activeSession.liveCompaction}
 					<!-- Working occupies existing trailing breathing room, not a
 					     new 30px row + 18px gap that disappears at completion. -->
-					<div class="tail-activity"><TurnActivity startedAt={liveTurnStartedAt} queued={!!openRow?.start_queued} /></div>
+					<div class="tail-activity"><TurnActivity startedAt={liveTurnStartedAt} queued={!!openRow?.start_queued} thinking={$activeSession.liveThinking?.sessionId === $activeSession.sessionId ? $activeSession.liveThinking : null} /></div>
 				{/if}
 				<div class="tail-controls" bind:this={tailControlsRef} style:min-height={`${tailQueueSlotPx}px`}>
 					{#if pendingMessages.length > 0}

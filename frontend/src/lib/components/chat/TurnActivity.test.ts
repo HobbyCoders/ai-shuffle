@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/svelte';
-import TurnActivity, { COMPACTION_FAILURE_VISIBLE_MS } from './TurnActivity.svelte';
+import TurnActivity, { COMPACTION_FAILURE_VISIBLE_MS, THINKING_FRESH_MS } from './TurnActivity.svelte';
 import type { LiveCompaction } from '$lib/stores/session/v2/reducer';
 
 afterEach(cleanup);
@@ -33,6 +33,22 @@ describe('TurnActivity', () => {
 		expect(status.textContent).toContain('Queued (database busy)');
 		expect(status.textContent).not.toContain('Working');
 		expect(status.getAttribute('aria-label')).toBe('Waiting for the database');
+	});
+
+	it('shows a live thinking estimate instead of Working (#1271)', () => {
+		const startedAt = new Date(Date.now() - 65000).toISOString();
+		render(TurnActivity, { props: { startedAt, thinking: { tokens: 12400, at: Date.now() } } });
+		const text = screen.getByRole('status').textContent ?? '';
+		expect(text).toContain('Thinking for');
+		expect(text).toContain('12.4k tokens');
+		expect(text).not.toContain('Working');
+	});
+
+	it('goes back to Working once the estimate stops arriving', () => {
+		render(TurnActivity, { props: { thinking: { tokens: 12400, at: Date.now() - THINKING_FRESH_MS - 1 } } });
+		const text = screen.getByRole('status').textContent ?? '';
+		expect(text).toContain('Working…');
+		expect(text).not.toContain('tokens');
 	});
 
 	it('shows the running compaction with its reason', () => {

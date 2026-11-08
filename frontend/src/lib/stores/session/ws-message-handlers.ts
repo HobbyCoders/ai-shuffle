@@ -389,7 +389,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 	// ── Handler: done ────────────────────────────────────────────────
 
+	function clearLiveThinking(): void {
+		if (getState().liveThinking) update(s => ({ ...s, liveThinking: null }));
+	}
+
 	function handleDone(data: Record<string, unknown>): void {
+		clearLiveThinking();
 		const metadata = data.metadata as Record<string, unknown>;
 		const sessionId = data.session_id as string;
 		// done event — the SSE feed folds the streaming→ended transition into
@@ -455,6 +460,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	// ── Handler: stopped / interrupted ───────────────────────────────
 
 	function handleStoppedOrInterrupted(data: Record<string, unknown>): void {
+		clearLiveThinking();
 		// Route by the EVENT's session_id, not the active session — mirror
 		// handleDone. A stopped/interrupted event for a BACKGROUND session must
 		// not clobber the ACTIVE session's pendingTools. Pre-fix this handler
@@ -995,6 +1001,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				if (!tuSessionId || tuSessionId !== getState().sessionId) break;
 				const toolId = data.id as string;
 				if (toolId) internal.pendingTools.add(toolId);
+				clearLiveThinking();
+				break;
+			}
+
+			case 'thinking_progress': {
+				const thinkingSessionId = data.session_id as string | undefined;
+				const tokens = Number(data.estimated_tokens);
+				if (!thinkingSessionId || thinkingSessionId !== getState().sessionId) break;
+				if (!Number.isFinite(tokens) || tokens <= 0) break;
+				update(s => ({ ...s, liveThinking: { sessionId: thinkingSessionId, tokens, at: Date.now() } }));
 				break;
 			}
 

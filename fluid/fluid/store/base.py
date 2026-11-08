@@ -17,17 +17,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
 
-from fluid.events.model import Event, ProviderAlive, TextDelta, ThinkingDelta, ToolArgsDelta
+from fluid.events.model import Event, ProviderAlive, TextDelta, ThinkingDelta, ThinkingProgress, ToolArgsDelta
 from fluid.messages import Message
 
 log = logging.getLogger(__name__)
 
 # Events whose loss costs a gap in the replay log and nothing else: streaming
 # progress whose full content the turn's stored node carries, and the
-# content-free ProviderAlive liveness signal, which only matters live. Only
+# content-free ProviderAlive and ThinkingProgress signals, which only matter live. Only
 # these may wait in a store's stream batch; every other event is a durable
 # barrier.
-RECONSTRUCTIBLE_EVENTS = (TextDelta, ThinkingDelta, ToolArgsDelta, ProviderAlive)
+RECONSTRUCTIBLE_EVENTS = (TextDelta, ThinkingDelta, ToolArgsDelta, ProviderAlive, ThinkingProgress)
 
 
 async def iter_events(store: SessionStore, session_id: str, seq: int) -> AsyncIterator[Event]:

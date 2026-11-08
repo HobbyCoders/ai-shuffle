@@ -5,8 +5,9 @@ unfiltered, so streaming deltas dominate it by volume. Left alone the table beco
 largest thing in the database, and it has no timestamp column or secondary
 index to make that cheap to live with.
 
-Only PURE STREAMING DELTAS are prunable, plus ``ProviderAlive``, a content-free
-liveness signal that only matters while its model call is running. A delta
+Only PURE STREAMING DELTAS are prunable, plus ``ProviderAlive`` and
+``ThinkingProgress``, content-free signals that only matter while their model
+call is running. A delta
 carries an incremental fragment of something the record already holds in
 completed form:
 
@@ -53,6 +54,8 @@ PRUNABLE_EVENT_CLASSES: Tuple[str, ...] = (
     # call and is streaming" signal, which is evidence of nothing once the
     # call's Usage row exists.
     "ProviderAlive",
+    # A live estimate for the working line; the transcript never holds it.
+    "ThinkingProgress",
 )
 
 

@@ -206,6 +206,9 @@ export interface ActiveSessionState {
 	 *  indicator and the sidebar's "Compacting" word. Transient — same
 	 *  lifecycle as `liveModel`. */
 	liveCompaction?: LiveCompaction | null;
+	/** The model's latest live thinking estimate, for the working line (#1271).
+	 *  Never in the transcript. Names its chat, so a switch cannot show it elsewhere. */
+	liveThinking?: { sessionId: string; tokens: number; at: number } | null;
 	wsConnected: boolean;
 	wsReconnectRequired: boolean;
 	/** The user's own Reconnect tap: `connecting` while that handshake runs (the
