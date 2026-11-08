@@ -390,6 +390,28 @@ async function stageNames(ctx, width, names = LONG) {
 }
 
 /** A desktop window whose chat column (beside the open sidebar) is `chat` px wide. */
+/**
+ * Run a branch pick and fail if the app asks for the Git state of a checkout
+ * that only the first send will create (#949). The recorder starts after a
+ * case's setup, so it cannot see this request.
+ */
+async function withoutCheckoutRefusal(page, pick) {
+	const refused = [];
+	const listen = (response) => {
+		if (response.status() === 409 && /\/git\/status(\?|$)/.test(response.url())) refused.push(response.url());
+	};
+	page.on('response', listen);
+	try {
+		await pick();
+		// The header reloads its Git state just after the chip changes.
+		await page.waitForTimeout(1500);
+	} finally {
+		page.off('response', listen);
+	}
+	if (refused.length) throw new Error(`a staged branch's Git status was refused ${refused.length}x: ${refused[0]}`);
+	if (await page.getByText('Git unavailable').first().isVisible()) throw new Error('the header says Git unavailable for a staged branch');
+}
+
 function narrowChips(chat) {
 	return {
 		name: `narrow-chips-${chat}`,
@@ -690,8 +712,10 @@ await runJourney({
 					await menu.getByRole('button', { name: /New branch/ }).click();
 					const branch = `journey/${uniq()}`;
 					await page.getByPlaceholder('Enter a branch name').fill(branch);
-					await page.getByRole('button', { name: 'Continue', exact: true }).click();
-					await expectBranch(page, hero, `Worktree branch: ${branch}`, { timeout: 20_000 });
+					await withoutCheckoutRefusal(page, async () => {
+						await page.getByRole('button', { name: 'Continue', exact: true }).click();
+						await expectBranch(page, hero, `Worktree branch: ${branch}`, { timeout: 20_000 });
+					});
 				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'new-branch')
@@ -735,8 +759,10 @@ await runJourney({
 				await worktreeOn(page, hero);
 				await withChatSetup(page, async () => {
 					const menu = await openBranchMenu(page, hero);
-					await menu.getByRole('button', { name: SEEDED_BRANCH, exact: true }).click();
-					await expectBranch(page, hero, `Worktree branch: ${SEEDED_BRANCH}`, { timeout: 20_000 });
+					await withoutCheckoutRefusal(page, async () => {
+						await menu.getByRole('button', { name: SEEDED_BRANCH, exact: true }).click();
+						await expectBranch(page, hero, `Worktree branch: ${SEEDED_BRANCH}`, { timeout: 20_000 });
+					});
 				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'existing-branch')

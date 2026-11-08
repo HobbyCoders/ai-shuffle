@@ -473,6 +473,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			selectedWorktreeBranch: state.selectedWorktreeBranch,
 			worktreeMode: state.worktreeMode,
 			worktreeCreateNewBranch: state.worktreeCreateNewBranch,
+			worktreeCheckoutPending: state.worktreeCheckoutPending,
 			worktreeDeleted: state.worktreeDeleted,
 		};
 	}
@@ -497,6 +498,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeMode: 'new',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
+			worktreeCheckoutPending: false,
 			worktreeDeleted: false,
 		};
 	}
@@ -804,6 +806,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// flash in the ActiveTasks strip until the target session's feed replays.
 			activeTasks: [],
 			worktreeCreateNewBranch: false,
+			worktreeCheckoutPending: false,
 			// Mark context as pending — null signals "not yet loaded" so the
 			// context bar holds its last value instead of flashing to 0%. The feed
 			// / metadata snapshot will populate with correct values.
@@ -1244,6 +1247,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			deviceIntent: newChatEphemeral ? newChatEphemeral.deviceIntent : getPersistedDeviceIntent(),
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
+			worktreeCheckoutPending: false,
 			worktreeMode: 'new' as const,
 			isCreatingWorktree: false,
 			worktreeError: null,
@@ -1262,6 +1266,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeBranch:keptPlace.worktreeBranch, worktreeBaseBranch:keptPlace.worktreeBaseBranch,
 			selectedWorktreeBranch:keptPlace.selectedWorktreeBranch, worktreeMode:keptPlace.worktreeMode,
 			worktreeCreateNewBranch:keptPlace.worktreeCreateNewBranch ?? false,
+			worktreeCheckoutPending:keptPlace.worktreeCheckoutPending ?? false,
 		}));
 		// Typed text and its run binding are one draft with that place.
 		if (savedDraft) update(s => ({...s,
