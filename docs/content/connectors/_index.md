@@ -54,6 +54,7 @@ Most connectors give your agent actions, such as sending a message, pinning a me
 - **Action categories:** each connector's settings let you choose which kinds of actions your agent may use. Leave it empty to allow all.
 - **Destructive actions,** such as deleting a message or banning a member, ask someone in the chat to approve first. With no answer within 2 minutes, the action is denied. You can turn this check off in the connector's settings.
 - **Automations** can run connector actions as a step. Those do not ask for approval.
+- **Permission requests** for the agent's other tools wait for you in the app. In a chat started from one of your own owner accounts on that connector, you can also answer in the chat: a plain yes or no answers the oldest open request. Nobody else in the chat can answer, and their "yes" is an ordinary message.
 
 ## Conversations
 

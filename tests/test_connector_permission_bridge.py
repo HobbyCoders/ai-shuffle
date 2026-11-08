@@ -147,3 +147,124 @@ class TestDeliverPermissionPrompt:
             )
         inst.send_message.assert_not_awaited()
         mgr.get_running_instance.assert_not_called()
+
+
+# =============================================================================
+# The owner's plain-text answer: the only control a connector chat has
+# =============================================================================
+
+
+def _chat_message(text="yes", user="owner-account", attachments=None):
+    from app.core.connectors.base import IncomingMessage
+
+    return IncomingMessage(
+        connector_id="c1", platform_chat_id="chan-9", platform_user_id=user,
+        platform_user_name="Someone", text=text, attachments=attachments or [],
+    )
+
+
+def _open_request(tool="Bash", tool_input=None, kind="permission"):
+    return {"kind": kind, "payload": {
+        "request_id": "req-1", "tool_name": tool, "tool_input": tool_input or {"command": "ls"},
+    }}
+
+
+class TestAnswerFromChat:
+    @pytest.fixture
+    def channel(self):
+        """A linked chat with one open request, and the respond seam."""
+        from app.core import connector_permissions as bridge  # noqa: F401
+
+        instance = _fake_instance()
+        with patch("app.core.connector_service.sender_is_owner", side_effect=lambda _c, user: user == "owner-account"), \
+                patch("app.db.database.get_connector_session",
+                      return_value={"session_id": "sess-1", "is_active": True}), \
+                patch("app.db.interactions.get_pending_interactions", return_value=[_open_request()]) as pending, \
+                patch("app.network.ownership.enrolled", return_value=False), \
+                patch("app.core.connectors.manager.connector_manager") as manager, \
+                patch("app.core.permission_handler.permission_handler.respond",
+                      new=AsyncMock(return_value={"resolved": True})) as respond:
+            manager.get_running_instance.return_value = instance
+            yield {"respond": respond, "pending": pending, "instance": instance}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text,decision", [("yes", "allow"), ("No.", "deny"), ("go ahead", "allow")])
+    async def test_the_owners_firm_answer_settles_the_request(self, channel, text, decision):
+        from app.core.connector_permissions import answer_from_chat
+
+        assert await answer_from_chat(_chat_message(text)) is True
+        channel["respond"].assert_awaited_once_with("req-1", "sess-1", decision)
+        channel["instance"].send_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_someone_else_saying_yes_is_an_ordinary_message(self, channel):
+        from app.core.connector_permissions import answer_from_chat
+
+        assert await answer_from_chat(_chat_message(user="someone-else")) is False
+        channel["respond"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text", ["maybe", "yes if it's safe", "what will it do?", ""])
+    async def test_anything_not_firm_is_an_ordinary_message(self, channel, text):
+        from app.core.connector_permissions import answer_from_chat
+
+        assert await answer_from_chat(_chat_message(text)) is False
+        channel["respond"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_yes_with_an_attachment_is_an_ordinary_message(self, channel):
+        from app.core.connector_permissions import answer_from_chat
+
+        assert await answer_from_chat(_chat_message(attachments=[{"name": "a.png"}])) is False
+        channel["respond"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_safety_check_cannot_be_answered_in_text(self, channel):
+        from app.core.connector_permissions import answer_from_chat
+
+        channel["pending"].return_value = [_open_request(tool="ModelGuardrail", tool_input={})]
+        assert await answer_from_chat(_chat_message()) is False
+        channel["respond"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_chat_with_nothing_open_is_an_ordinary_message(self, channel):
+        from app.core.connector_permissions import answer_from_chat
+
+        channel["pending"].return_value = [_open_request(kind="question")]
+        assert await answer_from_chat(_chat_message()) is False
+        channel["respond"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_request_already_settled_leaves_the_message_ordinary(self, channel):
+        from app.core.connector_permissions import answer_from_chat
+
+        channel["respond"].return_value = {"resolved": False}
+        assert await answer_from_chat(_chat_message()) is False
+        channel["instance"].send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failure_leaves_the_request_open_and_never_raises(self, channel):
+        from app.core.connector_permissions import answer_from_chat
+
+        channel["respond"].side_effect = RuntimeError("database gone")
+        assert await answer_from_chat(_chat_message()) is False
+
+    @pytest.mark.asyncio
+    async def test_the_answer_does_not_wait_behind_the_blocked_turn(self):
+        """The turn holding the chat's lock is the one waiting for this answer."""
+        from app.core.connectors.manager import ConnectorManager
+
+        manager = ConnectorManager.__new__(ConnectorManager)
+        manager._message_locks = MagicMock()
+        with patch("app.core.connector_permissions.answer_from_chat", new=AsyncMock(return_value=True)):
+            await ConnectorManager.handle_incoming_message(manager, _chat_message())
+        manager._message_locks.get.assert_not_called()
+
+    def test_only_the_owners_own_chat_is_invited_to_reply(self):
+        from app.core.connector_permissions import _prompt_text, waiting_for_owner_text
+
+        cs = {"connector_id": "c1", "platform_user_id": "owner-account"}
+        with patch("app.core.connector_service.sender_is_owner", side_effect=lambda _c, user: user == "owner-account"):
+            assert "Reply yes or no" in _prompt_text(cs, "Bash", {"command": "ls"})
+            assert _prompt_text({**cs, "platform_user_id": "x"}, "Bash", {"command": "ls"}) == waiting_for_owner_text("Bash")
+            assert _prompt_text(cs, "ModelGuardrail", {}) == waiting_for_owner_text("ModelGuardrail")

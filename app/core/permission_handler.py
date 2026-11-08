@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
+from app.core.owner_confirm import PAYLOAD_KEY as OWNER_APPROVAL_KEY, approval_of
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -177,7 +178,7 @@ class PermissionHandler:
             payload.get("tool_name") == PROMPT_TOOL
             or (payload.get("provider_agent") or {}).get("remote_approval_id") is not None
             or payload.get("safety_check")
-            or (payload.get("skip_saved_rules") and payload.get("assistant_confirm") is None)
+            or payload.get("skip_saved_rules")
         )
 
     def remember_scopes(self, session_id: str | None, payload: dict[str, Any]) -> list[str]:
@@ -335,7 +336,7 @@ class PermissionHandler:
             ("decision_reason", decision_reason),
             ("blocked_path", blocked_path),
             ("provider_agent", provider_agent),
-            ("assistant_confirm", assistant_confirm),
+            (OWNER_APPROVAL_KEY, assistant_confirm),
         ):
             if value is not None:
                 payload[key] = value
@@ -388,7 +389,9 @@ class PermissionHandler:
             "blocked_path",
             # Worker tag — present only on a redirected worker prompt.
             "provider_agent",
-            # Present only on a prompt answered in the assistant's conversation.
+            # Present only on a prompt raised on an owner chat (voice reads it).
+            OWNER_APPROVAL_KEY,
+            # The same marker on a row an earlier build wrote.
             "assistant_confirm",
             # False only on a prompt that cannot be deferred (Switch model).
             "deferrable",
@@ -423,8 +426,8 @@ class PermissionHandler:
         from app.db import interactions
 
         # This chat's own call in an owner chat (not a worker's redirected
-        # prompt): the owner answers it in words, and another message from the
-        # owner answers it "not run yet" instead of holding that message (#523).
+        # prompt): another message from the owner answers it "not run yet"
+        # instead of holding that message, and its prompt stays open (#523).
         own_confirm = assistant_confirm is not None and provider_agent is None
         if own_confirm:
             from app.core import owner_confirm as confirm_flow
@@ -474,9 +477,8 @@ class PermissionHandler:
             payload["mode_managed"] = True
         if safety_check:
             payload["safety_check"] = True
-        if skip_saved_rules and assistant_confirm is None:
-            # Owner-confirm calls bypass prior rules but keep the remembered-
-            # answer contract, including cards released while another turn runs.
+        if skip_saved_rules:
+            # A person decides this one call, so the prompt offers no "always".
             payload["skip_saved_rules"] = True
         ttl_seconds = PERMISSION_TTL_SECONDS
         if assistant_confirm is not None:
@@ -774,7 +776,7 @@ class PermissionHandler:
         # read back as answered and judged on ``released`` alone (a park and
         # release from another device may land after the read above), so only
         # a call its waiter really let go counts.
-        settled = [(row["id"], decision)] if payload.get("assistant_confirm") else []
+        settled = [(row["id"], decision)] if approval_of(payload) else []
         settled += [
             (emit_id, (emit_answer or {}).get("decision"))
             for emit_id, _rid, emit_answer in resolved_emits
@@ -938,7 +940,7 @@ class PermissionHandler:
                     decision_reason=payload.get("decision_reason"),
                     blocked_path=payload.get("blocked_path"),
                     provider_agent=payload.get("provider_agent"),
-                    assistant_confirm=payload.get("assistant_confirm"),
+                    assistant_confirm=approval_of(payload),
                 )
                 await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
@@ -990,9 +992,9 @@ class PermissionHandler:
         # redirected onto its parent. Absent on every ordinary request.
         if request.provider_agent is not None:
             permission_event["provider_agent"] = request.provider_agent
-        # The client shows this as the assistant's question, not a card.
+        # Raised on an owner chat; the client shows its ordinary prompt.
         if request.assistant_confirm is not None:
-            permission_event["assistant_confirm"] = request.assistant_confirm
+            permission_event[OWNER_APPROVAL_KEY] = request.assistant_confirm
         if not is_deferrable(request.tool_name):
             permission_event["deferrable"] = False
 

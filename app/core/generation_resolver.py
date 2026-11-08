@@ -111,6 +111,9 @@ class RunContext:
     # turns. Standalone callers (voice, catalog, peer requests) keep theirs.
     requires_active_turn: bool = False
     voice_mode: bool = False
+    # Where the person has the app's permission prompt: asks it about a spend
+    # above the threshold. None where there is no prompt to press.
+    spend_prompt: Callable | None = field(default=None, compare=False, repr=False)
     # False only for the fail-closed context of an idle pooled tool server.
     active_turn: bool = True
 
@@ -496,7 +499,8 @@ class Resolver:
                 approved = False
                 # Nobody approves in an unattended run, so a receipt issued to an
                 # earlier interactive turn of this session is never spent here.
-                if args.get("confirmed") is True and isinstance(token, str) and not context.unattended:
+                if (args.get("confirmed") is True and isinstance(token, str)
+                        and not context.unattended and context.spend_prompt is None):
                     approved = (await self.confirmations.consume(token, fingerprint) if self.confirmations
                                 else self._confirmations.pop(token, None) == fingerprint)
                 if not approved and context.unattended:
@@ -504,6 +508,13 @@ class Resolver:
                     return result("skipped", price=candidate.price, reason="needs_confirmation", kind=kind,
                                   choice=candidate.choice(), threshold_usd=str(CONFIRM_ABOVE_USD),
                                   message="Generation skipped: its price is above the confirmation threshold and this run is unattended.")
+                if not approved and context.spend_prompt is not None:
+                    # The prompt's control decides; a message in the chat never does.
+                    declined = await context.spend_prompt(kind, candidate, prompt)
+                    if declined is not None:
+                        return result("refused", price=candidate.price, reason="declined", kind=kind,
+                                      choice=candidate.choice(), error=declined)
+                    approved = True
                 if not approved:
                     if len(self._confirmations) >= 256:
                         self._confirmations.pop(next(iter(self._confirmations)))

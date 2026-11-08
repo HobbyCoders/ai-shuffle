@@ -3617,7 +3617,7 @@ class HarnessAdapter(ProviderAdapter):
         thread), so a subagent never spends the main chat's one-shot pass.
 
         The approver routes it to the assistant's conversation, where only
-        the owner's firm yes approves it (``app.core.owner_confirm``).
+        the owner's approval on its prompt counts (``app.core.owner_confirm``).
         With no approver attached nobody can be asked, so it is denied.
         """
         from types import SimpleNamespace

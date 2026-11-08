@@ -2614,7 +2614,7 @@ async def _stream_to_websocket_turn(
                 # set this flag from app.core.background_permissions, never the
                 # model. It goes to the owner whatever the mode, past saved
                 # rules; routing puts it in the assistant's conversation, where
-                # only a firm yes approves it (app.core.owner_confirm).
+                # only its permission prompt approves it (app.core.owner_confirm).
                 # The computer-use access request is asked with its own card
                 # instead (the branch below), so the owner answers it once
                 # (background_permissions.OWN_CONSENT_TOOLS).

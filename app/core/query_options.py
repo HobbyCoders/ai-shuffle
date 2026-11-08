@@ -15,6 +15,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
+from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
 if TYPE_CHECKING:
@@ -826,6 +827,7 @@ def _generation_context(
     unattended: bool, chat_mode: bool = False, native_generation: bool = False,
     turn_source: str | None = None,
 ) -> "RunContext":
+    from app.core.generation_confirmations import ask_on_prompt
     from app.core.generation_resolver import RunContext
 
     # Native-only grants still need the same saved choices, without enabling
@@ -845,7 +847,9 @@ def _generation_context(
                       choices_loader=lambda: _generation_choices(choice_config, session_row, api_user_id),
                       turn_source=turn_source if isinstance(turn_source, str) else None,
                       requires_active_turn=bool(session_id),
-                      voice_mode=bool(session_row and session_row.get("mode") == "voice"))
+                      voice_mode=bool(session_row and session_row.get("mode") == "voice"),
+                      spend_prompt=(partial(ask_on_prompt, session_id, (session_row or {}).get("profile_id"))
+                                    if session_id and not unattended else None))
 
 
 #: A turn whose bound provider row was deleted. Plain words, no raw id.
@@ -1276,7 +1280,7 @@ def build_options_from_profile(
     # Ask/Auto/Bypass stay selected; Accept Edits has nothing to approve here.
     permission_mode = permission_mode_for_session_mode(permission_mode, session_mode)
 
-    # An owner coordination chat (no project): the app asks the owner for the
+    # An owner coordination chat (no project): the app asks the owner on the permission prompt for the
     # high-risk calls itself (``app.core.background_permissions``).
     assistant_scope = ({"session_id": session_id, "home_session_id": session_id,
                         "roots": [], "cwd": working_dir} if owner_coordinator else None)

@@ -254,17 +254,25 @@ def test_a_local_worker_under_the_remote_child_asks_the_parent_too(workers, monk
     assert row["payload"]["provider_agent"]["worker_session_id"] == child
 
 
-def test_the_starter_chat_answers_in_conversation(workers, monkeypatch, proxies, held):
+def test_a_starter_chat_answers_a_remote_child_on_its_prompt(workers, monkeypatch, proxies, held):
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)
     from app.core import session_orchestration
     monkeypatch.setattr(session_orchestration, "_principal", lambda sid: None)
+    answer = responder("allow")
 
-    async def say_yes(row):
-        confirm = row["payload"]["assistant_confirm"]
-        assert "df -h /mnt/user" in confirm["question"] and "on ServerWorker" in confirm["question"]
-        assert (await owner_confirm.on_owner_message("caller", "yes"))["decision"] == "approved"
-    _, result = round_trip(a, b, proxies, held, ask_kwargs(child), say_yes)
+    async def typed_yes_then_prompt(row):
+        marker = owner_confirm.approval_of(row["payload"])
+        assert "df -h /mnt/user" in marker["question"] and "on ServerWorker" in marker["question"]
+        assert "assistant_confirm" not in row["payload"]  # every client draws its regular prompt
+        held_or_none = await owner_confirm.on_owner_message("caller", "yes")
+        assert held_or_none is None or held_or_none["decision"] == owner_confirm.HELD
+        assert row["payload"]["request_id"] in {
+            item["request_id"] for item in owner_confirm.pending_requests("caller")}
+        result = answer(row)
+        if asyncio.iscoroutine(result):
+            await result
+    _, result = round_trip(a, b, proxies, held, ask_kwargs(child), typed_yes_then_prompt)
     assert isinstance(result, PermissionResultAllow)
 
 

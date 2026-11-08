@@ -1611,8 +1611,8 @@ class SessionRuntime:
             from app.core import owner_confirm
 
             if not resume and not already_recorded and not awaiting_uploads:
-                # The owner's message answered an approval in words: its outcome
-                # goes right after the message it came from (#484).
+                # A message queued by an older version answered an approval in
+                # words: its outcome goes right after that message (#484).
                 await owner_confirm.after_owner_message(self.session_id, self.turn.get("payload"))
             answer = turn_payload.get(owner_confirm.ANSWER_KEY)
             if (self.source in ("user", "queue") and isinstance(answer, dict)
@@ -2548,8 +2548,8 @@ class SessionRuntime:
                 )
                 if not recorded:
                     return
-                # An approval answered in words: its outcome follows the
-                # message, wherever the message lands (#484).
+                # A message queued by an older version answered an approval in
+                # words: its outcome follows the message (#484).
                 from app.core import owner_confirm
 
                 await owner_confirm.after_owner_message(self.session_id, row.get("payload"))

@@ -139,11 +139,11 @@ Send the ordinary `permission_response`:
 the `suggested_model` shown. The engine already accepts a different choice
 through `updated_input.model`, if the respond API ever carries one.
 
-Owner chats (where other approvals are asked in words, `assistant_confirm`)
-still show this prompt as the Continue / Stop button card, answered only by its
-request id: `owner_confirm.asks_in_words` is false for it, so it never carries
-the `assistant_confirm` marker and is never in the typed approval set. A message
-typed while the card waits is an ordinary message, as in any chat: it queues
+Owner chats show this prompt as the Continue / Stop button card, answered only
+by its request id. A connector chat cannot answer it in plain text:
+`owner_confirm.is_owner_approval` is false for it, so it never carries the
+`owner_approval` marker. A message typed while the card waits is an ordinary
+message, as in any chat: it queues
 behind the live turn (Interrupt / Unsend), never settles the card, and runs as
 its own turn on the chat's model once the card is answered. A safety-check row
 that an earlier build marked `assistant_confirm` is treated the same way: clients
