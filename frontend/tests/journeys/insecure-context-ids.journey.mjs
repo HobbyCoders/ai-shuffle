@@ -85,6 +85,9 @@ async function reachFirstRun(page) {
 
 await runJourney({
 	name: 'insecure-context-ids',
+	// On a loopback address the built app's service worker would answer
+	// auth/status itself, past the page routes that keep /setup open.
+	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	cases: [
 		{
 			name: 'pairing-exchange',
