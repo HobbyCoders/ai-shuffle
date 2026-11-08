@@ -8,13 +8,13 @@ maintenance loop. Never the configured application database.
 import time
 
 import httpx
-import psycopg2.errors
 import pytest
 
-from app.db import database
+from app.db import database, retention
 from app.db import network as store
 from app.db import session_events as events_db
 from app.network import catalog, engine, transcripts, transport
+from tests.core.network.test_merged_run_recovery_postgres import frames
 from tests.core.network.test_transcript_op_retention_postgres import (  # noqa: F401
     admit,
     cluster,
@@ -142,14 +142,11 @@ def deltas(worker, count, *, finish=False):
         catalog.publish_owned()
 
 
-@pytest.mark.xfail(strict=True, raises=psycopg2.errors.UniqueViolation,
-                   reason="issue 1278: the merged row collides with the held first fragment")
 async def test_expired_peer_holding_part_of_a_merged_run_recovers(pg_workers, monkeypatch):
     """The peer holds a run's first fragments; the owner later merged the run into one row.
 
-    The merged row reuses the first fragment's event id, so today the transcript
-    fill collides with the fragment the peer holds (issue 1278). Any fix must
-    also cover ordinary sync interleaving and connected readers; see the issue.
+    The merged row reuses the first fragment's event id; the transcript fill
+    replaces the fragments the peer holds with it (issue 1278).
     """
     source, peer = pg_workers("source"), pg_workers("peer")
     with source.active():
@@ -348,3 +345,232 @@ async def test_any_unrevoked_member_pins_and_revocation_releases(pg_workers, mon
     remaining = own_ops(source, held)
     assert sum(op["collection"] == "session_events" for op in remaining) <= 1
     assert sum(op["collection"] == "sessions" for op in remaining) == 1
+
+
+# Issue 1278's recovery and early retention together: what a worker that lost
+# what it acknowledged, or was not yet known to the pruner, ends up holding.
+RESTORED_TABLES = ("session_events", "session_event_counters", "sync_records", "sync_ops", "sync_watermarks",
+                   "sync_pending", "network_state")
+
+
+def back_up(worker):
+    for table in RESTORED_TABLES:
+        worker.sql(f"CREATE TABLE backup_{table} AS TABLE {table}")
+
+
+def restore(worker):
+    """Every table the sync log and transcript live in goes back to the backup; the identity file does not."""
+    for table in RESTORED_TABLES:
+        worker.sql(f"DELETE FROM {table}")
+        worker.sql(f"INSERT INTO {table} SELECT * FROM backup_{table}")
+
+
+async def fill_from(worker, served, monkeypatch):
+    """Run the transcript fill and the repair queue against ``served`` until nothing is left."""
+    monkeypatch.setattr(transcripts, "_link", lambda device_id: transport.PeerLink(
+        device_id, [served.base_url] if device_id == served.server.device_id else []))
+    with worker.active():
+        async with httpx.AsyncClient(transport=served.transport()) as client:
+            for _ in range(5):
+                if transcripts.pending():
+                    await transcripts.run_once(client)
+                await transcripts.repair_queued(client)
+        assert not transcripts.pending()
+        assert store.transcript_repairs_due(10, int(time.time()) + 3600) == []
+
+
+WHOLE_REPLY = [("message.user", "message 1"), ("assistant.text_delta", "part 0 part 1 part 2 " * 2),
+               ("message.assistant", "done")]
+
+
+async def restored_receiver(pg_workers):
+    """B acknowledged A's whole merged reply to A and C, then went back to a backup holding its first fragments."""
+    a, b, c = (pg_workers(name) for name in ("a", "b", "c"))
+    with a.active():
+        engine.create_network("Bounds")
+    publish(a, 1, create=True)
+    admit(a, b)
+    admit(a, c)
+    served_a, served_c = ServedBy(a, "https://a.example.com"), ServedBy(c, "https://c.example.com")
+    deltas(a, 3)
+    await sync(b, served_a)
+    await sync(c, served_a)
+    back_up(b)
+    # After the backup: B signs an op C keeps (the later proof of the restore).
+    with b.active():
+        engine.publish_presence(capabilities={}, version="after-backup")
+    await sync(b, served_c)
+    deltas(a, 3, finish=True)
+    with a.active():
+        assert events_db.compact_session_deltas("chat", keep_tail_events=0) == (1, 5)
+    await sync(c, served_a)
+    await sync(c, served_a)
+    await sync(b, served_a)
+    await sync(b, served_a)
+    await sync(b, served_c)
+    await sync(b, served_c)  # B's acknowledgement of the complete reply, cached by A and C
+    acked = cached_ack(b)
+    assert frames(b) == frames(a) == WHOLE_REPLY
+    restore(b)
+    assert len(transcript(b)) == 4  # the message and the first three fragments, nothing else
+    return a, b, c, served_a, served_c, acked
+
+
+def cached_ack(peer):
+    return (dict(transport._peer_watermarks[peer.device_id]), transport._peer_watermark_at[peer.device_id],
+            dict(transport._peer_watermark_binding[peer.device_id]))
+
+
+async def prune_with_cached_ack(worker, peer, acked, monkeypatch):
+    """Maintenance on ``worker``, holding what it last cached for ``peer`` (one process hosts every test worker)."""
+    (transport._peer_watermarks[peer.device_id], transport._peer_watermark_at[peer.device_id],
+     transport._peer_watermark_binding[peer.device_id]) = acked
+    await prune_once(worker, monkeypatch)
+
+
+async def test_restored_receiver_seen_through_a_peer_keeps_what_it_lost(pg_workers, monkeypatch):
+    """S6: A learns B's new incarnation through C, so B's old acknowledgement no longer releases anything."""
+    a, b, _c, served_a, served_c, acked = await restored_receiver(pg_workers)
+    await sync(b, served_c)  # C proves the rollback: B moves to a new incarnation
+    with b.active():
+        assert engine.context().identity.incarnation == 2
+    await sync(a, served_c)  # B's new stream reaches A through C
+    with a.active():
+        assert store.get_member(b.device_id) and store.local_watermarks()[b.device_id].get("2")
+    before = ops_of(a, "session_events")
+    age_ops(a, 2)
+    await prune_with_cached_ack(a, b, acked, monkeypatch)
+    assert ops_of(a, "session_events") == before
+    assert not (await sync(b, served_a)).get("snapshot_required")
+    assert frames(b) == frames(a) == WHOLE_REPLY
+
+
+async def test_readmission_invalidates_a_cached_acknowledgement(pg_workers, monkeypatch):
+    """A device revoked and admitted again is a new member: its old acknowledgement releases nothing."""
+    source, peer = pg_workers("source"), pg_workers("peer")
+    with source.active():
+        engine.create_network("Bounds")
+    publish(source, 1, create=True)
+    admit(source, peer)
+    served = ServedBy(source, "https://source.example.com")
+    publish(source, 4)
+    await sync(peer, served)
+    await sync(peer, served)
+    acked = cached_ack(peer)
+    with source.active():
+        engine.revoke_device(peer.device_id)
+        engine.admit_device(device_id=peer.device_id, signing_public=peer.identity.signing_public,
+                            encryption_public=peer.identity.encryption_public, name=peer.name)
+    before = ops_of(source, "session_events")
+    age_ops(source, 2)
+    await prune_with_cached_ack(source, peer, acked, monkeypatch)
+    assert ops_of(source, "session_events") == before
+
+
+async def test_membership_change_during_the_pass_stops_early_deletes(pg_workers, monkeypatch):
+    """A batch re-checks membership: bounds computed before a change delete nothing after it."""
+    source, peer = pg_workers("source"), pg_workers("peer")
+    with source.active():
+        engine.create_network("Bounds")
+    publish(source, 1, create=True)
+    admit(source, peer)
+    served = ServedBy(source, "https://source.example.com")
+    publish(source, 4)
+    retitle(source, 1)
+    retitle(source, 2)
+    await sync(peer, served)
+    await sync(peer, served)
+    before = {name: ops_of(source, name) for name in ("session_events", "sessions")}
+    age_ops(source, 2)
+    real = retention.delete_batches
+
+    def membership_moves_first(*args, **kwargs):
+        source.sql("UPDATE network_state SET generation = generation + 1 WHERE id = 1")
+        return real(*args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(retention, "delete_batches", membership_moves_first)
+        await prune_once(source, monkeypatch)
+    assert {name: ops_of(source, name) for name in before} == before
+    # The next pass recomputes from fresh acknowledgements and deletes them.
+    await sync(peer, served)
+    await sync(peer, served)
+    age_ops(source, 2)
+    await prune_once(source, monkeypatch)
+    assert len(ops_of(source, "session_events")) < len(before["session_events"])
+    assert len(ops_of(source, "sessions")) < len(before["sessions"])
+
+
+async def test_restored_receiver_nobody_knows_about_recovers_by_state_copy(pg_workers, monkeypatch):
+    """S6, no signal yet: both pruners delete on the stale acknowledgement; the copy and repair restore the text."""
+    a, b, c, served_a, _served_c, acked = await restored_receiver(pg_workers)
+    age_ops(a, 2)
+    age_ops(c, 2)
+    await prune_with_cached_ack(a, b, acked, monkeypatch)
+    await prune_with_cached_ack(c, b, acked, monkeypatch)
+    assert (await sync(b, served_a)).get("snapshot_required")
+    await fill_from(b, served_a, monkeypatch)
+    assert frames(b) == frames(a) == WHOLE_REPLY
+    # Later writes still flow by ops.
+    publish(a, 1)
+    assert not (await sync(b, served_a)).get("snapshot_required")
+    assert frames(b) == frames(a)
+
+
+async def test_frontier_of_a_peer_with_newer_membership_keeps_what_a_new_member_lacks(pg_workers, monkeypatch):
+    """S7: A's frontier reaches C before A's admission of B; C cannot release what B lacks on it."""
+    a, c = pg_workers("a"), pg_workers("c")
+    with a.active():
+        engine.create_network("Bounds")
+    publish(a, 1, create=True)
+    admit(a, c)
+    served_a, served_c = ServedBy(a, "https://a.example.com"), ServedBy(c, "https://c.example.com")
+    await sync(c, served_a)
+
+    def write_on_c(content):
+        with c.active():
+            events_db.append_events("c-chat", [{"type": "message.user", "payload": {"content": content}}])
+            catalog.publish_owned()
+
+    with c.active():
+        database.create_session(session_id="c-chat", profile_id="default", project_id=None, title="C chat")
+    write_on_c("from c")
+    await sync(c, served_a)
+    b = pg_workers("b")
+    admit(a, b)
+    # C writes more; A receives and acknowledges it. A's admission of B has not reached C yet.
+    write_on_c("second from c")
+    write_on_c("third from c")
+    with c.active():
+        ops = store.ops_since(store_marks(a), limit=100, exclude_origin=a.device_id)
+        assert store.get_member(b.device_id) is None
+    with a.active():
+        applied = engine.apply_batch(ops)
+        assert applied.rejected == applied.pending == applied.retry == 0
+    with a.active():
+        reported = engine.context().generation
+    with c.active():
+        context = engine.context()
+        assert context.generation < reported
+        transport.note_watermarks(a.device_id, store_marks(a), binding=transport.acknowledgement_binding(
+            context, a.device_id, 1, reported))
+    before = ops_of(c, "session_events")
+    age_ops(c, 2)
+    await prune_once(c, monkeypatch)
+    assert ops_of(c, "session_events") == before
+    # C learns of B, and only then can B reach it: B reads its gap from the ops, no state copy.
+    await sync(c, served_a)
+    with c.active():
+        assert store.get_member(b.device_id) is not None
+    assert not (await sync(b, served_c)).get("snapshot_required")
+    rows = "SELECT event_type, payload FROM session_events WHERE session_id = 'c-chat' ORDER BY seq"
+    assert b.sql(rows) == c.sql(rows)
+    assert len(c.sql(rows)) == 3
+    # An exchange this worker started records the peer's reported incarnation and membership.
+    with a.active():
+        assert transport._peer_watermark_binding[c.device_id]["incarnation"] == 1
+
+
+def store_marks(worker):
+    with worker.active():
+        return store.local_watermarks()

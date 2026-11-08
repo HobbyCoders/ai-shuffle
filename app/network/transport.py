@@ -102,6 +102,8 @@ _binding_warning_at: Dict[str, float] = {}
 # request does not make a known backlog disappear. Only committed watermarks do.
 _peer_watermarks: Dict[str, dict] = {}
 _peer_watermark_at: Dict[str, float] = {}
+# What each frontier above was acknowledged under (:func:`acknowledgement_binding`).
+_peer_watermark_binding: Dict[str, dict] = {}
 _snapshot_peers: set[str] = set()
 _peer_catalog_backlog: Dict[str, bool] = {}
 # Only viewed chats request transcript heads. Bound memory and exchange work;
@@ -119,10 +121,29 @@ _state_copy: Optional[dict] = None
 _applying: Dict[str, asyncio.Future] = {}
 
 
-def note_watermarks(device_id: str, watermarks: dict, *, catalog_backlog: bool = False) -> None:
+def acknowledgement_binding(ctx: engine.NetworkContext, device_id: str, incarnation: Any, generation: Any) -> dict:
+    """What a peer's frontier was acknowledged under, for early retention (``store._acknowledged``).
+
+    The peer's own incarnation and membership generation as it reported them
+    in this exchange, and its certificate generation here. Anything missing
+    or malformed (an older peer, say) leaves the acknowledgement unusable.
+    """
+    member = ctx.member(device_id)
+
+    def number(value: Any) -> Optional[int]:
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    return {"incarnation": number(incarnation), "generation": number(generation),
+            "member_generation": member.generation if member is not None else None}
+
+
+def note_watermarks(device_id: str, watermarks: dict, *, catalog_backlog: bool = False,
+                    binding: Optional[dict] = None) -> None:
     _peer_watermarks[device_id] = {origin: dict(streams) for origin, streams in watermarks.items()}
     _peer_watermark_at[device_id] = time.time()
     _peer_catalog_backlog[device_id] = catalog_backlog
+    if binding is not None:
+        _peer_watermark_binding[device_id] = binding
 
 
 def state_copy_status() -> Optional[dict]:
@@ -705,6 +726,7 @@ class PeerLink:
             exchange = await self.call(client, ctx, "POST", "/api/v1/network/peer/exchange", json_body={
                 "session_ids": session_ids,
                 "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
+                "generation": ctx.generation,
                 "flush": catch_up and target is None,
                 "catalog_backlog": await asyncio.to_thread(catalog.has_events_backlog, ctx=ctx),
                 **(await asyncio.to_thread(_description)), "version": settings.version,
@@ -712,7 +734,9 @@ class PeerLink:
             })
             note_session_watermarks(self.device_id, session_ids, exchange.get("session_watermarks"))
             theirs = exchange.get("watermarks") or {}
-            note_watermarks(self.device_id, theirs, catalog_backlog=bool(exchange.get("catalog_backlog")))
+            note_watermarks(self.device_id, theirs, catalog_backlog=bool(exchange.get("catalog_backlog")),
+                            binding=acknowledgement_binding(ctx, self.device_id, exchange.get("incarnation"),
+                                                            exchange.get("generation")))
             if not exchange.get("snapshot_required"):
                 _snapshot_peers.discard(self.device_id)
             if catch_up and target is None and not exchange.get("flushed"):
@@ -1621,7 +1645,8 @@ async def prune_loop() -> None:
                     # Copy before crossing into the maintenance thread. These are
                     # authenticated observations, never optimistic push counters.
                     observations = {peer: {"seen_at": _peer_watermark_at[peer],
-                                           "watermarks": {o: dict(s) for o, s in marks.items()}}
+                                           "watermarks": {o: dict(s) for o, s in marks.items()},
+                                           "binding": dict(_peer_watermark_binding.get(peer) or {})}
                                     for peer, marks in _peer_watermarks.items() if peer in _peer_watermark_at}
                     pruned += await asyncio.to_thread(store.prune_transcript_ops, ctx.device_id,
                                                      observations, stop=stop, _heads=heads)
@@ -1774,6 +1799,7 @@ def forget_peers() -> None:
     _last_contact.clear()
     _peer_watermarks.clear()
     _peer_watermark_at.clear()
+    _peer_watermark_binding.clear()
     _snapshot_peers.clear()
     _peer_catalog_backlog.clear()
     with _session_watermark_lock:

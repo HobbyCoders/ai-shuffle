@@ -63,12 +63,12 @@ ids cannot starve it. For each origin/incarnation it deletes only operations:
    Idle delta compaction (`compact_session_deltas`) merges a run of delta rows
    into its last row and deletes the rest, so their `order_seq` points at a
    missing row and their envelopes are never retired by this pass. That is a
-   known leak, left as it is: retiring them makes a known recovery bug more
-   likely (issue 1278). A worker that holds only the start of a merged run and
-   later takes a state copy collides with the merged row's reused event id, and
-   its transcript fill fails on every retry. The shorter floor does not make it
-   more likely: an op a member has not acknowledged keeps main's 30-day age, so
-   a peer only meets a pruned gap when it would on main too.
+   known leak, left as it is: cleaning up merged fragments is separate work. A
+   worker that holds only the start of a merged run and later takes a state
+   copy no longer sticks on it (see "A peer that holds part of a merged delta
+   run" below). The shorter floor does not make that case more likely: an op a
+   member has not acknowledged keeps main's 30-day age, so a peer only meets a
+   pruned gap when it would on main too.
 
 Recent means a successful authenticated sync observation within
 `AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS` (default **30**, positive integer days).
@@ -104,6 +104,33 @@ authenticated advertised frontier, or at zero when this worker has none (after
 a restart, say). An op any member has not acknowledged is left to main's rules:
 the transcript pass applies the 30-day age to it (independent of the configured
 grace), and session compaction leaves it to the legacy 30-day prune.
+
+An advertised frontier only counts as an acknowledgement while it still
+describes the receiver and the membership this worker holds. Each exchange
+records, beside the frontier, the receiver's incarnation, its certificate
+generation and the membership generation it reported (`_acknowledged`). The
+member pins at zero until it acknowledges afresh when:
+
+- its incarnation is behind what this worker now knows for it (it restored a
+  backup and moved to a new incarnation, seen through any peer);
+- its certificate generation changed (it was revoked and re-admitted);
+- it reported a membership generation newer than this worker holds, or none at
+  all. A frontier from a peer that has applied membership this worker has not
+  yet applied may leave out a member that is still missing here. Peers on older
+  versions send no generation when they call this worker, so they fail closed
+  to the 30-day age until both sides are updated.
+
+Each early delete also re-checks the membership generation, read before the
+members were, so a pass stops deleting early as soon as an admission or
+revocation lands while it runs: the transcript pass falls back to the 30-day age
+and session compaction deletes nothing more. The next daily pass starts over from
+the new membership.
+
+A receiver that restored a backup and has not yet been seen by anyone cannot be
+detected: its cached acknowledgement still looks current. If the ops it now
+lacks have been deleted it gets a state copy on its next exchange, and the
+transcript fill plus the repair queue bring back the full text (see "A peer
+that holds part of a merged delta run" below).
 
 The cost: **a stale member blocks the savings** for everything it has not
 acknowledged, until it catches up or is removed (revoked) from the network. A
@@ -256,7 +283,10 @@ keeps every op it lacks, a peer unseen for 31 days stops pinning, a lagging
 peer pins superseded catalog ops, the kill switch holds everything, a bad,
 infinite or oversized floor skips only transcript retention while the rest of
 the maintenance pass still runs, and event rows plus `sync_records` stay
-unchanged. Issue 1278's recovery case is kept there as an expected failure. A local lab (not
+unchanged. The same file covers a peer that held part of a merged delta run
+recovering in full, a restored receiver (seen through a peer, and seen by nobody),
+re-admission, a membership change during a pass, and a frontier from a peer with
+newer membership. A local lab (not
 committed) with 4 chats, 60 streamed answers, runtime toggles and retitles,
 both peers caught up, measured:
 

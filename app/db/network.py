@@ -986,7 +986,8 @@ def _recent_peers(cur, local_device_id: str, peer_observations: dict, *, now: da
 LEGACY_RETENTION_DAYS = 30
 
 
-def _member_frontiers(peers: Dict[str, dict], expired: List[str], peer_observations: dict) -> Dict[str, dict]:
+def _member_frontiers(cur, peers: Dict[str, dict], expired: List[str], peer_observations: dict,
+                      generation: int) -> Dict[str, dict]:
     """Every active worker member, recent or not, mapped to its acknowledged frontier.
 
     Liveness is not inferred: a member past the contact grace may still sync
@@ -995,9 +996,45 @@ def _member_frontiers(peers: Dict[str, dict], expired: List[str], peer_observati
     revoked pins at its last authenticated frontier, or at zero when this
     worker has none in memory (after a restart, say). The short-retention
     passes apply only below this; above it an op keeps main's 30-day rule.
+
+    A frontier is cached by device id alone, so it also pins at zero unless it
+    still describes this member as it is now (:func:`_acknowledged`).
     """
-    return {**{device_id: (peer_observations.get(device_id) or {}).get("watermarks") or {}
-               for device_id in expired}, **peers}
+    return {device_id: _acknowledged(cur, device_id, peer_observations.get(device_id) or {}, generation)
+            for device_id in [*peers, *expired]}
+
+
+def _acknowledged(cur, device_id: str, observation: dict, generation: int) -> dict:
+    """An observation's frontier, or ``{}`` unless it can still be relied on.
+
+    Unusable when the member has since moved to a newer incarnation (it was
+    restored from a backup and may have lost what it acknowledged), when it
+    has been re-admitted under a new certificate, or when the peer reported a
+    newer membership than this worker has applied: it may know a member this
+    worker does not yet pin. A fresh acknowledgement replaces the observation.
+    """
+    binding = observation.get("binding") or {}
+    if binding.get("generation") is None or binding["generation"] > generation:
+        return {}
+    cur.execute("SELECT generation, incarnation FROM network_members WHERE device_id = %s", (device_id,))
+    member = cur.fetchone()
+    if member is None or binding.get("member_generation") != member["generation"]:
+        return {}
+    incarnation = binding.get("incarnation")
+    if incarnation is None or incarnation < max(int(member["incarnation"]), highest_incarnation(cur, device_id)):
+        return {}
+    return observation.get("watermarks") or {}
+
+
+def _membership_generation(cur) -> int:
+    """The membership generation; read before the members so a change in between aborts the pass."""
+    cur.execute("SELECT generation FROM network_state WHERE id = 1")
+    row = cur.fetchone()
+    return int(row["generation"]) if row else 0
+
+
+# Early deletes stop as soon as membership moves past what their bounds were computed from.
+_MEMBERSHIP_UNCHANGED = "(SELECT generation FROM network_state WHERE id = 1) = %s"
 
 
 def _stream_frontier(origin: str, incarnation: int, head: int, peers: Dict[str, dict]) -> int:
@@ -1048,8 +1085,9 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cur = conn.cursor()
         set_timeout(cur)
+        generation = _membership_generation(cur)
         peers, expired = _recent_peers(cur, local_device_id, peer_observations, now=now, grace_days=grace_days)
-        members = _member_frontiers(peers, expired, peer_observations)
+        members = _member_frontiers(cur, peers, expired, peer_observations, generation)
         heads = _log_heads(cur) if _heads is None else _heads
     legacy_cutoff = (now - timedelta(days=LEGACY_RETENTION_DAYS)).isoformat()
 
@@ -1069,7 +1107,8 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
         sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                      SELECT o.ingest_id FROM sync_ops o
                      WHERE o.origin_device_id = %s AND o.incarnation = %s
-                       AND o.created_at < CASE WHEN o.seq <= %s THEN %s::timestamptz ELSE %s::timestamptz END
+                       AND o.created_at < CASE WHEN o.seq <= %s AND """ + _MEMBERSHIP_UNCHANGED + """
+                                          THEN %s::timestamptz ELSE %s::timestamptz END
                        AND o.seq > %s AND o.seq < %s AND o.seq <= %s
                        AND o.collection = 'session_events' AND EXISTS (
                            SELECT 1 FROM sync_records r WHERE r.collection = o.collection
@@ -1084,11 +1123,11 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
             nonlocal bytes_estimate
             rows = cursor.fetchall()
             bytes_estimate += sum(int(row["bytes_estimate"]) for row in rows)
-            return (origin, incarnation, short, cutoff, legacy_cutoff,
+            return (origin, incarnation, short, generation, cutoff, legacy_cutoff,
                     max((row["seq"] for row in rows), default=0), head, frontier, BATCH_SIZE)
 
-        total += delete_batches(sql, (origin, incarnation, short, cutoff, legacy_cutoff, 0, head, frontier,
-                                      BATCH_SIZE),
+        total += delete_batches(sql, (origin, incarnation, short, generation, cutoff, legacy_cutoff, 0, head,
+                                      frontier, BATCH_SIZE),
                                 advance=advance, stop=stop, cursor=_conn.cursor() if _conn is not None else None)
     logger.info("Transcript sync operation retention %s", _json({
         "deleted_ops": total, "bytes_estimate": bytes_estimate, "min_age_hours": min_age_hours,
@@ -1137,8 +1176,9 @@ def _compact_superseded_ops(collections: Tuple[str, ...], *, label: str, kill_sw
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cur = conn.cursor()
         set_timeout(cur)
+        generation = _membership_generation(cur)
         peers, expired = _recent_peers(cur, local_device_id, peer_observations, now=now, grace_days=grace_days)
-        pins = _member_frontiers(peers, expired, peer_observations) if pin_all_members else peers
+        pins = _member_frontiers(cur, peers, expired, peer_observations, generation) if pin_all_members else peers
         heads = _log_heads(cur) if _heads is None else _heads
     bounds = []
     for stream in heads:
@@ -1151,13 +1191,15 @@ def _compact_superseded_ops(collections: Tuple[str, ...], *, label: str, kill_sw
         values = ", ".join("(%s, %s, %s, %s)" for _ in bounds)
         flat = tuple(value for bound in bounds for value in bound)
         names = ", ".join("%s" for _ in collections)
+        # Only the all-member pass is early; memory compaction keeps its own rules.
+        guard, guard_params = (" AND " + _MEMBERSHIP_UNCHANGED, (generation,)) if pin_all_members else ("", ())
         # Driven by the (collection, record_id, ingest_id) index: only rows of
         # these collections are visited, never a stream's transcript backlog.
         sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                      SELECT o.ingest_id FROM sync_ops o
                      JOIN (VALUES """ + values + """) AS f(origin_device_id, incarnation, frontier, head)
                        ON o.origin_device_id = f.origin_device_id AND o.incarnation = f.incarnation
-                     WHERE o.collection IN (""" + names + """) AND o.ingest_id > %s
+                     WHERE o.collection IN (""" + names + """)""" + guard + """ AND o.ingest_id > %s
                        AND o.seq <= f.frontier AND o.seq < f.head
                        AND EXISTS (
                            SELECT 1 FROM sync_ops n
@@ -1170,9 +1212,9 @@ def _compact_superseded_ops(collections: Tuple[str, ...], *, label: str, kill_sw
             nonlocal bytes_estimate
             rows = cursor.fetchall()
             bytes_estimate += sum(int(row["bytes_estimate"]) for row in rows)
-            return (*flat, *collections, max((row["ingest_id"] for row in rows), default=0), batch)
+            return (*flat, *collections, *guard_params, max((row["ingest_id"] for row in rows), default=0), batch)
 
-        total = delete_batches(sql, (*flat, *collections, 0, batch), advance=advance, stop=stop,
+        total = delete_batches(sql, (*flat, *collections, *guard_params, 0, batch), advance=advance, stop=stop,
                                cursor=_conn.cursor() if _conn is not None else None,
                                batch_size=batch)
     logger.info("%s %s", label, _json({
