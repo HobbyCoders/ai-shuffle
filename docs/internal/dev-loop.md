@@ -44,9 +44,10 @@ authentication, HTTP bodies, SSE and WebSockets remain unchanged.
 
 With pausing enabled only, `scripts.devloop.child` runs the normal `app.main`
 `__main__` startup with an ASGI activity observer, a short pause admission gate,
-and a **five-second Uvicorn graceful-shutdown timeout**. That timeout only applies after shutdown
-starts: lingering passive streams are cancelled, then normal lifespan teardown
-runs. These are the only intentional differences from `python -m app.main`.
+and the same **five-second Uvicorn graceful-shutdown timeout** as the normal
+app. That timeout only applies after shutdown starts: lingering passive streams
+are cancelled, then normal lifespan teardown runs. The observer and admission
+gate are the intentional differences from `python -m app.main`.
 It tracks unknown
 HTTP requests, non-heartbeat client frames and voice/unknown sockets without
 buffering or changing requests. A private process-identified receipt is written
@@ -56,7 +57,7 @@ whole lease using its process identity, even during long waits. Durable active
 runs, running/interrupting/draining turns, background tasks and queued/running
 git operations prevent pausing. A failed busy check keeps it awake. No live
 app or database is consulted. CI and `--no-pause` retain `python -m app.main`
-without the observer or dev-only shutdown timeout.
+without the observer, with the same bounded connection-drain timeout.
 
 Before SIGTERM, the child atomically closes admission only if no finite request
 or new foreground activity appeared since the idle decision. The launcher then

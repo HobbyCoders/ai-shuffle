@@ -26,7 +26,8 @@ The first Send after a pause wakes the copy and reloads the page; the draft
 survives, so press Send again.
 A failed clean stop reports `pause-failed` and retains its data until `down` or
 TTL; it never silently starts a second cluster. See the dev-loop guide for the
-dev-only five-second stream shutdown grace and the whole-pause deadline.
+five-second stream shutdown grace (also used by the normal app) and the
+whole-pause deadline.
 
 ## The loop
 

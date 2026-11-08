@@ -194,6 +194,10 @@ def run(app, settings) -> None:
             proxy_headers=False,
             log_level=settings.log_level.lower(),
             access_log=False,
+            # Passive chat streams can stay open forever. Bound connection
+            # draining so Uvicorn reaches lifespan teardown, where running
+            # turns are stopped and persisted by the normal shutdown path.
+            timeout_graceful_shutdown=5,
             ws_max_size=10 * 1024 * 1024,
             ws_ping_interval=None,
             ws_ping_timeout=None,
