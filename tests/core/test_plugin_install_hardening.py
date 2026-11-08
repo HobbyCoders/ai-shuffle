@@ -428,9 +428,10 @@ def test_pinned_sha_is_fetched_and_verified(svc, fake_git):
                                                         "sha": PINNED}}])
     svc.install_plugin("x@mp")
     verbs = [c[3] for c in fake_git.calls if c[1] == "-C"]
-    assert verbs == ["rev-parse", "fetch", "checkout", "rev-parse"]
+    assert verbs == ["rev-parse", "fetch", "checkout", "rev-parse", "rev-parse"]
     assert fake_git.fetched == PINNED
     assert _installed(svc)["x@mp"][0]["sourceSha"] == PINNED[:7]
+    assert _installed(svc)["x@mp"][0]["sourceRevision"] == PINNED
 
 
 def test_pinned_sha_mismatch_fails_closed(svc, monkeypatch):
@@ -451,7 +452,9 @@ def test_pinned_sha_already_at_head_skips_fetch(svc, monkeypatch):
     _marketplace(svc, plugins=[{"name": "x", "source": {"source": "github", "repo": "o/x",
                                                         "sha": PINNED[:12]}}])
     svc.install_plugin("x@mp")
-    assert [c[3] for c in git.calls if c[1] == "-C"] == ["rev-parse"]
+    # One read verifies the pin; the other records the installed revision.
+    assert [c[3] for c in git.calls if c[1] == "-C"] == ["rev-parse", "rev-parse"]
+    assert _installed(svc)["x@mp"][0]["sourceRevision"] == PINNED
 
 
 @pytest.mark.parametrize("sha", ["--upload-pack=x", "zzzzzzz", "abc", 123])
