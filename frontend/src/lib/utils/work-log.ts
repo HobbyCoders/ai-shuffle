@@ -362,6 +362,10 @@ function isAskingTool(msg: ChatMessage): boolean {
  * spec §3): it asks something, or it carries a finding (two or more lines, or a
  * heading, list, table or code fence). One short line without a question is
  * narration ("Now checking the workflow.") and folds with the work.
+ *
+ * Shape alone decides, on purpose (#1010): a label like "Finding:" is not
+ * special. Matching on wording would misfire on narration and still miss
+ * "I found a bug: ...", and the folded line is one click away.
  */
 export function isProtectedProse(content: string): boolean {
 	const text = content.trim();

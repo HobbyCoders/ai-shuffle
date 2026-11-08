@@ -1394,6 +1394,14 @@ describe('duration helpers', () => {
 		expect(turnDurationMs([msg({ metadata: { duration_ms: 2_500 } })])).toBe(2_500);
 	});
 
+	it('lets shape alone decide which prose stays visible (#1010)', () => {
+		for (const line of ['Finding: the cache is stale.', '**Finding:** the cache is stale.', 'I found a bug: the cache is stale.']) {
+			expect(isProtectedProse(line)).toBe(false);
+		}
+		expect(isProtectedProse('## Finding: the cache is stale.')).toBe(true);
+		expect(isProtectedProse('Finding: the cache is stale.\nIt was never invalidated.')).toBe(true);
+	});
+
 	it('detects the interrupt marker', () => {
 		expect(turnWasInterrupted([text('partial\n\n[Stopped]')])).toBe(true);
 		expect(turnWasInterrupted([text('all done')])).toBe(false);
