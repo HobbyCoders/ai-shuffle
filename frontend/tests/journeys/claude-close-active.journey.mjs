@@ -51,6 +51,9 @@ await runJourney({
 			expect(!alive, 'closed CLI process was reaped');
 			await page.getByRole('dialog').waitFor({ state: 'hidden' });
 			await waitChat(page, { streaming: 'false', messages: '2' });
+			// The DOM predicate can resolve before the recorder samples its
+			// paint. Keep that sample inside this step's half-open time window.
+			await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
 			await mark('send after rewind');
 			await composer(page).fill('');
 			await typeAndSend(page, `after-${uniq()} [script:default]`);
