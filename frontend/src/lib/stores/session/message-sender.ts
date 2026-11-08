@@ -86,6 +86,11 @@ export function newSessionWorker(
 	return { isRemote: target !== null, ownerDeviceName: target?.name ?? null, createdFromComposer: true };
 }
 
+/** An optimistic echo's attachments, in the shape its durable row will carry. */
+function uploadsMetadata(paths?: string[]): { metadata?: { upload_paths: string[] } } {
+	return paths?.length ? { metadata: { upload_paths: paths } } : {};
+}
+
 function formatWorktreeError(rawError: string, branchName: string): string {
 	const lower = rawError.toLowerCase();
 
@@ -706,6 +711,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 								// The same command identity comes back on the durable receipt.
 								commandId: clientMessageId,
 								timestamp: new Date().toISOString(),
+								// The bubble shows its chips before the durable row arrives.
+								...uploadsMetadata(options?.pendingUploadPaths),
 							}],
 							// S6: declared optimistic flip (see the skipMessageAppend
 							// branch above) — not a competing write of isStreaming.
@@ -1176,6 +1183,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						content: prompt,
 						profileId: queryProfileId,
 						timestamp: new Date().toISOString(),
+						...uploadsMetadata(pendingUploadPaths),
 					}],
 				};
 			});
