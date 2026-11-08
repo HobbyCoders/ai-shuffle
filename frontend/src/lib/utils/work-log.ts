@@ -493,9 +493,14 @@ export function turnDurationMs(turn: ChatMessage[]): number | null {
 		.find((value): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0);
 	if (reportedDuration !== undefined) return reportedDuration;
 
+	// A note that lands after the last real row (the chat being settled minutes
+	// later, say) says when the chat changed, not how long the work ran (#1163).
+	let workEnd = turn.length;
+	while (workEnd > 0 && (turn[workEnd - 1].type === 'system' || turn[workEnd - 1].role === 'system')) workEnd--;
+
 	let first: number | null = null;
 	let last: number | null = null;
-	for (const message of turn) {
+	for (const message of turn.slice(0, workEnd)) {
 		const timestamp = parseStamp(message.timestamp);
 		if (timestamp === null) continue;
 		if (first === null || timestamp < first) first = timestamp;

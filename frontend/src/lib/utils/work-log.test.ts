@@ -1394,6 +1394,23 @@ describe('duration helpers', () => {
 		expect(turnDurationMs([msg({ metadata: { duration_ms: 2_500 } })])).toBe(2_500);
 	});
 
+	it('does not count a late lifecycle note as work (#1163)', () => {
+		const start = '2026-08-19T10:00:00.000Z';
+		const end = '2026-08-19T10:00:00.988Z';
+		const settled = msg({
+			type: 'system', role: 'system', systemSubtype: 'session_settled', content: 'Session settled.',
+			timestamp: '2026-08-19T10:04:05.000Z'
+		});
+		expect(turnDurationMs([text('a', start), text('b', end), settled])).toBe(988);
+		// Several notes in a row, and a reported duration still wins.
+		expect(turnDurationMs([text('a', start), text('b', end), settled, settled])).toBe(988);
+		expect(turnDurationMs([text('a', start), msg({ metadata: { duration_ms: 2_500 } }), settled])).toBe(2_500);
+		// A note in the middle of the work is inside the interval either way.
+		expect(turnDurationMs([text('a', start), { ...settled, timestamp: end }, text('b', '2026-08-19T10:00:09.000Z')])).toBe(9_000);
+		// Nothing but notes has no work to time.
+		expect(turnDurationMs([settled, { ...settled, timestamp: end }])).toBeNull();
+	});
+
 	it('lets shape alone decide which prose stays visible (#1010)', () => {
 		for (const line of ['Finding: the cache is stale.', '**Finding:** the cache is stale.', 'I found a bug: the cache is stale.']) {
 			expect(isProtectedProse(line)).toBe(false);
