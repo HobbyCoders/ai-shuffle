@@ -57,21 +57,17 @@ ids cannot starve it. For each origin/incarnation it deletes only operations:
 3. Strictly below the stream's retained head (including old incarnations).
 4. With a materialized sync version at least as new as the operation, and either
    its canonical event row/order_seq or a deletion tombstone still present.
+   Damaged/incomplete materializations are kept, not assumed disposable.
    Idle delta compaction (`compact_session_deltas`) merges a run of delta rows
    into its last row and deletes the rest, so their `order_seq` points at a
-   missing row. Those count as materialized when the next surviving row of the
-   session is a delta row (the run's survivor); otherwise their envelopes would
-   never be retired. Damaged/incomplete materializations are kept, not assumed
-   disposable.
-
-A state copy or transcript fill sends the merged row, which carries the run's
-first event id at the run's last seq. A peer that received only the start of
-the run before it went away still holds that first fragment under the same id.
-When the merged row is applied, the receiver deletes its own fragments from
-that first one up to the merged seq in the same transaction, as the owner did
-(`engine._retire_merged_fragments`). Without that, the insert collided with
-the held id and the fill failed on every retry. This was possible before this
-change after 30 days; the shorter floor makes it more likely.
+   missing row and their envelopes are never retired by this pass. That is a
+   known leak, left as it is: retiring them makes a known recovery bug more
+   likely (issue 1278). A worker that holds only the start of a merged run and
+   later takes a state copy collides with the merged row's reused event id, and
+   its transcript fill fails on every retry. That needs a worker past its
+   contact window, so the shorter floor does not change how often it happens:
+   the ops such a worker lacks start with the rest of the run, written right
+   after its last contact, so they are already older than 30 days.
 
 Recent means a successful authenticated sync observation within
 `AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS` (default **30**, positive integer days).
@@ -218,21 +214,23 @@ kB). Each pass logs `Session sync operation compaction`. Disable it with
 `AI_SHUFFLE_SYNC_SESSION_OP_COMPACTION=0` (`false`/`off` also work).
 
 `tests/core/network/test_sync_log_bounds_postgres.py` covers the one-hour
-floor, the compacted delta runs and session compaction with real PostgreSQL
+floor and session compaction with real PostgreSQL
 workers and signed exchange: an offline peer inside its grace pins what it
 lacks and then catches up by ordinary op sync with no state copy, a lagging
-peer pins superseded catalog ops, the kill switch and a bad floor value hold
-everything, and event rows plus `sync_records` stay unchanged. A local lab (not
+peer pins superseded catalog ops, the kill switch holds everything, a bad,
+infinite or oversized floor skips only transcript retention while the rest of
+the maintenance pass still runs, and event rows plus `sync_records` stay
+unchanged. Issue 1278's recovery case is kept there as an expected failure. A local lab (not
 committed) with 4 chats, 60 streamed answers, runtime toggles and retitles,
 both peers caught up, measured:
 
 | Case | main | this change |
 | --- | --- | --- |
 | A week of ops, ages spread over 0–167 hours | 1,803 ops, 2,279 kB | 22 ops, 32 kB |
-| Ops 40 days old after idle delta compaction | 1,452 ops, 1,789 kB | 12 ops, 18 kB |
 
 The 22 left are the last hour of transcript ops plus the stream head, and one
-catalog and one runtime envelope per chat. This is a count lab, not a field
+catalog and one runtime envelope per chat. The lab had no idle delta
+compaction; ops of merged runs stay as on main (see rule 4). This is a count lab, not a field
 measurement; the space already held on disk only returns after a one-time
 `VACUUM FULL sync_ops` with the app stopped (the daily `VACUUM ANALYZE` reuses
 freed space but does not shrink the file).

@@ -1013,10 +1013,6 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
         peers, expired = _recent_peers(cur, local_device_id, peer_observations, now=now, grace_days=grace_days)
         heads = _log_heads(cur) if _heads is None else _heads
 
-    from app.db.session_events import COMPACTABLE_DELTA_TYPES
-
-    # Module constants, never input; quoted for the IN list below.
-    delta_types = ", ".join("'" + t.replace("'", "''") + "'" for t in COMPACTABLE_DELTA_TYPES)
     total = bytes_estimate = 0
     frontiers = {}
     for stream in heads:
@@ -1027,11 +1023,7 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
             continue
         # Keyset-page the stream's UNIQUE(origin, incarnation, seq) index. Never
         # repeatedly sort/rescan the whole retained log. A materialized version
-        # (or tombstone) must still exist for the ordinary snapshot path: the
-        # row at order_seq, or, when idle delta compaction merged the record's
-        # run, the run's survivor (the next row, a delta carrying the merged
-        # text). Requiring the exact seq kept every merged delta's envelope
-        # forever, since no newer op of that record ever follows.
+        # (or tombstone) must still exist for the ordinary snapshot path.
         sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                      SELECT o.ingest_id FROM sync_ops o
                      WHERE o.origin_device_id = %s AND o.incarnation = %s
@@ -1039,11 +1031,9 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
                        AND o.collection = 'session_events' AND EXISTS (
                            SELECT 1 FROM sync_records r WHERE r.collection = o.collection
                              AND r.record_id = o.record_id AND r.clock >= o.clock
-                             AND (r.deleted OR (
-                                 SELECT e.seq = r.order_seq OR e.event_type IN (""" + delta_types + """)
-                                 FROM session_events e
-                                 WHERE e.session_id = split_part(r.record_id, '|', 1) AND e.seq >= r.order_seq
-                                 ORDER BY e.seq LIMIT 1)))
+                             AND (r.deleted OR EXISTS (
+                                 SELECT 1 FROM session_events e
+                                 WHERE e.session_id = split_part(r.record_id, '|', 1) AND e.seq = r.order_seq)))
                      ORDER BY o.seq LIMIT %s)
                  RETURNING seq, pg_column_size(envelope) AS bytes_estimate"""
 
