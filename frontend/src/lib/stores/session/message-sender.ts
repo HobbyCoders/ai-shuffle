@@ -87,8 +87,9 @@ export function newSessionWorker(
 }
 
 /** An optimistic echo's attachments, in the shape its durable row will carry. */
-function uploadsMetadata(paths?: string[]): { metadata?: { upload_paths: string[] } } {
-	return paths?.length ? { metadata: { upload_paths: paths } } : {};
+function uploadsMetadata(paths: string[] = [], references: import('$lib/api/rewind').UploadReference[] = []): { metadata?: { upload_paths: string[] } } {
+	const all = [...paths, ...references.map(reference => reference.path)];
+	return all.length ? { metadata: { upload_paths: all } } : {};
 }
 
 function formatWorktreeError(rawError: string, branchName: string): string {
@@ -711,7 +712,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 								commandId: clientMessageId,
 								timestamp: new Date().toISOString(),
 								// The bubble shows its chips before the durable row arrives.
-								...uploadsMetadata(options?.pendingUploadPaths),
+								...uploadsMetadata(options?.pendingUploadPaths, options?.pendingUploadReferences),
 							}],
 							// S6: declared optimistic flip (see the skipMessageAppend
 							// branch above) — not a competing write of isStreaming.

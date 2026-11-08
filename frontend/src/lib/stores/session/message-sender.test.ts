@@ -196,6 +196,14 @@ describe('compact first send', () => {
         expect(apiMocks.post.mock.calls.at(-1)![1].then_send.upload_references).toEqual(refs);
     });
 
+	it('shows a resent chip that only has a restored reference in the optimistic bubble', async () => {
+		const path = '/uploads/staged/report.pdf';
+		const reference = { owner_id: 'worker-1', event_id: 'evt-1', index: 0, path };
+		const test = makeDeps(baseState({ sessionId: 'sess-1' }));
+		expect(await createMessageSender(test.deps).sendMessage(`Read @${path}`, { pendingUploadReferences: [reference] })).toBe(true);
+		expect(test.getState().messages.at(-1)!.metadata).toEqual({ upload_paths: [path] });
+	});
+
 	it('posts the exact normal query payload and uses only a queued optimistic echo', async () => {
 		const settings = { sessionId: 'compact-chat', title: 'Old chat', modelOverride: 'sonnet',
 			effortLevelOverride: 'high', permissionModeOverride: 'default', fastMode: false };
