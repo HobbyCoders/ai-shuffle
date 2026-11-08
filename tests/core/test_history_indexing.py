@@ -38,44 +38,67 @@ def test_migration_stamp_is_worker_local() -> None:
     assert not is_shared_setting_key(hi.KEY)
 
 
-def test_background_indexing_is_off_without_opt_in(
-    mock_db: Any, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("recall_ready", [True, False])
+def test_background_indexing_starts_itself_after_recall_is_ready(
+    mock_db: Any, monkeypatch: pytest.MonkeyPatch, recall_ready: bool,
 ) -> None:
-    def forbidden_migration() -> bool:
-        pytest.fail("experimental migration ran without opt-in")
+    from app.db import session_recall
 
-    monkeypatch.setattr(hi, "migrate", forbidden_migration)
-    assert hi.run_pass()
+    migrations: list[int] = []
 
+    def migrate() -> bool:
+        migrations.append(1)
+        return False
 
-def test_cli_without_apply_never_opens_database(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.db import base
-    from app.maintenance.history_indexing import main
-
-    def forbidden_init(*args: Any, **kwargs: Any) -> None:
-        pytest.fail("CLI opened a database without --apply")
-
-    monkeypatch.setattr(base, "init_pool", forbidden_init)
-    assert main([]) == 0
-
-
-def test_cli_requests_restart_safe_worker_local_migration(
-    mock_db: Any, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.db import base, session_recall
-    from app.maintenance.history_indexing import main
-
-    monkeypatch.setattr(base, "init_pool", lambda **kwargs: None)
-    monkeypatch.setattr(base, "close_pool", lambda: None)
-    monkeypatch.setattr(session_recall, "ready", lambda _: True)
-    assert main(["--apply"]) == 0
-    with base.get_db() as conn:
+    monkeypatch.setattr(session_recall, "ready", lambda _: recall_ready)
+    monkeypatch.setattr(hi, "migrate", migrate)
+    assert hi.run_pass() is not recall_ready
+    assert len(migrations) == int(recall_ready)
+    with hi.get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT value FROM system_settings WHERE key=%s", (hi.KEY,))
-        assert cur.fetchone()["value"] == "building"
+        marker = cur.fetchone()
+        assert marker == ({"value": "building"} if recall_ready else None)
+        # Building is not ready: imports stay synchronous until the swap finishes.
         assert not hi.enabled(cur)
-    monkeypatch.setattr(hi, "migrate", lambda: False)
-    assert not hi.run_pass()
+
+
+@pytest.mark.parametrize(
+    ("waiting", "running", "free"),
+    [(0, False, True), (1, False, False), (0, True, False)],
+)
+def test_waiting_and_running_turns_both_hold_background_work(
+    monkeypatch: pytest.MonkeyPatch, waiting: int, running: bool, free: bool,
+) -> None:
+    from app.core import start_admission, startup, streaming_status
+
+    monkeypatch.setattr(streaming_status, "has_any_active_run", lambda: running)
+    monkeypatch.setattr(start_admission.StartAdmission, "queued", property(lambda _: waiting))
+    assert startup._no_foreground_turn() is free
+
+
+def test_pending_lists_fit_every_platform_postgresql() -> None:
+    # Windows builds of PostgreSQL cap kilobyte options at INT_MAX / 1024.
+    assert 1_048_576 <= hi.HISTORY_PENDING_KB <= 2_097_151
+
+
+def test_merge_waits_for_the_move_to_finish(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden_database() -> Any:
+        pytest.fail("merge opened a database while the move was still writing")
+
+    monkeypatch.setattr(hi, "get_db", forbidden_database)
+    monkeypatch.setattr(hi, "_unmerged_at", hi.time.monotonic())
+    assert not hi.flush_pending()
+    assert not hi.flush_pending(quiet=0, can_work=lambda: False)
+
+
+def test_nothing_to_merge_opens_no_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden_database() -> Any:
+        pytest.fail("idle pass reopened a connection with nothing to merge")
+
+    monkeypatch.setattr(hi, "get_db", forbidden_database)
+    monkeypatch.setattr(hi, "_unmerged_at", None)
+    assert hi.flush_pending()
 
 
 @pytest.mark.parametrize("budget", ["rows", "bytes", "time", "foreground"])

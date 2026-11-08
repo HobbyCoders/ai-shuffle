@@ -19,6 +19,12 @@ def finish_migration() -> None:
     pytest.fail("online index migration did not finish")
 
 
+@pytest.fixture
+def legacy_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rows queued as state 1 by a build that promoted them one at a time."""
+    monkeypatch.setattr(hi, "IMPORT_STATE", "1")
+
+
 def test_online_migration_and_restart_safe_import() -> None:
     session_recall.install_triggers()
     # Simulate a restart after each completed index, not one giant transaction.
@@ -31,7 +37,7 @@ def test_online_migration_and_restart_safe_import() -> None:
                     ("idx_session_recall_text_trgm_e_h2",))
         options = cur.fetchone()["reloptions"]
         assert "fastupdate=on" in options
-        assert "gin_pending_list_limit=4096" in options
+        assert f"gin_pending_list_limit={hi.HISTORY_PENDING_KB}" in options
         cur.execute("DELETE FROM session_events WHERE session_id='history-index-test'")
         cur.execute("DELETE FROM sessions WHERE id='history-index-test'")
         cur.execute("INSERT INTO sessions(id,title) VALUES ('history-index-test','History test')")
@@ -48,12 +54,9 @@ def test_online_migration_and_restart_safe_import() -> None:
         assert cur.fetchone()["s"] == 0
         source = hi.search_table(cur, "session_recall_text")
         cur.execute(f"SELECT count(*) AS n FROM {source} WHERE body LIKE '%deferredneedle%'")
-        assert cur.fetchone()["n"] == 0
-    # Promotion is durable; a new invocation resumes without an in-memory cursor.
-    assert hi.promote_batch(rows=1) > 0
+        assert cur.fetchone()["n"] == 3
+    assert hi.flush_pending(quiet=0)
     finish_migration()
-    for _ in range(8):
-        hi.promote_batch(rows=1)
     with base.get_db() as conn:
         cur = conn.cursor()
         source = hi.search_table(cur, "session_recall_text")
@@ -85,7 +88,9 @@ def test_online_migration_and_restart_safe_import() -> None:
         cur.execute("DELETE FROM sessions WHERE id='history-index-test'")
 
 
-def test_state_only_event_promotion_keeps_projection_in_its_own_queue() -> None:
+def test_state_only_event_promotion_keeps_projection_in_its_own_queue(
+    legacy_pending: None,
+) -> None:
     session_recall.install_triggers()
     with base.get_db() as conn:
         assert session_recall.install_objects(conn.cursor())
@@ -189,31 +194,27 @@ def test_handoff_producer_searches_after_durable_catchup(
         for source in session_recall.SOURCES:
             while not session_recall.backfill_step(cur, source):
                 pass
+        # Moved rows go straight to the history indexes; nothing is left queued.
         for table in hi.TABLES:
             cur.execute(f"SELECT count(*) AS n FROM {table} WHERE history_index_state=1")
-            assert cur.fetchone()["n"] > 0
-    assert not fluid_pg_store._search_sync(["handoffneedle"], 10, None)
-
-    @contextmanager
-    def fail_commit() -> Iterator[Any]:
-        with base.get_db() as conn:
-            yield conn
-            raise RuntimeError("interrupted promotion")
-
-    # The source row's state and its GIN/projection changes roll back together.
-    with monkeypatch.context() as patcher:
-        patcher.setattr(hi, "get_db", fail_commit)
-        with pytest.raises(RuntimeError, match="interrupted promotion"):
-            hi.promote_batch(rows=1)
-    hi.promote_batch(rows=1)
-    # Drop every connection/cursor, then resume exclusively from persisted state.
+            assert cur.fetchone()["n"] == 0
+        cur.execute("SELECT count(*) AS n FROM session_recall_text "
+                    "WHERE session_id=%s AND history_index_state=2", (sdk,))
+        assert cur.fetchone()["n"] > 0
+    # Searchable straight away, from the pending list, then again once merged.
+    assert fluid_pg_store._search_sync(["handoffneedle"], 10, None)
+    assert hi.flush_pending(quiet=0)
+    # Drop every connection/cursor, then read only what the database persisted.
     base.close_pool()
     base.init_pool(min_conn=1, max_conn=6)
     finish_migration()
-    for _ in range(20):
-        if not hi.promote_batch(rows=2):
-            break
     assert fluid_pg_store._search_sync(["handoffneedle", "café"], 10, None)
+    # Another worker's mirror recalls its events; its store copy stays hidden
+    # until this worker adopts the session, then native/delegated rows recall.
+    assert not fluid_pg_store._search_sync(["nativeonly"], 10, None)
+    with base.get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET owner_device_id='test-local' "
+                              "WHERE id='history-producer'")
     assert fluid_pg_store._search_sync(["nativeonly"], 10, None)
     assert fluid_pg_store._search_sync(["delegatedonly"], 10, None)
     from app.db import sessions
@@ -226,8 +227,124 @@ def test_handoff_producer_searches_after_durable_catchup(
             assert cur.fetchone()["n"] == 0
         # A mirror without a local SDK pointer is eligible for event recall;
         # adopted local sessions deliberately recall their native/delegated rows.
-        cur.execute("UPDATE sessions SET sdk_session_id=NULL WHERE id='history-producer'")
+        cur.execute("UPDATE sessions SET sdk_session_id=NULL, owner_device_id='test-remote' "
+                    "WHERE id='history-producer'")
     assert fluid_pg_store._search_sync(["punctuation.a_b%"], 10, None)
+
+
+def test_interrupted_legacy_promotion_rolls_back_with_its_index_changes(
+    legacy_pending: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+
+    finish_migration()
+    sid = "history-legacy-rollback"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        with hi.importing(cur, "fluid_session_nodes"):
+            cur.execute("INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) "
+                        "VALUES (%s,'n',0,%s)", (sid, Json({"role": "user", "content": []})))
+
+    def state() -> int:
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT history_index_state AS s FROM fluid_session_nodes "
+                        "WHERE session_id=%s", (sid,))
+            return cur.fetchone()["s"]
+
+    @contextmanager
+    def fail_commit() -> Iterator[Any]:
+        with base.get_db() as conn:
+            yield conn
+            raise RuntimeError("interrupted promotion")
+
+    try:
+        assert state() == 1
+        with monkeypatch.context() as patcher:
+            patcher.setattr(hi, "get_db", fail_commit)
+            with pytest.raises(RuntimeError, match="interrupted promotion"):
+                hi.promote_batch(rows=1)
+        assert state() == 1
+        assert hi.promote_batch(rows=1) == 1
+        assert state() == 2
+    finally:
+        with base.get_db() as conn:
+            conn.cursor().execute("DELETE FROM fluid_session_nodes WHERE session_id=%s", (sid,))
+
+
+def test_merge_stops_for_a_foreground_turn_and_resumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finish_migration()
+    sid = "history-merge-yield"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        with hi.importing(cur, "session_recall_text"):
+            cur.execute("INSERT INTO session_recall_text(source,session_id,row_key,part,ts,body) "
+                        "VALUES ('n',%s,'r',0,0,'mergeyieldneedle')", (sid,))
+    # Hold the merge at the index lock, so the statement is certainly running
+    # when the turn arrives. An ordinary merge can finish before the first poll.
+    blocker = base.get_db()
+    conn = blocker.__enter__()
+    try:
+        cur = conn.cursor()
+        cur.execute("DROP INDEX idx_session_recall_text_trgm_n_h2")
+        calls = 0
+
+        def can_work() -> bool:
+            nonlocal calls
+            calls += 1
+            return calls <= 2  # Pass gate and pre-statement gate, then a turn starts.
+
+        started = hi.time.monotonic()
+        assert not hi.flush_pending(quiet=0, can_work=can_work, poll=0.05)
+        assert hi.time.monotonic() - started < 30
+        assert calls == 3
+        assert hi._unmerged_at is not None, "a cancelled merge must be retried"
+    finally:
+        conn.rollback()
+        blocker.__exit__(None, None, None)
+    try:
+        assert hi.flush_pending(quiet=0)
+        assert hi._unmerged_at is None
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT gin_clean_pending_list(%s::regclass) AS pages",
+                        ("idx_session_recall_text_trgm_n_h2",))
+            assert cur.fetchone()["pages"] == 0
+            source = hi.search_table(cur, "session_recall_text")
+            cur.execute(f"SELECT count(*) AS n FROM {source} "
+                        "WHERE body LIKE '%mergeyieldneedle%'")
+            assert cur.fetchone()["n"] == 1
+    finally:
+        with base.get_db() as conn:
+            conn.cursor().execute("DELETE FROM session_recall_text WHERE session_id=%s", (sid,))
+
+
+def test_restart_merges_what_the_previous_process_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finish_migration()
+    sid = "history-merge-restart"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        with hi.importing(cur, "session_recall_text"):
+            cur.execute("INSERT INTO session_recall_text(source,session_id,row_key,part,ts,body) "
+                        "VALUES ('n',%s,'r',0,0,'restartmergeneedle')", (sid,))
+    # A new process knows nothing about earlier imports but starts dirty.
+    monkeypatch.setattr(hi, "_unmerged_at", 0.0)
+    try:
+        assert hi.flush_pending()
+        assert hi._unmerged_at is None
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT gin_clean_pending_list(%s::regclass) AS pages",
+                        ("idx_session_recall_text_trgm_n_h2",))
+            assert cur.fetchone()["pages"] == 0
+    finally:
+        with base.get_db() as conn:
+            conn.cursor().execute("DELETE FROM session_recall_text WHERE session_id=%s", (sid,))
 
 
 def test_migration_retries_a_busy_table_without_long_lock() -> None:
@@ -265,14 +382,15 @@ def test_catchup_yields_before_migration_and_between_batches(
 
 
 @pytest.mark.parametrize("opted_in", [False, True])
-def test_projection_rebuild_preserves_opt_in_and_resumes_pending_imports(
-    opted_in: bool, request: pytest.FixtureRequest,
+def test_projection_rebuild_rebuilds_indexes_and_starts_workers_without_a_marker(
+    opted_in: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.db import sessions
     from app.network import handoff
     from tests.db.test_handoff_import_postgres import snapshot
 
     finish_migration()
+    monkeypatch.setattr(hi, "FLUSH_QUIET_SECONDS", 0.0)
     sid = f"history-repair-{opted_in}"
     needle = f"repairneedle{opted_in}"
     with base.get_db() as conn:
@@ -297,12 +415,12 @@ def test_projection_rebuild_preserves_opt_in_and_resumes_pending_imports(
                 cur.execute(f"DELETE FROM {table} WHERE session_id IN (%s,%s)", (sid, sdk))
 
     request.addfinalizer(cleanup)
-    assert bool(sessions.search_sessions(needle)) == (not opted_in)
+    assert sessions.search_sessions(needle)
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT history_index_state AS state FROM fluid_session_nodes "
                     "WHERE session_id=%s", (sdk,))
-        assert cur.fetchone()["state"] == (1 if opted_in else 0)
+        assert cur.fetchone()["state"] == (2 if opted_in else 0)
         cur.execute("DROP TABLE session_recall_text")
 
     # Match startup order: repair/backfill recall BEFORE the history worker.
@@ -317,7 +435,7 @@ def test_projection_rebuild_preserves_opt_in_and_resumes_pending_imports(
         marker = cur.fetchone()
         assert marker == ({"value": "building"} if opted_in else None)
 
-    # No explicit opt-in or direct migrator call may mask a lost request here.
+    # No direct migrator call may mask a worker that never starts by itself.
     for _ in range(20):
         if hi.run_pass(seconds=1, pause=0):
             break
@@ -333,10 +451,10 @@ def test_projection_rebuild_preserves_opt_in_and_resumes_pending_imports(
                     "WHERE session_id=%s", (sdk,))
         assert cur.fetchone()["state"] == (2 if opted_in else 0)
         cur.execute("SELECT value FROM system_settings WHERE key=%s", (hi.KEY,))
-        assert cur.fetchone() == ({"value": "ready"} if opted_in else None)
+        assert cur.fetchone() == {"value": "ready"}
 
 
-def test_promotion_visits_bounded_window_in_heap_order() -> None:
+def test_promotion_visits_bounded_window_in_heap_order(legacy_pending: None) -> None:
     finish_migration()
     sid = "history-heap-window"
     with base.get_db() as conn:
@@ -392,7 +510,7 @@ def test_history_budget_upgrade_never_changes_live_index_options() -> None:
         cur = conn.cursor()
         cur.execute("SELECT reloptions FROM pg_class "
                     "WHERE relname='idx_session_recall_text_trgm_e_h2'")
-        assert "gin_pending_list_limit=4096" in cur.fetchone()["reloptions"]
+        assert f"gin_pending_list_limit={hi.HISTORY_PENDING_KB}" in cur.fetchone()["reloptions"]
         cur.execute("SELECT relname, reloptions FROM pg_class WHERE relname = ANY(%s)",
                     (list(hi.INDEXES),))
         assert sorted(cur.fetchall(), key=lambda row: row["relname"]) == sorted(

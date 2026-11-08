@@ -479,8 +479,8 @@ def install_objects(cursor, *, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
         if not schema or "'" in schema:
             raise ValueError("no usable current schema")
         if not present:
-            # Preserve existing opt-in so automatic maintenance rebuilds the
-            # indexes and resumes pending imports. Never opt in a new worker.
+            # Automatic maintenance must rebuild the indexes and resume pending
+            # imports. A worker with no marker gets one from that maintenance.
             cursor.execute("UPDATE system_settings SET value = 'building' WHERE key = %s",
                            ("migration:history_indexing_v1",))
         for statement in _DDL if present else [*_TABLE_DDL, *_DDL]:

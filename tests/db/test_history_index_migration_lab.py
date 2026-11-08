@@ -18,6 +18,8 @@ pytestmark = requires_real_pg
 @pytest.mark.skipif(os.environ.get("HISTORY_MILLION_LAB") != "1", reason="opt-in migration lab")
 def test_million_event_migration(capsys: pytest.CaptureFixture[str]) -> None:
     count = 1_000_000
+    # Each unit is 32 characters; 32 units is about one real projection piece.
+    width = int(os.environ.get("HISTORY_MILLION_WIDTH", "2"))
     with base.get_db() as conn:
         cur = conn.cursor()
         assert not hi.enabled(cur), "use a fresh disposable database"
@@ -32,8 +34,9 @@ def test_million_event_migration(capsys: pytest.CaptureFixture[str]) -> None:
             cur = conn.cursor()
             cur.execute("INSERT INTO session_events(id,session_id,seq,event_type,payload) "
                         "SELECT 'million-event-'||i,'million-history-lab',i,'message.user', "
-                        "jsonb_build_object('content', md5(i::text)||md5((i+1)::text)) "
-                        "FROM generate_series(%s,%s) i", (start, start + 9999))
+                        "jsonb_build_object('content', (SELECT string_agg(md5((i+j)::text), '') "
+                        "FROM generate_series(0,%s) j)) "
+                        "FROM generate_series(%s,%s) i", (width - 1, start, start + 9999))
             cur.execute("INSERT INTO session_recall_text "
                         "(source,session_id,row_key,part,ts,body,seq,event_type,raw) "
                         "SELECT 'e',session_id,id,0,0,payload->>'content',seq,event_type, "
@@ -79,6 +82,6 @@ def test_million_event_migration(capsys: pytest.CaptureFixture[str]) -> None:
         assert after["heap"] == before["heap"], "migration rewrote the event heap"
     with capsys.disabled():
         print("HISTORY_MIGRATION_LAB " + json.dumps({"events": count,
-              "projection_rows": count, "content_chars": 64, "seconds": elapsed,
+              "projection_rows": count, "content_chars": 32 * width, "seconds": elapsed,
               "wal_bytes": int(after["wal"]), "before_bytes": before["bytes"],
               "after_bytes": after["bytes"], "live_latency_seconds": latency}))

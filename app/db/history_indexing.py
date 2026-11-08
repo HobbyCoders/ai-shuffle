@@ -1,13 +1,18 @@
 """Online, restart-safe GIN isolation for hand-off history.
 
-0 = ordinary live write, 1 = imported/pending, 2 = imported/indexed. History
-GINs have their own bounded pending lists. Live inserts and updates always use
-state 0, never those lists. No setting on a live GIN is changed. The state is the
-persistent work queue; each promotion transaction commits independently.
+0 = ordinary live write, 2 = imported, in the history GINs. 1 = imported by an
+older build and still waiting for promotion; nothing writes it any more, but
+those rows drain through the durable queue. Live inserts and updates always use
+state 0 and never touch a history GIN, so no setting on a live GIN is changed.
+
+Imports only append to a large, history-only pending list, which keeps the
+expensive GIN merge out of the move. Imported text is searchable at once and the
+list is merged in the background, between foreground turns.
 """
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
@@ -35,6 +40,17 @@ INDEXES = (
     "idx_session_recall_text_trgm_e",
     "idx_sse_fts", "idx_session_messages_fts",
 )
+IMPORT_STATE = "2"
+# Just below 2 GiB: Windows PostgreSQL caps this option at 2097151 KB. A list of
+# this size holds about three copies of the 78 MB all-text load-test chat, and
+# reaching the limit would make the importer merge it inline, using work_mem.
+HISTORY_PENDING_KB = 2_096_128
+_HISTORY_OPTIONS = f"fastupdate=on, gin_pending_list_limit={HISTORY_PENDING_KB}"
+# Let a move finish before merging what it wrote.
+FLUSH_QUIET_SECONDS = 5.0
+# When a deferred import last wrote; None once merged. Starts dirty so the first
+# pass after a restart merges whatever the previous process left behind.
+_unmerged_at: float | None = 0.0
 _DEFAULT = f"COALESCE(NULLIF(current_setting('{SETTING}', true), ''), '0')::smallint"
 
 
@@ -67,13 +83,16 @@ def search_table(
 @contextmanager
 def importing(cursor: Any, table: str) -> Iterator[bool]:
     """Scope deferral to hand-off INSERTs, never the rest of publication."""
+    global _unmerged_at
     active = table in TABLES and enabled(cursor)
     if active:
-        cursor.execute("SELECT set_config(%s, '1', true)", (SETTING,))
+        _unmerged_at = time.monotonic()
+        cursor.execute("SELECT set_config(%s, %s, true)", (SETTING, IMPORT_STATE))
     try:
         yield active
     finally:
         if active:
+            _unmerged_at = time.monotonic()
             # On a failed statement the caller rolls back the entire transaction.
             # Do not mask that exception with a command in an aborted transaction.
             import sys
@@ -148,7 +167,7 @@ def migrate() -> bool:
         if cur is None:
             return False
         cur.execute("SET lock_timeout = '250ms'")
-        cur.execute("SET statement_timeout = '15min'")
+        cur.execute("SET statement_timeout = '1h'")
         cur.execute("CREATE TABLE IF NOT EXISTS history_index_migrations "
                     "(name text PRIMARY KEY, tail text NOT NULL)")
         for table in TABLES:
@@ -197,10 +216,9 @@ def migrate() -> bool:
                 cur.execute("SELECT reloptions FROM pg_class WHERE oid=to_regclass(%s)",
                             (name + "_h2",))
                 options = cur.fetchone()["reloptions"] or []
-                wanted = {"fastupdate=on", "gin_pending_list_limit=4096"}
+                wanted = set(_HISTORY_OPTIONS.split(", "))
                 if not wanted.issubset(options):
-                    cur.execute(f"ALTER INDEX {name}_h2 SET "
-                                "(fastupdate=on, gin_pending_list_limit=4096)")
+                    cur.execute(f"ALTER INDEX {name}_h2 SET ({_HISTORY_OPTIONS})")
                 continue
             if row and not partial:
                 tail = row["ddl"].split(" USING gin ", 1)[1]
@@ -226,7 +244,7 @@ def migrate() -> bool:
                     cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {replacement}")
                     where = f"({original_predicate}) AND " if sep else ""
                     if state == 2:
-                        options = " WITH (fastupdate=on, gin_pending_list_limit=4096)"
+                        options = f" WITH ({_HISTORY_OPTIONS})"
                     else:
                         options = " WITH " + original_options if has_options else ""
                     cur.execute(f"CREATE INDEX CONCURRENTLY {replacement} ON {table} "
@@ -297,6 +315,59 @@ def promote_batch(
     return count
 
 
+def flush_pending(
+    *, can_work: Callable[[], bool] = lambda: True,
+    quiet: float | None = None, poll: float = 1.0,
+) -> bool:
+    """Merge the history GINs' pending lists; True once nothing is left to merge.
+
+    Live writers never use these lists. PostgreSQL applies a merge as physical
+    index changes, so a cancelled or crashed one keeps what it finished and the
+    rest stays searchable in the list. That is what makes it safe to cancel the
+    statement as soon as a foreground turn starts, and to retry later.
+    """
+    global _unmerged_at
+    started = _unmerged_at
+    if started is None:
+        return True
+    if time.monotonic() - started < (FLUSH_QUIET_SECONDS if quiet is None else quiet) or not can_work():
+        return False
+    try:
+        with _online_cursor() as cur:
+            if cur is None:
+                return False
+            cur.execute("SET lock_timeout = '0'")
+            cur.execute("SET statement_timeout = '10min'")
+            for name in INDEXES:
+                cur.execute("SELECT to_regclass(%s) AS name", (name + "_h2",))
+                if not cur.fetchone()["name"]:
+                    continue
+                if not can_work():
+                    return False
+                done = threading.Event()
+
+                def cancel_on_foreground() -> None:
+                    while not done.wait(poll):
+                        if not can_work():
+                            cur.connection.cancel()
+                            return
+
+                watcher = threading.Thread(target=cancel_on_foreground, daemon=True)
+                watcher.start()
+                try:
+                    cur.execute("SELECT gin_clean_pending_list(%s::regclass)", (name + "_h2",))
+                finally:
+                    done.set()
+                    watcher.join()
+    except psycopg2.Error:
+        # A foreground turn, the time limit or a lost connection. Retry later.
+        logger.info("History index merge deferred; will retry", exc_info=True)
+        return False
+    if _unmerged_at == started:
+        _unmerged_at = None
+    return True
+
+
 def run_pass(
     *, seconds: float = 5.0, pause: float = 0.1, can_work: Callable[[], bool] = lambda: True,
 ) -> bool:
@@ -306,7 +377,11 @@ def run_pass(
         cur.execute("SELECT 1 FROM system_settings WHERE key=%s "
                     "AND value IN ('building','ready')", (KEY,))
         if not cur.fetchone():
-            return True  # Experimental: no online DDL or deferral without opt-in.
+            from app.db import session_recall
+            if not session_recall.ready(cur):
+                return True  # The migration splits the projection's indexes.
+            cur.execute("INSERT INTO system_settings(key,value) VALUES (%s,'building') "
+                        "ON CONFLICT (key) DO NOTHING", (KEY,))
     if not can_work() or not migrate():
         return False
     deadline = time.monotonic() + seconds
@@ -314,6 +389,6 @@ def run_pass(
         if not can_work():
             return False
         if not promote_batch(can_work=can_work):
-            return can_work()
+            return flush_pending(can_work=can_work)
         time.sleep(pause)
     return False

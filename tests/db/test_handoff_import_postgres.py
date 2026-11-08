@@ -379,16 +379,26 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
     payload_bytes = len(json.dumps(data))
     timing = handoff._Timing("lab", chat)
     data["_timing"] = timing
-    with base.get_db() as conn:
-        create_session_recall_text(conn.cursor())
-        session_recall.install_objects(conn.cursor())
-    session_recall.install_triggers()
+    if os.environ.get("HANDOFF_LAB_RETIRED") == "1":
+        # A worker that finished the projection backfill and #1170's retirement.
+        from app.db import recall_index_retirement
+        assert session_recall.run_backfill(max_seconds=60.0)
+        for _ in range(30):
+            if recall_index_retirement.run_pass(seconds=60.0):
+                break
+        else:
+            pytest.fail("transcript GIN retirement did not finish")
+    else:
+        with base.get_db() as conn:
+            create_session_recall_text(conn.cursor())
+            session_recall.install_objects(conn.cursor())
+        session_recall.install_triggers()
     if os.environ.get("HANDOFF_LAB_DEFERRED") == "1":
         from tests.db.test_history_indexing_postgres import finish_migration
         finish_migration()
-        pending_kb = int(os.environ.get("HANDOFF_LAB_HISTORY_PENDING_KB", "4096"))
-        assert pending_kb in (1024, 2048, 4096)
-        from app.db.history_indexing import INDEXES
+        from app.db.history_indexing import HISTORY_PENDING_KB, INDEXES
+        pending_kb = int(os.environ.get("HANDOFF_LAB_HISTORY_PENDING_KB", HISTORY_PENDING_KB))
+        assert 64 <= pending_kb <= HISTORY_PENDING_KB
         with base.get_db() as conn:
             cur = conn.cursor()
             for name in INDEXES:
@@ -472,6 +482,17 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
         promoted = 0
         complete = False
         args = {}
+        flushed = None
+        if os.environ.get("HANDOFF_LAB_FLUSH") == "1":
+            from app.db import sessions
+            search = time.perf_counter()
+            sessions.search_sessions("handofflabneedle")
+            searched_pending = time.perf_counter() - search
+            flushed = history_indexing.flush_pending(quiet=0)
+            search = time.perf_counter()
+            sessions.search_sessions("handofflabneedle")
+            flushed = {"merged": flushed, "search_pending_s": searched_pending,
+                       "search_merged_s": time.perf_counter() - search}
         if os.environ.get("HANDOFF_LAB_BATCH_ROWS"):
             args["rows"] = int(os.environ["HANDOFF_LAB_BATCH_ROWS"])
         try:
@@ -497,7 +518,7 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
             with capsys.disabled():
                 print("HANDOFF_CATCHUP_LAB " + json.dumps({"seconds": elapsed,
                       "complete": complete, "pending": pending, "batch_args": args,
-                      "promoted_rows": promoted, "total_import_and_catchup_wal": total_wal,
+                      "promoted_rows": promoted, "flushed_pages": flushed, "total_import_and_catchup_wal": total_wal,
                       "wal_diagnostics": wal_summary(catchup_wal_start, "catchup"),
                       "live_latency_seconds": catchup_latency}))
         assert complete, "catch-up exceeded the lab time budget"

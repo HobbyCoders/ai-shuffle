@@ -299,33 +299,43 @@ rebuilds and refills it. A term matching more than a couple of thousand pieces
 is read newest-first, so a very common word ranks recent sessions rather than
 scanning the whole history.
 
-Experimental deferred indexing is off by default pending latency acceptance.
-`python -m app.maintenance.history_indexing --apply` requests the online upgrade
-on a disposable candidate; its worker-local migration stamp resumes interrupted
-work after restart. No migration or deferral runs without that explicit opt-in.
-Hand-off imports defer search indexing after the online migration has replaced
-transcript and recall GIN indexes with disjoint live/history partial indexes.
-Existing rows remain live-indexed; adding the state columns is metadata-only.
-Indexes are built and retired concurrently, with a 250 ms lock-acquisition limit.
-Before the migration completes, imports use the original synchronous path.
-Imported rows persist as pending (`history_index_state = 1`); background batches
-promote them to state 2, while ordinary writes use state 0. Search prefilters use
-UNION ALL over states 0 and 2 so each arm can use its partial GIN index. Imported
-text may be absent from search until catch-up, but transcript viewing is unchanged.
-The queue survives restarts. History GIN indexes have separate pending lists,
-limited to 4 MiB per history index. Disposable WAL decoding showed that the
-former 1 MiB history lists amplified GIN insert records; this history-only budget
-reduces that churn, but is not proof of live-latency acceptance. Live inserts and
-edits always enter state 0, so they cannot inherit a history pending-list flush.
-Live GIN settings and the global pending-list limit are unchanged.
-Batches select at most 32 rows using the queue index, then visit only that locked
-window in heap order. The 128 KB and 100 ms budgets span all tables in a call
-(one oversize row may progress); already-indexed rows are excluded. Short
-transactions are paced with 100 ms pauses. Startup checks for active foreground
-runs before migration and before every catch-up row, yielding while turns are
-running. An index build or promotion statement already in progress still finishes.
-Catch-up does not force checkpoints. Total WAL and live-write tails still require
-acceptance on disposable workers before default enablement.
+Hand-off imports keep GIN merging out of the move. Once the projection is
+ready, background maintenance starts the online upgrade by itself on every
+worker; its worker-local migration stamp resumes interrupted work after restart.
+The upgrade replaces transcript and recall GIN indexes with disjoint live/history
+partial indexes. Existing rows remain live-indexed, adding the state columns is
+metadata-only, and indexes are built and retired concurrently with a 250 ms
+lock-acquisition limit. Before the migration completes, imports use the original
+synchronous path.
+
+Imported rows are written as `history_index_state = 2`, ordinary writes as 0.
+Search prefilters use UNION ALL over those states so each arm can use its partial
+GIN index, and imported text is searchable at once. Each history GIN has a
+pending list of just under 2 GiB, the most Windows PostgreSQL allows, so an import
+only appends to it and never pays for a merge. A list that does fill is merged
+by the importer that filled it. Live inserts and edits always enter state 0, so
+they cannot inherit a history pending-list flush. Live GIN settings and the
+global pending-list limit are unchanged.
+
+A background `gin_clean_pending_list` then merges each history list, five seconds
+after the last import and only while no foreground turn is running or waiting to
+start. A watcher cancels the statement within about a second of a turn appearing,
+including one still held in the database-busy queue. A cancelled merge keeps the
+pages it finished, the rest stays searchable in the list, and the next pass
+retries; a restart merges whatever the previous process left. Autovacuum may also
+clean these lists. Until a merge finishes, a search scans the list linearly.
+
+State 1 is the queue left by builds that promoted imported rows one at a time.
+Nothing writes it now. Remaining rows drain in batches of at most 32, located by
+the queue index and visited in heap order, within 128 KB and 100 ms budgets that
+span all tables in a call (one oversize row may progress). Those transactions are
+short, paced with 100 ms pauses, and checked against foreground runs before every
+row.
+
+Measured on a disposable PostgreSQL 16 with the 24,333-row, 78 MB all-text bundle:
+the import fell from 223 s to about 25 s and total WAL including the merge from
+9.5 GB to 1.1 GB, on a shared host. An index build already in progress still
+finishes before it yields.
 
 Once the projection is ready, native transcript search in both session-list
 APIs also prefilters through it, then checks the original visible text for

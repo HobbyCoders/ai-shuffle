@@ -456,6 +456,18 @@ def report_nested_projects() -> int:
     return nested
 
 
+def _no_foreground_turn() -> bool:
+    """Background index work waits for running turns and turns waiting to start.
+
+    A waiting turn counts because the work itself can be what holds it in the
+    database-busy queue; it would never become a run while the work continued.
+    """
+    from app.core import streaming_status
+    from app.core.start_admission import admission
+
+    return not admission.queued and not streaming_status.has_any_active_run()
+
+
 def start_background_tasks() -> List[asyncio.Task]:
     """Phase 6: Start periodic background tasks. Returns tasks for shutdown cancellation."""
     tasks = []
@@ -557,12 +569,11 @@ def start_background_tasks() -> List[asyncio.Task]:
                 from app.db import history_indexing, recall_index_retirement
                 if ready:
                     await asyncio.to_thread(recall_index_retirement.run_pass)
-                from app.core import streaming_status
                 history_ready = await asyncio.to_thread(
-                    history_indexing.run_pass,
-                    can_work=lambda: not streaming_status.has_any_active_run(),
+                    history_indexing.run_pass, can_work=_no_foreground_turn,
                 )
-                await asyncio.sleep(60 if ready and history_ready else 1)
+                # Waiting on a foreground turn should not spin the checks above.
+                await asyncio.sleep(1 if not ready else 60 if history_ready else 5)
             except asyncio.CancelledError:
                 break
             except Exception as e:  # noqa: BLE001 — recall keeps its legacy queries
