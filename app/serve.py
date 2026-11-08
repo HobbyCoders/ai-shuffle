@@ -203,9 +203,10 @@ def run(app, settings) -> None:
             ws_max_size=10 * 1024 * 1024,
             ws_ping_interval=None,
             ws_ping_timeout=None,
-            # Request-owned queries settle explicitly before lifespan. Do not
-            # spend a second, unbounded connection-drain budget afterwards.
-            timeout_graceful_shutdown=0,
+            # Query settlement already drained HTTP. Give Uvicorn one bounded
+            # scheduling tick inside the cleanup reserve: wait_for(timeout=0)
+            # never runs even an empty drain and falsely reports an ERROR.
+            timeout_graceful_shutdown=0.1,
         )
         class StreamDrainingServer(uvicorn.Server):
             async def shutdown(self, sockets=None):

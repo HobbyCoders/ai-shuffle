@@ -68,7 +68,7 @@ async def stream():
             (root / 'stream-closed').touch()
     return PassiveEventResponse(events(), media_type='text/event-stream')
 
-serve.run(app, SimpleNamespace(host='127.0.0.1', port=18000, log_level='critical'))
+serve.run(app, SimpleNamespace(host='127.0.0.1', port=18000, log_level='error'))
 """
 
 
@@ -154,6 +154,7 @@ def test_single_sigterm_drains_connections_then_reaches_lifespan(tmp_path, open_
             assert (tmp_path / 'cleanup-completed').exists(), log.read_text()
             assert (tmp_path / 'turn-settled').read_text() == 'normal shutdown'
             assert not (tmp_path / 'turn-cancelled').exists()
+            assert 'timeout graceful shutdown exceeded' not in log.read_text()
             if open_stream:
                 assert (tmp_path / 'stream-closed').exists()
         finally:
