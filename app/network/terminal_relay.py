@@ -23,7 +23,10 @@ AUTH_RECHECK_SECONDS = 15
 MAX_LEASES = 64
 _owners = {}
 _sessions = {}
-_opening = set()
+_opening = {}  # key -> True once the source revoked this lease mid-open.
+# A device link's last check before a shell registers, and its deletion, take
+# turns here, so a revocation that has returned leaves no shell to appear later.
+_final_authorization = asyncio.Lock()
 
 
 def require_peer(device_id):
@@ -104,13 +107,20 @@ async def _close(key, reason):
         logger.info("peer terminal closed source=%s terminal=%s reason=%s", key[0], terminal.id, reason)
 
 
+async def _revoke_and_close(key_id):
+    try:
+        async with _final_authorization:
+            return await device_links.revoke(key_id)
+    finally:
+        for key, entry in list(_sessions.items()):
+            if entry[5] == key_id:
+                await _close(key, "device-link-revoked")
+
+
 async def revoke_device(key_id):
     """Revoke the link, and close what it opened: authority ends now, not at the next check."""
-    result = await device_links.revoke(key_id)
-    for key, entry in list(_sessions.items()):
-        if entry[5] == key_id:
-            await _close(key, "device-link-revoked")
-    return result
+    # Shielded: a caller who goes away must not leave the link half revoked.
+    return await asyncio.shield(_revoke_and_close(key_id))
 
 
 async def _require_source_owner(from_device, lease):
@@ -142,6 +152,32 @@ def _open_error(code, message, status, **extra):
     return {"error": {"code": code, "message": message, "status": status, **extra}}
 
 
+async def _finish_open(key, terminal, signed, from_device):
+    """Last authorization and registration, as one step against revocation."""
+    async with _final_authorization:
+        await run_sync(link_store.touch, signed["key_id"])
+        link = await run_sync(link_store.get, signed["key_id"])
+        # No awaits from here to registration, so these answers are still true there.
+        if not link or link["via_device"] != from_device:
+            raise PermissionError("Device link revoked during open")
+        require_peer(from_device)
+        if not availability()["available"] or _opening[key]:
+            raise PermissionError("Terminal authorization ended during open")
+        viewer, replay = terminal.attach()
+        viewer.push_output(replay)
+        now = time.monotonic()
+        _sessions[key] = [terminal, viewer, now, asyncio.create_task(_expire(key)), now + MAX_LIFETIME_SECONDS, signed["key_id"]]
+
+
+async def _discard_opening_shell(registry, terminal):
+    from app.core import terminals as service
+    try:
+        # Shielded: a second cancel must not leave a half-killed shell behind.
+        await asyncio.shield(registry.close(terminal.id, by="authorization-lost-during-open"))
+    except service.TerminalError:
+        pass
+
+
 async def _open(key, body, from_device):
     from fastapi import HTTPException
     from app.api.terminals import _validated_terminal_cwd
@@ -153,7 +189,7 @@ async def _open(key, body, from_device):
         return _open_error(state["reason_code"], state["reason"], 409)
     registry = service.registry
     options = body.get("options") or {}
-    _opening.add(key)
+    _opening[key] = False
     terminal = None
     try:
         try:
@@ -172,22 +208,16 @@ async def _open(key, body, from_device):
         terminal = await registry.create(created_by="peer-owner:" + from_device, session_id=target["session_id"],
                                          cwd=cwd, cwd_root=cwd_root, shell=target["shell"],
                                          cols=options.get("cols"), rows=options.get("rows"))
-        # A revocation that landed while the shell spawned wins over the spawn.
-        if not await run_sync(link_store.get, signed["key_id"]):
-            raise PermissionError("Device link revoked during open")
+        # Anything that landed while the shell spawned wins over the spawn.
+        await _finish_open(key, terminal, signed, from_device)
     except BaseException as exc:
         if terminal:
-            await registry.close(terminal.id, by="authorization-lost-during-open")
+            await _discard_opening_shell(registry, terminal)
         if isinstance(exc, service.TerminalError):
             return _open_error(exc.code, exc.message, exc.status)
         raise
     finally:
-        _opening.discard(key)
-    await run_sync(link_store.touch, signed["key_id"])
-    viewer, replay = terminal.attach()
-    viewer.push_output(replay)
-    task = asyncio.create_task(_expire(key))
-    _sessions[key] = [terminal, viewer, time.monotonic(), task, time.monotonic() + MAX_LIFETIME_SECONDS, signed["key_id"]]
+        _opening.pop(key, None)
     logger.info("peer terminal opened source=%s terminal=%s action=%s key=%s", from_device, terminal.id,
                 signed["action"], signed["key_id"][:12])
     return {"terminal": terminal.to_dict()}
@@ -218,6 +248,8 @@ async def handle(body, from_device):
         raise PermissionError("Owner authorization required")
     key = (from_device, lease)
     if op == "revoke":
+        if key in _opening:
+            _opening[key] = True
         await _close(key, "source-owner-revoked")
         return {"revoked": True}
     if op == "open":

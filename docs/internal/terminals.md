@@ -83,6 +83,16 @@ and **immediately closes every shell that device opened** on that worker
 does not outlive its device's authority. An open relay also rechecks the link
 every 15 seconds.
 
+A shell being opened cannot slip past a revocation. The last check of the link
+and the registration of the shell are one step, and the deletion of the link
+takes turns with that step (`terminal_relay._final_authorization`). When a
+revocation has returned, no shell from that device can appear afterwards: an
+open that was already finishing is registered first and then closed by the
+revocation, and a later one is refused and its shell killed. That last step
+also rechecks the setting, the requesting worker's membership and a revoke from
+the requesting worker. If any part of it fails or is cancelled, the shell is
+killed and nothing is left registered.
+
 **Stated limit.** A fully compromised requesting worker serves the page the
 owner is using, so it could trick an open browser into signing a request. The
 key itself cannot be stolen, cannot be used without that browser being open, and

@@ -158,7 +158,7 @@
 					{@const row = isPeerTarget(target, localId) ? peerRow(target, peerTerminals.flow(target.worker_id)?.phase, keyProblem) : null}
 					{@const chip = row ? row.chip : target.available ? null : { label: 'Unavailable', tone: 'off' }}
 					{@const reason = row?.reason ?? null}
-					{@const pickable = index === 0 ? target.available : selectable(target, keyProblem)}
+					{@const pickable = index === 0 ? target.available : selectable(target, isPeerTarget(target, localId) ? keyProblem : null)}
 					<label class="target" class:on={selected === value} class:off={!pickable}>
 						<input type="radio" name="terminal-target" {value} checked={selected === value} disabled={!pickable}
 							aria-label={[target.name, kindLabel(target, index), chip?.label].filter(Boolean).join(', ')}

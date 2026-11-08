@@ -102,6 +102,18 @@ describe('target selection with peer workers', () => {
 		expect(ui.getByText(reason)).toBeTruthy();
 		expect((ui.getByRole('radio', { name: 'Local, This worker' }) as HTMLInputElement).disabled).toBe(false);
 	});
+
+	it("keeps an SSH target usable where this browser can't hold a key: SSH signs nothing with it", async () => {
+		const onOpen = vi.fn(async () => ({ ok: true as const }));
+		const reason = 'This browser needs a secure connection.';
+		const ui = render(NewTerminalPicker, { probe: probeWith([local, peer(), ssh], { deviceKeyProblem: reason }), onOpen });
+		expect((ui.getByRole('radio', { name: /^Peer/ }) as HTMLInputElement).disabled).toBe(true);
+		const radio = ui.getByRole('radio', { name: /^Approved host/ }) as HTMLInputElement;
+		expect(radio.disabled).toBe(false);
+		await fireEvent.click(radio);
+		await fireEvent.click(ui.getByRole('button', { name: 'Open terminal' }));
+		expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ target: { kind: 'ssh', grant_id: 'grant', worker_id: undefined } }));
+	});
 });
 
 describe('opening on a peer worker', () => {

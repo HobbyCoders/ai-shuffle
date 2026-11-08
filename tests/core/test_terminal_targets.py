@@ -22,6 +22,7 @@ def peers(monkeypatch, tmp_path):
     # In-process transport, with the production receiver checks and a real device
     # signature. Owner credentials are covered by the API authorization tests.
     monkeypatch.setattr(relay, "peer_targets_enabled", lambda: True)
+    monkeypatch.setattr(relay, "_final_authorization", asyncio.Lock())  # One per test's event loop.
     secure_context = control.inbound_https.set(True)
     directory = {"runners": [
         {"id": "peer", "device_name": "Peer", "is_self": False, "online": True,
