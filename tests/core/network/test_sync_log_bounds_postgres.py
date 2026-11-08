@@ -234,6 +234,7 @@ async def test_superseded_session_ops_pin_for_a_lagging_peer_and_honour_kill_swi
     assert peer.sql("SELECT title FROM sessions WHERE id = 'chat'") == [{"title": "Chat 4"}]
 
 
+
 def head_seq(worker):
     return worker.sql("SELECT COALESCE(MAX(seq), 0) AS s FROM sync_ops WHERE origin_device_id = %s",
                       (worker.device_id,))[0]["s"]
@@ -244,12 +245,19 @@ def own_ops(worker, after):
                       "ORDER BY seq", (worker.device_id, after))
 
 
-def last_direct_contact(source, peer, days):
-    """The peer last exchanged with ``source`` directly ``days`` ago (its ack is that old too)."""
+def last_direct_contact(source, peer, days, marks):
+    """The peer last exchanged with ``source`` directly ``days`` ago and acknowledged ``marks`` then.
+
+    Every other trace of it is that old too: no fresher presence receipt.
+    """
     source.sql("INSERT INTO sync_peers(device_id, last_contact, updated_at) "
                "VALUES (%s, NOW() - make_interval(days => %s), NOW() - make_interval(days => %s)) "
                "ON CONFLICT (device_id) DO UPDATE SET last_contact = EXCLUDED.last_contact, "
                "updated_at = EXCLUDED.updated_at", (peer.device_id, days, days))
+    source.sql("UPDATE sync_records SET updated_at = NOW() - make_interval(days => %s) "
+               "WHERE collection = 'presence' AND record_id = %s", (days, peer.device_id))
+    # One process hosts every test worker: restore what ``source`` itself last observed.
+    transport._peer_watermarks[peer.device_id] = marks
     transport._peer_watermark_at[peer.device_id] = time.time() - days * 86400
 
 
@@ -260,48 +268,45 @@ def age_split(source, held, *, old_days, new_hours):
                (source.device_id, held, old_days, new_hours))
 
 
-async def test_relayed_peer_past_its_contact_grace_keeps_what_it_lacks(pg_workers, monkeypatch):
-    """B last met A directly 31 days ago but syncs through C; nothing B lacks is deleted early."""
+async def test_relayed_member_past_its_contact_grace_keeps_what_it_lacks(pg_workers, monkeypatch):
+    """B last met A directly 31 days ago but syncs through C; nothing young that B lacks is deleted.
+
+    B's presence fields never change, so A has no fresh trace of it at all.
+    """
     a, b, c = (pg_workers(name) for name in ("a", "b", "c"))
     with a.active():
         engine.create_network("Bounds")
     publish(a, 1, create=True)
     admit(a, b)
     admit(a, c)
-    served_a, served_b, served_c = (ServedBy(w, f"https://{w.name}.example.com") for w in (a, b, c))
+    served_a, served_c = ServedBy(a, "https://a.example.com"), ServedBy(c, "https://c.example.com")
     await sync(b, served_a)
-    await sync(b, served_a)  # A records B's frontier: B's last direct ack
+    await sync(b, served_a)  # B's last direct acknowledgement to A
     held = head_seq(a)
+    acked = {origin: dict(streams) for origin, streams in transport._peer_watermarks[b.device_id].items()}
     await sync(c, served_a)
     # Two hours ago: B gets the start of a streamed reply through C, then goes offline.
     deltas(a, 3)
     await sync(c, served_a)
     await sync(b, served_c)
-    with b.active():
-        engine.publish_presence(version="test")
-    await sync(c, served_b)
     # A finishes the reply and retitles; C holds and acknowledges everything.
     deltas(a, 3, finish=True)
     retitle(a, 1)
     retitle(a, 2)
     await sync(c, served_a)
     await sync(c, served_a)
-    await sync(a, served_c)  # B's presence reaches A only through C
-    assert a.sql("SELECT 1 AS x FROM sync_records WHERE collection = 'presence' AND record_id = %s",
-                 (b.device_id,)) == [{"x": 1}]
-    a.sql("UPDATE sync_records SET updated_at = NOW() - INTERVAL '2 hours' "
-          "WHERE collection = 'presence' AND record_id = %s", (b.device_id,))
-    last_direct_contact(a, b, 31)
+    last_direct_contact(a, b, 31, acked)
     age_split(a, held, old_days=31, new_hours=2)
     with b.active():
         b_holds = store.local_watermarks()[a.device_id][str(a.identity.incarnation)]
     assert b_holds > held  # the reply's start, received through C
-    lacking = own_ops(a, b_holds)
-    assert sum(op["collection"] == "session_events" for op in lacking) == 4
-    assert sum(op["collection"] == "sessions" for op in lacking) >= 2
+    young = own_ops(a, held)
+    assert sum(op["collection"] == "session_events" for op in young) == 7
+    assert sum(op["collection"] == "sessions" for op in young) >= 2
 
     await prune_once(a, monkeypatch)
-    assert own_ops(a, b_holds) == lacking  # main keeps these 2-hour-old ops; so does this branch
+    # B never acknowledged these to A, so they keep main's 30 days, the part B holds included.
+    assert own_ops(a, held) == young
     served_a.requests.clear()
     assert not (await sync(b, served_a)).get("snapshot_required")
     assert not any(path.endswith("/state") for _, path in served_a.requests)
@@ -309,8 +314,8 @@ async def test_relayed_peer_past_its_contact_grace_keeps_what_it_lacks(pg_worker
     assert b.sql("SELECT title FROM sessions WHERE id = 'chat'") == [{"title": "Chat 2"}]
 
 
-async def test_short_grace_keeps_ops_for_a_peer_seen_within_30_days(pg_workers, monkeypatch):
-    """A 1-day contact grace and a 2-day absence keep main's retention; 31 days unseen does not pin."""
+async def test_any_unrevoked_member_pins_and_revocation_releases(pg_workers, monkeypatch):
+    """A short grace or a long absence does not release a member's ops; only revocation does."""
     source, peer = pg_workers("source"), pg_workers("peer")
     with source.active():
         engine.create_network("Bounds")
@@ -320,22 +325,26 @@ async def test_short_grace_keeps_ops_for_a_peer_seen_within_30_days(pg_workers, 
     await sync(peer, served)
     await sync(peer, served)
     held = head_seq(source)
+    acked = {origin: dict(streams) for origin, streams in transport._peer_watermarks[peer.device_id].items()}
     publish(source, 4)
     retitle(source, 1)
     retitle(source, 2)
-    monkeypatch.setenv(store.PEER_GRACE_DAYS_ENV, "1")
-    last_direct_contact(source, peer, 2)
-    source.sql("UPDATE sync_records SET updated_at = NOW() - INTERVAL '2 days' WHERE collection = 'presence'")
-    age_split(source, held, old_days=2, new_hours=2)
     lacking = own_ops(source, held)
     assert sum(op["collection"] == "session_events" for op in lacking) == 4
 
-    await prune_once(source, monkeypatch)
-    assert own_ops(source, held) == lacking
+    # A 1-day grace and a 2-day absence, then 31 days with no trace: still a member, still pinned.
+    monkeypatch.setenv(store.PEER_GRACE_DAYS_ENV, "1")
+    for days in (2, 31):
+        last_direct_contact(source, peer, days, acked)
+        age_split(source, held, old_days=days, new_hours=2)
+        await prune_once(source, monkeypatch)
+        assert own_ops(source, held) == lacking
 
-    # Not seen by any route for 31 days: the peer no longer pins, as on main.
-    last_direct_contact(source, peer, 31)
-    source.sql("UPDATE sync_records SET updated_at = NOW() - INTERVAL '31 days' WHERE collection = 'presence'")
+    # Revoked: the member no longer pins and the early rules apply.
+    with source.active():
+        engine.revoke_device(peer.device_id)
+    age_split(source, held, old_days=31, new_hours=2)
     await prune_once(source, monkeypatch)
-    assert sum(op["collection"] == "session_events" for op in own_ops(source, held)) <= 1
-    assert sum(op["collection"] == "sessions" for op in own_ops(source, held)) == 1
+    remaining = own_ops(source, held)
+    assert sum(op["collection"] == "session_events" for op in remaining) <= 1
+    assert sum(op["collection"] == "sessions" for op in remaining) == 1
