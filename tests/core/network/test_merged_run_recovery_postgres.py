@@ -31,7 +31,7 @@ from app.db import base, sessions
 from app.db import network as store
 from app.db import session_events as events_db
 from app.db.base import get_db
-from app.network import catalog, engine, policy, transcripts, transport
+from app.network import catalog, engine, handoff, policy, transcripts, transport
 from tests.core.network.test_transcript_op_retention_postgres import (  # noqa: F401
     admit,
     cluster,
@@ -684,3 +684,22 @@ async def test_failing_repairs_rotate_and_do_not_hide_a_reachable_owner(pg_worke
     assert set(tried) == set(sessions_queued)
     assert len(tried) == len(sessions_queued)  # A deferred entry is not retried ahead of its turn.
     assert "zz-reachable" not in queued(peer)
+
+
+def test_a_hand_off_import_resets_readers_only_when_it_rewrites_beneath_them(pg_workers):
+    worker = lone_worker(pg_workers)
+    plant(worker, delta_row(8, "terminal", "end"))
+    first = transcript(worker)[0]["id"]
+    unchanged = [(first, 1), ("terminal", 8)]
+    above = [*unchanged, ("newer", 9)]
+    beneath = [(first, 1), ("filled", 4), ("terminal", 8)]
+    with worker.active():
+        epoch = events_db.get_reader_epoch("chat")
+        for snapshot in (unchanged, above):
+            with get_db() as conn:
+                handoff._reconcile_app_rows(conn.cursor(), "chat", "session_events", snapshot)
+            assert events_db.get_reader_epoch("chat") == epoch
+        with get_db() as conn:
+            handoff._reconcile_app_rows(conn.cursor(), "chat", "session_events", beneath)
+        assert events_db.get_reader_epoch("chat") != epoch
+        assert events_db.get_log_epoch("chat") == first
