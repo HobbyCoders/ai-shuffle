@@ -80,8 +80,9 @@ def content_update(svc, plugin_id, install, marketplace):
     name, mp_id = plugin_id.rsplit("@", 1)
     location = marketplace.get("installLocation")
     installed_path = install.get("installPath")
-    if not location or not installed_path or not Path(installed_path).is_dir():
-        return None
+    if not location:
+        raise ValueError("Plugin source location is unavailable")
+    missing = not installed_path or not Path(installed_path).is_dir()
     mp_path = Path(location)
     entry = svc._find_plugin_in_manifest(mp_id, name)
     implicit = bool(install.get("implicit"))
@@ -90,15 +91,18 @@ def content_update(svc, plugin_id, install, marketplace):
     source = entry.get("source", "") if entry and not implicit else ""
     installed_version = install.get("version", "unknown")
     entry_version = entry.get("version") if entry and not implicit else None
+    # A changed fallback label still needs candidate metadata inspection even
+    # when the git pin/revision is unchanged (a manifest may omit its version).
+    inspect_metadata = missing or _is_update(installed_version, entry_version or installed_version)
     if isinstance(source, dict):
         pin = source.get("sha")
         installed_revision = install.get("sourceRevision")
-        if pin and ((installed_revision and installed_revision.startswith(pin))
+        if not inspect_metadata and pin and ((installed_revision and installed_revision.startswith(pin))
                     or (not installed_revision and install.get("sourceSha") == pin[:7])):
             return None  # An unchanged exact pin never follows the branch tip.
         if not source.get("sha"):
             revision = _remote_revision(source)
-            if revision and revision == install.get("sourceRevision"):
+            if not inspect_metadata and revision and revision == install.get("sourceRevision"):
                 return None  # Do not re-clone unchanged external repositories.
 
     with tempfile.TemporaryDirectory(prefix="plugin-update-") as tmp:
@@ -106,6 +110,8 @@ def content_update(svc, plugin_id, install, marketplace):
         available = tmp / "available"
         if implicit:
             components = discover_implicit_components(svc, mp_path)
+            if not any(components.values()):
+                raise ValueError("Plugin source contains no installable components")
             available.mkdir()
             for component in IMPLICIT_COMPONENTS:
                 src = components.get(f"{component}_dir")
@@ -122,11 +128,20 @@ def content_update(svc, plugin_id, install, marketplace):
             metadata = manifest.get("metadata") or {}
             local = svc._resolve_plugin_source(source, mp_path, metadata.get("pluginRoot"))
             if not local:
-                return None
+                raise ValueError("Plugin source directory is unavailable")
             _copy_tree_resolving_symlinks(local, available, root=mp_path, skip_git=True)
             version = svc._get_plugin_manifest_version(available) or entry_version or installed_version
         if _compare_versions(installed_version, version) == -1:
+            if missing:
+                raise ValueError("Missing plugin cannot be repaired from an older release")
             return None
+        if missing:
+            return PluginUpdateInfo(
+                plugin_id=plugin_id, name=name, marketplace=mp_id,
+                installed_version=installed_version,
+                available_version=version if version != installed_version else f"{version} (repair)",
+                is_local=not isinstance(source, dict),
+            )
         current = tmp / "current"
         _copy_tree_resolving_symlinks(Path(installed_path), current, skip_git=True)
         current_hash, available_hash = _tree_digest(current), _tree_digest(available)
