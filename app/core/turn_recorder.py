@@ -12,7 +12,7 @@ Invariants (program rules):
 - Recording never blocks a turn: if the run lease cannot be claimed, events are
   appended UNFENCED (``run_id=None``) with a logged warning.
 
-Delta batching: ``stream_delta`` text/thinking/tool-input payloads are
+Delta batching: ``stream_delta`` text/thinking/tool-input and ``subagent_chunk`` payloads are
 buffered in memory and flushed as ONE coalesced contract event per kind when
 150ms have elapsed since the first buffered delta, OR the kind's buffer reaches
 2048 chars, OR any non-delta event arrives (flushed BEFORE it so log order
@@ -1156,7 +1156,7 @@ class TurnRecorder:
             return
         etype = event.get("type")
 
-        if etype == "stream_delta":
+        if etype in ("stream_delta", "subagent_chunk"):
             if self._buffer_delta(event):
                 # Size threshold (≥ FLUSH_MAX_BUFFER_CHARS) — flush now.
                 await self._append(self._drain_buffered_events())
@@ -1347,7 +1347,11 @@ class TurnRecorder:
         """Buffer one stream_delta. Returns True when a size-flush is due."""
         delta_type = event.get("delta_type")
         content = event.get("content") or ""
-        if delta_type not in ("text", "thinking", "tool_input") or not content:
+        if event.get("type") == "subagent_chunk":
+            delta_type = "subagent/" + str(event.get("agent_id") or "")
+        elif delta_type not in ("text", "thinking", "tool_input"):
+            return False
+        if not content:
             return False
         if delta_type == "thinking" and event.get("subtype"):
             # The provider's summary and its reasoning text are different
@@ -1404,6 +1408,12 @@ class TurnRecorder:
                         **({"subtype": subtype} if subtype else {}),
                     )
                 )
+            elif kind.startswith("subagent/"):
+                events.append(self._event(
+                    contract.SubagentProgress,
+                    task_id=kind.partition("/")[2], kind="chunk",
+                    payload={"content": text},
+                ))
             elif kind == "tool_input":
                 events.append(self._event(
                     contract.ToolInputDelta,

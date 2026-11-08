@@ -2993,6 +2993,9 @@ async def _stream_to_websocket_turn(
                 "run_in_background": True,
                 "_cross_turn": True,
             }
+        # Final child AssistantMessages repeat their streamed text; only
+        # non-streamed blocks need the complete-block fallback.
+        streamed_subagent_blocks: set[tuple[str, int]] = set()
         tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
         metadata = {
             "usage_settlement_key": await capture_usage_identity(session_id),
@@ -3432,10 +3435,16 @@ async def _stream_to_websocket_turn(
                 # Route subagent StreamEvents — don't mix into main agent stream.
                 # parent_tool_use_id is set on subagent events.
                 if is_subagent_lane:
-                    # Only forward text deltas as subagent_chunk for real-time display
+                    if event_type == "message_start":
+                        streamed_subagent_blocks.difference_update(
+                            key for key in list(streamed_subagent_blocks) if key[0] == parent_tool_id
+                        )
+                    # The recorder coalesces these per child before persistence;
+                    # live consumers still receive each fragment immediately.
                     if event_type == "content_block_delta":
                         delta = event.get("delta", {})
                         if delta.get("type") == "text_delta" and delta.get("text"):
+                            streamed_subagent_blocks.add((parent_tool_id, event.get("index", 0)))
                             yield {
                                 "type": "subagent_chunk",
                                 "agent_id": parent_tool_id,
@@ -3587,11 +3596,15 @@ async def _stream_to_websocket_turn(
                 if asst_uuid and not parent_tool_id:
                     metadata["last_assistant_uuid"] = asst_uuid
 
-                for block in message.content:
+                for block_index, block in enumerate(message.content):
                     if isinstance(block, TextBlock):
                         # Check if this text is from a subagent.
                         if is_subagent_lane:
-                            # Text from subagent - send as subagent_chunk
+                            key = (parent_tool_id, block_index)
+                            if key in streamed_subagent_blocks:
+                                streamed_subagent_blocks.discard(key)
+                                continue
+                            # No partial text arrived: retain the complete-block fallback.
                             logger.debug(f"[WS] Subagent chunk len={len(block.text)} for agent={parent_tool_id}")
                             yield {
                                 "type": "subagent_chunk",
