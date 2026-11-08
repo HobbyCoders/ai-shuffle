@@ -131,7 +131,7 @@ test('a first start that is not healthy yet, or an update holding the lock, leav
 test('an active build under a temporary name is still read, so everything it runs from survives', async t => {
   // Review of #1276: an active build being put back sits in versions/<revision>.restoring.
   const f = await fixture(t);
-  await fs.rm(path.join(f.root, 'versions', R), { recursive: true });
+  await fs.rm(path.join(f.root, 'versions', R), { recursive: true, maxRetries: 10, retryDelay: 100 });
   await fs.rename(path.join(f.root, 'versions', A), path.join(f.root, 'versions', A + '.restoring'));
   const result = await pruneDependencies(f.root, A, quiet);
   assert.equal(result.skipped, undefined);
