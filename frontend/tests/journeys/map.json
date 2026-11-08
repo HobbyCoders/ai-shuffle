@@ -233,6 +233,18 @@
 			]
 		},
 		{
+			"why": "an agent's edits save through the preview cookie a dev instance is reached with, and read back after a reload",
+			"journeys": ["agent-model-pin"],
+			"globs": [
+				"frontend/tests/journeys/agent-model-pin.journey.mjs",
+				"frontend/src/lib/components/deck/cards/ProfileCard.svelte",
+				"frontend/src/lib/components/deck/cards/profiles/AgentModelsTab.svelte",
+				"app/api/agents.py",
+				"app/api/auth.py",
+				"app/core/preview_access.py"
+			]
+		},
+		{
 			"why": "rewinding a message: its dialog, its request and what the transcript does through it",
 			"journeys": ["rewind-transcript"],
 			"globs": [
