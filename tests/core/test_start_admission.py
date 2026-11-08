@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from itertools import pairwise
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -176,6 +176,72 @@ async def test_bound_timeout_and_stop_do_not_claim_work(
     assert gate.queued == 0
     assert await gate.wait("b", "other", lambda: False) == "deferred"  # deadline
     assert gate.queued == 0
+
+
+@pytest.mark.asyncio
+async def test_status_changes_only_for_a_turn_that_really_waits(
+    quick_gate: tuple, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, stats = quick_gate
+    monkeypatch.setattr(start_admission.settings, "db_start_max_waiters", 1)
+    heard: list[tuple[str, bool]] = []
+
+    def teller(name: str):
+        async def tell(queued: bool) -> None:
+            heard.append((name, queued))
+        return tell
+
+    stopped = False
+    task = asyncio.create_task(gate.wait("a", "s", lambda: stopped, teller("waiter")))
+    await asyncio.sleep(0.01)
+    assert heard == [("waiter", True)]
+    assert gate.queued_sessions() == {"s"}
+    assert await gate.wait("a", "s", lambda: False, teller("duplicate")) == "cancelled"
+    assert await gate.wait("b", "other", lambda: False, teller("overflow")) == "deferred"
+    assert heard == [("waiter", True)]
+
+    stopped = True  # Stop still reaches a waiting turn, and the row hears it ended.
+    assert await task == "cancelled"
+    assert heard == [("waiter", True), ("waiter", False)]
+    assert gate.queued_sessions() == set()
+
+    for key in ("utilization", "waiting", "oldest"):
+        stats[key] = 0
+    gate._blocked = False
+    gate._next_start = 0
+    assert await gate.wait("c", "s", lambda: False, teller("fast")) == "ready"
+    assert ("fast", True) not in heard
+
+
+@pytest.mark.asyncio
+async def test_a_failing_status_update_cannot_decide_the_turn(
+    quick_gate: tuple, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, _ = quick_gate
+    monkeypatch.setattr(start_admission.settings, "db_start_wait_seconds", 0.02)
+
+    async def broken(_queued: bool) -> None:
+        raise RuntimeError("socket gone")
+
+    assert await gate.wait("a", "s", lambda: False, broken) == "deferred"
+    assert gate.queued == 0
+
+
+@pytest.mark.asyncio
+async def test_publishing_the_wait_names_the_owner_without_reading_the_database() -> None:
+    from app.core.sync_engine import sync_engine
+
+    for api_user_id, audience in ((None, "admin"), ("user-1", "api_user")):
+        runtime = session_runtime.SessionRuntime.__new__(session_runtime.SessionRuntime)
+        runtime.session_id = "s"
+        runtime.api_user_id = api_user_id
+        with patch.object(sync_engine, "broadcast_user_session_updated", new=AsyncMock()) as sent:
+            await runtime._publish_start_queued(True)
+            await runtime._publish_start_queued(False)
+        first, second = (call.kwargs for call in sent.call_args_list)
+        assert first["user_id"].user_type == audience
+        assert first["updates"] == {"start_queued": True}
+        assert second["updates"] == {"start_queued": None}
 
 
 def test_sustained_pressure_hysteresis_and_recent_latency(

@@ -27,6 +27,14 @@ describe('TurnActivity', () => {
 		expect(screen.getByRole('status').textContent).toContain('Working…');
 	});
 
+	it('says a held turn is queued, with no working timer (#583)', () => {
+		render(TurnActivity, { props: { startedAt: new Date(Date.now() - 8000).toISOString(), queued: true } });
+		const status = screen.getByRole('status');
+		expect(status.textContent).toContain('Queued (database busy)');
+		expect(status.textContent).not.toContain('Working');
+		expect(status.getAttribute('aria-label')).toBe('Waiting for the database');
+	});
+
 	it('shows the running compaction with its reason', () => {
 		render(TurnActivity, { props: { compaction: compaction() } });
 		const status = screen.getByRole('status');

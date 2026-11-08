@@ -30,6 +30,7 @@ from app.core.models import (
     PaginatedSessionSearchResults
 )
 from app.db import database
+from app.core import start_admission
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.api.common import api_error_handler
@@ -1100,6 +1101,8 @@ async def get_session(
     from app.db.background_tasks import get_running_task_presence
     presence = await run_sync(get_running_task_presence, [session["id"]])
     session["has_running_tasks"] = presence.get(session["id"], {}).get("has_running_tasks", False)
+    if session["id"] in start_admission.admission.queued_sessions():
+        session["start_queued"] = True
 
     session["messages"] = messages
     session["tags"] = await run_sync(database.get_session_tags, session_id)

@@ -2012,6 +2012,15 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	it('patches the admission wait onto the row and clears it (#583)', () => {
+		for (const value of [true, null]) {
+			deps = createMockDeps();
+			handlers = createMessageHandlers(deps);
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: { start_queued: value } });
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { start_queued: value });
+		}
+	});
+
 	describe.each(['session_updated', 'user_session_updated'])('%s handler (parked task kind)', (type) => {
 		it.each(['agent', 'shell', null])('patches parked_task_kind=%s without a list reload', async (parkedTaskKind) => {
 			vi.useFakeTimers();

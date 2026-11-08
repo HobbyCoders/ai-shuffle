@@ -35,9 +35,11 @@
 		/** False when only a compaction may show: with nothing to report the
 		 *  line renders nothing instead of "Working…". */
 		working?: boolean;
+		/** The turn is held until the database has room, so nothing is working yet. */
+		queued?: boolean;
 	}
 
-	let { startedAt = null, compaction = null, working = true }: Props = $props();
+	let { startedAt = null, compaction = null, working = true, queued = false }: Props = $props();
 	let now = $state(Date.now());
 	let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -60,6 +62,7 @@
 	const shownCompaction = $derived(compactionVisible(compaction, now) ? compaction : null);
 	const label = $derived.by(() => {
 		const c = shownCompaction;
+		if (!c && queued) return 'Queued (database busy)';
 		if (!c) return elapsed ? `Working for ${elapsed}` : 'Working…';
 		const reason = compactionReason(c);
 		if (c.phase === 'failed') {
@@ -76,7 +79,7 @@
 	class:compacting={shownCompaction?.phase === 'running'}
 	class:compaction-failed={shownCompaction?.phase === 'failed'}
 	role="status"
-	aria-label={shownCompaction ? 'Context compaction' : 'Assistant is working'}
+	aria-label={shownCompaction ? 'Context compaction' : queued ? 'Waiting for the database' : 'Assistant is working'}
 	data-testid="turn-activity"
 >
 	<span class="activity-dot" aria-hidden="true"></span>

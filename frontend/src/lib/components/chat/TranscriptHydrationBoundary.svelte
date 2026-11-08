@@ -24,13 +24,15 @@
 	import { classifyChatSurface, type ChatSurface, type HistoryStallKind } from '$lib/components/layout/chat-empty-state';
 	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
 
-	let { children, graceMs = TRANSCRIPT_LOADING_GRACE_MS, mirrorPending = false, navigationOverlayOpen = false, onSurface }: {
+	let { children, graceMs = TRANSCRIPT_LOADING_GRACE_MS, mirrorPending = false, navigationOverlayOpen = false, startQueued = false, onSurface }: {
 		children: Snippet;
 		graceMs?: number;
 		/** The ancestor gate owns inertness and its own notice during a remote barrier. */
 		mirrorPending?: boolean;
 		/** Native phone navigation selects its target one frame after closing the drawer. */
 		navigationOverlayOpen?: boolean;
+		/** The open chat's first turn is waiting for database room. */
+		startQueued?: boolean;
 		onSurface?: (surface: ChatSurface, messageCount: number, sessionId: string | null | undefined) => void;
 	} = $props();
 
@@ -177,7 +179,8 @@
 		messageCount,
 		isLoadingSession: $presented.isLoadingSession,
 		isRestoringSession: $presented.isRestoringSession,
-		historyStalled: !!$presented.historyStall
+		historyStalled: !!$presented.historyStall,
+		startQueued
 	}), overlay ? 0 : messageCount, overlay ? targetSessionId : $presented.sessionId));
 </script>
 

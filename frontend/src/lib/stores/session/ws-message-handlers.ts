@@ -193,6 +193,8 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'pr_state',
 	'pull_requests',
 	'parked_task_kind',
+	// The turn is held until the database has room: the row says Queued, not Working.
+	'start_queued',
 	'has_running_tasks',
 	// A turn started or ended: a sidebar not watching that chat learns here
 	// whether its latest turn failed.

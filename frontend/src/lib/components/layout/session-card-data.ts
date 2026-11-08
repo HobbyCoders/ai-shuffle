@@ -15,6 +15,7 @@ import type { ChatMessage } from '$lib/stores/types';
 /** Status shown on a card's first line. */
 export type SessionCardStatus =
 	| 'working'
+	| 'queued'
 	| 'parked'
 	| 'needs_permission'
 	| 'has_question'
@@ -29,6 +30,7 @@ export type SessionCardStatus =
 
 export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 	working: 'Working',
+	queued: 'Queued (database busy)',
 	parked: 'Parked',
 	needs_permission: 'Needs Permission',
 	has_question: 'Has Question',
@@ -52,6 +54,7 @@ export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 
 export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 	working: 'Working',
+	queued: 'Queued',
 	parked: 'Parked',
 	needs_permission: 'Needs permission',
 	has_question: 'Has question',
@@ -216,6 +219,8 @@ export function sessionNeedsInput(
 export function deriveStatus(input: {
 	remoteRuntimeState?: Session['remote_runtime_state'];
 	streaming: boolean;
+	/** The new turn is waiting for start admission (the database is busy). */
+	startQueued?: boolean;
 	optimisticStreaming?: boolean;
 	backgroundWork?: boolean;
 	parked?: boolean;
@@ -261,6 +266,8 @@ export function deriveStatus(input: {
 	if (input.attention && input.attention.count > 0) {
 		return input.attention.kind === 'question' ? 'has_question' : 'needs_permission';
 	}
+	// Accepted but held for database room: no turn runs yet, so not Working.
+	if (input.startQueued) return 'queued';
 	// Working means a turn is actually running. A turn that ended with live
 	// background work (a Monitor shell, a sub-agent) is parked even when the
 	// durable marker is missing: some park paths never write it (durable agent

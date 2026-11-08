@@ -383,6 +383,9 @@ class Session(SessionBase):
     # The latest turn that ran ended in a failure, so the row says so (#1032).
     # Like the chips: read for the list and search, null where it was not read.
     last_turn_failed: Optional[bool] = None
+    # Accepted, but held by start admission until the database can take it (#583).
+    # Only set while it waits; read from memory, never stored.
+    start_queued: Optional[bool] = None
     api_user_id: Optional[str] = None
     api_user_name: Optional[str] = None
     total_cost_usd: float = 0.0
