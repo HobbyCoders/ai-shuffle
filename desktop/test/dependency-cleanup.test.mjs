@@ -117,6 +117,29 @@ for (const [name, damage] of [
   assert.equal(await exists(path.join(f.root, 'update.lock')), false);
 });
 
+for (const [name, before, swap] of [
+  // Review of #1276: a folder is swapped for a junction after the inventory, just before a delete.
+  // The root swap lands right before a whole-tree delete, which has no folder between it and the root.
+  ['updates/dependencies', ORPHAN, async ({ deps }, decoy) => { await fs.rename(deps, deps + '-moved'); await link(decoy, deps); }],
+  ['node/tools', `node/tools/${gen('0')}`, async ({ d }, decoy) => { await fs.rename(d('node/tools'), d('node/tools-moved')); await link(path.join(decoy, 'node/tools'), d('node/tools')); }],
+]) test(`nothing more is deleted when ${name} becomes a junction after the inventory`, async t => {
+  const f = await fixture(t);
+  // The junction target holds folders with exactly the names the inventory chose to delete.
+  const decoy = path.join(f.outside, 'decoy');
+  for (const inside of [path.join('node/tools', gen('0')), ORPHAN]) await file(path.join(decoy, inside, 'keep.txt'), 'must survive');
+  let swapped = false, after = [];
+  const result = await pruneDependencies(f.root, R, quiet, { beforeRemove: async candidate => {
+    if (swapped) after.push(candidate);
+    if (candidate === before && !swapped) { swapped = true; after.push(candidate); await swap(f, decoy); }
+  } });
+  assert.ok(swapped, `the inventory chose ${before}`);
+  assert.match(result.skipped, /changed after the inventory|is a link/);
+  assert.deepEqual(after, [before], 'the cleanup stops at the first changed folder');
+  assert.ok(!result.removed.includes(before));
+  for (const inside of [path.join('node/tools', gen('0')), ORPHAN]) assert.equal(await fs.readFile(path.join(decoy, inside, 'keep.txt'), 'utf8'), 'must survive');
+  assert.equal(await exists(path.join(f.root, 'update.lock')), false);
+});
+
 test('a first start that is not healthy yet, or an update holding the lock, leaves everything', async t => {
   const f = await fixture(t);
   await fs.writeFile(path.join(f.root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: A, previous: B, booting: R }));

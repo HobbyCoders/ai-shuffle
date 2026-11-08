@@ -15,7 +15,9 @@
  * - never follows a junction or symlink: links are read with readlink, never
  *   walked, and a link is removed as a link. A link anywhere on the way to a
  *   folder it would list or delete, including updates/dependencies itself, stops
- *   the whole cleanup;
+ *   the whole cleanup. Right before each delete, every one of those folders must
+ *   still have the volume and file id the inventory recorded (see the limits noted
+ *   at the delete);
  * - holds update.lock, so no update build runs at the same time, and skips when
  *   it is taken;
  * - never throws: a failure is logged and the next start tries again;
@@ -57,7 +59,10 @@ export async function removeDependencyDirectory(directory: string): Promise<void
   await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
-export async function pruneDependencies(root: string, running: string | null, logger: Logger = console): Promise<DependencyCleanup> {
+/** Test seam: runs after the inventory, just before each candidate's final check and delete. */
+export interface CleanupHooks { beforeRemove?(candidate: string): Promise<void> }
+
+export async function pruneDependencies(root: string, running: string | null, logger: Logger = console, hooks: CleanupHooks = {}): Promise<DependencyCleanup> {
   const result: DependencyCleanup = { removed: [], failed: [] };
   let state: SourceState;
   try {
@@ -81,10 +86,19 @@ export async function pruneDependencies(root: string, running: string | null, lo
     const real = await plainDependencies(dependencies);
     if (real === null) return result;
     const keep = await protectedPaths(root, state, running, real);
-    for (const candidate of await candidates(dependencies, real, keep)) {
+    const identities = new Map<string, string>();
+    for (const candidate of await candidates(dependencies, real, keep, identities)) {
       try {
-        // Checked again just before deleting: no folder on the way may have become a link.
-        if (!await assertPlain(dependencies, real, candidate.slice(0, -1))) continue;
+        await hooks.beforeRemove?.(candidate.join('/'));
+        // Just before deleting, updates/dependencies, every folder below it on the way and
+        // the candidate itself must still be the same real folders the inventory saw (same
+        // volume and file id, not a link). Any change stops the rest of the cleanup.
+        // Limits, accepted on purpose: a swap in the moment between this check and the
+        // delete cannot be fully ruled out on Windows without handle-relative deletes, and
+        // it needs a local process that can already write to the user's AppData. The
+        // cleanup is not transactional either: folders deleted before a check stops it
+        // stay deleted, which is safe because they were unused.
+        await assertUnchanged(dependencies, candidate, identities);
         await removeDependencyDirectory(path.join(dependencies, ...candidate));
         // A rejected npm set's tombstone sits beside it; it means nothing once the set is gone.
         if (candidate.at(-3) === 'node') await fs.rm(path.join(dependencies, ...candidate.slice(0, -1), '.invalid-' + candidate.at(-1)), { force: true });
@@ -237,21 +251,49 @@ async function protectedPaths(root: string, state: SourceState, running: string 
 }
 
 /** Unused dependency folders as path segments under updates/dependencies. Links and unknown names are never listed. */
-async function candidates(dependencies: string, real: string, keep: Set<string>): Promise<string[][]> {
+async function candidates(dependencies: string, real: string, keep: Set<string>, identities: Map<string, string>): Promise<string[][]> {
   const kept = (segments: string[]) => { const self = key(segments); for (const used of keep) if (used === self || used.startsWith(self + '/')) return true; return false; };
   const directories = async (segments: string[], pattern: RegExp) => {
     // Never list through a link: a folder reached that way is not where its name says.
     if (!await assertPlain(dependencies, real, segments)) return [];
+    await remember(dependencies, segments, identities);
     return (await fs.readdir(path.join(dependencies, ...segments), { withFileTypes: true }))
       .filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && pattern.test(entry.name)).map(entry => [...segments, entry.name]);
   };
   const unused: string[][] = [];
-  const nodeSets = async (base: string[]) => { for (const pkg of NODE_PACKAGES) for (const set of await directories([...base, 'node', pkg], NODE_SET)) if (!kept(set)) unused.push(set); };
+  const add = async (segments: string[]) => { await remember(dependencies, segments, identities); unused.push(segments); };
+  const nodeSets = async (base: string[]) => { for (const pkg of NODE_PACKAGES) for (const set of await directories([...base, 'node', pkg], NODE_SET)) if (!kept(set)) await add(set); };
   await nodeSets([]);
   for (const tree of await directories([], RUNTIME_TREE)) {
-    if (!kept(tree)) { unused.push(tree); continue; }
-    for (const set of await directories([...tree, 'python'], PYTHON_SET)) if (!kept(set)) unused.push(set);
+    if (!kept(tree)) { await add(tree); continue; }
+    for (const set of await directories([...tree, 'python'], PYTHON_SET)) if (!kept(set)) await add(set);
     await nodeSets(tree);
   }
   return unused;
+}
+
+const label = (segments: string[]) => ['dependencies', ...segments].join('/');
+
+/** A real folder's identity: its volume and file id. A link, a file or an unreadable entry is Unsafe. */
+async function identity(at: string, name: string): Promise<string> {
+  let stat;
+  try { stat = await fs.lstat(at, { bigint: true }); } catch { throw new Unsafe(`${name} cannot be read`); }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Unsafe(`${name} is a link or not a folder`);
+  return `${stat.dev}:${stat.ino}`;
+}
+
+/** Record the identity of updates/dependencies and every folder down to `segments`, as the inventory saw them. */
+async function remember(dependencies: string, segments: string[], identities: Map<string, string>): Promise<void> {
+  for (let depth = 0; depth <= segments.length; depth++) {
+    const part = segments.slice(0, depth), id = key(part);
+    if (!identities.has(id)) identities.set(id, await identity(path.join(dependencies, ...part), label(part)));
+  }
+}
+
+/** updates/dependencies, every folder on the way and the candidate must still have the identity the inventory recorded. */
+async function assertUnchanged(dependencies: string, candidate: string[], identities: Map<string, string>): Promise<void> {
+  for (let depth = 0; depth <= candidate.length; depth++) {
+    const part = candidate.slice(0, depth), recorded = identities.get(key(part));
+    if (recorded === undefined || await identity(path.join(dependencies, ...part), label(part)) !== recorded) throw new Unsafe(`${label(part)} changed after the inventory`);
+  }
 }
