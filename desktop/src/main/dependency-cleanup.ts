@@ -30,7 +30,8 @@ const RUNTIME_TREE = /^(?:[a-f0-9]{24}|[a-f0-9]{64})$/;
 const NODE_PACKAGES = ['frontend', 'tools', 'browser-mcp', 'desktop'];
 /** A completed npm set, or a partial install left by an interrupted one. */
 const NODE_SET = /^[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?(?:\.tmp-[a-f0-9]{8})?$/;
-const PYTHON_SET = /^[a-f0-9]{24}$/;
+/** A Python environment, or a partial one left by an interrupted install. */
+const PYTHON_SET = /^[a-f0-9]{24}(?:\.tmp-[a-f0-9]{8})?$/;
 const NODE_GENERATION = /^(?:[a-f0-9]{24}(?:[a-f0-9]{40})?\/)?node\/(?:frontend|tools|browser-mcp|desktop)\/[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?$/;
 /** Every node_modules link a build makes (removeSourceDirectory detaches the same ones). */
 const LINKED_PACKAGES = ['frontend', 'mobile', 'tools', 'browser-mcp', 'desktop'];

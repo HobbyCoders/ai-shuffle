@@ -50,6 +50,7 @@ async function fixture(t) {
   await file(path.join(root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: A, previous: B, failed: [FAILED] }));
   // Leftovers no kept folder uses.
   await file(d(tree1, 'python', P0.slice(0, 24), 'Scripts/python.exe'));
+  await file(d(tree1, 'python', P1.slice(0, 24) + '.tmp-abcdef12', 'pyvenv.cfg'));
   await file(d('node/tools', gen('0'), 'node_modules/.package-lock.json'));
   await file(d('node/tools', '.invalid-' + gen('0')), '');
   await file(d('node/tools', gen('e', '-mabc99-0123abcd.tmp-abcdef12'), 'package.json'));
@@ -73,6 +74,7 @@ test('unused dependency trees and npm sets are removed; everything a kept or run
     ORPHAN,
     `${K2}/node/tools/${gen('0')}`,
     `${tree1}/python/${P0.slice(0, 24)}`,
+    `${tree1}/python/${P1.slice(0, 24)}.tmp-abcdef12`,
     `node/tools/${gen('0')}`,
     `node/tools/${gen('e', '-mabc99-0123abcd.tmp-abcdef12')}`,
   ].sort());
