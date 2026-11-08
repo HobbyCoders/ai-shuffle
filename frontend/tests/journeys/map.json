@@ -169,6 +169,17 @@
 			]
 		},
 		{
+			"why": "which worker a chat is on when its local record and its owner disagree: the row's marker, the worker filter and the Move menu",
+			"journeys": ["sidebar-worker-owner"],
+			"globs": [
+				"frontend/tests/journeys/sidebar-worker-owner.journey.mjs",
+				"frontend/src/lib/components/layout/SessionCard*",
+				"frontend/src/lib/components/layout/session-card-data*",
+				"frontend/src/lib/components/chat/ContextPillBar.svelte",
+				"app/api/sessions_helpers.py"
+			]
+		},
+		{
 			"why": "what a sidebar row says is true: one row's failed change undoes only that change, a failed turn reads Failed on every producer, a project is listed once in the Filter",
 			"journeys": ["sidebar-truth"],
 			"globs": [
