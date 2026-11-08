@@ -9,6 +9,7 @@ from app.core import application_updates as producer
 from docker import application_updates as consumer
 from docker import container_runtime as runtime
 from tests.test_update_candidate_harness import Clock
+from tests.test_application_updates import A, B, FakeDatabase, feed
 
 
 def test_actual_producer_and_consumer_install_before_first_readiness_probe(tmp_path, monkeypatch):
@@ -110,6 +111,68 @@ def test_startup_does_not_accept_expired_or_disabled_install(tmp_path, monkeypat
     assert updater.state["pending"] == "b" * 40
     assert updater.image["revision"] == "a" * 40
     assert updater.running is None
+
+
+def test_repeat_install_before_first_successful_probe_preserves_snapshot(feed, monkeypatch):
+    updater, publish, *_ = feed
+    publish()
+    updater.database = FakeDatabase()
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.activating()
+    snapshot = updater.state["snapshot"]
+    updater.database.databases["ai_shuffle"] = "migrated by B"
+    clock = Clock()
+    for module in (producer, consumer, runtime):
+        monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(producer, "allowed", lambda: True)
+    monkeypatch.setattr(producer, "control_root", lambda: updater.root)
+    monkeypatch.setattr(updater, "tick", updater.service)
+    # B's HTTP API is ready, but the supervisor has not resolved its first boot.
+    producer.enqueue("install")
+    monkeypatch.setattr(runtime, "STOP", SimpleNamespace(is_set=lambda: clock.now >= 12, wait=clock.sleep))
+    monkeypatch.setattr(runtime, "stop_group", Mock())
+    monkeypatch.setattr(runtime, "start_app", Mock(return_value=SimpleNamespace(poll=lambda: None)))
+    monkeypatch.setattr(updater, "lifecycle", lambda action: {"active_sessions": 0, "stopped": True})
+    monitor = runtime.ReadinessMonitor("http://unused/health/ready", probe=lambda _: False)
+    current = SimpleNamespace(poll=lambda: None)
+    runtime.watch(current, SimpleNamespace(process=None), None, monitor=monitor,
+                  updates=updater, restart=lambda app: runtime.restart_into_update(app, updater, {}))
+    assert updater.state["booting"] == B
+    assert updater.state["snapshot"] == snapshot
+    assert updater.database.databases[snapshot] == "before"
+    assert [call for call in updater.database.calls if call[0] == "snapshot"] == [("snapshot", snapshot)]
+    runtime.stop_group.assert_not_called()
+    runtime.start_app.assert_not_called()
+    assert not updater.request_path.exists()
+    assert not updater.install_requested.is_set()
+    updater.failed()
+    assert updater.database.databases["ai_shuffle"] == "before"
+    assert updater.running is None
+
+
+@pytest.mark.parametrize("entry", ["launch", "activating"])
+def test_direct_repeat_activation_cannot_replace_first_boot_snapshot(feed, entry):
+    updater, publish, *_ = feed
+    publish()
+    updater.database = FakeDatabase()
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.activating()
+    snapshot = updater.state["snapshot"]
+    updater.database.databases["ai_shuffle"] = "migrated by B"
+    with pytest.raises(consumer.UpdateError, match="first start"):
+        if entry == "launch":
+            updater.launch({}, activate=True)
+        else:
+            updater.activating()
+    assert updater.database.databases[snapshot] == "before"
+    assert [call for call in updater.database.calls if call[0] == "snapshot"] == [("snapshot", snapshot)]
+    updater.healthy()
+    updater.require_resolved_first_boot()
+    assert updater.state["active"] == B
+    assert "booting" not in updater.state
+    assert "snapshot" not in updater.state
 
 
 def test_command_only_pass_does_not_start_due_automatic_check(tmp_path, monkeypatch):

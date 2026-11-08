@@ -1064,9 +1064,14 @@ class ContainerUpdates:
             self.publish("idle", "Application updated. Some old build files could not be removed.")
         self.prune_dependencies()
 
+    def require_resolved_first_boot(self):
+        if self.state.get("booting"):
+            raise UpdateError("The update is still starting. Wait for its first start to finish before restarting again.")
+
     def launch(self, env, activate=False):
         revision = self.state.get("active")
         if activate:
+            self.require_resolved_first_boot()
             if not self.allowed():
                 raise UpdateError("Application updates are disabled")
             revision = self.state.get("pending")
@@ -1139,6 +1144,7 @@ class ContainerUpdates:
         # After the old app stopped, before anything could migrate the DB: copy
         # it, then record the first start. A failed copy raises before booting
         # is saved, and the old version is started again over the same data.
+        self.require_resolved_first_boot()
         revision = self.state["pending"]
         snapshot = None
         if self.database is not None:
@@ -1845,6 +1851,7 @@ class ContainerUpdates:
                 # Refuse stale request.json writers too, without setting a restart intent.
                 raise UpdateError("In-app updater refresh is unavailable. Reloading the updater requires a separately approved container restart.")
             if action == "install":
+                self.require_resolved_first_boot()
                 if not self.allowed():
                     raise UpdateError("Application updates are disabled")
                 if not self.state.get("pending"):
