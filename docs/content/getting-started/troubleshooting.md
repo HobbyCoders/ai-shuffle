@@ -77,11 +77,7 @@ The message in the app says which of these it is.
 
 ## Compaction kept more tokens than its goal
 
-Claude Code compaction's computed size target (for example, 30,000 tokens) is a
-soft goal, not a hard limit. Recent tool results, the newest instructions and
-recovery information may keep the result above it. An informational log with a
-kept-size breakdown is not a failure; you do not need to discard recent work.
-A warning at the selected context window still needs investigation.
+Claude Code compaction's computed size target (for example, 30,000 tokens) is a soft goal, not a hard limit. Recent tool results, the newest instructions and recovery information may keep the result above it. An informational log with a kept-size breakdown is not a failure; you do not need to discard recent work. A warning at the selected context window still needs investigation.
 
 ## Tool calls are denied
 
