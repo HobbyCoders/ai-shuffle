@@ -55,6 +55,7 @@ APP_USER = "ai_shuffle"
 APP_DB = "ai_shuffle"
 ADMIN = "shuffle_admin"
 STOP = threading.Event()
+APP_STOP_SECONDS = 30
 # Hand-over (#1821). An image that provides "source-supervisor" starts the
 # active update's own copy of this file, passing SHUFFLE_HANDED_OVER (the
 # revision), SHUFFLE_IMAGE_DIR (its image.json and trust key) and
@@ -833,6 +834,9 @@ def start_app(command, cwd, env, updates_root=None):
         if updates_root is not None:
             module.ensure_traversable(updates_root, log)
         command = module.app_command(command)
+    # The app reserves settlement/lifespan time inside the same budget used by
+    # every application stop below. This is supervisor metadata, not a setting.
+    env = dict(env, SHUFFLE_SUPERVISOR_STOP_SECONDS=str(APP_STOP_SECONDS))
     started = time.monotonic()
     _telemetry_log("application child spawn starting")
     try:
@@ -1784,7 +1788,7 @@ def restart_into_update(current, updates, env, before_start=None):
     # Once sent, even a timeout cannot prove the worker is still usable.
     if updates.lifecycle("stop-sessions").get("stopped") is not True:
         raise RuntimeFailure("Could not quiesce the worker")
-    stop_group(current, 30)
+    stop_group(current, APP_STOP_SECONDS)
     updates.activating()  # copies the database, then records the first start
     if before_start is not None:
         before_start(child_env)
@@ -1795,7 +1799,7 @@ def start_current(current, updates, env, before_start=None):
     """Stop ``current`` and start the version that should run now: after a
     failed first start, the previous one over the restored database copy.
     None when the worker cannot run (blocked, or its build fails to verify)."""
-    stop_group(current, 30)
+    stop_group(current, APP_STOP_SECONDS)
     command, cwd, child_env = [sys.executable, "-m", "app.main"], None, env
     if updates is not None:
         updates.failed()
@@ -1815,7 +1819,7 @@ def shutdown(app, chrome, db):
     # tini forwards only to THIS supervisor. All three children have separate
     # process groups, so app cleanup can still use PostgreSQL and Chromium.
     try:
-        stop_group(app, 30)
+        stop_group(app, APP_STOP_SECONDS)
     finally:
         try:
             stop_group(chrome, 5)

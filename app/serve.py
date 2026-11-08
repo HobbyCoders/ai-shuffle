@@ -203,13 +203,16 @@ def run(app, settings) -> None:
             ws_max_size=10 * 1024 * 1024,
             ws_ping_interval=None,
             ws_ping_timeout=None,
+            # Request-owned queries settle explicitly before lifespan. Do not
+            # spend a second, unbounded connection-drain budget afterwards.
+            timeout_graceful_shutdown=0,
         )
         class StreamDrainingServer(uvicorn.Server):
             async def shutdown(self, sockets=None):
-                # Only passive event responses opt into this signal. Finite
-                # request-owned work (including queries) must settle before
-                # lifespan cleanup; a global HTTP task timeout cancels it.
-                shutdown_event.set()
+                from app.core import query_shutdown
+
+                shutdown_event.set()  # Passive subscriptions close immediately.
+                await query_shutdown.settle(http_tasks=set(self.server_state.tasks))
                 await super().shutdown(sockets=sockets)
 
         StreamDrainingServer(config).run(sockets=sockets)

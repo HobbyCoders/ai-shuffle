@@ -45,10 +45,28 @@ authentication, HTTP bodies, SSE and WebSockets remain unchanged.
 With pausing enabled only, `scripts.devloop.child` runs the normal `app.main`
 `__main__` startup with an ASGI activity observer, a short pause admission gate,
 and a **five-second Uvicorn graceful-shutdown timeout** after the pause gate
-confirms no finite request remains. The normal app instead ends only passive
-event subscriptions when HTTP draining starts; finite requests and active query
-streams can finish before lifespan teardown. The dev-only timeout remains a
+confirms no finite request remains. The normal app ends passive event
+subscriptions immediately and allows 6.5 seconds by default for finite requests
+and active query streams. The Python container supervisor passes its unchanged
+30-second stop budget through `SHUFFLE_SUPERVISOR_STOP_SECONDS`; that makes the
+finite drain 26.5 seconds, leaving the same 1.5-second query-settlement reserve
+and two seconds for lifespan. Missing, invalid or outside-10-to-30-second budget
+metadata retains the safe default. At the drain deadline only raw query engine
+reads are retired, allowing interrupted queries to save terminal turns and
+publish memory before lifespan teardown. The dev-only timeout remains a
 fallback after admission is closed, not permission to cancel request-owned work.
+
+**Known limit:** the shortest normal stop budget is 10 seconds, lifespan
+`stop_running_sessions` can take 25 seconds, and adapter disconnect can take
+5 seconds, so a slow database write or stalled disconnect can exceed the
+reserve. This is not worst-case cancellation-safe settlement. An idle full-app
+shutdown measured 0.282 seconds and the delayed real-query check settled/exited
+in 6.856 seconds; a controlled two-second memory-publication tail exceeded the
+1.5-second reserve and was cancelled. Coordinator and launcher-budget work is
+tracked in [#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305), not
+implemented here. Forced disposable dev-loop teardown still has its separate
+four-second budget; it is not the normal app's graceful-stop guarantee.
+
 It tracks unknown
 HTTP requests, non-heartbeat client frames and voice/unknown sockets without
 buffering or changing requests. A private process-identified receipt is written

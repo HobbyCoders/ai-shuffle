@@ -27,8 +27,25 @@ survives, so press Send again.
 A failed clean stop reports `pause-failed` and retains its data until `down` or
 TTL; it never silently starts a second cluster. See the dev-loop guide for the
 dev-only five-second shutdown fallback after admission closes and the
-whole-pause deadline. The normal app closes passive event subscriptions while
-allowing finite request-owned work to settle before lifespan cleanup.
+whole-pause deadline. The normal app closes passive event subscriptions and
+allows finite requests to finish before retiring remaining raw query engine
+reads. The default ten-second stop budget allows 6.5 seconds for that drain,
+then a shared 1.5-second query-settlement reserve and two seconds for lifespan.
+The Python container supervisor passes its unchanged 30-second stop budget as
+`SHUFFLE_SUPERVISOR_STOP_SECONDS`, so its finite drain is 26.5 seconds instead.
+This is deployment metadata, not a user setting; absent, invalid or out-of-range
+values retain the 6.5-second default. The Windows desktop pre-stop route also
+settles headless API queries, which do not belong to the session pool.
+
+**Known limit:** the shortest normal stop budget is 10 seconds, lifespan
+`stop_running_sessions` can take 25 seconds, and adapter disconnect can take
+5 seconds, so a slow database write or stalled disconnect can exceed the
+reserve. This is not worst-case cancellation-safe settlement. An idle full-app
+shutdown measured 0.282 seconds and a delayed real query settled/exited in
+6.856 seconds, but a controlled two-second memory-publication tail exceeded the
+1.5-second reserve and was cancelled. The shared coordinator and launcher-budget
+work is tracked in [#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305);
+launcher stop budgets are unchanged here.
 
 ## The loop
 

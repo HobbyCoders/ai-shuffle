@@ -587,14 +587,17 @@ async def execute_query(
     """Run one headless turn under the chat's lease (see ``session_admission``)."""
     is_new_session = not session_id
     session_id = session_id or str(uuid.uuid4())
-    lease = await session_admission.acquire(session_id, stoppable=False)
-    try:
-        return await _execute_query_turn(
-            lease, is_new_session, prompt, profile_id, project_id, overrides,
-            session_id, api_user_id, automation_id, persist_user_message,
-        )
-    finally:
-        await session_admission.close_and_wait(lease)
+    from app.core import query_shutdown
+
+    async with query_shutdown.turn():
+        lease = await session_admission.acquire(session_id, stoppable=False)
+        try:
+            return await _execute_query_turn(
+                lease, is_new_session, prompt, profile_id, project_id, overrides,
+                session_id, api_user_id, automation_id, persist_user_message,
+            )
+        finally:
+            await session_admission.close_and_wait(lease)
 
 
 async def _execute_query_turn(
@@ -888,6 +891,11 @@ async def _execute_query_turn(
                     # flag on the ledger row, never subtracted.
                     metadata["usage_estimated"] = bool(message.usage.get("usage_estimated"))
 
+    except asyncio.CancelledError:
+        # A shutdown ends the provider read, not this turn's persistence tail.
+        # This also covers cancellation from an HTTP owner that went away.
+        metadata.update(is_error=True, stop_reason="server_shutdown",
+                        terminal_reason="server_shutdown", errors=["Worker is shutting down"])
     except SessionReplacedError:
         # No pool entry for a rewind to evict, so its claim is what stops this turn.
         if lease.stopped:
@@ -1078,13 +1086,15 @@ def stream_query(
     """Run one streamed turn under the chat's lease (see ``session_admission``)."""
     is_new_session = not session_id
     session_id = session_id or str(uuid.uuid4())
-    return session_admission.outlive_reader(session_admission.stream_turn(
+    from app.core import query_shutdown
+
+    return session_admission.outlive_reader(query_shutdown.track_stream(session_admission.stream_turn(
         session_id,
         lambda lease: _stream_query_turn(
             lease, is_new_session, prompt, profile_id, project_id, overrides,
             session_id, api_user_id, device_id, persist_user_message,
         ),
-    ))
+    )))
 
 
 async def _stream_query_turn(
