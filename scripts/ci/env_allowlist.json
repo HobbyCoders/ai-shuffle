@@ -246,6 +246,16 @@
     "reason": "Database-maintenance kill switch for early removal of superseded whole-store memory sync entries; on by default, lagging peers still pin what they need",
     "base_settings": false
   },
+  "AI_SHUFFLE_SYNC_SESSION_OP_COMPACTION": {
+    "kind": "infra",
+    "reason": "Database-maintenance kill switch for early removal of superseded session catalog and runtime sync entries; on by default, lagging peers still pin what they need",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_SYNC_TRANSCRIPT_OP_MIN_AGE_HOURS": {
+    "kind": "infra",
+    "reason": "Database-maintenance age floor (hours, default 1) before acknowledged transcript sync entries may be removed; peer frontiers still pin unacknowledged entries",
+    "base_settings": false
+  },
   "AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS": {
     "kind": "infra",
     "reason": "Database-maintenance acknowledgement grace for offline worker replicas; only duplicate sync-log retention changes and returning peers use state-copy recovery",
