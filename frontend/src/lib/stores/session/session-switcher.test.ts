@@ -81,6 +81,7 @@ vi.mock('./v2/feed-controller', () => ({
 
 function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionState {
 	return {
+		worktreeCheckoutPending: false,
 		sessionId: 'session-A',
 		mode: 'code',
 		title: 'Session A',

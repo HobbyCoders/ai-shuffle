@@ -59,6 +59,7 @@ const QUEUED_AT = '2026-10-24T12:00:00.000Z';
 
 function baseState(): ActiveSessionState {
 	return {
+		worktreeCheckoutPending: false,
 		sessionId: A, mode: 'code', title: 'A', messages: [], isStreaming: true,
 		liveTurnId: null, liveModel: null, liveRequestedModel: null, liveProvider: null,
 		wsConnected: true, wsReconnectRequired: false, wsManualReconnect: 'idle', error: null, profile: 'default',

@@ -117,6 +117,7 @@ function createMockDeps(overrides?: Partial<MessageHandlerDeps>): MessageHandler
 
 function mockState(): ActiveSessionState {
 	return {
+		worktreeCheckoutPending: false,
 		sessionId: 'session-1',
 		mode: 'code',
 		title: '',
