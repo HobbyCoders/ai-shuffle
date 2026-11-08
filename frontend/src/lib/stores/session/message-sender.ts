@@ -459,13 +459,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					clearTimeout(contextTimeout);
 				}
 				const paths = options?.pendingUploadPaths;
-				if (paths?.length) {
-					prompt += '\n\nAttached file references (ask a worker to inspect these files):\n' + paths.map(path => JSON.stringify(path)).join('\n');
-				}
+				const references = options?.pendingUploadReferences;
+				const uploads = paths?.length || references?.length ? { paths, references } : undefined;
 				try {
 					// Streaming calls acknowledge admission before the composer clears
 					// its draft; WebRTC retains its existing local-transport result.
-					const sent = await sendVoiceText(_state.sessionId, prompt);
+					const sent = await (uploads ? sendVoiceText(_state.sessionId, prompt, uploads) : sendVoiceText(_state.sessionId, prompt));
 					if (!sent) update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Voice call is not ready. Keep your message and try again when connected.' } : s);
 					return sent;
 				} catch (error) {

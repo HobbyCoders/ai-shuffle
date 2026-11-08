@@ -28,6 +28,7 @@ from app.core.slash_commands import (
 )
 # Legacy JSONL fallback and checkpoint-backed rewind services.
 from app.core.jsonl_rewind import jsonl_rewind_service
+from app.core.voice_prompts import typed_request_text
 from app.core.pg_session_store import (
     RewindTargetNotFound,
     main_transcript_is_empty,
@@ -481,7 +482,7 @@ def _resolve_checkpoint_uuid_from_content(
     checkpoints = _get_checkpoints(sdk_session_id, working_dir)
     matches = [
         cp for cp in checkpoints
-        if cp.role == "user" and (cp.full_message or "").strip() == want
+        if cp.role == "user" and typed_request_text(cp.full_message or "") == want
     ]
     if target_occurrence < 0 or target_occurrence >= len(matches):
         return None, (
@@ -555,10 +556,10 @@ def _resolve_rewind_from_seq(
                 f"Rewind refused: target {target_uuid} not found among the "
                 f"transcript's user prompts"
             )
-        want = (user_cps[pos].full_message or "").strip()
+        want = typed_request_text(user_cps[pos].full_message or "")
         occurrence = sum(
             1 for cp in user_cps[:pos]
-            if (cp.full_message or "").strip() == want
+            if typed_request_text(cp.full_message or "") == want
         )
         prompts = [
             (i, row) for i, row in enumerate(events)

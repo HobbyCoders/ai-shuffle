@@ -227,6 +227,16 @@ describe('voice PCM stream', () => {
   expect(await sent).toBe(true);
   await stream.close();
  });
+ it('carries attachments as fields beside the words', async () => {
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
+  const reference = { owner_id: 'w', event_id: 'e', index: 0, path: '/uploads/old.pdf' };
+  const sent = stream.sendText('Read @/uploads/new.pdf', { paths: ['/uploads/new.pdf'], references: [reference] });
+  const event = JSON.parse(sockets[0].send.mock.calls[0][0]);
+  expect(event).toMatchObject({ type: 'input_text', text: 'Read @/uploads/new.pdf', upload_paths: ['/uploads/new.pdf'], upload_references: [reference] });
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'text.accepted', id: event.id }) });
+  expect(await sent).toBe(true);
+  await stream.close();
+ });
  it('bounds text acknowledgement and ignores a late acceptance without resending', async () => {
   const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
   vi.useFakeTimers();

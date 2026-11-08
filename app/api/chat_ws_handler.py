@@ -1147,37 +1147,7 @@ class ChatWebSocketHandler:
         """
         from app.core import upload_transfer
 
-        if not project_id:
-            session = await run_sync(database.get_session, session_id)
-            if not session or not session.get("project_v2_id"):
-                raise upload_transfer.UploadLiftError("Attachments need a project session.")
-            return await run_sync(upload_transfer.lift_session_paths_to_blobs, upload_paths, session)
-        project = await run_sync(database.get_project, project_id)
-        if not project:
-            raise upload_transfer.UploadLiftError(
-                f"Project not found: {project_id}"
-            )
-        project_v2_id = None
-        try:
-            from app.core import project_resolver
-
-            resolved = await run_sync(
-                project_resolver.resolve_project_v2,
-                {"project_id": project_id, "id": session_id},
-            )
-            project_v2_id = (resolved or {}).get("id")
-        except Exception:  # noqa: BLE001 — the v2 id is bookkeeping, not a gate
-            logger.debug(
-                "Upload lift: project_v2 resolve failed for %s", project_id,
-                exc_info=True,
-            )
-        return await run_sync(
-            upload_transfer.lift_paths_to_blobs,
-            upload_paths,
-            project,
-            session_id,
-            project_v2_id,
-        )
+        return await run_sync(upload_transfer.lift_send_uploads, upload_paths, project_id, session_id)
 
     async def _authorize_mobile_session(self, session_id, *, claim=False):
         from app.core.mobile_tool_identity import bind_session

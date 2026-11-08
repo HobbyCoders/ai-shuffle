@@ -491,7 +491,8 @@ describe('message-sender voice ownership', () => {
 		expect(await createMessageSender(deps).sendMessage('Read @report.pdf', {
 			pendingUploadPaths: ['/workspace/uploads/report.pdf'],
 		})).toBe(true);
-		expect(voice.sendVoiceText).toHaveBeenLastCalledWith('owner', expect.stringContaining('/workspace/uploads/report.pdf'));
+		// Structured, so the server can check them; the words stay the words.
+		expect(voice.sendVoiceText).toHaveBeenLastCalledWith('owner', 'Read @report.pdf', { paths: ['/workspace/uploads/report.pdf'], references: undefined });
 		expect(wsConn.send).not.toHaveBeenCalled();
 	});
 	it('keeps the draft when context persistence fails', async () => {
