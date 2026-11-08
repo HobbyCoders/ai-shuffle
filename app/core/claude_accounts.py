@@ -234,6 +234,11 @@ async def mutate_subscription(function: Callable[..., Any], *args: Any) -> Any:
     return result
 
 
+def saved_sign_in_commands(account_id: str) -> dict:
+    """Let an owner re-sign into an inactive saved folder without activating it."""
+    return _subscription_call(subscriptions.sign_in_commands, account_id)
+
+
 async def start_login(*, external: bool = False) -> dict:
     """Start a CLI sign-in into a fresh folder (``add another``)."""
     from app.db.async_database import run_sync

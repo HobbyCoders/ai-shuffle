@@ -51,6 +51,7 @@ _lock = threading.RLock()
 # removing one, so a spawn never recreates a folder that is being deleted.
 _folder_lock = threading.Lock()
 _verified: dict[str, float] = {}
+_identity_cache: dict[Optional[str], tuple[float, Any]] = {}
 _last_pending_probe = 0.0
 # Set when the active folder changes; the API then retires idle pooled CLIs.
 _reap_due = False
@@ -73,7 +74,7 @@ def setting_key() -> str:
 
 
 def _empty() -> dict:
-    return {"accounts": [], "active_id": None, "pending": None}
+    return {"accounts": [], "active_id": None, "pending": None, "cleanup": []}
 
 
 def _parse(raw: Optional[str]) -> dict:
@@ -89,7 +90,9 @@ def _parse(raw: Optional[str]) -> dict:
         active = value.get("active_id")
         if not any(a["id"] == active for a in accounts):
             active = None
-        return {"accounts": accounts, "active_id": active, "pending": pending}
+        cleanup = value.get("cleanup", [])
+        cleanup = [item for item in cleanup if home.valid_id(item)] if isinstance(cleanup, list) else []
+        return {"accounts": accounts, "active_id": active, "pending": pending, "cleanup": cleanup}
     except (ValueError, AttributeError, TypeError):
         logger.warning("The saved Claude sign-in list could not be read; using the default sign-in")
         return _empty()
@@ -176,6 +179,23 @@ def _probe(account_id: Optional[str]):
     return claude_cli_status.probe_home(home.env_for(account_id))
 
 
+def invalidate_identity() -> None:
+    """A login/switch ended: never serve the prior per-folder auth result."""
+    # Also called while the login terminal holds its own lock. Do not acquire
+    # _lock here: payload() holds it while reading the terminal's state.
+    _identity_cache.clear()
+
+
+def _current_identity(account: dict):
+    account_id = account["id"] if account["kind"] == KIND_SAVED else None
+    now = time.monotonic()
+    cached = _identity_cache.get(account_id)
+    if cached is None or now - cached[0] >= _VERIFY_INTERVAL_SECONDS:
+        cached = (now, _probe(account_id))
+        _identity_cache[account_id] = cached
+    return cached[1]
+
+
 def _record_identity(account: dict, status) -> None:
     account["signed_in"] = status.signed_in
     account["checked_at"] = time.time()
@@ -207,12 +227,13 @@ def _cmd_command(folder: str) -> Optional[str]:
     return f'set "CLAUDE_CONFIG_DIR={folder}" && claude auth login'
 
 
-def _login_state(pending: Optional[dict]) -> Optional[dict]:
+def _login_state(pending: Optional[dict], *, terminal: Optional[bool] = None) -> Optional[dict]:
     if not pending:
         return None
     from app.core import claude_cli_login
 
-    terminal = claude_cli_login.terminal_supported()
+    if terminal is None:
+        terminal = claude_cli_login.terminal_supported()
     folder = str(home.account_dir(pending["id"]))
     state = {
         "id": pending["id"],
@@ -257,6 +278,8 @@ def payload() -> dict[str, Any]:
             active = (account["id"] == state["active_id"]) if state["active_id"] else (
                 account["kind"] == KIND_DEFAULT)
             folder_ok = account["kind"] == KIND_DEFAULT or home.intact(account["id"])
+            if folder_ok:
+                _record_identity(account, _current_identity(account))
             rows.append({
                 "id": account["id"],
                 "label": account.get("label") or DEFAULT_LABEL,
@@ -300,6 +323,7 @@ def _switched() -> None:
     from app.core import claude_cli_status
 
     _reap_due = True
+    invalidate_identity()
     claude_cli_status.invalidate()
     claude_cli_status.announce_account_change()
 
@@ -356,6 +380,8 @@ def change(account_id: str, action: str, label: str = "") -> None:
             state["accounts"] = [a for a in state["accounts"] if a["id"] != account["id"]]
             if state["active_id"] == account["id"]:
                 state["active_id"] = None
+            if account["kind"] == KIND_SAVED and account_id not in state["cleanup"]:
+                state["cleanup"].append(account_id)
             _save(state)
             _verified.pop(account["id"], None)
             if was_active_folder:
@@ -365,11 +391,13 @@ def change(account_id: str, action: str, label: str = "") -> None:
                 try:
                     with _folder_lock:
                         home.remove(account["id"])
+                    state["cleanup"].remove(account_id)
+                    _save(state)
                 except (home.HomeError, OSError) as exc:
                     raise SubscriptionError(
                         "storage_unavailable",
                         "The sign-in was removed from the list, but its folder could not be "
-                        f"deleted ({type(exc).__name__}).", 503,
+                        f"deleted ({type(exc).__name__}). Cleanup will retry at startup.", 503,
                     ) from None
             return
         raise SubscriptionError("invalid_action", "Unknown account action.", 400)
@@ -381,7 +409,9 @@ def _refresh_quietly(account_id: str) -> None:
         account = _find(_load(), account_id)
         if account is None:
             return
-        status = _probe(account["id"] if account["kind"] == KIND_SAVED else None)
+        home_id = account["id"] if account["kind"] == KIND_SAVED else None
+        status = _probe(home_id)
+        _identity_cache[home_id] = (time.monotonic(), status)
         if status.signed_in is None:
             return
         state = _load()
@@ -404,6 +434,20 @@ def _sign_out_folder(account_id: str) -> None:
 
 
 # ─── Add another: a CLI sign-in into a fresh folder ──────────────────────────
+
+def sign_in_commands(account_id: str) -> dict:
+    """Folder-scoped external login commands, without switching the active account."""
+    _require_support()
+    with _lock:
+        account = _find(_load(), account_id)
+        if account is None or account["kind"] != KIND_SAVED:
+            raise SubscriptionError("not_found", "Saved Claude sign-in not found.", 404)
+        try:
+            home.ensure(account_id)
+        except home.HomeError as exc:
+            raise SubscriptionError("folder_unavailable", str(exc), 409) from None
+        return _login_state({"id": account_id, "status": "waiting"}, terminal=False)
+
 
 def start_login() -> dict:
     """Prepare a fresh folder and start ``claude auth login`` into it.
@@ -539,6 +583,20 @@ def repair_on_startup() -> None:
     except Exception:  # noqa: BLE001
         logger.warning("Could not read saved Claude sign-ins at startup", exc_info=True)
         return
+    # Retry only explicitly deleted app-owned folders, not arbitrary unlisted
+    # directories. Keep failed ids durable for the next startup.
+    listed = {a["id"] for a in state["accounts"]}
+    pending_id = (state.get("pending") or {}).get("id")
+    for account_id in list(state["cleanup"]):
+        if account_id in listed or account_id == pending_id:
+            continue
+        try:
+            with _folder_lock:
+                home.remove(account_id)
+            state["cleanup"].remove(account_id)
+            _save(state)
+        except (home.HomeError, OSError):
+            logger.warning("Could not finish removing a deleted Claude sign-in folder", exc_info=True)
     for account in state["accounts"]:
         if account["kind"] != KIND_SAVED:
             continue

@@ -81,6 +81,7 @@ def sign_ins(client, tmp_path, monkeypatch):
     monkeypatch.setattr(claude_subscriptions.database, "set_system_setting", values.__setitem__)
     monkeypatch.setattr(claude_subscriptions, "setting_key", lambda: "claude_cli_logins:test")
     monkeypatch.setattr(claude_subscriptions, "_last_pending_probe", 0.0)
+    monkeypatch.setattr(claude_subscriptions, "_identity_cache", {})
     monkeypatch.setattr(claude_cli_login, "terminal_supported", lambda: False)
     monkeypatch.setattr(cs, "announce_account_change", lambda: None)
     signed = {}
@@ -124,6 +125,12 @@ def test_subscription_routes_contract(client, sign_ins, tmp_path):
     assert client.patch(BASE + f"/subscription/{new_id}", json={"label": "Work"}).status_code == 200
     assert client.post(BASE + f"/subscription/{default_id}/activate").status_code == 200
     assert claude_subscriptions.active_home_env() == {}
+    relogin = client.post(BASE + f"/subscription/{new_id}/sign-in")
+    assert relogin.status_code == 200
+    assert relogin.json()["login"]["env"] == {"CLAUDE_CONFIG_DIR": folder}
+    assert relogin.json()["login"]["terminal"] is False
+    assert claude_subscriptions.active_home_env() == {}
+    assert client.post(BASE + "/subscription/missing/sign-in").status_code == 404
     assert client.post(BASE + f"/subscription/{new_id}/activate").status_code == 200
     assert claude_subscriptions.active_home_env() == {"CLAUDE_CONFIG_DIR": folder}
     deleted = client.delete(BASE + f"/subscription/{new_id}").json()["accounts"]
@@ -156,6 +163,7 @@ def test_subscription_routes_contract(client, sign_ins, tmp_path):
     ("post", "/subscription/add-another", None),
     ("post", "/subscription/cancel-login", None),
     ("post", "/subscription/account/activate", None),
+    ("post", "/subscription/account/sign-in", None),
     ("patch", "/subscription/account", {"label": "New"}),
     ("delete", "/subscription/account", None),
 ])
@@ -177,3 +185,4 @@ def test_requires_owner():
     with TestClient(app) as client:
         assert client.get(BASE).status_code == 403
         assert client.post(BASE + "/api-keys", json={"api_key": KEY}).status_code == 403
+        assert client.post(BASE + "/subscription/account/sign-in").status_code == 403
