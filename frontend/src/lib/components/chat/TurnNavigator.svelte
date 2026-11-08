@@ -377,10 +377,17 @@
 		position: absolute;
 		left: 6px;
 		/* Stable origin: centring the changing tick list moved every existing
-		   tick on each send, and re-centred again as the composer cleared. Sized
-		   from the screen, not this box: the box's height follows the composer,
-		   so a percentage moved the rail whenever a wrapped draft was sent (#1094). */
-		top: min(120px, 20vh);
+		   tick on each send, and re-centred again as the composer cleared.
+		   Sized from the visible height, not this box: the box's height follows
+		   the composer, so a percentage of it moved the rail whenever a wrapped
+		   draft was sent (#1094). 120px on an ordinary screen, easing to 8px as
+		   a keyboard or a landscape phone leaves too little height for it. No
+		   percentage here even as a cap: under a keyboard it would become the
+		   smaller value and follow the composer again. */
+		--visible-height: var(--app-viewport-height, 100dvh);
+		--rail-top: clamp(8px, calc((var(--visible-height) - 300px) * 0.4), 120px);
+		top: var(--rail-top);
+		max-height: calc(100% - var(--rail-top));
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
@@ -402,6 +409,13 @@
 		opacity: 1;
 	}
 
+	.turn-rail::before,
+	.turn-rail::after {
+		content: '';
+		flex: none;
+		height: calc(10px - var(--rail-gap));
+	}
+
 	/* Ticks start at the top and never shrink: a centred, shrinking column is
 	   what pushed the first turns off-screen in long sessions (#1378). */
 	.turn-rail {
@@ -409,12 +423,15 @@
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
-		gap: clamp(3px, calc(42vh / var(--count, 4) - 2px), 9px);
-		max-height: 56vh;
+		--rail-gap: clamp(3px, calc(var(--visible-height) * 0.42 / var(--count, 4) - 2px), 9px);
+		gap: var(--rail-gap);
+		max-height: calc(var(--visible-height) * 0.56);
 		min-height: 0;
 		/* The 2px left pad (the nav sits at left: 0) keeps the focus ring
-		   clear of the rail's horizontal clip. */
-		padding: 10px 12px 10px 2px;
+		   clear of the rail's horizontal clip. The 10px above and below the
+		   ticks are the spacers below, not padding: padding would hold the
+		   rail 20px tall even when a keyboard leaves no transcript at all. */
+		padding: 0 12px 0 2px;
 		overflow-x: hidden;
 		overflow-y: auto;
 		overscroll-behavior: contain;
