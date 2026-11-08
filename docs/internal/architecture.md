@@ -116,12 +116,20 @@ snapshot; the counter serializes them and late duplicate requests cannot reopen
 settled cards. Deferred re-asks have a new durable interaction id and still reopen
 the existing display card.
 
-The recording-failure close retries the entire owned settlement transaction,
-including its run-id guard and run/counter/session lock prefix, only after a
-confirmed lock-timeout rollback. If every attempt fails, it still rolls back:
-the turn remains live without a terminal receipt, and a dead-lease sweep may
-requeue a user/queue prompt. Bounded retry is not a durable failure outbox or an
-exactly-once execution guarantee during a sustained database failure.
+Recording failure first commits a run-id-guarded, row-only `draining` marker
+with a stable terminal intent in the existing Stop notice outbox. This does not
+need the transcript counter. The marker excludes the already-executed prompt
+from reaping/requeue and holds its live slot until the receipt commits, preventing
+a delayed close from closing a successor's stream. Delivery atomically aborts
+the marked turn, appends its terminal receipt and acknowledges the outbox using
+the shared run/counter/session/turn lock order and the captured run-id guard.
+Only confirmed lock-timeout rollbacks get immediate bounded retries. If they
+exhaust, the existing pending-notice observer finishes delivery after contention
+clears, including after restart; it never replays the prompt, failed recorder
+batch or Stop cleanup. Deleted/replaced targets consume stale intents without
+closing their successor. No schema or SQL-timeout increase is required. This
+protects a persisted failure intent, not arbitrary crashes before intent can
+commit or an exactly-once execution guarantee during a database outage.
 
 The standalone sweep includes rewind boundaries (admission stays held through
 recovery) and archive-retirement reconciliation (the durable marker stays pending

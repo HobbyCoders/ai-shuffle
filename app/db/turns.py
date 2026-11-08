@@ -1513,27 +1513,38 @@ def settle_turn(
     recorded its message: the queue sweep can no longer see it, so its words
     become a "Not sent" row here, as in ``remove_queued_turn``.
 
-    A ``recording_failed`` abort commits a stable terminal event in this same
-    transaction, independently of the failed recorder. It takes the shared
-    run/counter/session lock prefix before the turn lock, as Stop does.
+    A ``recording_failed`` abort first commits the guarded row-only transition
+    to ``draining`` and a stable terminal intent in the existing notice outbox.
+    The live slot stays occupied until the close commits, so a late terminal
+    cannot close a successor's stream. This needs no transcript counter, so
+    even exhausted receipt retries cannot requeue work already performed.
+    The notice observer finishes
+    the terminal after contention clears, including across process restarts.
 
     Returns the settled turn row on the transition that actually settles it.
     """
     from app.db.session_events import LOCK_RETRY_DELAYS_SECONDS
 
-    # This entry point owns its transaction (it accepts no caller connection).
-    # Retry the WHOLE guarded transition only after PostgreSQL confirms rollback,
-    # never just its terminal append and never the failed recorder's batch.
-    delays = LOCK_RETRY_DELAYS_SECONDS if outcome == "aborted" and stop_reason == "recording_failed" else ()
-    for delay in (*delays, None):
-        try:
-            return _settle_turn_once(turn_id, outcome, stop_reason, error, run_id,
-                                     keep_unsent_words=keep_unsent_words)
-        except psycopg2.errors.LockNotAvailable:
-            if delay is None:
-                raise
-            logger.warning("recording-failure settlement rolled back for %s; retrying in %.2fs", turn_id, delay)
-            time.sleep(delay)
+    # Persist non-replayable intent BEFORE any wait on the transcript counter.
+    # An uncertain intent commit is not replayed; its committed outbox, if any,
+    # is sufficient for the observer to recover it without re-executing work.
+    result = _settle_turn_once(turn_id, outcome, stop_reason, error, run_id,
+                               keep_unsent_words=keep_unsent_words)
+    if result and outcome == "aborted" and stop_reason == "recording_failed":
+        from app.db import stop_notices
+        for delay in (*LOCK_RETRY_DELAYS_SECONDS, None):
+            try:
+                # Each owned delivery atomically closes the saved intent,
+                # appends + acknowledges; it never replays the recorder.
+                stop_notices.deliver("recording-failed:" + turn_id)
+                result["state"] = "aborted"
+                break
+            except psycopg2.errors.LockNotAvailable:
+                if delay is None:
+                    logger.warning("recording-failure receipt deferred for %s; durable intent retained", turn_id)
+                    break
+                time.sleep(delay)
+    return result
 
 
 def _settle_turn_once(
@@ -1545,8 +1556,10 @@ def _settle_turn_once(
     sql = (
         "UPDATE turns SET state=%s, stop_reason=%s, error=%s, ended_at=NOW() "
         "WHERE id=%s AND state NOT IN ('completed','aborted','parked') "
+        "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') "
     )
-    params: tuple = (outcome, stop_reason, error, turn_id)
+    recording_failed = outcome == "aborted" and stop_reason == "recording_failed"
+    params: tuple = ("draining" if recording_failed else outcome, stop_reason, error, turn_id)
     if run_id is not None:
         sql += "AND run_id=%s "
         params += (run_id,)
@@ -1555,13 +1568,16 @@ def _settle_turn_once(
     with get_db() as conn:
         cursor = conn.cursor()
         queued_peer = False
-        recording_failed = outcome == "aborted" and stop_reason == "recording_failed"
-        if keep_unsent_words or recording_failed:
+        if keep_unsent_words and not recording_failed:
             cursor.execute("SELECT session_id FROM turns WHERE id=%s", (turn_id,))
             target = cursor.fetchone()
             if target:
                 _lock_for_event_write(cursor, target["session_id"])
-        if outcome == "aborted" and run_id is None:
+        if recording_failed:
+            # A stale runtime must not abort a row already requeued for a new
+            # owner. The guarded UPDATE rechecks run_id after any row wait.
+            sql += "AND state IN ('running','interrupting','draining') "
+        if outcome == "aborted" and run_id is None and not recording_failed:
             cursor.execute("SELECT source, state FROM turns WHERE id=%s", (turn_id,))
             target = cursor.fetchone()
             if target and target["source"] == "agent_message":
@@ -1578,31 +1594,53 @@ def _settle_turn_once(
         else:
             cursor.execute(sql + "RETURNING *", params)
             row = cursor.fetchone()
-            if row and keep_unsent_words:
-                kept_words = _keep_unsent_words(cursor, conn, _row(row))
             if row and recording_failed:
-                from app.db import session_events
-
-                # The failed recorder cannot write its close. This is a NEW,
-                # stable terminal receipt, not a replay of the uncertain batch.
-                # Commit it with the guarded row transition: never leave a
-                # durably aborted turn whose transcript still looks streaming.
-                session_events.append_events(row["session_id"], [{
-                    "id": "recording-failed:" + turn_id,
-                    "type": "turn.aborted", "turn_id": turn_id,
-                    "payload": {
-                        "reason": "error", "stop_reason": "recording_failed",
-                        "message": "The reply stopped because a database write failed. "
-                                   "You can send another message to continue.",
-                    },
-                }], _conn=conn)
+                from app.db import stop_notices
+                stop_notices.save("recording-failed:" + turn_id, row["session_id"], {
+                    "run_id": row["run_id"], "keep_unsent_words": keep_unsent_words,
+                }, _conn=conn)
+            elif row and keep_unsent_words:
+                kept_words = _keep_unsent_words(cursor, conn, _row(row))
     result = _row(row)
-    if cancelled_peer or kept_words or (result and recording_failed):
+    if cancelled_peer or kept_words:
         from app.db import session_events
         session_events.notify_session_write(result["session_id"], "session_events")
     # A queued row settled without ever starting has no interval to bank.
     _bank_ended(result)
     return result
+
+
+def _deliver_recording_failure(conn: Any, session_id: str, notice_id: str, data: dict) -> None:
+    """Finish one saved abort, never replay a prompt or stop a successor.
+
+    The caller owns transition + append + outbox acknowledgement. Match the
+    shared lock order, then guard the captured run and pending intent state.
+    Deleted or replaced targets consume stale intent without creating an event.
+    """
+    from app.db import session_events
+
+    cursor = conn.cursor()
+    _lock_for_event_write(cursor, session_id)
+    turn_id = notice_id.removeprefix("recording-failed:")
+    guard = "run_id=%s" if data.get("run_id") is not None else "run_id IS NULL"
+    params = (turn_id, session_id) + ((data["run_id"],) if data.get("run_id") is not None else ())
+    cursor.execute(
+        "UPDATE turns SET state='aborted' WHERE id=%s AND session_id=%s AND state='draining' "
+        "AND stop_reason='recording_failed' AND " + guard + " RETURNING *", params,
+    )
+    row = _row(cursor.fetchone())
+    if row is None:
+        return
+    if data.get("keep_unsent_words"):
+        _keep_unsent_words(cursor, conn, row)
+    session_events.append_events(session_id, [{
+        "id": notice_id, "type": "turn.aborted", "turn_id": turn_id,
+        "payload": {
+            "reason": "error", "stop_reason": "recording_failed",
+            "message": "The reply stopped because a database write failed. "
+                       "You can send another message to continue.",
+        },
+    }], _conn=conn)
 
 
 def _holds_unsent_owner_words(row: Optional[Dict[str, Any]]) -> bool:
@@ -2149,7 +2187,7 @@ def requeue_turn(turn_id: str) -> Optional[Dict[str, Any]]:
             "UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL, "
             "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE, overrides=%s "
             "WHERE id=%s AND state IN ('running','interrupting','draining') "
-            "RETURNING *",
+            "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') RETURNING *",
             (json.dumps(overrides), turn_id),
         )
         row = cursor.fetchone()
@@ -2477,6 +2515,7 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
             "SELECT t.* FROM turns t "
             "LEFT JOIN runs r ON t.run_id = r.id "
             "WHERE t.state IN ('running','interrupting','draining') "
+            "AND (t.stop_reason IS NULL OR t.stop_reason <> 'recording_failed') "
             "AND (r.id IS NULL OR r.state <> 'active' OR r.lease_expires_at < NOW())",
         )
         skip = set(skip_turn_ids)
@@ -2493,7 +2532,8 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
                 cursor.execute(
                     "UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL, "
                     "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE, overrides=%s "
-                    "WHERE id=%s AND state IN ('running','interrupting','draining')",
+                    "WHERE id=%s AND state IN ('running','interrupting','draining') "
+                    "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed')",
                     (json.dumps(overrides), turn["id"]),
                 )
                 banked.append((turn["session_id"], None))
@@ -2502,6 +2542,7 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
                     "UPDATE turns SET state='aborted', stop_reason='lease_expired', "
                     "ended_at=NOW() "
                     "WHERE id=%s AND state IN ('running','interrupting','draining') "
+                    "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') "
                     "RETURNING started_at, ended_at",
                     (turn["id"],),
                 )

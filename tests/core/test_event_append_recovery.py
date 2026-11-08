@@ -91,7 +91,7 @@ def test_recording_failure_commits_one_terminal_with_aborted_row():
 
 
 @pytest.mark.parametrize("boundary", ["lock", "terminal"])
-def test_terminal_rollback_retries_whole_transaction_without_reexecution(monkeypatch, boundary):
+def test_terminal_delivery_retries_without_reexecution(monkeypatch, boundary):
     turn = turns.enqueue_turn("recovery-chat", "user", prompt="hello")
     turns.start_turn(turn["id"], None, "runner")
     target, attribute = ((turns, "_lock_for_event_write") if boundary == "lock"
@@ -104,8 +104,8 @@ def test_terminal_rollback_retries_whole_transaction_without_reexecution(monkeyp
         attempts += 1
         if attempts == 1:
             raise LockNotAvailable()
-        # The lock precedes UPDATE; the terminal follows the retried UPDATE.
-        assert turns.get_turn(turn["id"])["state"] == ("running" if boundary == "lock" else "aborted")
+        # At the prefix it is still draining; UPDATE precedes the append.
+        assert turns.get_turn(turn["id"])["state"] == ("draining" if boundary == "lock" else "aborted")
         assert events.get_events("recovery-chat") == []
         return real(*args, **kwargs)
 
@@ -119,20 +119,34 @@ def test_terminal_rollback_retries_whole_transaction_without_reexecution(monkeyp
     assert rows[0]["id"] == "recording-failed:" + turn["id"]
 
 
-def test_exhausted_terminal_recovery_still_rolls_back_and_can_be_requeued(monkeypatch):
-    turn = turns.enqueue_turn("recovery-chat", "user", prompt="hello")
+@pytest.mark.parametrize("source", ["user", "queue"])
+def test_exhausted_terminal_recovery_persists_nonreplayable_intent(monkeypatch, source):
+    from app.db import stop_notices
+
+    turn = turns.enqueue_turn("recovery-chat", source, prompt="already ran")
     turns.start_turn(turn["id"], None, "runner")
+    real = events.append_events
     append = Mock(side_effect=LockNotAvailable())
     monkeypatch.setattr(events, "append_events", append)
-    with pytest.raises(LockNotAvailable):
-        turns.settle_turn(turn["id"], "aborted", "recording_failed")
+    assert turns.settle_turn(turn["id"], "aborted", "recording_failed")
     assert append.call_count == 3
-    assert turns.get_turn(turn["id"])["state"] == "running"
+    assert turns.get_turn(turn["id"])["state"] == "draining"
     assert events.get_events("recovery-chat") == []
-    # Bounded recovery is not a durable failure outbox: if EVERY attempt fails,
-    # dead-lease recovery can still requeue this user prompt. Do not hide it.
-    assert [row["id"] for row in turns.reap_expired()] == [turn["id"]]
-    assert turns.get_turn(turn["id"])["state"] == "queued"
+    assert turns.reap_expired() == []
+    assert turns.requeue_turn(turn["id"]) is None
+    assert turns.settle_turn(turn["id"], "completed") is None
+    assert turns.start_turn(turn["id"], "replacement-run", "replacement") is None
+    successor = turns.enqueue_turn("recovery-chat", "user", prompt="a new message")
+    assert turns.start_turn(successor["id"], "replacement-run", "replacement") is None
+    assert stop_notices.pending() == ["recording-failed:" + turn["id"]]
+    monkeypatch.setattr(events, "append_events", real)
+    assert stop_notices.deliver(stop_notices.pending()[0])
+    assert stop_notices.deliver("recording-failed:" + turn["id"])
+    assert stop_notices.pending() == []
+    rows = events.get_events("recovery-chat")
+    assert len(rows) == 1 and rows[0]["event_type"] == "turn.aborted"
+    assert turns.get_turn(turn["id"])["state"] == "aborted"
+    assert turns.start_turn(successor["id"], "replacement-run", "replacement")
 
 
 @pytest.mark.parametrize("error", [psycopg2.OperationalError(), psycopg2.errors.QueryCanceled()])
@@ -144,6 +158,9 @@ def test_terminal_uncertain_outcome_is_not_retried(monkeypatch, error):
     with pytest.raises(type(error)):
         turns.settle_turn(turn["id"], "aborted", "recording_failed")
     assert append.call_count == 1
+    from app.db import stop_notices
+    assert turns.get_turn(turn["id"])["state"] == "draining"
+    assert stop_notices.pending() == ["recording-failed:" + turn["id"]]
 
 
 async def test_deferred_reask_has_a_new_request_generation():
@@ -183,13 +200,40 @@ def test_runner_replaced_during_retry_cannot_publish_a_failure(monkeypatch):
 
     def takeover(delay):
         with get_db() as conn:
-            conn.cursor().execute("UPDATE turns SET run_id='new-run' WHERE id=%s", (turn["id"],))
+            conn.cursor().execute("UPDATE turns SET run_id='new-run', state='running' WHERE id=%s", (turn["id"],))
 
     monkeypatch.setattr(turns.time, "sleep", takeover)
-    assert turns.settle_turn(turn["id"], "aborted", "recording_failed", run_id="old-run") is None
+    assert turns.settle_turn(turn["id"], "aborted", "recording_failed", run_id="old-run")
     assert lock.call_count == 2
     assert turns.get_turn(turn["id"])["run_id"] == "new-run"
     assert events.get_events("recovery-chat") == []
+
+
+def test_intent_insert_failure_rolls_back_the_marker(monkeypatch):
+    from app.db import stop_notices
+
+    turn = turns.enqueue_turn("recovery-chat", "user", prompt="hello")
+    turns.start_turn(turn["id"], "run", "runner")
+    save = Mock(side_effect=psycopg2.OperationalError("lost acknowledgement"))
+    monkeypatch.setattr(stop_notices, "save", save)
+    with pytest.raises(psycopg2.OperationalError):
+        turns.settle_turn(turn["id"], "aborted", "recording_failed", run_id="run")
+    assert save.call_count == 1  # an uncertain intent write is never retried
+    assert turns.get_turn(turn["id"])["state"] == "running"
+    assert stop_notices.pending() == []
+    assert events.get_events("recovery-chat") == []
+
+
+def test_existing_stop_warning_outbox_still_delivers_once():
+    from app.db import stop_notices
+
+    stop_notices.save("ordinary-stop-warning", "recovery-chat", {"remaining": 1})
+    assert stop_notices.deliver("ordinary-stop-warning")
+    assert stop_notices.deliver("ordinary-stop-warning")
+    rows = events.get_events("recovery-chat")
+    assert len(rows) == 1 and rows[0]["event_type"] == "system.note"
+    assert rows[0]["payload"] == {"subtype": "stop_incomplete", "data": {"remaining": 1}}
+    assert stop_notices.pending() == []
 
 
 def test_stale_runner_cannot_publish_a_failure():
