@@ -44,8 +44,11 @@ async function fixture(t) {
   await file(d(K2, 'node/desktop', gen('8'), 'node_modules/electron/dist/electron.exe'));
   await file(path.join(root, 'versions', B, 'build.json'), JSON.stringify({ revision: B, runtimeKey: K2, pythonKey: null, electron: d(K2, 'node/desktop', gen('8'), 'node_modules/electron/dist/electron.exe') }));
   await link(d(K2, 'node/tools', gen('7'), 'node_modules'), path.join(root, 'versions', B, 'source/tools/node_modules'));
-  // R: the running build, recorded nowhere in state.json; its folder still protects its set.
+  // R: the running build, recorded nowhere in state.json; its folder still protects its set,
+  // which only its link names (its record lists no npm sets).
   await file(d('node/frontend', gen('6'), 'node_modules/.package-lock.json'));
+  await file(path.join(root, 'versions', R, 'build.json'), JSON.stringify({ revision: R, runtimeKey: K1, pythonKey: P1, layout: 2,
+    electron: d('node/desktop', gen('f'), 'node_modules/electron/dist/electron.exe') }));
   await link(d('node/frontend', gen('6'), 'node_modules'), path.join(root, 'versions', R, 'source/frontend/node_modules'));
   await file(path.join(root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: A, previous: B, failed: [FAILED] }));
   // Leftovers no kept folder uses.
@@ -96,6 +99,13 @@ for (const [name, damage] of [
   ['a link points outside the update folders', async ({ root, outside }) => link(outside, path.join(root, 'versions', B, 'server/tools/node_modules'))],
   ['the restore journal cannot be read', async ({ root }) => fs.writeFile(path.join(root, 'restore-point.json'), 'not json')],
   ['the update state cannot be read', async ({ root }) => fs.writeFile(path.join(root, 'state.json'), '[]')],
+  // Review of #1276: a link above a folder it lists must stop everything, not only a link at the folder itself.
+  ['updates/dependencies itself is a link', async ({ root, deps }) => { await fs.rename(deps, path.join(root, '..', 'dependencies-real')); await link(path.join(root, '..', 'dependencies-real'), deps); }],
+  ['a package folder is a link to somewhere outside', async ({ d, outside }) => { await fs.rename(d('node/tools'), path.join(outside, 'tools')); await link(path.join(outside, 'tools'), d('node/tools')); }],
+  ['the npm folder is a link into a runtime tree', async ({ d, tree1 }) => { await fs.rename(d('node'), d(tree1, 'node')); await link(d(tree1, 'node'), d('node')); }],
+  ['the running build is missing its record', async ({ root }) => fs.rm(path.join(root, 'versions', R, 'build.json'))],
+  ['the active build sits under a temporary name with no record', async ({ root }) => { await fs.rm(path.join(root, 'versions', A, 'build.json')); await fs.rename(path.join(root, 'versions', A), path.join(root, 'versions', A + '.restoring')); }],
+  ['a kept older build has files but no record', async ({ root }) => fs.rm(path.join(root, 'versions', B, 'build.json'))],
 ]) test(`nothing is removed when ${name}`, async t => {
   const f = await fixture(t);
   await damage(f);
@@ -118,9 +128,45 @@ test('a first start that is not healthy yet, or an update holding the lock, leav
   assert.ok(await exists(f.d(ORPHAN)));
 });
 
+test('an active build under a temporary name is still read, so everything it runs from survives', async t => {
+  // Review of #1276: an active build being put back sits in versions/<revision>.restoring.
+  const f = await fixture(t);
+  await fs.rm(path.join(f.root, 'versions', R), { recursive: true });
+  await fs.rename(path.join(f.root, 'versions', A), path.join(f.root, 'versions', A + '.restoring'));
+  const result = await pruneDependencies(f.root, A, quiet);
+  assert.equal(result.skipped, undefined);
+  for (const kept of [f.d(f.tree1, 'python', P1.slice(0, 24), 'Scripts/python.exe'), f.d(f.tree1, 'cloudflared/cloudflared.exe'),
+    f.d('node/desktop', gen('f'), 'node_modules/electron/dist/electron.exe'), f.d('node/browser-mcp', gen('9'), 'node_modules')]) assert.ok(await exists(kept), kept);
+  assert.ok(result.removed.includes(`node/frontend/${gen('6')}`), 'the set only the removed build used is gone');
+});
+
+test('a lock that cannot be written is closed and removed again, and another process\'s lock is never removed', async t => {
+  // Review of #1276: an empty leftover lock blocks update checks for ten minutes.
+  const f = await fixture(t);
+  const promises = require('node:fs').promises, open = promises.open;
+  t.after(() => { promises.open = open; });
+  let closed = 0;
+  promises.open = async (...args) => {
+    const handle = await open(...args);
+    if (!String(args[0]).endsWith('update.lock')) return handle;
+    return { writeFile: async () => { throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }); }, close: async () => { closed++; await handle.close(); } };
+  };
+  const result = await pruneDependencies(f.root, R, quiet);
+  promises.open = open;
+  assert.match(result.skipped, /no space/);
+  assert.equal(closed, 1);
+  assert.equal(await exists(path.join(f.root, 'update.lock')), false);
+  assert.ok(await exists(f.d(ORPHAN)));
+  await fs.writeFile(path.join(f.root, 'update.lock'), '4242');
+  assert.match((await pruneDependencies(f.root, R, quiet)).skipped, /update is running/);
+  assert.equal(await fs.readFile(path.join(f.root, 'update.lock'), 'utf8'), '4242');
+});
+
 test('a staged or pending build keeps what it links, and a missing updates folder is not an error', async t => {
   const f = await fixture(t);
   const staged = hex('e', 40);
+  await file(path.join(f.root, 'versions', staged, 'build.json'), JSON.stringify({ revision: staged, runtimeKey: K1, pythonKey: null, layout: 2,
+    electron: f.d('node/desktop', gen('f'), 'node_modules/electron/dist/electron.exe') }));
   await link(f.d(ORPHAN, 'python'), path.join(f.root, 'versions', staged, 'server/tools/node_modules'));
   await link(f.d('node/tools', gen('0'), 'node_modules'), path.join(f.root, 'staging/source/tools/node_modules'));
   await fs.writeFile(path.join(f.root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: A, previous: B, staged }));

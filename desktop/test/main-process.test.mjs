@@ -659,6 +659,9 @@ test('a healthy start removes update dependency folders no kept version uses (#1
 		const orphan = path.join(root, 'dependencies', '5'.repeat(24));
 		await fs.mkdir(path.join(orphan, 'python'), { recursive: true });
 		await fs.writeFile(path.join(root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: 'a'.repeat(40) }));
+		await fs.mkdir(path.join(root, 'versions', 'a'.repeat(40)), { recursive: true });
+		await fs.writeFile(path.join(root, 'versions', 'a'.repeat(40), 'build.json'), JSON.stringify({ revision: 'a'.repeat(40), runtimeKey: '1'.repeat(64), pythonKey: null, layout: 2,
+			electron: path.join(root, 'dependencies', 'node', 'desktop', '1'.repeat(24), 'node_modules', 'electron', 'dist', 'electron.exe') }));
 		const updates = { options: { root }, async requireRestorePoint() {}, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {}, async load() {} };
 		const application = { revision: 'a'.repeat(40), resources: '/isolated/resources', python: '/isolated/python', serverDir: '/isolated/server', node: '/isolated/node', desktopDir: '/isolated/desktop' };
 		const main = await launch({ managed: { root, application, updates, host: null } });
