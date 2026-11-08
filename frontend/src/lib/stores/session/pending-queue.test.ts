@@ -533,6 +533,21 @@ describe('pendingQueue — a send\'s attachments', () => {
 		});
 	});
 
+	// Stored times keep microseconds and Date.parse keeps milliseconds. Cutting both
+	// the same way can only make two moments equal, never swap their order.
+	it.each([
+		['a later millisecond', '2026-01-01T00:00:00.123999+00:00', '2026-01-01T00:00:00.124001+00:00', true],
+		['the same millisecond', '2026-01-01T00:00:00.123100+00:00', '2026-01-01T00:00:00.123900+00:00', false],
+		['an older attempt', '2026-01-01T00:00:00.124001+00:00', '2026-01-01T00:00:00.123999+00:00', false],
+	])('compares a receipt to its queued row at stored precision: %s', (_name, queued, receipt, settles) => {
+		pendingQueue.reset('s1', true);
+		uploads('client-p');
+		pendingQueue.requestRemoval('s1', { id: 'row-p', clientMessageId: 'client-p', content: 'Read', queuedAt: new Date(queued).getTime() });
+		expect(pendingQueue.settleWithdrawalReceipt('client-p', receipt, true)).toBe(settles);
+		expect(pendingQueue.hasSendUploads('client-p')).toBe(!settles);
+		pendingQueue.reset('s1', true);
+	});
+
 	it('keeps a newer re-queue cancelling, and its files, past an older attempt\'s receipt', () => {
 		pendingQueue.reset('s1', true);
 		uploads('client-r');
