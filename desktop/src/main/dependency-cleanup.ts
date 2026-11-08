@@ -59,8 +59,8 @@ export async function removeDependencyDirectory(directory: string): Promise<void
   await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
-/** Test seam: runs after the inventory, just before each candidate's final check and delete. */
-export interface CleanupHooks { beforeRemove?(candidate: string): Promise<void> }
+/** Test seams: run after the inventory, just before a candidate's (or its tombstone's) final check and delete. */
+export interface CleanupHooks { beforeRemove?(candidate: string): Promise<void>; beforeTombstone?(candidate: string): Promise<void> }
 
 export async function pruneDependencies(root: string, running: string | null, logger: Logger = console, hooks: CleanupHooks = {}): Promise<DependencyCleanup> {
   const result: DependencyCleanup = { removed: [], failed: [] };
@@ -100,9 +100,14 @@ export async function pruneDependencies(root: string, running: string | null, lo
         // stay deleted, which is safe because they were unused.
         await assertUnchanged(dependencies, candidate, identities);
         await removeDependencyDirectory(path.join(dependencies, ...candidate));
-        // A rejected npm set's tombstone sits beside it; it means nothing once the set is gone.
-        if (candidate.at(-3) === 'node') await fs.rm(path.join(dependencies, ...candidate.slice(0, -1), '.invalid-' + candidate.at(-1)), { force: true });
         result.removed.push(candidate.join('/'));
+        // A rejected npm set's tombstone sits beside it; it means nothing once the set is gone.
+        // The removal above can take a while, so the folders on the way are checked again first.
+        if (candidate.at(-3) === 'node') {
+          await hooks.beforeTombstone?.(candidate.join('/'));
+          await assertUnchanged(dependencies, candidate.slice(0, -1), identities);
+          await fs.rm(path.join(dependencies, ...candidate.slice(0, -1), '.invalid-' + candidate.at(-1)), { force: true });
+        }
       } catch (error) {
         if (error instanceof Unsafe) throw error;
         result.failed.push(candidate.join('/'));

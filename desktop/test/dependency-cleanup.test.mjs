@@ -140,6 +140,22 @@ for (const [name, before, swap] of [
   assert.equal(await exists(path.join(f.root, 'update.lock')), false);
 });
 
+test('a rejected set\'s marker file is not deleted through node/tools swapped for a junction after the set is removed', async t => {
+  // Review of #1276: the set's removal can take long, and node/tools may be swapped before its marker file goes.
+  const f = await fixture(t);
+  const set = `node/tools/${gen('0')}`, decoy = path.join(f.outside, 'decoy');
+  const marker = path.join(decoy, 'node/tools', '.invalid-' + gen('0'));
+  await file(marker, 'must survive');
+  let swapped = false;
+  const result = await pruneDependencies(f.root, R, quiet, { beforeTombstone: async candidate => {
+    if (candidate === set && !swapped) { swapped = true; await fs.rename(f.d('node/tools'), f.d('node/tools-moved')); await link(path.join(decoy, 'node/tools'), f.d('node/tools')); }
+  } });
+  assert.ok(swapped, `the inventory chose ${set}`);
+  assert.match(result.skipped, /changed after the inventory|is a link/);
+  assert.equal(await fs.readFile(marker, 'utf8'), 'must survive');
+  assert.equal(await exists(path.join(f.root, 'update.lock')), false);
+});
+
 test('a first start that is not healthy yet, or an update holding the lock, leaves everything', async t => {
   const f = await fixture(t);
   await fs.writeFile(path.join(f.root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: A, previous: B, booting: R }));
