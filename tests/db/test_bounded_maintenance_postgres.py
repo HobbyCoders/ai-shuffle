@@ -57,7 +57,7 @@ def pg(cluster, monkeypatch):
                                cursor_factory=Cursor if tracked else RealDictCursor)
         # Preserve the app-managed post-commit contract for producer calls.
         from app.db import base
-        callbacks = []
+        callbacks = base._CommitCallbacks()
         token = base._commit_callbacks.set((*base._commit_callbacks.get(), (conn, callbacks)))
         try:
             with conn:
