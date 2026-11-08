@@ -581,7 +581,7 @@ def _outcome_text(answer: Any) -> Optional[str]:
 def expired_note(action: str) -> str:
     """The wake an expired parked request sends the agent (plain text: it is
     the wake turn's own prompt)."""
-    return (f"The approval request expired without a yes or no from the owner: {action}. "
+    return (f"The approval request expired without an answer from the owner: {action}. "
             "The call was answered \"Not run yet\" earlier and was never run. Do not run it "
             "unless the owner asks for it again.")
 
