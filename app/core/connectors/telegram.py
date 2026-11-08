@@ -195,7 +195,7 @@ class TelegramConnector(BaseConnector):
             platform_user_name=user.full_name if user else "Unknown",
             text=message.text or "",
             platform_message_id=str(message.message_id),
-            sent_at=sent_at_seconds(message.date),
+            sent_at=sent_at_seconds(getattr(message, "date", None)),
             metadata={"chat_type": message.chat.type},
         )
         await self.emit_durable_trigger("watch_message_received", {

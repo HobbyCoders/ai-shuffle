@@ -6,7 +6,7 @@
       "module": "telegram",
       "class": "TelegramConnector",
       "files": {
-        "telegram.py": "66e9327f23bdd6676a160791b08d20aa5c8de0a80565fbdaadb5191c59a96f48",
+        "telegram.py": "39693e54727e5f91a81fcc702df2df6617d15ce54bce43c105e91b1e6f090f38",
         "telegram_actions.py": "b1f33a8a249e16fa582c7e00bb3da22770c52a55ab513ded25b9af9b54a89281"
       }
     },
@@ -14,7 +14,7 @@
       "module": "discord_connector",
       "class": "DiscordConnector",
       "files": {
-        "discord_connector.py": "6d10e45ab4e9dd1ab980cfd9cda941b016b97810b8454641c00e9032bb97766b",
+        "discord_connector.py": "76dc3be22797feae97410c17a08ec16c779a982ea1b85269bca39f5d71024cff",
         "discord_actions.py": "7d76da94b24d40c09b4ac6277eddf912d9dd0ce19b8b87808df4aaa98984b083",
         "watch_history.py": "043086d62c915463920475b285e0286ee32dd5c21c19de6055c20241e6b81f71"
       }
@@ -23,7 +23,7 @@
       "module": "whatsapp",
       "class": "WhatsAppConnector",
       "files": {
-        "whatsapp.py": "0892c0344df8d18a4cdaaffe3f1b39f01850223491716d21ededf4b9644ce436",
+        "whatsapp.py": "a61c40b585f19555ec2a581b31e2dd58eb70aa421a9b7a5f3413695ac595ba21",
         "whatsapp_actions.py": "172afe2188cf34fb5d9dd44c71d57801f73b764fd11e0f438e955aa52c78abd2"
       }
     },
@@ -38,7 +38,7 @@
       "module": "slack",
       "class": "SlackConnector",
       "files": {
-        "slack.py": "ada2535e945a3a8c857e6208d4031ed162be91e5bd3f903fa7329465f75dc46b",
+        "slack.py": "facbf3211a95124d00f51641dce1a3c15a8004bc76e2bc57e6683bbc9e4f8845",
         "slack_actions.py": "a7e2fe70523d2c21125605649ffaf69a1ad8d88f575c0bed5a480cf4911e58fb",
         "watch_history.py": "043086d62c915463920475b285e0286ee32dd5c21c19de6055c20241e6b81f71"
       }
@@ -47,7 +47,7 @@
       "module": "line",
       "class": "LINEConnector",
       "files": {
-        "line.py": "16389b0ff4bb1fa6c8b4a00ccf48e2b2e9eed658bc7ba62e496464b77c82ebfe",
+        "line.py": "4ff0ea8fed98498cb609c524f7e3d4e5258048fcefc7156085b247c22d40663a",
         "line_actions.py": "0f309fffdaf75c954976285c6b03fe6833728319fc57f4ed2bb6d7966ca28078"
       }
     },
@@ -55,7 +55,7 @@
       "module": "signal_connector",
       "class": "SignalConnector",
       "files": {
-        "signal_connector.py": "15ceb5558bdcbf2b95ff5f44c95cb3565e20eab1ab47cb890e3dd527ec57e5ff",
+        "signal_connector.py": "c311b3be1eb45d1b20cd83b03b5d50911605bad9883609a50662a43274f0e40b",
         "signal_actions.py": "8f4139205355f19b18f0f8fbc29e5bb954ec4c420e14d566fe56085593ad7431"
       }
     },
@@ -63,7 +63,7 @@
       "module": "imessage",
       "class": "IMessageConnector",
       "files": {
-        "imessage.py": "84fc5ceea6f69dbad72f8b8543e21094aef57a1ae30de9f86b4ef4aabfaf694a",
+        "imessage.py": "bc9d8554479df040c679cb7aa83a72aaed8bcb893674bb8b3298ac56fe82e3bb",
         "imessage_actions.py": "c0352b5b38d0cd7ece65c29889ddfd62d6dc997abc2f632b1e7490b8f56157f4"
       }
     },
@@ -73,7 +73,7 @@
       "module": "msteams",
       "class": "MSTeamsConnector",
       "files": {
-        "msteams.py": "c2dd0a94f3c599d1d105c531890ce6db946050ae5cdc73fa5ec1b19e3985ff92",
+        "msteams.py": "13c80a383b86a81ab701e7ddf537e15d57f2e265f9887a8585733e5f108040d3",
         "msteams_actions.py": "64326379b68407cd3a4eeb0256143c9bc20a837b1ab6d145193774aa81c4e757"
       }
     },
@@ -81,7 +81,7 @@
       "module": "bluebubbles",
       "class": "BlueBubblesConnector",
       "files": {
-        "bluebubbles.py": "6bdf2d94ab5c54998929a9f03c6724ac75e60628449529a7155a39bd05b5a22c",
+        "bluebubbles.py": "df37fdba8ae8b5844c3daa5e19d9de58c61351c955c94edca1e9a198d4787953",
         "bluebubbles_actions.py": "26329d62a2a775f3710687202b7b1cea365822cc5e8131a8fca6fa18db57e68e"
       }
     },
@@ -145,5 +145,5 @@
     ]
   },
   "sdk": 1,
-  "release": "64614cb83b9fa442"
+  "release": "3911d1498bae82ee"
 }

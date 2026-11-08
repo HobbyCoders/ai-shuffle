@@ -268,7 +268,7 @@ class DiscordConnector(BaseConnector):
                 platform_user_name=str(message.author),
                 text=text,
                 platform_message_id=str(message.id),
-                sent_at=sent_at_seconds(message.created_at),
+                sent_at=sent_at_seconds(getattr(message, "created_at", None)),
                 metadata={
                     "guild_id": guild_id,
                     "channel_name": getattr(message.channel, "name", None),
