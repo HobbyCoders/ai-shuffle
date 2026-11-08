@@ -1,8 +1,13 @@
 """Deferred history indexes against disposable PostgreSQL, never an installed worker."""
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from typing import Any
 
+import psycopg2
+import psycopg2.errors
 import pytest
 from psycopg2.extras import Json
 
@@ -516,3 +521,256 @@ def test_history_budget_upgrade_never_changes_live_index_options() -> None:
         assert sorted(cur.fetchall(), key=lambda row: row["relname"]) == sorted(
             before, key=lambda row: row["relname"],
         )
+
+
+def _insert_probe(cur: Any, sid: str, needle: str) -> None:
+    cur.execute("INSERT INTO session_recall_text(source,session_id,row_key,part,ts,body) "
+                "VALUES ('n',%s,'r',0,0,%s)", (sid, needle))
+
+
+def _delete_probe(sid: str) -> None:
+    with base.get_db() as conn:
+        conn.cursor().execute("DELETE FROM session_recall_text WHERE session_id=%s", (sid,))
+
+
+def _invalid_indexes() -> list[str]:
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+                    "WHERE NOT i.indisvalid AND c.relnamespace=current_schema()::regnamespace")
+        return [row["relname"] for row in cur.fetchall()]
+
+
+def _migrate_in_thread() -> tuple[Any, list[BaseException]]:
+    errors: list[BaseException] = []
+
+    def body() -> None:
+        try:
+            finish_migration()
+        except BaseException as exc:  # noqa: BLE001 — reported by the test thread
+            errors.append(exc)
+
+    worker = threading.Thread(target=body, daemon=True)
+    worker.start()
+    return worker, errors
+
+
+@pytest.mark.parametrize("holder", ["writer", "old_snapshot"])
+def test_concurrent_build_outlasts_writers_and_old_snapshots(holder: str) -> None:
+    finish_migration()
+    with base.get_db() as conn:
+        conn.cursor().execute("DROP INDEX idx_session_recall_text_trgm_n_h2")
+    sid = f"history-build-{holder}"
+    blocker = base.get_db()
+    conn = blocker.__enter__()
+    try:
+        cur = conn.cursor()
+        if holder == "writer":
+            _insert_probe(cur, sid, "buildwriterneedle")
+        else:
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute("SELECT count(*) AS n FROM sessions")
+            cur.fetchone()
+        worker, errors = _migrate_in_thread()
+        # Far beyond the short limit that applies to metadata locks.
+        worker.join(1.5)
+        assert worker.is_alive(), f"the build gave up behind {holder}: {errors}"
+    finally:
+        conn.rollback()
+        blocker.__exit__(None, None, None)
+    worker.join(60)
+    assert not worker.is_alive()
+    assert errors == []
+    assert _invalid_indexes() == []
+
+
+def test_interrupted_concurrent_build_is_rebuilt_on_the_next_pass() -> None:
+    finish_migration()
+    with base.get_db() as conn:
+        conn.cursor().execute("DROP INDEX idx_session_recall_text_trgm_n_h2")
+    sid = "history-build-interrupted"
+    blocker = base.get_db()
+    conn = blocker.__enter__()
+    try:
+        cur = conn.cursor()
+        _insert_probe(cur, sid, "buildinterruptedneedle")
+        worker, errors = _migrate_in_thread()
+        deadline = time.monotonic() + 20
+        cancelled = False
+        while time.monotonic() < deadline and not cancelled:
+            with base.get_db() as admin:
+                probe = admin.cursor()
+                probe.execute("SELECT pg_cancel_backend(pid) AS ok FROM pg_stat_activity "
+                              "WHERE query LIKE 'CREATE INDEX CONCURRENTLY%%' "
+                              "AND pid <> pg_backend_pid()")
+                cancelled = bool(probe.fetchall())
+            time.sleep(0.05)
+        assert cancelled, "the build never reached its concurrent phase"
+        worker.join(20)
+        assert errors and isinstance(errors[0], psycopg2.Error)
+        assert _invalid_indexes(), "a cancelled concurrent build should leave an INVALID index"
+    finally:
+        conn.rollback()
+        blocker.__exit__(None, None, None)
+    finish_migration()
+    assert _invalid_indexes() == []
+
+
+def test_database_error_during_migration_retries_at_normal_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail() -> bool:
+        raise psycopg2.errors.LockNotAvailable("busy")
+
+    monkeypatch.setattr(hi, "migrate", fail)
+    # Escaping would send startup's loop into its ten-minute error back-off.
+    assert hi.run_pass() is False
+
+
+@pytest.mark.parametrize(("free", "index_bytes"), [(1024 ** 3, 4 * 1024 ** 3)])
+def test_automatic_build_defers_when_the_disk_is_short(
+    free: int, index_bytes: int, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    finish_migration()
+    with base.get_db() as conn:
+        conn.cursor().execute("DROP INDEX idx_session_recall_text_trgm_n_h2")
+    monkeypatch.setattr(hi, "_retry_build_at", 0.0)
+    monkeypatch.setattr(hi, "_volumes", lambda cur, name: [("data", 1, free, index_bytes)])
+    with caplog.at_level(logging.WARNING, logger=hi.__name__):
+        assert hi.migrate() is False
+    assert "free" in caplog.text
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        assert hi._valid(cur, "idx_session_recall_text_trgm_n"), "the original must stay usable"
+        assert not hi._valid(cur, "idx_session_recall_text_trgm_n_h0")
+    assert _invalid_indexes() == []
+    # Waits out the retry interval without touching the database again.
+    monkeypatch.setattr(hi, "_online_cursor", lambda: pytest.fail("retried too soon"))
+    assert hi.migrate() is False
+    monkeypatch.undo()
+    finish_migration()
+
+
+def test_merge_waits_for_an_import_scope_held_past_the_quiet_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finish_migration()
+    monkeypatch.setattr(hi, "FLUSH_QUIET_SECONDS", 0.2)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        with hi.importing(cur, "session_recall_text"):
+            time.sleep(0.5)  # Longer than the quiet time, like a big table's publish.
+            monkeypatch.setattr(hi, "_online_cursor", lambda: pytest.fail("merged mid-move"))
+            assert hi.flush_pending() is False
+    # The quiet time counts from the end of the scope, not its start.
+    assert hi.flush_pending() is False
+    monkeypatch.undo()
+    monkeypatch.setattr(hi, "FLUSH_QUIET_SECONDS", 0.2)
+    time.sleep(0.3)
+    assert hi.flush_pending() is True
+
+
+def test_merge_is_cancelled_by_an_import_that_starts_after_it() -> None:
+    finish_migration()
+    sid = "history-merge-import"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        with hi.importing(cur, "session_recall_text"):
+            _insert_probe(cur, sid, "mergeimportneedle")
+    blocker = base.get_db()
+    conn = blocker.__enter__()
+    result: list[bool] = []
+    try:
+        # Holds the merge at the index lock so its statement is certainly running.
+        conn.cursor().execute("DROP INDEX idx_session_recall_text_trgm_n_h2")
+        worker = threading.Thread(
+            target=lambda: result.append(hi.flush_pending(quiet=0, poll=0.05)), daemon=True)
+        worker.start()
+        time.sleep(0.5)
+        assert worker.is_alive()
+        with base.get_db() as other:
+            with hi.importing(other.cursor(), "session_recall_text"):
+                worker.join(10)
+                assert not worker.is_alive(), "the import did not cancel the merge"
+    finally:
+        conn.rollback()
+        blocker.__exit__(None, None, None)
+    assert result == [False]
+    assert hi._unmerged_at is not None, "a cancelled merge must be retried"
+    assert hi.flush_pending(quiet=0)
+    _delete_probe(sid)
+
+
+@pytest.fixture
+def imported_overflow(request: pytest.FixtureRequest) -> list[str]:
+    """Two imported events too long to index inline, leaving overflow markers."""
+    session_recall.install_triggers()
+    with base.get_db() as conn:
+        assert session_recall.install_objects(conn.cursor())
+    finish_migration()
+    ids = ["history-overflow-a", "history-overflow-b"]
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        with hi.importing(cur, "session_events"):
+            for seq, sid in enumerate(ids):
+                cur.execute("INSERT INTO session_events(id,session_id,seq,event_type,payload) "
+                            "VALUES (%s,%s,%s,'message.user',%s)",
+                            (sid, sid, seq, Json({"content": "overflowneedle " * 20_000})))
+        cur.execute("SELECT count(*) AS n FROM session_recall_text "
+                    "WHERE session_id = ANY(%s) AND part = -1", (ids,))
+        assert cur.fetchone()["n"] == 2
+
+    def cleanup() -> None:
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM session_events WHERE session_id = ANY(%s)", (ids,))
+            cur.execute("DELETE FROM session_recall_text WHERE session_id = ANY(%s)", (ids,))
+
+    request.addfinalizer(cleanup)
+    return ids
+
+
+def test_delayed_overflow_promotion_after_a_merge_is_merged_too(
+    imported_overflow: list[str],
+) -> None:
+    assert hi.flush_pending(quiet=0)
+    assert hi._unmerged_at is None
+    while session_recall.promote_overflow(pause_seconds=0):
+        pass
+    assert hi._unmerged_at is not None, "history pieces written after the merge were forgotten"
+    assert hi.flush_pending(quiet=0)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT gin_clean_pending_list(%s::regclass) AS pages",
+                    ("idx_session_recall_text_trgm_e_h2",))
+        assert cur.fetchone()["pages"] == 0
+        source = hi.search_table(cur, "session_recall_text")
+        cur.execute(f"SELECT count(DISTINCT session_id) AS n FROM {source} "
+                    "WHERE source='e' AND part >= 0 AND body LIKE '%%overflowneedle%%'")
+        assert cur.fetchone()["n"] == 2
+
+
+def test_overflow_promotion_yields_to_a_foreground_turn(imported_overflow: list[str]) -> None:
+    # One row per pass still goes through, so unbroken activity cannot hide a
+    # long message from search for ever.
+    assert session_recall.promote_overflow(pause_seconds=0, can_work=lambda: False) == 1
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) AS n FROM session_recall_text "
+                    "WHERE session_id = ANY(%s) AND part = -1", (imported_overflow,))
+        assert cur.fetchone()["n"] == 1
+
+
+def test_import_scope_allows_an_inline_merge_and_restores_the_limit() -> None:
+    finish_migration()
+
+    def limit(cur: Any) -> str:
+        cur.execute("SHOW statement_timeout")
+        return cur.fetchone()["statement_timeout"]
+
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SET LOCAL statement_timeout = '30s'")
+        with hi.importing(cur, "session_events"):
+            assert limit(cur) == hi.IMPORT_STATEMENT_TIMEOUT
+        assert limit(cur) == "30s"

@@ -565,7 +565,9 @@ def start_background_tasks() -> List[asyncio.Task]:
         await asyncio.sleep(45)
         while True:
             try:
-                ready = await asyncio.to_thread(session_recall.run_backfill)
+                ready = await asyncio.to_thread(
+                    session_recall.run_backfill, can_work=_no_foreground_turn,
+                )
                 from app.db import history_indexing, recall_index_retirement
                 if ready:
                     await asyncio.to_thread(recall_index_retirement.run_pass)
