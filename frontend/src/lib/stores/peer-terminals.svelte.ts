@@ -43,11 +43,17 @@ let listInflight = 0;
 let ticker: ReturnType<typeof setInterval> | null = null;
 let listTimer: ReturnType<typeof setInterval> | null = null;
 let watchers = 0;
+/**
+ * Workers with a link card counting down. Plain, not read from `flows`, because
+ * syncTimers also runs from an effect teardown, where Svelte hands back a key
+ * added in the same flush as undefined.
+ */
+const linking = new Set<string>();
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 function syncTimers() {
-	const counting = Object.values(flows).some((flow) => flow.phase === 'linking') || watchers > 0;
+	const counting = linking.size > 0 || watchers > 0;
 	if (counting && !ticker) ticker = setInterval(() => { now = Date.now(); }, 1_000);
 	if (!counting && ticker) { clearInterval(ticker); ticker = null; }
 	if (watchers > 0 && !listTimer) listTimer = setInterval(() => {
@@ -62,6 +68,8 @@ function setFlow(workerId: string, flow: LinkFlow | null) {
 	now = Date.now();
 	if (flow) flows[workerId] = flow;
 	else delete flows[workerId];
+	if (flow?.phase === 'linking') linking.add(workerId);
+	else linking.delete(workerId);
 	syncTimers();
 }
 
@@ -241,7 +249,7 @@ export const peerTerminals = {
 	/** Test hook. */
 	reset() {
 		flows = {}; requests = []; links = []; fetchedAt = 0; loaded = false; loadError = null; working = {}; notices = {}; approving = false;
-		attempts.clear(); listSeq = 0; listInflight = 0; watchers = 0; now = Date.now();
+		attempts.clear(); linking.clear(); listSeq = 0; listInflight = 0; watchers = 0; now = Date.now();
 		syncTimers();
 	},
 };
