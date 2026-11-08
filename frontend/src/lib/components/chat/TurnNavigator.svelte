@@ -377,8 +377,10 @@
 		position: absolute;
 		left: 6px;
 		/* Stable origin: centring the changing tick list moved every existing
-		   tick on each send, and re-centred again as the composer cleared. */
-		top: min(120px, 20%);
+		   tick on each send, and re-centred again as the composer cleared. Sized
+		   from the screen, not this box: the box's height follows the composer,
+		   so a percentage moved the rail whenever a wrapped draft was sent (#1094). */
+		top: min(120px, 20vh);
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
