@@ -2,8 +2,9 @@
 
 The default ten-second stop budget allows 6.5s for finite requests, 1.5s for
 query settlement and two seconds for lifespan (idle measurement: 0.282s). A
-Python supervisor can supply its larger budget. These are shared deadlines,
-not a fresh timeout for every query. Only raw engine reads are cancelled here.
+Python supervisor can supply its larger budget; the settlement share scales
+with it, retaining two seconds for lifespan. These are shared deadlines, not a
+fresh timeout for every query. Only raw engine reads are cancelled here.
 Slow app writes/disconnect can still exceed the reserve: see issue #1305.
 This is not worst-case cancellation-safe settlement.
 """
@@ -96,16 +97,25 @@ async def engine_event(events, on_shutdown=None):
             reading.add_done_callback(_reaped)
 
 
-def configured_grace_seconds(environ=None):
+def configured_stop_budget(environ=None):
     """Infrastructure metadata from the supervisor; never extend an unknown budget."""
     environ = os.environ if environ is None else environ
     try:
         budget = float(environ.get("SHUFFLE_SUPERVISOR_STOP_SECONDS", "10"))
     except (TypeError, ValueError):
-        return GRACE_SECONDS
-    if not math.isfinite(budget) or not 10 <= budget <= 30:
-        return GRACE_SECONDS
-    return budget - SETTLE_SECONDS - CLEANUP_RESERVE_SECONDS
+        return 10.0
+    return budget if math.isfinite(budget) and 10 <= budget <= 30 else 10.0
+
+
+def configured_settle_seconds(environ=None):
+    # Preserve the default 15% settlement share for a larger supplied budget,
+    # rather than giving all extra time to engine reads and starving the tail.
+    return SETTLE_SECONDS * configured_stop_budget(environ) / 10
+
+
+def configured_grace_seconds(environ=None):
+    return (configured_stop_budget(environ) - configured_settle_seconds(environ)
+            - CLEANUP_RESERVE_SECONDS)
 
 
 async def settle(*, grace=None, http_tasks=()):
@@ -123,7 +133,7 @@ async def settle(*, grace=None, http_tasks=()):
         work.interrupt.set()
     if turns:
         waits = {asyncio.create_task(work.finished.wait()) for work in turns}
-        _, pending = await asyncio.wait(waits, timeout=SETTLE_SECONDS)
+        _, pending = await asyncio.wait(waits, timeout=configured_settle_seconds())
         for task in pending:
             task.cancel()
         if pending:

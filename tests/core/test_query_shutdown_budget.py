@@ -49,6 +49,7 @@ async def record_sync(fn, *args, **kwargs):
     result = await original_sync(fn, *args, **kwargs)
     if fn.__name__ == 'record_adhoc_turn':
         (root / 'terminal-turn.json').write_text(json.dumps(kwargs, default=str))
+        (root / 'query-settled').touch()
     return result
 qe.run_sync = record_sync
 
@@ -57,9 +58,10 @@ async def persist(**kwargs):
     (root / 'persisted.json').write_text(json.dumps(kwargs))
 qe._persist_turn_results = persist
 async def memory(*args):
-    await asyncio.sleep(.15)
+    # Controlled delay before replication; local memory was already written.
+    (root / 'local-memory.md').write_text('durable local memory')
+    await asyncio.sleep(MEMORY_DELAY)
     (root / 'memory-published').touch()
-    (root / 'query-settled').touch()
 qe.push_memory = memory
 
 async def raw_events():
@@ -81,7 +83,10 @@ async def messages():
 adapter.receive_events = messages
 # Keep the real query route and both engine entrypoints; isolate failover/config lookup.
 async def real_query(**kwargs):
-    return await qe.execute_query(**kwargs)
+    try:
+        return await qe.execute_query(**kwargs)
+    finally:
+        (root / 'query-owner-ended').touch()
 async def real_stream(**kwargs):
     async for event in qe.stream_query(**kwargs):
         yield event
@@ -91,9 +96,10 @@ query._stream_query_with_failover = real_stream
 """
 
 
-def run_query_shutdown_probe(tmp_path, mode, budget, query_path, *, container_supervised=False):
+def run_query_shutdown_probe(tmp_path, mode, budget, query_path, *, container_supervised=False,
+                             memory_delay=.15, expect_memory=True):
     script = tmp_path / "server.py"
-    setup = QUERY_SETUP + f"\nMODE = {mode!r}\n" + REAL_QUERY_SETUP
+    setup = QUERY_SETUP + f"\nMODE = {mode!r}\nMEMORY_DELAY = {memory_delay!r}\n" + REAL_QUERY_SETUP
     script.write_text(SERVER.replace("serve.run(app,", setup + "\nserve.run(app,"))
     env = dict(os.environ, SHUFFLE_PREVIEW_PORT="off", PYTHONPATH=str(ROOT))
     env.pop("SHUFFLE_SUPERVISOR_STOP_SECONDS", None)
@@ -129,7 +135,19 @@ def run_query_shutdown_probe(tmp_path, mode, budget, query_path, *, container_su
             assert (tmp_path / "cleanup-completed").exists(), log.read_text()
             assert (tmp_path / "query-settled").exists(), log.read_text()
             assert (tmp_path / "engine-fenced").exists() is (mode != "finite-15"), log.read_text()
-            assert (tmp_path / "memory-published").exists(), log.read_text()
+            assert (tmp_path / "memory-published").exists() is expect_memory, log.read_text()
+            assert (tmp_path / "local-memory.md").read_text() == "durable local memory"
+            if query_path == "/api/v1/query":
+                assert (tmp_path / "query-owner-ended").exists(), log.read_text()
+            if not expect_memory:
+                # Uvicorn may have already closed the connection before its
+                # cancelled request task can send a 500; neither is success.
+                try:
+                    status = connection.getresponse().status
+                except http.client.RemoteDisconnected:
+                    status = "disconnected"
+                assert status in (500, "disconnected")
+                assert "exceeded the shutdown reserve" in log.read_text()
             terminal = json.loads((tmp_path / "terminal-turn.json").read_text())
             assert terminal["outcome"] == ("completed" if mode == "finite-15" else "aborted")
             if mode == "finite-15":
