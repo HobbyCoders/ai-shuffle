@@ -496,7 +496,8 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 observed.update(tasks)
                 continue
             await asyncio.sleep(0)
-            if not self._background_completions or self._background_wake_blocked:
+            if (self._background_closed or not self._background_completions
+                    or self._background_wake_blocked):
                 return
             self._kick_background_wake()
 

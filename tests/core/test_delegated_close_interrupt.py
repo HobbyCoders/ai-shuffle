@@ -228,6 +228,7 @@ async def test_a_claimed_background_wake_cannot_clear_close_interruption(monkeyp
 
     async def interrupt():
         interrupt_flags.append(loop._interrupted.is_set())
+        await asyncio.sleep(0)  # let the concurrent waiter observe the closed wake
 
     monkeypatch.setattr(loop, "_run_turn", turn)
     monkeypatch.setattr(loop, "_send_interrupt", interrupt)
@@ -237,7 +238,24 @@ async def test_a_claimed_background_wake_cannot_clear_close_interruption(monkeyp
     # Close enters before its next await; that queued wake must not clear the
     # flag while close's interrupt write lets other tasks run.
     await loop._claim_background_wake()
-    await loop.aclose()
-    assert started == []
-    assert interrupt_flags == [True]
-    assert loop._interrupted.is_set()
+    waiter = asyncio.create_task(loop.wait_turn())
+    try:
+        await loop.aclose()
+        await asyncio.wait_for(waiter, timeout=0.5)
+        assert started == []
+        assert interrupt_flags == [True]
+        assert loop._interrupted.is_set()
+        assert loop._background_completions["background-result"].summary == "done"
+        # The closed engine did not consume the durable completion either:
+        # a fresh engine reconstructs the same outbox from producer events.
+        fresh = DelegatedLoop(store=loop.store, model="fixture", session_id=loop.session_id)
+        try:
+            async with fresh._background_lock:
+                await fresh._rehydrate_background_lifecycle_unlocked()
+            assert fresh._background_completions["background-result"].summary == "done"
+        finally:
+            await fresh.aclose()
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
