@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -897,12 +898,27 @@ def _transcript_op_min_age_hours() -> Optional[float]:
     """The transcript pass's age floor in hours, or None (fail closed) when misconfigured."""
     try:
         hours = float(os.environ.get(TRANSCRIPT_OP_MIN_AGE_HOURS_ENV, DEFAULT_TRANSCRIPT_OP_MIN_AGE_HOURS))
-        if not hours >= 0:  # also rejects NaN
-            raise ValueError("age floor must not be negative")
+        if not (math.isfinite(hours) and hours >= 0):
+            raise ValueError("age floor must be a finite, non-negative number")
     except ValueError:
         logger.warning("Skipping transcript op retention: invalid %s", TRANSCRIPT_OP_MIN_AGE_HOURS_ENV)
         return None
     return hours
+
+
+def _transcript_op_cutoff(now: datetime, min_age_hours: float) -> Optional[str]:
+    """``now`` minus the floor, or None (fail closed) when no datetime can hold it.
+
+    An oversized floor (say ``1e12`` hours) must skip only this pass: an
+    OverflowError would abort the whole maintenance round, memory and session
+    compaction and the legacy prune included.
+    """
+    try:
+        return (now - timedelta(hours=min_age_hours)).isoformat()
+    except (OverflowError, ValueError):
+        logger.warning("Skipping transcript op retention: %s=%r is out of range",
+                       TRANSCRIPT_OP_MIN_AGE_HOURS_ENV, min_age_hours)
+        return None
 
 
 def _peer_grace_days(purpose: str) -> Optional[int]:
@@ -988,7 +1004,9 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
         if min_age_hours is None:
             return 0
     now = datetime.now(timezone.utc)
-    cutoff = (now - timedelta(hours=min_age_hours)).isoformat()
+    cutoff = _transcript_op_cutoff(now, min_age_hours)
+    if cutoff is None:
+        return 0
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cur = conn.cursor()
         set_timeout(cur)

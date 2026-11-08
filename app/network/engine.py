@@ -678,6 +678,35 @@ def _billing_refresh_needed(cursor, coll, record_id, record):
                 or _provider_value_changed(coll, previous, "balance_key", record["balance_key"])))
 
 
+def _retire_merged_fragments(cursor, record: Mapping[str, Any]) -> None:
+    """Drop the fragments of a delta run this worker holds once the run arrives merged.
+
+    Idle delta compaction (``compact_session_deltas``) merges a run into one
+    row at the run's LAST seq carrying the FIRST fragment's event id. A state
+    copy or transcript fill sends that row, not the fragments. A worker that
+    received only part of the run before going away still holds the first
+    fragment under the same id, so inserting the merged row would collide
+    with it. The merged row supersedes every fragment from the first one up
+    to its own seq: delete them here, in the applying transaction, exactly as
+    the owner deleted them. Their sync records stay, as on the owner.
+    """
+    from app.db.session_events import COMPACTABLE_DELTA_TYPES
+
+    session_id, seq, event_id = record.get("session_id"), record.get("seq"), record.get("id")
+    if (record.get("event_type") not in COMPACTABLE_DELTA_TYPES or not isinstance(session_id, str)
+            or not isinstance(event_id, str) or type(seq) is not int):
+        return
+    cursor.execute("SELECT seq FROM session_events WHERE id = %s AND session_id = %s AND seq < %s",
+                   (event_id, session_id, seq))
+    held = cursor.fetchone()
+    if held is None:
+        return
+    types = sorted(COMPACTABLE_DELTA_TYPES)
+    cursor.execute("DELETE FROM session_events WHERE session_id = %s AND seq >= %s AND seq < %s "
+                   f"AND event_type IN ({', '.join(['%s'] * len(types))})",
+                   (session_id, int(held["seq"]), seq, *types))
+
+
 def materialize(
     cursor: Any, coll: policy.Collection, record_id: str,
     record: Optional[Mapping[str, Any]], *, origin_device_id: Optional[str] = None,
@@ -730,6 +759,8 @@ def materialize(
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
     record = dict(record)
+    if coll.name == "session_events":
+        _retire_merged_fragments(cursor, record)
     if coll.name == "system_settings" and record_id.startswith("provider_observation:"):
         from app.core.provider_observations import _number
         existing = _read_row(cursor, coll, record_id)

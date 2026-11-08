@@ -5,10 +5,13 @@ Real PostgreSQL, independent worker schemas, the real event and catalog
 producers, signed exchange through the actual peer router and the scheduled
 maintenance loop. Never the configured application database.
 """
+import httpx
+import pytest
+
 from app.db import database
 from app.db import network as store
 from app.db import session_events as events_db
-from app.network import catalog, engine
+from app.network import catalog, engine, transcripts, transport
 from tests.core.network.test_transcript_op_retention_postgres import (  # noqa: F401
     admit,
     cluster,
@@ -145,6 +148,76 @@ def test_ops_of_compacted_delta_runs_are_retired(pg_workers):
     # 33 events, 29 rows merged away: every envelope but the stream head goes.
     assert (deleted, op_count(source)) == (32, 1)
     assert protected_rows(source) == content
+
+
+def deltas(worker, count, *, finish=False):
+    with worker.active():
+        events_db.append_events("chat", [
+            {"type": "assistant.text_delta", "payload": {"text": f"part {n} "}} for n in range(count)])
+        if finish:
+            events_db.append_events("chat", [{"type": "message.assistant", "payload": {"content": "done"}}])
+        catalog.publish_owned()
+
+
+async def test_expired_peer_holding_part_of_a_merged_run_recovers(pg_workers, monkeypatch):
+    """The peer holds a run's first fragments; the owner later merged the run into one row.
+
+    The merged row reuses the first fragment's event id, so the transcript fill
+    must replace the fragments the peer holds rather than collide with them.
+    """
+    source, peer = pg_workers("source"), pg_workers("peer")
+    with source.active():
+        engine.create_network("Bounds")
+    publish(source, 1, create=True)
+    admit(source, peer)
+    served = ServedBy(source, "https://source.example.com")
+    deltas(source, 3)
+    await sync(peer, served)
+    assert len(transcript(peer)) == 4  # the message and the run's first three fragments
+    deltas(source, 3, finish=True)
+    with source.active():
+        assert events_db.compact_session_deltas("chat", keep_tail_events=0) == (1, 5)
+    # The peer's contact expires and the log is pruned below what it holds.
+    source.sql("INSERT INTO sync_peers(device_id, last_contact, updated_at) VALUES (%s, '2000-01-01', '2000-01-01') "
+               "ON CONFLICT (device_id) DO UPDATE SET last_contact = EXCLUDED.last_contact, "
+               "updated_at = EXCLUDED.updated_at", (peer.device_id,))
+    transport._peer_watermarks.pop(peer.device_id, None)
+    age_ops(source, 2)
+    await prune_once(source, monkeypatch)
+    assert (await sync(peer, served))["snapshot_required"]
+    monkeypatch.setattr(transcripts, "_link", lambda device_id: transport.PeerLink(
+        device_id, [served.base_url] if device_id == source.device_id else []))
+    with peer.active():
+        async with httpx.AsyncClient(transport=served.transport()) as client:
+            for _ in range(5):
+                if not transcripts.pending():
+                    break
+                await transcripts.run_once(client)
+        assert not transcripts.pending()
+    assert transcript(peer) == transcript(source)
+    assert [row["seq"] for row in transcript(peer)] == [1, 7, 8]
+    # Later writes still flow by ops.
+    publish(source, 1)
+    assert not (await sync(peer, served)).get("snapshot_required")
+    assert transcript(peer) == transcript(source)
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e300", "1e12"])
+async def test_unrepresentable_floor_skips_only_transcript_retention(pg_workers, monkeypatch, value):
+    source = pg_workers("source")
+    with source.active():
+        engine.create_network("Bounds")
+    publish(source, 3, create=True)
+    for n in range(3):
+        retitle(source, n)
+    publish(source, 1)  # a transcript head above the catalog copies
+    age_ops(source, 2)
+    monkeypatch.setenv(store.TRANSCRIPT_OP_MIN_AGE_HOURS_ENV, value)
+    with source.active():
+        assert store.prune_transcript_ops(source.device_id, {}) == 0
+    await prune_once(source, monkeypatch)
+    assert op_count(source) == 4  # transcript retention skipped, fail closed
+    assert len(ops_of(source, "sessions")) == 1  # the rest of the maintenance pass still ran
 
 
 async def test_superseded_session_ops_pin_for_a_lagging_peer_and_honour_kill_switch(pg_workers, monkeypatch):

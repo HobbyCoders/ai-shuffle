@@ -46,7 +46,8 @@ ids cannot starve it. For each origin/incarnation it deletes only operations:
 
 1. In `session_events`, received/created locally more than an hour ago
    (`AI_SHUFFLE_SYNC_TRANSCRIPT_OP_MIN_AGE_HOURS`, default **1**, hours; a
-   negative or unreadable value fails closed). This was 30 days until the
+   negative, infinite, oversized or unreadable value skips this pass only;
+   the rest of the maintenance round still runs). This was 30 days until the
    1.6-million-ops-a-week field report (see below). Rule 2 is what protects an
    offline peer, not the age, so the floor only keeps ops for a peer that has
    just joined and not yet advertised a frontier.
@@ -62,6 +63,15 @@ ids cannot starve it. For each origin/incarnation it deletes only operations:
    session is a delta row (the run's survivor); otherwise their envelopes would
    never be retired. Damaged/incomplete materializations are kept, not assumed
    disposable.
+
+A state copy or transcript fill sends the merged row, which carries the run's
+first event id at the run's last seq. A peer that received only the start of
+the run before it went away still holds that first fragment under the same id.
+When the merged row is applied, the receiver deletes its own fragments from
+that first one up to the merged seq in the same transaction, as the owner did
+(`engine._retire_merged_fragments`). Without that, the insert collided with
+the held id and the fill failed on every retry. This was possible before this
+change after 30 days; the shorter floor makes it more likely.
 
 Recent means a successful authenticated sync observation within
 `AI_SHUFFLE_SYNC_OP_PEER_GRACE_DAYS` (default **30**, positive integer days).
