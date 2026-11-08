@@ -37,6 +37,7 @@ from contextlib import nullcontext
 import json
 import logging
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Collection, Dict, List, Optional
@@ -1518,6 +1519,27 @@ def settle_turn(
 
     Returns the settled turn row on the transition that actually settles it.
     """
+    from app.db.session_events import LOCK_RETRY_DELAYS_SECONDS
+
+    # This entry point owns its transaction (it accepts no caller connection).
+    # Retry the WHOLE guarded transition only after PostgreSQL confirms rollback,
+    # never just its terminal append and never the failed recorder's batch.
+    delays = LOCK_RETRY_DELAYS_SECONDS if outcome == "aborted" and stop_reason == "recording_failed" else ()
+    for delay in (*delays, None):
+        try:
+            return _settle_turn_once(turn_id, outcome, stop_reason, error, run_id,
+                                     keep_unsent_words=keep_unsent_words)
+        except psycopg2.errors.LockNotAvailable:
+            if delay is None:
+                raise
+            logger.warning("recording-failure settlement rolled back for %s; retrying in %.2fs", turn_id, delay)
+            time.sleep(delay)
+
+
+def _settle_turn_once(
+    turn_id: str, outcome: str, stop_reason: Optional[str], error: Optional[str],
+    run_id: Optional[str], *, keep_unsent_words: bool,
+) -> Optional[Dict[str, Any]]:
     if outcome not in ("completed", "aborted"):
         raise ValueError(f"settle_turn outcome must be completed|aborted, got {outcome!r}")
     sql = (

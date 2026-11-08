@@ -109,8 +109,27 @@ ordinary contention. Neither could supply a closing event once a failed recorder
 stopped accepting writes. Recovery therefore covers the standalone producers as
 well as the guarded terminal transition; it does not increase SQL timeouts or
 retry caller-owned transactions or uncertain commits. The focused PostgreSQL
-permission test holds the event counter past `lock_timeout` and checks ordered,
-exactly-once request/answer events after release.
+permission tests hold the event counter past `lock_timeout`, including two
+independent processes where the answering install wins the counter before the
+requesting install retries. Each terminal batch includes its stable-id request
+snapshot; the counter serializes them and late duplicate requests cannot reopen
+settled cards. Deferred re-asks have a new durable interaction id and still reopen
+the existing display card.
+
+The recording-failure close retries the entire owned settlement transaction,
+including its run-id guard and run/counter/session lock prefix, only after a
+confirmed lock-timeout rollback. If every attempt fails, it still rolls back:
+the turn remains live without a terminal receipt, and a dead-lease sweep may
+requeue a user/queue prompt. Bounded retry is not a durable failure outbox or an
+exactly-once execution guarantee during a sustained database failure.
+
+The standalone sweep includes rewind boundaries (admission stays held through
+recovery) and archive-retirement reconciliation (the durable marker stays pending
+until its event commits). Caller-owned appends in Stop/unsent restoration, plans,
+session moves, parked settlement, task replay and orchestration remain with their
+owning transaction; warning delivery already has a durable outbox. Recorder and
+between-turn taps retain their existing ordered recovery. Watch events use a
+separate watch store, not the transcript event log.
 
 ### Admission recovery and independent background work
 

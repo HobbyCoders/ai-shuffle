@@ -19,6 +19,8 @@ Design (mirrors ``turn_recorder``):
   lease (it may not even be the runner), so these events must not be gated on a
   fence. DB work runs off-loop on the recorder's ordered, shielded writer;
   server-confirmed lock timeouts are retried without replaying uncertain commits.
+  A terminal batch includes the stable-id request snapshot so causality also
+  holds across installs sharing a database, not only within one process queue.
 - Every emitter swallows and logs any failure — emission must never fail the
   user's answer/cancel. It runs AFTER the caller's ``notify_changed`` + WS
   broadcast, so a swallowed append leaves the live path fully intact.
@@ -75,7 +77,29 @@ async def _emit(session_id: str, event: Dict[str, Any]) -> None:
     # Seed legacy history BEFORE the first append so a first-writer interaction
     # event never seeds session_event_counters and blocks the backfill.
     await ensure_backfilled(session_id)
-    await _append_unfenced(session_id, [event])
+    interaction_id = event["payload"]["interaction_id"]
+    request_event_id = "interaction-requested:" + interaction_id
+    batch = [event]
+    if event["type"] == "interaction.requested":
+        event["id"] = request_event_id
+    else:
+        from app.db import interactions
+
+        row = await asyncio.to_thread(interactions.get_interaction, interaction_id)
+        if row and row["session_id"] == session_id and row["kind"] in ("permission", "question"):
+            # Another install can answer the durable row while this install's
+            # requested event is retrying. Reserve the request and terminal in
+            # ONE counter-serialized transaction. Stable-id insertion makes an
+            # already-written or delayed request a no-op, not a reopened card.
+            # Deferred re-asks mint a NEW interaction id (same display request id).
+            requested = _build_event(
+                contract.InteractionRequested, session_id,
+                interaction_id=interaction_id, request_id=event["payload"].get("request_id"),
+                kind=row["kind"], request=row["payload"],
+            )
+            requested["id"] = request_event_id
+            batch.insert(0, requested)
+    await _append_unfenced(session_id, batch)
 
 
 async def emit_interaction_requested(
