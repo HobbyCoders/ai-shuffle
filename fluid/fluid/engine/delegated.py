@@ -1591,6 +1591,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # cleanup cancels a question wake AND the turn it directly awaits,
             # so the active-turn check and interrupt must precede that cleanup.
             self._background_closed = True
+            # The reader may map the CLI's result while the interrupt write
+            # yields: it must already know this is a stopped turn, not a
+            # rejected resume handle to discard and replay.
+            self._interrupted.set()
             if self._turn_task and not self._turn_task.done():
                 # EOF closes input, not an in-flight provider reply. Ask the CLI
                 # to abort without letting a blocked stdin hold up close.
@@ -1599,7 +1603,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 except Exception:
                     logger.debug("interrupting the closing claude CLI failed", exc_info=True)
             await self._close_background_lifecycle()
-            self._interrupted.set()
             # Settle anyone parked on a control reply: the CLI is going away, so
             # they get "unavailable" now instead of waiting out the timeout.
             for request_id, fut in list(self._pending_controls.items()):

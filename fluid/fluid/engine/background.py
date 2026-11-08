@@ -409,6 +409,10 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     async def _run_background_wake(
         self, completions: Iterable[BackgroundTaskFinished]
     ) -> None:
+        # Close can win after the wake was claimed but before this task runs.
+        # Do not clear its stop flag or start a turn on the closing engine.
+        if self._background_closed:
+            return
         batch = tuple(completions)
         task_ids = tuple(item.task_id for item in batch)
         self._interrupted.clear()

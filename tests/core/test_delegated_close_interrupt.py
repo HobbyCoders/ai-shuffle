@@ -9,7 +9,8 @@ import time
 import pytest
 
 from fluid.engine.delegated import DelegatedLoop
-from fluid.events.ops import BackgroundTaskFinished, RespondQuestion
+from fluid.events.model import ErrorEvent, Interrupted
+from fluid.events.ops import BackgroundTaskFinished, RespondQuestion, UserTurn
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import BackgroundTaskReceipt
 
@@ -144,3 +145,99 @@ async def test_outer_cancellation_during_interrupt_still_reaps_the_cli(monkeypat
         if proc.returncode is None:
             proc.kill()
             await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_close_maps_interrupt_result_without_discarding_a_valid_resume(monkeypatch):
+    store = MemoryStore()
+    loop = DelegatedLoop(store=store, model="fixture", cli_session_id="cli-prev")
+    loop._spawn_resume = "cli-prev"
+    # The first turn on a resumed CLI has no mapped nodes yet. Its error result
+    # on interrupt is NOT evidence that the valid resume handle was rejected.
+    proc = await _spawn(loop, """
+import json, sys
+print('ready', flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    if frame.get('request', {}).get('subtype') == 'interrupt':
+        print(json.dumps({'type': 'result', 'subtype': 'error_during_execution',
+                          'is_error': True, 'errors': ['interrupted']}), flush=True)
+""")
+    user_written = asyncio.Event()
+    interrupt_processed = asyncio.Event()
+    frames = []
+    restarts = []
+    real_write = loop._write_frame
+    real_interrupt = loop._send_interrupt
+    real_ensure = loop._ensure_process
+
+    async def write_frame(frame):
+        await real_write(frame)
+        frames.append(frame)
+        if frame.get("type") == "user":
+            user_written.set()
+
+    async def interrupt_while_reader_runs():
+        await real_interrupt()
+        # A blocked drain can yield after the frame was written. Hold that
+        # window open until the real _run_turn/_drive_turn/mapper processes the
+        # subprocess result, not an arbitrary sleep or a mocked turn reader.
+        await asyncio.shield(loop._turn_task)
+        interrupt_processed.set()
+
+    async def ensure_existing_process():
+        if loop._proc is None:
+            restarts.append(True)
+            raise RuntimeError("unexpected replacement CLI during close")
+        return await real_ensure()
+
+    monkeypatch.setattr(loop, "_write_frame", write_frame)
+    monkeypatch.setattr(loop, "_send_interrupt", interrupt_while_reader_runs)
+    monkeypatch.setattr(loop, "_ensure_process", ensure_existing_process)
+    try:
+        sid = (await loop._ensure_session()).session_id
+        await loop.submit(UserTurn(content="continue the existing conversation"))
+        await asyncio.wait_for(user_written.wait(), timeout=2)
+        await asyncio.wait_for(loop.aclose(), timeout=2)
+        assert interrupt_processed.is_set()
+        assert loop.cli_session_id == "cli-prev"
+        assert restarts == []
+        assert len([f for f in frames if f.get("type") == "user"]) == 1
+        events = await store.events_since(sid, 0)
+        assert len([event for event in events if isinstance(event, Interrupted)]) == 1
+        assert not any(isinstance(event, ErrorEvent) for event in events)
+        assert proc.returncode == 0
+    finally:
+        if loop._turn_task is not None and not loop._turn_task.done():
+            loop._turn_task.cancel()
+            await asyncio.gather(loop._turn_task, return_exceptions=True)
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_a_claimed_background_wake_cannot_clear_close_interruption(monkeypatch):
+    loop = DelegatedLoop(store=MemoryStore(), model="fixture")
+    started = []
+    interrupt_flags = []
+
+    async def turn(op):
+        started.append(op)
+        await asyncio.Event().wait()
+
+    async def interrupt():
+        interrupt_flags.append(loop._interrupted.is_set())
+
+    monkeypatch.setattr(loop, "_run_turn", turn)
+    monkeypatch.setattr(loop, "_send_interrupt", interrupt)
+    await loop._background_task_started(BackgroundTaskReceipt(task_id="background-result"))
+    await loop.submit(BackgroundTaskFinished(task_id="background-result", summary="done"))
+    # Claim inline so the real wake coroutine is queued but has not started.
+    # Close enters before its next await; that queued wake must not clear the
+    # flag while close's interrupt write lets other tasks run.
+    await loop._claim_background_wake()
+    await loop.aclose()
+    assert started == []
+    assert interrupt_flags == [True]
+    assert loop._interrupted.is_set()
