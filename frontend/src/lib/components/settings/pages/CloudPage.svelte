@@ -55,15 +55,19 @@
 
 	const accountView = $derived.by((): { text: string; tone?: StatusTone } => {
 		if (!status) {
-			if (load === 'forbidden') return { text: FORBIDDEN_TEXT };
-			return { text: load === 'error' ? 'Unavailable' : 'Loading…' };
+			return { text: load === 'forbidden' ? FORBIDDEN_TEXT : 'Unavailable' };
 		}
 		if (tier === 'paid') return { text: 'Paid', tone: 'ok' };
 		if (tier === 'free') return { text: 'Free', tone: 'ok' };
 		return { text: 'Not linked', tone: 'off' };
 	});
 
-	const accountHint = $derived(status?.linked ? 'Linked to AI Shuffle Cloud' : undefined);
+	/* The answer sets this row's shape and the Plans rows' height (a Link button,
+	   a hint, a meter, a renewal row), so no reserved height fits every plan.
+	   Until it lands, only the row's own title and "Loading…" are painted: those
+	   stay put, and the rest appears once, already in its final place (#1270). */
+	const loading = $derived(load === 'loading');
+	const accountHint = $derived(loading ? 'Loading…' : status?.linked ? 'Linked to AI Shuffle Cloud' : undefined);
 
 	function shortDate(iso: string | null): string {
 		if (!iso) return '';
@@ -114,14 +118,16 @@
 <PreferencePage category="cloud">
 	<RowGroup title="Account">
 		<SettingRow id="cloud.account" hint={accountHint} stackOnPhone={!!status && !status.linked}>
-			<span data-testid="cloud-state"><ValueText value={accountView.text} status={accountView.tone} /></span>
+			{#if !loading}
+				<span data-testid="cloud-state"><ValueText value={accountView.text} status={accountView.tone} /></span>
+			{/if}
 			{#if status && !status.linked}
 				<button type="button" class="st-btn primary" data-setting-anchor="cloud.link" onclick={linkAccount}>Link account</button>
 			{/if}
 		</SettingRow>
 	</RowGroup>
 
-	<section aria-label="Plans" aria-busy={load === 'loading'} data-testid="cloud-tiers">
+	<section class:cl-pending={loading} aria-label="Plans" aria-busy={loading} data-testid="cloud-tiers">
 		<RowGroup title="Plans">
 			{#each tiers as t (t.id)}
 				<SettingRow label={t.name} hint={`${t.figure} · ${t.unit}`} stackOnPhone={t.id === 'paid' || (t.id === currentTier && used !== null)}>
@@ -157,7 +163,7 @@
 			{/if}
 		</RowGroup>
 	</section>
-	<div class="cl-foot st-footnote">
+	<div class="cl-foot st-footnote" class:cl-pending={loading}>
 		<p class="cl-msg" data-testid="cloud-follows">Your plan follows your Cloud account across workers. Local use stays free.</p>
 		<button type="button" class="st-btn ghost sm" onclick={openDocs}><BookOpen />How Cloud works</button>
 	</div>
@@ -165,6 +171,7 @@
 </PreferencePage>
 
 <style>
+	.cl-pending { visibility: hidden; }
 	/* A small badge beside the plan name. */
 	.cl-here { flex: none; font-size: 11.5px; font-weight: 400; line-height: 16px; padding: 0 7px; border: 1px solid var(--st-border-strong); border-radius: 999px; color: var(--st-mfg); white-space: nowrap; }
 	.cl-seats-label { display: none; }

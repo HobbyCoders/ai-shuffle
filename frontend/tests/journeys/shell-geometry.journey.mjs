@@ -87,4 +87,29 @@ await runJourney({name:'shell-geometry', allow:[...DEV_INSTANCE_NOISE, {
     await page.locator('.p-head').filter({visible:true}).first().waitFor();
    }
   }
- }))) });
+ }))).concat([{
+  // The answer sets the page's shape, and a slow one must not move what is on screen (#1270).
+  name:'cloud-slow-license', viewports:['desktop','phone'],
+  async setup({page,status}) {
+   await page.route(/\/api\/v1\/license(?:\?|$)/, async route => {
+    const response=await route.fetch();
+    await new Promise(done=>setTimeout(done,1000));
+    await route.fulfill({response});
+   });
+   await gotoApp(page,status);
+   const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
+   if(!await nav.isVisible()) await page.getByRole('button',{name:/^(Chats|Open menu)( \(|$)/}).first().click();
+   await nav.getByRole('button',{name:'Settings',exact:true}).click();
+   await page.getByRole('navigation',{name:'Settings',exact:true}).waitFor();
+  },
+  async act({page,mark}) {
+   await shown(page.getByRole('navigation',{name:'Settings',exact:true}).getByRole('button',{name:'Cloud',exact:true})).click();
+   await mark('Cloud opened, license answer still on its way');
+   await page.locator('[data-testid="cloud-tiers"]').first().waitFor({state:'attached'});
+   expect(await page.locator('[data-testid="cloud-tiers"][aria-busy="true"]').count()===1,'the plans wait for the answer');
+   await page.locator('[data-testid="cloud-tiers"][aria-busy="false"]').waitFor({timeout:8000});
+   await mark('license answer landed');
+   await page.waitForTimeout(600);
+   await page.locator('[data-testid="cloud-state"]').filter({visible:true}).first().waitFor();
+  }
+ }]) });
