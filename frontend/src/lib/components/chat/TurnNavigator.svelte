@@ -109,6 +109,64 @@
 		return () => observer.disconnect();
 	});
 
+	// ── Vertical centring ───────────────────────────────────────────────────
+	/** How far off-centre the rail may drift before it moves. Re-centring on
+	 *  every change shifted each tick by half a row on every send, and again
+	 *  as the composer cleared. */
+	const RECENTRE_DRIFT_PX = 40;
+	let navTop = $state<number | null>(null);
+	let centredSession: string | undefined;
+
+	/** The least rail worth keeping above a tall draft. */
+	const MIN_RAIL_PX = 40;
+	/** Height of whatever shares the composer's slot when the rail last moved. */
+	let placedComposer = 0;
+
+	/** The rail's height with nothing squeezing it. A tall draft shortens the box,
+	 *  down to nothing, and a box read then would look like a rail wanting to move. */
+	function restingHeight(navEl: HTMLElement): number {
+		if (!rail) return navEl.offsetHeight;
+		const cap = parseFloat(getComputedStyle(rail).maxHeight) || Infinity;
+		return Math.max(navEl.offsetHeight, Math.min(rail.scrollHeight, cap));
+	}
+
+	function centreNav(force = false) {
+		const host = nav?.parentElement;
+		if (!nav || !host || (scrubbing && !force)) return;
+		const available = host.clientHeight;
+		const height = restingHeight(nav);
+		const composer = nav.closest('.chat-view')?.querySelector('.input-slot')?.clientHeight ?? 0;
+		const cramped = force || navTop === null || available - navTop < Math.min(height, MIN_RAIL_PX);
+		// The composer trades height one for one with the transcript. Measure as if it
+		// had not changed since the rail last moved, or a draft growing or being sent
+		// counts as drift and the rail follows every send (#1094). Only a draft that
+		// leaves the rail no room moves it, and its own bottom gives way before that.
+		const room = cramped ? available : available + composer - placedComposer;
+		const centred = Math.max(0, Math.round((room - height) / 2));
+		if (cramped || navTop! + height > room || Math.abs(centred - navTop!) > RECENTRE_DRIFT_PX) {
+			navTop = centred;
+			placedComposer = composer;
+		}
+	}
+
+	// A different chat centres exactly; a new turn only moves past the drift.
+	$effect(() => {
+		const session = items[0]?.id;
+		void items.length;
+		if (!nav) return;
+		const force = session !== centredSession;
+		centredSession = session;
+		void nextTick().then(() => centreNav(force));
+	});
+
+	$effect(() => {
+		const host = nav?.parentElement;
+		if (!host || typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(() => centreNav());
+		observer.observe(host);
+		return () => observer.disconnect();
+	});
+
 	// ── Touch scrub ─────────────────────────────────────────────────────────
 	/** Movement that turns a touch into a scrub; less is a tap (the click path). */
 	const SCRUB_SLOP_PX = 4;
@@ -250,6 +308,8 @@
 		scrub = null;
 		if (!active) return;
 		scrubbing = false;
+		// Anything the gesture held the rail still for applies now.
+		centreNav();
 		hoveredIndex = null;
 		// The gesture's own click (if the browser still sends one) must not
 		// select the tick the finger started on. Other ticks stay tappable.
@@ -361,7 +421,7 @@
 	class:is-scrubbing={scrubbing}
 	class:is-scrolling={scrolling}
 	class:needs-you={needsYouIds.length > 0}
-	style="--count: {items.length}"
+	style="--count: {items.length}; top: {navTop ?? 0}px; max-height: calc(100% - {navTop ?? 0}px)"
 	aria-label="Navigate user turns"
 	onfocusin={() => (focused = true)}
 	onfocusout={() => (focused = false)}
@@ -433,26 +493,14 @@
 	.turn-nav {
 		position: absolute;
 		left: 6px;
-		/* Stable origin: centring the changing tick list moved every existing
-		   tick on each send, and re-centred again as the composer cleared.
-		   A constant, never a function of this box or the visible height: the
-		   box follows the composer and whatever else shares its slot, so any
-		   formula that read it moved the rail when a draft was sent (#1094).
-		   Flush with the transcript's top, so the bottom can always give way. */
-		--rail-top: 0px;
+		/* `top` and `max-height` are set inline: vertically centred, see centreNav().
+		   The height stops at the transcript's bottom, so a tall draft takes room from
+		   the rail's bottom and the rail itself stays where it is (#1094). */
 		--visible-height: var(--app-viewport-height, 100dvh);
-		top: var(--rail-top);
-		max-height: calc(100% - var(--rail-top));
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
 		pointer-events: auto;
-	}
-
-	/* With a mouse and a tall window the rail has room to stand lower, beside
-	   what is being read. No keyboard shortens a window like this. */
-	@media (min-width: 640px) and (pointer: fine) and (min-height: 700px) {
-		.turn-nav { --rail-top: 120px; }
 	}
 
 	/* At rest the rail is invisible: it answers to the pointer, to the keyboard

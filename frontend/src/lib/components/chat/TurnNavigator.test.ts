@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import TurnNavigator from './TurnNavigator.svelte';
 import type { ChatMessage } from '$lib/stores/types';
 import { deriveUserTurnNavigationItems } from '$lib/utils/transcript-navigation';
@@ -124,6 +125,97 @@ describe('TurnNavigator', () => {
 		await fireEvent.pointerDown(clicked, { pointerType: 'mouse' });
 		await fireEvent.click(clicked);
 		expect(document.activeElement).toBe(clicked);
+	});
+
+	describe('vertical centring', () => {
+		const items = Array.from({ length: 6 }, (_, i) => ({ id: String(i), label: `Prompt ${i}`, title: `Prompt ${i}`, preview: `Body ${i}` }));
+		const observers: ResizeObserverCallback[] = [];
+
+		/** jsdom has no layout: fixes the transcript and rail heights by hand. */
+		async function mount(hostHeight: number, navHeight: number, composerHeight = 0) {
+			observers.length = 0;
+			vi.stubGlobal('ResizeObserver', class {
+				constructor(callback: ResizeObserverCallback) { observers.push(callback); }
+				observe() {}
+				disconnect() {}
+			});
+			const { container } = render(TurnNavigator, { props: { items, currentIndex: 0, onSelect: vi.fn() } });
+			const nav = container.querySelector('nav') as HTMLElement;
+			Object.defineProperty(nav, 'offsetHeight', { configurable: true, value: navHeight });
+			container.classList.add('chat-view');
+			const slot = container.appendChild(document.createElement('div'));
+			slot.className = 'input-slot';
+			const setComposer = (height: number) => Object.defineProperty(slot, 'clientHeight', { configurable: true, value: height });
+			setComposer(composerHeight);
+			const resizeTo = async (height: number) => {
+				Object.defineProperty(container, 'clientHeight', { configurable: true, value: height });
+				observers.forEach((callback) => callback([], {} as ResizeObserver));
+				await tick();
+			};
+			Object.defineProperty(container, 'clientHeight', { configurable: true, value: hostHeight });
+			await tick();
+			return { nav, resizeTo, setComposer, container };
+		}
+
+		afterEach(() => vi.unstubAllGlobals());
+
+		it('holds still inside the drift band and moves past it', async () => {
+			const { nav, resizeTo } = await mount(400, 100);
+			expect(nav.style.top).toBe('150px');
+			await resizeTo(440);
+			expect(nav.style.top).toBe('150px');
+			await resizeTo(600);
+			expect(nav.style.top).toBe('250px');
+		});
+
+		it('moves inside the drift band when the rail would run past the transcript', async () => {
+			const { nav, resizeTo } = await mount(400, 380);
+			expect(nav.style.top).toBe('10px');
+			await resizeTo(385);
+			expect(nav.style.top).toBe('3px');
+		});
+
+		it('holds still while a draft grows and is sent, however far the transcript changes', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			expect(nav.style.top).toBe('150px');
+			setComposer(320);
+			await resizeTo(200);
+			expect(nav.style.top).toBe('150px');
+			setComposer(120);
+			await resizeTo(400);
+			expect(nav.style.top).toBe('150px');
+		});
+
+		it('moves for a draft that leaves it no room, and sending that draft does not move it back', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			setComposer(420);
+			await resizeTo(100);
+			expect(nav.style.top).toBe('0px');
+			setComposer(120);
+			await resizeTo(400);
+			expect(nav.style.top).toBe('0px');
+		});
+
+		it('centres on the rail\'s real height while a tall draft squeezes its box to nothing', async () => {
+			const { nav, resizeTo, container } = await mount(400, 100);
+			expect(nav.style.top).toBe('150px');
+			Object.defineProperty(nav, 'offsetHeight', { configurable: true, value: 0 });
+			Object.defineProperty(container.querySelector('.turn-rail'), 'scrollHeight', { configurable: true, value: 100 });
+			await resizeTo(410);
+			expect(nav.style.top).toBe('150px');
+		});
+
+		it('applies a resize it held back for a touch scrub once the finger lifts', async () => {
+			const { nav, resizeTo } = await mount(400, 100);
+			const ticks = screen.getAllByRole('button');
+			await fireEvent.pointerDown(ticks[0], { pointerType: 'touch', isPrimary: true, pointerId: 7, clientY: 10 });
+			await fireEvent.pointerMove(nav, { pointerType: 'touch', isPrimary: true, pointerId: 7, clientY: 40 });
+			await resizeTo(1000);
+			expect(nav.style.top).toBe('150px');
+			await fireEvent.pointerUp(nav, { pointerType: 'touch', isPrimary: true, pointerId: 7, clientY: 40 });
+			await tick();
+			expect(nav.style.top).toBe('450px');
+		});
 	});
 
 	describe('touch scrub', () => {

@@ -23,9 +23,9 @@
 // Hosted journeys build only the shared desktop UI and run it at desktop and
 // phone widths. `--mobile-shell` opens the phone variants in the separately
 // built production /mobile/ shell (npm run build, app.preview stamp,
-// devloop up --no-vite). There one question with options is answered by a
-// tap and has no Skip of its own, so `skip` and `skip-offline` run on the
-// desktop UI only and `answer` taps the option.
+// devloop up --no-vite). There one question is answered by a tap on the
+// prompt dock, which has its own Skip: `answer`, `skip` and `skip-offline`
+// use the dock's controls.
 import { runJourney } from './runner.mjs';
 import { PROJECT, CHAT, chatIdByToken, expect, openNewChat, pickAccess, scriptTag, typeAndSend, uniq, waitChat, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -89,7 +89,11 @@ const holdAcks = (page) => page.evaluate(() => { window.__journeySocket.holdAcks
 
 const form = (page) => page.getByRole('form', { name: 'Answer questions' });
 const tray = (page) => page.getByRole('region', { name: 'Questions for you' });
+const dock = (page) => page.getByRole('region', { name: 'Waiting on you' });
 const skipButton = (page) => form(page).getByRole('button', { name: /^(Skip this question|Skipped — undo)$/ });
+/** The Skip of a request with one question, and the surface that shows it. */
+const singleSkip = (page, variant) => (inMobileShell(variant) ? dock(page).getByRole('button', { name: 'Skip this question', exact: true }) : skipButton(page));
+const waitingOn = (page, variant) => (inMobileShell(variant) ? dock(page) : tray(page));
 const heading = (page) => form(page).getByRole('heading', { level: 3 });
 
 /** Ask through the scenario on the desktop UI; then (mobile shell) reopen the chat there. */
@@ -132,7 +136,7 @@ async function finalReply(page) {
  * with the tap and not up to a second later (#891). Then let the ack through.
  */
 async function expectClosedOnTap(page) {
-	const open = [form(page), tray(page), page.getByRole('region', { name: 'Waiting on you' })];
+	const open = [form(page), tray(page), dock(page)];
 	const closed = await Promise.all(open.map((l) => l.waitFor({ state: 'hidden', timeout: 2_000 }).then(() => true, () => false)));
 	const held = await page.evaluate(() => window.__journeySocket.held.length);
 	await page.evaluate(() => {
@@ -175,11 +179,11 @@ const answerCase = {
 const skipCase = {
 	name: 'skip',
 	setup: (ctx) => ask(ctx, 'ask-question'),
-	async act({ page, mark, log }) {
+	async act({ page, mark, variant, log }) {
 		expect((await responsesSent(page)) === 0, 'nothing answered before the skip');
 		await mark('skip the only question');
 		await holdAcks(page);
-		await skipButton(page).click();
+		await singleSkip(page, variant).click();
 		await expectClosedOnTap(page);
 		await expectTrayClosed(page);
 		const reply = await finalReply(page);
@@ -226,28 +230,29 @@ const skipTwoCase = {
 
 const skipOfflineCase = {
 	name: 'skip-offline',
-	viewports: mobileShell ? ['desktop'] : undefined,
 	setup: (ctx) => ask(ctx, 'ask-question'),
-	async act({ page, mark, log }) {
+	async act({ page, mark, variant, log }) {
+		const skip = singleSkip(page, variant);
+		const waiting = waitingOn(page, variant);
 		await mark('lose the connection');
 		await page.evaluate(() => {
 			const probe = window.__journeySocket;
 			probe.blocked = true;
 			for (const socket of probe.sockets) socket.close();
 		});
-		await tray(page).getByText('Reconnect to answer', { exact: true }).waitFor({ timeout: 15_000 });
-		expect(await skipButton(page).isDisabled(), 'Skip is disabled while disconnected');
+		await waiting.getByText('Reconnect to answer', { exact: true }).waitFor({ timeout: 15_000 });
+		expect(await skip.isDisabled(), 'Skip is disabled while disconnected');
 		// A press on the disabled control (as a hurried tap would) sends nothing.
-		await skipButton(page).click({ force: true });
+		await skip.click({ force: true });
 		await page.waitForTimeout(800);
 		expect((await responsesSent(page)) === 0, 'no answer left the page while disconnected');
-		expect((await form(page).count()) === 1, 'the question stays open while disconnected');
+		expect((await waiting.count()) === 1, 'the question stays open while disconnected');
 
 		await mark('reconnect and skip');
 		await page.evaluate(() => { window.__journeySocket.blocked = false; });
 		await page.getByRole('button', { name: 'Reconnect', exact: true }).click().catch(() => {});
-		await tray(page).getByText('Answer to continue', { exact: true }).waitFor({ timeout: 30_000 });
-		await skipButton(page).click();
+		await waiting.getByText(inMobileShell(variant) ? 'Waiting for you' : 'Answer to continue', { exact: true }).waitFor({ timeout: 30_000 });
+		await skip.click();
 		await expectTrayClosed(page);
 		const reply = await finalReply(page);
 		log(`reply: ${JSON.stringify(reply.slice(0, 200))}`);
@@ -303,21 +308,21 @@ const relayOfflineTypedCase = {
 	viewports: ['phone'],
 	setup: (ctx) => ask(ctx, 'ask-question'),
 	async act({ page, mark, log }) {
-		const dock = page.getByRole('region', { name: 'Waiting on you' });
+		const card = dock(page);
 		await mark('type an answer in the dock, send; delivery fails');
-		await dock.getByRole('button', { name: 'Type an answer' }).click();
-		await dock.getByRole('textbox', { name: 'Your answer' }).fill('Amber, but softer');
+		await card.getByRole('button', { name: 'Type an answer' }).click();
+		await card.getByRole('textbox', { name: 'Your answer' }).fill('Amber, but softer');
 		await failNextAnswer(page);
-		await dock.getByRole('button', { name: 'Send answer' }).click();
-		await expectBackAfterFailure(page, dock);
+		await card.getByRole('button', { name: 'Send answer' }).click();
+		await expectBackAfterFailure(page, card);
 
 		await mark('the typed answer came back');
-		const input = dock.getByRole('textbox', { name: 'Your answer' });
+		const input = card.getByRole('textbox', { name: 'Your answer' });
 		expect((await input.inputValue()) === 'Amber, but softer', 'the typed answer came back');
 
 		await mark('send again');
-		await dock.getByRole('button', { name: 'Send answer' }).click();
-		await dock.waitFor({ state: 'hidden', timeout: 15_000 });
+		await card.getByRole('button', { name: 'Send answer' }).click();
+		await card.waitFor({ state: 'hidden', timeout: 15_000 });
 		const reply = await finalReply(page);
 		log(`reply: ${JSON.stringify(reply.slice(0, 200))}`);
 		expect(reply.includes('Amber, but softer'), `the agent received the restored answer (${reply})`);
@@ -337,7 +342,7 @@ await runJourney({
 	name: 'question-tray',
 	cases: [
 		withProbe(answerCase),
-		withProbe({ ...skipCase, viewports: mobileShell ? ['desktop'] : undefined }),
+		withProbe(skipCase),
 		withProbe(skipTwoCase),
 		withProbe(skipOfflineCase),
 		withProbe(relayOfflineCase),

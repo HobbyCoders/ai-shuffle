@@ -992,13 +992,13 @@ The planning budget additionally reserves the 120-second prediction error allowe
 by the independent hosted calibration. That uncertainty is not borrowed from
 retry or teardown: the stronger headroom regression limits point-estimated
 journey runtime to 990 seconds. Job logs and summaries include this error reserve.
-The Nov 9 inventory (62 files, 1033 cases) totals 12013.04 estimated seconds,
-more than twelve shards can hold at 990 seconds each. Thirteen shards peak at
-959.72 seconds; the one-percent-refresh regression also preserves the uncertainty
+The Nov 9 refresh from clean matched main run `42664620034` covers 64 files and
+1064 cases, totaling 11822.90 measured seconds. Thirteen shards peak at 944.27
+seconds; the one-percent-refresh regression also preserves the uncertainty
 reserve when it adds two new journeys. Older green runs with changed app/journey
 workloads cannot refresh these measurements: the guarded producer refuses them.
-Until a complete matching green main run exists, new or grown files keep their
-conservative case-count fallbacks rather than fabricated fresh measurements.
+New or grown files keep their conservative case-count fallbacks until a complete
+matching green main run supplies fresh measurements.
 
 The earlier 9/10/11-shard changes guarded point estimates but not their allowed
 error. Across eleven main-suite runs on Nov 7–8, the slowest measured steps took

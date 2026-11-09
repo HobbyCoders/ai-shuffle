@@ -1,9 +1,9 @@
 // Sending must not move the turn rail, including when the composer gives height
 // back: its box sets the transcript's height, and a rail placed from that box
 // followed it (#1094). chat-position-stability's own send is one short line and
-// never changes the composer's height, so these sends live here. On a phone the
-// rail stands at the transcript's top whatever shares the composer's slot, and
-// only its bottom gives way to a keyboard or a tall draft.
+// never changes the composer's height, so these sends live here. The rail is
+// centred beside the transcript, whatever shares the composer's slot does not
+// count towards that centre, and only its bottom gives way to a tall draft.
 import { runJourney } from './runner.mjs';
 import { composer, expect, gotoApp, PROJECT, pickAccess, pickProject, seededChatId, sendButton, stopButton, typeAndSend, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { mobileShell, openStopChat, queueDuringASlowTurn } from './lib/stop-queue.mjs';
@@ -147,10 +147,9 @@ const railGeometry = (page) => page.evaluate((selector) => {
 // Enough for a few ticks; a shorter rail scrolls, and a shorter transcript fills it.
 const MIN_RAIL = 40;
 
-/** The rail's top is the transcript's top; only a transcript with no height left may lose the rail. */
+/** The rail stays inside the transcript; only a transcript with no height left may lose it. */
 function expectRailUsable(name, at) {
 	const detail = JSON.stringify(at);
-	expect(Math.abs(at.railTop - at.logTop) <= 1, `${name}: the rail stands at the transcript's top (${detail})`);
 	const room = at.composerTop - at.logTop;
 	if (room < 1) return;
 	expect(at.railTop >= at.logTop - 1 && at.railBottom <= at.composerTop + 1, `${name}: the rail stays inside the transcript (${detail})`);
@@ -281,8 +280,8 @@ await runJourney({
 			name: 'wrapped-send', setup: openHistory,
 			prepare: ({ page }) => composer(page).fill('please read the deployment notes again and then list every question that is still open for me [script:default]')
 		}),
-		// With a keyboard up the rail stands at the top of a short transcript, and a
-		// wrapped draft must not change that.
+		// With a keyboard up the transcript is short, and a wrapped draft must not
+		// move the rail inside it.
 		sendCase({
 			// Prepared in setup, which is not recorded: the journey shrinks the screen
 			// itself, and on a slow phone that lands outside "recent input".

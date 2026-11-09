@@ -265,6 +265,76 @@ describe('agent question', () => {
 		expect(screen.getByRole('form', { name: 'Answer questions' })).toBeTruthy();
 	});
 
+	it('uses the shared form, with its picker and Not now, for a model question', () => {
+		renderDock({ permissions: [], questions: [{ ...question, questions: [{ question: 'Which model should subagents use?', header: 'Subagent model', multiSelect: false, options: [], picker: 'model' }] }] });
+		expect(screen.getByRole('form', { name: 'Answer questions' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Not now' })).toBeTruthy();
+		expect(screen.queryByRole('textbox', { name: 'Your answer' })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Skip this question' })).toBeNull();
+	});
+
+	describe('skipping', () => {
+		const skip = () => screen.getByRole('button', { name: 'Skip this question' }) as HTMLButtonElement;
+		const skippedReply = {
+			request_id: 'q1', tool_use_id: 'tu1', answers: {}, skipped: ['Which install format should the guide lead with?']
+		};
+
+		it('sends a skip for a question answered by tapping an option', async () => {
+			const { onQuestion } = renderDock({ permissions: [], questions: [question] });
+			await armed();
+			await fireEvent.click(skip());
+			expect(onQuestion).toHaveBeenCalledExactlyOnceWith(skippedReply);
+			expect((await screen.findByRole('status')).textContent).toContain('Question skipped');
+		});
+
+		it('holds back a tap that lands as the question appears', async () => {
+			const { onQuestion } = renderDock({ permissions: [], questions: [question] });
+			expect(skip().disabled).toBe(true);
+			await fireEvent.click(skip());
+			expect(onQuestion).not.toHaveBeenCalled();
+		});
+
+		it('stays available after choosing to type an answer', async () => {
+			const { onQuestion } = renderDock({ permissions: [], questions: [question] });
+			await armed();
+			await fireEvent.click(screen.getByRole('button', { name: 'Type an answer' }));
+			await fireEvent.click(skip());
+			expect(onQuestion).toHaveBeenCalledExactlyOnceWith(skippedReply);
+		});
+
+		it('is offered on a question with no options', async () => {
+			const open = { ...question, questions: [{ ...question.questions[0], options: [] }] };
+			const { onQuestion } = renderDock({ permissions: [], questions: [open] });
+			await armed();
+			await fireEvent.click(skip());
+			expect(onQuestion).toHaveBeenCalledExactlyOnceWith(skippedReply);
+		});
+
+		it('sends nothing while disconnected', async () => {
+			const { onQuestion } = renderDock({ permissions: [], questions: [question], connected: false });
+			await armed();
+			expect(skip().disabled).toBe(true);
+			await fireEvent.click(skip());
+			expect(onQuestion).not.toHaveBeenCalled();
+		});
+
+		it('sends one skip for repeated taps', async () => {
+			const { onQuestion } = renderDock({ permissions: [], questions: [question, { ...question, request_id: 'q2' }] });
+			await armed();
+			const button = skip();
+			await fireEvent.click(button);
+			await fireEvent.click(button);
+			expect(onQuestion).toHaveBeenCalledOnce();
+		});
+
+		it('keeps the shared form\'s Skip and Send next to each other on the phone', () => {
+			renderDock({ permissions: [], questions: [{ ...question, questions: [question.questions[0], { ...question.questions[0], question: 'Second?', header: 'Second' }] }] });
+			const actions = screen.getByRole('group', { name: 'Answer actions' });
+			expect(within(actions).getByRole('button', { name: 'Skip this question' })).toBeTruthy();
+			expect(within(actions).getByRole('button', { name: 'Send answers' })).toBeTruthy();
+		});
+	});
+
 	// #899: the dock hides an answered question on the tap (#891). ChatView
 	// drops it from `questions` while its id is marked sent; a relay_offline
 	// ack un-marks it and it comes back. The draft must come back with it.
