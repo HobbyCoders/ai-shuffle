@@ -600,8 +600,9 @@ async def _follow_existing(request: _Request, row: Mapping[str, Any]) -> None:
     """Wait on a proxy prompt a previous process raised, then answer (restore)."""
     from app.core import interaction_wait
 
-    final = await interaction_wait.await_interaction(row["id"], request.root_session_id,
-                                                     max(1.0, _seconds_left(row.get("expires_at"))))
+    with interaction_wait.awaiting(row["id"]):
+        final = await interaction_wait.await_interaction(row["id"], request.root_session_id,
+                                                         max(1.0, _seconds_left(row.get("expires_at"))))
     state = (final or {}).get("state")
     answer = (final or {}).get("answer") or {}
     if state == "answered" and answer.get("decision") == "allow":

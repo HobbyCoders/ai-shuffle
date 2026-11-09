@@ -639,20 +639,29 @@ class ConnectorManager:
 
         Polling and permission callbacks do not acquire this lock. Different
         chats also remain concurrent. asyncio locks admit waiting messages FIFO.
-        The owner's plain-text answer to a permission request is taken first:
-        the lock is held by the very turn that is waiting for it.
+        The owner's plain-text answer to a permission request does not wait for
+        the lock, which is held by the very turn waiting for that answer. The
+        message's place in the queue is still taken before anything is awaited,
+        so a slow check of one message cannot let a later one overtake it.
         """
         from app.core.connector_permissions import answer_from_chat
 
-        if await answer_from_chat(message):
-            return
         key = (message.connector_id, message.platform_chat_id)
         lock = self._message_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
             self._message_locks[key] = lock
-        async with lock:
+        place = asyncio.ensure_future(lock.acquire())
+        try:
+            if await answer_from_chat(message):
+                return
+            await place
             await self._handle_incoming_message(message)
+        finally:
+            if not place.done():
+                place.cancel()
+            elif not place.cancelled() and place.exception() is None:
+                lock.release()
 
     async def _handle_incoming_message(self, message: IncomingMessage) -> None:
         """

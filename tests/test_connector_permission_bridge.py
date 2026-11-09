@@ -6,6 +6,7 @@ and the permission_handler hook that drives it.
 import asyncio
 import hashlib
 import json
+import re
 import time
 import uuid
 
@@ -442,10 +443,11 @@ class TestAnswerFromChat:
 
         _open_request()
         manager = ConnectorManager.__new__(ConnectorManager)
-        manager._message_locks = MagicMock()
+        manager._message_locks = {}
+        manager._handle_incoming_message = AsyncMock()
         for text, message_id in (("yes", "m0"), ("yes 4821", "m1"), ("yes 4821", "m1"), ("yes 9999", "m2")):
             await ConnectorManager.handle_incoming_message(manager, _chat_message(text, message_id=message_id))
-        manager._message_locks.get.assert_not_called()
+        manager._handle_incoming_message.assert_not_awaited()
         channel["respond"].assert_awaited_once()
 
     def test_claims_keep_no_platform_ids_and_stay_on_this_worker(self, mock_db):
@@ -525,10 +527,15 @@ class TestAnswerFromChat:
         from app.core.connectors.manager import ConnectorManager
 
         manager = ConnectorManager.__new__(ConnectorManager)
-        manager._message_locks = MagicMock()
+        held_by_the_turn = asyncio.Lock()
+        await held_by_the_turn.acquire()
+        reply = _chat_message()
+        manager._message_locks = {(reply.connector_id, reply.platform_chat_id): held_by_the_turn}
+        manager._handle_incoming_message = AsyncMock()
         with patch("app.core.connector_permissions.answer_from_chat", new=AsyncMock(return_value=True)):
-            await ConnectorManager.handle_incoming_message(manager, _chat_message())
-        manager._message_locks.get.assert_not_called()
+            await asyncio.wait_for(ConnectorManager.handle_incoming_message(manager, reply), timeout=2)
+        manager._handle_incoming_message.assert_not_awaited()
+        assert held_by_the_turn.locked()
 
     def test_only_the_owners_own_chat_is_told_the_action(self):
         from app.core.connector_permissions import _action_to_offer
@@ -606,18 +613,30 @@ class TestOnlyARequestThisWorkerCanActOnIsAnswered:
         assert _state(request) == ("answered" if answered else "pending")
 
     @pytest.mark.asyncio
-    async def test_a_real_waiter_is_what_counts(self, mock_db):
+    async def test_following_a_restored_proxy_prompt_keeps_it_answerable(self, mock_db):
+        from app.core import interaction_wait, remote_task_approvals
+
+        seen = []
+
+        async def stop_at_the_wait(interaction_id, *_args, **_kwargs):
+            seen.append(interaction_wait.is_awaited(interaction_id))
+            raise LookupError("stop here")
+
+        with patch.object(interaction_wait, "await_interaction", side_effect=stop_at_the_wait), \
+                pytest.raises(LookupError):
+            await remote_task_approvals._follow_existing(
+                MagicMock(root_session_id="sess-1"), {"id": "row-1", "expires_at": None})
+
+        assert seen == [True]
+        assert not interaction_wait.is_awaited("row-1")
+
+    def test_only_a_call_that_opened_the_request_marks_it_live(self, mock_db):
         from app.core import interaction_wait
-        from app.db import interactions
 
         request = _open_request()
-        with patch("app.core.interaction_wait._ensure_listener"), \
-                patch("app.core.interaction_wait._set_work_paused", new=AsyncMock()):
-            waiter = asyncio.create_task(interaction_wait.await_interaction(request, "sess-1", 10, poll_seconds=0.01))
-            while not interaction_wait.is_awaited(request):
-                await asyncio.sleep(0.01)
-            assert interactions.answer_interaction(request, {"decision": "allow"})
-            await waiter
+        assert not interaction_wait.is_awaited(request)
+        with interaction_wait.awaiting(request):
+            assert interaction_wait.is_awaited(request)
         assert not interaction_wait.is_awaited(request)
 
 
@@ -956,6 +975,87 @@ async def test_a_bluebubbles_sender_cannot_approve_even_with_the_right_code(mock
     assert turns == ["yes 4821"]
 
 
+class TestTurnsKeepArrivalOrder:
+    """ConnectorManager's own entry, which every adapter dispatches into."""
+
+    @pytest.fixture
+    def manager(self, mock_db):
+        from app.core.connectors.manager import ConnectorManager
+
+        manager = ConnectorManager()
+        manager.turns, manager.release = [], asyncio.Event()
+
+        async def turn(message):
+            manager.turns.append(message.text)
+            if message.text == "hold":
+                await manager.release.wait()
+
+        manager._handle_incoming_message = turn
+        return manager
+
+    @staticmethod
+    async def _settle(condition):
+        for _ in range(300):
+            if condition():
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("never happened")
+
+    @pytest.mark.asyncio
+    async def test_a_slow_owner_lookup_keeps_its_place(self, manager):
+        def slow_owner(connector_id, user_id):
+            time.sleep(0.05)
+            return True
+
+        with patch("app.core.connector_service.sender_is_owner", side_effect=slow_owner), \
+                patch("app.network.ownership.enrolled", return_value=False):
+            await asyncio.gather(
+                manager.handle_incoming_message(_chat_message("yes", message_id="m1")),
+                manager.handle_incoming_message(_chat_message("inspect the folder", message_id="m2")),
+            )
+
+        assert manager.turns == ["yes", "inspect the folder"]
+
+    @pytest.mark.asyncio
+    async def test_a_consumed_reply_never_waits_and_gives_up_its_place(self, manager):
+        async def only_the_reply_is_answered(message):
+            return message.text == "yes 4821"
+
+        with patch("app.core.connector_permissions.answer_from_chat", side_effect=only_the_reply_is_answered):
+            held = asyncio.create_task(manager.handle_incoming_message(_chat_message("hold", message_id="m1")))
+            await self._settle(lambda: manager.turns == ["hold"])
+
+            await asyncio.wait_for(manager.handle_incoming_message(
+                _chat_message("yes 4821", message_id="m2")), timeout=2)
+
+            after = asyncio.create_task(manager.handle_incoming_message(_chat_message("after", message_id="m3")))
+            await asyncio.sleep(0.02)
+            assert manager.turns == ["hold"]
+            manager.release.set()
+            await asyncio.wait_for(asyncio.gather(held, after), timeout=2)
+
+        assert manager.turns == ["hold", "after"]
+
+    @pytest.mark.asyncio
+    async def test_a_cancel_during_the_lookup_frees_the_chat(self, manager):
+        started, never = asyncio.Event(), asyncio.Event()
+
+        async def stuck_then_ordinary(message):
+            if message.text == "stuck":
+                started.set()
+                await never.wait()
+            return False
+
+        with patch("app.core.connector_permissions.answer_from_chat", side_effect=stuck_then_ordinary):
+            stuck = asyncio.create_task(manager.handle_incoming_message(_chat_message("stuck", message_id="m1")))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            stuck.cancel()
+            await asyncio.gather(stuck, return_exceptions=True)
+            await asyncio.wait_for(manager.handle_incoming_message(_chat_message("next", message_id="m2")), timeout=2)
+
+        assert manager.turns == ["next"]
+
+
 class TestSignalReadsTheReplyWhileItsTurnWaits:
     """Real: SignalConnector's SSE loop, ConnectorManager's entry, the owner gate,
     the code draw, the waiter and the responder. Fake: signal-cli's HTTP stream
@@ -1043,23 +1143,115 @@ class TestSignalReadsTheReplyWhileItsTurnWaits:
 
         request = interactions.create_interaction(
             "sess-1", "permission", {"request_id": "req-1", "tool_name": "Bash", "tool_input": {"command": "ls"}}, 300)["id"]
-        waiter = asyncio.create_task(interaction_wait.await_interaction(request, "sess-1", 30, poll_seconds=0.01))
-        await self._until(lambda: interaction_wait.is_awaited(request))
-        await deliver_permission_prompt("sess-1", "req-1", "Bash", {"command": "ls"}, "d", interaction_id=request)
-        code = interactions.get_interaction(request)["payload"][interactions.CHAT_CODES_KEY][f"c1:{self.GROUP}"]
-        assert f"Reply yes {code} or no {code}" in signal["adapter"].send_message.await_args.args[0].text
+        with interaction_wait.awaiting(request):
+            waiter = asyncio.create_task(interaction_wait.await_interaction(request, "sess-1", 30, poll_seconds=0.01))
+            await deliver_permission_prompt("sess-1", "req-1", "Bash", {"command": "ls"}, "d", interaction_id=request)
+            code = interactions.get_interaction(request)["payload"][interactions.CHAT_CODES_KEY][f"c1:{self.GROUP}"]
+            assert f"Reply yes {code} or no {code}" in signal["adapter"].send_message.await_args.args[0].text
 
-        signal["events"].put_nowait(self._event(self.STRANGER, f"yes {code}", 2))
-        await self._until(lambda: len(signal["adapter"]._chat_tasks) == 2)
-        await asyncio.sleep(0.05)
-        assert interactions.get_interaction(request)["state"] == "pending"
+            signal["events"].put_nowait(self._event(self.STRANGER, f"yes {code}", 2))
+            await self._until(lambda: len(signal["adapter"]._chat_tasks) == 2)
+            await asyncio.sleep(0.05)
+            assert interactions.get_interaction(request)["state"] == "pending"
 
-        signal["events"].put_nowait(self._event(self.OWNER, f"yes {code}", 3))
-        row = await asyncio.wait_for(waiter, timeout=5)
+            signal["events"].put_nowait(self._event(self.OWNER, f"yes {code}", 3))
+            row = await asyncio.wait_for(waiter, timeout=5)
 
         assert row["state"] == "answered" and row["answer"]["decision"] == "allow"
         assert not signal["release"].is_set() and signal["turns"] == ["tidy the folder"]
         await self._until(lambda: signal["adapter"].send_message.await_args.args[0].text.startswith("Approved"))
+
+    @staticmethod
+    def _held_prompts(signal):
+        """Hold the prompt's send open, as a slow platform or a second chat does."""
+        prompts, told, hold = [], [], asyncio.Event()
+
+        async def send(message):
+            if "Reply yes" in message.text:
+                prompts.append(message.text)
+                await hold.wait()
+            else:
+                told.append(message.text)
+            return True
+
+        signal["adapter"].send_message = AsyncMock(side_effect=send)
+        return prompts, told, hold
+
+    @staticmethod
+    def _ask_permission(broadcast=None):
+        from app.core import permission_handler as module
+
+        return asyncio.create_task(module.permission_handler.request_permission(
+            session_id="sess-1", request_id="req-1", profile_id="p1", tool_name="Bash",
+            tool_input={"command": "ls"}, broadcast_func=broadcast or AsyncMock()))
+
+    @pytest.mark.asyncio
+    async def test_a_reply_while_the_prompt_is_still_sending_is_answered(self, signal):
+        """The owner can read a prompt before the platform's send call returns."""
+        from app.core.permission_handler import PermissionResultAllow
+
+        prompts, told, hold = self._held_prompts(signal)
+        ask = self._ask_permission()
+        await self._until(lambda: prompts)
+        code = re.search(r"yes (\d{4})", prompts[0])[1]
+
+        signal["events"].put_nowait(self._event(self.OWNER, f"yes {code}", 2))
+        await self._until(lambda: told)
+
+        assert told[0].startswith("Approved")
+        hold.set()
+        assert isinstance(await asyncio.wait_for(ask, timeout=5), PermissionResultAllow)
+
+    @pytest.mark.asyncio
+    async def test_the_request_is_logged_before_a_chat_can_answer_it(self, signal):
+        prompts, _, hold = self._held_prompts(signal)
+        with patch("app.core.interaction_events.emit_interaction_requested", new=AsyncMock()) as logged:
+            ask = self._ask_permission()
+            await self._until(lambda: prompts)
+            logged.assert_awaited_once()
+            ask.cancel()
+            hold.set()
+            await asyncio.gather(ask, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_a_call_cancelled_while_the_prompt_is_sending_is_not_left_answerable(self, signal):
+        from app.core import interaction_wait
+
+        prompts, _, _ = self._held_prompts(signal)
+        ask = self._ask_permission()
+        await self._until(lambda: prompts)
+
+        ask.cancel()
+        await asyncio.gather(ask, return_exceptions=True)
+
+        assert not interaction_wait._awaited
+
+    @pytest.mark.asyncio
+    async def test_a_failure_before_the_wait_is_not_left_answerable(self, signal):
+        from app.core import interaction_wait
+
+        signal["adapter"].send_message = AsyncMock(return_value=True)
+        with patch("app.core.interaction_events.emit_interaction_requested",
+                   new=AsyncMock(side_effect=RuntimeError("log gone"))):
+            ask = self._ask_permission()
+            await asyncio.gather(ask, return_exceptions=True)
+
+        assert isinstance(ask.exception(), RuntimeError)
+        assert not interaction_wait._awaited
+
+    @pytest.mark.asyncio
+    async def test_a_delayed_lookup_cannot_reorder_the_stream(self, signal):
+        def slow_owner(connector_id, user_id):
+            time.sleep(0.05)
+            return True
+
+        signal["release"].set()
+        with patch("app.core.connector_service.sender_is_owner", side_effect=slow_owner):
+            signal["events"].put_nowait(self._event(self.OWNER, "yes", 1))
+            signal["events"].put_nowait(self._event(self.OWNER, "inspect the folder", 2))
+            await self._until(lambda: len(signal["turns"]) == 2)
+
+        assert signal["turns"] == ["yes", "inspect the folder"]
 
     @pytest.mark.asyncio
     async def test_disconnect_cancels_a_waiting_turn(self, signal):
