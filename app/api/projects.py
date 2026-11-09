@@ -21,8 +21,10 @@ from app.core.platform import is_local_mode
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
-from app.api.common import check_project_access, format_file_size, get_file_extension, api_error_handler, is_path_safe
+from app.api.common import check_project_access, format_file_size, get_file_extension, api_error_handler, is_path_safe, require_origin_access
 from app.api.sessions_helpers import check_session_access_for_api_user
+from app.api import session_files
+from app.network import control
 from app.core.project_links import is_link_locked
 
 logger = logging.getLogger(__name__)
@@ -599,6 +601,36 @@ def _get_project_session(session_id: str, project_id: str, api_user: Optional[di
     return session
 
 
+def _get_listing_session(session_id: str, project_id: str, api_user: Optional[dict]) -> Optional[dict]:
+    """``_get_project_session`` for read-only lists, also taking the shared id.
+
+    A chat that runs on another worker is often known here by the shared
+    project id alone, so the shared id names its project as well.
+    """
+    session = database.get_session(session_id)
+    if session and session.get("project_v2_id") == project_id:
+        check_session_access_for_api_user(api_user, session)
+        return session
+    return _get_project_session(session_id, project_id, api_user)
+
+
+def _check_listing_project_access(request: Request, project_id: str) -> None:
+    """``check_project_access``, or its shared-id equivalent for a shared id."""
+    from app.db.projects_v2 import get_project_v2
+
+    if get_project_v2(project_id):
+        require_origin_access(request=request, project_v2_id=project_id)
+    else:
+        check_project_access(request, project_id)
+
+
+class _RunsElsewhere:
+    """A session-scoped list that the worker running the session must answer."""
+
+    def __init__(self, owner: str):
+        self.owner = owner
+
+
 def _get_project_worktree(worktree_id: str, project_id: str) -> Optional[dict]:
     """Load a worktree for a project-scoped route; 404 if it belongs to another project's repository."""
     worktree = database.get_worktree(worktree_id)
@@ -681,7 +713,10 @@ async def list_project_files(
     token: str = Depends(require_auth)
 ):
     """List files in a project directory. API users can only access their assigned project."""
-    check_project_access(request, project_id)
+    if session_id:
+        await run_sync(_check_listing_project_access, request, project_id)
+    else:
+        check_project_access(request, project_id)
     api_user = get_api_user_from_request(request)
 
     def _list():
@@ -695,52 +730,17 @@ async def list_project_files(
         if session_id:
             from app.core.project_resolver import resolve_existing_cwd
 
-            session = _get_project_session(session_id, project_id, api_user)
+            session = _get_listing_session(session_id, project_id, api_user)
             if session:
+                owner = control.owner_of(session)
+                if owner:
+                    return _RunsElsewhere(owner)
                 cwd = resolve_existing_cwd(session)
                 if cwd:
                     session_cwd = Path(cwd)
 
         if session_cwd is not None:
-            base_path = session_cwd
-            full_path = base_path / path if path else base_path
-            if not is_path_safe(full_path, base_path):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Path escapes session checkout"
-                )
-
-            if not full_path.exists():
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Directory not found"
-                )
-            if not full_path.is_dir():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Path is not a directory"
-                )
-
-            files = []
-            for item in full_path.iterdir():
-                if item.name.startswith('.') and not show_hidden:
-                    continue
-                try:
-                    stat_info = item.stat()
-                    is_dir = item.is_dir()
-                    files.append({
-                        "name": item.name,
-                        "type": "directory" if is_dir else "file",
-                        "size": stat_info.st_size if not is_dir else None,
-                        "sizeFormatted": format_file_size(stat_info.st_size) if not is_dir else None,
-                        "path": str(item.relative_to(base_path)),
-                        "extension": get_file_extension(item.name) if not is_dir else None,
-                        "modifiedAt": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
-                        "createdAt": datetime.fromtimestamp(stat_info.st_ctime).isoformat(),
-                    })
-                except (OSError, PermissionError):
-                    continue
-            files.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
+            files = session_files.list_session_directory(session_cwd, path, show_hidden)
             return {"files": files, "path": path, "projectId": project_id}
 
         project = database.get_project(project_id)
@@ -795,7 +795,11 @@ async def list_project_files(
 
         return {"files": files, "path": path, "projectId": project_id}
 
-    return await run_sync(_list)
+    listing = await run_sync(_list)
+    if isinstance(listing, _RunsElsewhere):
+        result = await session_files.forward(listing.owner, session_id, "list", {"path": path, "show_hidden": show_hidden})
+        return {**result, "projectId": project_id}
+    return listing
 
 
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -1254,7 +1258,10 @@ async def list_chat_history(
     """
     from app.core.jsonl_parser import list_chat_history_sessions
 
-    check_project_access(request, project_id)
+    if session_id and not worktree_id:
+        await run_sync(_check_listing_project_access, request, project_id)
+    else:
+        check_project_access(request, project_id)
     api_user = get_api_user_from_request(request)
 
     def _load():
@@ -1267,8 +1274,11 @@ async def list_chat_history(
         if not worktree_id and session_id:
             from app.core.project_resolver import resolve_existing_cwd
 
-            session = _get_project_session(session_id, project_id, api_user)
+            session = _get_listing_session(session_id, project_id, api_user)
             if session:
+                owner = control.owner_of(session)
+                if owner:
+                    return _RunsElsewhere(owner)
                 cwd = resolve_existing_cwd(session)
                 if cwd:
                     return list_chat_history_sessions(
@@ -1300,6 +1310,9 @@ async def list_chat_history(
         )
 
     sessions = await run_sync(_load)
+    if isinstance(sessions, _RunsElsewhere):
+        result = await session_files.forward(sessions.owner, session_id, "chat-history", {"search": search, "limit": limit})
+        sessions = result["sessions"]
 
     return ChatHistoryResponse(sessions=[ChatHistoryItem(**s) for s in sessions])
 

@@ -331,6 +331,15 @@
 			]
 		},
 		{
+			"why": "@ file mentions in a chat that runs on another worker",
+			"journeys": ["remote-chat-mentions"],
+			"globs": [
+				"frontend/tests/journeys/remote-chat-mentions.journey.mjs",
+				"frontend/src/lib/components/FileAutocomplete.svelte",
+				"app/api/session_files.py"
+			]
+		},
+		{
 			"why": "cross-worker project sync: worker chips, the Workers tab, New project's worker picker and Set up & send",
 			"journeys": ["project-workers"],
 			"globs": [

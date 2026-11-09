@@ -3,8 +3,8 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
 import FileAutocomplete from './FileAutocomplete.svelte';
 
-const { getNotesAutocomplete } = vi.hoisted(() => ({ getNotesAutocomplete: vi.fn() }));
-vi.mock('$lib/api/client', () => ({ getNotesAutocomplete, getSubagentsForAutocomplete: vi.fn() }));
+const { getNotesAutocomplete, getSubagentsForAutocomplete } = vi.hoisted(() => ({ getNotesAutocomplete: vi.fn(), getSubagentsForAutocomplete: vi.fn() }));
+vi.mock('$lib/api/client', () => ({ getNotesAutocomplete, getSubagentsForAutocomplete }));
 vi.mock('$lib/api/git', () => ({ getWorktreeFiles: vi.fn().mockResolvedValue({ files: [] }) }));
 
 afterEach(() => { cleanup(); vi.resetAllMocks(); vi.unstubAllGlobals(); });
@@ -154,7 +154,7 @@ it('clears notes when the next request loses authorization', async () => {
     await waitFor(() => expect(screen.getByText((_, element) => element?.classList.contains('autocomplete-item-name') === true && element.textContent === 'Allowed note')).toBeTruthy());
     await rerender({ inputValue: '@Notes/forbidden' });
     await waitFor(() => expect(getNotesAutocomplete).toHaveBeenCalledWith('forbidden', 30));
-    await waitFor(() => expect(screen.getByText('No matching items')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Couldn't load this list.")).toBeTruthy());
     await waitFor(() => expect(screen.queryByText((_, element) => element?.classList.contains('autocomplete-item-name') === true && element.textContent === 'Allowed note')).toBeNull());
 });
 
@@ -171,4 +171,73 @@ it.each([false, true])('treats Shift+Enter as a new line, never a selection (pen
     const enter = new KeyboardEvent('keydown', { key: 'Enter', cancelable: true });
     expect(component.handleKeyDown(enter, '@Notes/alpha')).toBe(true);
     expect(onSelect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ name: 'Result A' }));
+});
+
+const failure = (status: number, detail?: string) => ({ ok: false, status, json: async () => (detail ? { detail } : {}) });
+const OFFLINE = 'The worker running this chat is offline or unreachable.';
+
+it('says why the file list failed and keeps the folders that do not depend on it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(failure(503, OFFLINE)));
+    render(FileAutocomplete, { ...props, sessionId: 'session', inputValue: '@' });
+    await screen.findByText(OFFLINE);
+    expect(screen.getAllByText('Notes', { exact: false }).length).toBeGreaterThan(0);
+    expect(screen.queryByText('No matching items')).toBeNull();
+});
+
+it('falls back to a plain message when the failure has no reason', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(failure(500)));
+    render(FileAutocomplete, { ...props, sessionId: 'session', inputValue: '@src/' });
+    await screen.findByText("Couldn't load this list.");
+    expect(screen.queryByText('No matching items')).toBeNull();
+});
+
+it('stops the spinner when the request times out', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('timed out', 'TimeoutError')));
+    render(FileAutocomplete, { ...props, sessionId: 'session', inputValue: '@src/' });
+    await screen.findByText('This list is taking too long to load.');
+    expect(document.querySelector('.autocomplete-loading')).toBeNull();
+});
+
+it('bounds the file request so a dead worker cannot spin forever', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ files: [] }) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(FileAutocomplete, { ...props, sessionId: 'session', inputValue: '@' });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(fetchMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+});
+
+it('says why chat history failed', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(failure(503, OFFLINE)));
+    render(FileAutocomplete, { ...props, sessionId: 'session', inputValue: '@Chat History/' });
+    await screen.findByText(OFFLINE);
+});
+
+it('tries again and clears the notice once the list loads', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(failure(503, OFFLINE)).mockResolvedValue({
+        ok: true, json: async () => ({ files: [{ name: 'back.md', type: 'file', path: 'back.md', size: 1 }] })
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(FileAutocomplete, { ...props, sessionId: 'session', inputValue: '@' });
+    (await screen.findByRole('button', { name: 'Try again' })).click();
+    await screen.findByText('back.md');
+    expect(screen.queryByText(OFFLINE)).toBeNull();
+});
+
+it('asks for files by the id it was given and selects the relative path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+        ok: true, json: async () => ({ files: [{ name: 'a.md', type: 'file', path: 'src/a.md', size: 1 }] })
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const onSelect = vi.fn();
+    render(FileAutocomplete, { ...props, onSelect, projectId: 'pv2-shared', sessionId: 'session', inputValue: '@src/' });
+    (await screen.findByText('a.md')).click();
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/projects/pv2-shared/files?path=src&session_id=session');
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ path: 'src/a.md' }));
+});
+
+it('offers project agents only from the local project it is told about', async () => {
+    getSubagentsForAutocomplete.mockResolvedValue([]);
+    render(FileAutocomplete, { ...props, projectId: 'pv2-shared', profileId: 'agent', inputValue: '@Subagents/' });
+    await waitFor(() => expect(getSubagentsForAutocomplete).toHaveBeenCalled());
+    expect(getSubagentsForAutocomplete.mock.calls[0][1]).toBeUndefined();
 });
