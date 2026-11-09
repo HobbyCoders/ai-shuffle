@@ -2746,6 +2746,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     if not await spawned():
                         return
             op, question_ids = await self._question_turn_content(op)
+            self.ctx.extra["time_turn_source"] = op.source
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
             from fluid.tools.time_context import delegated_wake_time
 

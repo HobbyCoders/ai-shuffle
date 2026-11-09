@@ -2569,7 +2569,7 @@ class HarnessAdapter(ProviderAdapter):
 
     def _compact_note(self) -> List[Any]:
         """:meth:`_turn_context_note` as restoration sections, always with
-        today's date and the branch.
+        the current owner-local time and the branch.
 
         The turn note carries them only where nothing else does (see
         :meth:`_env_note`). A compaction drops whatever the conversation said
@@ -2583,7 +2583,12 @@ class HarnessAdapter(ProviderAdapter):
         """
         from fluid.engine.compact_restore import RestorationSection
 
-        env = self._env_note() or self._checkout_env_note()
+        # Internal wakes bypass submit_prompt: retain their source when the CLI
+        # asks for a fresh post-compaction note, rather than skipping an owner
+        # message as though this were the adapter's last human submit.
+        ctx = getattr(self._engine, "ctx", None)
+        source = (getattr(ctx, "extra", None) or {}).get("time_turn_source")
+        env = self._checkout_env_note(source)
         section = self._memory_section()
         self._memory_put_back_section = section
         memory = f"<system-reminder>\n{section}\n</system-reminder>" if section else None
@@ -2642,20 +2647,17 @@ class HarnessAdapter(ProviderAdapter):
             return ""
 
     def _env_note(self) -> Optional[str]:
-        """Today's date and the checkout's branch for this turn, or ``None``.
+        """Fresh owner-local time and checkout facts for either delegated leg.
 
-        Only for a delegated leg whose prompt replaced Claude Code's preset:
-        that drops the CLI's own date and git facts, and the compiled prompt
-        holds the session-stable half only. The native leg gets both from
-        fluid's own per-turn reminder (``NativeLoop._environment_reminder``)
-        and a preset keeps the CLI's, so neither gets a second copy here.
+        The CLI preset has no owner timezone or gap. Native turns get these
+        through ``NativeLoop._environment_reminder`` instead.
         """
         if not self._is_delegated:
             return None
         return self._checkout_env_note()
 
-    def _checkout_env_note(self) -> Optional[str]:
-        """The date-and-branch reminder for the session's checkout. Never raises."""
+    def _checkout_env_note(self, source: str | None = None) -> Optional[str]:
+        """The owner-local clock and branch for this checkout. Never raises."""
         try:
             from app.core.environment import (
                 checkout_branch, generate_turn_environment_note,
@@ -2663,7 +2665,7 @@ class HarnessAdapter(ProviderAdapter):
 
             cwd = getattr(self._options, "cwd", None)
             return generate_turn_environment_note(
-                branch=checkout_branch(cwd), time_context=self._time_context(),
+                branch=checkout_branch(cwd), time_context=self._time_context(source),
                 include_rule=not self._delegated_replaces_preset,
             )
         except Exception:  # noqa: BLE001 — a reminder never fails a turn

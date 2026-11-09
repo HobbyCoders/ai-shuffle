@@ -2945,7 +2945,7 @@ def create_builtin_tools_server(
         "worker by itself with your note as its prompt. Call it once, then finish "
         "the turn with a short summary of where the work stands. Pass the "
         "worker's name as shown in the app (or its device id) and an optional "
-        "one-line note saying what to continue there.",
+        "one-line note saying what to continue there; use absolute dates, not relative ones.",
         {
             "type": "object",
             "properties": {

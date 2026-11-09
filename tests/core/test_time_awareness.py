@@ -118,3 +118,26 @@ def test_timezone_sync_materializes_in_receiving_worker_owner_namespace(monkeypa
                         "value": "America/New_York"}
 
 
+@pytest.mark.parametrize("preset", [True, False])
+def test_post_compaction_note_uses_internal_turn_source(monkeypatch, tmp_path, preset):
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.provider.types import SessionOptions
+    adapter = HarnessAdapter()
+    adapter._options = SessionOptions(cwd=str(tmp_path), model="fake-model")
+    adapter._is_delegated = True
+    adapter._delegated_replaces_preset = not preset
+    adapter._time_source = "user"  # stale source of the earlier host submit
+    adapter._engine = SimpleNamespace(ctx=SimpleNamespace(extra={"time_turn_source": "unpark"}))
+    seen = []
+    def context(source):
+        seen.append(source)
+        return {"zone": "America/New_York", "last_owner_at": "2026-11-08T23:00:00Z"}
+    monkeypatch.setattr(adapter, "_time_context", context)
+    for name in ("_memory_section", "_working_record_block", "_away_note", "_scratch_note", "_plan_note"):
+        monkeypatch.setattr(adapter, name, lambda: None)
+    sections = adapter._compact_note()
+    assert seen == ["unpark"]
+    assert sections[0].name == "environment"
+    assert "Current time:" in sections[0].text and "Owner's previous message:" in sections[0].text
+
+
