@@ -36,7 +36,14 @@ the slug on the canonical project/base checkout across worktrees; standalone Flu
 and has no app dependency. Report receipts are absolute and use normal Read
 permissions, not a blanket allow. Legacy cwd ledger/notes are copied exclusively
 on first access; existing canonical files (including empty cleared state) win.
-Old files and owner scratch are left intact. Project `.fluid/` remains a load
+Legacy files and owner scratch are left intact. Designated session scratch is
+cleared after settlement and one hour of filesystem quiet, unless an open turn,
+a process reference or unavailable safety evidence prevents it. An unsettle or
+handoff recreates temporary files on demand; ledger, notes and reports survive.
+Settled task checkouts use a 15-minute grace and five-minute cleanup passes;
+unmerged worker work is verified under `refs/fluid-archive/` before the existing
+safe worktree removal path runs. Missing-session worker checkouts need seven days.
+Project `.fluid/` remains a load
 scope for skills, agents, commands, plugins and settings, plus app-managed
 worktrees; explicit skill/plugin authoring and worktree lifecycle are unchanged.
 Standalone scratch guidance is CLI-owned context: native turns carry a removable

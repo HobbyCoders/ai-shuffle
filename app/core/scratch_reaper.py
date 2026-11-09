@@ -34,10 +34,12 @@ def _disabled(reason):
     return None
 
 
-def _uninspectable_is_unrelated(base, proc, protected_prefixes=None):
+def _uninspectable_is_unrelated(base, proc, protected_prefixes=None, *, strict=False):
     status = dict(line.split(":", 1) for line in (base / "status").read_text().splitlines() if ":" in line)
     uids = {int(uid) for uid in status["Uid"].split()}
     if 0 not in uids:
+        if strict:
+            return False  # Opaque apps may reference arbitrary session scratch.
         # Retaining cwd/fds then switching every UID to another user is a known gap.
         if os.getuid() not in uids:
             return True
@@ -66,7 +68,9 @@ def _is_application_process(base, status, proc, protected_prefixes=None):
     args = argv[1:]
     while args and args[0] in {b"-s", b"-I", b"-E", b"-u", b"-B"}:
         args = args[1:]
-    if args in ([b"-m", b"app.main"], [b"-m", b"app.preview_process"]):
+    devloop = (len(args) == 3 and args[:2] == [b"-m", b"scripts.devloop.child"]
+               and Path(os.fsdecode(args[2])).is_absolute())
+    if devloop or args in ([b"-m", b"app.main"], [b"-m", b"app.preview_process"]):
         if protected_prefixes is not None:
             protected_prefixes.add("ai-shuffle-preview-")
         return True
@@ -96,7 +100,7 @@ def _is_ancestor(base, proc):
     return False
 
 
-def _references(proc, deadline, *, protected_prefixes=None):
+def _references(proc, deadline, *, protected_prefixes=None, strict=False):
     references = set()
     count = 0
     descriptor_count = 0
@@ -124,11 +128,14 @@ def _references(proc, deadline, *, protected_prefixes=None):
                         continue
                     if value.startswith("/"):
                         references.add(value.removesuffix(" (deleted)"))
+                references.add(os.fsdecode((base / "cmdline").read_bytes()).replace("\0", " "))
             except (FileNotFoundError, ProcessLookupError):
                 continue  # exited during observation
             except PermissionError:
                 try:
-                    if _uninspectable_is_unrelated(base, proc, protected_prefixes):
+                    unrelated = (_uninspectable_is_unrelated(base, proc, protected_prefixes, strict=True)
+                                 if strict else _uninspectable_is_unrelated(base, proc, protected_prefixes))
+                    if unrelated:
                         continue
                 except (FileNotFoundError, ProcessLookupError):
                     continue
@@ -201,7 +208,7 @@ def sweep(root=None, *, ttl=21600, proc=Path("/proc"), now=None):
                         continue
                     if process_identity(receipt["pid"], proc) == receipt["start"]:
                         continue
-                    if any(ref == str(path) or ref.startswith(str(path) + "/") for ref in references):
+                    if any(str(path) in ref for ref in references):
                         continue
                     if not _small_stale_tree(path, cutoff, info.st_dev, deadline):
                         continue
