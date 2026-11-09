@@ -3,6 +3,7 @@ import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
 import { TextSelection } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
+import { createChipRemovalGuard, type ChipRemovalNotice } from './chip-removal';
 import { FileChipNode } from './FileChipNode';
 import { isLargePaste } from './large-paste';
 
@@ -108,6 +109,8 @@ export interface EditorOptions {
 	onLargePaste?: (text: string) => boolean;
 	/** True when this paste was Ctrl/Cmd+Shift+V, which always stays inline. */
 	consumePlainPaste?: () => boolean;
+	/** A keystroke took file chips with it: offer them back. */
+	onChipsRemoved?: ChipRemovalNotice;
 }
 
 /**
@@ -119,12 +122,13 @@ export interface EditorOptions {
 export function createChatEditor(options: EditorOptions): Editor {
 	const {
 		element, placeholder = 'Message...', initialContent = '', onUpdate, onTransaction, onFocus, onBlur,
-		onLargePaste, consumePlainPaste
+		onLargePaste, consumePlainPaste, onChipsRemoved
 	} = options;
 
 	// Captured by the placeholder callback so the first decoration pass (which runs
 	// inside `new Editor`, before the instance exists to key the WeakMap on) is correct.
 	const placeholderBox = { text: placeholder };
+	let chipGuard: ReturnType<typeof createChipRemovalGuard> | null = null;
 
 	const editor = new Editor({
 		element,
@@ -173,6 +177,18 @@ export function createChatEditor(options: EditorOptions): Editor {
 				insertPlainText(view, text);
 				return true;
 			},
+			// A tap on a chip means "write here": the caret goes after it (and after
+			// the space that follows it), never onto it (#1263).
+			handleClickOn: (view, _pos, node, nodePos, event) => {
+				if (node.type.name !== 'fileChip') return false;
+				if (event.target instanceof Element && event.target.closest('.file-chip-remove')) return false;
+				const chipEnd = nodePos + node.nodeSize;
+				const next = view.state.doc.resolve(chipEnd).nodeAfter;
+				const caret = next?.isText && next.text?.startsWith(' ') ? chipEnd + 1 : chipEnd;
+				view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, caret)));
+				view.focus();
+				return true;
+			},
 			handleDOMEvents: {
 				// Multi-line text that arrives as typed input rather than a paste
 				// event: an IME commit (Gboard's clipboard chip), dictation or an
@@ -205,7 +221,8 @@ export function createChatEditor(options: EditorOptions): Editor {
 		onUpdate: () => {
 			onUpdate?.();
 		},
-		onTransaction: () => {
+		onTransaction: ({ transaction }) => {
+			chipGuard?.observe(transaction);
 			onTransaction?.();
 		},
 		onFocus: () => {
@@ -217,6 +234,7 @@ export function createChatEditor(options: EditorOptions): Editor {
 	});
 
 	editorPlaceholders.set(editor, placeholderBox);
+	if (onChipsRemoved) chipGuard = createChipRemovalGuard(editor, onChipsRemoved);
 	return editor;
 }
 

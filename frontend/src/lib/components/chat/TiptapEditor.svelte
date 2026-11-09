@@ -12,6 +12,7 @@
 	import { createLiveDictation } from './tiptap/liveDictation';
 	import { createPlainPasteIntent } from './tiptap/large-paste';
 	import type { FileChipAttributes } from './tiptap/FileChipNode';
+	import type { ChipRemovalNotice } from './tiptap/chip-removal';
 	import { serializeToMessage, isEditorEmpty, findActiveAtMention, getSlashCommand } from './tiptap/serialization';
 
 	interface Props {
@@ -27,6 +28,8 @@
 		onBeforeDestroy?: (editor: Editor) => void;
 		/** A paste of LARGE_PASTE_BYTES or more; return true to take it as an attachment. */
 		onLargePaste?: (text: string) => boolean;
+		/** A keystroke removed file chips: offer them back; returns how to withdraw the offer. */
+		onChipsRemoved?: ChipRemovalNotice;
 	}
 
 	let {
@@ -40,7 +43,8 @@
 		onKeyDown,
 		onFocusChange,
 		onBeforeDestroy,
-		onLargePaste
+		onLargePaste,
+		onChipsRemoved
 	}: Props = $props();
 	const plainPaste = createPlainPasteIntent();
 
@@ -62,6 +66,7 @@
 				initialContent,
 				onLargePaste: text => onLargePaste?.(text) ?? false,
 				consumePlainPaste: () => plainPaste.consume(),
+				onChipsRemoved: (filenames, undo) => onChipsRemoved?.(filenames, undo) ?? (() => {}),
 				onUpdate: () => {
 					// Use getMessage() to include chip @path references in the text
 					// This ensures send button enables when chips are present

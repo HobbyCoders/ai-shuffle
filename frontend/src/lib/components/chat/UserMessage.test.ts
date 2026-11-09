@@ -55,3 +55,33 @@ describe('UserMessage time line', () => {
 		expect(older.container.querySelector('.bubble')?.getAttribute('title')).toContain('2024');
 	});
 });
+
+describe('UserMessage attachments', () => {
+	const path = '/workspace/project/.uploads/note.txt';
+
+	it('shows a recorded upload as a chip where it was mentioned, never its path', () => {
+		const { container } = render(UserMessage, { props: { content: `Read @${path} please`, uploadPaths: [path] } });
+		const bubble = container.querySelector('.bubble-text');
+		expect(bubble?.textContent).toBe('Read note.txt please');
+		expect(container.querySelector('.bubble')?.innerHTML).not.toContain('.uploads');
+		expect(container.querySelector('.attachment-chip-name')?.textContent).toBe('note.txt');
+	});
+
+	it('adds a chip for a recorded upload the words never mention', () => {
+		const { container } = render(UserMessage, { props: { content: 'Read this', uploadPaths: [path] } });
+		expect(container.querySelector('.bubble-text')?.textContent).toBe('Read thisnote.txt');
+		expect(container.querySelectorAll('.attachment-chip')).toHaveLength(1);
+	});
+
+	it('leaves an older message with no recorded uploads exactly as it was', () => {
+		const content = `Read @${path} please`;
+		const { container } = render(UserMessage, { props: { content } });
+		expect(container.querySelector('.bubble-text')?.textContent).toBe(content);
+		expect(container.querySelector('.attachment-chip')).toBeNull();
+	});
+
+	it('does not chip an @mention the send did not record', () => {
+		const { container } = render(UserMessage, { props: { content: `Ask @/other/file.txt and @${path}`, uploadPaths: [path] } });
+		expect(container.querySelector('.bubble-text')?.textContent).toBe('Ask @/other/file.txt and note.txt');
+	});
+});

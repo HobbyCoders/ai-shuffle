@@ -1,6 +1,7 @@
 import type { Editor } from '@tiptap/core';
 import type { FileChipAttributes } from './FileChipNode';
 import type { JSONContent } from '@tiptap/core';
+import { splitUploadMentions, uploadFileName } from '$lib/utils/message-presentation';
 
 /**
  * Find the last @ position in text that could start a mention.
@@ -59,27 +60,14 @@ export function restoreMessageDocument(text: string, uploadPaths: string[] = [],
 	const found = new Set<string>();
 	const chip = (path: string): JSONContent => ({ type: 'fileChip', attrs: {
         ...(references.find(ref => ref.path === path) ? { uploadReference: references.find(ref => ref.path === path) } : {}),
-		path, fullPath: path, filename: path.split(/[/\\]/).pop() || 'attachment', size: 0, type: 'file'
+		path, fullPath: path, filename: uploadFileName(path), size: 0, type: 'file'
 	} });
-	const paragraphs = text.split('\n').map(line => {
-		const content: JSONContent[] = [];
-		let offset = 0;
-		while (offset < line.length) {
-			let at = -1;
-			let path = '';
-			for (const candidate of paths) {
-				const index = line.indexOf('@' + candidate, offset);
-				if (index !== -1 && (at === -1 || index < at)) { at = index; path = candidate; }
-			}
-			if (at === -1) { content.push({ type: 'text', text: line.slice(offset) }); break; }
-			if (at > offset) content.push({ type: 'text', text: line.slice(offset, at) });
-			content.push(chip(path));
-			found.add(path);
-			offset = at + path.length + 1;
-		}
-		return { type: 'paragraph', content };
-	});
-	const tail = paragraphs[paragraphs.length - 1].content;
+	const paragraphs = text.split('\n').map(line => ({ type: 'paragraph', content: splitUploadMentions(line, paths).map((part): JSONContent => {
+		if (typeof part === 'string') return { type: 'text', text: part };
+		found.add(part.path);
+		return chip(part.path);
+	}) }));
+	const tail: JSONContent[] = paragraphs[paragraphs.length - 1].content;
 	for (const path of paths.filter(path => !found.has(path))) {
 		if (tail.length) tail.push({ type: 'text', text: ' ' });
 		tail.push(chip(path));
@@ -118,7 +106,9 @@ function serializeNode(node: JSONContent): string {
 	} else if (node.type === 'paragraph') {
 		// Process paragraph content
 		if (node.content) {
-			result += node.content.map(serializeNode).join('');
+			result += node.content
+				.map((child, index) => serializeNode(child) + chipSeparator(child, node.content?.[index + 1]))
+				.join('');
 		}
 		// Add newline after paragraph (except for last one)
 		result += '\n';
@@ -135,6 +125,13 @@ function serializeNode(node: JSONContent): string {
 	}
 
 	return result;
+}
+
+/** A word typed straight after a chip must not join its @path. */
+function chipSeparator(node: JSONContent, next: JSONContent | undefined): string {
+	if (node.type !== 'fileChip' || !next) return '';
+	if (next.type === 'fileChip') return ' ';
+	return next.type === 'text' && !/^\s/.test(next.text || '') ? ' ' : '';
 }
 
 /**

@@ -232,6 +232,20 @@ async def test_a_forwarded_request_carries_a_stable_command_id(mirror):
 
 
 @pytest.mark.asyncio
+async def test_a_forwarded_request_carries_its_attachments_for_the_owner_to_check(monkeypatch):
+    from app.core import voice_remote
+    from app.network import control
+    forward = AsyncMock(return_value={"turn_id": "turn-1"})
+    monkeypatch.setattr(control, "submit_turn", forward)
+    uploads = {"upload_paths": ["/up/a.pdf"], "upload_references": [], "upload_blob_ids": ["blob-1"]}
+
+    await voice_remote.submit("worker-2", {"id": "s1"}, "context", instructions="note", spoken="Read this.", uploads=uploads)
+
+    payload = forward.await_args.kwargs["payload"]
+    assert {key: payload[key] for key in uploads} == uploads
+
+
+@pytest.mark.asyncio
 async def test_a_lost_answer_says_it_may_have_reached_the_chat(mirror, monkeypatch):
     async def lost(*_args, **_kwargs):
         raise control.MaybeApplied("Office PC did not answer in time.")

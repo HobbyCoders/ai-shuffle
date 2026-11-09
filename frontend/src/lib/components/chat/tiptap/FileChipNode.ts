@@ -1,6 +1,7 @@
 import { Node, mergeAttributes } from '@tiptap/core';
 import { apiUrl } from '$lib/api/runtime';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
+import { EXPLICIT_CHIP_REMOVAL } from './chip-removal';
 
 /**
  * Attributes for a FileChip node
@@ -38,7 +39,9 @@ export const FileChipNode = Node.create({
 	group: 'inline',
 	inline: true,
 	atom: true, // Atomic - cursor can't enter, delete as unit
-	selectable: true,
+	// Never a node selection: a selected chip is replaced by the next keystroke,
+	// and on a phone the chip is nearly as wide as the composer (#1263).
+	selectable: false,
 	draggable: false,
 
 	addAttributes() {
@@ -216,7 +219,7 @@ export const FileChipNode = Node.create({
 							deleteEnd = chipEnd + 1;
 						}
 					}
-					editor.chain().focus().deleteRange({ from: pos, to: deleteEnd }).run();
+					editor.chain().focus().setMeta(EXPLICIT_CHIP_REMOVAL, true).deleteRange({ from: pos, to: deleteEnd }).run();
 				}
 			});
 			dom.appendChild(removeBtn);

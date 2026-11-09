@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { pendingQueue, reconcilePendingPeerMessages, isLocalPendingId, LOCAL_PENDING_PREFIX, type PendingEntry } from './pending-queue';
 import type { ChatMessage, PendingPeerMessage } from '../types';
 
@@ -467,7 +467,7 @@ describe('pendingQueue — command-id receipts (#524)', () => {
 // Review round 8 S7: a send's attachments are never evicted while it may still
 // run; every terminal outcome removes them, so the store cannot grow unbounded.
 describe('pendingQueue — a send\'s attachments', () => {
-	const uploads = (key: string) => pendingQueue.noteSendUploads(key, [`/uploads/${key}.pdf`]);
+	const uploads = (key: string) => pendingQueue.noteSendUploads('s1', key, [`/uploads/${key}.pdf`]);
 	const queued = (key: string): PendingEntry => ({ id: key, clientMessageId: key, content: `Read ${key}`, queuedAt: 1 });
 
 	it('keeps them for every send still waiting, however many', () => {
@@ -499,5 +499,96 @@ describe('pendingQueue — a send\'s attachments', () => {
 		pendingQueue.applyRemovalVerdict('s1', 'client-y', 'withdrawn');
 		expect(pendingQueue.hasSendUploads('client-y')).toBe(false);
 		expect(pendingQueue.takeWithdrawnRestore('s1')).toEqual({ prompt: 'Read client-y', uploadPaths: ['/uploads/client-y.pdf'], uploadReferences: [] });
+	});
+
+	// Unsend timed out and the socket verdict was lost; the durable receipt still came.
+	describe('when the verdict of a timed-out Unsend is lost', () => {
+		const restore = { prompt: 'Read client-z', uploadPaths: ['/uploads/client-z.pdf'], uploadReferences: [] };
+		beforeEach(() => {
+			vi.useFakeTimers();
+			pendingQueue.reset('s1', true);
+			uploads('client-z');
+			pendingQueue.requestRemoval('s1', queued('client-z'));
+			vi.advanceTimersByTime(10_000);
+		});
+		afterEach(() => vi.useRealTimers());
+
+		it('clears the entry on the receipt and hands the files back', () => {
+			expect(pendingQueue.settleWithdrawalReceipt('client-z', '2026-01-01T00:00:00Z', true)).toBe(true);
+			expect(pendingQueue.hasSendUploads('client-z')).toBe(false);
+			expect(pendingQueue.takeWithdrawnRestore('s1')).toEqual(restore);
+		});
+
+		it('hands them back once when the delayed verdict does arrive', () => {
+			pendingQueue.settleWithdrawalReceipt('client-z', '2026-01-01T00:00:00Z', true);
+			pendingQueue.applyRemovalVerdict('s1', 'client-z', 'withdrawn');
+			expect(pendingQueue.takeWithdrawnRestore('s1')).toEqual(restore);
+			expect(pendingQueue.takeWithdrawnRestore('s1')).toBeNull();
+		});
+
+		it('still hands them back when the verdict beats the receipt', () => {
+			pendingQueue.applyRemovalVerdict('s1', 'client-z', 'withdrawn');
+			expect(pendingQueue.settleWithdrawalReceipt('client-z', '2026-01-01T00:00:00Z', true)).toBe(false);
+			expect(pendingQueue.takeWithdrawnRestore('s1')).toEqual(restore);
+		});
+	});
+
+	// Stored times keep microseconds and Date.parse keeps milliseconds. Cutting both
+	// the same way can only make two moments equal, never swap their order.
+	it.each([
+		['a later millisecond', '2026-01-01T00:00:00.123999+00:00', '2026-01-01T00:00:00.124001+00:00', true],
+		['the same millisecond', '2026-01-01T00:00:00.123100+00:00', '2026-01-01T00:00:00.123900+00:00', false],
+		['an older attempt', '2026-01-01T00:00:00.124001+00:00', '2026-01-01T00:00:00.123999+00:00', false],
+	])('compares a receipt to its queued row at stored precision: %s', (_name, queued, receipt, settles) => {
+		pendingQueue.reset('s1', true);
+		uploads('client-p');
+		pendingQueue.requestRemoval('s1', { id: 'row-p', clientMessageId: 'client-p', content: 'Read', queuedAt: new Date(queued).getTime() });
+		expect(pendingQueue.settleWithdrawalReceipt('client-p', receipt, true)).toBe(settles);
+		expect(pendingQueue.hasSendUploads('client-p')).toBe(!settles);
+		pendingQueue.reset('s1', true);
+	});
+
+	it('keeps a newer re-queue cancelling, and its files, past an older attempt\'s receipt', () => {
+		pendingQueue.reset('s1', true);
+		uploads('client-r');
+		pendingQueue.requestRemoval('s1', { id: 'row-2', clientMessageId: 'client-r', content: 'Read', queuedAt: Date.parse('2026-01-02T00:00:00Z') });
+		expect(pendingQueue.settleWithdrawalReceipt('client-r', '2026-01-01T00:00:00Z', false)).toBe(false);
+		expect(pendingQueue.hasSendUploads('client-r')).toBe(true);
+		expect(pendingQueue.sendOwner('client-r')).toEqual({ sessionId: 's1' });
+		pendingQueue.reset('s1', true);
+	});
+
+	describe('when the chat is deleted while a send is queued', () => {
+		beforeEach(() => pendingQueue.reset('s1', true));
+
+		it('clears that chat\'s attachments and undelivered drafts, and no other chat\'s', () => {
+			uploads('client-a');
+			pendingQueue.noteSendUploads('s2', 'client-b', ['/uploads/b.pdf']);
+			pendingQueue.rejectSend('s1', 'client-c', 'A draft kept for the next switch-in');
+			pendingQueue.forgetSession('s1');
+			expect(pendingQueue.hasSendUploads('client-a')).toBe(false);
+			expect(pendingQueue.hasSendUploads('client-b')).toBe(true);
+			expect(pendingQueue.takeWithdrawnRestore('s1')).toBeNull();
+		});
+
+		it('covers a first send adopted from a new chat', () => {
+			pendingQueue.noteSendUploads(null, 'client-new', ['/uploads/new.pdf']);
+			pendingQueue.adoptSession('s9', ['client-new']);
+			pendingQueue.forgetSession('s9');
+			expect(pendingQueue.hasSendUploads('client-new')).toBe(false);
+		});
+
+		it('stops a running Unsend timer from reporting into the deleted chat', () => {
+			vi.useFakeTimers();
+			try {
+				const onTimeout = vi.fn();
+				pendingQueue.requestRemoval('s1', queued('client-t'), onTimeout);
+				pendingQueue.forgetSession('s1');
+				vi.advanceTimersByTime(10_000);
+				expect(onTimeout).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
 	});
 });

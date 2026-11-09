@@ -185,3 +185,59 @@ def test_project_upload_validation_uses_the_session_checkout(mock_db, tmp_path):
     outside.write_bytes(b"file")
     with pytest.raises(UploadLiftError, match="upload area"):
         validate_upload_paths([str(outside)], row)
+
+
+@pytest.mark.parametrize("mentioned", [True, False])
+async def test_attachment_typed_into_a_call_is_recorded_and_its_rewind_is_refused(staged_upload, rewind_env, monkeypatch, mentioned):
+    """Admission through recording, then a refused rewind; provider and agent stubbed."""
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.core import voice_stream
+    from app.core.voice_prompts import voice_turn_note
+
+    socket = SimpleNamespace(send_json=AsyncMock(), send_bytes=AsyncMock(), close=AsyncMock())
+    call = voice_stream.VoiceStream(socket, {"id": SID}, {"model": "gpt-live-1", "voice": "marin"}, "secret", 5)
+    call.upstream = AsyncMock()
+    delegate = AsyncMock(return_value="Read.")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    words = f"inspect @{staged_upload}" if mentioned else "inspect this"
+    await call.receive_text(json.dumps({"type": "input_text", "id": "typed", "text": words, "upload_paths": [str(staged_upload)]}))
+    await call.delegation_task
+    sent = [row for row in session_events.get_events(SID) if row["event_type"] == "message.user"]
+    assert len(sent) == 1
+    assert sent[0]["payload"]["content"] == words
+    assert sent[0]["payload"]["upload_paths"] == [str(staged_upload)]
+
+    # What the chat agent's transcript holds for that request.
+    prompt = f"{delegate.await_args.args[1]}\n\n{voice_turn_note('')}"
+    session_events.append_events(SID, [_asst_ev("answer", uuid="answer-id")])
+    _patch_checkpoints(monkeypatch, [_cp("user-id", prompt)])
+    before = session_events.get_events(SID)
+    result = await execute_rewind_and_wait(SID, commands.RewindRequestV2(
+        target_uuid="user-id", target_role="user", include_response=False))
+    assert result.success is False
+    assert "content guard" in (result.error or "")
+    assert rewind_env.truncate_calls == []
+    assert session_events.get_events(SID) == before
+
+
+async def test_a_call_refuses_a_typed_attachment_a_chat_send_would_refuse(staged_upload, rewind_env, monkeypatch, tmp_path):
+    """No stub on the check: the same validation as a chat send decides."""
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from app.core import voice_stream
+
+    socket = SimpleNamespace(send_json=AsyncMock(), send_bytes=AsyncMock(), close=AsyncMock())
+    call = voice_stream.VoiceStream(socket, {"id": SID}, {"model": "gpt-live-1", "voice": "marin"}, "secret", 5)
+    call.upstream = AsyncMock()
+    delegate = AsyncMock(return_value="Read.")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private")
+    await call.receive_text(json.dumps({"type": "input_text", "id": "typed", "text": "inspect", "upload_paths": [str(outside)]}))
+    sent = [c.args[0] for c in socket.send_json.await_args_list if c.args[0].get("type", "").startswith("text.")]
+    assert [e["type"] for e in sent] == ["text.rejected"]
+    delegate.assert_not_awaited()
+    assert not [row for row in session_events.get_events(SID) if row["event_type"] == "message.user"]

@@ -770,6 +770,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 			// After the switch away, which records the leaving session.
 			forgetProseQuestion(sessionId);
+			pendingQueue.forgetSession(sessionId);
 			return;
 		}
 

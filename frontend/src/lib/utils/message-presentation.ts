@@ -10,6 +10,39 @@ export function canRewindUserMessage(message: ChatMessage, earlierPromptInTurn =
 	return !earlierPromptInTurn;
 }
 
+/** A stretch of a user message: its words, or an upload the send recorded. */
+export type UploadMentionPart = string | { path: string };
+
+/** Cut `@path` mentions of the recorded uploads out of `text`, keeping their place. */
+export function splitUploadMentions(text: string, uploadPaths: string[]): UploadMentionPart[] {
+	const paths = [...new Set(uploadPaths.filter(Boolean))].sort((a, b) => b.length - a.length);
+	const parts: UploadMentionPart[] = [];
+	let offset = 0;
+	while (offset < text.length) {
+		let at = -1;
+		let path = '';
+		for (const candidate of paths) {
+			const index = text.indexOf('@' + candidate, offset);
+			if (index !== -1 && (at === -1 || index < at)) { at = index; path = candidate; }
+		}
+		if (at === -1) { parts.push(text.slice(offset)); break; }
+		if (at > offset) parts.push(text.slice(offset, at));
+		parts.push({ path });
+		offset = at + path.length + 1;
+	}
+	return parts;
+}
+
+/** What a sent bubble shows: words with chips in place, then any upload never mentioned. */
+export function userBubbleParts(content: string, uploadPaths: string[]): UploadMentionPart[] {
+	if (!uploadPaths.length) return [content];
+	const parts = splitUploadMentions(content, uploadPaths);
+	const shown = new Set(parts.flatMap(part => typeof part === 'string' ? [] : [part.path]));
+	return [...parts, ...[...new Set(uploadPaths.filter(Boolean))].filter(path => !shown.has(path)).map(path => ({ path }))];
+}
+
+export const uploadFileName = (path: string): string => path.split(/[/\\]/).pop() || 'attachment';
+
 export const MAX_COLLAPSED_USER_MESSAGE_LINES = 8;
 export const MAX_COLLAPSED_USER_MESSAGE_LENGTH = 600;
 
