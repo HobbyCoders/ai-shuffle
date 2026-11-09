@@ -278,6 +278,13 @@ const cases = [{
 		const frames = await stop();
 		log(`short send ${JSON.stringify(summary(frames))}`);
 		expect(travel(frames, 'rail') <= 2, `short send keeps the turn rail still (${travel(frames, 'rail').toFixed(1)}px)`);
+		// Centred within the rail's 40px hold-still band (TurnNavigator).
+		const railOffCentre = await page.evaluate(() => {
+			const nav = document.querySelector('nav.turn-nav').getBoundingClientRect();
+			const shell = document.querySelector('.transcript-shell').getBoundingClientRect();
+			return Math.abs((nav.top + nav.bottom) / 2 - (shell.top + shell.bottom) / 2);
+		});
+		expect(railOffCentre <= 41, `the turn rail is vertically centred beside the transcript (${railOffCentre.toFixed(1)}px off)`);
 		const tops = frames.map(f => f.composer?.top).filter(Number.isFinite);
 		const directionChanges = tops.slice(1).reduce((state, top, i) => {
 			const direction = Math.sign(Math.round(top - tops[i]));

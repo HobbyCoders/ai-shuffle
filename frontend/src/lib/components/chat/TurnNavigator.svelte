@@ -109,6 +109,39 @@
 		return () => observer.disconnect();
 	});
 
+	// ── Vertical centring ───────────────────────────────────────────────────
+	/** How far off-centre the rail may drift before it moves. Re-centring on
+	 *  every change shifted each tick by half a row on every send, and again
+	 *  as the composer cleared. */
+	const RECENTRE_DRIFT_PX = 40;
+	let navTop = $state<number | null>(null);
+	let centredSession: string | undefined;
+
+	function centreNav(force = false) {
+		const host = nav?.parentElement;
+		if (!nav || !host || (scrubbing && !force)) return;
+		const centred = Math.max(0, Math.round((host.clientHeight - nav.offsetHeight) / 2));
+		if (force || navTop === null || Math.abs(centred - navTop) > RECENTRE_DRIFT_PX) navTop = centred;
+	}
+
+	// A different chat centres exactly; a new turn only moves past the drift.
+	$effect(() => {
+		const session = items[0]?.id;
+		void items.length;
+		if (!nav) return;
+		const force = session !== centredSession;
+		centredSession = session;
+		void nextTick().then(() => centreNav(force));
+	});
+
+	$effect(() => {
+		const host = nav?.parentElement;
+		if (!host || typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(() => centreNav());
+		observer.observe(host);
+		return () => observer.disconnect();
+	});
+
 	// ── Touch scrub ─────────────────────────────────────────────────────────
 	/** Movement that turns a touch into a scrub; less is a tap (the click path). */
 	const SCRUB_SLOP_PX = 4;
@@ -303,7 +336,7 @@
 	class:is-scrubbing={scrubbing}
 	class:is-scrolling={scrolling}
 	class:needs-you={needsYouIds.length > 0}
-	style="--count: {items.length}"
+	style="--count: {items.length}; top: {navTop ?? 0}px"
 	aria-label="Navigate user turns"
 	onfocusin={() => (focused = true)}
 	onfocusout={() => (focused = false)}
@@ -376,9 +409,7 @@
 	.turn-nav {
 		position: absolute;
 		left: 6px;
-		/* Stable origin: centring the changing tick list moved every existing
-		   tick on each send, and re-centred again as the composer cleared. */
-		top: min(120px, 20%);
+		/* `top` is set inline: vertically centred, see centreNav(). */
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
