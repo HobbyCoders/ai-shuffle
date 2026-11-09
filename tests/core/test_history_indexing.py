@@ -184,8 +184,8 @@ GIB = 1024 ** 3
 def test_rebuild_needs_room_for_the_copy_its_wal_and_a_reserve(
     volumes: list[tuple[str, int, int, int]], safe: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(hi, "_volumes", lambda cur, name: volumes)
-    problem = hi._space_problem(None, "idx")
+    monkeypatch.setattr(hi, "_volumes", lambda cur, place: volumes)
+    problem = hi._space_problem(None, hi._BuildPlace(0, "", None))
     assert (problem is None) == safe
     if problem:
         assert "free some disk space" in problem
@@ -194,11 +194,11 @@ def test_rebuild_needs_room_for_the_copy_its_wal_and_a_reserve(
 def test_rebuild_is_refused_when_the_disk_cannot_be_measured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def unmeasurable(cur: object, name: str) -> list[tuple[str, int, int, int]]:
+    def unmeasurable(cur: object, place: object) -> list[tuple[str, int, int, int]]:
         raise ManagedDataDirectoryError("no managed cluster")
 
     monkeypatch.setattr(hi, "_volumes", unmeasurable)
-    assert "cannot be measured" in hi._space_problem(None, "idx")
+    assert "cannot be measured" in hi._space_problem(None, hi._BuildPlace(0, "", None))
 
 
 def test_folded_text_keeps_its_separators() -> None:

@@ -29,7 +29,7 @@ def pg_schema():
     # A disposable cluster is not laid out like a worker's managed database, so
     # its disk cannot be measured. tests that cover the guard replace this.
     measure_volumes = history_indexing._volumes
-    history_indexing._volumes = lambda cur, name: []
+    history_indexing._volumes = lambda cur, place: []
     base.init_pool(min_conn=1, max_conn=6)
     try:
         with base.get_db() as conn:
