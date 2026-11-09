@@ -42,8 +42,10 @@
 		 */
 		draft?: QuestionDraft;
 		onDraft?: (requestId: string, draft: QuestionDraft) => void;
+		/** Phone layout: finger-sized controls, with Skip and Send pinned in view. */
+		touch?: boolean;
 	}
-	let { data, onRespond, disabled = false, draft, onDraft }: Props = $props();
+	let { data, onRespond, disabled = false, draft, onDraft, touch = false }: Props = $props();
 	const id = $props.id();
 	let active = $state(0);
 	let selections = $state<Record<number, string[]>>({});
@@ -133,7 +135,18 @@
 	}
 </script>
 
-<form class="question-form" onsubmit={submit} aria-label="Answer questions">
+{#snippet sendButton()}
+	<button class="submit-btn" type="submit" disabled={disabled || !canSubmit}>
+		{questions.length > 1 ? 'Send answers' : 'Send answer'}<ArrowUpRight size={touch ? 16 : 14} />
+	</button>
+{/snippet}
+{#snippet skipButton()}
+	<button type="button" class="skip" aria-pressed={Boolean(skipped[active])} onclick={toggleSkip} {disabled}>
+		<SkipForward size={touch ? 15 : 12} />{skipped[active] ? 'Skipped — undo' : 'Skip this question'}
+	</button>
+{/snippet}
+
+<form class="question-form" class:touch onsubmit={submit} aria-label="Answer questions">
 	{#if questions.length > 1}
 		<div class="question-tabs" role="group" aria-label="Questions in this request">
 			{#each questions as question, index}
@@ -189,16 +202,20 @@
 					oninput={(event) => writeAnswer(active, event.currentTarget.value)}
 					placeholder="Your answer…"></textarea>
 			</div>
-			<button class="submit-btn" type="submit" disabled={disabled || !canSubmit}>
-				{questions.length > 1 ? 'Send answers' : 'Send answer'}<ArrowUpRight size={14} />
-			</button>
+			{#if !touch}{@render sendButton()}{/if}
 		</div>
-		<div class="question-footer">
-			<span>{written[active]?.trim() && current.options?.length ? 'Your written answer will be sent.' : questions.length > 1 ? 'Answer or skip each question before sending.' : 'You can keep using the conversation.'}</span>
-			<button type="button" class="skip" aria-pressed={Boolean(skipped[active])} onclick={toggleSkip} {disabled}>
-				<SkipForward size={12} />{skipped[active] ? 'Skipped — undo' : 'Skip this question'}
-			</button>
-		</div>
+		{#if touch}
+			{#if questions.length > 1}<p class="touch-hint">Answer or skip each question before sending.</p>{/if}
+			<div class="touch-actions" role="group" aria-label="Answer actions">
+				{@render skipButton()}
+				{@render sendButton()}
+			</div>
+		{:else}
+			<div class="question-footer">
+				<span>{written[active]?.trim() && current.options?.length ? 'Your written answer will be sent.' : questions.length > 1 ? 'Answer or skip each question before sending.' : 'You can keep using the conversation.'}</span>
+				{@render skipButton()}
+			</div>
+		{/if}
 		{/if}
 	{/if}
 </form>
@@ -237,7 +254,7 @@
 	.model-panel { --mpp-width: 100%; --mpp-height: clamp(150px, 24dvh, 216px); border: 1px solid var(--border); border-radius: calc(var(--radius, 10px) - 4px); overflow: hidden; background: var(--popover, var(--background)); }
 	/* Pinned to the bottom of the tray's scroll box: the answer buttons stay
 	   in view on a short screen while the list scrolls above them. */
-	.picker-actions { position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center; gap: 0.5rem; margin: 0.625rem 0 -0.75rem; padding: 0.5rem 0 0.75rem; background: var(--card); }
+	.picker-actions { position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center; gap: 0.5rem; margin: 0.625rem 0 -0.75rem; padding: 0.5rem 0 0.75rem; background: var(--q-surface, var(--card)); }
 	.picked { flex: 1; min-width: 0; font-size: 0.6875rem; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.picked strong { color: var(--foreground); font-weight: 600; }
 	.not-now { min-height: 44px; padding: 0 0.875rem; border: 1px solid var(--border); border-radius: calc(var(--radius, 10px) - 4px); background: none; color: var(--foreground); font-size: 0.75rem; flex-shrink: 0; }
@@ -249,4 +266,33 @@
 		.not-now, .picker-submit { flex: 1 1 0; }
 	}
 	@media (max-width: 480px) { .choices label { flex-basis: 100%; } .question-footer { align-items: flex-start; } }
+
+	/* The phone's prompt dock: the dock already insets its content, so the form
+	   adds none, and every control is big enough for a thumb. */
+	.touch { padding: 0; }
+	.touch h3 { margin-bottom: 0.625rem; font-size: 0.90625rem; line-height: 1.4; }
+	.touch .question-tabs { gap: 0.375rem; margin-bottom: 0.5rem; }
+	.touch .question-tabs button { min-height: 44px; padding: 0 0.75rem; border-radius: calc(var(--radius, 10px) - 4px); font-size: 0.8125rem; }
+	.touch .selection-hint, .touch .picker-hint { margin: -0.25rem 0 0.625rem; font-size: 0.75rem; }
+	.touch .choices label { flex-basis: 100%; gap: 0.625rem; min-height: 52px; padding: 0.625rem 0.875rem; font-size: 0.875rem; line-height: 1.35; background: var(--card); }
+	.touch .choices label:hover, .touch .choices label.selected { background: var(--muted); }
+	.touch .choices input { width: 18px; height: 18px; margin-top: 1px; }
+	.touch .choices small { font-size: 0.75rem; }
+	.touch .answer-row { margin-top: 0.75rem; }
+	.touch .written-answer label { margin-bottom: 6px; font-size: 0.75rem; }
+	/* 16px: a smaller field makes iOS zoom the page on focus. */
+	.touch textarea { min-height: 44px; padding: 10px 12px; background: var(--card); font-size: 1rem; line-height: 1.35; }
+	.touch-hint { margin: 0.5rem 2px 0; font-size: 0.75rem; line-height: 1.4; color: var(--muted-foreground); }
+	/* Pinned to the bottom of the dock's scroll box: Skip and Send stay in view
+	   with a long list of options or the keyboard up. */
+	.touch-actions { position: sticky; bottom: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.25rem 0.75rem; margin-top: 0.25rem; padding-top: 0.25rem; background: var(--q-surface, var(--card)); box-shadow: 0 1.5rem 0 var(--q-surface, var(--card)); }
+	.touch .skip { gap: 6px; min-height: 44px; padding: 0 2px; font-size: 0.8125rem; }
+	.touch-actions .submit-btn { min-height: 44px; padding: 0 1rem; font-size: 0.875rem; }
+	.touch .picker-actions { bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+	/* A small phone: keep Skip and Send on one row rather than stacking them. */
+	@media (max-width: 360px) {
+		.touch-actions { gap: 0.25rem 0.5rem; }
+		.touch-actions .skip :global(svg) { display: none; }
+		.touch-actions .submit-btn { padding: 0 0.75rem; }
+	}
 </style>
