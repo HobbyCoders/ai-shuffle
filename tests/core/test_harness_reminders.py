@@ -45,6 +45,13 @@ def _note(*blocks: str) -> str:
 # The rule, against the real producers
 # ---------------------------------------------------------------------------
 
+def test_older_turn_environment_wording_is_still_removed():
+    """Saved chats keep the note's earlier header; clients must not see it."""
+    block = ("<system-reminder>\nEnvironment facts that change while a session runs "
+             "(current as of this message):\nToday's date: 2026-01-01\n</system-reminder>")
+    assert strip_harness_reminders(_note(block)) == PROMPT
+
+
 def test_memory_snapshot_is_removed_and_the_prompt_kept():
     assert strip_harness_reminders(_note(MEMORY)) == PROMPT
 

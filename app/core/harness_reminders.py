@@ -40,6 +40,8 @@ HARNESS_REMINDER_OPENERS = (
     # instead of the full snapshot when saved facts changed mid-session.
     "# Memory changes\n",
     # app.core.environment.TURN_ENV_HEADER
+    "Current environment (",
+    # The earlier wording of that header, still in older transcripts.
     "Environment facts that change while a session runs",
     # app.core.away_mode CONTEXT_NOTE, OWNER_BACK_NOTE, ASSISTANT_WORK_NOTE,
     # REPORTED_AWAY_NOTE
