@@ -36,8 +36,10 @@ def _disabled(reason):
 def _uninspectable_is_unrelated(base, proc, protected_prefixes=None, *, strict=False):
     status = dict(line.split(":", 1) for line in (base / "status").read_text().splitlines() if ":" in line)
     uids = {int(uid) for uid in status["Uid"].split()}
-    if strict and _is_supervisor(base, status):
-        return _is_ancestor(base, proc)
+    if strict and os.getuid() in uids:
+        # Ancestry, not argv spelling, establishes a launcher's role. An opaque
+        # ancestor can still hold external scratch: settled paths have no lease.
+        return _is_ancestor(base, proc, strict=True)
     if 0 not in uids:
         if strict:
             return False  # Opaque apps may reference arbitrary session scratch.
@@ -67,14 +69,6 @@ def _python_args(base, status):
     return args
 
 
-def _is_supervisor(base, status):
-    args = _python_args(base, status)
-    if args is None or len(args) != 2 or args[1] != b"run":
-        return False
-    script = Path(os.fsdecode(args[0]))
-    return script.is_absolute() and script.parts[-2:] == ("docker", "container_runtime.py")
-
-
 def _is_application_process(base, status, proc, protected_prefixes=None):
     # Normal startup makes app/runner processes non-dumpable. Live-owner receipts
     # protect their own scratch, but an orphaned preview app can retain a dead
@@ -101,35 +95,41 @@ def _is_application_process(base, status, proc, protected_prefixes=None):
     return False
 
 
-def _is_ancestor(base, proc):
+def _is_ancestor(base, proc, *, strict=False):
     pid = os.getpid()
-    seen = set()
+    seen = {int(base.name): process_identity(int(base.name), proc)} if strict else {}
     while pid and pid not in seen and len(seen) < MAX_ENTRIES:
-        seen.add(pid)
+        seen[pid] = process_identity(pid, proc) if strict else None
         try:
             parent = dict(line.split(":", 1) for line in (proc / str(pid) / "status").read_text().splitlines() if ":" in line)
         except (FileNotFoundError, ProcessLookupError):
             return False  # incomplete ancestry cannot establish an exemption
         pid = int(parent["PPid"])
         if str(pid) == base.name:
-            return True
+            # Recheck every start identity, not just the target: an intermediate
+            # PID may also exit and be reused while this live chain is read.
+            return not strict or all(start is not None and process_identity(pid, proc) == start
+                                     for pid, start in seen.items())
     return False
 
 
 def _managed_postgres(base, proc, deadline):
     # Use the established saved service identity, never an environment UID alone.
-    # Only service-UID postgres chains descending from OUR supervisor qualify;
-    # an agent's disposable postgres and unrelated service daemons do not.
+    # Require a postgres-only service chain reaching our live non-init ancestry,
+    # not a launcher spelling. Agent databases and unrelated daemons do not qualify.
     from app.core.private_storage import _service_ids
     ids = _service_ids()
     if ids is None or ids[0] in (0, os.getuid()):
         return False
-    seen = set()
+    seen = {}
     while base.name not in seen and len(seen) < MAX_ENTRIES and time.monotonic() < deadline:
-        seen.add(base.name)
+        seen[base.name] = process_identity(int(base.name), proc)
         status = dict(line.split(":", 1) for line in (base / "status").read_text().splitlines() if ":" in line)
-        if _is_supervisor(base, status):
-            return _is_ancestor(base, proc)
+        if (len(seen) > 1 and base.name != "1"
+                and status["Name"].strip() not in {"tini", "docker-init", "init", "systemd"}
+                and _is_ancestor(base, proc, strict=True)):
+            return all(start is not None and process_identity(pid, proc) == start
+                       for pid, start in seen.items())
         if status["Name"].strip() != "postgres" or {int(uid) for uid in status["Uid"].split()} != {ids[0]}:
             return False
         base = proc / status["PPid"].strip()
@@ -308,10 +308,15 @@ def _references(proc, deadline, *, protected_prefixes=None, strict=False, on_dis
                         continue
                     unrelated = (_uninspectable_is_unrelated(base, proc, protected_prefixes, strict=True)
                                  if strict else _uninspectable_is_unrelated(base, proc, protected_prefixes))
-                    if unrelated:
+                    if unrelated and not strict:
                         continue
                     if strict:
-                        roots = _isolated_preview(base, proc, deadline)
+                        try:
+                            roots = _isolated_preview(base, proc, deadline)
+                        except (OSError, ValueError, KeyError, ImportError):
+                            if not unrelated:
+                                raise
+                            roots = None  # A proven ancestor needs no preview receipt.
                         if roots:
                             references.protected_roots.extend(roots)
                             references.update(str(path) for path in roots)
@@ -319,6 +324,8 @@ def _references(proc, deadline, *, protected_prefixes=None, strict=False, on_dis
                             if on_exempt is not None:
                                 on_exempt(f"preview_exempt pid={base.name} name=python")
                             continue
+                    if unrelated:
+                        continue
                 except (FileNotFoundError, ProcessLookupError):
                     if not base.exists():
                         continue

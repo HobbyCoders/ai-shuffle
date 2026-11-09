@@ -59,9 +59,19 @@ def processes(tmp_path, monkeypatch):
     return proc, add, root
 
 
-def test_exact_supervisor_ancestor_does_not_disable_eligible_candidate(processes, caplog):
+# entrypoint.sh execs these flags with "$@" empty; handover appends "run".
+LAUNCHERS = [
+    ["/usr/local/bin/python3", "-I", "-B", "-u", "/app/docker/container_runtime.py"],
+    ["/version/venv/bin/python", "/version/source/docker/container_runtime.py", "run"],
+    ["/bin/sh", "-c", "launch-app"],
+    ["python", "-m", "app.main"],
+]
+
+
+@pytest.mark.parametrize("args", LAUNCHERS)
+def test_opaque_live_ancestor_does_not_disable_eligible_candidate(processes, caplog, args):
     _, add, root = processes
-    add(880001, ["python", "/opt/app/docker/container_runtime.py", "run"], hidden=True)
+    add(880001, args, name=Path(args[0]).name, hidden=True)
     path = session(root)
     sweep = ss.ScratchSweep(root)
     with caplog.at_level("INFO", logger=ss.__name__):
@@ -77,10 +87,10 @@ def test_exact_supervisor_ancestor_does_not_disable_eligible_candidate(processes
 
 @pytest.mark.parametrize("args,parent", [
     (["python", "/opt/app/docker/container_runtime.py", "run"], 880999),
-    (["python", "/opt/app/not-supervisor.py", "run"], 880001),
-    (["python", "-m", "app.main"], 880001),
+    (["python", "/opt/app/not-supervisor.py", "run"], 880999),
+    (["python", "-m", "app.main"], 880999),
 ])
-def test_opaque_sibling_wrong_launcher_or_unreceipted_app_retains(processes, args, parent, caplog):
+def test_opaque_sibling_retains_regardless_of_launcher(processes, args, parent, caplog):
     proc, add, root = processes
     (proc / str(os.getpid()) / "status").write_text(
         f"Name: python\nUid: {os.getuid()}\nPPid: {parent}\n")
@@ -94,6 +104,47 @@ def test_opaque_sibling_wrong_launcher_or_unreceipted_app_retains(processes, arg
             sweep.close()
     assert "pid=880001 name=python" in caplog.text
     assert "retained=1" in caplog.text
+
+
+def test_incomplete_ancestor_chain_retains(processes):
+    proc, add, root = processes
+    add(880001, LAUNCHERS[0], hidden=True)
+    add(880002, ["sh"], parent=880003)
+    own = proc / str(os.getpid()) / "status"
+    own.write_text(own.read_text().replace("880001", "880002"))
+    path = session(root)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 0 and path.exists()
+    finally:
+        sweep.close()
+
+
+@pytest.mark.parametrize("reused", [880001, 880002])
+def test_reused_target_or_intermediate_pid_cannot_prove_ancestry(processes, monkeypatch, reused):
+    proc, add, root = processes
+    monkeypatch.delenv("SHUFFLE_AGENT_ISOLATION", raising=False)
+    add(880001, LAUNCHERS[0], hidden=True)
+    add(880002, ["sh"], parent=880001)
+    own = proc / str(os.getpid()) / "status"
+    own.write_text(own.read_text().replace("880001", "880002"))
+    identity = sr.process_identity
+    calls = 0
+    def changing(pid, proc):
+        nonlocal calls
+        if int(pid) == reused:
+            calls += 1
+            if calls > 1:
+                return "reused"
+        return identity(pid, proc)
+    monkeypatch.setattr(sr, "process_identity", changing)
+    path = session(root)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 0 and path.exists()
+        assert calls >= 2
+    finally:
+        sweep.close()
 
 
 def preview(processes, tmp_path, monkeypatch, *, bare=False):
@@ -119,10 +170,14 @@ def preview(processes, tmp_path, monkeypatch, *, bare=False):
 
 
 @pytest.mark.parametrize("bare", [False, True])
+@pytest.mark.parametrize("ancestor", [False, True])
 def test_live_isolated_preview_from_other_checkout_allows_cleanup_and_protects_roots(
-        processes, tmp_path, monkeypatch, caplog, bare):
+        processes, tmp_path, monkeypatch, caplog, bare, ancestor):
     proc, _, root = processes
     directory, _ = preview(processes, tmp_path, monkeypatch, bare=bare)
+    if ancestor:
+        own = proc / str(os.getpid()) / "status"
+        own.write_text(own.read_text().replace("880001", "880002"))
     refs = sr._references(proc, time.monotonic() + 2, strict=True)
     assert refs is not None and refs.preview_exemptions == 1
     assert ss._in_use(directory / "home" / ".fluid" / "projects" / "p" / "scratch" / "s", refs)
@@ -208,10 +263,14 @@ def test_paired_preview_scopes_are_proven_from_exact_launcher(processes, tmp_pat
 
 
 @pytest.mark.parametrize("fresh_identity", [True, False])
+@pytest.mark.parametrize("ancestor", [False, True])
 def test_devloop_status_checkout_is_protected_only_for_live_identity(
-        processes, tmp_path, monkeypatch, fresh_identity):
+        processes, tmp_path, monkeypatch, fresh_identity, ancestor):
     proc, _, root = processes
     preview(processes, tmp_path, monkeypatch)
+    if ancestor:
+        own = proc / str(os.getpid()) / "status"
+        own.write_text(own.read_text().replace("880001", "880002"))
     path = session(root)
     status = tmp_path / "status.json"
     status.write_text(json.dumps({"pid": 880001, "pid_identity": "1234", "checkout": str(path),
@@ -226,8 +285,8 @@ def test_devloop_status_checkout_is_protected_only_for_live_identity(
         sweep.close()
 
 
-@pytest.fixture
-def split_ids(processes, monkeypatch):
+@pytest.fixture(params=LAUNCHERS)
+def split_ids(processes, monkeypatch, request):
     proc, add, root = processes
     uid, gid = os.getuid(), os.getgid()
     service = 64000 if uid != 64000 else 64001
@@ -238,7 +297,7 @@ def split_ids(processes, monkeypatch):
         monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", str(service))
     monkeypatch.setattr(os, "getresuid", lambda: (uid, uid, service))
     monkeypatch.setattr(os, "getresgid", lambda: (gid, gid, service_gid))
-    add(880001, ["python", "/opt/app/docker/container_runtime.py", "run"], hidden=True,
+    add(880001, request.param, name=Path(request.param[0]).name, hidden=True,
         uids=[uid, service, service, service])
     (proc / str(os.getpid()) / "status").write_text(
         f"Name: python\nUid: {uid} {uid} {service} {uid}\nPPid: 880001\n")
@@ -284,6 +343,43 @@ def test_split_role_proof_never_exempts_unknown_or_agent_process(split_ids, monk
     elif bad == "parent_cycle":
         kwargs["parent"] = 880010
     add(880010, ["postgres"], **kwargs)
+    path = session(root)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 0 and path.exists()
+    finally:
+        sweep.close()
+
+
+@pytest.mark.parametrize("name,pid", [("tini", "880001"), ("docker-init", "880001"),
+                                      ("init", "880001"), ("systemd", "880001"), ("python", "1")])
+def test_postgres_chain_ending_only_at_init_never_qualifies(split_ids, name, pid):
+    proc, add, root, service = split_ids
+    base = proc / "880001"
+    status = base / "status"
+    rows = status.read_text().splitlines()
+    status.write_text("\n".join(f"Name: {name}" if row.startswith("Name:") else row for row in rows))
+    if pid == "1":
+        base.rename(proc / pid)
+        own = proc / str(os.getpid()) / "status"
+        own.write_text(own.read_text().replace("880001", pid))
+    pg = add(880010, ["postgres"], parent=int(pid), hidden=True, uids=[service] * 4, name="postgres")
+    assert not sr._managed_postgres(pg, proc, time.monotonic() + 2)
+    path = session(root)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 0 and path.exists()
+    finally:
+        sweep.close()
+
+
+def test_foreign_uid_ancestor_is_not_a_postgres_chain_by_itself(split_ids):
+    proc, _, root, service = split_ids
+    status = proc / "880001" / "status"
+    rows = status.read_text().splitlines()
+    status.write_text("\n".join(f"Uid: {service} {service} {service} {service}"
+                                if row.startswith("Uid:") else row for row in rows))
+    assert not sr._managed_postgres(status.parent, proc, time.monotonic() + 2)
     path = session(root)
     sweep = ss.ScratchSweep(root)
     try:

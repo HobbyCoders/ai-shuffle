@@ -142,8 +142,11 @@ notes and Task reports are not scratch and are never swept. Narrow live-receipte
 preview exceptions protect their private roots, not arbitrary external handles;
 quiet settled scratch has no promised path lifetime. Windows uses exclusive
 delete handles to retain open files even when process inspection is denied.
-Managed PostgreSQL is recognized only by the established split service identity,
-PostgreSQL ancestry and the app's exact supervisor; agent databases never qualify.
+Strict scans exempt live app-UID ancestors without relying on launcher spelling.
+Managed PostgreSQL requires the established split service identity and a
+PostgreSQL-only chain to a proven non-init ancestor. Agent-owned databases do not
+get that PostgreSQL exemption. An opaque ancestor can still hold external scratch;
+ancestry is a launch relationship, not proof that it has no descriptors.
 Each pass logs removed bytes, retained reasons (at most eight named holders) and
 preview exemptions. Unknown safety facts
 retain files; symlinks are never followed and Windows reparse trees are retained.
