@@ -49,6 +49,9 @@ def state_lock(svc):
 def serialized_plugin(operation):
     @wraps(operation)
     def wrapped(svc, plugin_id, *args, **kwargs):
+        # Refuse unreadable state before even creating a lock sidecar. The
+        # operation rechecks under the lock before staging or publishing.
+        svc._check_files_replaceable(svc.INSTALLED_FILE, svc.SETTINGS_FILE)
         with plugin_lock(svc, plugin_id):
             return operation(svc, plugin_id, *args, **kwargs)
     return wrapped

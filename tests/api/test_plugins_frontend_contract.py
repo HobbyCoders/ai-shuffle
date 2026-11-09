@@ -139,7 +139,7 @@ def _payloads(client, tmp_path) -> dict:
     return _normalise(raw, str(tmp_path))
 
 
-def test_response_keys_match_the_frontend_types(client, tmp_path):
+def test_response_keys_match_the_frontend_types(client, tmp_path, svc):
     p = _payloads(client, tmp_path)
     assert set(p["marketplace_sync"]) == EXPECTED_KEYS["marketplace_sync"]
     assert p["marketplace_sync"] == {"status": "synced", "marketplace_id": "mp"}
@@ -156,6 +156,9 @@ def test_response_keys_match_the_frontend_types(client, tmp_path):
     # #1610: the shared reader's format and components ride along.
     installed = p["installed"][0]
     assert (installed["format"], installed["trust"]) == ("claude", "marketplace")
+    recorded = _normalise(svc.get_installation_records("toolkit@mp")[0]["installPath"], str(tmp_path))
+    assert installed["install_path"] == p["details_installed"]["install_path"] == recorded
+    assert p["file_based_agents"][0]["file_path"] == recorded + "/agents/reviewer.md"
     assert {(c["kind"], c["name"], c["support"]) for c in installed["components"]} == {
         ("skill", "lint", "loaded"), ("command", "review", "loaded"), ("agent", "reviewer", "loaded"),
     }
