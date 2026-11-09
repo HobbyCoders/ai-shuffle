@@ -174,8 +174,9 @@ clone those URLs without GitHub or real Git credentials: setting a project
 up on another worker clones the project's own recorded remote, which may be a
 local path outside the workspace (typed clone URLs in the Git panel still may
 not). On a dev instance the preview cookie may add projects and set them up,
-cancel or remove them on the other worker (Projects → Workers); other
-owner-only changes stay refused. The two apps run as
+cancel or remove them on the other worker (Projects → Workers), and it may
+create or update an agent (the Agents page's autosave); other owner-only
+changes stay refused. The two apps run as
 the same OS user: this exercises real pairing, encrypted sync, cross-worker
 API calls and separate project installations, not host isolation or Unix
 permissions between different users.
