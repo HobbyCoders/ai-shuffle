@@ -923,6 +923,39 @@ async def test_channels_that_cannot_verify_a_sender_are_sent_to_the_app(mock_db,
     assert interactions.CHAT_CODES_KEY not in interactions.get_interaction(request)["payload"]
 
 
+@pytest.mark.asyncio
+async def test_a_bluebubbles_sender_cannot_approve_even_with_the_right_code(mock_db):
+    """Real: BlueBubbles' webhook handler, ConnectorManager's entry and the owner
+    gate, with the sender even listed as an owner account. Fake: the ordinary turn."""
+    from app.core.connectors.bluebubbles import BlueBubblesConnector
+    from app.core.connectors.manager import ConnectorManager
+    from app.db import interactions
+
+    manager = ConnectorManager()
+    turns = []
+
+    async def ordinary_turn(message):
+        turns.append(message.text)
+
+    manager._handle_incoming_message = ordinary_turn
+    adapter = BlueBubblesConnector("c1", "bluebubbles", {}, manager.handle_incoming_message, AsyncMock())
+    adapter.send_message = AsyncMock(return_value=True)
+    connector = {"id": "c1", "type": "bluebubbles", "config": {"owner_sender_ids": ["owner-account"]}}
+    request = _open_request()
+
+    with patch("app.db.database.get_connector", return_value=connector), \
+            patch("app.network.ownership.enrolled", return_value=False), \
+            patch("app.core.interaction_wait.is_awaited", return_value=True), \
+            patch("app.core.permission_handler.permission_handler.respond", new=AsyncMock()) as responded:
+        await adapter.handle_webhook_payload({"type": "new-message", "data": {
+            "guid": "m1", "text": "yes 4821", "handle": {"address": "owner-account"},
+            "chats": [{"guid": "chan-9"}]}})
+
+    responded.assert_not_awaited()
+    assert interactions.get_interaction(request)["state"] == "pending"
+    assert turns == ["yes 4821"]
+
+
 class TestSignalReadsTheReplyWhileItsTurnWaits:
     """Real: SignalConnector's SSE loop, ConnectorManager's entry, the owner gate,
     the code draw, the waiter and the responder. Fake: signal-cli's HTTP stream
