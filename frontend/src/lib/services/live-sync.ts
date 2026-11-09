@@ -22,6 +22,7 @@ import { RESOURCE_NAMES, resourceSync } from './resource-sync';
 import { resetUserEventDedupe } from './user-event-dedupe';
 import { handleGlobalUserEvent, activeSession } from '$lib/stores/active-session';
 import { appData } from '$lib/stores/app-data.svelte';
+import { awayMode } from '$lib/stores/away-mode.svelte';
 import { refreshProjectsOverviewIfUsed } from '$lib/stores/projects-overview';
 import { hydrateModelRegistry } from '$lib/constants/models';
 import { notify } from '$lib/stores/notifications';
@@ -36,7 +37,8 @@ const FIRST_SYNC_READS: Record<string, string> = {
  projects: '/projects',
  agents: '/agents',
  settings: '/models',
- notifications: '/notifications'
+ notifications: '/notifications',
+ away_mode: '/away-mode'
 };
 
 /** A hide at least this long refreshes every resource on return, as the
@@ -99,7 +101,8 @@ export function startLiveSync() {
    await hydrateModelRegistry();
    activeSession.applyComposerDefaults();
   }),
-  resourceSync.subscribe(['notifications'], () => notify.loadHistory())
+  resourceSync.subscribe(['notifications'], () => notify.loadHistory()),
+  resourceSync.subscribe(['away_mode'], () => awayMode.refreshGlobal())
  ];
  function disconnect(reset: boolean) {
   generation++; if (retry) clearTimeout(retry); if (heartbeat) clearInterval(heartbeat);
@@ -183,6 +186,7 @@ export function startLiveSync() {
  }
  const unsubscribeAuth = auth.subscribe(state => {
   if (state.loading) return;
+  awayMode.setGlobalAccess(state.status?.authenticated === true && state.status?.is_admin === true);
   const identity = state.status?.preference_identity;
   const next = !state.status?.authenticated ? null : identity
    ? `${identity.user_type}:${identity.user_id}`

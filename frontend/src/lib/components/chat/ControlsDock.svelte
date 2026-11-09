@@ -447,7 +447,10 @@
 	// Away mode: the agent takes recommended defaults instead of asking and
 	// reports them at the end; approvals are deferred, never granted.
 	const awaySessionId = $derived($activeSession.sessionId);
-	const away = $derived(awayMode.isAway(awaySessionId));
+	// What the chat's agent obeys. The toggle below still flips only its own flag.
+	const away = $derived(awayMode.isEffectivelyAway(awaySessionId));
+	const awayGlobal = $derived(awayMode.globalAway);
+	const awayChatFlag = $derived(awayMode.isChatAway(awaySessionId));
 	$effect(() => {
 		void awayMode.load(awaySessionId);
 	});
@@ -458,9 +461,9 @@
 		awayMode.observe(awaySessionId, awayRowValue);
 	});
 	async function toggleAway() {
-		if (!awaySessionId || awayMode.busy[awaySessionId]) return;
+		if (awayGlobal || !awaySessionId || awayMode.busy[awaySessionId]) return;
 		try {
-			const result = await awayMode.set(awaySessionId, !away);
+			const result = await awayMode.set(awaySessionId, !awayChatFlag);
 			if (result.released_questions) {
 				notify(`Answered ${result.released_questions} waiting question${result.released_questions === 1 ? '' : 's'} with recommended defaults`, { severity: 'info' });
 			}
@@ -531,7 +534,7 @@
 					aria-expanded={openPopover === 'permission'}
 					aria-busy={permissionPending || undefined}
 					aria-label="Permission mode: {permissionPending ? 'loading' : permissionLabel}{away ? ', Away mode on' : ''}"
-				>{permissionLabel}{#if away}<span class="away-badge" title="Away: agent decides with recommended defaults and reports them at the end">· Away</span>{/if}</button>
+				>{permissionLabel}{#if away}<span class="away-badge" title={awayGlobal ? 'Away is on for all chats: agents decide with recommended defaults and report them at the end' : 'Away: agent decides with recommended defaults and reports them at the end'}>· Away</span>{/if}</button>
 
 				{#if openPopover === 'permission'}
 					<div
@@ -569,15 +572,16 @@
 								type="button"
 								class="access-row away-row"
 								class:selected={away}
-								disabled={!awaySessionId || !!(awaySessionId && awayMode.busy[awaySessionId])}
+								class:held={awayGlobal}
+								disabled={awayGlobal || !awaySessionId || !!(awaySessionId && awayMode.busy[awaySessionId])}
 								onclick={toggleAway}
 								role="menuitemcheckbox"
 								aria-checked={away}
-								title={awaySessionId ? 'Away: agent decides with recommended defaults and reports them at the end' : 'Start the chat first'}
+								title={awayGlobal ? 'Away is on for all chats. Turn that off to use this chat\'s own setting.' : awaySessionId ? 'Away: agent decides with recommended defaults and reports them at the end' : 'Start the chat first'}
 							>
 								<span class="access-copy">
 									<strong>Away</strong>
-									<small>{awaySessionId ? 'Don\'t ask me; use recommended defaults and list them at the end' : 'Available once the chat has started'}</small>
+									<small>{awayGlobal ? 'On for all chats' : awaySessionId ? 'Don\'t ask me; use recommended defaults and list them at the end' : 'Available once the chat has started'}</small>
 								</span>
 								{#if away}
 									<svg class="w-3.5 h-3.5 access-check" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -766,7 +770,8 @@
 	{permissionPending}
 	{permissionUpdating}
 	onPermissionSelect={selectPermission}
-	awayEnabled={away}
+	awayEnabled={awayChatFlag}
+	{awayGlobal}
 	awayAvailable={!!awaySessionId}
 	awayBusy={!!(awaySessionId && awayMode.busy[awaySessionId])}
 	onToggleAway={toggleAway}
@@ -1024,6 +1029,7 @@
 		margin-top: 4px;
 		padding-top: 4px;
 	}
+	.away-row.held { cursor: default; }
 	.away-badge {
 		margin-left: 4px;
 		color: var(--warning, #d29922);

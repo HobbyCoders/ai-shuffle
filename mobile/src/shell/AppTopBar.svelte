@@ -18,6 +18,8 @@
 	 * (SessionTitleMenu variant="sheet") with the whole title. `actions` is
 	 * MainPanel's header cluster: private access + the compact Git button.
 	 *
+	 * The moon at the end of the bar is Away for all chats: one tap on any screen.
+	 *
 	 * The notification bell lives in that sidebar's header. This bar adds its own
 	 * only while something is unread, so nothing is said at zero and the count is
 	 * never hidden behind the ☰. The ☰ keeps the unread wording for screen readers.
@@ -39,6 +41,7 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { unreadCount } from '$lib/stores/notifications';
+	import AwayAllChatsSwitch from '$lib/components/layout/AwayAllChatsSwitch.svelte';
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
 	import SessionBreadcrumbs from '$lib/components/layout/SessionBreadcrumbs.svelte';
 	import SessionTitleMenu from '$lib/components/layout/SessionTitleMenu.svelte';
@@ -372,6 +375,7 @@
 			</button>
 		{/if}
 		<NotificationCenter bar />
+		<AwayAllChatsSwitch variant="bar" />
 	</div>
 </header>
 

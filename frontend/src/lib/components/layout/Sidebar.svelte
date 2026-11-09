@@ -70,6 +70,7 @@
 	import { notify } from '$lib/stores/notifications';
 	import { splitWorkspaceItems, WORKSPACE_ITEM_IDS, workspacePrefs, type WorkspaceItemId } from '$lib/stores/sidebar-prefs.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
+	import AwayAllChatsSwitch from './AwayAllChatsSwitch.svelte';
 	import DesktopUpdateButton from './sidebar/DesktopUpdateButton.svelte';
 	import SessionCard from './SessionCard.svelte';
 	import { backToChats } from '$lib/services/session-navigation';
@@ -828,6 +829,7 @@
 {/snippet}
 
 {#snippet globalControls(rail: boolean)}
+	<AwayAllChatsSwitch variant={rail ? 'rail' : 'drawer'} />
 	<DesktopUpdateButton {rail} bind:this={updater} bind:canCheck />
 	<NotificationCenter {rail} />
 {/snippet}

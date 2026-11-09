@@ -20,6 +20,7 @@
 	import { phoneBack } from '../settings/shell/BackRow.svelte';
 	import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
+	import AwayAllChatsSwitch from './AwayAllChatsSwitch.svelte';
 	import { unreadCount } from '$lib/stores/notifications';
 	import { NEW_CHAT_LABEL } from './chat-empty-state';
 	import { workerInstalls } from '$lib/stores/worker-presence';
@@ -127,6 +128,8 @@
 		{/if}
 		{#if phoneWidth && phoneBack.onclick}{@render phoneBack.actions?.()}{/if}
 			{#if phoneWidth}<NotificationCenter bar />{/if}
+			<!-- From 768px the rail is on every screen and carries this switch. -->
+			<span class="tb-away"><AwayAllChatsSwitch variant="bar" /></span>
 	</div>
 </header>
 
@@ -169,6 +172,9 @@
 	/* From 768px the open panel carries its own Hide control (PanelToggle) in its
 	   header row, so the bar shows this one only as the way to reopen it. */
 	@media (min-width: 768px) { .tb-icon.docked { display: none; } }
+
+	.tb-away { display: contents; }
+	@media (min-width: 768px) { .tb-away { display: none; } }
 
 	.tb-right {
 		margin-left: auto;
