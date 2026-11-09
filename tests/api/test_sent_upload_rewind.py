@@ -188,8 +188,8 @@ def test_project_upload_validation_uses_the_session_checkout(mock_db, tmp_path):
 
 
 @pytest.mark.parametrize("mentioned", [True, False])
-async def test_attachment_typed_into_a_call_rewinds_to_a_chip(staged_upload, rewind_env, monkeypatch, mentioned):
-    """Admission through recording to rewind, with the provider and agent stubbed."""
+async def test_attachment_typed_into_a_call_is_recorded_and_its_rewind_is_refused(staged_upload, rewind_env, monkeypatch, mentioned):
+    """Admission through recording, then a refused rewind; provider and agent stubbed."""
     import json
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
@@ -213,11 +213,13 @@ async def test_attachment_typed_into_a_call_rewinds_to_a_chip(staged_upload, rew
     prompt = f"{delegate.await_args.args[1]}\n\n{voice_turn_note('')}"
     session_events.append_events(SID, [_asst_ev("answer", uuid="answer-id")])
     _patch_checkpoints(monkeypatch, [_cp("user-id", prompt)])
+    before = session_events.get_events(SID)
     result = await execute_rewind_and_wait(SID, commands.RewindRequestV2(
         target_uuid="user-id", target_role="user", include_response=False))
-    assert result.success, result.error
-    assert result.restored_upload_paths == [str(staged_upload)]
-    assert [ref["path"] for ref in result.restored_upload_references] == [str(staged_upload)]
+    assert result.success is False
+    assert "content guard" in (result.error or "")
+    assert rewind_env.truncate_calls == []
+    assert session_events.get_events(SID) == before
 
 
 async def test_a_call_refuses_a_typed_attachment_a_chat_send_would_refuse(staged_upload, rewind_env, monkeypatch, tmp_path):

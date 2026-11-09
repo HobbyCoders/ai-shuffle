@@ -18,10 +18,10 @@
 //   relay       the caller asks, the chat agent answers ([script:voice-reply]); the reply is said once, in full
 //   wait-update the agent starts a background build and waits ([script:voice-wait]): its update is said before the wait, the result after
 //   busy        a call placed while the chat is still answering says that reply once it lands, then relays a new request
-//   attachment-during-call (#1265) a file sent while a call is live goes as fields beside the words,
-//               shows as a chip on the message, and a rewind brings the chip back to the composer
+//   attachment-during-call (#1265) a file sent while a call is live goes as fields beside the words
+//               and shows as a chip on the message
 import { runJourney } from './runner.mjs';
-import { PROJECT, api, composer, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
+import { PROJECT, composer, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import {
 	VOICE_REPLY_SPOKEN,
@@ -238,11 +238,9 @@ const attachmentDuringCall = {
 	async act(ctx) {
 		const { page, mark, state, log } = ctx;
 		const box = composer(page);
-		let sessionId = null;
 		// The preview cookie cannot save execution settings; answer that one save.
 		await page.route('**/api/v1/voice/sessions/*/context', route => {
 			if (route.request().method() !== 'PATCH') return route.continue();
-			sessionId = route.request().url().match(/voice\/sessions\/([^/]+)\/context/)[1];
 			return route.fulfill({ status: 200, contentType: 'application/json', body: route.request().postData() });
 		});
 		await mark('attach a file and send it into the call');
@@ -256,29 +254,9 @@ const attachmentDuringCall = {
 		expect(ctx.typedFrames.length === 1, `one typed frame went up (saw ${ctx.typedFrames.length})`);
 		const paths = ctx.typedFrames[0].upload_paths || [];
 		expect(paths.length === 1 && paths[0].endsWith(state.file), `the frame names the file as a field: ${JSON.stringify(paths)}`);
-		// Wait for the chat agent's answer: its transcript is what the rewind finds.
 		await waitTurnSettled(page, { messagesAtLeast: 4, text: 'Live conversation context' });
-		await mark('end the call and rewind the message');
+		await mark('end the call');
 		await endCall(page);
-		// The chat agent's transcript is written just after its reply shows, and
-		// a rewind reads that transcript: wait for this message to be in it.
-		const waitedFrom = Date.now();
-		let inTranscript = false;
-		for (let attempt = 0; attempt < 40 && !inTranscript; attempt++) {
-			if (attempt) await page.waitForTimeout(250);
-			const { checkpoints = [] } = await api(page, 'GET', `/commands/rewind/checkpoints/${sessionId}`);
-			inTranscript = checkpoints.some((cp) => (cp.full_message || '').includes(state.words));
-		}
-		log(`the transcript held the message after ${Date.now() - waitedFrom}ms`);
-		expect(inTranscript, 'the chat agent transcript holds the typed message');
-		await page.getByTitle('Rewind to before this message', { exact: true }).last().focus();
-		await page.keyboard.press('Enter');
-		await page.getByRole('dialog').getByRole('button', { name: 'Rewind', exact: true }).click();
-		await box.getByText(state.words).waitFor({ timeout: 20_000 });
-		const chips = await box.locator('[data-file-chip]').count();
-		const text = await box.innerText();
-		expect(chips === 1, `the attachment came back as one chip (found ${chips})`);
-		expect(!/\/\S*uploads\//.test(text), `no raw upload path in the composer: ${JSON.stringify(text)}`);
 	}
 };
 

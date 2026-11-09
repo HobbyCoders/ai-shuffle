@@ -1128,191 +1128,36 @@ async def test_real_standalone_peer_rewind_native_and_logical_boundaries(
     assert "".join(row["payload"]["text"] for row in kept if row["event_type"] == "assistant.text_delta") == "".join(f"Reply {i+1}" for i in range(retained))
 
 
-def _wrapped(words):
-    from app.core.voice_prompts import LIVE_CONTEXT_OPENER, TYPED_MESSAGE_PREFIX, voice_turn_note
-    return f"{LIVE_CONTEXT_OPENER}user: {TYPED_MESSAGE_PREFIX}{words}\n\n{voice_turn_note('')}"
+def _call_checkpoint_text(words, label="Typed message:\n"):
+    """A streamed call's delegated request, as the chat agent's transcript holds it."""
+    from app.core.voice_prompts import LIVE_CONTEXT_OPENER, voice_turn_note
+    return f"{LIVE_CONTEXT_OPENER}user: {label}{words}\n\n{voice_turn_note('')}"
 
 
-async def test_ordinary_text_shaped_like_a_call_prompt_stays_its_own_message(mock_db, monkeypatch):
-    """Both resolvers must cut at the second message, not the look-alike before it."""
-    from app.core.voice_prompts import LIVE_CONTEXT_OPENER, TYPED_MESSAGE_PREFIX
-    look_alike = f"{LIVE_CONTEXT_OPENER}user: {TYPED_MESSAGE_PREFIX}hello"
-    seed_session(SID)
-    se.append_events(SID, [_user_ev(look_alike), _asst_ev("a1", uuid="a1"), _user_ev("hello"), _asst_ev("a2", uuid="a2")])
-    _patch_checkpoints(monkeypatch, [_cp("first", look_alike), _cp("second", "hello", index=1)])
-
-    resolved, error = _resolve_checkpoint_uuid_from_content(SDK, WD, "hello", 0, session_id=SID)
-    assert (resolved, error) == ("second", None)
-    from_seq, error = _resolve_rewind_from_seq(SID, SDK, WD, "second", False, "user")
-    second = [row["seq"] for row in _load_message_events(SID) if _is_prompt_event(row)][1]
-    assert (from_seq, error) == (second, None)
-
-
-async def test_a_genuine_typed_call_message_still_anchors_to_its_wrapped_checkpoint(mock_db, monkeypatch):
-    seed_session(SID)
-    row = _user_ev("hello")
-    row["payload"]["source"] = "typed"
-    se.append_events(SID, [_user_ev("hi"), _asst_ev("a1", uuid="a1"), row, _asst_ev("a2", uuid="a2")])
-    _patch_checkpoints(monkeypatch, [_cp("first", "hi"), _cp("second", _wrapped("hello"), index=1)])
-
-    resolved, error = _resolve_checkpoint_uuid_from_content(SDK, WD, "hello", 0, session_id=SID)
-    assert (resolved, error) == ("second", None)
-    from_seq, error = _resolve_rewind_from_seq(SID, SDK, WD, "second", False, "user")
-    second = [row["seq"] for row in _load_message_events(SID) if _is_prompt_event(row)][1]
-    assert (from_seq, error) == (second, None)
-
-
-async def test_a_call_shaped_checkpoint_without_a_typed_record_is_not_unwrapped(mock_db, monkeypatch):
-    """Same words spoken as an ordinary prompt do not vouch for the wrapper."""
-    seed_session(SID)
-    se.append_events(SID, [_user_ev("hello"), _asst_ev("a1", uuid="a1")])
-    _patch_checkpoints(monkeypatch, [_cp("wrapped", _wrapped("hello"))])
-    assert _resolve_checkpoint_uuid_from_content(SDK, WD, "hello", 0, session_id=SID)[0] is None
-
-
-def _call_row(words, source="typed"):
+def _call_row(words, source):
     row = _user_ev(words)
     row["payload"]["source"] = source
     return row
 
 
-def _prompt_seqs():
-    return [row["seq"] for row in _load_message_events(SID) if _is_prompt_event(row)]
+def _rewind_by(by_content, words, uuid):
+    if by_content:
+        return RewindRequestV2(target_content=words, target_occurrence=0, include_response=False)
+    return RewindRequestV2(target_uuid=uuid, include_response=False)
 
 
-def _assert_resolves(content, occurrence, checkpoint, prompt_index):
-    """Both resolvers name the same message: the rewind can't cut two places."""
-    assert _resolve_checkpoint_uuid_from_content(SDK, WD, content, occurrence, session_id=SID) == (checkpoint, None)
-    assert _resolve_rewind_from_seq(SID, SDK, WD, checkpoint, False, "user") == (_prompt_seqs()[prompt_index], None)
-
-
-def _assert_refused(content, occurrence, checkpoint):
-    uuid, error = _resolve_checkpoint_uuid_from_content(SDK, WD, content, occurrence, session_id=SID)
-    assert uuid is None and "content guard" in error
-    seq, error = _resolve_rewind_from_seq(SID, SDK, WD, checkpoint, False, "user")
-    assert seq is None and "content guard" in error
-
-
-@pytest.mark.parametrize("typed_first", [True, False])
-async def test_a_call_message_and_its_wrapper_sent_verbatim_each_rewind_to_themselves(mock_db, monkeypatch, typed_first):
-    """Typing into a call, then pasting its exact wrapper, is two messages."""
-    wrapped = _wrapped("hello")
-    seed_session(SID)
-    rows = [_call_row("hello"), _user_ev(wrapped)]
-    se.append_events(SID, rows if typed_first else rows[::-1])
-    _patch_checkpoints(monkeypatch, [_cp("first", wrapped), _cp("second", wrapped, index=1)])
-
-    typed_at, pasted_at = (0, 1) if typed_first else (1, 0)
-    _assert_resolves("hello", 0, ["first", "second"][typed_at], typed_at)
-    _assert_resolves(wrapped, 0, ["first", "second"][pasted_at], pasted_at)
-
-
-@pytest.mark.parametrize("typed_first", [True, False])
-async def test_the_same_words_typed_in_a_call_and_sent_normally_stay_in_order(mock_db, monkeypatch, typed_first):
-    seed_session(SID)
-    rows = [_call_row("hello"), _user_ev("hello")]
-    cps = [_wrapped("hello"), "hello"]
-    if not typed_first:
-        rows, cps = rows[::-1], cps[::-1]
-    se.append_events(SID, rows)
-    _patch_checkpoints(monkeypatch, [_cp("first", cps[0]), _cp("second", cps[1], index=1)])
-
-    _assert_resolves("hello", 0, "first", 0)
-    _assert_resolves("hello", 1, "second", 1)
-
-
-async def test_a_spoken_row_does_not_claim_a_later_prompts_checkpoint(mock_db, monkeypatch):
-    """A spoken turn has no verbatim checkpoint, so it can't take this one."""
-    seed_session(SID)
-    se.append_events(SID, [_call_row("hello", source="voice"), _user_ev("hello")])
-    _patch_checkpoints(monkeypatch, [_cp("only", "hello")])
-
-    _assert_resolves("hello", 1, "only", 1)
-    uuid, error = _resolve_checkpoint_uuid_from_content(SDK, WD, "hello", 0, session_id=SID)
-    assert uuid is None and "content guard" in error
-
-
-async def test_a_checkpoint_with_no_row_is_refused_and_leaves_its_neighbours_working(mock_db, monkeypatch):
-    """Older data or a lost row: the extra checkpoint can't shift the others."""
-    seed_session(SID)
-    se.append_events(SID, [_user_ev("kept"), _user_ev("later")])
-    _patch_checkpoints(monkeypatch, [
-        _cp("older", "from before the log", index=0),
-        _cp("kept", "kept", index=1),
-        _cp("lost", "row was lost", index=2),
-        _cp("later", "later", index=3),
-    ])
-
-    _assert_resolves("kept", 0, "kept", 0)
-    _assert_resolves("later", 0, "later", 1)
-    assert _resolve_rewind_from_seq(SID, SDK, WD, "older", False, "user")[0] is None
-    assert _resolve_rewind_from_seq(SID, SDK, WD, "lost", False, "user")[0] is None
-
-
-async def test_a_row_with_no_checkpoint_is_refused_and_leaves_its_neighbours_working(mock_db, monkeypatch):
-    seed_session(SID)
-    se.append_events(SID, [_user_ev("first"), _user_ev("no checkpoint"), _user_ev("last")])
-    _patch_checkpoints(monkeypatch, [_cp("first", "first"), _cp("last", "last", index=1)])
-
-    _assert_resolves("first", 0, "first", 0)
-    _assert_resolves("last", 0, "last", 2)
-    uuid, error = _resolve_checkpoint_uuid_from_content(SDK, WD, "no checkpoint", 0, session_id=SID)
-    assert uuid is None and "content guard" in error
-
-
-@pytest.mark.parametrize("texts, rows", [
-    # One row, two checkpoints it could equally be.
-    (["again", "again"], ["again"]),
-    # Two rows, one checkpoint that could equally be either.
-    (["again"], ["again", "again"]),
-])
-async def test_an_uneven_duplicate_cannot_be_placed_and_is_refused(mock_db, monkeypatch, texts, rows):
-    seed_session(SID)
-    se.append_events(SID, [_user_ev(text) for text in rows])
-    _patch_checkpoints(monkeypatch, [_cp(f"u-{i}", text, index=i) for i, text in enumerate(texts)])
-
-    for i in range(len(texts)):
-        assert _resolve_rewind_from_seq(SID, SDK, WD, f"u-{i}", False, "user")[0] is None
-    for occurrence in range(len(rows)):
-        assert _resolve_checkpoint_uuid_from_content(SDK, WD, "again", occurrence, session_id=SID)[0] is None
-
-
-@pytest.mark.parametrize("content, occurrence, checkpoint, prompt_index", [
-    ("hello", 0, "first", 0),
-    (_wrapped("hello"), 0, "second", 1),
-])
-async def test_rewinding_either_message_cuts_both_histories_at_it(
-    rewind_env, monkeypatch, content, occurrence, checkpoint, prompt_index,
+@pytest.mark.parametrize("by_content", [True, False])
+@pytest.mark.parametrize("source, label", [("typed", "Typed message:\n"), ("voice", "")])
+async def test_a_message_from_a_call_is_refused_and_neither_history_changes(
+    rewind_env, monkeypatch, source, label, by_content,
 ):
-    wrapped = _wrapped("hello")
+    """A wrapped request has no row with its text, so neither lookup may pick one."""
     seed_session(SID)
-    se.append_events(SID, [_call_row("hello"), _asst_ev("a1", uuid="a1"), _user_ev(wrapped), _asst_ev("a2", uuid="a2")])
-    _patch_checkpoints(monkeypatch, [_cp("first", wrapped), _cp("second", wrapped, index=1)])
-    expected_seq = _prompt_seqs()[prompt_index]
-
-    resp = await execute_rewind_and_wait(SID, RewindRequestV2(
-        target_uuid="", include_response=False, target_content=content, target_occurrence=occurrence,
-    ))
-
-    assert resp.success is True, resp.error
-    assert rewind_env.truncate_calls == [checkpoint]
-    assert [r["payload"]["from_seq"] for r in se.get_events(SID) if r["event_type"] == "transcript.rewound"] == [expected_seq]
-
-
-@pytest.mark.parametrize("by_content", [True, False])
-async def test_a_refused_ambiguous_rewind_touches_neither_history(rewind_env, monkeypatch, by_content):
-    """The typed row is lost, so either wrapped checkpoint could be the prompt."""
-    wrapped = _wrapped("hello")
-    seed_session(SID)
-    se.append_events(SID, [_user_ev(wrapped), _asst_ev("a1", uuid="a1")])
-    _patch_checkpoints(monkeypatch, [_cp("first", wrapped), _cp("second", wrapped, index=1)])
+    se.append_events(SID, [_user_ev("before"), _asst_ev("a1", uuid="a1"), _call_row("hello", source), _asst_ev("a2", uuid="a2")])
+    _patch_checkpoints(monkeypatch, [_cp("before-cp", "before"), _cp("call-cp", _call_checkpoint_text("hello", label), index=1)])
     before = se.get_events(SID)
 
-    request = (
-        RewindRequestV2(target_uuid="", include_response=False, target_content=wrapped, target_occurrence=0)
-        if by_content else RewindRequestV2(target_uuid="second", include_response=False)
-    )
-    resp = await execute_rewind_and_wait(SID, request)
+    resp = await execute_rewind_and_wait(SID, _rewind_by(by_content, "hello", "call-cp"))
 
     assert resp.success is False
     assert "content guard" in (resp.error or "")
@@ -1320,151 +1165,18 @@ async def test_a_refused_ambiguous_rewind_touches_neither_history(rewind_env, mo
     assert se.get_events(SID) == before
 
 
-def _spoken_wrapped(words):
-    from app.core.voice_prompts import LIVE_CONTEXT_OPENER, voice_turn_note
-    return f"{LIVE_CONTEXT_OPENER}user: {words}\n\n{voice_turn_note('')}"
-
-
-def _noted(words):
-    from app.core.voice_prompts import voice_turn_note
-    return f"{words}\n\n{voice_turn_note('')}"
-
-
 @pytest.mark.parametrize("by_content", [True, False])
-async def test_a_spoken_request_keeps_its_checkpoint_from_a_later_paste_of_it(rewind_env, monkeypatch, by_content):
-    """The pasted copy has no checkpoint yet, so the only one is the spoken request's."""
-    wrapped = _spoken_wrapped("hello")
+async def test_a_call_message_stays_refused_after_its_wrapped_text_is_pasted(rewind_env, monkeypatch, by_content):
+    """The later paste carries the call's checkpoint text; the call message stays refused."""
+    wrapped = _call_checkpoint_text("hello")
     seed_session(SID)
-    se.append_events(SID, [_call_row("hello", source="voice"), _asst_ev("a1", uuid="a1"), _user_ev(wrapped)])
-    _patch_checkpoints(monkeypatch, [_cp("spoken-cp", wrapped)])
+    se.append_events(SID, [_call_row("hello", "typed"), _asst_ev("a1", uuid="a1"), _user_ev(wrapped), _asst_ev("a2", uuid="a2")])
+    _patch_checkpoints(monkeypatch, [_cp("call-cp", wrapped), _cp("paste-cp", wrapped, index=1)])
     before = se.get_events(SID)
 
-    request = (
-        RewindRequestV2(target_uuid="", include_response=False, target_content=wrapped, target_occurrence=0)
-        if by_content else RewindRequestV2(target_uuid="spoken-cp", include_response=False)
-    )
-    resp = await execute_rewind_and_wait(SID, request)
+    resp = await execute_rewind_and_wait(SID, _rewind_by(by_content, "hello", "paste-cp"))
 
     assert resp.success is False
     assert "content guard" in (resp.error or "")
     assert rewind_env.truncate_calls == []
     assert se.get_events(SID) == before
-
-
-async def test_a_spoken_request_cannot_be_rewound_even_when_its_row_is_certain(mock_db, monkeypatch):
-    seed_session(SID)
-    se.append_events(SID, [_call_row("hello", source="voice")])
-    _patch_checkpoints(monkeypatch, [_cp("spoken-cp", _spoken_wrapped("hello"))])
-
-    _assert_refused("hello", 0, "spoken-cp")
-
-
-@pytest.mark.parametrize("source", ["voice", "typed"])
-async def test_a_request_a_voice_model_rewrote_keeps_its_checkpoint_from_a_later_message(mock_db, monkeypatch, source):
-    """Realtime: the row holds the caller's words, the checkpoint the model's."""
-    seed_session(SID)
-    se.append_events(SID, [_call_row("could you look at that", source=source), _user_ev("check the logs")])
-    _patch_checkpoints(monkeypatch, [_cp("model-cp", _noted("check the logs"))])
-
-    _assert_refused("check the logs", 0, "model-cp")
-
-
-async def test_both_copies_rewind_once_each_has_its_checkpoint(mock_db, monkeypatch):
-    wrapped = _spoken_wrapped("hello")
-    seed_session(SID)
-    se.append_events(SID, [_call_row("hello", source="voice"), _user_ev(wrapped)])
-    _patch_checkpoints(monkeypatch, [_cp("spoken-cp", wrapped), _cp("pasted-cp", wrapped, index=1)])
-
-    _assert_resolves(wrapped, 0, "pasted-cp", 1)
-    _assert_refused("hello", 0, "spoken-cp")
-
-
-@pytest.mark.parametrize("delegated", [True, False])
-async def test_a_spoken_message_then_the_same_words_typed_into_the_call(mock_db, monkeypatch, delegated):
-    seed_session(SID)
-    se.append_events(SID, [_call_row("hello", source="voice"), _call_row("hello")])
-    cps = [_cp("typed-cp", _wrapped("hello"), index=1)]
-    if delegated:
-        cps.insert(0, _cp("spoken-cp", _spoken_wrapped("hello")))
-    _patch_checkpoints(monkeypatch, cps)
-
-    _assert_resolves("hello", 1, "typed-cp", 1)
-    assert _resolve_rewind_from_seq(SID, SDK, WD, cps[0].uuid, False, "user")[0] == (None if delegated else _prompt_seqs()[1])
-
-
-async def test_a_spoken_message_then_the_same_words_sent_normally(mock_db, monkeypatch):
-    seed_session(SID)
-    se.append_events(SID, [_call_row("hello", source="voice"), _user_ev("hello")])
-    _patch_checkpoints(monkeypatch, [_cp("spoken-cp", _spoken_wrapped("hello")), _cp("sent-cp", "hello", index=1)])
-
-    _assert_resolves("hello", 1, "sent-cp", 1)
-    _assert_refused("hello", 0, "spoken-cp")
-
-
-async def test_small_talk_in_a_call_does_not_disturb_the_messages_around_it(mock_db, monkeypatch):
-    """Most spoken turns have no checkpoint at all."""
-    seed_session(SID)
-    se.append_events(SID, [
-        _user_ev("before"),
-        _call_row("hi there", source="voice"),
-        _call_row("do the thing", source="voice"),
-        _call_row("thanks", source="voice"),
-        _call_row("typed note"),
-        _call_row("and goodbye", source="voice"),
-        _user_ev("after"),
-    ])
-    _patch_checkpoints(monkeypatch, [
-        _cp("before", "before", index=0),
-        _cp("spoken-cp", _spoken_wrapped("do the thing"), index=1),
-        _cp("typed-cp", _wrapped("typed note"), index=2),
-        _cp("after", "after", index=3),
-    ])
-
-    _assert_resolves("before", 0, "before", 0)
-    _assert_resolves("typed note", 0, "typed-cp", 4)
-    _assert_resolves("after", 0, "after", 6)
-
-
-async def test_two_requests_from_one_utterance_can_refuse_a_lone_neighbour(mock_db, monkeypatch):
-    """The known cost of counting spoken rows: refused, never cut wrongly."""
-    wrapped = _spoken_wrapped("hello")
-    seed_session(SID)
-    se.append_events(SID, [_call_row("hello", source="voice"), _user_ev("between"), _call_row("later", source="voice")])
-    _patch_checkpoints(monkeypatch, [_cp("one", wrapped), _cp("two", wrapped, index=1), _cp("between", "between", index=2)])
-
-    _assert_refused("between", 0, "between")
-
-
-@pytest.mark.parametrize("by_content", [True, False])
-async def test_a_chat_over_the_size_limit_is_refused_before_building_any_pairs(rewind_env, monkeypatch, by_content):
-    import app.api.commands as commands
-    monkeypatch.setattr(commands, "_MAX_ALIGNMENT_PAIRS", 3, raising=False)
-    def no_expansion(*_args):
-        raise AssertionError("pairs were built for a chat over the limit")
-    monkeypatch.setattr(commands, "_chain_lengths", no_expansion)
-    seed_session(SID)
-    se.append_events(SID, [_user_ev("again"), _user_ev("again")])
-    _patch_checkpoints(monkeypatch, [_cp("u-0", "again"), _cp("u-1", "again", index=1)])
-    before = se.get_events(SID)
-
-    request = (
-        RewindRequestV2(target_uuid="", include_response=False, target_content="again", target_occurrence=0)
-        if by_content else RewindRequestV2(target_uuid="u-0", include_response=False)
-    )
-    resp = await execute_rewind_and_wait(SID, request)
-
-    assert resp.success is False
-    assert "too many times" in (resp.error or "")
-    assert rewind_env.truncate_calls == []
-    assert se.get_events(SID) == before
-
-
-async def test_a_chat_exactly_at_the_size_limit_still_rewinds(mock_db, monkeypatch):
-    import app.api.commands as commands
-    monkeypatch.setattr(commands, "_MAX_ALIGNMENT_PAIRS", 4)
-    seed_session(SID)
-    se.append_events(SID, [_user_ev("again"), _user_ev("again")])
-    _patch_checkpoints(monkeypatch, [_cp("u-0", "again"), _cp("u-1", "again", index=1)])
-
-    _assert_resolves("again", 0, "u-0", 0)
-    _assert_resolves("again", 1, "u-1", 1)

@@ -1035,34 +1035,7 @@ async def test_a_local_typed_send_gives_the_turn_the_fields_a_chat_send_would(mo
     assert delegate.await_args.kwargs["uploads"] == fields
 
 
-def test_typed_request_text_unwraps_only_a_call_prompt():
-    from app.core.voice_prompts import (
-        LIVE_CONTEXT_OPENER, TYPED_MESSAGE_PREFIX, attachment_note, split_attachment_note, typed_request_text, voice_turn_note,
-    )
-    wrapped = LIVE_CONTEXT_OPENER + "user: earlier words\n\n" + TYPED_MESSAGE_PREFIX + "Read this\n"
-    assert typed_request_text(wrapped) == "Read this"
-    assert typed_request_text(wrapped + attachment_note(["/up/a"]) + "\n\n" + voice_turn_note("")) == "Read this"
-    assert typed_request_text("Typed message:\nA normal prompt") == "Typed message:\nA normal prompt"
-    assert typed_request_text("Read this\n\n" + voice_turn_note("")) == "Read this"  # Forwarded to the worker running it.
+def test_split_attachment_note_reads_only_a_whole_note():
+    from app.core.voice_prompts import attachment_note, split_attachment_note
     assert split_attachment_note("Read" + attachment_note(["/up/a", "/up/b"])) == ("Read", ["/up/a", "/up/b"])
     assert split_attachment_note("Read") == ("Read", [])
-
-
-@pytest.mark.asyncio
-async def test_a_voice_reply_landing_during_a_typed_send_stays_out_of_its_request(monkeypatch):
-    """The typed words end the delegated request, or a rewind cannot find them."""
-    from app.core import turn_recorder, upload_transfer
-    from app.core.voice_prompts import typed_request_text
-    call = stream()
-    call.upstream = Upstream([])
-    _upload_row(monkeypatch)
-    monkeypatch.setattr(upload_transfer, "partition_upload_paths", lambda paths, session, references=None: (paths, []))
-
-    async def recording(*args, **kwargs):
-        await call.caption("assistant", "What can I do for you?")
-    monkeypatch.setattr(turn_recorder, "record_voice_exchange", recording)
-    delegate = AsyncMock(return_value="Read.")
-    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
-    await call.receive_text(json.dumps({"type": "input_text", "id": "a", "text": "Read this", "upload_paths": ["/up/a.pdf"]}))
-    await call.delegation_task
-    assert typed_request_text(delegate.await_args.args[1]) == "Read this"

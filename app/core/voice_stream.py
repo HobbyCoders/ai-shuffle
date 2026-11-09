@@ -1198,11 +1198,9 @@ class VoiceStream:
             # path, not a guessed provider text event or a second conversation.
             await self.flush()
             await self.caption("user", "\n\n" + TYPED_MESSAGE_PREFIX + text, typed_uploads=recorded)
-            # Before the flush can yield: the typed words stay last in this
-            # request, which is how a rewind finds them in the transcript.
+            await self.flush()  # Durable admission before acknowledging/dispatching.
             entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
             self.delegated_seq = self.transcript_seq
-            await self.flush()  # Durable admission before acknowledging/dispatching.
             # A resent draft is accepted once; typed ids stay out of the
             # provider session's handoff count.
             self.typed_ids[key] = None
