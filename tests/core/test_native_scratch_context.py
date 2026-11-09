@@ -70,13 +70,14 @@ def _recording_loop(compaction=None, reply="ok", **kwargs) -> tuple[_Recording, 
 # Fixed-fixture guards
 # ---------------------------------------------------------------------------
 
-def test_the_block_text_is_unchanged_and_within_its_allowance():
-    """A prompt-tightening pass may not reword this rule; a growth must be seen."""
+def test_the_block_text_includes_lifetime_and_stays_within_its_allowance():
+    """The new temporary lifetime stays within the existing fixed prompt budget."""
     path = NOTE.split("Use ", 1)[1].split(" (absolute", 1)[0]
     assert NOTE == mr.wrap(
         "# Harness scratch\n"
         f"Use {path} (absolute, per-session) for temporary briefs, "
-        "artifacts and review evidence; create it only when needed. Never put "
+        "artifacts and review evidence; create it only when needed. Cleared once "
+        "settled and quiet. Never put "
         "harness state or scratch in the working folder's .fluid/. Project "
         ".fluid is for loading skills, agents, commands, plugins and settings "
         "(and host-managed worktrees); explicit skill/plugin authoring is unchanged."
