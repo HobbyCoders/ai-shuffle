@@ -13,6 +13,8 @@ export interface FileChipAttributes {
 	size: number;
 	type: 'file' | 'chat_history' | 'note' | 'subagent';
 	uploadReference?: import('$lib/api/rewind').UploadReference;
+	/** Picked from the @ menu: text for the agent, never an upload. */
+	mention?: boolean;
 }
 
 declare module '@tiptap/core' {
@@ -46,6 +48,13 @@ export const FileChipNode = Node.create({
 		return {
             // JSON draft state only. Pasted HTML must not mint owner identities.
             uploadReference: { default: null, rendered: false },
+			// In the HTML as well, so a chip copied within the composer stays a mention.
+			// It can only ever withhold an upload, so pasted HTML gains nothing from it.
+			mention: {
+				default: null,
+				parseHTML: (element) => element.hasAttribute('data-mention') || null,
+				renderHTML: (attributes) => (attributes.mention ? { 'data-mention': '' } : {})
+			},
 			path: {
 				default: '',
 				parseHTML: (element) => element.getAttribute('data-path'),

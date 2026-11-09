@@ -383,6 +383,11 @@ def _rewind_handler():
     return handle_rewind
 
 
+def _session_files_handler():
+    from app.api.session_files import handle_session_files
+    return handle_session_files
+
+
 def _session_git_handler():
     from app.api.git_owner import handle_session_git
     return handle_session_git
@@ -617,6 +622,7 @@ _LAZY_HANDLERS = {
     "generation": _generation_handler,
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,
+    "session-files": _session_files_handler,
     "project-git": _project_git_handler,
     "git-state": _git_state_handler,
     "git-catalog": _git_catalog_handler,

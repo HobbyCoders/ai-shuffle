@@ -717,6 +717,8 @@ app.include_router(generation_choices_api.router)
 app.include_router(project_agents.router)
 app.include_router(project_plugins.router)
 app.include_router(project_memory.router)
+from app.api import memories
+app.include_router(memories.router)
 app.include_router(mcp.router)
 app.include_router(tools_api.router)
 app.include_router(browser_panel.router)

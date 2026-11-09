@@ -21,7 +21,13 @@ async def upload_session_file(
     if not session.get("project_v2_id") or session.get("mode") == "chat":
         raise HTTPException(400, "Attachments need a code or voice project session.")
     from app.api.projects import MAX_UPLOAD_SIZE, _read_upload_within_limit
-    from app.core.upload_transfer import stage_session_upload
+    from app.core.upload_transfer import resolve_upload_target, stage_admitted_session_upload
+    from app.core.query_options import WorktreeUnavailableError
+
+    try:
+        await run_sync(resolve_upload_target, session)
+    except WorktreeUnavailableError as exc:
+        raise HTTPException(409, {"message": str(exc), "reason": "worktree_unavailable"}) from exc
 
     length = request.headers.get("content-length", "")
     if length.isdigit() and int(length) > MAX_UPLOAD_SIZE:
@@ -31,6 +37,8 @@ async def upload_session_file(
         raise HTTPException(400, "Invalid filename")
     content = await _read_upload_within_limit(file)
     try:
-        return await run_sync(stage_session_upload, session_id, filename, content)
+        return await run_sync(stage_admitted_session_upload, session, filename, content)
+    except WorktreeUnavailableError as exc:
+        raise HTTPException(409, {"message": str(exc), "reason": "worktree_unavailable"}) from exc
     except ValueError:
         raise HTTPException(400, "Invalid upload path")

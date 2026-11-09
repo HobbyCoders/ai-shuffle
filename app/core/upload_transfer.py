@@ -94,6 +94,50 @@ def stage_session_upload(session_id: str, filename: str, content: bytes) -> Dict
     }
 
 
+def resolve_upload_target(session: Dict[str, Any]) -> tuple[Optional[str], bool]:
+    """Read-only admission shared by both upload routes and direct writers.
+
+    Return (existing local cwd, needs per-session staging). A remote or new
+    checkout may stage; an expected, registered local checkout must be usable,
+    with the same diagnostic as Send. Never create a checkout while uploading.
+    """
+    from app.core import project_resolver
+    from app.core.config import settings
+    from app.core.placement import resolve_placement
+    from app.core.query_options import worktree_unavailable_error
+    from app.network.control import owner_of
+
+    decision = resolve_placement(session)
+    remote = owner_of(session) or (
+        decision.kind == "runner" and decision.runner_id != settings.effective_instance_id
+    )
+    cwd = project_resolver.resolve_existing_cwd(session) if not remote else None
+    bound = bool(session.get("branch") or session.get("worktree_branch")
+                 or session.get("worktree_id") or session.get("worktree_path"))
+    staging = bound and bool(remote or decision.kind == "none")
+    if not remote and not cwd:
+        error = worktree_unavailable_error(session)
+        if error and project_resolver.resolve_local_checkout(session):
+            from app.db import git_ops
+
+            project = project_resolver.resolve_project_v2(session)
+            branch = session.get("branch") or session.get("worktree_branch")
+            # Send can still claim/wait for this durable checkout intent. Keep
+            # staging until then, without running or changing the operation.
+            if not branch or not git_ops.find_matching(
+                settings.effective_instance_id, project["id"], "ensure_worktree", branch
+            ):
+                raise error
+        staging = staging or bool(error)
+    return cwd, staging
+
+
+def stage_admitted_session_upload(session: Dict[str, Any], filename: str, data: bytes) -> Dict[str, Any]:
+    """Recheck the read-only admission immediately before a staging write."""
+    resolve_upload_target(session)
+    return stage_session_upload(session["id"], filename, data)
+
+
 def split_session_staged_paths(paths: List[str], session_id: str) -> tuple[List[str], List[str]]:
     """Separate this session's staged files from files in a project checkout."""
     root = session_upload_dir(session_id).resolve()
@@ -287,7 +331,18 @@ def lift_send_uploads(paths: List[str], project_id: Optional[str], session_id: s
         project_v2_id = (resolved or {}).get("id")
     except Exception:  # noqa: BLE001 — the v2 id is bookkeeping, not a gate
         logger.debug("Upload lift: project_v2 resolve failed for %s", project_id, exc_info=True)
-    return blob_ids + lift_paths_to_blobs(paths, project, session_id, project_v2_id)
+    # A send can mix session staging, a first-message source in main, and an
+    # established checkout outside the base project. Select each file's root,
+    # rather than losing another attachment by replacing the batch's root.
+    session = database.get_session(session_id)
+    cwd = project_resolver.resolve_existing_cwd(session) if session else None
+    checkout = Path(cwd).resolve() if cwd else None
+    for source in paths:
+        source_project = project
+        if checkout and _is_under(Path(source).resolve(), checkout):
+            source_project = {**project, "path": str(checkout)}
+        blob_ids += lift_paths_to_blobs([source], source_project, session_id, project_v2_id)
+    return blob_ids
 
 
 def lift_session_paths_to_blobs(paths: List[str], session: Dict[str, Any]) -> List[str]:

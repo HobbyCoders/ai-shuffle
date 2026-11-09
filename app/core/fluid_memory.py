@@ -32,9 +32,10 @@ def owner_root(owner: str) -> Path:
     return skills_root() / ".users" / hashlib.sha256(owner.encode()).hexdigest()
 
 
-def store_for_owner(owner: str):
+def store_for_owner(owner: str, *, initialize: bool = True):
+    """Resolve a store; read-only observers can skip directory/journal setup."""
     from fluid.codemode.skills import SkillStore
-    return SkillStore(owner_root(owner), owner=owner)
+    return SkillStore(owner_root(owner), owner=owner, initialize=initialize)
 
 
 def save_detected_owner_fact(text: str, key: str, source: str) -> bool:
