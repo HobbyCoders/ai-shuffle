@@ -124,6 +124,31 @@ test('a spent explanation cannot explain a second jump', () => {
 	assert.equal(transcriptMovements(frames(rows, { composer })), 1);
 });
 
+test('a multi-frame return counts twice, however each step is explained', () => {
+	const rows = [68, 154, 124, 68];
+	const content = [2000, 2000, 2030, 2086];
+	const composer = [592, 678, 678, 678];
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 2);
+	const padded = (list) => [...list, ...Array(21).fill(list[list.length - 1])];
+	assert.equal(transcriptMovements(frames(padded(rows), { content: padded(content), composer: padded(composer) })), 2);
+});
+
+test('a row that returns after a long stay away still counts twice', () => {
+	const rows = [68, 154, ...Array(40).fill(154), 68, 68];
+	assert.equal(transcriptMovements(frames(rows)), 2);
+});
+
+test('a row that passes its old position on the way up has not returned', () => {
+	const rows = [-38, 48, -534, -559];
+	const content = [2116, 2116, 2698, 2723];
+	const composer = [592, 678, 678, 678];
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 0);
+});
+
+test('content that shrinks does not explain a row moving down', () => {
+	assert.equal(transcriptMovements(frames([500, 500, 540, 540], { content: [2040, 2040, 2000, 2000] })), 1);
+});
+
 test('frames without the row are skipped, not read as a jump', () => {
 	assert.equal(transcriptMovements([{ row: 10, content: 2000, composer: 700 }, { row: null, content: 2000, composer: 700 }, { row: 10, content: 2000, composer: 700 }]), 0);
 });

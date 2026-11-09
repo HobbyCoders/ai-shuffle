@@ -380,14 +380,16 @@
 		   tick on each send, and re-centred again as the composer cleared.
 		   Sized from the visible height, not this box: the box's height follows
 		   the composer, so a percentage of it moved the rail whenever a wrapped
-		   draft was sent (#1094). 120px on an ordinary screen, easing to 8px as
-		   a keyboard or a landscape phone leaves too little height for it.
-		   The box only gets a say once that offset would leave the rail less
-		   than --rail-room: a draft that tall has taken the space the rail
-		   stood in, so it moves up rather than vanishing. */
+		   draft was sent (#1094). 120px on an ordinary screen, easing to 0 as a
+		   keyboard or a landscape phone leaves too little height for it.
+		   436px is the 56px header, a six-line draft's 324px composer and
+		   --rail-room, so the offset always leaves an ordinary draft room and
+		   the box has no say. It only does once a taller draft would leave the
+		   rail less than --rail-room: that draft has taken the rail's space, so
+		   the rail moves up rather than vanishing. */
 		--visible-height: var(--app-viewport-height, 100dvh);
 		--rail-room: 56px;
-		--rail-offset: clamp(8px, calc((var(--visible-height) - 300px) * 0.4), 120px);
+		--rail-offset: clamp(0px, calc(var(--visible-height) - 436px), 120px);
 		--rail-top: max(0px, min(var(--rail-offset), calc(100% - var(--rail-room))));
 		top: var(--rail-top);
 		max-height: calc(100% - var(--rail-top));

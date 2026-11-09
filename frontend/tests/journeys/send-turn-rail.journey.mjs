@@ -41,7 +41,9 @@ async function watchFrames(page) {
 	await page.evaluate((selector) => {
 		const log = document.querySelector(selector);
 		const logTop = log.getBoundingClientRect().top;
-		const row = [...log.querySelectorAll('[data-transcript-key]')].find((el) => el.getBoundingClientRect().bottom > logTop + 1);
+		const rows = [...log.querySelectorAll('[data-transcript-key]')];
+		// A transcript a few pixels tall can show only its bottom padding; the last row still reports.
+		const row = rows.find((el) => el.getBoundingClientRect().bottom > logTop + 1) ?? rows[rows.length - 1];
 		const watch = (window.__railFrames = { running: true, next: 0, frames: [] });
 		const sample = () => {
 			if (!watch.running) return;
@@ -68,8 +70,8 @@ async function watchFrames(page) {
 
 const present = (frames, key) => frames.map((frame) => frame[key]).filter(Number.isFinite);
 
-const sendCase = ({ name, setup, prepare }) => ({
-	name, setup,
+const sendCase = ({ name, setup, prepare, ...options }) => ({
+	name, setup, ...options,
 	async act(ctx) {
 		const { page, mark, log } = ctx;
 		await prepare(ctx);
@@ -109,7 +111,7 @@ async function showVisibleHeight(page, height) {
 const railGeometry = (page) => page.evaluate((selector) => {
 	const box = (query) => document.querySelector(query).getBoundingClientRect();
 	const [rail, log, composer] = [box('.turn-rail'), box(selector), box('.input-slot')];
-	return { railTop: rail.top, railBottom: rail.bottom, logTop: log.top, composerTop: composer.top };
+	return { railTop: rail.top, railBottom: rail.bottom, logTop: log.top, composerTop: composer.top, composerHeight: composer.height };
 }, LOG);
 
 // Enough for a few ticks; a shorter rail scrolls, and a shorter transcript fills it.
@@ -123,6 +125,12 @@ function expectRailUsable(name, at) {
 	expect(at.railTop >= at.logTop - 1 && at.railBottom <= at.composerTop + 1, `${name}: the rail stays inside the transcript (${detail})`);
 	expect(at.railBottom - at.railTop >= Math.min(room, MIN_RAIL) - 1, `${name}: the rail stays usable while the transcript has room (${detail})`);
 }
+
+const DRAFT = 'please read the deployment notes again and then list every question that is still open for me ';
+// Six wrapped lines in the phone composer: 166px empty, 228px for two lines, then
+// 24px a line. /mobile/ stops at 300px. Up to this size the rail must not move at
+// any visible height; only a taller draft can genuinely be taking its space.
+const ORDINARY_COMPOSER = 324;
 
 const short = [
 	{ name: 'portrait keyboard', width: 390, height: 844, visible: 544 },
@@ -156,12 +164,31 @@ await runJourney({
 				await page.waitForFunction((top) => document.querySelector('.input-slot').getBoundingClientRect().top < top - 10, before.composerTop);
 				const after = await railGeometry(page);
 				expect(Math.abs(after.railTop - before.railTop) <= 1, `the draft's height does not move the rail (${before.railTop} to ${after.railTop})`);
+				// Up to ORDINARY_COMPOSER a draft must not move the rail at any visible height.
+				let tallestOrdinary = 0;
+				for (const visible of [340, 436, 544, 640]) {
+					await showVisibleHeight(page, visible);
+					await composer(page).fill('');
+					await page.waitForTimeout(200);
+					const rest = await railGeometry(page);
+					for (const chars of [60, 150, 230]) {
+						await composer(page).fill(DRAFT.repeat(3).slice(0, chars));
+						await page.waitForTimeout(200);
+						const at = await railGeometry(page);
+						log(`ordinary draft ${visible}/${chars} ${JSON.stringify(at)}`);
+						if (at.composerHeight > ORDINARY_COMPOSER) continue;
+						tallestOrdinary = Math.max(tallestOrdinary, at.composerHeight);
+						expect(Math.abs(at.railTop - rest.railTop) <= 1, `a ${Math.round(at.composerHeight)}px composer at visible ${visible} does not move the rail (${rest.railTop} to ${at.railTop})`);
+					}
+				}
+				expect(tallestOrdinary > 260, `the drafts reached a tall ordinary composer (${tallestOrdinary}px)`);
+				await showVisibleHeight(page, 544);
 				// Grow the draft until the transcript has less room than the rail's usual
 				// offset. /mobile/ caps its composer at 300px, so it needs less height to get there.
 				if (mobileShell) await showVisibleHeight(page, 440);
 				let tightest = Infinity;
 				for (const repeats of [4, 5, 7, 10, 14]) {
-					await composer(page).fill('please read the deployment notes again and then list every question that is still open for me '.repeat(repeats));
+					await composer(page).fill(DRAFT.repeat(repeats));
 					await page.waitForTimeout(200);
 					const tall = await railGeometry(page);
 					log(`tall draft ${repeats} under a keyboard ${JSON.stringify(tall)}`);
@@ -170,12 +197,44 @@ await runJourney({
 				}
 				expect(tightest > 0 && tightest < 130, `a draft left the transcript too little room for the usual offset (${tightest}px left)`);
 				await composer(page).fill('');
+				// The rail and the app's shell read one height, so the rule holds with that
+				// height missing (both use 100dvh) or out of date.
+				await page.setViewportSize({ width: 360, height: 340 });
+				await showVisibleHeight(page, null);
+				for (const height of [null, '544px']) {
+					await page.evaluate((value) => {
+						if (value) document.documentElement.style.setProperty('--app-viewport-height', value);
+						else document.documentElement.style.removeProperty('--app-viewport-height');
+					}, height);
+					await composer(page).fill('');
+					await page.waitForTimeout(200);
+					const rest = await railGeometry(page);
+					await composer(page).fill(DRAFT);
+					await page.waitForTimeout(200);
+					const at = await railGeometry(page);
+					log(`app height ${height ?? 'unset'} ${JSON.stringify({ rest, at })}`);
+					expect(at.composerHeight > rest.composerHeight + 20, `the draft wrapped with the app height ${height ?? 'unset'}`);
+					// A shell taller than the window scrolls the page to the composer, so read the rail against the transcript.
+					const offset = ({ railTop, logTop }) => railTop - logTop;
+					expect(Math.abs(offset(at) - offset(rest)) <= 1, `with the app height ${height ?? 'unset'} a wrapped draft does not move the rail (${offset(rest)} to ${offset(at)} below the header)`);
+				}
+				await composer(page).fill('');
 			},
 			async act() {}
 		},
 		sendCase({
 			name: 'wrapped-send', setup: openHistory,
 			prepare: ({ page }) => composer(page).fill('please read the deployment notes again and then list every question that is still open for me [script:default]')
+		}),
+		// With a keyboard up the rail stands at the top of a short transcript, and a
+		// wrapped draft must not change that.
+		sendCase({
+			name: 'wrapped-send-keyboard', viewports: ['phone'], setup: openHistory,
+			async prepare({ page }) {
+				await page.setViewportSize({ width: 360, height: 640 });
+				await showVisibleHeight(page, 340);
+				await composer(page).fill('please read the deployment notes again and then list every question that is still open for me [script:default]');
+			}
 		}),
 		// The words of a "Not sent" row join a typed draft, and both go at once.
 		sendCase({ name: 'restored-row-send', setup: openStopChat, prepare: restoreNotSentRowIntoADraft })
