@@ -87,7 +87,13 @@ const RAIL_PRESSES = {
 		const cdp = await page.context().newCDPSession(page);
 		const touch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
 		await touch('touchStart', [{ x, y }]);
-		await touch('touchMove', [{ x, y: y + 60 }]);
+		// Paced like a finger, then held before lifting: Chromium swallows the next
+		// tap after a zero-time flick, which would fail the reopen for the wrong reason.
+		for (const step of [15, 30, 45, 60]) {
+			await touch('touchMove', [{ x, y: y + step }]);
+			await page.waitForTimeout(16);
+		}
+		await page.waitForTimeout(150);
 		await touch('touchEnd', []);
 		await cdp.detach();
 	},
