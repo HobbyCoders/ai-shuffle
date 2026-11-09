@@ -149,3 +149,97 @@ def test_plain_vacuum_during_streaming_restores_connection(pg, monkeypatch, stre
         writer.commit()
     finally:
         writer.close()
+
+
+@pytest.mark.parametrize("failure", [
+    "autocommit_on", "cursor", "budget_set", "worker_set", "vacuum", "worker_reset",
+    "autocommit_off", "budget_restore",
+])
+def test_vacuum_failure_never_uses_released_analyze_cursor(pg, cluster, monkeypatch, failure):
+    _, open_connection = pg
+    state = {"released": False, "armed": False}
+    late_analyze_sql, checked_out = [], []
+
+    class AnalyzeCursor(RealDictCursor):
+        def execute(self, query, params=None):
+            if state["released"]:
+                late_analyze_sql.append(str(query))
+            return super().execute(query, params)
+
+    analyze_conn = open_connection()
+    analyze_conn.cursor_factory = AnalyzeCursor
+
+    @contextmanager
+    def analyze_checkout():
+        try:
+            with analyze_conn:
+                yield analyze_conn
+        finally:
+            state["released"] = True  # A real pool could lend it to someone else now.
+
+    class FaultCursor(RealDictCursor):
+        def execute(self, query, params=None):
+            triggers = {"budget_set": "SET lock_timeout",
+                        "worker_set": "SET max_parallel_maintenance_workers",
+                        "vacuum": "VACUUM", "worker_reset": "RESET max_parallel_maintenance_workers",
+                        "budget_restore": "SELECT set_config("}
+            if state["armed"] and str(query).startswith(triggers.get(failure, "never")):
+                raise psycopg2.OperationalError("injected " + failure)
+            return super().execute(query, params)
+
+    class FaultConnection(psycopg2.extensions.connection):
+        def __setattr__(self, name, value):
+            if state["armed"] and name == "autocommit" and (
+                (failure == "autocommit_on" and value is True)
+                or (failure == "autocommit_off" and value is False)
+            ):
+                raise psycopg2.OperationalError("injected " + failure)
+            super().__setattr__(name, value)
+
+        def cursor(self, *args, **kwargs):
+            if state["armed"] and failure == "cursor":
+                raise psycopg2.OperationalError("injected cursor")
+            return super().cursor(*args, **kwargs)
+
+    pool = base._RetainingThreadedConnectionPool(
+        1, 1, reserved=0, host="127.0.0.1", port=cluster["port"], user=cluster["user"],
+        password=cluster["password"], dbname=cluster["database"],
+        connection_factory=FaultConnection, cursor_factory=FaultCursor,
+        options="-c statement_timeout=30s -c lock_timeout=30s",
+    )
+
+    def vacuum_checkout():
+        conn = pool.getconn()
+        checked_out.append(conn)
+        state["armed"] = True
+        return conn
+
+    monkeypatch.setattr(base, "_pg_pool", pool)  # Exercise the real slot-release helper.
+    monkeypatch.setattr(database, "get_db", analyze_checkout)
+    monkeypatch.setattr(database, "get_connection", vacuum_checkout)
+    monkeypatch.setattr(database, "exempt_from_start_pressure", lambda conn: None)
+    monkeypatch.setattr(retention, "mutate_batches", lambda *a, **k: 0)
+    monkeypatch.setattr(database, "_prune_notifications_cap", lambda *a, **k: 0)
+    monkeypatch.setattr(fluid_events, "prune_fluid_delta_events", lambda *a, **k: 0)
+    monkeypatch.setattr(session_events, "compact_idle_session_deltas", lambda **k: {"rows": 0})
+    try:
+        result = database.run_database_maintenance(skip_vacuum=True)
+        assert result["analyze"] == "ok"
+        assert state["released"] and not late_analyze_sql
+        assert not pool._used and not pool._rused and not pool._returning
+        conn = checked_out[0]
+        discard = failure not in ("budget_set", "worker_set", "vacuum")
+        assert bool(conn.closed) is discard
+        state["armed"] = False
+        if not discard:
+            assert conn.autocommit is False
+            cur = conn.cursor()
+            cur.execute("SELECT current_setting('statement_timeout') AS statement, "
+                        "current_setting('lock_timeout') AS lock, "
+                        "current_setting('max_parallel_maintenance_workers') AS workers")
+            assert cur.fetchone() == {"statement": "30s", "lock": "30s", "workers": "2"}
+            conn.rollback()
+    finally:
+        state["armed"] = False
+        analyze_conn.close()
+        pool.closeall()
