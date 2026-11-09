@@ -152,8 +152,27 @@ and its README; the app still checks `docs/content` against the frontend copy.
 ## Hosted main-suite
 
 `main-suite.yml` runs once per push to `main`, or an explicit dispatch on `main`.
-A dispatch on another ref skips the suites and fails the aggregate. Superseded
-main runs may be cancelled. The root workflow calls the same checked-in reusable
+A dispatch on another ref skips the suites and fails the aggregate. A started
+run always finishes. GitHub keeps one more run waiting behind it; a newer merge
+replaces that waiting run, which GitHub then lists as "cancelled". It never
+started and nothing is lost: the newer run tests a main revision that contains
+the replaced commit, and the publisher ships the newest proven revision with
+everything before it.
+
+To wait for a merged change to reach the nightly, follow the commit, never one
+run (a replaced run is not a failure and needs no report):
+
+```bash
+python scripts/ci/nightly_wait.py --pr <number>   # or the commit on main
+```
+
+It reads GitHub and the public nightly pointer, prints one line per change of
+state, and exits 0 once the published nightly contains the commit, 1 when
+nothing in flight can publish it (the newest covering run failed, or a pass was
+never published; the reason is printed), or 2 on timeout (default 120 minutes).
+`--once` reports the current state and exits (3 when not published yet).
+
+The root workflow calls the same checked-in reusable
 CI workflows; their PR triggers, matrices, full test selection and gates remain
 in force. No test job has signing secrets; workflow-default permissions are
 `contents: read`, using only standard free hosted runners. The separate,
