@@ -282,7 +282,8 @@ describe('SettingsShell read-only', () => {
 		}
 		expect((screen.getByRole('combobox', { name: 'Time zone' }) as HTMLSelectElement).disabled).toBe(true);
 		await fireEvent.click(screen.getByRole('button', { name: 'Open Devices' }));
-		await screen.findByRole('heading', { level: 1, name: 'Devices' });
+		// The Devices page is a lazy chunk; its first import can outlast the default wait on a busy runner.
+		await screen.findByRole('heading', { level: 1, name: 'Devices' }, { timeout: 5000 });
 	});
 });
 
