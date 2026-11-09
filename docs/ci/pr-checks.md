@@ -31,7 +31,7 @@ These workflows retain manual dispatch and also run on unfiltered
   credentials; it never installs or updates a production CLI.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
-  tools/WebCrypto vectors, Browser MCP, the twelve `UI journeys (N/12)` shards
+  tools/WebCrypto vectors, Browser MCP, the thirteen `UI journeys (N/13)` shards
   and `Visual regression (4 viewports)` run in parallel. The stable
   `JavaScript package checks` aggregate requires every branch to succeed, so
   the journeys and the visual comparison are required for merge (see
@@ -958,17 +958,17 @@ and shell overrides on this check, and keeps `contracts` in both the aggregate's
 `needs` and its expected-results list.
 This validates selection metadata; the journey shards still run every journey.
 
-`UI journeys (N/12)`: each shard installs the Python and JavaScript
+`UI journeys (N/13)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
 playwright-core build, cached), builds and stamps the desktop UI, then runs
-`python -m scripts.devloop.ci journeys --shard N/12 --retry-failures`. That starts a fresh dev
+`python -m scripts.devloop.ci journeys --shard N/13 --retry-failures`. That starts a fresh dev
 instance (`python -m scripts.devloop up --ci`: real app, its own throwaway
 PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
 scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
-`down`. The plan step splits the journey files across the twelve shards by
+`down`. The plan step splits the journey files across the thirteen shards by
 measured hosted runtime, longest first, each file exactly once
-(`python -m scripts.devloop.ci plan --shards 12`). The checked-in medians are
+(`python -m scripts.devloop.ci plan --shards 13`). The checked-in medians are
 in `scripts/devloop/journey_weights.json`, when the current unfiltered `--list`
 case count matches the recorded inventory. New files and changed case counts
 use the current count times the measured median seconds per case, with explicit
@@ -985,13 +985,20 @@ job log and step summary (excluding instance setup/teardown); stdout remains
 the JSON partition consumed by the workflow. A shard with no file stops after
 the plan, and a plan with no journey file at all fails.
 
-Twelve free standard-runner shards preserve the original 1110-second journey
+Thirteen free standard-runner shards preserve the original 1110-second journey
 bound and all operational allowances: 30 seconds of setup, the full 180-second
 retry phase, and 180 seconds of teardown inside the unchanged 1500-second step.
 The planning budget additionally reserves the 120-second prediction error allowed
 by the independent hosted calibration. That uncertainty is not borrowed from
 retry or teardown: the stronger headroom regression limits point-estimated
 journey runtime to 990 seconds. Job logs and summaries include this error reserve.
+The Nov 9 inventory (62 files, 1033 cases) totals 12013.04 estimated seconds,
+more than twelve shards can hold at 990 seconds each. Thirteen shards peak at
+959.72 seconds; the one-percent-refresh regression also preserves the uncertainty
+reserve when it adds two new journeys. Older green runs with changed app/journey
+workloads cannot refresh these measurements: the guarded producer refuses them.
+Until a complete matching green main run exists, new or grown files keep their
+conservative case-count fallbacks rather than fabricated fresh measurements.
 
 The earlier 9/10/11-shard changes guarded point estimates but not their allowed
 error. Across eleven main-suite runs on Nov 7–8, the slowest measured steps took

@@ -55,7 +55,7 @@ FRONTEND = ROOT / "frontend"
 JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
-HOSTED_SHARDS = 12
+HOSTED_SHARDS = 13
 # Clean shards across six main-suite runs on 2026-11-06 had 7–14s step overhead.
 # Keep the existing setup, retry and teardown allowances. Planning also reserves
 # the 120s error allowed by the independent hosted calibration: point estimates

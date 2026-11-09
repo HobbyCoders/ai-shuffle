@@ -154,6 +154,9 @@ def test_valid_one_percent_refresh_does_not_rewrite_historical_calibration(tmp_p
              for bucket in ci.partition(refreshed, ci.HOSTED_SHARDS)]
     assert max(loads) <= 1110
     assert max(ci.shard_budget_seconds(load) for load in loads) <= journey_retry.STEP_SECONDS
+    # A valid refresh and a small feature must leave the calibration uncertainty
+    # outside both full operational reserves, just like the current checked-in plan.
+    assert max(ci.planning_budget_seconds(load) for load in loads) <= journey_retry.STEP_SECONDS
 
     def current_weights(directory=ci.JOURNEYS, weights_path=ci.WEIGHTS):
         return estimate(directory, path if weights_path == ci.WEIGHTS else weights_path)
