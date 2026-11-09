@@ -135,10 +135,9 @@ async def test_turn_on_releases_real_question_and_permission_waiters(monkeypatch
     {"provider_agent": {"worker_session_id": "remote", "remote_approval_id": "a"}},
     {"assistant_confirm": {"question": "Run this?"}}, {"tool_name": "ModelGuardrail"}])
 async def test_every_permission_card_kind_is_away_denied_once(tag, monkeypatch):
-    from collections import OrderedDict
     from app.core import remote_task_approvals
 
-    monkeypatch.setattr(remote_task_approvals, "_SEEN", OrderedDict({"a": None}))
+    monkeypatch.setattr(remote_task_approvals, "_ACTIVE_RELAYS", {"a"})
     chat("owner")
     payload = {"request_id": "p", "tool_name": "Bash", **tag}
     row = interactions.create_interaction("owner", "permission", payload, 300)
@@ -295,9 +294,7 @@ async def test_provider_worker_routed_to_owner_gets_away_denial(monkeypatch):
 async def test_remote_task_proxy_sends_away_denial_to_the_executing_worker(monkeypatch, restored):
     from app.core import remote_task_approvals as approvals
 
-    from collections import OrderedDict
-
-    monkeypatch.setattr(approvals, "_SEEN", OrderedDict({"away-proxy": None}))
+    monkeypatch.setattr(approvals, "_ACTIVE_RELAYS", {"away-proxy"})
     chat("owner")
     posted, ids = watch_permission_waiter(monkeypatch)
     send = AsyncMock()
@@ -325,6 +322,212 @@ async def test_remote_task_proxy_sends_away_denial_to_the_executing_worker(monke
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.fixture
+async def restored_proxy(monkeypatch):
+    """A durable remote card and the real restore entry point, with captured sends."""
+    from collections import OrderedDict
+    from app.core import interaction_wait, remote_task_approvals as approvals
+    from app.db import remote_tasks
+
+    chat("owner")
+    row = interactions.create_interaction("owner", "permission", {
+        "request_id": "live-proxy", "tool_name": "Bash",
+        "provider_agent": {"worker_session_id": "remote-child", "remote_approval_id": "live-approval"},
+    }, 300)
+    monkeypatch.setattr(approvals, "_SEEN", OrderedDict())
+    monkeypatch.setattr(approvals, "_ACTIVE_RELAYS", set(), raising=False)
+    monkeypatch.setattr(remote_tasks, "tracked_dispatches", lambda: [{
+        "root_session_id": "owner", "worker_session_id": "remote-child", "target_device_id": "peer",
+    }])
+    monkeypatch.setattr(interaction_wait, "_ensure_listener", lambda: None)
+    tasks, send = [], AsyncMock()
+    monkeypatch.setattr(approvals, "_spawn", lambda coro, name: tasks.append(asyncio.create_task(coro)))
+    monkeypatch.setattr(approvals, "_send_answer", send)
+    try:
+        yield SimpleNamespace(row=row, tasks=tasks, send=send, approvals=approvals)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_restored_relay_retries_transient_read_and_delivers_away_once(monkeypatch, restored_proxy):
+    from app.core import interaction_wait
+
+    proxy = restored_proxy
+    approvals = proxy.approvals
+    original_get = interactions.get_interaction
+    failed, resume = asyncio.Event(), asyncio.Event()
+    first = True
+
+    def read(interaction_id):
+        nonlocal first
+        if interaction_id == proxy.row["id"] and first:
+            first = False
+            raise RuntimeError("temporary interaction read failure")
+        return original_get(interaction_id)
+
+    async def retry_sleep(seconds):
+        assert 0 < seconds <= approvals.RELAY_WAIT_RETRY_SECONDS
+        # The real await_interaction finally must balance both structures before retry.
+        assert not interaction_wait.has_waiters("owner")
+        assert interaction_wait._blocked.get("owner", 0) == 0
+        assert interaction_wait.is_awaited(proxy.row["id"])
+        failed.set()
+        await resume.wait()
+
+    monkeypatch.setattr(interactions, "get_interaction", read)
+    monkeypatch.setattr(approvals, "asyncio", SimpleNamespace(to_thread=asyncio.to_thread, sleep=retry_sleep))
+    assert await approvals.restore_proxies() == 1
+    await asyncio.wait_for(failed.wait(), 1)
+    assert approvals.has_live_relay("live-approval")
+    with patch.object(away_mode, "record_decision", AsyncMock()):
+        assert (await global_away_mode.apply(True))["deferred_approvals"] == 1
+        assert (await global_away_mode.apply(True))["deferred_approvals"] == 0
+    # The answered row is no longer discoverable by restoration: this same relay must send it.
+    assert await approvals.restore_proxies() == 0
+    resume.set()
+    await asyncio.wait_for(proxy.tasks[0], 1)
+    proxy.send.assert_awaited_once()
+    assert proxy.send.await_args.args[1:] == ("deny", approvals.AWAY_MESSAGE)
+    assert not approvals.has_live_relay("live-approval")
+    assert not interaction_wait.has_waiters("owner")
+    assert interaction_wait._blocked.get("owner", 0) == 0
+    assert not interaction_wait.is_awaited(proxy.row["id"])
+
+
+@pytest.mark.parametrize("outcome", ["finished", "cancelled", "exception"])
+async def test_relay_liveness_ends_with_its_body(monkeypatch, restored_proxy, outcome):
+    proxy = restored_proxy
+    approvals = proxy.approvals
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def body(request, row):
+        entered.set()
+        await finish.wait()
+        if outcome == "exception":
+            raise RuntimeError("unexpected relay failure")
+
+    monkeypatch.setattr(approvals, "_follow_existing", body)
+    assert await approvals.restore_proxies() == 1
+    # Live even before the collected task has started running.
+    assert approvals.has_live_relay("live-approval")
+    await asyncio.wait_for(entered.wait(), 1)
+    task = proxy.tasks[0]
+    if outcome == "cancelled":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        finish.set()
+        if outcome == "exception":
+            with pytest.raises(RuntimeError, match="unexpected relay failure"):
+                await task
+        else:
+            await task
+    assert "live-approval" in approvals._SEEN  # replay history outlives the relay
+    assert not approvals.has_live_relay("live-approval")
+    proxy.send.assert_not_awaited()
+    # Any early end with a still-pending row must be recoverable on the next pass.
+    assert interactions.get_interaction(proxy.row["id"])["state"] == "pending"
+    assert await approvals.restore_proxies() == 1
+
+
+async def test_live_relay_survives_replay_eviction_without_duplicate_waiter(monkeypatch, restored_proxy):
+    proxy = restored_proxy
+    approvals = proxy.approvals
+    monkeypatch.setattr(approvals, "_SEEN_LIMIT", 1)
+    assert await approvals.restore_proxies() == 1
+    approvals._note(approvals._SEEN, "another-approval")
+    assert "live-approval" not in approvals._SEEN
+    assert approvals.has_live_relay("live-approval")
+    assert await approvals.restore_proxies() == 0
+    assert len(proxy.tasks) == 1
+    with patch.object(away_mode, "record_decision", AsyncMock()):
+        assert (await global_away_mode.apply(True))["deferred_approvals"] == 1
+    await asyncio.wait_for(proxy.tasks[0], 1)
+    proxy.send.assert_awaited_once()
+    assert proxy.send.await_args.args[1:] == ("deny", approvals.AWAY_MESSAGE)
+    assert not approvals.has_live_relay("live-approval")
+
+
+async def test_restored_wait_retry_uses_original_deadline(monkeypatch, restored_proxy):
+    proxy = restored_proxy
+    approvals = proxy.approvals
+    # A fake clock avoids sleeping but still forces every retry to recompute time left.
+    left, ttls, sleeps = 7.0, [], []
+
+    async def fail_wait(interaction_id, session_id, ttl):
+        ttls.append(ttl)
+        raise RuntimeError("read still unavailable")
+
+    async def sleep(seconds):
+        nonlocal left
+        sleeps.append(seconds)
+        left -= seconds
+
+    monkeypatch.setattr(approvals, "_seconds_left", lambda expires: left)
+    monkeypatch.setattr("app.core.interaction_wait.await_interaction", fail_wait)
+    monkeypatch.setattr(approvals, "asyncio", SimpleNamespace(to_thread=asyncio.to_thread, sleep=sleep))
+    assert await approvals.restore_proxies() == 1
+    await asyncio.wait_for(proxy.tasks[0], 1)
+    assert ttls == [7.0, 4.0, 1.0]
+    assert sleeps == [3.0, 3.0, 1.0]
+    proxy.send.assert_awaited_once()
+    assert proxy.send.await_args.args[1:] == ("deny", approvals.TIMED_OUT_MESSAGE)
+    assert not approvals.has_live_relay("live-approval")
+
+
+async def test_cancelled_restored_wait_sends_nothing_and_cleans_up(monkeypatch, restored_proxy):
+    from app.core import interaction_wait
+
+    proxy = restored_proxy
+    approvals = proxy.approvals
+    posted, _ = watch_permission_waiter(monkeypatch)
+    assert await approvals.restore_proxies() == 1
+    await asyncio.wait_for(posted.wait(), 1)
+    assert interaction_wait.has_waiters("owner")
+    proxy.tasks[0].cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await proxy.tasks[0]
+    proxy.send.assert_not_awaited()
+    assert not approvals.has_live_relay("live-approval")
+    assert interactions.get_interaction(proxy.row["id"])["state"] == "pending"
+    assert not interaction_wait.has_waiters("owner")
+    assert interaction_wait._blocked.get("owner", 0) == 0
+    assert not interaction_wait.is_awaited(proxy.row["id"])
+
+
+async def test_failed_spawn_unmarks_relay_and_closes_wrapper(monkeypatch, restored_proxy):
+    proxy = restored_proxy
+    approvals = proxy.approvals
+    collected, marked = [], []
+
+    def fail(coro, name):
+        assert approvals.has_live_relay("live-approval")  # marked before _spawn
+        marked.append("live-approval" in approvals._ACTIVE_RELAYS)
+        collected.append(coro)
+        raise RuntimeError("spawn unavailable")
+
+    monkeypatch.setattr(approvals, "_spawn", fail)
+    assert await approvals.restore_proxies(report_status=True) == approvals.ProxyRestoration(0, False)
+    assert not approvals.has_live_relay("live-approval")
+    assert "live-approval" not in approvals._SEEN
+    assert len(collected) == 1
+    assert marked == [True]
+    assert collected[0].cr_frame is None  # closed even though it never ran
+    assert interactions.get_interaction(proxy.row["id"])["state"] == "pending"
+
+
+def test_reset_clears_live_relays(monkeypatch):
+    from app.core import remote_task_approvals as approvals
+
+    monkeypatch.setattr(approvals, "_ACTIVE_RELAYS", {"live-approval"}, raising=False)
+    approvals.reset()
+    assert not approvals._ACTIVE_RELAYS
 
 
 @pytest.mark.parametrize("enabled", [False, True])
