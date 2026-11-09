@@ -1036,8 +1036,13 @@ def _clip_verbatim(text: str, cap: int) -> str:
 def _matches_pinned_text(stored: str, raw: str) -> bool:
     if stored == raw:
         return True
-    marker = re.search(r"… \(\+\d+ chars\)$", stored)
-    return marker is not None and stored == _clip_verbatim(raw, marker.start())
+    marker = re.search(r"… \(\+(\d+) chars\)$", stored)
+    if marker is None or not marker.start():
+        return False
+    # A later checkpoint can clip an already clipped pin, so the count may
+    # measure that earlier clip (one marker longer at most), not the original.
+    body = stored[:marker.start()]
+    return raw.startswith(body) and len(body) + int(marker[1]) <= len(raw) + _CLIP_MARK_ALLOWANCE
 
 
 def _intent_pin(

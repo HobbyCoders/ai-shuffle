@@ -493,3 +493,40 @@ def test_legacy_clip_validation_does_not_strip_literal_or_forged_markers():
     assert _matches_pinned_text("real … (+123 chars)", "real … (+123 chars)")
     assert not _matches_pinned_text("real … (+123 chars)", "real more words")
     assert _matches_pinned_text(_clip_verbatim("x" * 13000, 4096), "x" * 13000)
+    twice = _clip_verbatim(_clip_verbatim("x" * 13000, 4096), 4096)
+    assert twice != _clip_verbatim("x" * 13000, 4096) and _matches_pinned_text(twice, "x" * 13000)
+    assert not _matches_pinned_text(twice, "y" * 13000)
+    assert not _matches_pinned_text("… (+5 chars)", "anything")
+
+
+def test_legacy_pin_clipped_by_two_checkpoints_keeps_its_exact_send_time():
+    from fluid.context.compaction import Compactor, Promotion, _clip_verbatim
+    from fluid.messages.content import SteerDelivery, ToolResultBlock, ToolUseBlock
+
+    sent = dt("2026-11-09T04:55:00Z").timestamp()
+    steers = [SteerDelivery(text="Another message", accepted_at=sent - 60),
+              SteerDelivery(text="Tomorrow " + "x" * 13_000, accepted_at=sent)]
+    first = node("Opening request")
+    tool = SessionNode("tool", first.node_id, Message(role="assistant", content=[ToolUseBlock("call", "Bash", {})]), ts=sent)
+    carrier = SessionNode("carrier", tool.node_id, Message(role="user", content=[
+        ToolResultBlock("call", [Text("ok")], delivered_steers=steers)]), ts=sent + 900)
+    covered = SessionNode("covered", carrier.node_id, Message(role="assistant", content=[Text("done")]), ts=sent + 960)
+    later = SessionNode("later", covered.node_id, Message(role="assistant", content=[Text("next")]), ts=sent + 1800)
+    last = SessionNode("last", later.node_id, Message(role="assistant", content=[Text("last")]), ts=sent + 3600)
+
+    v3 = CompactionConfig(render_version=3, peer_pin_chars=4096)
+    old = Compactor(config=v3)
+    once = old._checkpoint_pin(first.node_id, covered.node_id, [first, tool, carrier, covered])
+    legacy_once = Promotion(tier=4, render_version=3,
+        spans=((first.node_id, covered.node_id, "summary"),), summary_text="old", summary_pin=once)
+    old.rehydrate([legacy_once])
+    twice = old._checkpoint_pin(first.node_id, later.node_id, [first, tool, carrier, covered, later])
+    stored = twice["messages"][-1][1]
+    assert stored == _clip_verbatim(once["messages"][-1][1], 4096) != once["messages"][-1][1]
+    legacy_twice = Promotion(tier=4, render_version=3,
+        spans=((first.node_id, later.node_id, "summary"),), summary_text="older", summary_pin=twice)
+
+    current = Compactor(config=CompactionConfig(render_version=4, peer_pin_chars=5000))
+    current.rehydrate([legacy_once, legacy_twice])
+    promoted = current._checkpoint_pin(first.node_id, last.node_id, [first, tool, carrier, covered, later, last])
+    assert promoted["messages"][-1][1] == f"[sent/delivered 2026-11-09 04:55:00 UTC +0000 (UTC)]\n{stored}"
