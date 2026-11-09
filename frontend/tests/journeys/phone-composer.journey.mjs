@@ -15,7 +15,6 @@
 //   controls-pages       Chat controls: Project page fills the sheet; pick and remove
 //                        a project, then Runs on and back never shift the pages sideways
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { mobileShell } from './lib/stop-queue.mjs';
 import {
 	PROJECT,
 	composer,
