@@ -29,6 +29,113 @@ def test_wakes_keep_last_real_owner_message(source):
     assert previous_owner_time(rows, source, "earlier-host-submit") == rows[-1]["created_at"]
 
 
+@pytest.fixture
+def owner_event_lookup(monkeypatch):
+    """Execute the production bounded query, not a prefiltered Python fixture."""
+    import json
+    import sqlite3
+    from contextlib import contextmanager
+    from app.core import time_awareness as host
+    from app.db import database
+
+    def lookup(events, source, current_input_id):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE session_events (session_id TEXT, seq INT, event_type TEXT, created_at TEXT, payload TEXT)")
+        conn.execute("CREATE INDEX idx_session_events_session_seq ON session_events(session_id, seq)")
+        conn.executemany("INSERT INTO session_events VALUES ('owner', ?, 'message.user', ?, ?)",
+                         [(i, at, json.dumps(payload)) for i, (at, payload) in enumerate(events)])
+        calls, plans = [], []
+        class Cursor:
+            rows = []
+            def execute(self, sql, params=()):
+                calls.append((sql, params))
+                self.rows = []
+                if "FROM session_events" in sql:
+                    sql = sql.replace("%s", "?")
+                    self.rows = [dict(r) for r in conn.execute(sql, params)]
+                    plans.extend(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params))
+            def fetchone(self):
+                return None
+            def fetchall(self):
+                return self.rows
+        cursor = Cursor()
+        @contextmanager
+        def db():
+            yield SimpleNamespace(cursor=lambda: cursor)
+        with monkeypatch.context() as patch:
+            patch.setattr(database, "get_session", lambda _: {})
+            patch.setattr(host, "get_db", db)
+            patch.setattr(host, "preference_identity", lambda *_: ("admin", "fixture"))
+            result = host.session_time_context("owner", source, current_input_id)
+        conn.close()
+        return result, calls, plans
+    return lookup
+
+
+@pytest.mark.parametrize("source, current_id, receipts", [
+    ("user", None, [None, None]), ("queue", None, [None, None]),
+    ("user", "current", [None, "current"]),
+    ("queue", "current", ["older", "current"]),
+    ("user", "current", [None, "current", "current"]),
+    ("queue", "current", ["older", "current", "current"]),
+    ("wakeup", "current", [None, "current", "current"]),
+])
+def test_owner_lookup_excludes_current_receipts_before_limit(owner_event_lookup, source, current_id, receipts):
+    from fluid.context.time_awareness import as_utc, turn_time_lines
+    previous, current = "2026-11-09T00:00:00Z", "2026-11-09T18:00:00Z"
+    events = []
+    for i, receipt in enumerate(receipts):
+        payload = {"source": "user"}
+        if receipt:
+            payload.update(owner_input_id=receipt, owner_message_at=previous if i == 0 else current)
+        events.append((previous if i == 0 else current, payload))
+    result, calls, plans = owner_event_lookup(events, source, current_id)
+    expected = current if source == "wakeup" else previous
+    assert as_utc(result["last_owner_at"]) == as_utc(expected)
+    if source != "wakeup":
+        assert "18 hours ago" in turn_time_lines(zone="UTC", last_owner_at=result["last_owner_at"], now=as_utc(current))[1]
+    sql, params = calls[-1]
+    assert sql.endswith("ORDER BY seq DESC LIMIT 2")
+    assert len(params) == (2 if current_id and source != "wakeup" else 1)
+    assert calls[0][0] == "SET LOCAL statement_timeout = '250ms'"
+    assert any("idx_session_events_session_seq" in plan for plan in plans)
+    assert not any("TEMP B-TREE" in plan for plan in plans)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_recorded", [False, True])
+async def test_old_queue_id_is_not_an_identified_current_receipt(mock_db, owner_event_lookup, already_recorded):
+    from app.db import turns
+    from app.core import session_runtime
+    from tests.core.test_send_steering import _seed_session, _pump_env
+    sid = _seed_session("old-queue-time")
+    turn = turns.enqueue_turn(sid, "user", prompt="tomorrow",
+                              payload={"user_message_already_recorded": already_recorded})
+    # An actual pre-upgrade queue row has an ID but no host receipt in payload.
+    turn["payload"].pop("owner_input_id")
+    turn["payload"].pop("owner_message_at")
+    # execute() reclaims the durable row; changing only the local dict would
+    # accidentally test a modern receipt after the refresh.
+    import json
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(turn["payload"]), turn["id"]))
+    captured = {}
+    async def pump(**kwargs):
+        captured.update(kwargs["overrides"])
+        yield {"type": "done", "metadata": {}}
+    with _pump_env(pump) as env:
+        await session_runtime.SessionRuntime(turn).execute()
+    assert turn["id"]
+    assert captured["owner_input_id"] is None
+    assert env["recorder"].start.call_args.kwargs["owner_receipt"]["owner_input_id"] == turn["id"]
+    events = [("2026-11-09T00:00:00Z", {"source": "user"}),
+              ("2026-11-09T18:00:00Z", {"source": "user"})]
+    result, _, _ = owner_event_lookup(events, "user", captured["owner_input_id"])
+    assert result["last_owner_at"] == events[0][0]
+
+
 def test_preference_identity_is_same_namespace_as_settings():
     from app.core.preference_identity import principal_preference_identity
     owner = principal_preference_identity({"kind": "admin"})
@@ -100,10 +207,10 @@ def test_host_store_read_timezone_precedence_and_worker_owner_lineage(monkeypatc
 def test_pg_recall_accumulator_keeps_the_message_timestamp():
     from app.core.provider.fluid_pg_store import _accumulate
     acc = {}
-    _accumulate(acc, "fixture", "user", ["GamingPC tomorrow"], 123.0, ["gamingpc"])
-    _accumulate(acc, "fixture", "user", ["GamingPC today"], 456.0, ["gamingpc"])
+    _accumulate(acc, "fixture", "user", ["ExampleWorker tomorrow"], 123.0, ["exampleworker"])
+    _accumulate(acc, "fixture", "user", ["ExampleWorker today"], 456.0, ["exampleworker"])
     assert [(item[2], item[3]) for item in acc["fixture"]["texts"]] == [
-        ("GamingPC tomorrow", 123.0), ("GamingPC today", 456.0)]
+        ("ExampleWorker tomorrow", 123.0), ("ExampleWorker today", 456.0)]
 
 @pytest.mark.parametrize("source", ["user", "queue"])
 def test_queued_acceptance_receipt_survives_delivery_and_retry(mock_db, monkeypatch, source):
@@ -208,15 +315,15 @@ async def test_unsent_deferred_upload_keeps_host_receipt(mock_db):
 @pytest.mark.parametrize("key", ["timezone", "timezone_resolved"])
 def test_timezone_sync_materializes_in_receiving_worker_owner_namespace(monkeypatch, key):
     # Exercise the existing shared user_preferences wire hooks, including the
-    # different local admin identities on GamingPC and Unraid. No new protocol.
+    # different local admin identities on ExampleWorker and OtherWorker. No new protocol.
     from app.network import policy
-    monkeypatch.setattr(policy, "_owner_identity", lambda: "gamingpc-owner")
-    wire = policy._serialize_preference({"user_type": "admin", "user_id": "gamingpc-owner",
+    monkeypatch.setattr(policy, "_owner_identity", lambda: "exampleworker-owner")
+    wire = policy._serialize_preference({"user_type": "admin", "user_id": "exampleworker-owner",
                                          "key": key, "value": "America/New_York"})
     assert wire["user_id"] == policy.OWNER_PLACEHOLDER
-    monkeypatch.setattr(policy, "_owner_identity", lambda: "unraid-owner")
+    monkeypatch.setattr(policy, "_owner_identity", lambda: "otherworker-owner")
     received = policy._materialize_preference(wire)
-    assert received == {"user_type": "admin", "user_id": "unraid-owner", "key": key,
+    assert received == {"user_type": "admin", "user_id": "otherworker-owner", "key": key,
                         "value": "America/New_York"}
 
 

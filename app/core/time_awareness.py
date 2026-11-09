@@ -66,13 +66,17 @@ def session_time_context(session_id: str | None, source: str = "wakeup", current
                 owner_session_id = owner["id"] if owner and not owner["is_worker"] else None
                 source = "wakeup"
             if owner_session_id:
+                identified = current_input_id if source in ("user", "queue") else None
+                exclusion = "AND payload->>'owner_input_id' IS DISTINCT FROM %s " if identified else ""
+                params = (owner_session_id, identified) if identified else (owner_session_id,)
                 cur.execute("SELECT created_at, payload FROM session_events WHERE session_id = %s "
                             "AND event_type = 'message.user' "
                             "AND COALESCE(payload->>'source', 'user') IN ('user', 'queue') "
                             "AND COALESCE(payload->>'agent_wake', 'false') != 'true' "
                             "AND COALESCE(payload->>'not_sent', 'false') != 'true' "
-                            "ORDER BY seq DESC LIMIT 2", (owner_session_id,))
-                result["last_owner_at"] = previous_owner_time(cur.fetchall(), source, current_input_id)
+                            + exclusion + "ORDER BY seq DESC LIMIT 2", params)
+                result["last_owner_at"] = previous_owner_time(
+                    cur.fetchall(), source, current_input_id, current_excluded=bool(identified))
     except Exception:  # a reminder must never fail a turn or log session text
         pass
     return result
@@ -88,12 +92,14 @@ def owner_message_receipt(turn):
             "owner_input_id": payload.get("owner_input_id") or turn.get("id")}
 
 
-def previous_owner_time(rows, source, current_input_id=None):
+def previous_owner_time(rows, source, current_input_id=None, *, current_excluded=False):
     rows = list(rows)
     payloads = [json.loads(row["payload"]) if isinstance(row.get("payload"), str)
                 else (row.get("payload") or {}) for row in rows]
     # Already-recorded pre-upgrade steers have no receipt identity in the log.
-    legacy = not any(payload.get("owner_input_id") for payload in payloads)
+    # SQL may leave only legacy *older* rows after excluding a modern input;
+    # do not skip one of those a second time.
+    legacy = not current_excluded and not any(payload.get("owner_input_id") for payload in payloads)
     skip = 1 if source in ("user", "queue") and (not current_input_id or legacy) else 0
     for row, payload in zip(rows, payloads):
         if (payload.get("source", "user") not in ("user", "queue")

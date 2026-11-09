@@ -934,7 +934,8 @@ def enqueue_turn(
         # the original receipt; normal recovery keeps the same durable row.
         payload.pop("owner_message_at", None)
         payload.pop("owner_input_id", None)
-        payload.update(_owner_receipt or {"owner_message_at": time.time(), "owner_input_id": turn_id})
+        if _is_human_input(source, payload):
+            payload.update(_owner_receipt or {"owner_message_at": time.time(), "owner_input_id": turn_id})
         # A copied retry payload is a new admission, not recovery of the old
         # logical row. Only start/reap of that SAME row retain this identity.
         payload.pop("accepted_input_order", None)

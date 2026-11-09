@@ -573,7 +573,8 @@ def _handoff_context(pending: PendingHandoff, label: str) -> str:
     from fluid.context.time_awareness import absolute_time
     from datetime import datetime, timezone
 
-    prompt = f"[hand-off] At {absolute_time(datetime.now(timezone.utc), 'UTC')}, moved from {_self_label()} to {label}{reason}"
+    prompt = (f"[hand-off] Moved from {_self_label()} to {label}{reason} "
+              f"At {absolute_time(datetime.now(timezone.utc), 'UTC')}.")
     if pending.note:
         prompt += f" Your hand-off note: {pending.note}"
     return prompt

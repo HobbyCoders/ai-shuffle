@@ -42,7 +42,7 @@ await runJourney({
    await pickAccess(ctx.page, "Bypass");
    const token=`time-awareness-${uniq()}`;
    ctx.page.timeToken=token;
-   await typeAndSend(ctx.page, `${token} We will test GamingPC tomorrow. [script:default]`);
+   await typeAndSend(ctx.page, `${token} We will test ExampleWorker tomorrow. [script:default]`);
    await waitTurnSettled(ctx.page,{text:'Fake AI here'});
    const sid=await chatIdByToken(ctx.page,token);
    ctx.page.timeSession=sid;

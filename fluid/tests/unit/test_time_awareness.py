@@ -20,7 +20,7 @@ def dt(value):
     return datetime.fromisoformat(value).astimezone(UTC)
 
 
-def node(text="GamingPC tomorrow", ts="2026-11-08T23:00:00+00:00"):
+def node(text="ExampleWorker tomorrow", ts="2026-11-08T23:00:00+00:00"):
     return SessionNode("node_0123456789ab", None, Message(role="user", content=[Text(text)]), ts=dt(ts).timestamp())
 
 
@@ -103,7 +103,7 @@ def test_digest_v4_dates_and_old_versions_stay_byte_stable():
     old = render_span_digest([n], CompactionConfig(render_version=3))
     assert "2026-11-08 23:00:00 UTC +0000" in new.text()
     assert "[sent " not in old.text()
-    assert n.message.text() == "GamingPC tomorrow"
+    assert n.message.text() == "ExampleWorker tomorrow"
     assert render_span_digest([n], CompactionConfig(render_version=3)).text() == old.text()
 
 
@@ -162,13 +162,72 @@ def test_v4_all_interjection_lanes_have_stable_times_and_old_versions_do_not():
     assert [(n.node_id, n.ts, n.message.to_dict()) for n in path] == stored
 
 
+@pytest.mark.parametrize("reachable", [True, False])
+@pytest.mark.parametrize("budget", [512, 4096])
+def test_legacy_checkpoint_promotion_dates_reachable_and_windowed_words(reachable, budget):
+    import json
+    from fluid.context.compaction import Compactor, Promotion
+    from fluid.messages.content import SteerDelivery, ToolResultBlock, ToolUseBlock
+    first = node("Opening tomorrow")
+    tool = SessionNode("node_111111111111", first.node_id,
+                       Message(role="assistant", content=[ToolUseBlock(id="tool", name="Bash", input={})]), ts=first.ts + 1)
+    sent = dt("2026-11-09T04:55:00Z").timestamp()
+    carrier = SessionNode("node_222222222222", tool.node_id,
+                          Message(role="user", content=[ToolResultBlock(tool_use_id="tool", content=[Text("ok")],
+                                  delivered_steers=[SteerDelivery(text="Earlier " + "x" * 180, id="old"),
+                                                    SteerDelivery(text="Do it tomorrow", id="new", accepted_at=sent)],
+                                  delivery_metadata_version=1)]), ts=sent + 900)
+    covered = SessionNode("node_333333333333", carrier.node_id, Message(role="assistant", content=[Text("done")]), ts=sent + 960)
+    later = SessionNode("node_444444444444", covered.node_id, Message(role="assistant", content=[Text("next")]), ts=sent + 1800)
+    last = SessionNode("node_555555555555", later.node_id, Message(role="assistant", content=[Text("last")]), ts=sent + 3600)
+    original = [first, tool, carrier, covered]
+    legacy = Compactor(config=CompactionConfig(render_version=3))
+    pin = legacy._checkpoint_pin(first.node_id, covered.node_id, original)
+    pin.pop("brief_at")  # Persisted v3 decisions predate this field.
+    if not reachable:
+        pin["brief"][0] = "windowed-opening"
+    snapshot = json.dumps(pin, sort_keys=True)
+    legacy_bytes = legacy._summary_message(first.node_id, covered.node_id, "old", pin).text()
+    old = Promotion(tier=4, render_version=3, spans=((first.node_id, covered.node_id, "summary"),),
+                    summary_text="old", summary_pin=pin)
+    compactor = Compactor(config=CompactionConfig(render_version=4, peer_pin_chars=budget))
+    compactor.rehydrate([old])
+    assert compactor._summary_message(first.node_id, covered.node_id, "old").text() == legacy_bytes
+    path = original + [later, last] if reachable else [first, covered, later, last]
+    promoted = compactor._checkpoint_pin(first.node_id, later.node_id, path)
+    texts = "\n".join(text for _, text in promoted["messages"])
+    assert "Do it tomorrow" in texts
+    if reachable:
+        assert "[sent/delivered 2026-11-09 04:55:00 UTC +0000" in texts
+    else:
+        assert "[sent/delivered before 2026-11-09 05:11:00 UTC +0000" in texts
+        assert "exact time unavailable" in texts
+        assert "[sent/delivered before" in promoted["brief"][1]
+    assert sum(len(text) for _, text in promoted["messages"]) <= budget
+    if budget == 512:
+        assert promoted["left_out"] > 0
+    new = Promotion(tier=4, render_version=4, spans=((first.node_id, later.node_id, "summary"),),
+                    summary_text="new", summary_pin=promoted)
+    compactor.rehydrate([new])
+    frozen = compactor._summary_message(first.node_id, later.node_id, "new").text()
+    restored = Compactor(config=compactor.config)
+    restored.rehydrate([old, new])
+    assert restored._summary_message(first.node_id, later.node_id, "new").text() == frozen
+    rolled = restored._checkpoint_pin(first.node_id, last.node_id, path)
+    assert rolled["messages"] == promoted["messages"]
+    assert rolled["brief"] == promoted["brief"]
+    assert all(text.count("[sent/delivered") == 1 for _, text in rolled["messages"])
+    assert json.dumps(pin, sort_keys=True) == snapshot
+    assert restored._summary_message(first.node_id, covered.node_id, "old").text() == legacy_bytes
+
+
 def test_recall_per_message_zone_and_expansion_offsets_are_stable():
     n = node()
     text, ok = expand_ref([n], n.node_id, zone="America/New_York")
     utc, _ = expand_ref([n], n.node_id, zone="UTC")
     assert not ok and "2026-11-08 18:00:00 EST -0500" in text
     assert text.split("\n", 1)[1] == utc.split("\n", 1)[1]
-    assert "18:00:00 EST" in render_hits(search_path([n], "GamingPC"), "GamingPC", "America/New_York")
+    assert "18:00:00 EST" in render_hits(search_path([n], "ExampleWorker"), "ExampleWorker", "America/New_York")
     msg = RecallMessage(role="user", text=n.message.text(), ts=n.ts)
     for show in ["all", "text"]:
         assert "2026-11-08 18:00:00 EST -0500" in "\n".join(_render(0, msg, show, "America/New_York"))
@@ -269,13 +328,13 @@ async def test_search_snippets_preserve_individual_send_times(tmp_path):
     store = JsonlStore(tmp_path / "history")
     sid = (await store.create_session()).session_id
     first = node()
-    second = SessionNode("node_abcdef012345", first.node_id, Message(role="user", content=[Text("GamingPC today")]),
+    second = SessionNode("node_abcdef012345", first.node_id, Message(role="user", content=[Text("ExampleWorker today")]),
                          ts=dt("2026-11-09T23:00:00+00:00").timestamp())
     for n in (first, second):
         await store.append(sid, n)
-    hits = await store.search(["gamingpc"])
+    hits = await store.search(["exampleworker"])
     hit = hits[0]
-    snippets = "\n".join(_snippet_lines(hit.texts, ["gamingpc"], hit.text_times, "America/New_York"))
+    snippets = "\n".join(_snippet_lines(hit.texts, ["exampleworker"], hit.text_times, "America/New_York"))
     assert "2026-11-08 18:00:00 EST" in snippets and "2026-11-09 18:00:00 EST" in snippets
 
 
@@ -283,8 +342,8 @@ def test_epoch_pins_have_absolute_send_times_without_rewriting_the_owner():
     from fluid.context.compaction import render_epoch_stub
     owner = node()
     current = render_epoch_stub([[owner]], CompactionConfig()).text()
-    assert "GamingPC tomorrow" in current and "2026-11-08 23:00:00 UTC +0000" in current
+    assert "ExampleWorker tomorrow" in current and "2026-11-08 23:00:00 UTC +0000" in current
     legacy = render_epoch_stub([[owner]], CompactionConfig(render_version=3)).text()
-    assert "GamingPC tomorrow" in legacy and "[sent " not in legacy
+    assert "ExampleWorker tomorrow" in legacy and "[sent " not in legacy
 
 

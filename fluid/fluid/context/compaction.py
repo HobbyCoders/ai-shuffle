@@ -3269,6 +3269,26 @@ class Compactor:
             brief = prior.get("brief")
             brief_at = prior.get("brief_at")
             found = [(str(ref), str(text)) for ref, text in prior.get("messages") or []]
+            if self.config.render_version >= 4 and self._config_at(start, nodes[earlier].node_id).render_version < 4:
+                from fluid.context.time_awareness import absolute_time
+
+                # Upgrade only a new decision, never the stored legacy pin.
+                # A window can remove the carrier: then the checkpoint's end
+                # supplies an honest bound, not an invented exact send time.
+                bound = (f"[sent/delivered before {absolute_time(nodes[earlier].ts, 'UTC')}; "
+                         "exact time unavailable]\n")
+                spans = split_spans(nodes[:earlier + 1])
+                available = {}
+                for raw, (_, dated) in zip(_delivered_on_path(spans, steers=True),
+                                           _delivered_on_path(spans, steers=True, dated=True)):
+                    available.setdefault(raw, []).append(dated)
+                upgraded = []
+                for ref, text in reversed(found):
+                    matches = available.get((ref, text))
+                    upgraded.append((ref, matches.pop() if matches else bound + text))
+                found = list(reversed(upgraded))
+                if brief and brief_at is None and brief[0] not in index:
+                    brief = [brief[0], bound + brief[1]]
             left_out = int(prior.get("left_out") or 0)
             run = nodes[earlier + 1:last + 1]
         found += _delivered_on_path(split_spans(run), steers=True, dated=self.config.render_version >= 4)

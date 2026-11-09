@@ -28,6 +28,25 @@ def test_permission_provenance_is_an_enqueue_choice_not_copied_context(mock_db, 
     assert requeued["overrides"]["permission_mode"] == "bypassPermissions"
 
 
+@pytest.mark.parametrize("source, human_answer, stamped", [
+    ("user", True, True), ("queue", True, True), ("api", True, True),
+    ("user", False, False), ("automation", True, False), ("wakeup", True, False),
+    ("watch", True, False), ("agent_message", True, False), ("resume", True, False),
+    ("worktree", True, False), ("connector", True, False),
+])
+def test_acceptance_receipts_belong_only_to_human_inputs(mock_db, monkeypatch, source, human_answer, stamped):
+    monkeypatch.setattr(turns.time, "time", lambda: 1234.0)
+    payload = {"owner_message_at": 1, "owner_input_id": "forged"}
+    if not human_answer:
+        payload["question_answer_human_input"] = False
+    turn = turns.enqueue_turn("receipt-sources", source, payload=payload)
+    assert ("owner_input_id" in turn["payload"]) is stamped
+    assert ("owner_message_at" in turn["payload"]) is stamped
+    if stamped:
+        assert turn["payload"]["owner_input_id"] == turn["id"]
+        assert turn["payload"]["owner_message_at"] == 1234.0
+
+
 def test_enqueue_assigns_increasing_positions_and_reads_back(mock_db):
     t1 = turns.enqueue_turn("s1", "user", prompt="first")
     t2 = turns.enqueue_turn("s1", "queue", prompt="second")
@@ -35,7 +54,7 @@ def test_enqueue_assigns_increasing_positions_and_reads_back(mock_db):
     assert t1["state"] == "queued"
     assert t1["position"] < t2["position"] < t3["position"]
     # overrides/payload decode to dicts, not raw JSON text.
-    assert t1["overrides"] == {} and t1["payload"] == {}
+    assert t1["overrides"] == {} and t1["payload"]["owner_input_id"] == t1["id"]
 
     queued = turns.get_queued_turns("s1")
     assert [t["prompt"] for t in queued] == ["first", "second", "third"]

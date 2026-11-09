@@ -1526,6 +1526,9 @@ class SessionRuntime:
 
         owner_receipt = owner_message_receipt(self.turn)
         turn_overrides.update(owner_receipt)
+        # A legacy queue ID can label new history, but cannot identify an old
+        # already-recorded input for the clock's exclusion-before-limit query.
+        turn_overrides["owner_input_id"] = (self.turn.get("payload") or {}).get("owner_input_id")
         # Host-set on every turn, so nothing a client sends can claim it.
         turn_overrides["continues_approved_generation"] = continues_approved_generation(
             self.turn.get("payload")
