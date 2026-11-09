@@ -10,7 +10,7 @@ def history_zone(extra) -> str | None:
         return None
 
 
-def delegated_wake_time(content, extra, source):
+def delegated_wake_time(content, extra, source, *, host_time_note=False):
     """Host submits already carry the note; internal wakes bypass that adapter.
 
     Never edit earlier nodes or a CLI slash command. Only app-bound loops opt in.
@@ -22,10 +22,8 @@ def delegated_wake_time(content, extra, source):
     callback = (extra or {}).get("time_context")
     if not callable(callback):
         return content
-    # This exact header is the host's per-turn environment note, not quoted
-    # older history. It includes the time already captured for this submit.
-    if any(isinstance(b, Text) and "Environment facts that change while a session runs" in b.text
-           and "Current time:" in b.text for b in content):
+    # Only the submitter can attest that THIS turn carries its fresh note.
+    if host_time_note:
         return content
     text = "".join(b.text for b in content if isinstance(b, Text)).lstrip()
     if text.startswith("/"):

@@ -2759,6 +2759,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             node_id=node_id,
             parent_id=op.parent_node_id or meta.head_node_id,
             message=Message(role="user", content=content, context_pin=op.context_pin),
+            **({"ts": op.accepted_at} if op.accepted_at is not None else {}),
         )
         if scratch_note and op.context_pin is None:
             user_node.message.pin_context(scratch_note)
@@ -6630,6 +6631,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
         delivered: list[tuple[str | None, str, str | None, str]] = []
         if self._pending_steers:
+            accepted = {pending.id: pending.accepted_at for pending in self._pending_steers
+                        if isinstance(pending, Steer)}
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
             # Only delivered user intent may exempt a later command. A queued
@@ -6638,7 +6641,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if origin == "user" and sender is None:
                     self.ctx.extra["bash_file_guard_user_text"] = text
             self._tool_deliveries.extend(
-                SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin)
+                SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin, accepted_at=accepted.get(steer_id))
                 for steer_id, text, sender, origin in delivered
             )
             steers = "".join(

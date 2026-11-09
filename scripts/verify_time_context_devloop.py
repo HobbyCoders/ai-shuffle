@@ -46,7 +46,7 @@ def main():
             if args.session:
                 previous = datetime.now(ZoneInfo("America/New_York")) - timedelta(days=1)
                 previous = previous.replace(hour=21, minute=14, second=0, microsecond=0)
-                cur.execute("UPDATE session_events SET created_at=%s WHERE session_id=%s AND seq=(SELECT MAX(seq) FROM session_events WHERE session_id=%s AND event_type='message.user' AND COALESCE(payload->>'source','user') IN ('user','queue'))", (previous, args.session, args.session))
+                cur.execute("UPDATE session_events SET created_at=%s, payload=jsonb_set(payload, '{owner_message_at}', %s::jsonb) WHERE session_id=%s AND seq=(SELECT MAX(seq) FROM session_events WHERE session_id=%s AND event_type='message.user' AND COALESCE(payload->>'source','user') IN ('user','queue'))", (previous, json.dumps(previous.timestamp()), args.session, args.session))
                 assert cur.rowcount == 1, "No real owner message was produced for this synthetic chat"
                 print(json.dumps({"backdated_owner_at": previous.isoformat()}))
 

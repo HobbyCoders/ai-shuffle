@@ -50,6 +50,7 @@ class SteerDelivery:
     origin: str = "user"
     sender: str | None = None
     id: str | None = None
+    accepted_at: float | None = None
 
     def render(self) -> str:
         from fluid.context.peer import format_peer_message

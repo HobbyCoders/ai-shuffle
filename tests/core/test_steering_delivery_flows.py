@@ -68,7 +68,7 @@ class _Adapter:
         self._refuse_once = refuse_once
         self._cancel_raises = cancel_raises
 
-    async def steer(self, text, *, id=None, origin="user"):
+    async def steer(self, text, *, id=None, origin="user", accepted_at=None):
         if self._refuse_once is not None:
             exc, self._refuse_once = self._refuse_once, None
             raise exc

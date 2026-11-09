@@ -1522,6 +1522,10 @@ class SessionRuntime:
 
         app_source = await asyncio.to_thread(effective_turn_source, self.turn)
         turn_overrides["turn_source"] = app_source
+        from app.core.time_awareness import owner_message_receipt
+
+        owner_receipt = owner_message_receipt(self.turn)
+        turn_overrides.update(owner_receipt)
         # Host-set on every turn, so nothing a client sends can claim it.
         turn_overrides["continues_approved_generation"] = continues_approved_generation(
             self.turn.get("payload")
@@ -1573,6 +1577,7 @@ class SessionRuntime:
                 recorded_prompt, profile_id=self.turn.get("profile_id"),
                 source=fluid_turn_source(app_source), upload_paths=paths or None,
                 accepted_input_id=turn_payload.get("accepted_input_id"),
+                extra_payload=owner_receipt,
             )
             if self._abort_reason == "recording_failed":
                 raise RuntimeError("Could not record the message's prepared attachments")
@@ -1604,6 +1609,7 @@ class SessionRuntime:
                 profile_id=self.turn.get("profile_id"),
                 record_user=not resume and not already_recorded and not awaiting_uploads,
                 source=fluid_turn_source(app_source),
+                owner_receipt=owner_receipt,
                 upload_paths=turn_payload.get("upload_paths") or None,
                 **({"continued": True} if turn_payload.get("continued_turn") else {}),
                 **({"accepted_input_id": turn_payload["accepted_input_id"]}
@@ -1817,6 +1823,7 @@ class SessionRuntime:
                     # Every exit before preparation (gate refusal, disk failure,
                     # cancellation or exception) must leave recoverable words.
                     metadata = {
+                        **owner_receipt,
                         "not_sent": True, "checkpoint_backed": False,
                         "queued_turn_id": self.turn_id,
                         "upload_paths": turn_payload.get("upload_paths") or [],
@@ -2077,7 +2084,10 @@ class SessionRuntime:
                     steer_id = (command_id if isinstance(command_id, str)
                                 and command_id.startswith("client-") else row_id)
                     self._steer_ids[row_id] = steer_id
-                    await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id)
+                    from app.core.time_awareness import owner_message_receipt
+
+                    await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id,
+                                        accepted_at=owner_message_receipt(row)["owner_message_at"])
                     # Armed only once the engine took the message: a steer that
                     # failed leaves the pass for the turn the row runs in.
                     from app.core import owner_confirm as _confirm
@@ -2458,6 +2468,8 @@ class SessionRuntime:
         absorb leaves the row ``queued``, so it re-runs as an ordinary turn —
         a rare, visible duplicate rather than a silently lost message.
         """
+        from app.core.time_awareness import owner_message_receipt
+
         steers = event.get("steers") or []
         absorbed = False
         for steer in steers:
@@ -2547,6 +2559,7 @@ class SessionRuntime:
                     profile_id=profile_id,
                     command_id=row.get("command_id"),
                     upload_paths=(row.get("payload") or {}).get("upload_paths") or None,
+                    owner_receipt=owner_message_receipt(row),
                     **({"queued_turn_id": row_id, "checkpoint_backed": False,
                         "source": "agent_message"}
                        if row.get("source") == "agent_message" else {}),
@@ -3256,6 +3269,8 @@ class SessionRuntime:
         if not stranded:
             return
 
+        from app.core.time_awareness import owner_message_receipt
+
         requeued = 0
         # ``at_front`` puts each new row before every queued one, so inserting
         # newest-first leaves the queue in the original order.
@@ -3279,6 +3294,7 @@ class SessionRuntime:
                     worktree_id=row.get("worktree_id"),
                     overrides=row.get("overrides") or None,
                     payload=payload,
+                    _owner_receipt=owner_message_receipt(row),
                     command_id=row.get("command_id"),
                     instance_id=row.get("instance_id"),
                     at_front=True,

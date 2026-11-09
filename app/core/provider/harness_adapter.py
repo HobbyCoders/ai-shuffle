@@ -1851,7 +1851,7 @@ class HarnessAdapter(ProviderAdapter):
                 ctx.extra["session_plan"] = previous
             raise
 
-    async def send_query(self, prompt: str) -> None:
+    async def send_query(self, prompt: str, *, _source: str | None = None) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         if self._options is not None:
@@ -1883,6 +1883,7 @@ class HarnessAdapter(ProviderAdapter):
         # older than this turn. The memory snapshot rides only when the model
         # does not already hold it (see _memory_turn_note).
         source = self._take_turn_source()
+        source = _source or source
         self._time_source = source
         # Claude Code takes its own slash commands as typed; a native session takes
         # only a bare "/compact", which its engine runs as a compaction.
@@ -1910,6 +1911,7 @@ class HarnessAdapter(ProviderAdapter):
             self._scratch_held = None
             self._scratch_put_back = None
             self._scratch_pending = None
+        self._host_time_note_rendered = False
         if command:
             note = None
         else:
@@ -1938,6 +1940,8 @@ class HarnessAdapter(ProviderAdapter):
             await self._submit_turn(UserTurn(
                 content=cast(Any, content), source=source,
                 context_pin=self._memory_context_pin(content),
+                host_time_note=bool(note) and self._host_time_note_rendered,
+                accepted_at=(getattr(self, "_owner_receipt", {}).get("owner_message_at") if source in ("user", "queue") else None),
                 emergency_compaction=self._take_emergency_compaction(),
             ))
         except BaseException:
@@ -1956,6 +1960,10 @@ class HarnessAdapter(ProviderAdapter):
             # Trusted once TurnStarted names the node that carries it.
             self._memory_trusted_node = None
             self._memory_full_pending = True
+
+    def set_owner_receipt(self, receipt: dict | None) -> None:
+        """Host-only receipt for this submit, including pooled adapters."""
+        self._owner_receipt = dict(receipt or {})
 
     def set_turn_source(self, app_source: Optional[str]) -> None:
         """Name what starts the next turn, as an app ``turns.source``.
@@ -2157,8 +2165,9 @@ class HarnessAdapter(ProviderAdapter):
         """Let AskUser answer at once with recommended defaults while away."""
         from app.core.away_mode import make_question_auto_answer
 
-        ctx.extra["time_context"] = self._time_context
-        ctx.extra["time_rule_in_prefix"] = self._delegated_replaces_preset or not self._is_delegated
+        if not (getattr(self._options, "extra", None) or {}).get("one_shot"):
+            ctx.extra["time_context"] = self._time_context
+            ctx.extra["time_rule_in_prefix"] = self._delegated_replaces_preset or not self._is_delegated
         ctx.extra["auto_answer_questions"] = make_question_auto_answer(
             self._resolve_app_session_id
         )
@@ -2654,7 +2663,9 @@ class HarnessAdapter(ProviderAdapter):
         """
         if not self._is_delegated:
             return None
-        return self._checkout_env_note()
+        note = self._checkout_env_note()
+        self._host_time_note_rendered = bool(note)
+        return note
 
     def _checkout_env_note(self, source: str | None = None) -> Optional[str]:
         """The owner-local clock and branch for this checkout. Never raises."""
@@ -2675,8 +2686,11 @@ class HarnessAdapter(ProviderAdapter):
     def _time_context(self, source: str | None = None) -> dict:
         from app.core.time_awareness import session_time_context
 
+        source = source or getattr(self, "_time_source", "wakeup")
+        current = getattr(self, "_owner_receipt", {}).get("owner_input_id")
         return session_time_context(
-            self._resolve_app_session_id(), source or getattr(self, "_time_source", "wakeup"),
+            self._resolve_app_session_id(), source,
+            current_input_id=current if source in ("user", "queue") else None,
         )
 
     def _away_note(self) -> Optional[str]:
@@ -2754,7 +2768,7 @@ class HarnessAdapter(ProviderAdapter):
 
         note = await run_sync(self._away_note)
         if note and OWNER_BACK_NOTE in note:
-            await self.send_query("Resume the unfinished request above, using the current Away mode.")
+            await self.send_query("Resume the unfinished request above, using the current Away mode.", _source="wakeup")
             return
         self._memory_held_for_turn = await self._memory_held()
         self._native_scratch_held_for_turn = await self._native_scratch_held()
@@ -2803,7 +2817,7 @@ class HarnessAdapter(ProviderAdapter):
         self._turn_call_indices = set()
 
     async def steer(
-        self, text: str, *, id: Optional[str] = None, origin: str = "user"
+        self, text: str, *, id: Optional[str] = None, origin: str = "user", accepted_at: float | None = None
     ) -> None:
         """Hand ``text`` to the RUNNING turn as a fluid ``Steer``.
 
@@ -2831,7 +2845,7 @@ class HarnessAdapter(ProviderAdapter):
         """
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
-        await self._engine.submit(Steer(text=text, id=id, origin=origin))
+        await self._engine.submit(Steer(text=text, id=id, origin=origin, accepted_at=accepted_at))
 
     async def steer_peer(self, text: str, *, sender: str, id: Optional[str] = None,
                          provenance: str = "peer") -> None:

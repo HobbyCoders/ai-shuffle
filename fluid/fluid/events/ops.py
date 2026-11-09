@@ -42,6 +42,9 @@ class UserTurn(Op):
     # summarizer stand in when Fluid has nothing more, as it does for an
     # automatic compaction. Never set for a compaction a person asked for.
     emergency_compaction: bool = False
+    # Explicit host provenance, never inferred from prompt text.
+    host_time_note: bool = False
+    accepted_at: float | None = None
 
 
 @dataclass(kw_only=True)
@@ -99,6 +102,7 @@ class Steer(Op):
     text: str
     id: str | None = None
     origin: str = "user"  # "user" | "system"
+    accepted_at: float | None = None
 
 
 @dataclass(kw_only=True)

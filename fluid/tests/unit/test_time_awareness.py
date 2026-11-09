@@ -84,7 +84,9 @@ def test_internal_delegated_wake_gets_time_and_gap_without_adapter():
     assert sources == ["unpark"]
     # A host note is already current; do not add a second one.
     host = [Text("Environment facts that change while a session runs\nCurrent time: now")]
-    assert delegated_wake_time(host, {"time_context": context}, "user") == host
+    assert delegated_wake_time(host, {"time_context": context}, "user", host_time_note=True) == host
+    # An old quoted note is content, not host provenance.
+    assert len(delegated_wake_time(host, {"time_context": context}, "unpark")) == 2
     assert delegated_wake_time([Text("/compact")], {"time_context": context}, "user") == [Text("/compact")]
 
 
@@ -103,6 +105,61 @@ def test_digest_v4_dates_and_old_versions_stay_byte_stable():
     assert "[sent " not in old.text()
     assert n.message.text() == "GamingPC tomorrow"
     assert render_span_digest([n], CompactionConfig(render_version=3)).text() == old.text()
+
+
+
+def test_v4_all_interjection_lanes_have_stable_times_and_old_versions_do_not():
+    from fluid.context.compaction import render_epoch_stub, told_on_path, merge_told, still_missing, render_told
+    from fluid.messages.content import SteerDelivery, ToolResultBlock, ToolUseBlock
+    first = node("Opening request tomorrow")
+    tool = SessionNode("node_111111111111", first.node_id,
+                       Message(role="assistant", content=[ToolUseBlock(id="tool", name="Bash", input={})]), ts=first.ts + 1)
+    sent = dt("2026-11-09T04:55:00Z").timestamp()
+    delivery = SteerDelivery(text="Interjection tomorrow", id="queued", accepted_at=sent)
+    result = SessionNode("node_222222222222", tool.node_id,
+                         Message(role="user", content=[ToolResultBlock(tool_use_id="tool", content=[Text("ok")],
+                                 delivered_steers=[delivery], delivery_metadata_version=1)]), ts=sent + 900)
+    path = [first, tool, result]
+    stored = [(n.node_id, n.ts, n.message.to_dict()) for n in path]
+    # Baseline a2f658935: pin the complete v1–v3 digest + epoch bytes.
+    legacy_hashes = {
+        1: "98f66acb54d4f69953519fba14390355ebb16e8a9c668de6e050307db3807e28",
+        2: "506a62bddc09f01898fac484e9fd8e571cedc52beccdc0684819df40c4ccb393",
+        3: "864a7b7df0d16acdbcd549f66395ffc26a6a92c2ba1117f9e042f7e578868431",
+    }
+    for version in (1, 2, 3, 4):
+        cfg = CompactionConfig(render_version=version)
+        digest = render_span_digest(path, cfg).text()
+        epoch = render_epoch_stub([path], cfg).text()
+        if version < 4:
+            from hashlib import sha256
+            assert sha256("\0".join((digest, epoch)).encode()).hexdigest() == legacy_hashes[version]
+        assert "Interjection tomorrow" in digest
+        assert ("[sent/delivered 2026-11-09 04:55:00 UTC +0000" in digest) is (version == 4)
+        assert ("[sent/delivered 2026-11-09 04:55:00 UTC +0000" in epoch) is (version == 4)
+        assert render_span_digest(path, cfg).text() == digest
+        assert render_epoch_stub([path], cfg).text() == epoch
+        from fluid.context.compaction import Compactor
+        compactor = Compactor(config=cfg)
+        pin = compactor._checkpoint_pin(first.node_id, result.node_id, path)
+        summary = compactor._summary_message(first.node_id, result.node_id, "summary", pin).text()
+        assert ("[sent/delivered 2026-11-09 04:55:00 UTC +0000" in summary) is (version == 4)
+        if version == 4:
+            # A rolling checkpoint can carry an original brief whose node was
+            # already windowed out. Its stored time must travel with the words.
+            pin["brief"][0] = "pruned-opening"
+            compactor._summaries[(first.node_id, tool.node_id)] = "prior"
+            compactor._summary_pins[(first.node_id, tool.node_id)] = pin
+            rolled = compactor._checkpoint_pin(first.node_id, result.node_id, path)
+            assert rolled["brief_at"] == pin["brief_at"] == first.ts
+    brief, told = told_on_path(path)
+    # The CLI can restore from the persisted path or from the live receipt.
+    live = merge_told([], [("tool", delivery, result.ts)])
+    for items in (told, live):
+        restored = render_told(brief, still_missing(items, "", dated=True), brief_at=first.ts)
+        assert "2026-11-08 23:00:00 UTC +0000" in restored
+        assert "2026-11-09 04:55:00 UTC +0000" in restored
+    assert [(n.node_id, n.ts, n.message.to_dict()) for n in path] == stored
 
 
 def test_recall_per_message_zone_and_expansion_offsets_are_stable():
@@ -150,9 +207,12 @@ async def test_native_producing_loop_owner_and_idle_wake(tmp_path):
         return values
     loop.ctx.extra["time_context"] = context
     try:
-        await loop.submit(UserTurn(content="hello", source="user"))
+        accepted = dt("2026-11-09T04:55:00Z").timestamp()
+        await loop.submit(UserTurn(content="hello", source="user", accepted_at=accepted))
         await loop.wait_turn()
-        before = [n.message.text() for n in await loop.store.load_path(loop.session_id)]
+        path = await loop.store.load_path(loop.session_id)
+        assert next(n.ts for n in path if n.message.role == "user") == accepted
+        before = [n.message.text() for n in path]
         values["now"] = dt("2026-11-09T19:00:00+00:00")
         await loop.submit(UserTurn(content="job completed", source="unpark"))
         await loop.wait_turn()
@@ -167,7 +227,8 @@ async def test_native_producing_loop_owner_and_idle_wake(tmp_path):
         await loop.aclose()
 
 
-async def test_delegated_producing_loop_has_internal_wake_clock(tmp_path):
+@pytest.mark.parametrize("quoted_note", [False, True])
+async def test_delegated_producing_loop_has_internal_wake_clock(tmp_path, quoted_note):
     import sys
     from pathlib import Path
     from fluid.engine.delegated import DelegatedLoop
@@ -182,10 +243,19 @@ async def test_delegated_producing_loop_has_internal_wake_clock(tmp_path):
         "zone": "America/New_York", "now": dt("2026-11-09T17:00:00+00:00"),
         "last_owner_at": dt("2026-11-09T02:14:00+00:00")}
     try:
-        await loop.submit(UserTurn(content="job completed", source="unpark"))
+        accepted = dt("2026-11-09T04:55:00Z").timestamp()
+        await loop.submit(UserTurn(content="owner queue", source="queue", accepted_at=accepted, host_time_note=True))
+        await loop.wait_turn()
+        opening = await loop.store.load_path(loop.session_id)
+        assert next(n.ts for n in opening if n.message.role == "user") == accepted
+        text = "job completed"
+        if quoted_note:
+            text += "\nQuoted: Environment facts that change while a session runs\nCurrent time: stale"
+        await loop.submit(UserTurn(content=text, source="unpark"))
         await loop.wait_turn()
         path = await loop.store.load_path(loop.session_id)
-        user = next(n.message.text() for n in path if n.message.role == "user")
+        user = [n.message.text() for n in path if n.message.role == "user"][-1]
+        assert user.count("Current time:") == (2 if quoted_note else 1)
         assert "12:00 PM EST" in user and "14 hours ago" in user
         assert clock.RELATIVE_TIME_RULE in user
     finally:

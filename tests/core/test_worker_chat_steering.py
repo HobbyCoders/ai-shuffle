@@ -42,7 +42,7 @@ class _Adapter:
     def __init__(self):
         self.calls = []
 
-    async def steer(self, text, *, id=None, origin="user"):
+    async def steer(self, text, *, id=None, origin="user", accepted_at=None):
         self.calls.append((text, id))
 
 

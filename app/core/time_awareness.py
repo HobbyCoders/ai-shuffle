@@ -17,7 +17,7 @@ def preference_identity(session, principal=None):
     return principal_preference_identity(principal)
 
 
-def session_time_context(session_id: str | None, source: str = "wakeup") -> dict:
+def session_time_context(session_id: str | None, source: str = "wakeup", current_input_id=None) -> dict:
     """Called off-loop for each turn. Current owner input is already in the log.
 
     Reads at most two indexed human-message rows, with a short statement deadline.
@@ -72,23 +72,39 @@ def session_time_context(session_id: str | None, source: str = "wakeup") -> dict
                             "AND COALESCE(payload->>'agent_wake', 'false') != 'true' "
                             "AND COALESCE(payload->>'not_sent', 'false') != 'true' "
                             "ORDER BY seq DESC LIMIT 2", (owner_session_id,))
-                result["last_owner_at"] = previous_owner_time(cur.fetchall(), source)
+                result["last_owner_at"] = previous_owner_time(cur.fetchall(), source, current_input_id)
     except Exception:  # a reminder must never fail a turn or log session text
         pass
     return result
 
 
-def previous_owner_time(rows, source):
-    skip = 1 if source in ("user", "queue") else 0
-    for row in rows:
-        payload = row.get("payload") or {}
-        if isinstance(payload, str):
-            payload = json.loads(payload)
+def owner_message_receipt(turn):
+    """Durable host receipt. Pre-upgrade rows fall back to queue creation time."""
+    from fluid.context.time_awareness import as_utc
+
+    payload = turn.get("payload") or {}
+    at = as_utc(payload.get("owner_message_at")) or as_utc(turn.get("created_at"))
+    return {"owner_message_at": at.timestamp() if at else None,
+            "owner_input_id": payload.get("owner_input_id") or turn.get("id")}
+
+
+def previous_owner_time(rows, source, current_input_id=None):
+    rows = list(rows)
+    payloads = [json.loads(row["payload"]) if isinstance(row.get("payload"), str)
+                else (row.get("payload") or {}) for row in rows]
+    # Already-recorded pre-upgrade steers have no receipt identity in the log.
+    legacy = not any(payload.get("owner_input_id") for payload in payloads)
+    skip = 1 if source in ("user", "queue") and (not current_input_id or legacy) else 0
+    for row, payload in zip(rows, payloads):
         if (payload.get("source", "user") not in ("user", "queue")
                 or payload.get("agent_wake") or payload.get("not_sent")):
+            continue
+        if source in ("user", "queue") and current_input_id and payload.get("owner_input_id") == current_input_id:
             continue
         if skip:
             skip -= 1
         else:
-            return row.get("created_at")
+            from fluid.context.time_awareness import as_utc
+
+            return as_utc(payload.get("owner_message_at")) or row.get("created_at")
     return None

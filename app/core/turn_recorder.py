@@ -819,6 +819,7 @@ class TurnRecorder:
         profile_id: str | None = None,
         record_user: bool = True,
         source: str | None = None,
+        owner_receipt: Dict[str, Any] | None = None,
         continued: bool = False,
         accepted_input_id: str | None = None,
         upload_paths: list[str] | None = None,
@@ -848,6 +849,7 @@ class TurnRecorder:
                     content=user_message or "",
                     profile_id=profile_id,
                     extra_payload={
+                        **(owner_receipt or {}),
                         **({"source": source} if source is not None else {}),
                         **({"accepted_input_id": accepted_input_id} if accepted_input_id else {}),
                         **({"upload_paths": upload_paths} if upload_paths else {}),
@@ -886,6 +888,7 @@ class TurnRecorder:
         queued_turn_id: str | None = None,
         checkpoint_backed: bool | None = None,
         source: str | None = None,
+        owner_receipt: Dict[str, Any] | None = None,
         upload_paths: list[str] | None = None,
     ) -> bool:
         """Append a ``message.user`` for a message steered into the LIVE turn.
@@ -920,6 +923,7 @@ class TurnRecorder:
                     queued_turn_id=queued_turn_id,
                     checkpoint_backed=False,
                     extra_payload={
+                        **(owner_receipt or {}),
                         **({"source": source} if source is not None else {}),
                         **({"upload_paths": upload_paths} if upload_paths else {}),
                     } or None,

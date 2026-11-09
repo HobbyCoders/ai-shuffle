@@ -8,6 +8,7 @@ import pytest
 
 from app.core import owner_services as service, session_orchestration as orch, turn_scheduler, session_runtime
 from app.db import database, sessions, turns
+from app.core.time_awareness import owner_message_receipt
 from tests.db.test_assistant_store import assistant_fixture
 from tests.core.test_session_orchestration import chat
 from tests.core.test_send_steering import _Adapter, _pooled, _live_runtime
@@ -83,6 +84,7 @@ async def test_peer_message_joins_safe_boundary_with_non_user_attribution(mock_d
                 content, profile_id="agent", command_id=queued.get("command_id"),
                 queued_turn_id=row_id, checkpoint_backed=False, source="agent_message",
                 upload_paths=None,
+                owner_receipt=owner_message_receipt(queued),
             )
             runtime._persist_user_message.assert_awaited_once_with(
                 content, profile_id="agent", source="agent_message",

@@ -364,7 +364,28 @@ async def test_compaction_note_carries_date_and_branch_for_a_preset_profile(monk
         await adapter.disconnect()
 
 
-async def _sent_user_turn(adapter, monkeypatch, text="do the thing") -> str:
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preset", [False, True])
+async def test_one_shot_delegated_producing_path_has_only_caller_prompt(monkeypatch, tmp_path, preset):
+    from fluid.context.time_awareness import RELATIVE_TIME_RULE
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    options = (_preset_options if preset else _plain_options)(tmp_path, one_shot=True)
+    options.env = {"FAKE_CLAUDE_SCENARIO": "a"}
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(options)
+    try:
+        assert "time_context" not in adapter._engine.ctx.extra
+        result = await _run_turn(adapter, "Caller-owned utility prompt")
+        assert not result.is_error
+        nodes = await adapter._engine.store.load_path(adapter._engine.session_id)
+        user = next(n.message.text() for n in nodes if n.message.role == "user")
+        assert user == "Caller-owned utility prompt"
+        assert "Current time:" not in user and RELATIVE_TIME_RULE not in user
+    finally:
+        await adapter.disconnect()
+
+
+async def _sent_user_turn(adapter, monkeypatch, text="do the thing", *, source="user") -> str:
     """What ``send_query`` hands the real delegated loop for one user turn."""
     sent = []
 
@@ -372,14 +393,18 @@ async def _sent_user_turn(adapter, monkeypatch, text="do the thing") -> str:
         sent.append(op)
 
     monkeypatch.setattr(adapter._engine, "submit", record)
+    adapter.set_turn_source(source)
     await adapter.send_query(text)
     assert len(sent) == 1
+    assert sent[0].host_time_note and sent[0].source == ha.fluid_turn_source(source)
+    assert sent[0].content.count("Current time:") == 1
     return sent[0].content if isinstance(sent[0].content, str) else str(sent[0].content)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("full_replace", [True, False])
-async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_path, full_replace):
+@pytest.mark.parametrize("source", ["user", "queue"])
+async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_path, full_replace, source):
     """A custom (plain-string) prompt replaces Claude Code's preset, and with
     it the CLI's own date and git facts; the compiled prompt holds only the
     session-stable environment. So every user turn carries today's date and
@@ -396,30 +421,30 @@ async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_
     adapter = ha.HarnessAdapter()
     await adapter.connect(_plain_options(repo))
     try:
-        content = await _sent_user_turn(adapter, monkeypatch)
+        content = await _sent_user_turn(adapter, monkeypatch, source=source)
         assert content.startswith("do the thing")
         assert content.count(TURN_ENV_HEADER) == 1
         assert "Current time: " in content
         assert "Current branch: feature-turn" in content
         # Live, not frozen at connect: a checkout switch shows on the next turn.
         subprocess.run(["git", "checkout", "-q", "-b", "feature-next"], cwd=repo, check=True)
-        content = await _sent_user_turn(adapter, monkeypatch, "next")
+        content = await _sent_user_turn(adapter, monkeypatch, "next", source=source)
         assert "Current branch: feature-next" in content
     finally:
         await adapter.disconnect()
 
 
 @pytest.mark.asyncio
-async def test_preset_profile_user_turn_has_no_app_date_note(monkeypatch, tmp_path):
-    """A preset keeps Claude Code's own prompt (date and git status included),
-    so the adapter adds no second copy."""
+@pytest.mark.parametrize("source", ["user", "queue"])
+async def test_preset_profile_user_turn_has_one_attested_app_clock(monkeypatch, tmp_path, source):
+    """Both source paths carry one host-attested owner-local clock."""
     from app.core.environment import TURN_ENV_HEADER
 
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
     adapter = ha.HarnessAdapter()
     await adapter.connect(_preset_options(_git_repo(tmp_path, "feature-preset")))
     try:
-        content = await _sent_user_turn(adapter, monkeypatch)
+        content = await _sent_user_turn(adapter, monkeypatch, source=source)
         assert TURN_ENV_HEADER in content
         assert "Current time:" in content and "feature-preset" in content
     finally:
