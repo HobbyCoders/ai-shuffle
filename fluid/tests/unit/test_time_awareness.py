@@ -540,7 +540,7 @@ def test_partly_retained_old_clip_marker_never_takes_another_receipts_time():
         f"[sent/delivered before 2026-11-09 05:25:00 UTC +0000 (UTC); exact time unavailable]\n{stored}")
 
 
-@pytest.mark.parametrize("case", ["three_clips_shared_prefix", "genuine_ellipsis_at_default_budget"])
+@pytest.mark.parametrize("case", ["three_clips_shared_prefix", "genuine_ellipsis_at_default_budget", "early_ellipsis_still_distinguishes"])
 def test_repeated_clips_never_borrow_a_time_and_keep_genuine_ellipses(case):
     from fluid.context.compaction import Compactor, Promotion
     from fluid.messages.content import SteerDelivery, ToolResultBlock, ToolUseBlock
@@ -550,6 +550,9 @@ def test_repeated_clips_never_borrow_a_time_and_keep_genuine_ellipses(case):
     offset = SteerDelivery(text=newest).render().index(newest)
     if case == "three_clips_shared_prefix":
         older, budgets = newest[:12_000 - offset] + "…", (12_000, 12_010, 12_001)
+    elif case == "early_ellipsis_still_distinguishes":
+        newest = "Wait… here is the complete deployment log instead:\n" + "x" * 13_000
+        older, budgets = "Wait for the current job before deploying.", (12_000, 12_000)
     else:
         at = 11_995 - offset
         newest, older, budgets = newest[:at] + "…" + newest[at + 1:], "Another message", (12_000, 12_000)

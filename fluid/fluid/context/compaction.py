@@ -1042,9 +1042,9 @@ def _matches_pinned_text(stored: str, raw: str) -> bool:
     marker = re.search(r"… \(\+\d+ chars\)$", stored)
     if marker is None:
         return False
-    # Every clip marker opens with "…" and re-clipping can leave pieces of an
-    # old one in the body, so only the text before the first "…" is certain.
-    probe = stored[:marker.start()].split("…", 1)[0]
+    # Re-clipping can leave pieces of an old marker at the body's end, and they
+    # contain only marker characters: without those, the rest is certainly original.
+    probe = stored[:marker.start()].rstrip("… (+)0123456789chars")
     return bool(probe) and raw.startswith(probe)
 
 
