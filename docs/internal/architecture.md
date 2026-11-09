@@ -122,12 +122,18 @@ need the transcript counter. The marker excludes the already-executed prompt
 from reaping/requeue and holds its live slot until the receipt commits, preventing
 a delayed close from closing a successor's stream. Orphan Stop and parking also
 leave failure-owned rows to this intent: neither may erase its marker. Stop's
-shared cleanup predicate separately admits a still-current failure-owned turn:
-background tasks stop, the user-stop latch lands and queued words become
-restorable "Not sent" messages, just as for an ordinary Stop. They do not run
-when terminal delivery releases the slot. Local WebSocket and owning-peer Stop
-use the same predicate; a newer run (even released) or started successor makes
-that turn-scoped cleanup stale. The marker and closing intent stay untouched;
+shared cleanup admission captures its input receipt and ownership identity
+under the session admission lock, or refuses a stale target. Local WebSocket
+and owning-peer Stop use that same captured boundary, including parked and
+session-scoped Stops. A flip's receipt is reused, never read afresh after a wait.
+Background tasks stop by captured incarnation; queued words become restorable
+"Not sent" messages and cannot run when terminal delivery releases the slot.
+The session-wide user-stop/Swarm latch is set only under a fresh ownership and
+input check holding the admission lock: late cleanup cannot latch a successor
+or discover its input. Empty captured receipts never trigger a fresh read. No
+admission lock is held into async cleanup, and admission needs neither the run
+nor transcript-counter lock. A newer run (even released) or started successor makes turn-scoped
+admission stale. The marker and closing intent stay untouched;
 the page gets no false "nothing stopped" response and waits for the close. Delivery
 atomically aborts the marked turn, appends its terminal receipt and acknowledges
 the outbox using the shared run/counter/session/turn lock order and the captured

@@ -16,6 +16,124 @@ from tests.shared_fixtures import clean_task_registry, seed_session  # noqa: F40
 SESSION = "failure-owned-stop"
 
 
+@pytest.mark.parametrize("transport", ["ws", "peer"])
+async def test_idle_stop_captures_empty_work_without_recapturing(monkeypatch, transport):
+    monkeypatch.setattr(turns, "read_stop_receipt", Mock(side_effect=AssertionError("must not recapture")))
+    await stop(transport, None, monkeypatch)
+    assert turns.get_queued_turns(SESSION) == []
+    assert task_registry.is_user_stopped(SESSION)
+
+
+async def test_durable_cleanup_replay_cannot_latch_successor(monkeypatch):
+    from app.core import stop_receipts as recovery
+    from app.core.scoped_remote_stop import retry_incomplete_notes
+    from app.db import stop_receipts as receipts
+
+    lease, turn, _queued = fail_recording(monkeypatch)
+    receipt = turn_manager.capture_stop_receipt(SESSION, turn["id"], None)
+    saved = receipts.get(receipt["cleanup_receipts"][0])
+    assert saved["receipt"]["cleanup_guard"] == receipt["cleanup_guard"]
+    await retry_incomplete_notes()
+    assert runs.release_run(lease["id"], lease["fence_token"])
+    owner = runs.claim_run(SESSION, "replacement-runner", 60)
+    successor = turns.enqueue_turn(SESSION, "user", prompt="replacement work")
+    assert turns.start_turn(successor["id"], owner["id"], "replacement-runner")
+    newer = turns.enqueue_turn(SESSION, "queue", prompt="new words")
+    monkeypatch.setattr(turns, "read_stop_receipt", Mock(side_effect=AssertionError("must not recapture")))
+    await recovery.consume(saved)
+    assert turns.get_turn(successor["id"])["state"] == "running"
+    assert turns.get_turn(newer["id"])["state"] == "queued"
+    assert not task_registry.is_user_stopped(SESSION)
+    assert receipts.get(saved["id"])["consumed_at"] is not None
+
+
+@pytest.mark.parametrize("transport", ["ws", "peer"])
+@pytest.mark.parametrize("empty", [False, True])
+async def test_captured_receipt_never_expands_to_later_input(monkeypatch, transport, empty):
+    from app.core import query_session_lifecycle as lifecycle
+
+    _lease, turn, _queued = fail_recording(monkeypatch)
+    cleanup = lifecycle.stop_all_background_tasks
+    newer = {}
+    if empty:
+        monkeypatch.setattr(turn_manager, "capture_stop_receipt", lambda *_: {})
+    monkeypatch.setattr(turns, "read_stop_receipt", Mock(side_effect=AssertionError("must not recapture")))
+
+    async def after_admission(*args, **kwargs):
+        # A current owner too must not have its NEW input absorbed by old Stop.
+        assert kwargs["receipt"] is not None
+        newer.update(turns.enqueue_turn(SESSION, "queue", prompt="words after admission"))
+        return await cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "stop_all_background_tasks", after_admission)
+    await stop(transport, turn["id"], monkeypatch)
+    assert turns.get_turn(newer["id"])["state"] == "queued"
+    assert not task_registry.is_user_stopped(SESSION)
+    assert turns.get_turn(turn["id"])["stop_reason"] == "recording_failed"
+    assert stop_notices.pending() == ["recording-failed:" + turn["id"]]
+
+
+@pytest.mark.parametrize("transport", ["ws", "peer"])
+async def test_orphan_flip_keeps_its_original_input_boundary(monkeypatch, transport):
+    from app.core import query_session_lifecycle as lifecycle
+
+    turn = turns.enqueue_turn(SESSION, "user", prompt="orphan work")
+    assert turns.start_turn(turn["id"], None, "gone-runner")
+    # Orphan Stop used to capture after its standalone terminal append, even
+    # though that wait can let new owner input arrive after the flip.
+    append = session_events.append_events_with_lock_retry
+    newer = {}
+    def after_flip(sid, events, **kwargs):
+        newer.update(turns.enqueue_turn(SESSION, "queue", prompt="after orphan flip"))
+        return append(sid, events, **kwargs)
+    monkeypatch.setattr(session_events, "append_events_with_lock_retry", after_flip)
+    await stop(transport, turn["id"], monkeypatch)
+    assert turns.get_turn(newer["id"])["state"] == "queued"
+    assert not task_registry.is_user_stopped(SESSION)
+
+
+@pytest.mark.parametrize("transport", ["ws", "peer"])
+@pytest.mark.parametrize("target", ["failure", "parked", "flipped", "session"])
+async def test_takeover_after_stop_admission_spares_new_input_and_latch(monkeypatch, transport, target):
+    from app.core import query_session_lifecycle as lifecycle
+    from app.core.scoped_remote_stop import retry_incomplete_notes
+
+    if target == "failure":
+        lease, turn, _queued = fail_recording(monkeypatch)
+    else:
+        lease = runs.claim_run(SESSION, "original-runner", 60)
+        turn = turns.enqueue_turn(SESSION, "user", prompt="old work")
+        assert turns.start_turn(turn["id"], lease["id"], "original-runner")
+        if target == "parked":
+            assert turns.park_turn(turn["id"])
+    cleanup = lifecycle.stop_all_background_tasks
+    replacement = {}
+
+    async def overtake(*args, **kwargs):
+        # Admission has returned across the await, but cleanup has not latched
+        # or read input yet. Exercise the real recovery/start/enqueue producers.
+        if target == "failure":
+            await retry_incomplete_notes()
+        elif target == "parked":
+            assert turns.settle_parked_turns(SESSION)
+        else:
+            assert turns.settle_turn(turn["id"], "completed")
+        assert runs.release_run(lease["id"], lease["fence_token"])
+        owner = runs.claim_run(SESSION, "replacement-runner", 60)
+        successor = turns.enqueue_turn(SESSION, "user", prompt="new work")
+        assert turns.start_turn(successor["id"], owner["id"], "replacement-runner")
+        newer = turns.enqueue_turn(SESSION, "queue", prompt="new owner words")
+        replacement.update(successor=successor, newer=newer)
+        return await cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "stop_all_background_tasks", overtake)
+    await stop(transport, None if target == "session" else turn["id"], monkeypatch)
+    assert turns.get_turn(replacement["successor"]["id"])["state"] == "running"
+    assert turns.get_turn(replacement["newer"]["id"])["state"] == "queued"
+    assert not task_registry.is_user_stopped(SESSION)
+
+
+
 @pytest.fixture(autouse=True)
 def session(mock_db, monkeypatch):
     seed_session(SESSION)
@@ -114,7 +232,7 @@ async def test_failure_owned_stop_quiesces_only_the_current_run(monkeypatch, mon
     assert stop_notices.pending() == ["recording-failed:" + turn["id"]]
     if transport == "peer":
         # Shared predicate is also the owning peer receiver's cleanup admission.
-        assert turn_manager.stop_reaches_background_work(SESSION, turn["id"], None) is current
+        assert (turn_manager.capture_stop_receipt(SESSION, turn["id"], None) is not None) is current
     from app.core.scoped_remote_stop import retry_incomplete_notes
 
     await retry_incomplete_notes()

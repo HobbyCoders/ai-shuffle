@@ -15,6 +15,47 @@ from tests.db.test_event_write_lock_timeout_postgres import (  # noqa: F401
 
 pytestmark = requires_real_pg
 
+async def test_stop_capture_and_latch_need_no_run_or_counter_lock(session_id, connect, monkeypatch):
+    from psycopg2.errors import LockNotAvailable
+
+    owner = runs.claim_run(session_id, 'original-owner', 60)
+    turn = turns.enqueue_turn(session_id, 'user', prompt='already executed')
+    assert turns.start_turn(turn['id'], owner['id'], 'original-owner')
+    with monkeypatch.context() as blocked:
+        blocked.setattr(session_events, 'LOCK_RETRY_DELAYS_SECONDS', ())
+        blocked.setattr(stop_notices, 'deliver', lambda _: (_ for _ in ()).throw(LockNotAvailable()))
+        assert turns.settle_turn(turn['id'], 'aborted', 'recording_failed', run_id=owner['id'])
+    holder = connect()
+    rival = connect()
+    try:
+        cursor = holder.cursor()
+        # Model the prefix a transcript writer holds while C remains contended.
+        cursor.execute('SELECT id FROM runs WHERE session_id=%s FOR UPDATE', (session_id,))
+        cursor.execute('INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,0) '
+                       'ON CONFLICT (session_id) DO UPDATE SET next_seq=session_event_counters.next_seq',
+                       (session_id,))
+        receipt = await asyncio.wait_for(asyncio.to_thread(
+            turns.capture_stop_receipt, session_id, turn['id'], None), 1)
+        assert receipt is not None
+        def latch_under_admission():
+            # The synchronous latch is protected against enqueue/start, not a
+            # plain check followed by an awaited side effect.
+            with pytest.raises(LockNotAvailable):
+                rival.cursor().execute('SELECT id FROM sessions WHERE id=%s FOR UPDATE NOWAIT', (session_id,))
+            rival.rollback()
+            return 'latched'
+        assert await asyncio.wait_for(asyncio.to_thread(
+            turns.apply_stop_receipt, session_id, receipt, latch_under_admission), 1) == 'latched'
+        assert turns.get_turn(turn['id'])['state'] == 'draining'
+        assert stop_notices.pending() == ['recording-failed:' + turn['id']]
+    finally:
+        holder.rollback()
+        rival.rollback()
+    # Admission/latching released S; normal terminal delivery still owns one close.
+    assert stop_notices.deliver('recording-failed:' + turn['id'])
+    assert len(session_events.get_events(session_id)) == 1
+
+
 _SAVE_AND_EXIT = r"""
 import json, sys
 from app.core.config import settings
@@ -30,6 +71,11 @@ try:
     result = turns.settle_turn(turn['id'], 'aborted', 'recording_failed', run_id=run['id'])
     assert result['state'] == 'draining'
     assert stop_notices.pending() == ['recording-failed:' + turn['id']]
+    # The detecting/Stop process dies after guarded admission. No lock or
+    # transition may strand terminal recovery in the restarted process.
+    receipt = turns.capture_stop_receipt(sid, turn['id'], None)
+    assert receipt is not None and receipt['cleanup_guard']['turn']['id'] == turn['id']
+    assert turns.get_turn(turn['id'])['stop_reason'] == 'recording_failed'
     runs.release_run(run['id'], run['fence_token'])
     print(json.dumps({'turn_id': turn['id'], 'run_id': run['id']}), flush=True)
 finally:
@@ -231,14 +277,14 @@ async def test_failure_owned_stop_cleanup_uses_latest_run_even_when_released(ses
         blocked.setattr(stop_notices, 'deliver', lambda _: (_ for _ in ()).throw(LockNotAvailable()))
         assert turns.settle_turn(turn['id'], 'aborted', 'recording_failed', run_id=old['id'])
     marker = turns.get_turn(turn['id'])
-    assert turn_manager.stop_reaches_background_work(session_id, turn['id'], None)
+    assert turn_manager.capture_stop_receipt(session_id, turn['id'], None) is not None
     assert runs.release_run(old['id'], old['fence_token'])
-    assert turn_manager.stop_reaches_background_work(session_id, turn['id'], None)
+    assert turn_manager.capture_stop_receipt(session_id, turn['id'], None) is not None
     replacement = runs.claim_run(session_id, 'replacement-owner', 60)
     assert replacement
-    assert not turn_manager.stop_reaches_background_work(session_id, turn['id'], None)
+    assert turn_manager.capture_stop_receipt(session_id, turn['id'], None) is None
     assert runs.release_run(replacement['id'], replacement['fence_token'])
-    assert not turn_manager.stop_reaches_background_work(session_id, turn['id'], None)
+    assert turn_manager.capture_stop_receipt(session_id, turn['id'], None) is None
     assert turns.get_turn(turn['id']) == marker
     assert stop_notices.pending() == ['recording-failed:' + turn['id']]
     assert stop_notices.deliver('recording-failed:' + turn['id'])

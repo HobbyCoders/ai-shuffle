@@ -531,6 +531,31 @@ def _begin_user_stop(session_id: str, receipt: Optional[dict] = None) -> _UserSt
     return _UserStop(session_id, task_registry.stop_generation(session_id), first, receipt)
 
 
+async def _begin_captured_user_stop(session_id: str, receipt: Optional[dict]) -> _UserStop:
+    """Never install a late session latch on behalf of a superseded Stop."""
+    from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
+
+    def begin() -> _UserStop:
+        stop = _begin_user_stop(session_id, receipt)
+        # This too is session-wide, so it shares the latch's guarded instant.
+        try:
+            from app.core.swarm import latch_all
+            latch_all(session_id)
+        except Exception:  # noqa: BLE001 — per-task Stops must still run.
+            logger.warning("Stop: latching Swarm workflows failed for %s", session_id, exc_info=True)
+        return stop
+
+    if receipt is None:
+        return begin()  # Legacy direct caller: this call is its admission.
+    if not receipt:
+        return _UserStop(session_id, -1, False, {})  # Captured empty, not uncaptured.
+    stop = await asyncio.to_thread(turns_db.apply_stop_receipt, session_id, receipt, begin)
+    # Still end the captured task incarnations, but never latch or discover
+    # current input after ownership/input overtook this captured Stop.
+    return stop if stop is not None else _UserStop(session_id, -1, False, {})
+
+
 @dataclass(frozen=True)
 class StopScope:
     """The local work a Stop may end, each run named by its incarnation.
@@ -900,26 +925,19 @@ async def stop_all_background_tasks(
     """
     from app.core.task_registry import task_registry
 
+    # Latch validation can wait on admission. Freeze local task incarnations
+    # first, just as the endpoint callers do before their interrupt wait.
+    scope = scope or capture_stop_scope(session_id)
     stop: Optional[_UserStop] = None
     if user_stop:
-        # The latch before the snapshot: a task completing while we work through
-        # the list finds a stopped session and enqueues nothing.
-        stop = _begin_user_stop(session_id, receipt)
+        # Latch while the captured owner/input boundary is still current: a
+        # completing task then finds a stopped session and enqueues nothing.
+        stop = await _begin_captured_user_stop(session_id, receipt)
         if stop.first:
             logger.info("Stop: latched session %s", session_id)
         if include_shells and respect_shell_preference and _keep_monitor_shells_on_stop():
             include_shells = False
-        # A Swarm this session runs would start its next workers as the current
-        # ones die: latch its workflows first. The running workers are stopped
-        # below with this stop's attribution, like any other task.
-        try:
-            from app.core.swarm import latch_all
 
-            latch_all(session_id)
-        except Exception:  # noqa: BLE001 — the per-task stops below still run.
-            logger.warning("Stop: latching Swarm workflows failed for %s", session_id, exc_info=True)
-
-    scope = scope or capture_stop_scope(session_id)
     scope, revalidated = await _validate_remote_stop_scope(session_id, scope)
     active = scope.active
     # A worker shutting down (docker stop, quitting the desktop app) ends only

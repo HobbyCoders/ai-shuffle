@@ -748,7 +748,10 @@ def _interrupt_turn(session_id, mode, stop_background=False, turn_id=None, sourc
     # A dead runner cannot observe interrupt intent. Settle its turn and append
     # the terminal event so connected clients also leave their working state.
     if mode == "stop":
-        recovered = turns.stop_orphaned_turns(session_id, turn_id)
+        recovered = turns.stop_orphaned_turns(
+            session_id, turn_id, stop_background=stop_background,
+            capture_input=stop_background and source in (None, *turns.USER_STOP_SOURCES),
+        )
         if recovered:
             from app.db.session_events import append_events_with_lock_retry
 
@@ -837,34 +840,11 @@ async def interrupt_async(
     return row
 
 
-def stop_reaches_background_work(
+def capture_stop_receipt(
     session_id: str, turn_id: Optional[str], flipped: Optional[Dict[str, Any]],
-) -> bool:
-    """Whether a Stop goes on to end the chat's background work and queue.
-
-    Turn-scoped so a delayed Stop for a finished turn spares its successor. A
-    turn parked on background work matched nothing to interrupt, but it is still
-    the chat's current turn and that work is what the person is stopping. A
-    recording-failure marker likewise owns only the close, not Stop's cleanup.
-    Its original run must still be the latest ownership incarnation.
-    """
-    if flipped is not None or turn_id is None:
-        return True
-    # Queued/cancelled rows never owned the work. Only an actually started
-    # successor makes this Stop stale (#585); queue history must not hide P.
-    latest = turns.get_latest_started_turn(session_id)
-    if not latest or latest["id"] != turn_id:
-        return False
-    if latest["state"] == "parked":
-        return True
-    if latest["state"] != "draining" or latest.get("stop_reason") != "recording_failed":
-        return False
-    from app.db import runs
-
-    # A replacement lease can exist before its first turn starts (the marker
-    # still holds that slot). Releasing that lease must not revive an old Stop.
-    newest_run = runs.get_latest_run(session_id)
-    return newest_run is None or newest_run["id"] == latest.get("run_id")
+) -> Optional[dict]:
+    """One guarded admission/receipt, not check-then-act cleanup permission."""
+    return turns.capture_stop_receipt(session_id, turn_id, flipped)
 
 
 def stop_target_finished(session_id: str, turn_id: Optional[str]) -> bool:

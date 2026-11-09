@@ -642,6 +642,87 @@ def _park_identity(row: Dict[str, Any]) -> Dict[str, Any]:
             "ended_at": ended_at.isoformat() if hasattr(ended_at, "isoformat") else ended_at}
 
 
+def _stop_owner(cursor: Any, session_id: str) -> tuple[dict, Optional[dict]]:
+    """Identity of the latest ownership/start, including released run history."""
+    cursor.execute("SELECT * FROM turns WHERE session_id=%s AND started_at IS NOT NULL "
+                   "ORDER BY started_at DESC, insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1",
+                   (session_id,))
+    latest = _row(cursor.fetchone())
+    cursor.execute("SELECT id FROM runs WHERE session_id=%s ORDER BY fence_token DESC LIMIT 1", (session_id,))
+    run = cursor.fetchone()
+    owner = {"run_id": run["id"] if run else None, "turn": None}
+    if latest:
+        owner["turn"] = {"id": latest["id"], "run_id": latest.get("run_id"),
+                         "started_at": str(latest["started_at"]),
+                         "input_order": latest["payload"].get("accepted_input_order", latest["insert_order"])}
+    return owner, latest
+
+
+def _lock_stop_admission(cursor: Any, session_id: str) -> bool:
+    # S only: start/enqueue and terminal delivery share it. No run/counter
+    # writes here, and a writer waiting on C may already hold R. Owner reads
+    # are MVCC snapshots; an ownership claim cannot start a turn through S.
+    cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+    return cursor.fetchone() is not None
+
+
+def capture_stop_receipt(
+    session_id: str, turn_id: Optional[str], flipped: Optional[dict],
+) -> Optional[dict]:
+    """Admit cleanup AND capture its input/ownership boundary, or refuse it.
+
+    Reuse the flip's receipt (including an empty one), never a fresh boundary
+    after that flip. Parked/failure-owned and idle Stops capture under the same
+    admission lock that enqueue/start take. No marker or terminal intent moves.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if not _lock_stop_admission(cursor, session_id):
+            return None
+        owner, latest = _stop_owner(cursor, session_id)
+        target = flipped["id"] if flipped is not None else turn_id
+        if target is not None:
+            if not latest or latest["id"] != target:
+                return None
+            if owner["run_id"] is not None and owner["run_id"] != latest.get("run_id"):
+                return None
+            if flipped is None and not (latest["state"] == "parked" or (
+                    latest["state"] == "draining" and latest.get("stop_reason") == "recording_failed")):
+                return None
+        captured = ((flipped or {}).get("payload") or {}).get(STOP_RECEIPT_KEY)
+        if captured is not None:
+            return {"cleanup_guard": owner, **captured}
+        return _stop_receipt(cursor, session_id)
+
+
+def apply_stop_receipt(session_id: str, receipt: dict, apply: Callable[[], Any]) -> Any:
+    """Apply a local latch only while the captured owner/input is still current.
+
+    The callback is synchronous and runs under S, so start/enqueue cannot slip
+    between revalidation and latching. No lock survives this call or any await.
+    Legacy receipts have only a cutoff: never let those latch a later start.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if not _lock_stop_admission(cursor, session_id):
+            return None
+        owner, latest = _stop_owner(cursor, session_id)
+        if "cleanup_guard" in receipt and owner != receipt["cleanup_guard"]:
+            return None
+        if latest and owner["run_id"] is not None and owner["run_id"] != latest.get("run_id"):
+            return None
+        cutoff = receipt.get("input_cutoff")
+        if cutoff is None:
+            return None
+        if latest and latest["payload"].get("accepted_input_order", latest["insert_order"]) > cutoff:
+            return None
+        cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND insert_order>%s "
+                       "AND source IN ('user','queue','resume') LIMIT 1", (session_id, cutoff))
+        if cursor.fetchone() is not None:
+            return None
+        return apply()
+
+
 def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
     """Records this Stop, then reads what it applies to.
 
@@ -673,7 +754,7 @@ def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
                    (session_id,))
     handoffs = [row["token"] for row in cursor.fetchall()]
     receipt = {"input_cutoff": cutoff, "stop_seq": stop_seq, "queued": queued, "parks": parks,
-               "wakes": wakes, "handoffs": handoffs}
+               "wakes": wakes, "handoffs": handoffs, "cleanup_guard": _stop_owner(cursor, session_id)[0]}
     from app.db import stop_receipts
     receipt["cleanup_receipts"] = stop_receipts.publish(cursor, session_id, receipt)
     return receipt
@@ -1246,7 +1327,7 @@ def start_turn(
 
 def stop_orphaned_turns(
     session_id: str, turn_id: Optional[str] = None, *, _conn: Any = None,
-    stop_background: bool = True,
+    stop_background: bool = True, capture_input: bool = False,
 ) -> List[Dict[str, Any]]:
     """Stop stranded live turns, never a session with a valid execution lease.
 
@@ -1271,6 +1352,11 @@ def stop_orphaned_turns(
             )
             fence_params.append(turn_id)
         cursor.execute(fence_sql, tuple(fence_params))
+        if capture_input:
+            # Capture the orphan flip's boundary before releasing its slot,
+            # not after the standalone closing append's potentially long wait.
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+            cursor.fetchone()
         sql = (
             "UPDATE turns SET state='aborted', stop_reason='interrupted', "
             "interrupt_mode='stop', stop_background=%s, ended_at=NOW() "
@@ -1285,6 +1371,12 @@ def stop_orphaned_turns(
             params.append(turn_id)
         cursor.execute(sql + " RETURNING *", tuple(params))
         stopped = _rows(cursor.fetchall())
+        if stopped and capture_input:
+            receipt = _stop_receipt(cursor, session_id)
+            for row in stopped:
+                row["payload"][STOP_RECEIPT_KEY] = receipt
+                cursor.execute("UPDATE turns SET payload=%s WHERE id=%s",
+                               (json.dumps(row["payload"]), row["id"]))
     def bank():
         for row in stopped:
             _bank_live_segment(row.get("session_id"), row.get("started_at"), _dead_runner_end(row))

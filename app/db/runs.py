@@ -111,18 +111,6 @@ def release_run(run_id: str, fence_token: int) -> bool:
         return cursor.rowcount > 0
 
 
-def get_latest_run(session_id: str) -> Optional[Dict[str, Any]]:
-    """Latest ownership incarnation, even after its lease is released/expired."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM runs WHERE session_id=%s ORDER BY fence_token DESC LIMIT 1",
-            (session_id,),
-        )
-        row = cursor.fetchone()
-    return dict(row) if row else None
-
-
 def get_active_run(session_id: str) -> Optional[Dict[str, Any]]:
     """Return the session's active run, or None."""
     with get_db() as conn:
