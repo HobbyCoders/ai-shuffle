@@ -1,12 +1,13 @@
 """Real receiver writes must invalidate a warm SSE reader, not wait for reconnect.
 
-Only the PostgreSQL LISTEN transport is stubbed, as in the other SSE tests.
+Only notification transport is stubbed, as in the other SSE tests.
 Rows go through the production mirror materializer and post-mirror notifier;
 no test injects a reset frame or calls the reader's reset machinery.
 """
 import asyncio
 import json
 from uuid import uuid4
+from unittest.mock import patch
 
 import pytest
 
@@ -26,17 +27,13 @@ def clean_tails():
     events_mod._tails.clear()
 
 
-class NotifyCursor:
-    def __init__(self, cursor, notifications):
-        self.cursor, self.notifications = cursor, notifications
+class MirrorCursor:
+    def __init__(self, connection):
+        # Match psycopg2's cursor.connection, missing on the SQLite test shim.
+        self.connection, self.cursor = connection, connection.cursor()
 
     def __getattr__(self, name):
         return getattr(self.cursor, name)
-
-    def execute(self, sql, params=()):
-        if "pg_notify" in sql:
-            self.notifications.append(params[1])
-        return self.cursor.execute(sql, params)
 
 
 def mirror_rows(session_id, count, *, replace):
@@ -53,8 +50,12 @@ def mirror_rows(session_id, count, *, replace):
         template = {**se.get_events(source)[0], "session_id": session_id}
     coll = policy.collection("session_events")
     start = 1 if replace or not old else old[-1]["seq"] + 1
-    with get_db() as conn:
-        cursor = NotifyCursor(conn.cursor(), notifications)
+    def capture_wake(sid, seq, **hints):
+        notifications.append(json.dumps({"session_id": sid, "max_seq": seq, **hints}))
+
+    # The writer queues the actual post-commit wake; only its transport is stubbed.
+    with patch.object(se, "send_wake", side_effect=capture_wake), get_db() as conn:
+        cursor = MirrorCursor(conn)
         if replace:
             for row in old:
                 engine.materialize(cursor, coll, f"{session_id}|{row['seq']}", None)
@@ -63,6 +64,7 @@ def mirror_rows(session_id, count, *, replace):
                    "event_type": "message.user", "payload": {"content": f"peer-{seq}"}}
             engine.materialize(cursor, coll, f"{session_id}|{seq}", row)
             catalog.after_event_mirrored(cursor, row)
+        assert not notifications, "mirror wake must not run before commit"
     return notifications
 
 
@@ -90,7 +92,7 @@ async def test_peer_replacement_after_connect_resets_warm_reader(
     try:
         notifications = mirror_rows("mirror-replaced", new_count, replace=True)
         for payload in notifications:
-            gw._handle_payload(payload)  # Deliver the REAL committed pg_notify payload.
+            gw._handle_payload(payload)  # Deliver the committed mirror wake (transport stubbed).
         reset = (await collect_frames(stream, 1, timeout=0.8))[0]
         assert reset == {"event": "reset", "data": {
             "reason": "epoch", "epoch": se.get_log_epoch("mirror-replaced")}}

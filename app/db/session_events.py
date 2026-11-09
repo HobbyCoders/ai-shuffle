@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -86,10 +87,11 @@ def send_wake(session_id: str, max_seq: int, *, recheck_log: bool = False) -> No
     (#1065). A transaction that only notifies writes no WAL it must flush, so it
     holds the lock for microseconds and can only ever lose its own wake.
 
-    A commit that is still flushing with the lock held (a mirror apply, see
-    ``catalog.after_event_mirrored``) must not stall the writer sending this, so
-    the wait is short. A wake that cannot be sent still reaches this process's
-    readers directly, because they drop to a slow re-sync while LISTEN is healthy.
+    All app mirror notifications use this post-commit path too. An external
+    notifier can still hold the lock, so the wait stays short. A failed wake
+    reaches this process directly and is retried once in a bounded, coalescing
+    background batch. Delivery remains best effort; the periodic re-sync is
+    the final fallback if the retry fails or its bounded queue is full.
     """
     body: Dict[str, Any] = {"session_id": session_id, "max_seq": max_seq}
     if recheck_log:
@@ -109,12 +111,64 @@ def send_wake(session_id: str, max_seq: int, *, recheck_log: bool = False) -> No
     except Exception as exc:
         logger.debug("pg_notify on %s failed (non-fatal)", NOTIFY_CHANNEL, exc_info=True)
         if isinstance(exc, psycopg2.Error):
+            _retry_wake(session_id, max_seq, recheck_log)
             try:
                 from app.core.event_gateway import get_gateway
 
                 get_gateway()._handle_payload(payload)
             except Exception:
                 logger.debug("Local wake failed for %s", session_id, exc_info=True)
+
+
+# A single short-lived daemon, not one timer/thread per lost event. A burst for
+# one session keeps its highest cursor and never discards a log-recheck hint.
+_wake_retry_lock = threading.Lock()
+_wake_retries: Dict[str, Tuple[int, bool]] = {}
+_wake_retry_running = False
+
+
+def _retry_wake(session_id: str, max_seq: int, recheck_log: bool) -> None:
+    global _wake_retry_running
+    with _wake_retry_lock:
+        previous = _wake_retries.get(session_id)
+        if previous is None and len(_wake_retries) >= 1024:
+            logger.warning("Wake retry queue full; readers will use periodic re-sync")
+            return
+        _wake_retries[session_id] = (max(max_seq, previous[0]) if previous else max_seq,
+                                     recheck_log or bool(previous and previous[1]))
+        if not _wake_retry_running:
+            _wake_retry_running = True
+            try:
+                threading.Thread(target=_resend_wakes, name="event-wake-retry", daemon=True).start()
+            except Exception:
+                _wake_retry_running = False
+                logger.warning("Cannot start wake retry; readers will use periodic re-sync", exc_info=True)
+
+
+def _resend_wakes() -> None:
+    import time
+
+    global _wake_retry_running
+    while True:
+        time.sleep(0.5)
+        with _wake_retry_lock:
+            pending = dict(_wake_retries)
+            _wake_retries.clear()
+        payloads = [json.dumps({"session_id": sid, "max_seq": seq, "recheck_log": recheck})
+                    for sid, (seq, recheck) in pending.items()]
+        try:
+            # One notify-only transaction for the whole burst: a held lock
+            # costs one 250ms wait, not 1024 consecutive waits.
+            with get_db() as conn:
+                conn.cursor().execute(
+                    "SELECT set_config('lock_timeout', '250ms', true), pg_notify(%s, payload) "
+                    "FROM unnest(%s::text[]) AS wake(payload)", (NOTIFY_CHANNEL, payloads))
+        except Exception:
+            logger.warning("Wake retry failed; readers will use periodic re-sync", exc_info=True)
+        with _wake_retry_lock:
+            if not _wake_retries:
+                _wake_retry_running = False
+                return
 
 
 class FenceViolation(Exception):
@@ -715,12 +769,12 @@ def note_log_rewritten(cur: Any, session_id: str) -> None:
 
 
 def notify_log_recheck(cur: Any, session_id: str, max_seq: int) -> None:
-    """Send readers to re-validate this log when the mirror write commits."""
-    try:
-        cur.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, json.dumps({
-            "session_id": session_id, "max_seq": max_seq, "recheck_log": True})))
-    except Exception:  # noqa: BLE001 — absent on the SQLite shim; the gateway also polls
-        pass
+    """Wake after the mirror commits, never hold the notify lock across its WAL flush."""
+    from app.db.base import after_commit
+
+    connection = getattr(cur, "connection", None)
+    if connection is not None:  # PostgreSQL cursor; no NOTIFY on the SQLite shim.
+        after_commit(connection, lambda: send_wake(session_id, max_seq, recheck_log=True))
 
 
 def has_event_at(session_id: str, seq: int) -> bool:

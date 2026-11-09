@@ -388,11 +388,18 @@ lost wake. A log never rewritten keeps its plain epoch, so nothing changes for
 it, and clients only echo the value back, so older tabs work unchanged. Views
 built from the log (`transcript_views`) key on the same reader epoch.
 
-A hand-off import compares only the ids and seqs of the rows. If it corrects a
-row's text under the same id and seq, the token stays put and a client resuming
-above that row keeps the old text until it reloads. That was already so before
-the token existed; it is tracked in
-[#1281](https://github.com/HobbyCoders/ai-shuffle/issues/1281).
+Mirror wakes run after commit, never inside the transaction flushing its WAL.
+If the short notify-lock wait still expires, one bounded, coalescing background
+batch retries the lost hints; periodic reconciliation remains the final fallback.
+The LISTEN socket belongs to an isolated child, not the gateway thread. A frozen
+driver is reaped on a heartbeat deadline. A mailbox gap or reconnect rechecks
+subscribed logs, including a rewrite whose maximum sequence did not change.
+
+A hand-off import also compares the surviving rows' replay content (id, type,
+payload, command, timestamp and turn), not just their keys. A correction under
+the same id and seq rotates the token even at the last row, so a resuming client
+reloads the corrected text. JSON key order and equivalent timestamp/JSON
+representations do not count as changes; an identical import keeps its epoch.
 
 A connection that started with no epoch honours a `reset` once it holds rows, and
 a first load is told the epoch in an `X-Log-Epoch` response header, so a load

@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "fingerprint": "f49a3d7574d7919302c3a8c88924ff2ccfcd925e819d486c37d97e0f385edb82",
-  "bundle_sha256": "fd25ab82e44655d0b698d3b65136508b6ad538d5133fc49236e22d4fb02e0112",
+  "fingerprint": "1b636cd7394db64158485272f316a7c64982f869d46441f617378c8a9251d995",
+  "bundle_sha256": "3729d36557a13ded219a158559980eb7eb481989e29e422789bf26aa565c33fb",
   "minimum_node_major": 22,
   "canonical_sources": {
     "app/api/events.py": "e26e2627ab616f7e49a7fba5314173d100ef5c14ad082ed040444061a6fe66c0",
@@ -9,6 +9,6 @@
     "app/core/transcript_replay.py": "23af5359c20a185b2968f2ed6c8b44ece9142a3787eb3e92579ba13548884e2f",
     "app/core/transcript_views/preprocess.py": "488153378d7d27aa2fc71823268b4a5eaf7963c5208219694ebe4f3a7a76fefe",
     "app/core/turn_recorder.py": "efc213073048fa99a5eade3b234164685b9d66afc06903987ce1fe46ccb6de79",
-    "app/db/session_events.py": "fd8322a9068fbb07c17cc934da5b7dfbed3a271ac37743af29b20348a12de39b"
+    "app/db/session_events.py": "c43256797dd509c95e5dc989a3e4fd90e1a2c38e34787e06503e2fc0af9f40af"
   }
 }
