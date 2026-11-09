@@ -2039,7 +2039,15 @@ class ChatWebSocketHandler:
                 # unnamed source too); computer use reports it as theirs.
                 source="user_stop",
             )
-            receipt = await run_sync(turn_manager.capture_stop_receipt, session_id, target_turn_id, flipped)
+            try:
+                receipt = await run_sync(turn_manager.capture_stop_receipt, session_id, target_turn_id, flipped)
+            except Exception:  # noqa: BLE001 — no admission means no cleanup authority.
+                logger.warning("Stop: receipt capture failed for %s", session_id, exc_info=True)
+                await self.send_json({"type": "error", "session_id": session_id,
+                                      "message": "Stop cleanup could not be admitted. Press Stop again; "
+                                                 "background cleanup has not been confirmed."})
+                await self._v2_broadcast_queue(session_id)
+                return  # A committed flip's durable receipt still retries independently.
             if receipt is not None:
                 # A session-scoped Stop also quiesces queued/blocked work with
                 # no live turn. A stale TURN-scoped Stop still spares successors.

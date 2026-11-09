@@ -132,7 +132,18 @@ The session-wide user-stop/Swarm latch is set only under a fresh ownership and
 input check holding the admission lock: late cleanup cannot latch a successor
 or discover its input. Newer queued input disables the latch but does not spare
 older captured words while ownership is unchanged. Empty captured receipts
-never trigger a fresh read. No admission lock is held into async cleanup, and admission needs neither the run
+never trigger a fresh read. If receipt validation fails before its guarded
+callback, it grants no queue or latch authority, but captured task incarnations
+still stop. Validation and quiescing failures stay retryable: an incomplete
+warning does not checkpoint or consume the durable receipt, so the owner
+observer retries its original boundary. Replayed task scopes use the durable
+producer's incarnation tokens, never a resumed task's current identity.
+A completed read-only validation is
+still valid if only its transaction release fails. Capture failure, before any
+authority exists, instead reports that Stop was not admitted and asks for a new
+Stop; it cannot safely kill a possibly newer owner's scope. A committed flip's
+existing receipt remains independently replayable. No admission lock is held
+into async cleanup, and admission needs neither the run
 nor transcript-counter lock. A newer run (even released) or started successor makes turn-scoped
 admission stale. The marker and closing intent stay untouched;
 the page gets no false "nothing stopped" response and waits for the close. Delivery

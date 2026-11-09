@@ -460,6 +460,7 @@ class _UserStop:
     generation: int
     first: bool
     receipt: Optional[dict] = None
+    validation_failed: bool = False
 
     def _latch_held(self) -> bool:
         from app.core.task_registry import task_registry
@@ -536,10 +537,14 @@ async def _begin_captured_user_stop(session_id: str, receipt: Optional[dict]) ->
     from app.core.task_registry import task_registry
     from app.db import turns as turns_db
 
+    validated: Optional[_UserStop] = None
+
     def begin(latch: bool = True) -> _UserStop:
+        nonlocal validated
         if not latch:
-            return _UserStop(session_id, -1, False, receipt)
-        stop = _begin_user_stop(session_id, receipt)
+            validated = _UserStop(session_id, -1, False, receipt)
+            return validated
+        stop = validated = _begin_user_stop(session_id, receipt)
         # This too is session-wide, so it shares the latch's guarded instant.
         try:
             from app.core.swarm import latch_all
@@ -552,7 +557,15 @@ async def _begin_captured_user_stop(session_id: str, receipt: Optional[dict]) ->
         return begin()  # Legacy direct caller: this call is its admission.
     if not receipt:
         return _UserStop(session_id, -1, False, {})  # Captured empty, not uncaptured.
-    stop = await asyncio.to_thread(turns_db.apply_stop_receipt, session_id, receipt, begin)
+    try:
+        stop = await asyncio.to_thread(turns_db.apply_stop_receipt, session_id, receipt, begin)
+    except Exception:  # noqa: BLE001 — failed validation cannot abandon captured kills.
+        logger.warning("Stop: validating captured input failed for %s", session_id, exc_info=True)
+        # The callback already validated under S if only transaction release
+        # failed. This guard writes no DB state, so that authority still holds.
+        if validated is not None:
+            return validated
+        return _UserStop(session_id, -1, False, {}, validation_failed=True)
     # Still end the captured task incarnations, but never latch or discover
     # current input after ownership/input overtook this captured Stop.
     return stop if stop is not None else _UserStop(session_id, -1, False, {})
@@ -750,6 +763,7 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
     receipt = await stop.bind()
     await stop.overtaken()
 
+    retryable = False
     wakeups_cancelled = 0
     if receipt.get("wakes") or receipt.get("handoffs"):
         try:
@@ -759,6 +773,7 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
                 session_id, receipt.get("wakes") or [], receipt.get("handoffs") or [],
             )
         except Exception:  # noqa: BLE001 — one leg failing must not skip the rest.
+            retryable = True
             logger.warning(
                 "Stop: cancelling wakeups failed for session %s", session_id,
                 exc_info=True,
@@ -771,6 +786,7 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
             removed = await asyncio.to_thread(turns_db.stop_queued_turns, session_id, turn_ids)
             queued_aborted = len(removed)
     except Exception:  # noqa: BLE001
+        retryable = True
         logger.warning(
             "Stop: aborting queued turns failed for session %s", session_id,
             exc_info=True,
@@ -790,6 +806,7 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
 
             await broadcast_work_time(session_id)
     except Exception:  # noqa: BLE001
+        retryable = True
         logger.warning(
             "Stop: settling parked turns failed for session %s", session_id,
             exc_info=True,
@@ -808,6 +825,7 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
         "wakeups_cancelled": wakeups_cancelled,
         "queued_aborted": queued_aborted,
         "parked_settled": parked_settled,
+        **({"retryable": True} if retryable else {}),
         **({"incomplete": True} if task_registry.stop_admission_incomplete(session_id) else {}),
     }
 
@@ -972,6 +990,11 @@ async def stop_all_background_tasks(
         return newer or scope.older_only
 
     spared: list[dict] = []
+    if stop is not None and stop.validation_failed:
+        spared.append({"ok": False, "incomplete": True, "retryable": True,
+                       "reason": "stop validation unavailable",
+                       "detail": "Stop could not validate queued input and wake cleanup. "
+                                 "Captured background tasks were still targeted; cleanup needs a retry."})
     for task_id in scope.unattributed:
         record = task_registry.get_task(session_id, task_id) or {}
         if record.get("worker"):
@@ -1014,8 +1037,9 @@ async def stop_all_background_tasks(
 
     if stop is not None:
         quiesced = await enter_user_stop(session_id, stop=stop)
-        if quiesced.get("incomplete"):
-            spared.append({"ok": False, "incomplete": True, "skipped": "stop receipt unavailable"})
+        if quiesced.get("incomplete") or quiesced.get("retryable"):
+            spared.append({"ok": False, "incomplete": True, "skipped": "stop receipt unavailable",
+                           **({"retryable": True} if quiesced.get("retryable") else {})})
 
     # Checkpoints belong to the pooled engine, not the task registry. Idle
     # sessions have no turn runtime to interrupt, but Stop/archive must still
@@ -1146,7 +1170,7 @@ async def stop_all_background_tasks(
         # enter_user_stop may have published an owner receipt even when the
         # caller supplied none. That bound authority, not the original argument,
         # decides whether the receipt consumer already owns this warning.
-        bound = stop.receipt or {}
+        bound = (receipt if stop.validation_failed else stop.receipt) or {}
         if not _receipt_consumer and not bound.get("cleanup_receipts"):
             from app.core.scoped_remote_stop import record_incomplete_note
             await record_incomplete_note(session_id, results,

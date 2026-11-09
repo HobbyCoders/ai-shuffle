@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 
 logger = logging.getLogger(__name__)
 _running: dict[str, asyncio.Task] = {}
@@ -32,6 +33,7 @@ async def _consume(row: dict, *, scope=None) -> list[dict]:
     from app.core.query_session_lifecycle import capture_stop_scope, stop_all_background_tasks
     from app.core.task_registry import task_registry
     from app.db import stop_receipts
+    from app.db.base import parse_jsonb
 
     current = await asyncio.to_thread(stop_receipts.get, row["id"])
     if current is None:
@@ -46,21 +48,41 @@ async def _consume(row: dict, *, scope=None) -> list[dict]:
         # A deletion may already have removed the mutable mirrors. Keep the
         # captured identities available, but never overwrite a newer local run.
         task_registry.hydrate_rows(sid, receipt.get("tasks") or [])
-        scope = scope or capture_stop_scope(sid, before_turn=int(row["input_cutoff"]) + 1)
+        if scope is None:
+            scope = capture_stop_scope(sid, before_turn=int(row["input_cutoff"]) + 1)
+            # Retry must not recapture a task resumed under the same turn/id.
+            # Durable producer identities, not today's registry, own this Stop.
+            captured = {task["task_id"]: task for task in receipt.get("tasks") or []}
+            unknown = set(scope.runs) - captured.keys()
+            scope = replace(scope,
+                active=[task for task in scope.active if task.get("id") in captured],
+                worker_sessions=[tid for tid in scope.worker_sessions if tid in captured],
+                worker_shells={tid: ids for tid, ids in scope.worker_shells.items() if tid in captured},
+                runs={tid: captured[tid].get("started_at") for tid in scope.runs if tid in captured},
+                orders={tid: (captured[tid]["turn_order"] if captured[tid].get("turn_order") is not None
+                              else captured[tid].get("turn_order_upper_bound"))
+                        for tid in scope.runs if tid in captured},
+                remote_scopes={tid: parse_jsonb(captured[tid].get("remote_stop_scope"))
+                               for tid in scope.runs if tid in captured},
+                unattributed=tuple(sorted(set(scope.unattributed) | unknown)))
         try:
             results = await asyncio.wait_for(stop_all_background_tasks(
                 sid, user_stop=True, scope=scope, receipt=receipt, _receipt_consumer=True,
             ), timeout=30)
         except Exception as exc:
             logger.warning("Stop receipt %s cleanup failed", row["id"], exc_info=True)
-            results = [{"ok": False, "incomplete": True, "reason": type(exc).__name__}]
+            results = [{"ok": False, "incomplete": True, "retryable": True,
+                        "reason": type(exc).__name__}]
         missing = [task["task_id"] for task in receipt.get("tasks") or []
                    if task_registry.get_task(sid, task["task_id"]) is None]
         results.extend({"ok": False, "task_id": tid, "incomplete": True,
                         "reason": "captured task identity unavailable"} for tid in missing)
         result = {"incomplete": any(r.get("incomplete") or r.get("ok") is False for r in results),
                   "results": results}
-        await asyncio.to_thread(stop_receipts.record_result, row["id"], result)
+        # A warning is not completion. Leave failed validation/unfinished
+        # cleanup uncheckpointed so the owner observer replays its same receipt.
+        if not any(r.get("retryable") for r in results):
+            await asyncio.to_thread(stop_receipts.record_result, row["id"], result)
     results = result["results"]
     if result["incomplete"]:
         from app.core.scoped_remote_stop import record_incomplete_note
@@ -69,6 +91,8 @@ async def _consume(row: dict, *, scope=None) -> list[dict]:
                   "tasks": [r["task_id"] for r in results if r.get("task_id") and r.get("incomplete")]})
         if not noted:
             return results
+    if any(r.get("retryable") for r in results):
+        return results
     # Consume only after a committed warning (if needed), never a queued write.
     await asyncio.to_thread(stop_receipts.finish, row["id"], result)
     return results

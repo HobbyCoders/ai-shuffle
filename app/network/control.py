@@ -936,9 +936,16 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                                              turn_id=body.get("turn_id") or None,
                                              **({"source": source} if source else {}))
     is_stop = str(body.get("mode") or "stop") == "stop"
-    receipt = await run_sync(
-        turn_manager.capture_stop_receipt, session_id, body.get("turn_id") or None, row,
-    ) if body.get("stop_background") and is_stop else None
+    try:
+        receipt = await run_sync(
+            turn_manager.capture_stop_receipt, session_id, body.get("turn_id") or None, row,
+        ) if body.get("stop_background") and is_stop else None
+    except Exception:  # noqa: BLE001 — never turn an unadmitted Stop into authority.
+        logger.warning("Stop: receipt capture failed for %s", session_id, exc_info=True)
+        return {"interrupted": row is not None, "finished": False, "incomplete": True,
+                "turn_id": (row or {}).get("id"),
+                "message": "Stop cleanup could not be admitted. Press Stop again; "
+                           "background cleanup has not been confirmed."}
     results = []
     if body.get("stop_background") and (receipt is not None or (row is not None and not is_stop)):
         results = await stop_all_background_tasks(
