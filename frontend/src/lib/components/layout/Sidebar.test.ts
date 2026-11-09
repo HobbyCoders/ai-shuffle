@@ -233,7 +233,7 @@ describe('A new chat changing the order of the project groups (#1307)', () => {
 	const newLooseChat = row('new', 'New loose chat', null, 30);
 
 	/** Lets the groups have a place on the page, and records what asks to move. */
-	function watchMotion(reducedMotion = false) {
+	function watchMotion(reducedMotion = false, listBottom?: number) {
 		const proto = Element.prototype as unknown as { animate?: unknown; };
 		const moved: { el: Element; frames: Keyframe[] }[] = [];
 		proto.animate = vi.fn(function (this: Element, frames: Keyframe[]) {
@@ -243,6 +243,7 @@ describe('A new chat changing the order of the project groups (#1307)', () => {
 			return animation;
 		});
 		const rects = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+			if (listBottom !== undefined && this.classList.contains('list')) return new DOMRect(0, 0, 240, listBottom);
 			const place = Array.from(this.parentElement?.children ?? []).indexOf(this);
 			return new DOMRect(0, place * 400, 240, 400);
 		});
@@ -285,6 +286,23 @@ describe('A new chat changing the order of the project groups (#1307)', () => {
 			expect(String(frames[0].transform)).toMatch(/translateY\(-?[1-9]/);
 			expect(String(frames.at(-1)?.transform)).toBe('translateY(0px)');
 		}
+	});
+
+	it('stops a far group at the bottom of the list so the panel never empties', async () => {
+		const moved = watchMotion(false, 300);
+		mocks.sessions.set([projectChat, looseChat]);
+		render(Sidebar, sidebarProps);
+
+		mocks.sessions.set([newLooseChat, projectChat, looseChat]);
+		await tick();
+		const glides = () => moved.filter(({ frames }) => frames.length > 2);
+		await vi.waitFor(() => expect(glides().length).toBe(2));
+
+		const travel = glides().map(({ frames }) => [frames[0].transform, frames.at(-1)?.transform]);
+		// Rising from 400 to 0: starts at the edge, not at its true place below it.
+		expect(travel).toContainEqual(['translateY(300px)', 'translateY(0px)']);
+		// Sinking from 0 to 400: starts where it was and leaves past the edge.
+		expect(travel).toContainEqual(['translateY(-400px)', 'translateY(-100px)']);
 	});
 
 	it('puts the groups straight in place for reduced motion', async () => {

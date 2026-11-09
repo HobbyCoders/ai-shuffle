@@ -608,14 +608,23 @@
 	// down lifts that whole group over the ones above it (#1307). That is a
 	// screenful of rows changing place with nothing the user touched, so they
 	// glide there. Position only: a group growing by a row must not stretch.
-	function slideGroup(_node: HTMLElement, { from, to }: { from: DOMRect; to: DOMRect }): AnimationConfig {
-		const dy = from.top - to.top;
+	function slideGroup(node: HTMLElement, { from, to }: { from: DOMRect; to: DOMRect }): AnimationConfig {
 		const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
-		if (!dy || reduced) return { duration: 0 };
+		if (from.top === to.top || reduced) return { duration: 0 };
+		// In a long list a group can have thousands of pixels to travel, and the
+		// glide would empty the panel on the way. The part below the list's bottom
+		// edge is out of sight, so a group only covers the distance to that edge.
+		const edge = node.closest('.list')?.getBoundingClientRect().bottom ?? Infinity;
+		const start = from.top > edge && to.top < edge ? edge : from.top;
+		const end = to.top > edge && from.top < edge ? edge : to.top;
 		// The rising group passes over the rest on the panel's own colour, so two
 		// lists of rows never read through each other on the way.
-		const over = dy > 0 ? ' z-index: 1; background: var(--sidebar);' : '';
-		return { duration: 240, easing: cubicOut, css: (_t, u) => `transform: translateY(${u * dy}px);${over}` };
+		const over = start > end ? ' z-index: 1; background: var(--sidebar);' : '';
+		return {
+			duration: 240,
+			easing: cubicOut,
+			css: (_t, u) => `transform: translateY(${end + u * (start - end) - to.top}px);${over}`
+		};
 	}
 	// A lane with no project headers still needs its rows to say where they
 	// belong, unless the whole list is one project and it goes without saying.
