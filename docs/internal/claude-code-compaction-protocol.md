@@ -28,6 +28,17 @@ re-creations: every id is a placeholder the fake fills in at run time, and a
 test (`tests/scripts/test_fake_claude_fixtures.py`) fails on paths, emails,
 tokens, literal ids, private addresses or the owner's names in them.
 
+## Fluid's compaction size goal
+
+The computed conversation target (for example, 30,000 tokens for a 200,000-token
+window) is a **soft goal**, not a hard limit. Recent tool results, the newest
+instructions, and recall/restoration information may keep the result above it.
+An ordinary overshoot is informational and includes the approximate kept size,
+goal, and breakdown of Claude-only rows, stored messages, and Fluid-built rows.
+It is not a compaction failure and does not discard recent work just to reach a
+number. A retained estimate at or above the selected context window is still a
+warning; the CLI's normal context-limit and fallback handling is unchanged.
+
 ## The protocol (2.1.312)
 
 ### Frames
