@@ -13,16 +13,18 @@ from __future__ import annotations
 from contextlib import nullcontext
 import json
 import logging
+import secrets
 import uuid
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db, parse_jsonb as _parse_json, rows_to_list
 from app.db.session_events import notify_session_write
 
 logger = logging.getLogger(__name__)
 
-#: Payload key of a request's chat messages: chat -> when the platform posted it.
-CHAT_PROMPTS_KEY = "chat_prompts"
+#: Payload key of a request's codes in connector chats: chat -> four-digit code.
+CHAT_CODES_KEY = "chat_codes"
+_CHAT_CODE_LOCK_KEY = 718234977
 
 
 def _parse_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -282,16 +284,14 @@ def mark_interaction_requeued(interaction_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-def _edit_pending_payload(interaction_id: str, edit: Callable[[Dict[str, Any]], bool]) -> bool:
-    """Apply ``edit`` to a still-pending interaction's payload; it returns False
-    when the payload already says so.
+def _mark_pending_flag(interaction_id: str, key: str) -> bool:
+    """Stamp ``key: true`` into a still-pending interaction's payload.
 
     Read-modify-write in Python (not a JSONB ``||``) so the SQLite test shim
-    stays compatible; the row is locked for it and the UPDATE is guarded on
-    ``pending``, so it serializes against other edits, an answer, a cancel or an
-    expiry (each also guarded on ``pending``): either the edit lands while the
-    row is pending, or it is refused. True when the row is pending and now
-    carries the edit.
+    stays compatible; the UPDATE is guarded on ``pending``, so it serializes
+    against an answer, a cancel or an expiry (each also guarded on ``pending``):
+    either the stamp lands while the row is pending, or it is refused. True
+    when the row is pending and now carries the stamp.
     """
     session_id = None
     with get_db() as conn:
@@ -305,8 +305,9 @@ def _edit_pending_payload(interaction_id: str, edit: Callable[[Dict[str, Any]], 
         if row is None:
             return False
         payload = dict(_parse_json(row["payload"]) or {})
-        if edit(payload) is False:
+        if payload.get(key):
             return True
+        payload[key] = True
         cursor.execute(
             "UPDATE pending_interactions SET payload=%s WHERE id=%s AND state='pending'",
             (json.dumps(payload), interaction_id),
@@ -317,27 +318,57 @@ def _edit_pending_payload(interaction_id: str, edit: Callable[[Dict[str, Any]], 
     return session_id is not None
 
 
-def _mark_pending_flag(interaction_id: str, key: str) -> bool:
-    """Stamp ``key: true`` into a still-pending interaction's payload."""
-    def mark(payload: Dict[str, Any]) -> bool:
-        if payload.get(key):
-            return False
-        payload[key] = True
-        return True
+def _open_chat_codes(cursor: Any, chat: str) -> Dict[str, Dict[str, Any]]:
+    cursor.execute(
+        "SELECT * FROM pending_interactions "
+        "WHERE state='pending' AND (expires_at IS NULL OR expires_at >= NOW()) "
+        "ORDER BY created_at"
+    )
+    rows = [_parse_row(row) for row in rows_to_list(cursor.fetchall())]
+    return {
+        row["payload"][CHAT_CODES_KEY][chat]: row
+        for row in rows
+        if row and chat in ((row.get("payload") or {}).get(CHAT_CODES_KEY) or {})
+    }
 
-    return _edit_pending_payload(interaction_id, mark)
+
+def open_chat_codes(chat: str) -> Dict[str, Dict[str, Any]]:
+    """Code -> row of each open request asked in ``chat``, oldest first."""
+    with get_db() as conn:
+        return _open_chat_codes(conn.cursor(), chat)
 
 
-def record_chat_prompt(interaction_id: str, chat: str, posted_at: float, owner_revision: Optional[str]) -> bool:
-    """When the platform says it posted this request's message in ``chat``, and
-    which version of the connector's ownership posted it. A reply there must be
-    later, on that same clock, and find the ownership unchanged."""
-    def stamp(payload: Dict[str, Any]) -> bool:
-        payload[CHAT_PROMPTS_KEY] = {**(payload.get(CHAT_PROMPTS_KEY) or {}),
-                                     chat: {"posted_at": posted_at, "owner_revision": owner_revision}}
-        return True
+def assign_chat_code(interaction_id: str, chat: str) -> Optional[str]:
+    """Give a still-pending request a four-digit code in ``chat`` and return it.
 
-    return _edit_pending_payload(interaction_id, stamp)
+    The code is on the row, so it survives a restart with the request. It is
+    unique among this worker's open requests in that chat; the lock stops two
+    requests opening together from drawing the same one. None when the request
+    is no longer pending.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", (_CHAT_CODE_LOCK_KEY,))
+        cursor.execute(
+            "SELECT session_id, payload FROM pending_interactions "
+            "WHERE id=%s AND state='pending' FOR UPDATE",
+            (interaction_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        taken = _open_chat_codes(cursor, chat)
+        code = secrets.choice([f"{n:04d}" for n in range(10000) if f"{n:04d}" not in taken])
+        payload = dict(_parse_json(row["payload"]) or {})
+        payload[CHAT_CODES_KEY] = {**(payload.get(CHAT_CODES_KEY) or {}), chat: code}
+        cursor.execute(
+            "UPDATE pending_interactions SET payload=%s WHERE id=%s AND state='pending'",
+            (json.dumps(payload), interaction_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+    notify_session_write(row["session_id"], "pending_interactions")
+    return code
 
 
 def mark_interaction_parked(interaction_id: str) -> bool:

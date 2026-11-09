@@ -18,7 +18,7 @@ _WRITE_LOCK = threading.Lock()
 _REPLIES = {}
 _REPLY_LOCK = threading.Lock()
 MAX_FRAME = 2_000_000
-METHODS = {"poll_watch", "connect", "disconnect", "send_message", "send_timed",
+METHODS = {"poll_watch", "connect", "disconnect", "send_message",
            "send_permission_prompt", "send_notification",
            "send_typing_indicator", "send_ack_reaction", "mark_as_read", "execute_action", "execute_tool",
            "get_action_availability", "request_action_approval", "handle_webhook_payload", "handle_webhook_activity"}
@@ -111,7 +111,6 @@ async def serve(cls, base):
                 result = True
             elif instance is not None and method in METHODS:
                 conversion = {"send_message": (0, "message", base.OutgoingMessage),
-                              "send_timed": (0, "message", base.OutgoingMessage),
                               "send_permission_prompt": (1, "prompt", base.PermissionPrompt),
                               "request_action_approval": (1, "action", base.ActionDef)}.get(method)
                 if conversion:

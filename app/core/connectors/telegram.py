@@ -18,7 +18,6 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     TriggerDef,
     chunk_text,
-    sent_at_seconds,
 )
 from app.core.connectors import telegram_actions
 
@@ -195,7 +194,6 @@ class TelegramConnector(BaseConnector):
             platform_user_name=user.full_name if user else "Unknown",
             text=message.text or "",
             platform_message_id=str(message.message_id),
-            sent_at=sent_at_seconds(getattr(message, "date", None)),
             metadata={"chat_type": message.chat.type},
         )
         await self.emit_durable_trigger("watch_message_received", {
@@ -296,18 +294,9 @@ class TelegramConnector(BaseConnector):
 
     async def send_message(self, message: OutgoingMessage) -> bool:
         """Send a text message to a Telegram chat."""
-        return await self._send_chunks(message) is not None
-
-    async def send_timed(self, message: OutgoingMessage) -> Optional[float]:
-        """Telegram's own ``date`` on the last message it posted."""
-        sent = await self._send_chunks(message)
-        return sent_at_seconds(getattr(sent[-1], "date", None)) if sent else None
-
-    async def _send_chunks(self, message: OutgoingMessage) -> Optional[List[Any]]:
-        """Each posted message, or None when the send failed."""
         if self._bot is None:
             logger.error("Cannot send message: bot is not initialised")
-            return None
+            return False
 
         try:
             from aiogram.enums import ParseMode
@@ -332,23 +321,22 @@ class TelegramConnector(BaseConnector):
                 )
 
             chunks = chunk_text(message.text, self.MAX_MESSAGE_LENGTH)
-            posted = []
             for i, text in enumerate(chunks):
-                posted.append(await self._bot.send_message(
+                await self._bot.send_message(
                     chat_id=int(message.platform_chat_id),
                     text=text,
                     parse_mode=parse_mode,
                     # Only attach keyboard to the last chunk
                     reply_markup=keyboard if i == len(chunks) - 1 else None,
-                ))
-            return posted
+                )
+            return True
 
         except Exception as exc:
             logger.exception(
                 "Failed to send Telegram message to %s: %s",
                 message.platform_chat_id, exc,
             )
-            return None
+            return False
 
     async def send_typing_indicator(self, platform_chat_id: str) -> None:
         """Send a 'typing' chat action."""

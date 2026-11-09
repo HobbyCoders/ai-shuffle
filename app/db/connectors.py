@@ -394,10 +394,10 @@ def update_connector_session_ai_session(
         )
 
 
-#: ``system_settings`` keys recording a connector reply already counted. The
-#: ``network_`` prefix keeps them on this worker (``app.network.policy``), so they
-#: do not follow a connector to a new owner; ``connector_permissions`` refuses a
-#: reply older than its request for that case.
+#: ``system_settings`` keys recording a connector reply already counted. A code
+#: returns to the pool when its request closes, so without this a late repeat of
+#: "yes 4821" could answer a later request that drew 4821. The ``network_`` prefix
+#: keeps the keys on this worker (``app.network.policy``).
 ANSWER_CLAIM_PREFIX = "network_connector_answer:"
 #: Longer than any platform keeps retrying a delivery (about a week at most).
 ANSWER_CLAIM_TTL_SECONDS = 30 * 24 * 3600

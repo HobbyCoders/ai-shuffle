@@ -2,27 +2,24 @@
 
 Tool approvals for connector-linked sessions belong to the OWNER, not to
 whoever is talking to the bot. The owner can answer in the app, as for a web
-session, or in plain text from one of their own accounts on that connector
-(``connector_service.sender_is_owner``): a connector has no permission UI, so
-a firm yes or no is the control there. Nobody else in the chat can answer; for
-them the chat shows one line saying the agent is waiting, and their "yes" is
-an ordinary message. Platforms can deliver a message twice, so each reply counts
-once, by its platform message ID. A reply with no ID cannot be told from a
-repeat, so it never approves anything and stays an ordinary message.
+session, or in a text reply from one of their own accounts on that connector
+(``connector_service.sender_is_owner``). Nobody else can answer; for them the
+chat shows one line saying the agent is waiting, and what they type is an
+ordinary message.
 
-Those counted IDs stay on the worker that counted them, so a connector that moves
-to another worker can be sent an already counted reply again. A reply therefore
-answers only a request whose message the platform timed before it, both times
-from the platform's clock (``BaseConnector.send_timed``), so the workers' own
-clocks play no part. A request stays on the worker that opened it, and so does
-its time. A platform that does not report that time gets no invitation to reply.
+A request asked in a chat carries a four-digit code, and a reply answers only
+the request it names: "yes 4821" or "no 4821". Platforms repeat messages, also
+to another worker after a connector moves, and nothing about a bare yes says
+which request it meant, so a bare yes answers nothing and the chat shows the
+reply to send. A code that is not open gets "no longer open".
 
-A connector can also come back to a worker whose older request is still open,
-and that request's time cannot tell a repeated reply from a new one. So the
-request also keeps the version of the connector's synced definition that posted
-it (``ownership.revision``), and a reply answers it only while that is unchanged:
-any move, there and back included, sends the owner to the app. The running
-adapter is no guide, because a reassignment does not restart it.
+A reply with a platform message ID counts once on a worker, because a code can
+be drawn again once its request closes. One with no ID cannot be told from a
+repeat, so it answers nothing.
+
+Workers do not share codes, so the one way a reply can answer the wrong request
+is a platform delivering it to a second worker that happens to hold the same
+code open in that chat.
 
 The platform Approve/Deny buttons are not sent, and
 ``ConnectorManager.handle_permission_response`` ignores any left in old chat
@@ -35,14 +32,13 @@ permission flow itself. An unanswered request still ends with its TTL deny.
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional, Tuple
+import re
+from typing import Any, Dict, Optional, Union
 
 logger = logging.getLogger(__name__)
 
-#: What :func:`_request_to_answer` returns for a reply already delivered once.
-_REPEAT_DELIVERY: Tuple[str, str, Dict[str, Any]] = ("", "", {})
-_NOT_AFTER_REQUEST: Tuple[str, str, Dict[str, Any]] = ("", "", {})
-_CONNECTOR_CHANGED: Tuple[str, str, Dict[str, Any]] = ("", "", {})
+#: "yes 4821" in any case, with any spacing, and nothing else.
+_CODED_REPLY = re.compile(r"\s*(yes|no)\s*([0-9]{4})\s*", re.ASCII | re.IGNORECASE)
 
 
 async def deliver_permission_prompt(
@@ -96,7 +92,10 @@ async def deliver_permission_prompt(
                 continue
             text = waiting_for_owner_text(tool_name)
             if action is not None:
-                text = await _ask_in_chat(instance, interaction_id, connector_id, platform_chat_id, action)
+                # A command prefix makes the adapter drop "yes 4821" before it gets here.
+                codeable = None if instance.config.get("command_prefix") else interaction_id
+                text = await asyncio.to_thread(
+                    _question_text, codeable, _chat_key(connector_id, platform_chat_id), action)
             sent = await instance.send_message(
                 OutgoingMessage(platform_chat_id=platform_chat_id, text=text)
             )
@@ -132,42 +131,38 @@ def _action_to_offer(connector_session: Dict[str, Any], tool_name: str, tool_inp
     return owner_confirm.describe(tool_name, tool_input)
 
 
-async def _ask_in_chat(
-    instance: Any, interaction_id: Optional[str], connector_id: str, platform_chat_id: str, action: str,
-) -> str:
-    """Post the action, keep the platform's time for it on the request, and
-    return the line to follow it. The invitation to reply is only written once
-    that time is stored: a channel that gives none must not offer a reply it
-    cannot honour."""
-    from app.core.connectors.base import OutgoingMessage, sent_at_seconds
+def _question_text(interaction_id: Optional[str], chat: str, action: str) -> str:
+    """The question, with the code that answers it once that code is stored on
+    the request. Blocking (DB)."""
     from app.db import interactions
-    from app.network import ownership
 
-    # Read before posting: a move during the send must leave this stamp stale.
-    owner_revision = await asyncio.to_thread(ownership.revision, "connectors", connector_id)
-    posted_at = sent_at_seconds(await instance.send_timed(
-        OutgoingMessage(platform_chat_id=platform_chat_id, text=f"The agent wants to {action}.")
-    ))
-    if posted_at is None or not interaction_id or not await asyncio.to_thread(
-            interactions.record_chat_prompt, interaction_id, _chat_key(connector_id, platform_chat_id),
-            posted_at, owner_revision):
-        return "Answer it in the app."
-    return "Reply yes or no to answer."
+    code = interactions.assign_chat_code(interaction_id, chat) if interaction_id else None
+    if code is None:
+        return f"The agent wants to {action}. Answer it in the app."
+    return f"The agent wants to {action}. Reply yes {code} or no {code}."
 
 
 def _chat_key(connector_id: Any, platform_chat_id: Any) -> str:
     return f"{connector_id}:{platform_chat_id}"
 
 
-def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]]:
-    """``(session id, request id, payload)`` of the oldest request this sender
-    was asked in this chat, else None. Any doubt is None. A repeat of a reply is
-    :data:`_REPEAT_DELIVERY`; one the platform did not time after the request's
-    message, :data:`_NOT_AFTER_REQUEST`; one to a request posted under an earlier
-    version of the connector, :data:`_CONNECTOR_CHANGED`. Blocking (DB)."""
-    from app.core import owner_confirm
+def _code_hint(codes: list) -> str:
+    """What a bare yes or no is told: the reply that would answer."""
+    first = codes[0]
+    if len(codes) == 1:
+        return f"To answer, reply yes {first} or no {first}."
+    return f"Open requests: {', '.join(codes)}. To answer one, reply yes or no with its code, like yes {first}."
+
+
+def _closed_text(code: str) -> str:
+    return f"Request {code} is no longer open."
+
+
+def _read_reply(message: Any, code: Optional[str]) -> Union[Dict[str, Any], str, None]:
+    """What the owner's reply does: the open request it names, the line to tell
+    the chat when it answers nothing ("" for a repeat, which is told nothing),
+    or None when it is an ordinary message. Blocking (DB)."""
     from app.core.connector_service import sender_is_owner
-    from app.core.permission_handler import PERMISSION_KIND
     from app.db import connectors as connectors_db
     from app.db import database, interactions
     from app.network import ownership
@@ -176,72 +171,52 @@ def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]
         return None
     if ownership.enrolled() and not ownership.owns(database.get_connector(message.connector_id)):
         return None
-    message_id = str(message.platform_message_id or "").strip()
-    if not message_id or message.sent_at is None:
-        return None
-    # Claimed before anything is looked up: a yes first delivered with nothing
-    # open was an ordinary message, and its repeat must not answer a later request.
-    if not connectors_db.claim_answer_message(message.connector_id, message.platform_chat_id, message_id):
-        return _REPEAT_DELIVERY
-    linked = database.get_connector_session(message.connector_id, message.platform_chat_id)
-    session_id = (linked or {}).get("session_id")
-    if not session_id or not (linked or {}).get("is_active"):
-        return None
     chat = _chat_key(message.connector_id, message.platform_chat_id)
-    owner_revision = ownership.revision("connectors", message.connector_id)
-    for row in interactions.get_pending_interactions(session_id):
-        payload = row.get("payload") or {}
-        if row.get("kind") != PERMISSION_KIND or not payload.get("request_id"):
-            continue
-        prompt = (payload.get(interactions.CHAT_PROMPTS_KEY) or {}).get(chat)
-        if prompt is None:
-            continue  # never asked in this chat
-        if owner_confirm.is_owner_approval(payload.get("tool_name"), payload.get("tool_input")):
-            if prompt["owner_revision"] != owner_revision:
-                return _CONNECTOR_CHANGED
-            # Strictly later: platforms that report whole seconds cannot order
-            # two messages in one second, so such a reply is asked for again.
-            if message.sent_at <= prompt["posted_at"]:
-                return _NOT_AFTER_REQUEST
-            return session_id, payload["request_id"], payload
-    return None
+    if code is None:
+        codes = list(interactions.open_chat_codes(chat))
+        return _code_hint(codes) if codes else None
+    message_id = str(message.platform_message_id or "").strip()
+    if not message_id:
+        return "This connection did not identify that reply, so it answered nothing. Answer it in the app."
+    # One insert decides, so of concurrent deliveries exactly one goes on.
+    if not connectors_db.claim_answer_message(message.connector_id, message.platform_chat_id, message_id):
+        return ""
+    return interactions.open_chat_codes(chat).get(code) or _closed_text(code)
 
 
 async def answer_from_chat(message: Any) -> bool:
-    """Answer the chat's oldest open request from the owner's plain-text reply.
+    """Answer the open request the owner's reply names by its code.
 
-    True when ``message`` was that answer, a repeat delivery of a reply already
-    counted, or not timed after the request (the owner is told), and needs no
-    agent turn. False leaves it an ordinary message: another sender, nothing
-    asked in this chat, not a firm yes or no, or no platform message ID or send
-    time. Runs ahead of the per-chat message lock, because that lock is held by
-    the very turn waiting for this answer. Never raises.
+    True when ``message`` was for this path and needs no agent turn: an answer,
+    a repeat of one, a bare yes or no while a request is open (told the reply to
+    send), or a code that is not open (told so). False leaves it an ordinary
+    message: another sender, anything else they said, or a bare yes or no with
+    nothing open. Runs ahead of the per-chat message lock, because that lock is
+    held by the very turn waiting for this answer. Never raises.
     """
     from app.core import owner_confirm
 
     try:
-        verdict = owner_confirm.classify(message.text)
-        if verdict == owner_confirm.UNCLEAR or message.attachments:
+        coded = _CODED_REPLY.fullmatch(message.text or "")
+        if message.attachments or (coded is None and owner_confirm.classify(message.text) == owner_confirm.UNCLEAR):
             return False
-        found = await asyncio.to_thread(_request_to_answer, message)
+        code = coded[2] if coded else None
+        found = await asyncio.to_thread(_read_reply, message, code)
         if found is None:
             return False
-        if found is _REPEAT_DELIVERY:
+        if isinstance(found, str):
+            if found:
+                await _tell_chat(message, found)
             return True
-        if found is _NOT_AFTER_REQUEST:
-            await _tell_chat(message, "Couldn't tell that reply came after this request, so it did not "
-                                      "answer it. Reply yes or no again to answer.")
-            return True
-        if found is _CONNECTOR_CHANGED:
-            await _tell_chat(message, "This connector changed after that request was asked. Answer it in the app.")
-            return True
-        session_id, request_id, payload = found
         from app.core.permission_handler import permission_handler
 
-        allow = verdict == owner_confirm.YES
-        result = await permission_handler.respond(request_id, session_id, "allow" if allow else "deny")
+        payload = found["payload"]
+        allow = coded[1].lower() == "yes"
+        result = await permission_handler.respond(payload["request_id"], found["session_id"], "allow" if allow else "deny")
         if not result.get("resolved"):
-            return False
+            # Another path answered it first, or it expired since the lookup.
+            await _tell_chat(message, _closed_text(code))
+            return True
     except Exception:  # noqa: BLE001 — unanswered is safe; the TTL denies it
         logger.warning("connector_permissions: text answer failed", exc_info=True)
         return False

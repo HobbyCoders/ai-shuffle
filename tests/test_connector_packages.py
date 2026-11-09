@@ -81,56 +81,6 @@ async def test_watch_history_roundtrips_through_isolated_package(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override,expected", [
-    pytest.param("", None, id="installed-before-this-existed"),
-    pytest.param(
-        "    async def send_timed(self, message: Any) -> float:\n"
-        "        return 1800000000.5 if message.platform_chat_id == 'chat' else 0.0\n",
-        1800000000.5, id="reports-the-platform-time",
-    ),
-])
-async def test_send_timed_crosses_the_isolated_package(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str, expected: float | None
-) -> None:
-    """A package that predates the method posts and reports no time, so its chat
-    is never invited to reply."""
-    import hashlib
-    from app.core.connectors import package_proxy
-    from app.core.connectors.base import OutgoingMessage
-
-    (tmp_path / "fake_timed.py").write_text(
-        'from typing import Any\n'
-        'from app.core.connectors.base import BaseConnector, ConnectorStatus\n'
-        '\n\n'
-        'class FakeConnector(BaseConnector):\n'
-        '    async def connect(self) -> bool:\n'
-        '        self._status = ConnectorStatus.CONNECTED\n'
-        '        return True\n'
-        '\n'
-        '    async def disconnect(self) -> None:\n'
-        '        pass\n'
-        '\n'
-        '    async def send_message(self, *args: Any, **kwargs: Any) -> bool:\n'
-        '        return True\n'
-        '\n'
-        '    send_permission_prompt = send_notification = send_message\n'
-        '\n'
-        '    def get_context_instructions(self, channel: str) -> str:\n'
-        '        return ""\n'
-        '\n'
-        + override, encoding="utf-8")
-    spec = {"module": "fake_timed", "class": "FakeConnector", "files": {
-        "fake_timed.py": hashlib.sha256((tmp_path / "fake_timed.py").read_bytes()).hexdigest()}}
-    monkeypatch.setattr(package_proxy, "interpreter", lambda _: Path(sys.executable))
-    instance = package_proxy.proxy_class("slack", tmp_path, spec)("fake-timed", "slack", {}, AsyncMock(), AsyncMock())
-    try:
-        assert await instance.connect()
-        assert await instance.send_timed(OutgoingMessage(platform_chat_id="chat", text="hello")) == expected
-    finally:
-        await instance.disconnect()
-
-
-@pytest.mark.asyncio
 async def test_telegram_ingress_commit_ack_crosses_isolated_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

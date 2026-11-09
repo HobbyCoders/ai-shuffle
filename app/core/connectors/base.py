@@ -7,10 +7,8 @@ inherit from BaseConnector and implement the abstract methods.
 
 import asyncio
 import logging
-import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
@@ -22,20 +20,6 @@ class ConnectorStatus(str, Enum):
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
     ERROR = "error"
-
-
-def sent_at_seconds(value: Any) -> Optional[float]:
-    """A timestamp as epoch seconds, from a datetime, an ISO string, or a number
-    in seconds or milliseconds. None when it cannot be read."""
-    try:
-        if isinstance(value, str) and not value.replace(".", "", 1).isdigit():
-            value = datetime.fromisoformat(value)
-        number = value.timestamp() if isinstance(value, datetime) else float(value)
-    except (TypeError, ValueError, OverflowError, OSError):
-        return None
-    if not math.isfinite(number) or number <= 0:
-        return None
-    return number / 1000 if number > 1e11 else number
 
 
 @dataclass
@@ -50,8 +34,6 @@ class IncomingMessage:
     reply_to_message_id: Optional[str] = None
     attachments: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    #: When the platform says it was sent (epoch seconds). None when it did not say.
-    sent_at: Optional[float] = None
 
 
 @dataclass
@@ -335,19 +317,6 @@ class BaseConnector(ABC):
     async def send_message(self, message: OutgoingMessage) -> bool:
         """Send a message to a platform chat. Returns True on success."""
         ...
-
-    async def send_timed(self, message: OutgoingMessage) -> Optional[float]:
-        """Send ``message`` and return when the PLATFORM says it was posted, in
-        epoch seconds. None when the send failed or the platform does not say.
-
-        Override only when that time comes from the same clock as the
-        ``sent_at`` of incoming messages. A permission request in a chat is
-        answered only by a reply the platform timed after the request's message,
-        so this clock is what stops a repeated old reply from approving a new
-        request, whatever the workers' own clocks say.
-        """
-        await self.send_message(message)
-        return None
 
     @abstractmethod
     async def send_permission_prompt(

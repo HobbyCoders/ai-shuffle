@@ -24,7 +24,6 @@ from app.core.connectors.base import (
     ToolDef,
     TriggerDef,
     chunk_text,
-    sent_at_seconds,
 )
 
 logger = logging.getLogger(__name__)
@@ -435,7 +434,6 @@ class LINEConnector(BaseConnector):
             platform_user_name=user_name,
             text=text,
             platform_message_id=message.get("id"),
-            sent_at=sent_at_seconds(event.get("timestamp")),
             metadata={
                 "source_type": source_type,
                 "message_type": msg_type,

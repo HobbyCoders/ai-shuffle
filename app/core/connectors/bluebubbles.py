@@ -23,7 +23,6 @@ from app.core.connectors.base import (
     ToolDef,
     TriggerDef,
     chunk_text,
-    sent_at_seconds,
 )
 from app.core.detached_tasks import spawn_detached
 
@@ -434,7 +433,6 @@ class BlueBubblesConnector(BaseConnector):
             platform_user_name=sender_name,
             text=text,
             platform_message_id=message_guid,
-            sent_at=sent_at_seconds(msg_data.get("dateCreated")),
             metadata={
                 "is_group": is_group,
                 "chat_guid": chat_guid,

@@ -18,7 +18,6 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     TriggerDef,
     chunk_text,
-    sent_at_seconds,
 )
 from app.core.connectors import slack_actions
 
@@ -252,7 +251,6 @@ class SlackConnector(BaseConnector):
                 platform_user_name=user_name,
                 text=text,
                 platform_message_id=event.get("ts", ""),
-                sent_at=sent_at_seconds(event.get("ts")),
                 reply_to_message_id=thread_ts,
                 metadata={
                     "thread_ts": thread_ts,
@@ -332,35 +330,25 @@ class SlackConnector(BaseConnector):
 
     async def send_message(self, message: OutgoingMessage) -> bool:
         """Send a text message to a Slack channel."""
-        return await self._send_chunks(message) is not None
-
-    async def send_timed(self, message: OutgoingMessage) -> Optional[float]:
-        """Slack's own ``ts`` on the last message it posted."""
-        sent = await self._send_chunks(message)
-        return sent_at_seconds(sent[-1].get("ts")) if sent else None
-
-    async def _send_chunks(self, message: OutgoingMessage) -> Optional[List[Any]]:
-        """Slack's response for each posted message, or None when the send failed."""
         if self._web_client is None:
             logger.error("Cannot send message: web client is not initialised")
-            return None
+            return False
 
         try:
-            return [
+            for text in chunk_text(message.text, self.MAX_MESSAGE_LENGTH):
                 await self._web_client.chat_postMessage(
                     channel=message.platform_chat_id,
                     text=text,
                     thread_ts=message.reply_to_message_id,
                 )
-                for text in chunk_text(message.text, self.MAX_MESSAGE_LENGTH)
-            ]
+            return True
 
         except Exception as exc:
             logger.exception(
                 "Failed to send Slack message to %s: %s",
                 message.platform_chat_id, exc,
             )
-            return None
+            return False
 
     async def send_ack_reaction(
         self, platform_chat_id: str, platform_message_id: str

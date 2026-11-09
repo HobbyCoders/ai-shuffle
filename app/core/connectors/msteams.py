@@ -24,7 +24,6 @@ from app.core.connectors.base import (
     PermissionResponseCallback,
     TriggerDef,
     chunk_text,
-    sent_at_seconds,
 )
 from app.core.connectors import msteams_actions
 
@@ -473,7 +472,6 @@ class MSTeamsConnector(BaseConnector):
             platform_user_name=user_name,
             text=text,
             platform_message_id=activity.get("id"),
-            sent_at=sent_at_seconds(activity.get("timestamp")),
             metadata={
                 "conversation_type": conversation_type,
                 "tenant_id": conversation.get("tenantId"),

@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping, Optional, Tuple
 
-from app.db import network as store
 from app.db.base import get_db
 from app.network import engine
 
@@ -26,20 +25,6 @@ OWNED_TABLES = {"automations", "connectors"}
 
 def enrolled() -> bool:
     return engine.context() is not None
-
-
-def revision(table: str, row_id: str) -> Optional[str]:
-    """The synced version of an owned definition; None if it has never synced.
-
-    Each change, including a reassignment back to an earlier owner, publishes a
-    new (clock, origin) pair, and applying one always advances this. Local status
-    writes do not. So an unchanged value means the owner has not moved. Blocking.
-    """
-    if not enrolled():
-        return None
-    with get_db() as conn:
-        record = store.get_record(conn.cursor(), table, row_id)
-    return f"{record['clock']}:{record['origin_device_id']}" if record else None
 
 
 def my_device_id() -> Optional[str]:
