@@ -45,7 +45,21 @@ class PlanProvider:
 @pytest.fixture
 def plan_api(mock_db, monkeypatch, tmp_path):
     from app.api import auth, query, sessions
-    from app.core import credential_gate
+    from app.core import credential_gate, query_engine
+
+    original_stream = query_engine._stream_query_turn
+
+    async def checked_stream(*args, **kwargs):
+        try:
+            async for frame in original_stream(*args, **kwargs):
+                yield frame
+        except asyncio.CancelledError as exc:
+            # A fully consumed ASGI request is not a client disconnect. Keep
+            # the cancellation's originating traceback instead of a later
+            # revision-zero assertion followed by fixture-teardown fallout.
+            raise AssertionError("Plan API producer was unexpectedly cancelled") from exc
+
+    monkeypatch.setattr(query_engine, "_stream_query_turn", checked_stream)
 
     # Only external provider/config discovery is controlled. The API route,
     # admission, recorder claim/publication, real adapter/loop and Plan store run.
@@ -100,6 +114,7 @@ async def test_public_api_claim_to_plan_event_and_readback(plan_api, path):
         if path.endswith("/stream"):
             frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
             assert not [f for f in frames if f["type"] == "error"], frames
+            assert any(f["type"] == "done" for f in frames), frames
             sid = next(f["session_id"] for f in frames if f["type"] == "init")
         else:
             sid = response.json()["session_id"]
