@@ -6,6 +6,7 @@ listening socket address, and proxy-header rewriting is disabled.
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import os
@@ -71,7 +72,8 @@ class IngressApplication:
     other two ports outright, so this is the only way it sees the running UI.
     """
 
-    def __init__(self, app, local_port: int, remote_port: int = REMOTE_PORT, preview_port=None):
+    def __init__(self, app, local_port: int, remote_port: int = REMOTE_PORT, preview_port=None,
+                 *, shutdown_event=None):
         if local_port == remote_port:
             raise ValueError("Local and remote listener ports must be different")
         if preview_port is not None and preview_port in (local_port, remote_port):
@@ -80,6 +82,7 @@ class IngressApplication:
         self.local_port = local_port
         self.remote_port = remote_port
         self.preview_port = preview_port
+        self.shutdown_event = shutdown_event
 
     async def _preview_admitted(self, scope) -> bool:
         """Only the token redirect and requests carrying a live grant pass."""
@@ -111,6 +114,7 @@ class IngressApplication:
     async def __call__(self, scope, receive, send):
         if scope["type"] in {"http", "websocket"}:
             scope = dict(scope)
+            scope["shuffle.http_shutdown"] = self.shutdown_event
             server = scope.get("server")
             port = server[1] if server else None
             # Unknown sockets are deliberately treated as remote.
@@ -187,8 +191,10 @@ def run(app, settings) -> None:
         from app.core import preview_access
 
         preview_access.set_listener_port(preview_port, preview_host if preview_port else None)
+        shutdown_event = asyncio.Event()
         config = uvicorn.Config(
-            IngressApplication(app, local.getsockname()[1], remote.getsockname()[1], preview_port),
+            IngressApplication(app, local.getsockname()[1], remote.getsockname()[1], preview_port,
+                               shutdown_event=shutdown_event),
             host=settings.host,
             port=settings.port,
             proxy_headers=False,
@@ -197,5 +203,30 @@ def run(app, settings) -> None:
             ws_max_size=10 * 1024 * 1024,
             ws_ping_interval=None,
             ws_ping_timeout=None,
+            # Query settlement already drained HTTP. Give Uvicorn one bounded
+            # scheduling tick inside the cleanup reserve: wait_for(timeout=0)
+            # never runs even an empty drain and falsely reports an ERROR.
+            timeout_graceful_shutdown=0.1,
         )
-        uvicorn.Server(config).run(sockets=sockets)
+        class StreamDrainingServer(uvicorn.Server):
+            def handle_exit(self, sig, frame):
+                from app.core import query_shutdown
+                query_shutdown.begin_shutdown()
+                shutdown_event.set()
+                return super().handle_exit(sig, frame)
+
+            async def shutdown(self, sockets=None):
+                from app.core import query_shutdown
+
+                shutdown_event.set()  # Passive subscriptions close immediately.
+                settled = await query_shutdown.settle(http_tasks=set(self.server_state.tasks))
+                if not settled:
+                    logging.getLogger(__name__).warning(
+                        "Query finalization continues beyond HTTP drain; durable recovery retained")
+                await super().shutdown(sockets=sockets)
+                # Also covers embedders whose lifespan does not use app.main.
+                if not await query_shutdown.finish():
+                    logging.getLogger(__name__).warning(
+                        "Query finalization reached stop deadline; terminal receipts retained")
+
+        StreamDrainingServer(config).run(sockets=sockets)

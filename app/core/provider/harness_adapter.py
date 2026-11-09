@@ -2865,7 +2865,9 @@ class HarnessAdapter(ProviderAdapter):
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
 
-        async for event in raw_engine_events(self._engine.events(since_seq=self._event_cursor)):
+        async for event in raw_engine_events(
+            self._engine.events(since_seq=self._event_cursor), on_shutdown=self.abandon_turn,
+        ):
             # Advance the cursor even for untranslated events so the next turn
             # never replays this one.
             if getattr(event, "seq", -1) >= 0:

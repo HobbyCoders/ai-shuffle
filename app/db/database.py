@@ -336,7 +336,9 @@ def _savepoint(cursor, name: str):
 #     a task started. Additive; lands via the always-run guarded blocks in
 #     _run_column_migrations. A wake already pending reads 0, so the next Stop
 #     cancels it.
-SCHEMA_VERSION = 95
+# 96: durable ad-hoc query terminal receipts, committed before provider work.
+#     Additive only; existing turns remain untouched and never become runnable.
+SCHEMA_VERSION = 96
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -2854,6 +2856,8 @@ def _run_column_migrations(cursor: Any) -> None:
     from app.db.background_tasks import create_order_guard
     create_order_guard(cursor)
     _backfill_legacy_task_turn_bounds(cursor)
+    from app.db.query_recovery import create_schema as create_query_recovery_schema
+    create_query_recovery_schema(cursor)
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")

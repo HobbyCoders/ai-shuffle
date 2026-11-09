@@ -2494,6 +2494,11 @@
     "target_pr": 5,
     "base_settings": true
   },
+  "SHUFFLE_SUPERVISOR_STOP_SECONDS": {
+    "kind": "internal",
+    "reason": "Python supervisor-to-app shutdown budget metadata, overwritten by start_app to match its actual stop deadline; not a user preference, deployment option or behaviour switch",
+    "base_settings": false
+  },
   "SHUFFLE_TEST_DIRECTORY": {
     "kind": "internal",
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",
