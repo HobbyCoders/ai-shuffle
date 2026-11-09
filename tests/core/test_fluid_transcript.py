@@ -517,7 +517,7 @@ def _steered_result(steers):
         "kind": "toolresultblock", "tool_use_id": "t1",
         "content": [{"kind": "text", "text": "file body"}],
         "is_error": False,
-        "delivered_steers": [{"accepted_at": None, **steer} for steer in steers],
+        "delivered_steers": steers,
         "delivery_metadata_version": 1,
     }])
 
@@ -554,7 +554,9 @@ def test_steer_fixture_matches_real_fluid_serialization(accepted_at):
         delivery_metadata_version=1,
     )
     assert Message(role="user", content=[block]).to_dict() == _steered_result([
-        {"text": "also end with STEERED", "origin": "user", "sender": None, "id": "s1", "accepted_at": accepted_at},
+        {"text": "also end with STEERED", "origin": "user", "sender": None, "id": "s1",
+         # Receipts without a time keep the key out, so old chats replay byte-identically.
+         **({} if accepted_at is None else {"accepted_at": accepted_at})},
     ])
 
 
