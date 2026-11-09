@@ -115,11 +115,20 @@ def resolve_upload_target(session: Dict[str, Any]) -> tuple[Optional[str], bool]
     bound = bool(session.get("branch") or session.get("worktree_branch")
                  or session.get("worktree_id") or session.get("worktree_path"))
     staging = bound and bool(remote or decision.kind == "none")
-    if not staging and not cwd:
+    if not remote and not cwd:
         error = worktree_unavailable_error(session)
         if error and project_resolver.resolve_local_checkout(session):
-            raise error
-        staging = bool(error)
+            from app.db import git_ops
+
+            project = project_resolver.resolve_project_v2(session)
+            branch = session.get("branch") or session.get("worktree_branch")
+            # Send can still claim/wait for this durable checkout intent. Keep
+            # staging until then, without running or changing the operation.
+            if not branch or not git_ops.find_matching(
+                settings.effective_instance_id, project["id"], "ensure_worktree", branch
+            ):
+                raise error
+        staging = staging or bool(error)
     return cwd, staging
 
 

@@ -104,6 +104,91 @@ def test_shared_project_upload_refuses_unavailable_registered_checkout(branch_up
     assert not (checkout / "uploads").exists()
 
 
+@pytest.mark.parametrize("route", ["session", "project"])
+@pytest.mark.parametrize("state", ["missing", "wrong-branch", "unregistered", "usable", "remote"])
+def test_no_placement_checks_registered_checkout_before_staging(branch_upload, monkeypatch, route, state):
+    client, _, base, checkout = branch_upload
+    from app.core import checkout_manager, placement
+    from app.network import control
+
+    monkeypatch.setattr(placement, "resolve_placement", lambda row: placement.PlacementDecision("none", None, "no capable runner"))
+    monkeypatch.setattr(control, "owner_of", lambda row: "peer-worker" if state == "remote" else None)
+    if state in {"missing", "remote"}:
+        checkout.rename(checkout.with_name("moved-checkout"))
+    elif state == "wrong-branch":
+        subprocess.run(["git", "-C", str(checkout), "switch", "-c", "other"], check=True, capture_output=True)
+    elif state == "unregistered":
+        database.set_session_branch("upload-session", "new/pending", database.get_session("upload-session")["project_v2_id"])
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("upload must not materialize a checkout")
+    monkeypatch.setattr(checkout_manager, "ensure_checkout", unexpected)
+    session = database.get_session("upload-session")
+    expected_cwd = str(checkout) if state == "usable" else None
+    endpoint = ("/api/v1/sessions/upload-session/upload" if route == "session"
+                else "/api/v1/projects/upload-project/upload")
+    response = client.post(endpoint,
+        files={"file": ("degraded-proof.txt", b"degraded placement", "text/plain")},
+        data={} if route == "session" else {"session_id": session["id"]})
+    if state in {"missing", "wrong-branch"}:
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["reason"] == "worktree_unavailable"
+        assert not upload_transfer.session_upload_dir(session["id"]).exists()
+    else:
+        assert upload_transfer.resolve_upload_target(session) == (expected_cwd, True)
+        assert response.status_code == 200, response.text
+        target = Path(response.json()["full_path"])
+        assert target.parent == upload_transfer.session_upload_dir(session["id"])
+        assert target.read_bytes() == b"degraded placement"
+    assert not (base / "uploads").exists()
+    assert not (checkout / "uploads").exists()
+
+
+@pytest.mark.parametrize("route", ["session", "project"])
+@pytest.mark.parametrize("kind", ["none", "runner"])
+@pytest.mark.parametrize("status", ["queued", "running", "error"])
+def test_registered_checkout_with_pending_operation_stages(branch_upload, monkeypatch, route, kind, status):
+    client, _, base, checkout = branch_upload
+    from app.core import checkout_manager, placement
+    from app.db import git_ops
+    from app.network import control
+
+    monkeypatch.setattr(placement, "resolve_placement", lambda row: placement.PlacementDecision(
+        kind, config.settings.effective_instance_id if kind == "runner" else None, "test placement"))
+    monkeypatch.setattr(control, "owner_of", lambda row: None)
+    checkout.rename(checkout.with_name("moved-checkout"))
+    session = database.get_session("upload-session")
+    runner = config.settings.effective_instance_id
+    op = git_ops.insert_op(runner, "ensure_worktree", project_v2_id=session["project_v2_id"],
+        params={"branch": session["branch"]})
+    if status == "running":
+        assert git_ops.claim_op(op["id"], runner)
+    elif status == "error":
+        git_ops.fail_op(op["id"], "checkout could not be prepared")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("upload must not execute a pending checkout operation")
+    monkeypatch.setattr(checkout_manager, "ensure_checkout", unexpected)
+    endpoint = ("/api/v1/sessions/upload-session/upload" if route == "session"
+                else "/api/v1/projects/upload-project/upload")
+    response = client.post(endpoint,
+        files={"file": ("pending-proof.txt", b"pending placement", "text/plain")},
+        data={} if route == "session" else {"session_id": session["id"]})
+    if status == "error":
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["reason"] == "worktree_unavailable"
+        assert not upload_transfer.session_upload_dir(session["id"]).exists()
+    else:
+        assert response.status_code == 200, response.text
+        assert upload_transfer.resolve_upload_target(session) == (None, True)
+        target = Path(response.json()["full_path"])
+        assert target.parent == upload_transfer.session_upload_dir(session["id"])
+        assert target.read_bytes() == b"pending placement"
+    assert git_ops.get_op(op["id"])["status"] == status
+    assert not (base / "uploads").exists()
+    assert not (checkout / "uploads").exists()
+
+
 def test_before_session_exists_upload_still_stages_in_main(branch_upload):
     client, _, base, checkout = branch_upload
     result = upload(client)
