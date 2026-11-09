@@ -145,6 +145,49 @@ test('a row that passes its old position on the way up has not returned', () => 
 	assert.equal(transcriptMovements(frames(rows, { content, composer })), 0);
 });
 
+test('a return is read against where the row rested, including its drift', () => {
+	const rows = [68, 70, 154, 124, 72, 72];
+	const content = [2000, 2000, 2000, 2030, 2082, 2082];
+	const composer = [592, 592, 676, 676, 676, 676];
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 2);
+});
+
+test('a return that stops a few pixels short still counts', () => {
+	const content = [2000, 2000, 2030, 2083];
+	const composer = [592, 678, 678, 678];
+	assert.equal(transcriptMovements(frames([68, 154, 124, 71], { content, composer })), 2);
+});
+
+test('a slow drift back to the old place is a return', () => {
+	const back = Array.from({ length: 86 }, (_, i) => 153 - i);
+	assert.equal(transcriptMovements(frames([68, 154, ...back, 68])), 2);
+});
+
+test('repeated bounces each count', () => {
+	assert.ok(transcriptMovements(frames([68, 154, 68, 154, 68])) >= 4);
+});
+
+test('the real phone path passes its old position and has not returned', () => {
+	const rows = [-38, 47, -534, -558];
+	const content = [2116, 2116, 2697, 2721];
+	const composer = [592, 677, 677, 677];
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 0);
+});
+
+test('a scroll easing past the old place is not a return', () => {
+	const rows = [100, 186, 150, 110, 60, 0, -60, -60];
+	const content = [2000, 2000, 2036, 2076, 2126, 2186, 2246, 2246];
+	const composer = [592, 678, 678, 678, 678, 678, 678, 678];
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 0);
+});
+
+test('a forgiven correction uses up what explained it', () => {
+	const rows = [68, 76, 68, 60, 60, 52];
+	const content = [2000, 2000, 2008, 2008, 2008, 2008];
+	const composer = [744, 752, 752, 752, 752, 752];
+	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 2);
+});
+
 test('content that shrinks does not explain a row moving down', () => {
 	assert.equal(transcriptMovements(frames([500, 500, 540, 540], { content: [2040, 2040, 2000, 2000] })), 1);
 });
