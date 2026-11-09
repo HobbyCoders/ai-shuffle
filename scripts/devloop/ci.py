@@ -1,7 +1,8 @@
 """Run the UI journeys against a fresh dev instance, non-interactively (CI).
 
-    python -m scripts.devloop.ci plan [--shards N]
-    python -m scripts.devloop.ci journeys [--shard I/N] [--out DIR] [--build]
+    python -m scripts.devloop.ci plan [--shards N] [--only NAMES]
+    python -m scripts.devloop.ci matrix [--shards N]
+    python -m scripts.devloop.ci journeys [--shard I/N] [--only NAMES] [--out DIR] [--build]
     python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]
 
 ``journeys`` starts ``python -m scripts.devloop up --ci`` as its own child (so
@@ -15,6 +16,14 @@ the journey files by measured hosted runtime, each file exactly once. Unknown
 or changed case inventories use their current case count (``--list``) times the
 measured per-case median, with conservative floors (not measurements). A stale
 measurement is also a lower bound, scaled by its per-case cost when cases grow.
+
+``matrix`` is the workflow's one selection step. A pull request runs the
+journeys its changed files need (``frontend/tests/journeys/select.mjs --ci``
+over the merge commit's diff); every other event, and a diff or selection that
+cannot be read, runs them all. It prints ``only=`` (``*`` for every journey,
+else the comma-separated names, empty for none) and ``shards=`` (the shard
+numbers that got a file) as step outputs; ``plan`` and ``journeys`` take that
+``only`` value so each shard splits the same selection.
 
 Outputs under ``--out``: ``devloop.log`` (the instance's whole log),
 ``logs/<journey>.log``, and the runner's per-case text timelines (and contact
@@ -55,7 +64,11 @@ FRONTEND = ROOT / "frontend"
 JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
-HOSTED_SHARDS = 13
+HOSTED_SHARDS = 16
+EVERY_JOURNEY = "*"
+SELECTOR = JOURNEYS / "select.mjs"
+SUFFIX = ".journey.mjs"
+JOURNEY_MAP = "frontend/tests/journeys/map.json"
 # Clean shards across six main-suite runs on 2026-11-06 had 7–14s step overhead.
 # Keep the existing setup, retry and teardown allowances. Planning also reserves
 # the 120s error allowed by the independent hosted calibration: point estimates
@@ -113,11 +126,27 @@ def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
     return [sorted(bucket) for bucket in buckets]
 
 
-def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) -> dict[str, float]:
+def parse_only(value: str | None, directory: Path = JOURNEYS) -> list[str] | None:
+    """An ``only`` value as journey file names; None (or ``*``) is every journey."""
+    if value is None or value.strip() == EVERY_JOURNEY:
+        return None
+    names = [name if name.endswith(SUFFIX) else name + SUFFIX
+             for name in (part.strip() for part in value.split(",")) if name]
+    known = {path.name for path in journey_files(directory)}
+    unknown = sorted(set(names) - known)
+    if unknown:
+        raise ValueError(f"--only names no journey file under {directory}: {', '.join(unknown)}")
+    return sorted(set(names))
+
+
+def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS,
+                      only: list[str] | None = None) -> dict[str, float]:
     """Use matched hosted medians; stale/unknown inventories get conservative estimates."""
     files = journey_files(directory)
     if not files:
         raise SystemExit(f"No *.journey.mjs under {directory}: refusing to pass with no journeys")
+    if only is not None:
+        files = [path for path in files if path.name in set(only)]
     data = json.loads(weights_path.read_text(encoding="utf-8"))
     measured, per_case = data["seconds"], data["seconds_per_case"]
     for value in [per_case, *measured.values()]:
@@ -162,8 +191,12 @@ def planning_budget_seconds(runtime: float) -> float:
     return shard_budget_seconds(runtime) + (CALIBRATION_ERROR_SECONDS if runtime else 0)
 
 
-def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) -> list[list[str]]:
-    weights = estimated_seconds(directory, weights_path)
+def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS,
+         only: list[str] | None = None) -> list[list[str]]:
+    """Split the journeys (``only`` these file names, when given) across the shards."""
+    # Two-argument call when unfiltered: tests replace estimated_seconds with that shape.
+    weights = (estimated_seconds(directory, weights_path) if only is None
+               else estimated_seconds(directory, weights_path, only))
     buckets = partition(weights, shards)
     from scripts.devloop import journey_retry as retry
 
@@ -188,6 +221,99 @@ def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) 
                      f"{budget / 60:.1f} | {headroom:.0f} |")
     _write_summary("\n".join(lines) + "\n")
     return buckets
+
+
+# ─── which journeys a run needs ────────────────────────────────────────────
+
+
+def pull_request_files(root: Path = ROOT) -> list[str] | None:
+    """Files a pull request changes, read from its merge commit; None if unreadable.
+
+    ``pull_request`` runs check out GitHub's merge of the branch into its base:
+    the first parent is the base, so that diff is exactly what merging adds.
+    Renames list both paths. Needs the parents fetched (``fetch-depth: 2``).
+    """
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
+                              timeout=60, check=True).stdout
+    try:
+        if len(git("rev-list", "--parents", "-n", "1", "HEAD").split()) != 3:
+            return None  # not a two-parent merge commit
+        listed = git("diff", "--name-only", "--no-renames", "-z", "HEAD^1", "HEAD")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return sorted({name for name in listed.split("\0") if name})
+
+
+def base_journey_map(root: Path = ROOT) -> str | None:
+    """The base branch's map.json (the merge commit's first parent); None if unreadable."""
+    try:
+        text = subprocess.run(["git", "show", f"HEAD^1:{JOURNEY_MAP}"], cwd=root, capture_output=True,
+                              text=True, timeout=60, check=True).stdout
+        json.loads(text)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return text
+
+
+def select_journeys(files: list[str], selector: Path = SELECTOR, directory: Path = JOURNEYS,
+                    previous_map: str | None = None) -> list[str] | None:
+    """The journey files those changed files need; None for all, or when unsure.
+
+    ``previous_map`` is the base's map.json text. With it an edited map selects
+    what either map names for the other files; without it an edit runs them all.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        listing = Path(temporary) / "changed-files.txt"
+        listing.write_text("\n".join(files) + "\n", encoding="utf-8")
+        command = ["node", str(selector), "--ci", "--json", "--files-from", str(listing)]
+        if previous_map is not None:
+            previous = Path(temporary) / "base-map.json"
+            previous.write_text(previous_map, encoding="utf-8")
+            command += ["--previous-map", str(previous)]
+        try:
+            done = subprocess.run(command,
+                                  cwd=ROOT, capture_output=True, text=True, timeout=120, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    if done.returncode != 0:
+        return None
+    try:
+        data = json.loads(done.stdout)
+        if data["all"] is not False:
+            return None
+        return parse_only(",".join(data["journeys"]) if data["journeys"] else "", directory)
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def selection_for_event(event: str | None, root: Path = ROOT) -> tuple[list[str] | None, str]:
+    """(journey files or None for all, why) for a workflow event.
+
+    Only a pull request is narrowed, and only when both its diff and the
+    selection are readable: pushes to main, dispatches and callers run all.
+    """
+    if event != "pull_request":
+        return None, f"every journey: a {event or 'local'} run is not narrowed"
+    files = pull_request_files(root)
+    if files is None:
+        return None, "every journey: the pull request's merge diff could not be read"
+    only = select_journeys(files, previous_map=base_journey_map(root) if JOURNEY_MAP in files else None)
+    if only is None:
+        return None, f"every journey: {len(files)} changed files need the whole suite, or selection failed"
+    return only, f"{len(only)} of the journeys cover the {len(files)} changed files"
+
+
+def matrix(shards: int) -> int:
+    only, why = selection_for_event(os.environ.get("GITHUB_EVENT_NAME"))
+    buckets = plan(shards, only=only)
+    numbers = [index for index, bucket in enumerate(buckets, 1) if bucket]
+    print(f"[ci] UI journeys: {why}", file=sys.stderr, flush=True)
+    _write_summary(f"\n**UI journeys for this run:** {why}.\n")
+    # stdout is the step's output file: exactly these two lines.
+    print(f"only={EVERY_JOURNEY if only is None else ','.join(name.removesuffix(SUFFIX) for name in only)}")
+    print(f"shards={json.dumps(numbers, separators=(',', ':'))}")
+    return 0
 
 
 # ─── refresh hosted runtime measurements ────────────────────────────────────
@@ -504,7 +630,7 @@ def journeys(args: argparse.Namespace) -> int:
     (attempt_out / "logs").mkdir(parents=True, exist_ok=True)
     (attempt_out / "journeys").mkdir(parents=True, exist_ok=True)
     label = f"shard {index}/{shards}"
-    mine = plan(shards)[index - 1]
+    mine = plan(shards, only=parse_only(args.only))[index - 1]
     commands = ([["node", str(JOURNEYS / name)] for name in mine]
                 if args.retry_failures else commands_for(mine, shards))
     print(f"[ci] {label}: {', '.join(' '.join(Path(part).name for part in c[1:]) for c in commands) or 'nothing'}",
@@ -607,10 +733,15 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     show = commands.add_parser("plan", help="Print the journey files of every shard as JSON")
     show.add_argument("--shards", type=int, default=1)
+    only_help = f"Comma-separated journey names to split instead of all ({EVERY_JOURNEY} = all)"
+    show.add_argument("--only", help=only_help)
+    choose = commands.add_parser("matrix", help="Print this workflow event's journey selection and shards")
+    choose.add_argument("--shards", type=int, default=HOSTED_SHARDS)
     refresh = commands.add_parser("refresh-weights", help="Measure journey runtimes from green hosted runs")
     refresh.add_argument("run_ids", type=int, nargs="+", metavar="RUN_ID")
     run = commands.add_parser("journeys", help="Run a shard of the journeys on a fresh instance")
     run.add_argument("--shard", type=_shard, default=(1, 1), metavar="I/N")
+    run.add_argument("--only", help=only_help)
     run.add_argument("--out", type=Path,
                      default=Path(tempfile.gettempdir()) / "ai-shuffle-journeys-ci")
     run.add_argument("--build", action="store_true",
@@ -622,8 +753,10 @@ def main(argv: list[str] | None = None) -> int:
                      help="CI only: retry up to three failed cases/crashed files once, in the same instance")
     args = parser.parse_args(argv)
     if args.command == "plan":
-        print(json.dumps(plan(args.shards)))
+        print(json.dumps(plan(args.shards, only=parse_only(args.only))))
         return 0
+    if args.command == "matrix":
+        return matrix(args.shards)
     if args.command == "refresh-weights":
         refresh_weights(args.run_ids)
         return 0

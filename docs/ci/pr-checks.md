@@ -31,10 +31,12 @@ These workflows retain manual dispatch and also run on unfiltered
   credentials; it never installs or updates a production CLI.
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
-  tools/WebCrypto vectors, Browser MCP, the thirteen `UI journeys (N/13)` shards
-  and `Visual regression (4 viewports)` run in parallel. The stable
-  `JavaScript package checks` aggregate requires every branch to succeed, so
-  the journeys and the visual comparison are required for merge (see
+  tools/WebCrypto vectors, Browser MCP, `Select UI journeys` with the
+  `UI journeys (N/16)` shards it starts, and `Visual regression (4 viewports)`
+  run in parallel. The stable `JavaScript package checks` aggregate requires
+  every branch to succeed (the journeys may be skipped only when the selection
+  succeeded and chose none), so the selected journeys and the visual comparison
+  are required for merge (see
   [UI journeys and visual regression](#ui-journeys-and-visual-regression)).
 - `desktop.yml`: desktop typecheck and unit tests; packaging stays manual.
 - `desktop-source-checks.yml`: source-update protocol regressions.
@@ -57,7 +59,10 @@ These workflows retain manual dispatch and also run on unfiltered
   covers the production container path without requiring secrets.
 - `ci-android-minified.yml`: build the R8/resource-shrunk Play release bundle and
   test the non-debuggable `releaseSmoke` variant on API 34/36. Its fixture launcher
-  and disposable signing are test-only; release keep rules are unchanged. The
+  and disposable signing are test-only; release keep rules are unchanged. Like
+  `android.yml` it runs only on PRs that change what the APK is built from
+  (`android/**`, `mobile/**`, `frontend/**`), its own workflow or the cost policy:
+  a backend-only PR starts neither. The
   `android.yml` also runs the broader **debug** instrumentation suite on relevant
   PRs, as described below. Neither workflow publishes on a PR or needs publisher credentials.
 
@@ -957,9 +962,10 @@ out whether tests pass.
 
 ## UI journeys and visual regression
 
-Both run on every pull request in `ci-frontend.yml` on free standard runners
-and feed the required `JavaScript package checks` aggregate. Neither uses a
-path filter (no frontend job does).
+Both run in `ci-frontend.yml` on free standard runners and feed the required
+`JavaScript package checks` aggregate. The workflow has no path filter. The
+visual comparison runs on every pull request; the journeys a pull request runs
+are selected from its changed files, and every push to main runs all of them.
 
 ### UI journeys
 
@@ -975,19 +981,53 @@ for an unmatched glob, a rule-less or unknown journey, and a rule missing its
 `why`. The policy test rejects job- or step-level conditions, `continue-on-error`
 and shell overrides on this check, and keeps `contracts` in both the aggregate's
 `needs` and its expected-results list.
-This validates selection metadata; the journey shards still run every journey.
+This validates the selection metadata the pull request selection below relies on.
 
-`UI journeys (N/13)`: each shard installs the Python and JavaScript
+`Select UI journeys` (`python3 -m scripts.devloop.ci matrix --shards 16`) decides
+what a run needs and prints two outputs: `only` (`*` for every journey, else the
+journey names) and `shards` (the shard numbers that got a file).
+
+- A push to main (`main-suite.yml`), a dispatch and any caller run **every**
+  journey. Main is where the whole suite gates the nightly.
+- A pull request runs the journeys `select.mjs --ci` names for its changed
+  files. The files are the merge commit's own changes (`git diff HEAD^1 HEAD`
+  on GitHub's merge of the branch into its base, hence `fetch-depth: 2`; a
+  rename lists both paths). The union of every matching `map.json` rule is
+  selected; a file matching an `all` rule (the harness, `select.mjs`, this
+  workflow, `scripts/devloop/**`, the core chat surface and the session event
+  stream) selects everything.
+- A changed non-test file under `unmapped_runs_all` (`frontend/src/**`,
+  `frontend/static/**`) that **no** rule covers also selects everything: the
+  map says what a file needs, it does not prove an unlisted UI file needs
+  nothing. Files outside those globs that no rule covers (docs, most backend
+  code) select nothing. Only the CI selection widens like this; a local
+  `select.mjs` keeps naming what the rules name.
+- An edit to `map.json` is judged against the base's copy
+  (`git show HEAD^1:frontend/tests/journeys/map.json`): the other changed files
+  select what **either** copy names, so an edit can add journeys to the run but
+  cannot drop one the base map requires. If the base copy cannot be read, the
+  edit selects everything.
+- If the merge diff or the selection cannot be read, or the answer is not
+  usable, every journey runs. Nothing fails open to "none".
+
+Only the shards with a file start (`matrix.shard` is the `shards` output), and
+each repeats the same split with `--only`. With an empty selection the
+`UI journeys` job is skipped; the aggregate accepts that only when
+`Select UI journeys` succeeded with `shards` equal to `[]`, and requires
+success in every other case. A regression in a journey the pull request did
+not select is caught by the full run on main, before the nightly is published.
+
+`UI journeys (N/16)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
 playwright-core build, cached), builds and stamps the desktop UI, then runs
-`python -m scripts.devloop.ci journeys --shard N/13 --retry-failures`. That starts a fresh dev
+`python -m scripts.devloop.ci journeys --shard N/16 --only <selection> --retry-failures`. That starts a fresh dev
 instance (`python -m scripts.devloop up --ci`: real app, its own throwaway
 PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
 scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
-`down`. The plan step splits the journey files across the thirteen shards by
+`down`. The plan step splits the selected journey files across the sixteen shards by
 measured hosted runtime, longest first, each file exactly once
-(`python -m scripts.devloop.ci plan --shards 13`). The checked-in medians are
+(`python -m scripts.devloop.ci plan --shards 16 --only <selection>`). The checked-in medians are
 in `scripts/devloop/journey_weights.json`, when the current unfiltered `--list`
 case count matches the recorded inventory. New files and changed case counts
 use the current count times the measured median seconds per case, with explicit
@@ -1004,7 +1044,7 @@ job log and step summary (excluding instance setup/teardown); stdout remains
 the JSON partition consumed by the workflow. A shard with no file stops after
 the plan, and a plan with no journey file at all fails.
 
-Thirteen free standard-runner shards preserve the original 1110-second journey
+Sixteen free standard-runner shards preserve the original 1110-second journey
 bound and all operational allowances: 30 seconds of setup, the full 180-second
 retry phase, and 180 seconds of teardown inside the unchanged 1500-second step.
 The planning budget additionally reserves the 120-second prediction error allowed
@@ -1012,9 +1052,16 @@ by the independent hosted calibration. That uncertainty is not borrowed from
 retry or teardown: the stronger headroom regression limits point-estimated
 journey runtime to 990 seconds. Job logs and summaries include this error reserve.
 The Nov 9 refresh from clean matched main run `42664620034` covers 64 files and
-1064 cases, totaling 11822.90 measured seconds. Thirteen shards peak at 944.27
-seconds; the one-percent-refresh regression also preserves the uncertainty
-reserve when it adds two new journeys. Older green runs with changed app/journey
+1064 cases, totaling 11822.90 measured seconds. Thirteen shards averaged about
+910 seconds against the 990-second planning limit, so nearly every pull request
+that added journey cases failed the headroom regression until its author
+rebalanced the suite: 15 of 22 failed backend runs on Nov 8–9, across nine
+branches. Sixteen shards still peak at 944.27 seconds (one file,
+`chat-position-stability`, with `stop-with-queued-messages` next at 907.59),
+but every other shard plans at or under about 780 seconds, leaving over 200
+seconds for new cases. Growth in those two files is the remaining limit: split
+them before adding cases to either. The one-percent-refresh regression also
+preserves the uncertainty reserve when it adds two new journeys. Older green runs with changed app/journey
 workloads cannot refresh these measurements: the guarded producer refuses them.
 New or grown files keep their conservative case-count fallbacks until a complete
 matching green main run supplies fresh measurements.

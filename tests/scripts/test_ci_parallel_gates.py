@@ -59,6 +59,30 @@ def test_gates_fail_closed_for_failed_cancelled_skipped_and_missing_branches():
                 assert run(broken) != 0, (filename, name, result)
 
 
+def test_javascript_gate_accepts_skipped_journeys_only_for_a_successful_empty_selection():
+    gate = workflow("ci-frontend.yml")["jobs"]["javascript"]
+    command = gate["steps"][0]["run"].split("<<'JS'\n", 1)[1].rsplit("\nJS", 1)[0]
+
+    def passes(plan_result, shards, journeys):
+        results = {name: {"result": "success"} for name in gate["needs"]}
+        results["journey-plan"] = {"result": plan_result, "outputs": {"only": "", "shards": shards}}
+        results["journeys"] = {"result": journeys}
+        return subprocess.run(["node", "--input-type=module", "-e", command],
+                              env={**os.environ, "RESULTS": json.dumps(results)},
+                              capture_output=True).returncode == 0
+
+    assert passes("success", "[]", "skipped")
+    assert passes("success", "[1,2]", "success")
+    # Journeys that should have run, a selection that failed, and an empty
+    # selection whose journeys did not skip are all red.
+    assert not passes("success", "[1,2]", "skipped")
+    assert not passes("success", "", "skipped")
+    assert not passes("failure", "[]", "skipped")
+    assert not passes("skipped", "[]", "skipped")
+    assert not passes("success", "[]", "failure")
+    assert not passes("success", "[]", "cancelled")
+
+
 def test_all_parallel_branches_remain_unconditional_and_required():
     js = workflow("ci-frontend.yml")["jobs"]
     assert set(js["javascript"]["needs"]) == set(js) - {"javascript"}
@@ -203,23 +227,27 @@ if __name__ == "__main__":
 
 def test_ui_journeys_and_visual_regression_gate_every_pr():
     jobs = workflow("ci-frontend.yml")["jobs"]
-    assert {"journeys", "visual"} <= set(jobs["javascript"]["needs"])
+    assert {"journey-plan", "journeys", "visual"} <= set(jobs["javascript"]["needs"])
     journeys = jobs["journeys"]
     assert journeys["runs-on"] == "ubuntu-latest"
     assert journeys["strategy"]["fail-fast"] == "false"
-    shards = journeys["strategy"]["matrix"]["shard"]
     from scripts.devloop.ci import HOSTED_SHARDS
-    assert shards == [str(index) for index in range(1, HOSTED_SHARDS + 1)]
+    # Only the shards the selection gave a file start; the selection job plans
+    # the same HOSTED_SHARDS split every shard then repeats for its own files.
+    assert journeys["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.journey-plan.outputs.shards) }}"
+    select = jobs["journey-plan"]["steps"][-1]["run"]
+    assert select == f'python3 -m scripts.devloop.ci matrix --shards {HOSTED_SHARDS} >> "$GITHUB_OUTPUT"'
+    shards = range(HOSTED_SHARDS)
     assert journeys["name"] == f"UI journeys (${{{{ matrix.shard }}}}/{HOSTED_SHARDS})"
     steps = {step.get("name"): step for step in journeys["steps"]}
     plan = steps["Plan this shard"]["run"]
-    assert f"plan --shards {len(shards)}" in plan
+    assert f'plan --shards {len(shards)} --only "$JOURNEY_SELECTION"' in plan
     assert f"UI journeys shard ${{{{ matrix.shard }}}}/{len(shards)}:" in plan
     journey_step = steps["Run the journeys on a fresh dev instance"]
     assert journey_step["timeout-minutes"] == "25"
     run = journey_step["run"]
     assert "--retry-failures" in run
-    assert f'--shard "${{{{ matrix.shard }}}}/{len(shards)}"' in run
+    assert f'--shard "${{{{ matrix.shard }}}}/{len(shards)}" --only "$JOURNEY_SELECTION"' in run
     assert "/usr/lib/postgresql/16/bin" in run and "||" not in run
     assert "python -m app.preview stamp" in steps["Build and stamp the desktop UI"]["run"]
     # Steps after the plan skip only for a shard the plan gave no journey file.

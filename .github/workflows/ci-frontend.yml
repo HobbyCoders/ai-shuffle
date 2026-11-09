@@ -251,27 +251,50 @@ jobs:
         working-directory: frontend
         run: timeout --kill-after=10s 60s node --test tests/journeys/lib/*.test.mjs tests/journeys/runner.test.mjs
 
+  journey-plan:
+    name: Select UI journeys
+    # A pull request runs the journeys its changed files need
+    # (frontend/tests/journeys/map.json; an uncovered UI source file, or a diff
+    # that cannot be read, runs them all). A push to main, a dispatch and a
+    # caller always run every journey. Needs the merge commit's parents.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      only: ${{ steps.select.outputs.only }}
+      shards: ${{ steps.select.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Select the journeys and their shards
+        id: select
+        run: python3 -m scripts.devloop.ci matrix --shards 16 >> "$GITHUB_OUTPUT"
+
   journeys:
-    name: UI journeys (${{ matrix.shard }}/13)
-    # Real app, real PostgreSQL 16, fake AI, real Chromium: every
+    name: UI journeys (${{ matrix.shard }}/16)
+    # Real app, real PostgreSQL 16, fake AI, real Chromium: the selected
     # frontend/tests/journeys/*.journey.mjs against a fresh dev instance
-    # (python -m scripts.devloop up --ci). Shards split the journey files by
-    # measured hosted runtime, each file exactly once; a shard with none ends after the plan.
+    # (python -m scripts.devloop up --ci). Shards split those files by measured
+    # hosted runtime, each file exactly once; only shards with a file start.
+    needs: journey-plan
+    if: needs.journey-plan.outputs.shards != '[]'
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        shard: ${{ fromJSON(needs.journey-plan.outputs.shards) }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      JOURNEY_SELECTION: ${{ needs.journey-plan.outputs.only }}
     steps:
       - uses: actions/checkout@v4
       - name: Plan this shard
         id: plan
         run: |
-          plan=$(python3 -m scripts.devloop.ci plan --shards 13)
+          plan=$(python3 -m scripts.devloop.ci plan --shards 16 --only "$JOURNEY_SELECTION")
           files=$(python3 -c 'import json, sys; print(" ".join(json.loads(sys.argv[1])[int(sys.argv[2]) - 1]))' "$plan" "${{ matrix.shard }}")
           echo "files=$files" >> "$GITHUB_OUTPUT"
-          echo "UI journeys shard ${{ matrix.shard }}/13: ${files:-no journey files} (plan: $plan)" >> "$GITHUB_STEP_SUMMARY"
+          echo "UI journeys shard ${{ matrix.shard }}/16: ${files:-no journey files} (plan: $plan)" >> "$GITHUB_STEP_SUMMARY"
       - if: steps.plan.outputs.files != ''
         uses: actions/setup-python@v5
         with:
@@ -337,7 +360,7 @@ jobs:
           # The runner's preinstalled, stopped PostgreSQL 16 binaries; the dev
           # instance initializes its own throwaway cluster on a free port.
           export PATH="/usr/lib/postgresql/16/bin:$PATH"
-          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/13" --out "$RUNNER_TEMP/ui-journeys" --retry-failures
+          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/16" --only "$JOURNEY_SELECTION" --out "$RUNNER_TEMP/ui-journeys" --retry-failures
       - name: Upload journey timelines
         # A green retry is still a bug signal: retain both attempts.
         if: failure() || steps.journeys.outputs.retried == 'true'
@@ -399,7 +422,7 @@ jobs:
   javascript:
     name: JavaScript package checks
     if: always()
-    needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp, journeys, visual]
+    needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp, journey-plan, journeys, visual]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -410,7 +433,12 @@ jobs:
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
           const results = JSON.parse(process.env.RESULTS);
-          const expected = ["frontend", "contracts", "build", "typechecks", "mobile", "tools", "browser-mcp", "journeys", "visual"];
+          const expected = ["frontend", "contracts", "build", "typechecks", "mobile", "tools", "browser-mcp", "journey-plan", "journeys", "visual"];
           assert.deepEqual(Object.keys(results).sort(), [...expected].sort(), 'missing branch');
-          for (const name of expected) assert.equal(results[name].result, 'success', name);
+          // The journeys are skipped only when the selection succeeded and chose none.
+          const plan = results['journey-plan'];
+          const noJourneys = plan.result === 'success' && plan.outputs?.shards === '[]';
+          for (const name of expected) {
+            assert.equal(results[name].result, name === 'journeys' && noJourneys ? 'skipped' : 'success', name);
+          }
           JS

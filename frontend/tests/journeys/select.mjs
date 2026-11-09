@@ -5,13 +5,22 @@
 //   node tests/journeys/select.mjs --base <ref>     changes vs another base
 //   node tests/journeys/select.mjs --files a b …    these repo-relative paths instead of git
 //   node tests/journeys/select.mjs --why            say which rule picked each journey
-//   node tests/journeys/select.mjs --json           { journeys, reasons, files }
+//   node tests/journeys/select.mjs --json           { journeys, reasons, all, files }
+//   node tests/journeys/select.mjs --files-from <f> the paths listed in a file, one per line
+//   node tests/journeys/select.mjs --ci             pull request selection: also run every journey
+//                                                   when a changed UI source file has no rule
+//                                                   (map.json "unmapped_runs_all")
+//   node tests/journeys/select.mjs --ci --previous-map <f>  the base's map.json: an edited map then
+//                                                   selects what either map names for the other
+//                                                   changed files, instead of every journey
 //   node tests/journeys/select.mjs --check          validate map.json: every glob matches a
 //                                                   tracked file, every journey is reachable
 //   node tests/journeys/select.mjs --check --map <path>  validate another map against this checkout
 //
 // Exit code 0; 2 on a bad map or a git error. Files no rule covers select
-// nothing (a docs or backend-only change needs no journey).
+// nothing (a docs or backend-only change needs no journey). With --ci an
+// uncovered UI source file selects everything instead: the map names what a
+// file needs, it does not prove an unlisted UI file needs nothing.
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
@@ -88,6 +97,55 @@ export function selectJourneys(files, map = loadMap(), journeys = allJourneys())
 	return { journeys: names, reasons: Object.fromEntries(names.map((n) => [n, [...picked.get(n)]])) };
 }
 
+/** Does any rule of the map (an `all` rule or a journey rule) cover `file`? */
+export function isMapped(file, map = loadMap()) {
+	return [...map.all, ...map.rules].some((rule) => rule.globs.some((g) => globToRegExp(g).test(file)));
+}
+
+export const MAP_FILE = 'frontend/tests/journeys/map.json';
+
+/**
+ * What a pull request runs: selectJourneys, plus every journey when a changed
+ * file under map.unmapped_runs_all has no rule. `all` says the result is the
+ * whole suite.
+ *
+ * Editing map.json changes which journeys are chosen, not how the app behaves.
+ * Given the base's map (`previousMap`), an edited map is therefore not itself
+ * a reason to run everything: the other changed files select what EITHER map
+ * names, so an edit can add journeys to this run but never drop one the base
+ * map requires. Without the base's map an edited map runs every journey.
+ */
+export function selectForCi(files, map = loadMap(), journeys = allJourneys(), previousMap = null) {
+	if (previousMap && files.includes(MAP_FILE)) {
+		const others = files.filter((file) => file !== MAP_FILE);
+		const picked = new Map();
+		for (const each of [map, previousMap]) {
+			const part = selectForCi(others, each, journeys);
+			for (const name of part.journeys) picked.set(name, [...(picked.get(name) ?? []), ...part.reasons[name]]);
+		}
+		const names = journeys.filter((name) => picked.has(name));
+		return {
+			journeys: names,
+			reasons: Object.fromEntries(names.map((n) => [n, [...new Set(picked.get(n))]])),
+			all: names.length === journeys.length
+		};
+	}
+	const result = selectJourneys(files, map, journeys);
+	const fallback = map.unmapped_runs_all;
+	const picked = new Map(result.journeys.map((name) => [name, [...result.reasons[name]]]));
+	for (const file of files) {
+		if (isTestFile(file) || !fallback || isMapped(file, map)) continue;
+		if (!fallback.globs.some((g) => globToRegExp(g).test(file))) continue;
+		for (const name of journeys) picked.set(name, [...(picked.get(name) ?? []), `${file}: ${fallback.why}`]);
+	}
+	const names = journeys.filter((name) => picked.has(name));
+	return {
+		journeys: names,
+		reasons: Object.fromEntries(names.map((n) => [n, [...new Set(picked.get(n))]])),
+		all: names.length === journeys.length
+	};
+}
+
 function git(args) {
 	return execFileSync('git', args, { cwd: REPO, encoding: 'utf8' });
 }
@@ -108,6 +166,7 @@ export function checkMap(map = loadMap(), journeys = allJourneys()) {
 	// Tracked plus new (untracked, not ignored) files: a map in a branch may name files it adds.
 	const tracked = [...git(['ls-files']).split('\n'), ...git(['ls-files', '--others', '--exclude-standard']).split('\n')].filter(Boolean);
 	const rules = [...map.all.map((r) => ({ ...r, journeys: ['(all)'] })), ...map.rules];
+	if (map.unmapped_runs_all) rules.push({ ...map.unmapped_runs_all, journeys: ['(all)'] });
 	for (const rule of rules) {
 		if (!rule.why) problems.push(`a rule has no "why": ${JSON.stringify(rule.globs)}`);
 		for (const glob of rule.globs) {
@@ -140,9 +199,17 @@ if (process.argv[1] && relative(process.argv[1], fileURLToPath(import.meta.url))
 		}
 		const baseAt = args.indexOf('--base');
 		const filesAt = args.indexOf('--files');
+		const fromAt = args.indexOf('--files-from');
 		const files =
-			filesAt >= 0 ? args.slice(filesAt + 1).filter((a) => !a.startsWith('--')) : changedFiles(baseAt >= 0 ? args[baseAt + 1] : 'origin/main');
-		const result = selectJourneys(files);
+			fromAt >= 0
+				? readFileSync(args[fromAt + 1], 'utf8').split('\n').map((l) => l.trim()).filter(Boolean)
+				: filesAt >= 0
+					? args.slice(filesAt + 1).filter((a) => !a.startsWith('--'))
+					: changedFiles(baseAt >= 0 ? args[baseAt + 1] : 'origin/main');
+		const previousAt = args.indexOf('--previous-map');
+		const previous = previousAt >= 0 ? JSON.parse(readFileSync(args[previousAt + 1], 'utf8')) : null;
+		const selected = flag('--ci') ? selectForCi(files, loadMap(), allJourneys(), previous) : selectJourneys(files);
+		const result = { ...selected, all: selected.journeys.length === allJourneys().length };
 		if (flag('--json')) console.log(JSON.stringify({ ...result, files }, null, 2));
 		else if (flag('--why')) {
 			for (const name of result.journeys) console.log(`${name}\n${result.reasons[name].map((r) => `    ${r}`).join('\n')}`);

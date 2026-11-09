@@ -2,8 +2,16 @@ name: Android minified release smoke
 
 # No release credentials or publishing. The existing Android CI's full emulator
 # suite remains debug; these black-box tests exercise R8/resource-shrunk code.
+# Like Android CI, a pull request runs this only when it changes what the APK
+# is built from (android/, the bundled mobile/ and shared frontend/ code).
 on:
   pull_request:
+    paths:
+      - 'android/**'
+      - 'mobile/**'
+      - 'frontend/**'
+      - '.github/workflows/ci-android-minified.yml'
+      - 'scripts/ci/test-cost-policy.py'
   workflow_dispatch:
   workflow_call:
 permissions:
