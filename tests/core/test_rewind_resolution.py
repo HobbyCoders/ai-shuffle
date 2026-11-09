@@ -1168,3 +1168,153 @@ async def test_a_call_shaped_checkpoint_without_a_typed_record_is_not_unwrapped(
     se.append_events(SID, [_user_ev("hello"), _asst_ev("a1", uuid="a1")])
     _patch_checkpoints(monkeypatch, [_cp("wrapped", _wrapped("hello"))])
     assert _resolve_checkpoint_uuid_from_content(SDK, WD, "hello", 0, session_id=SID)[0] is None
+
+
+def _call_row(words, source="typed"):
+    row = _user_ev(words)
+    row["payload"]["source"] = source
+    return row
+
+
+def _prompt_seqs():
+    return [row["seq"] for row in _load_message_events(SID) if _is_prompt_event(row)]
+
+
+def _assert_resolves(content, occurrence, checkpoint, prompt_index):
+    """Both resolvers name the same message: the rewind can't cut two places."""
+    assert _resolve_checkpoint_uuid_from_content(SDK, WD, content, occurrence, session_id=SID) == (checkpoint, None)
+    assert _resolve_rewind_from_seq(SID, SDK, WD, checkpoint, False, "user") == (_prompt_seqs()[prompt_index], None)
+
+
+def _assert_refused(content, occurrence, checkpoint):
+    uuid, error = _resolve_checkpoint_uuid_from_content(SDK, WD, content, occurrence, session_id=SID)
+    assert uuid is None and "content guard" in error
+    seq, error = _resolve_rewind_from_seq(SID, SDK, WD, checkpoint, False, "user")
+    assert seq is None and "content guard" in error
+
+
+@pytest.mark.parametrize("typed_first", [True, False])
+async def test_a_call_message_and_its_wrapper_sent_verbatim_each_rewind_to_themselves(mock_db, monkeypatch, typed_first):
+    """Typing into a call, then pasting its exact wrapper, is two messages."""
+    wrapped = _wrapped("hello")
+    seed_session(SID)
+    rows = [_call_row("hello"), _user_ev(wrapped)]
+    se.append_events(SID, rows if typed_first else rows[::-1])
+    _patch_checkpoints(monkeypatch, [_cp("first", wrapped), _cp("second", wrapped, index=1)])
+
+    typed_at, pasted_at = (0, 1) if typed_first else (1, 0)
+    _assert_resolves("hello", 0, ["first", "second"][typed_at], typed_at)
+    _assert_resolves(wrapped, 0, ["first", "second"][pasted_at], pasted_at)
+
+
+@pytest.mark.parametrize("typed_first", [True, False])
+async def test_the_same_words_typed_in_a_call_and_sent_normally_stay_in_order(mock_db, monkeypatch, typed_first):
+    seed_session(SID)
+    rows = [_call_row("hello"), _user_ev("hello")]
+    cps = [_wrapped("hello"), "hello"]
+    if not typed_first:
+        rows, cps = rows[::-1], cps[::-1]
+    se.append_events(SID, rows)
+    _patch_checkpoints(monkeypatch, [_cp("first", cps[0]), _cp("second", cps[1], index=1)])
+
+    _assert_resolves("hello", 0, "first", 0)
+    _assert_resolves("hello", 1, "second", 1)
+
+
+async def test_a_spoken_row_does_not_claim_a_later_prompts_checkpoint(mock_db, monkeypatch):
+    """A spoken turn has no verbatim checkpoint, so it can't take this one."""
+    seed_session(SID)
+    se.append_events(SID, [_call_row("hello", source="voice"), _user_ev("hello")])
+    _patch_checkpoints(monkeypatch, [_cp("only", "hello")])
+
+    _assert_resolves("hello", 1, "only", 1)
+    uuid, error = _resolve_checkpoint_uuid_from_content(SDK, WD, "hello", 0, session_id=SID)
+    assert uuid is None and "content guard" in error
+
+
+async def test_a_checkpoint_with_no_row_is_refused_and_leaves_its_neighbours_working(mock_db, monkeypatch):
+    """Older data or a lost row: the extra checkpoint can't shift the others."""
+    seed_session(SID)
+    se.append_events(SID, [_user_ev("kept"), _user_ev("later")])
+    _patch_checkpoints(monkeypatch, [
+        _cp("older", "from before the log", index=0),
+        _cp("kept", "kept", index=1),
+        _cp("lost", "row was lost", index=2),
+        _cp("later", "later", index=3),
+    ])
+
+    _assert_resolves("kept", 0, "kept", 0)
+    _assert_resolves("later", 0, "later", 1)
+    assert _resolve_rewind_from_seq(SID, SDK, WD, "older", False, "user")[0] is None
+    assert _resolve_rewind_from_seq(SID, SDK, WD, "lost", False, "user")[0] is None
+
+
+async def test_a_row_with_no_checkpoint_is_refused_and_leaves_its_neighbours_working(mock_db, monkeypatch):
+    seed_session(SID)
+    se.append_events(SID, [_user_ev("first"), _user_ev("no checkpoint"), _user_ev("last")])
+    _patch_checkpoints(monkeypatch, [_cp("first", "first"), _cp("last", "last", index=1)])
+
+    _assert_resolves("first", 0, "first", 0)
+    _assert_resolves("last", 0, "last", 2)
+    uuid, error = _resolve_checkpoint_uuid_from_content(SDK, WD, "no checkpoint", 0, session_id=SID)
+    assert uuid is None and "content guard" in error
+
+
+@pytest.mark.parametrize("texts, rows", [
+    # One row, two checkpoints it could equally be.
+    (["again", "again"], ["again"]),
+    # Two rows, one checkpoint that could equally be either.
+    (["again"], ["again", "again"]),
+])
+async def test_an_uneven_duplicate_cannot_be_placed_and_is_refused(mock_db, monkeypatch, texts, rows):
+    seed_session(SID)
+    se.append_events(SID, [_user_ev(text) for text in rows])
+    _patch_checkpoints(monkeypatch, [_cp(f"u-{i}", text, index=i) for i, text in enumerate(texts)])
+
+    for i in range(len(texts)):
+        assert _resolve_rewind_from_seq(SID, SDK, WD, f"u-{i}", False, "user")[0] is None
+    for occurrence in range(len(rows)):
+        assert _resolve_checkpoint_uuid_from_content(SDK, WD, "again", occurrence, session_id=SID)[0] is None
+
+
+@pytest.mark.parametrize("content, occurrence, checkpoint, prompt_index", [
+    ("hello", 0, "first", 0),
+    (_wrapped("hello"), 0, "second", 1),
+])
+async def test_rewinding_either_message_cuts_both_histories_at_it(
+    rewind_env, monkeypatch, content, occurrence, checkpoint, prompt_index,
+):
+    wrapped = _wrapped("hello")
+    seed_session(SID)
+    se.append_events(SID, [_call_row("hello"), _asst_ev("a1", uuid="a1"), _user_ev(wrapped), _asst_ev("a2", uuid="a2")])
+    _patch_checkpoints(monkeypatch, [_cp("first", wrapped), _cp("second", wrapped, index=1)])
+    expected_seq = _prompt_seqs()[prompt_index]
+
+    resp = await execute_rewind_and_wait(SID, RewindRequestV2(
+        target_uuid="", include_response=False, target_content=content, target_occurrence=occurrence,
+    ))
+
+    assert resp.success is True, resp.error
+    assert rewind_env.truncate_calls == [checkpoint]
+    assert [r["payload"]["from_seq"] for r in se.get_events(SID) if r["event_type"] == "transcript.rewound"] == [expected_seq]
+
+
+@pytest.mark.parametrize("by_content", [True, False])
+async def test_a_refused_ambiguous_rewind_touches_neither_history(rewind_env, monkeypatch, by_content):
+    """The typed row is lost, so either wrapped checkpoint could be the prompt."""
+    wrapped = _wrapped("hello")
+    seed_session(SID)
+    se.append_events(SID, [_user_ev(wrapped), _asst_ev("a1", uuid="a1")])
+    _patch_checkpoints(monkeypatch, [_cp("first", wrapped), _cp("second", wrapped, index=1)])
+    before = se.get_events(SID)
+
+    request = (
+        RewindRequestV2(target_uuid="", include_response=False, target_content=wrapped, target_occurrence=0)
+        if by_content else RewindRequestV2(target_uuid="second", include_response=False)
+    )
+    resp = await execute_rewind_and_wait(SID, request)
+
+    assert resp.success is False
+    assert "content guard" in (resp.error or "")
+    assert rewind_env.truncate_calls == []
+    assert se.get_events(SID) == before

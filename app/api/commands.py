@@ -11,6 +11,7 @@ Rewind uses persisted transcript/checkpoint services rather than terminal parsin
 
 import asyncio
 import logging
+from bisect import bisect_left
 from typing import Any, Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
@@ -456,35 +457,109 @@ def _is_prompt_event(row: dict) -> bool:
     return True
 
 
-def _user_checkpoint_identities(user_cps: list, events: List[dict]) -> List[str]:
-    """The recorded prompt text each user checkpoint stands for, in order.
+def _checkpoint_rows(events: List[dict]) -> List[dict]:
+    """Event rows a user checkpoint can stand for, in order.
 
-    Normally that is the checkpoint's own text. A message typed into a voice
-    call is recorded as the words alone while its checkpoint wraps them, so a
-    wrapped checkpoint stands for those words. Pasted text can look just like
-    the wrapping, so the wrapping only counts when the event log agrees: text
-    recorded verbatim as a prompt is that prompt, and a call's context block
-    needs a typed call message with those words. Both rewind resolvers use this
-    one answer, or the model's transcript and the visible history would be cut
-    at different messages.
+    Commands are in the list because a command can leave a checkpoint of its
+    own, which must not be mistaken for a prompt's. Only prompts can be rewound.
     """
-    recorded: set[str] = set()
-    typed: set[str] = set()
-    for row in events:
-        if not _is_prompt_event(row):
+    return [row for row in events if _is_prompt_event(row) or (row.get("payload") or {}).get("kind") == "command"]
+
+
+_UNALIGNED_REWIND = (
+    "Rewind refused: this message cannot be matched to exactly one entry in "
+    "the conversation's transcript, so nothing was changed (content guard)"
+)
+
+
+def _checkpoint_candidates(user_cps: list, prompts: List[dict]) -> List[set[int]]:
+    """For each user checkpoint, the positions in ``prompts`` it could be.
+
+    A row stamped with a checkpoint's uuid is that checkpoint and nothing else.
+    Otherwise provenance decides. An ordinary prompt's checkpoint holds its text
+    verbatim. A message typed into a call is recorded as the words alone while
+    its checkpoint wraps them, so a call's context block can only be a row
+    recorded as typed in a call, and a checkpoint that only gained the voice
+    note can be either kind of row. Calls' own rows never match verbatim:
+    their checkpoint, when there is one, is always wrapped.
+    """
+    payloads = [row.get("payload") or {} for row in prompts]
+    cp_uuids = {cp.uuid for cp in user_cps if cp.uuid}
+    stamped = {p["uuid"]: j for j, p in enumerate(payloads) if p.get("uuid") in cp_uuids}
+    ordinary: dict[str, set[int]] = {}
+    typed: dict[str, set[int]] = {}
+    for j, payload in enumerate(payloads):
+        if payload.get("uuid") in stamped:
             continue
-        payload = row.get("payload") or {}
         content = (payload.get("content") or "").strip()
-        recorded.add(content)
-        if payload.get("source") == "typed":
-            typed.add(content)
-    identities: List[str] = []
+        source = payload.get("source")
+        if source == "typed":
+            typed.setdefault(content, set()).add(j)
+        elif source != "voice":
+            ordinary.setdefault(content, set()).add(j)
+    candidates: List[set[int]] = []
     for cp in user_cps:
+        if cp.uuid in stamped:
+            candidates.append({stamped[cp.uuid]})
+            continue
         text = (cp.full_message or "").strip()
+        rows = set(ordinary.get(text, ()))
         words = typed_request_text(text)
-        vouched = typed if text.startswith(LIVE_CONTEXT_OPENER) else recorded
-        identities.append(words if text not in recorded and words in vouched else text)
-    return identities
+        if words != text:
+            rows |= typed.get(words, set())
+            if not text.startswith(LIVE_CONTEXT_OPENER):
+                rows |= ordinary.get(words, set())
+        candidates.append(rows)
+    return candidates
+
+
+def _chain_lengths(candidates: List[List[int]]) -> List[List[int]]:
+    """Longest in-order pairing ending at each candidate, shaped like the input.
+
+    Each checkpoint's rows must be highest first, so they never extend each other.
+    """
+    tails: List[int] = []
+    lengths: List[List[int]] = []
+    for rows in candidates:
+        found: List[int] = []
+        for j in rows:
+            k = bisect_left(tails, j)
+            found.append(k + 1)
+            if k == len(tails):
+                tails.append(j)
+            else:
+                tails[k] = j
+        lengths.append(found)
+    return lengths
+
+
+def _align_checkpoints(user_cps: list, rows: List[dict]) -> dict[int, int]:
+    """Map checkpoint positions to the one row each certainly stands for.
+
+    Checkpoints and rows are the same conversation in the same order, each with
+    a few entries the other lacks: synthetic transcript lines, older data, a
+    lost row. So the mapping is the longest in-order pairing, each row used
+    once. A pair is returned only when every longest pairing contains it; a
+    checkpoint left out has no row, or more than one row it could equally be,
+    and a rewind to it must be refused. Both rewind resolvers read this one
+    answer, or the model's transcript and the visible history would be cut at
+    different messages.
+    """
+    candidates = [sorted(found, reverse=True) for found in _checkpoint_candidates(user_cps, rows)]
+    last = len(rows) - 1
+    forward = _chain_lengths(candidates)
+    backward = _chain_lengths([[last - j for j in reversed(found)] for found in reversed(candidates)])
+    best = max(map(max, filter(None, forward)), default=0)
+    # Every longest pairing has exactly one pair at each length, so a length
+    # with one possible pair is a pair they all contain.
+    only_pair: dict[int, Optional[tuple[int, int]]] = {}
+    for i, found in enumerate(candidates):
+        after = backward[len(candidates) - 1 - i]
+        for n, j in enumerate(found):
+            length = forward[i][n]
+            if length + after[len(found) - 1 - n] - 1 == best:
+                only_pair[length] = None if length in only_pair else (i, j)
+    return {pair[0]: pair[1] for pair in only_pair.values() if pair}
 
 
 def _resolve_checkpoint_uuid_from_content(
@@ -497,15 +572,16 @@ def _resolve_checkpoint_uuid_from_content(
 ) -> tuple[Optional[str], Optional[str]]:
     """Resolve a checkpoint uuid from the target prompt's content.
 
-    Returns ``(uuid, error)`` — exactly one is non-None. The target is the
-    ``target_occurrence``-th user checkpoint whose (trimmed) text equals
-    ``target_content``. Content anchoring instead of a global ordinal: the
-    SDK transcript contains user-role lines the client never renders
-    (synthetic "[Request interrupted by user]" markers, task notifications,
-    prompts retained after an empty-turn discard), so global positions skew
-    in any session that has seen an interrupt — but those lines never equal
-    a real prompt's text. FAILS CLOSED when nothing matches (content guard).
-    ``session_id`` names the event log that vouches for voice-typed messages.
+    Returns ``(uuid, error)`` — exactly one is non-None. With ``session_id``
+    the target is the ``target_occurrence``-th recorded prompt whose (trimmed)
+    text equals ``target_content``, and the answer is the checkpoint aligned
+    with that row (``_align_checkpoints``). With no event log it is the
+    ``target_occurrence``-th user checkpoint holding that text. Content
+    anchoring instead of a global ordinal: the SDK transcript contains
+    user-role lines the client never renders (synthetic "[Request interrupted
+    by user]" markers, task notifications, prompts retained after an
+    empty-turn discard), so global positions skew in any session that has
+    seen an interrupt. FAILS CLOSED when nothing matches (content guard).
     """
     want = (target_content or "").strip()
     if not want:
@@ -514,8 +590,28 @@ def _resolve_checkpoint_uuid_from_content(
             "(content guard)"
         )
     user_cps = [cp for cp in _get_checkpoints(sdk_session_id, working_dir) if cp.role == "user"]
-    identities = _user_checkpoint_identities(user_cps, _load_message_events(session_id) if session_id else [])
-    matches = [cp for cp, identity in zip(user_cps, identities) if identity == want]
+    rows = _checkpoint_rows(_load_message_events(session_id)) if session_id else []
+    if rows:
+        # The caller counted this occurrence among the visible messages.
+        same = [
+            j for j, row in enumerate(rows)
+            if _is_prompt_event(row) and ((row.get("payload") or {}).get("content") or "").strip() == want
+        ]
+        if target_occurrence < 0 or target_occurrence >= len(same):
+            return None, (
+                f"Rewind refused: event log has {len(same)} user prompt(s) "
+                f"matching the target content, occurrence {target_occurrence} "
+                f"requested (content guard)"
+            )
+        row_pos = same[target_occurrence]
+        aligned = _align_checkpoints(user_cps, rows)
+        position = next((i for i, j in aligned.items() if j == row_pos), None)
+        if position is None:
+            return None, _UNALIGNED_REWIND
+        matches = [user_cps[position]]
+        target_occurrence = 0
+    else:
+        matches = [cp for cp in user_cps if (cp.full_message or "").strip() == want]
     if target_occurrence < 0 or target_occurrence >= len(matches):
         return None, (
             f"Rewind refused: transcript has {len(matches)} user prompt(s) "
@@ -553,11 +649,10 @@ def _resolve_rewind_from_seq(
     Resolution order:
     1. uuid short-circuit — a backfilled (or uuid-stamped) message.* event whose
        payload uuid equals the target.
-    2. content + occurrence — the target checkpoint's text and its occurrence
-       among identical-text JSONL user checkpoints map to the matching
-       prompt-shaped message.user event. Content anchoring (not a global
-       ordinal) because the JSONL contains user-role lines the event log
-       never records — synthetic interrupt markers, retained discards.
+    2. alignment — the target checkpoint's one prompt-shaped message.user event
+       under ``_align_checkpoints``. Not a global ordinal, because the JSONL
+       contains user-role lines the event log never records — synthetic
+       interrupt markers, retained discards.
     """
     events = _load_message_events(session_id)
     if not events:
@@ -588,21 +683,11 @@ def _resolve_rewind_from_seq(
                 f"Rewind refused: target {target_uuid} not found among the "
                 f"transcript's user prompts"
             )
-        identities = _user_checkpoint_identities(user_cps, events)
-        want = identities[pos]
-        occurrence = identities[:pos].count(want)
-        prompts = [
-            (i, row) for i, row in enumerate(events)
-            if _is_prompt_event(row)
-            and ((row.get("payload") or {}).get("content") or "").strip() == want
-        ]
-        if occurrence >= len(prompts):
-            return None, (
-                f"Rewind refused: event log has {len(prompts)} user prompt(s) "
-                f"matching the target's text but the transcript places it at "
-                f"occurrence {occurrence} (content guard)"
-            )
-        target_idx = prompts[occurrence][0]
+        rows = _checkpoint_rows(events)
+        row_pos = _align_checkpoints(user_cps, rows).get(pos)
+        if row_pos is None or not _is_prompt_event(rows[row_pos]):
+            return None, _UNALIGNED_REWIND
+        target_idx = next(i for i, row in enumerate(events) if row is rows[row_pos])
 
     if target_role == "assistant" or include_response:
         # Keep the target (and its response); drop from the NEXT user prompt.
