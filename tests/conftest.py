@@ -791,6 +791,21 @@ def _no_host_memory_admission_floor(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_app_error_log_handler(_auto_db_shim, monkeypatch):
+    """Retire lifespan-owned DB logging before the next test borrows the root.
+
+    An interrupted lifespan (e.g. the aborted event-gateway test) never reaches
+    its late uninstall. Its listener would then persist unrelated tests' logs
+    through their DB mocks. Keep both the DB shim and monkeypatches alive until
+    the queue has drained; leave pytest/caplog and other root sinks untouched.
+    """
+    yield
+    error_logging = sys.modules.get("app.core.error_log_handler")
+    if error_logging is not None:
+        error_logging.uninstall_error_log_handler()
+
+
+@pytest.fixture(autouse=True)
 def reset_shutdown_flag():
     """Clear ``startup.is_shutting_down`` before each test.
 
