@@ -319,8 +319,13 @@ def payload() -> dict[str, Any]:
                 "checked_at": account.get("checked_at"),
                 "needs_sign_in": not folder_ok or account.get("signed_in") is False,
             })
+        refresh_error = {}
         if identities_changed:
-            _save(state)
+            try:
+                _save(state)
+            except Exception:  # noqa: BLE001 — keep readable rows and API keys available
+                logger.warning("Could not refresh saved Claude sign-ins", exc_info=True)
+                refresh_error["subscription_error"] = "storage_unavailable"
         active_row = next((r for r in rows if r["id"] == active_saved), None)
         return {
             "subscription": rows,
@@ -329,6 +334,7 @@ def payload() -> dict[str, Any]:
             "login_pending": state["pending"] is not None,
             "login": _login_state(state["pending"]),
             "recovery_required": bool(active_row and active_row["needs_sign_in"]),
+            **refresh_error,
         }
 
 

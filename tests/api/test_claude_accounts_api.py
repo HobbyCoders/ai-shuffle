@@ -158,6 +158,75 @@ def test_subscription_routes_contract(client, sign_ins, tmp_path):
     assert claude_subscriptions.active_home_env() == {"CLAUDE_CONFIG_DIR": late_folder}
 
 
+@pytest.mark.parametrize("signed_in", [True, False])
+def test_refresh_write_failure_keeps_rows_and_keys_then_retries(client, sign_ins, monkeypatch, signed_in):
+    from app.core import claude_cli_status as cs, claude_subscriptions as subs
+
+    sign_ins["default"] = "before@example.com"
+    saved = client.post(BASE + "/subscription/save-current", json={})
+    assert saved.status_code == 200, saved.text
+    account_id = saved.json()["account_id"]
+    before = subs._load()["accounts"][0]
+    key = client.post(BASE + "/api-keys", json={"api_key": KEY})
+    assert key.status_code == 200, key.text
+    expected_keys = key.json()["accounts"]["api_key"]
+
+    if signed_in:
+        sign_ins["default"] = "after@example.com"
+    else:
+        sign_ins.pop("default")
+    original_probe = cs.probe_home
+    probes = []
+
+    def probe(home_env, resolver=None):
+        probes.append(1)
+        result = original_probe(home_env, resolver)
+        result.checked_at = before["checked_at"] + 10
+        return result
+
+    monkeypatch.setattr(cs, "probe_home", probe)
+    subs.invalidate_identity()
+    original_set = subs.database.set_system_setting
+    unavailable, attempts = [True], []
+
+    def save(setting, value):
+        assert setting == subs.setting_key()
+        attempts.append(value)
+        if unavailable[0]:
+            raise OSError("example storage write failed")
+        original_set(setting, value)
+
+    monkeypatch.setattr(subs.database, "set_system_setting", save)
+    with TestClient(client.app, raise_server_exceptions=False) as route:
+        response = route.get(BASE)
+        assert response.status_code == 200, response.text
+        result = response.json()["accounts"]
+        assert result["api_key"] == expected_keys
+        assert result["subscription_error"] == "storage_unavailable"
+        assert result["storage_locked"] is False and result["error"] is None
+        row = result["subscription"][0]
+        assert row["id"] == account_id
+        assert row["signed_in"] is signed_in and row["needs_sign_in"] is not signed_in
+        assert row["email"] == ("after@example.com" if signed_in else "before@example.com")
+        assert row["checked_at"] == before["checked_at"] + 10
+        assert subs._load()["accounts"][0] == before  # failed write did not mutate storage
+        assert len(attempts) == 1 and len(probes) == 1
+
+        unavailable[0] = False
+        retry = route.get(BASE)
+        assert retry.status_code == 200, retry.text
+        recovered = retry.json()["accounts"]
+        assert "subscription_error" not in recovered
+        assert recovered["subscription"] == result["subscription"]
+        assert recovered["api_key"] == expected_keys
+        assert subs._load()["accounts"][0]["checked_at"] == row["checked_at"]
+        assert subs._load()["accounts"][0]["signed_in"] is signed_in
+        assert len(attempts) == 2 and len(probes) == 1  # retry even with the same cached probe
+        assert route.get(BASE).status_code == 200
+        assert len(attempts) == 2  # a successful save stops unnecessary retries
+        assert KEY not in response.text
+
+
 @pytest.mark.parametrize("method,path,body", [
     ("post", "/subscription/save-current", {}),
     ("post", "/subscription/add-another", None),
