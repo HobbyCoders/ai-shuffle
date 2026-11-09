@@ -229,7 +229,7 @@ class GlobalEvents:
 
     def resources_changed(self, *resources, user_type="admin", user_id=None, relay=True):
         self.publish({"type": "resources_changed", "resources": list(resources)},
-                     user_type=user_type, user_id=user_id, relay=relay)
+                     user_type=user_type, user_id=user_id, **({} if relay else {"relay": False}))
 
     def lifecycle(self, user_id, message, *, user_type=None, relay=True):
         if message.get("type") not in {
@@ -240,17 +240,18 @@ class GlobalEvents:
         # Managed accounts and direct-paired clients never receive legacy admin
         # payloads; they still need a signal to refetch their authorized lists.
         resource = "notifications" if message["type"] == "notification" else "sessions"
+        local_only = {} if relay else {"relay": False}
         for kind in ('account', 'paired'):
-            self.resources_changed(resource, user_type=kind, relay=relay)
+            self.resources_changed(resource, user_type=kind, **local_only)
         if user_type in {"admin", "api_user"}:
             self.publish(message, user_type=user_type,
-                         user_id=None if user_type == "admin" else user_id, relay=relay)
+                         user_id=None if user_type == "admin" else user_id, **local_only)
         else:
             # Legacy callers provide an untyped ID (and deleted sessions have
             # no owner row). Never guess a role or disclose their payload.
             resource = "notifications" if message["type"] == "notification" else "sessions"
             for kind in ("admin", "api_user"):
-                self.resources_changed(resource, user_type=kind)
+                self.resources_changed(resource, user_type=kind, **local_only)
 
 
 global_events = GlobalEvents()
