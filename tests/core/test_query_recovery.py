@@ -149,14 +149,16 @@ async def test_real_query_produces_receipt_before_provider_and_consumes_it(sessi
     async def no_plan(*args, **kwargs):
         yield None
 
-    with ExitStack() as stack:
+    # Nested overrides must restore while the harness boundary patches still
+    # exist, not restore its fake dispatcher during later fixture teardown.
+    with ExitStack() as stack, monkeypatch.context() as patches:
         adapter = fresh_adapter([ResultMessage(subtype="success")])
         adapter.send_query.side_effect = sent
         boundaries = engine_patches(stack, cwd=str(tmp_path), adapter=adapter, session_row=session)
-        monkeypatch.setattr(sdk_options, "build_session_options", lambda **kwargs: (boundaries.options, {}))
-        monkeypatch.setattr(credential_gate, "refusal_for_options_async", AsyncMock(return_value=None))
-        monkeypatch.setattr(qe, "recorded_turn", no_plan)
-        monkeypatch.setattr(qe, "_record_query_message", AsyncMock())
+        patches.setattr(sdk_options, "build_session_options", lambda **kwargs: (boundaries.options, {}))
+        patches.setattr(credential_gate, "refusal_for_options_async", AsyncMock(return_value=None))
+        patches.setattr(qe, "recorded_turn", no_plan)
+        patches.setattr(qe, "_record_query_message", AsyncMock())
         patched_sync = qe.run_sync
 
         async def dispatch(fn, *args, **kwargs):
@@ -175,7 +177,7 @@ async def test_real_query_produces_receipt_before_provider_and_consumes_it(sessi
                 return result
             return await patched_sync(fn, *args, **kwargs)
 
-        monkeypatch.setattr(qe, "run_sync", dispatch)
+        patches.setattr(qe, "run_sync", dispatch)
         if cancel_begin:
             owner = asyncio.create_task(qe.execute_query("do work", "default", session_id=session["id"]))
             try:
