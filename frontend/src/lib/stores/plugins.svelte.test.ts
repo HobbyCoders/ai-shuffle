@@ -139,6 +139,7 @@ describe('plugins store — marketplace and update failures', () => {
 		await seed([installed('a@mp'), installed('b@mp')], []);
 		api.checkForUpdates.mockResolvedValue([update('a@mp', '1.2.0'), update('b@mp', '1.1.0')]);
 		await plugins.checkForUpdates();
+		expect(api.checkForUpdates).toHaveBeenLastCalledWith(true);
 
 		api.updatePlugin.mockResolvedValue(installed('a@mp', { version: '1.2.0' }));
 		api.checkForUpdates.mockResolvedValue([update('b@mp', '1.1.0')]);

@@ -11,6 +11,7 @@ still tolerate such a file; writes refuse with a 409
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -260,6 +261,7 @@ def test_uninstall_refused_up_front_leaves_everything_and_can_be_retried(svc, ta
         svc.uninstall_plugin("demo@market")
     assert cache.exists()
     assert _snapshot(svc.FLUID_DIR) == before
+    assert not (svc.PLUGINS_DIR / ".locks").exists()
     # Fixed file: the retry finds the plugin still installed and removes it.
     bad.write_text(good_text)
     assert svc.uninstall_plugin("demo@market") is True
@@ -304,10 +306,12 @@ def test_install_refused_up_front_copies_nothing_and_can_be_retried(svc, target)
         svc.install_plugin("demo@market")
     assert not (svc.CACHE_DIR / "market").exists()
     assert _snapshot(svc.FLUID_DIR) == before
+    assert not (svc.PLUGINS_DIR / ".locks").exists()
     bad.unlink()
     info = svc.install_plugin("demo@market")
     assert info.id == "demo@market" and info.enabled
-    assert (svc.CACHE_DIR / "market" / "demo" / "1.0.0" / "commands" / "hello.md").exists()
+    assert svc.get_installation_records(info.id)[0]["installPath"] == info.install_path
+    assert (Path(info.install_path) / "commands" / "hello.md").exists()
 
 
 def test_update_with_corrupt_registry_is_409_not_404(svc):

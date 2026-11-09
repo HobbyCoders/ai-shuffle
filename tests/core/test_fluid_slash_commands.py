@@ -75,7 +75,9 @@ def test_installed_commands_and_skills_follow_owner_enablement(installed_plugin,
             assert cmd.model is None
             assert entries[name]["source"] == "installed@journey"
             assert 'Installed two words / release. "two words" release.' in result
-            assert str(svc.CACHE_DIR / "journey" / "installed" / "1.0.0") in result
+            recorded = svc.get_installation_records("installed@journey")[0]["installPath"]
+            assert recorded in result
+            assert Path(recorded).is_dir()
             assert "${CLAUDE_PLUGIN_" not in result
         else:
             assert result.startswith("# Skill: installed:guide\n# From:")

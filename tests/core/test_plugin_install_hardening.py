@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from app.core import plugin_install, plugin_updates
+from app.core.chat_files import AccessDenied
 from app.core.plugin_models import PluginScope
 from app.core.plugin_service import PluginService
 
@@ -57,10 +58,10 @@ def _marketplace(svc, name="mp", plugins=(), metadata=None, raw=None) -> Path:
     return root
 
 
-def _plugin_dir(root: Path, rel: str, version="1.2.0", files=None) -> Path:
+def _plugin_dir(root: Path, rel: str, version="1.2.0", files=None, name=None) -> Path:
     d = root / rel
     (d / ".claude-plugin").mkdir(parents=True, exist_ok=True)
-    manifest = {"name": d.name}
+    manifest = {"name": name or d.name}
     if version is not None:
         manifest["version"] = version
     (d / ".claude-plugin" / "plugin.json").write_text(json.dumps(manifest))
@@ -92,7 +93,7 @@ class FakeGit:
 
     def __init__(self, populate=None, head=TIP, fetch_ok=True):
         self.calls = []
-        self.populate = populate or (lambda dest: _plugin_dir(dest.parent, dest.name, "2.0.0"))
+        self.populate = populate or (lambda dest: _plugin_dir(dest.parent, dest.name, "2.0.0", name="x"))
         self.heads = {}
         self.default_head = head
         self.fetch_ok = fetch_ok
@@ -153,14 +154,17 @@ def test_manifest_version_with_traversal_is_rejected(svc, tmp_path):
     assert "evil@mp" not in _installed(svc)
 
 
-def test_manifest_version_traversal_guard_bites(svc, tmp_path, monkeypatch):
+def test_revision_key_confines_publication_even_with_relaxed_version_guard(svc, tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_install, "_safe_path_component", lambda v, _w: v)
     victim, err = _traversal_version_install(svc, tmp_path)
-    # Without the guard the install deletes and overwrites a directory
-    # outside the plugin cache.
+    # Even without validation, the immutable key never incorporates raw path
+    # separators and never deletes a directory before publication.
     assert err is None
-    assert not (victim / "keep.txt").exists()
-    assert (victim / "commands" / "hello.md").exists()
+    assert (victim / "keep.txt").read_text() == "precious"
+    assert not (victim / "commands").exists()
+    record = _installed(svc)["evil@mp"][0]
+    assert Path(record["installPath"]).parent == svc.CACHE_DIR / "mp" / "evil"
+    assert (Path(record["installPath"]) / "commands" / "hello.md").exists()
 
 
 @pytest.mark.parametrize("version", ["..", ".", "", "a/b", "a\\b", 7])
@@ -205,14 +209,17 @@ def test_relative_source_cannot_escape_marketplace(svc, tmp_path, source, metada
     assert listed["p@mp"].marketplace_path != str(outside)
 
 
-def test_relative_source_escape_guard_bites(svc, monkeypatch):
+def test_copy_confinement_survives_relaxed_source_resolver_guard(svc, monkeypatch):
     outside = svc.MARKETPLACES_DIR.parent / "outside"
     _plugin_dir(outside.parent, "outside", files={"secret.txt": "s3cret"})
     (_marketplace(svc, plugins=[{"name": "p", "source": "./plugins/../../../outside"}])
      / "plugins").mkdir()
     monkeypatch.setattr(plugin_install, "_is_within", lambda *_a: True)
-    svc.install_plugin("p@mp")
-    assert any(b"s3cret" in v for v in _tree(svc.CACHE_DIR).values())
+    # The resolver's advisory path check is no longer the IO boundary. Even if
+    # it is bypassed, pinned traversal independently refuses an outside root.
+    with pytest.raises(ValueError):
+        svc.install_plugin("p@mp")
+    assert not any(b"s3cret" in v for v in _tree(svc.CACHE_DIR).values())
 
 
 def test_project_install_rejects_traversal_name(svc, tmp_path):
@@ -298,13 +305,15 @@ def test_symlinks_outside_repo_are_not_copied(svc, tmp_path):
 
 
 @symlinks
-def test_symlink_guard_bites(svc, tmp_path, monkeypatch):
+def test_io_confinement_survives_relaxed_symlink_guard(svc, tmp_path, monkeypatch):
     real = plugin_install._is_within
-    # Disable only the "outside the repo" check; keep loop protection working.
+    # Disable the advisory link check; actual traversal/read confinement must
+    # still refuse either an outside directory or file, regardless of ordering.
     monkeypatch.setattr(plugin_install, "_is_within",
                         lambda p, root: True if p.is_symlink() else real(p, root))
-    info = _symlink_plugin(svc, tmp_path)
-    assert any(b"PRIVATE KEY" in v for v in _tree(Path(info.install_path)).values())
+    with pytest.raises((AccessDenied, ValueError)):
+        _symlink_plugin(svc, tmp_path)
+    assert not any(b"PRIVATE KEY" in v for v in _tree(svc.CACHE_DIR).values())
 
 
 @symlinks
@@ -417,7 +426,9 @@ def test_clone_passes_ref_and_separates_url(svc, fake_git):
     assert clone[clone.index("--branch") + 1] == "v2"
     assert clone[-3:-1] == ["--", "https://github.com/o/x.git"]
     assert info.version == "2.0.0"
-    assert Path(info.install_path) == svc.CACHE_DIR / "mp" / "x" / "2.0.0"
+    assert Path(info.install_path).parent == svc.CACHE_DIR / "mp" / "x"
+    assert Path(info.install_path).name.startswith(".revision-2.0.0-")
+    assert svc.get_installation_records(info.id)[0]["installPath"] == info.install_path
 
 
 # ── sha pinning ─────────────────────────────────────────────────────────────
@@ -428,9 +439,10 @@ def test_pinned_sha_is_fetched_and_verified(svc, fake_git):
                                                         "sha": PINNED}}])
     svc.install_plugin("x@mp")
     verbs = [c[3] for c in fake_git.calls if c[1] == "-C"]
-    assert verbs == ["rev-parse", "fetch", "checkout", "rev-parse"]
+    assert verbs == ["rev-parse", "fetch", "checkout", "rev-parse", "rev-parse"]
     assert fake_git.fetched == PINNED
     assert _installed(svc)["x@mp"][0]["sourceSha"] == PINNED[:7]
+    assert _installed(svc)["x@mp"][0]["sourceRevision"] == PINNED
 
 
 def test_pinned_sha_mismatch_fails_closed(svc, monkeypatch):
@@ -451,7 +463,9 @@ def test_pinned_sha_already_at_head_skips_fetch(svc, monkeypatch):
     _marketplace(svc, plugins=[{"name": "x", "source": {"source": "github", "repo": "o/x",
                                                         "sha": PINNED[:12]}}])
     svc.install_plugin("x@mp")
-    assert [c[3] for c in git.calls if c[1] == "-C"] == ["rev-parse"]
+    # One read verifies the pin; the other records the installed revision.
+    assert [c[3] for c in git.calls if c[1] == "-C"] == ["rev-parse", "rev-parse"]
+    assert _installed(svc)["x@mp"][0]["sourceRevision"] == PINNED
 
 
 @pytest.mark.parametrize("sha", ["--upload-pack=x", "zzzzzzz", "abc", 123])
@@ -494,17 +508,20 @@ def _run_auto_update(svc):
 
 def test_auto_update_never_downgrades(svc):
     _installed_local(svc, "1.5.0", "1.4.0")
+    before = _installed(svc)["p@mp"][0]
     summary = _run_auto_update(svc)
     assert summary["updates_available"] == [] and summary["updated_plugins"] == []
     rec = _installed(svc)["p@mp"][0]
     assert rec["version"] == "1.5.0"
-    assert Path(rec["installPath"]).name == "1.5.0"
+    assert rec == before
+    assert Path(rec["installPath"]).name.startswith(".revision-1.5.0-")
     assert not (svc.CACHE_DIR / "mp" / "p" / "1.4.0").exists()
     assert svc.get_auto_update_settings().last_check
 
 
 def test_downgrade_guard_bites(svc, monkeypatch):
-    monkeypatch.setattr(plugin_updates, "_is_update", lambda i, a: i != a)
+    # Discovery and installation now share the same precedence boundary.
+    monkeypatch.setattr(plugin_updates, "_compare_versions", lambda i, a: int(i != a))
     _installed_local(svc, "1.5.0", "1.4.0")
     _run_auto_update(svc)
     assert _installed(svc)["p@mp"][0]["version"] == "1.4.0"
@@ -528,14 +545,18 @@ def test_auto_update_respects_update_plugins_off(svc):
     assert _installed(svc)["p@mp"][0]["version"] == "1.0.0"
 
 
-def test_external_entry_with_lower_version_is_not_an_update(svc, fake_git):
+def test_external_catalog_version_never_overrides_canonical_manifest(svc, fake_git, monkeypatch):
     _marketplace(svc, plugins=[{"name": "x", "version": "3.0.0",
                                 "source": {"source": "github", "repo": "o/x"}}])
     svc.install_plugin("x@mp")  # cloned manifest says 2.0.0 -> recorded as 2.0.0
     assert _installed(svc)["x@mp"][0]["version"] == "2.0.0"
-    assert [u.available_version for u in svc.check_for_updates()] == ["3.0.0"]
+    from app.core import plugin_update_content
+
+    monkeypatch.setattr(plugin_update_content, "_remote_revision", lambda source: "d" * 40)
+    assert plugin_updates.check_for_updates(svc, allow_remote=True) == []
     _marketplace(svc, plugins=[{"name": "x", "version": "1.9.0",
                                 "source": {"source": "github", "repo": "o/x"}}])
+    assert plugin_updates.check_for_updates(svc, allow_remote=True) == []
     assert svc.check_for_updates() == []
 
 
@@ -545,7 +566,10 @@ def test_external_pinned_sha_unchanged_is_not_an_update(svc, fake_git):
     svc.install_plugin("x@mp")
     assert svc.check_for_updates() == []
     _marketplace(svc, plugins=[{"name": "x", "source": {**src, "sha": "c" * 40}}])
-    assert [u.available_version for u in svc.check_for_updates()] == ["c" * 7]
+    assert svc.check_for_updates() == []  # Passive reads do not fetch the changed pin.
+    updates = plugin_updates.check_for_updates(svc, allow_remote=True)
+    assert [u.plugin_id for u in updates] == ["x@mp"]
+    assert updates[0].available_version.startswith("2.0.0+")
 
 
 # ── uninstall cleanup ───────────────────────────────────────────────────────
