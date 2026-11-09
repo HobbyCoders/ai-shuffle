@@ -662,6 +662,7 @@ def test_automatic_build_defers_when_the_disk_is_short(
 TEST_TABLESPACE = "history_index_test"
 REBUILT = "idx_session_recall_text_trgm_n"
 LEFT_ALONE_LOG = "stays where it is"
+RECLAIMED_LOG = "Removed unfinished history index"
 PLENTY = 100 * 1024 ** 3
 
 
@@ -681,7 +682,7 @@ def _make_rebuild_pending(cur: Any, tablespace: str | None) -> None:
     """Put back the single index a worker has before the upgrade."""
     cur.execute("SELECT tail FROM history_index_migrations WHERE name = %s", (REBUILT,))
     expression, _, predicate = cur.fetchone()["tail"].partition(" WHERE ")
-    cur.execute(f"DROP INDEX {REBUILT}, {REBUILT}_h2")
+    cur.execute(f"DROP INDEX IF EXISTS {REBUILT}, {REBUILT}_h0, {REBUILT}_h2")
     place = f" TABLESPACE {tablespace}" if tablespace else ""
     where = f" WHERE {predicate}" if predicate else ""
     cur.execute(f"CREATE INDEX {REBUILT} ON session_recall_text USING gin "
@@ -827,6 +828,139 @@ def test_search_and_moves_work_with_one_index_left_alone(tablespace: str, disks:
             assert hi.flush_pending(quiet=0) is True
     finally:
         _delete_probe(sid)
+
+
+def _leftover(cur: Any, name: str, kind: str, place: str = "") -> None:
+    """A real index in the given state, as an interrupted concurrent build leaves one."""
+    if kind == "valid":
+        cur.execute(f"CREATE INDEX {name} ON session_recall_text "
+                    f"USING gin (body gin_trgm_ops){place}")
+    elif kind == "invalid":
+        # Two rows break the uniqueness, which fails the build after its catalog
+        # entry is committed. It needs no privilege to mark the index invalid.
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            cur.execute(f"CREATE UNIQUE INDEX CONCURRENTLY {name} "
+                        f"ON session_recall_text ((1)){place}")
+
+
+def _exists(cur: Any, name: str) -> bool:
+    cur.execute("SELECT to_regclass(%s) AS found", (name,))
+    return cur.fetchone()["found"] is not None
+
+
+@pytest.fixture
+def two_rows() -> Iterator[None]:
+    sid = "history-interrupted-leftovers"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        _insert_probe(cur, sid, "leftoverone")
+        _insert_probe(cur, sid + "-2", "leftovertwo")
+    yield
+    _delete_probe(sid)
+    _delete_probe(sid + "-2")
+
+
+LEFTOVER_KINDS = ("absent", "valid", "invalid")
+
+
+@pytest.mark.parametrize("h2", LEFTOVER_KINDS)
+@pytest.mark.parametrize("h0", LEFTOVER_KINDS)
+def test_interrupted_replacements_of_a_left_alone_index_are_reclaimed_once(
+    h0: str, h2: str, tablespace: str, disks: Disks, two_rows: None,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    with hi._online_cursor() as cur:
+        _make_rebuild_pending(cur, tablespace)
+        _leftover(cur, f"{REBUILT}_h0", h0)
+        _leftover(cur, f"{REBUILT}_h2", h2)
+        before = _index_identity(cur, REBUILT)
+    with caplog.at_level(logging.INFO, logger=hi.__name__):
+        assert hi.migrate() is True
+    assert hi._retry_build_at == 0.0
+    assert disks.seen == []
+    with hi._online_cursor() as cur:
+        assert not _exists(cur, f"{REBUILT}_h0") and not _exists(cur, f"{REBUILT}_h2")
+        assert _index_identity(cur, REBUILT) == before
+        assert hi._valid(cur, REBUILT)
+    assert _invalid_indexes() == []
+    assert caplog.text.count(RECLAIMED_LOG) == 2 - [h0, h2].count("absent")
+
+    # Once clean, a pass takes no lock and logs nothing more.
+    caplog.clear()
+    ddl: list[str] = []
+    real = hi._concurrent_ddl
+    monkeypatch.setattr(hi, "_concurrent_ddl", lambda c, t, s: (ddl.append(s), real(c, t, s)))
+    with caplog.at_level(logging.INFO, logger=hi.__name__):
+        assert hi.migrate() is True
+    assert ddl == []
+    assert caplog.text == ""
+
+
+@pytest.mark.parametrize("original", ["partial", "invalid"])
+def test_replacements_are_kept_unless_a_valid_full_original_remains(
+    original: str, tablespace: str, disks: Disks, two_rows: None,
+) -> None:
+    with hi._online_cursor() as cur:
+        if original == "partial":
+            cur.execute(f"DROP INDEX {REBUILT}_h2")
+            cur.execute(f"ALTER INDEX {REBUILT} SET TABLESPACE {tablespace}")
+        else:
+            cur.execute(f"DROP INDEX {REBUILT}, {REBUILT}_h2")
+            _leftover(cur, REBUILT, "invalid", f" TABLESPACE {tablespace}")
+        _leftover(cur, f"{REBUILT}_h0", "valid")
+        _leftover(cur, f"{REBUILT}_h2", "invalid")
+    try:
+        assert hi.migrate() is True
+        with hi._online_cursor() as cur:
+            assert _exists(cur, REBUILT)
+            assert _exists(cur, f"{REBUILT}_h0") and _exists(cur, f"{REBUILT}_h2")
+    finally:
+        with hi._online_cursor() as cur:
+            _make_rebuild_pending(cur, None)
+
+
+def test_cancelled_reclaim_is_retried_at_the_normal_cadence(
+    tablespace: str, disks: Disks, two_rows: None,
+) -> None:
+    with hi._online_cursor() as cur:
+        _make_rebuild_pending(cur, tablespace)
+        _leftover(cur, f"{REBUILT}_h0", "valid")
+        _leftover(cur, f"{REBUILT}_h2", "invalid")
+        before = _index_identity(cur, REBUILT)
+    sid = "history-reclaim-cancelled"
+    results: list[bool] = []
+    blocker = base.get_db()
+    conn = blocker.__enter__()
+    try:
+        _insert_probe(conn.cursor(), sid, "reclaimcancelledneedle")  # DROP waits for this.
+        worker = threading.Thread(target=lambda: results.append(hi.run_pass()))
+        worker.start()
+        deadline = time.monotonic() + 20
+        cancelled = False
+        while time.monotonic() < deadline and not cancelled:
+            with base.get_db() as admin:
+                probe = admin.cursor()
+                probe.execute("SELECT pg_cancel_backend(pid) AS ok FROM pg_stat_activity "
+                              "WHERE query LIKE 'DROP INDEX CONCURRENTLY%%' "
+                              "AND pid <> pg_backend_pid()")
+                cancelled = bool(probe.fetchall())
+            time.sleep(0.05)
+        assert cancelled, "the reclaim never reached its concurrent phase"
+        worker.join(20)
+        assert results == [False], "cancelled work is a retry, not a startup back-off"
+        assert hi._retry_build_at == 0.0
+    finally:
+        conn.rollback()
+        blocker.__exit__(None, None, None)
+    with hi._online_cursor() as cur:
+        assert _exists(cur, f"{REBUILT}_h0"), "the cancelled drop leaves its index behind"
+        assert _exists(cur, f"{REBUILT}_h2")
+        assert _index_identity(cur, REBUILT) == before and hi._valid(cur, REBUILT)
+    assert hi.run_pass() is True
+    with hi._online_cursor() as cur:
+        assert not _exists(cur, f"{REBUILT}_h0") and not _exists(cur, f"{REBUILT}_h2")
+        assert _index_identity(cur, REBUILT) == before
+    assert _invalid_indexes() == []
 
 
 def _after_tablespace_read(monkeypatch: pytest.MonkeyPatch, *statements: str) -> None:

@@ -280,6 +280,30 @@ def _space_problem(cur: Any, size: int) -> str | None:
     return None
 
 
+def _index_table(name: str) -> str:
+    return next(t for t in TABLES if (
+        (t == "fluid_session_nodes" and "fluid" in name)
+        or (t == "session_store_entries" and "sse" in name)
+        or (t == "session_recall_text" and "session_recall_text" in name)
+        or (t == "session_events" and "events" in name)
+        or (t == "session_messages" and "session_messages" in name)))
+
+
+def _reclaim_replacements(cur: Any, name: str) -> None:
+    """Drop what an interrupted build left beside an original that is staying.
+
+    Only call this with the full original still valid: it already covers every
+    row, so nothing depends on these, and each one left costs a whole index of
+    live-write work for good.
+    """
+    for replacement in (name + "_h0", name + "_h2"):
+        cur.execute("SELECT to_regclass(%s) AS found", (replacement,))
+        if cur.fetchone()["found"]:
+            _concurrent_ddl(cur, _index_table(name),
+                            f"DROP INDEX CONCURRENTLY IF EXISTS {replacement}")
+            logger.info("Removed unfinished history index %s", replacement)
+
+
 def migrate() -> bool:
     """One online migration pass. No startup transaction or table rewrite.
 
@@ -355,6 +379,8 @@ def migrate() -> bool:
                 continue
             size = _rebuild_size(cur, name)
             if size is None:
+                if row and not partial and _valid(cur, name):
+                    _reclaim_replacements(cur, name)
                 # Decided again each pass, so moving it back is picked up by itself.
                 if name not in _left_alone:
                     _left_alone.add(name)
@@ -375,12 +401,7 @@ def migrate() -> bool:
             # PostgreSQL supplies this expression/predicate, not external input.
             expression, sep, original_predicate = tail.partition(" WHERE ")
             expression, has_options, original_options = expression.partition(" WITH ")
-            table = next(t for t in TABLES if (
-                (t == "fluid_session_nodes" and "fluid" in name)
-                or (t == "session_store_entries" and "sse" in name)
-                or (t == "session_recall_text" and "session_recall_text" in name)
-                or (t == "session_events" and "events" in name)
-                or (t == "session_messages" and "session_messages" in name)))
+            table = _index_table(name)
             for state in (0, 2):
                 replacement = name + f"_h{state}"
                 if not _valid(cur, replacement):
