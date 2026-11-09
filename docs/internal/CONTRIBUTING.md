@@ -142,7 +142,10 @@ notes and Task reports are not scratch and are never swept. Narrow live-receipte
 preview exceptions protect their private roots, not arbitrary external handles;
 quiet settled scratch has no promised path lifetime. Windows uses exclusive
 delete handles to retain open files even when process inspection is denied.
-Each pass logs removed bytes, retained reasons and preview exemptions. Unknown safety facts
+Managed PostgreSQL is recognized only by the established split service identity,
+PostgreSQL ancestry and the app's exact supervisor; agent databases never qualify.
+Each pass logs removed bytes, retained reasons (at most eight named holders) and
+preview exemptions. Unknown safety facts
 retain files; symlinks are never followed and Windows reparse trees are retained.
 Backlogs resume in slices of at most two seconds, 512 entries or 256 MiB, with
 30 seconds between slices (one indivisible oversized file may exceed the byte

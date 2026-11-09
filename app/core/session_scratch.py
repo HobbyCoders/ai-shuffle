@@ -88,7 +88,8 @@ def _process_references(deadline, diagnostics=None):
 def _psutil_references(deadline, diagnostics, *, windows):
     import psutil
 
-    refs = set()
+    from app.core.scratch_reaper import References, process_label
+    refs = References()
     for process in psutil.process_iter():
         if time.monotonic() >= deadline:
             if diagnostics is not None:
@@ -96,22 +97,24 @@ def _psutil_references(deadline, diagnostics, *, windows):
             return None
         if process.pid == 0:
             continue  # kernel idle pseudo-process
+        try:
+            name = process.name()
+        except psutil.Error:
+            name = "unknown"
+        owner = process_label(process.pid, name)
         for field in ("cwd", "open_files", "cmdline"):
             try:
                 value = getattr(process, field)()
                 if field == "cwd":
-                    refs.add(value)
+                    refs.add_owned(value, owner)
                 else:
-                    refs.update(item.path if field == "open_files" else item for item in value)
+                    for item in value:
+                        refs.add_owned(item.path if field == "open_files" else item, owner)
             except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 break
             except psutil.AccessDenied:
-                try:
-                    name = process.name()
-                except psutil.Error:
-                    name = "unknown"
                 if diagnostics is not None:
-                    diagnostics.append(f"access_denied pid={process.pid} name={name} field={field}")
+                    diagnostics.append(f"access_denied {owner} field={field}")
                 if not windows:
                     return None
                 # Windows leaf deletion requires an exclusive delete handle,
@@ -306,7 +309,13 @@ class ScratchSweep:
             self.disabled_reason = notes[-1] if notes else "incomplete_process_table"
             return self._retain(self.disabled_reason)
         if _in_use(path, refs):
-            return self._retain("process_reference")
+            holder = refs.holder(path) if hasattr(refs, "holder") else None
+            reason = "process_reference" + (" " + holder if holder else "")
+            # Bound distinct holder details, not retention: overflow is counted.
+            if holder and reason not in self.reasons and sum(
+                    key.startswith("process_reference pid=") for key in self.reasons) >= 8:
+                reason = "process_reference additional_holders"
+            return self._retain(reason)
         if path.lstat().st_mtime_ns != job["root_modified"]:
             return self._retain("root_changed")
         return True

@@ -35,12 +35,12 @@ def processes(tmp_path, monkeypatch):
             raise PermissionError("non-dumpable")
         return original(path)
     monkeypatch.setattr(sr.os, "scandir", scandir)
-    def add(pid, args, parent=0, *, hidden=False, start="1234", cwd=None):
+    def add(pid, args, parent=0, *, hidden=False, start="1234", cwd=None, uids=None, name="python"):
         base = proc / str(pid)
         base.mkdir()
-        uid = os.getuid()
-        (base / "status").write_text(f"Name:\tpython\nUid:\t{uid} {uid} {uid} {uid}\nPPid:\t{parent}\n")
-        (base / "comm").write_text("python\n")
+        uid_text = " ".join(str(uid) for uid in (uids or [os.getuid()] * 4))
+        (base / "status").write_text(f"Name:\t{name}\nUid:\t{uid_text}\nPPid:\t{parent}\n")
+        (base / "comm").write_text(name + "\n")
         (base / "stat").write_text(f"{pid} (python) S " + "0 " * 18 + start)
         (base / "cmdline").write_bytes(b"\0".join(os.fsencode(arg) for arg in args) + b"\0")
         (base / "fd").mkdir()
@@ -224,6 +224,159 @@ def test_devloop_status_checkout_is_protected_only_for_live_identity(
         assert path.exists() is fresh_identity
     finally:
         sweep.close()
+
+
+@pytest.fixture
+def split_ids(processes, monkeypatch):
+    proc, add, root = processes
+    uid, gid = os.getuid(), os.getgid()
+    service = 64000 if uid != 64000 else 64001
+    service_gid = 64000 if gid != 64000 else 64001
+    monkeypatch.setenv("SHUFFLE_AGENT_ISOLATION", "on")
+    monkeypatch.delenv("AGENT_ISOLATION_SERVICE_UID", raising=False)
+    if service != 64000:
+        monkeypatch.setenv("AGENT_ISOLATION_SERVICE_UID", str(service))
+    monkeypatch.setattr(os, "getresuid", lambda: (uid, uid, service))
+    monkeypatch.setattr(os, "getresgid", lambda: (gid, gid, service_gid))
+    add(880001, ["python", "/opt/app/docker/container_runtime.py", "run"], hidden=True,
+        uids=[uid, service, service, service])
+    (proc / str(os.getpid()) / "status").write_text(
+        f"Name: python\nUid: {uid} {uid} {service} {uid}\nPPid: 880001\n")
+    return proc, add, root, service
+
+
+@pytest.mark.parametrize("depth", [0, 1, 2])
+def test_split_service_postgres_and_forked_helpers_allow_eligible_candidate(split_ids, depth):
+    _, add, root, service = split_ids
+    parent = 880001
+    for index in range(depth + 1):
+        pid = 880010 + index
+        add(pid, ["postgres", "-D", "/data/postgres/data"], parent=parent,
+            hidden=True, uids=[service] * 4, name="postgres")
+        parent = pid
+    path = session(root)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 1 and not path.exists()
+    finally:
+        sweep.close()
+
+
+@pytest.mark.parametrize("bad", ["unknown_service", "agent_postgres", "other_parent", "uid_gap",
+                                  "flag_unset", "same_saved_uid", "parent_cycle"])
+def test_split_role_proof_never_exempts_unknown_or_agent_process(split_ids, monkeypatch, bad):
+    _, add, root, service = split_ids
+    kwargs = {"uids": [service] * 4, "name": "postgres", "parent": 880001, "hidden": True}
+    if bad == "unknown_service":
+        kwargs["name"] = "python"
+    elif bad == "agent_postgres":
+        kwargs["uids"] = [os.getuid()] * 4
+    elif bad == "other_parent":
+        add(880030, ["python", "/opt/app/not-supervisor.py"], hidden=False)
+        kwargs["parent"] = 880030
+    elif bad == "uid_gap":
+        add(880030, ["postgres"], name="postgres", parent=880001, uids=[os.getuid()] * 4)
+        kwargs["parent"] = 880030
+    elif bad == "flag_unset":
+        monkeypatch.delenv("SHUFFLE_AGENT_ISOLATION")
+    elif bad == "same_saved_uid":
+        monkeypatch.setattr(os, "getresuid", lambda: (os.getuid(),) * 3)
+    elif bad == "parent_cycle":
+        kwargs["parent"] = 880010
+    add(880010, ["postgres"], **kwargs)
+    path = session(root)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 0 and path.exists()
+    finally:
+        sweep.close()
+
+
+def test_managed_postgres_argv_still_protects_candidate(split_ids, caplog):
+    _, add, root, service = split_ids
+    path = session(root)
+    add(880010, ["postgres", "-D", str(path)], parent=880001,
+        hidden=True, uids=[service] * 4, name="postgres")
+    sweep = ss.ScratchSweep(root)
+    with caplog.at_level("INFO", logger=ss.__name__):
+        try:
+            assert sweep.step() == 0 and path.exists()
+        finally:
+            sweep.close()
+    assert "process_reference pid=880010 name=postgres" in caplog.text
+    assert str(path) not in caplog.text
+
+
+def test_postmaster_restart_uses_fresh_ancestry_not_old_pid(split_ids):
+    proc, add, root, service = split_ids
+    add(880010, ["postgres"], parent=880001, hidden=True, uids=[service] * 4, name="postgres")
+    add(880011, ["postgres"], parent=880010, hidden=True, uids=[service] * 4, name="postgres")
+    sweep = ss.ScratchSweep(root)
+    first = session(root, "first")
+    try:
+        assert sweep.step() == 1 and not first.exists()
+        (proc / "880010").rename(proc / "exited-postmaster")
+        add(880020, ["postgres"], parent=880001, hidden=True, uids=[service] * 4, name="postgres")
+        status = proc / "880011" / "status"
+        status.write_text(status.read_text().replace("880010", "880020"))
+        second = session(root, "second")
+        assert sweep.step() == 1 and not second.exists()
+        # Surviving helpers reparented to init have no longer proven role.
+        status.write_text(status.read_text().replace("880020", "1"))
+        third = session(root, "third")
+        assert sweep.step() == 0 and third.exists()
+    finally:
+        sweep.close()
+
+
+@pytest.mark.parametrize("field", ["cwd", "fd", "cmdline"])
+def test_readable_holder_is_named_without_its_private_path(processes, caplog, field):
+    _, add, root = processes
+    path = session(root)
+    args = ["python", "task.py"] + ([str(path / "payload")] if field == "cmdline" else [])
+    base = add(880099, args, cwd=path if field == "cwd" else None)
+    if field == "fd":
+        (base / "fd" / "10").symlink_to(path / "payload")
+    sweep = ss.ScratchSweep(root)
+    with caplog.at_level("INFO", logger=ss.__name__):
+        try:
+            assert sweep.step() == 0 and path.exists()
+        finally:
+            sweep.close()
+    assert "process_reference pid=880099 name=python" in caplog.text
+    assert str(path) not in caplog.text
+
+
+def test_holder_details_are_capped_and_names_sanitized(processes, caplog):
+    _, add, root = processes
+    paths = []
+    for index in range(12):
+        path = session(root, f"held-{index}")
+        paths.append(path)
+        base = add(881000 + index, ["python"], cwd=path)
+        (base / "comm").write_text("long/name\n" + "x" * 1000)
+    sweep = ss.ScratchSweep(root)
+    with caplog.at_level("INFO", logger=ss.__name__):
+        try:
+            assert sweep.step() == 0 and all(path.exists() for path in paths)
+        finally:
+            sweep.close()
+    named = [key for key in sweep.reasons if key.startswith("process_reference pid=")]
+    assert len(named) == 8
+    assert sweep.reasons["process_reference additional_holders"] == 4
+    assert all(len(key.split("name=", 1)[1]) == 32 for key in named)
+    assert all(str(path) not in caplog.text for path in paths)
+    assert "long/name" not in caplog.text
+
+
+def test_psutil_readable_reference_keeps_owner(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    process = SimpleNamespace(pid=124, name=lambda: "python", cwd=lambda: str(tmp_path),
+                              open_files=list, cmdline=lambda: ["python"])
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter([Denied(123), process]))
+    refs = ss._psutil_references(time.monotonic() + 2, [], windows=True)
+    assert ss._in_use(tmp_path, refs)
+    assert refs.holder(tmp_path) == "pid=124 name=python"
 
 
 class Denied:

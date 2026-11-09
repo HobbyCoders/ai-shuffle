@@ -116,11 +116,56 @@ def _is_ancestor(base, proc):
     return False
 
 
+def _managed_postgres(base, proc, deadline):
+    # Use the established saved service identity, never an environment UID alone.
+    # Only service-UID postgres chains descending from OUR supervisor qualify;
+    # an agent's disposable postgres and unrelated service daemons do not.
+    from app.core.private_storage import _service_ids
+    ids = _service_ids()
+    if ids is None or ids[0] in (0, os.getuid()):
+        return False
+    seen = set()
+    while base.name not in seen and len(seen) < MAX_ENTRIES and time.monotonic() < deadline:
+        seen.add(base.name)
+        status = dict(line.split(":", 1) for line in (base / "status").read_text().splitlines() if ":" in line)
+        if _is_supervisor(base, status):
+            return _is_ancestor(base, proc)
+        if status["Name"].strip() != "postgres" or {int(uid) for uid in status["Uid"].split()} != {ids[0]}:
+            return False
+        base = proc / status["PPid"].strip()
+    return False
+
+
+def process_label(pid, name):
+    # No cwd, descriptor path or command-line payload enters the log. Names are
+    # single-line, bounded executable labels, not arbitrary argv or private paths.
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", name.strip())[:32] or "unknown"
+    return f"pid={str(pid)[:10]} name={name}"
+
+
+def _process_label(base):
+    try:
+        name = (base / "comm").read_text(errors="replace")
+    except OSError:
+        name = "unknown"
+    return process_label(base.name, name)
+
+
 class References(set):
     def __init__(self):
         super().__init__()
         self.protected_roots = []
         self.preview_exemptions = 0
+        self.owners = {}
+
+    def add_owned(self, value, owner):
+        self.add(value)
+        self.owners.setdefault(value, owner)
+
+    def holder(self, path):
+        target = os.path.normcase(str(path))
+        return next((owner for ref, owner in self.owners.items()
+                     if target in os.path.normcase(ref)), None)
 
 
 def _private_record(path):
@@ -220,11 +265,7 @@ def _isolated_preview(base, proc, deadline):
 def _references(proc, deadline, *, protected_prefixes=None, strict=False, on_disabled=None, on_exempt=None):
     def disabled(reason, base=None):
         if base is not None:
-            try:
-                name = " ".join((base / "comm").read_text().split())
-            except OSError:
-                name = "unknown"
-            reason += f" pid={base.name} name={name}"
+            reason += " " + _process_label(base)
         if on_disabled is not None:
             on_disabled(reason)
         return _disabled(reason)
@@ -241,6 +282,7 @@ def _references(proc, deadline, *, protected_prefixes=None, strict=False, on_dis
             if count > MAX_ENTRIES or time.monotonic() >= deadline:
                 return disabled("process scan limit reached")
             base = Path(process.path)
+            owner = _process_label(base)
             try:
                 links = [base / "cwd", base / "root"]
                 with os.scandir(base / "fd") as descriptors:
@@ -255,13 +297,15 @@ def _references(proc, deadline, *, protected_prefixes=None, strict=False, on_dis
                     except (FileNotFoundError, ProcessLookupError):
                         continue
                     if value.startswith("/"):
-                        references.add(value.removesuffix(" (deleted)"))
-                references.add(os.fsdecode((base / "cmdline").read_bytes()).replace("\0", " "))
+                        references.add_owned(value.removesuffix(" (deleted)"), owner)
+                references.add_owned(os.fsdecode((base / "cmdline").read_bytes()).replace("\0", " "), owner)
             except (FileNotFoundError, ProcessLookupError):
                 continue  # exited during observation
             except PermissionError:
                 try:
-                    references.add(os.fsdecode((base / "cmdline").read_bytes()).replace("\0", " "))
+                    references.add_owned(os.fsdecode((base / "cmdline").read_bytes()).replace("\0", " "), owner)
+                    if strict and _managed_postgres(base, proc, deadline):
+                        continue
                     unrelated = (_uninspectable_is_unrelated(base, proc, protected_prefixes, strict=True)
                                  if strict else _uninspectable_is_unrelated(base, proc, protected_prefixes))
                     if unrelated:

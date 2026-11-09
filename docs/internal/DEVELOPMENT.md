@@ -39,8 +39,9 @@ on first access; existing canonical files (including empty cleared state) win.
 Legacy files and owner scratch are left intact. Designated session scratch is
 cleared after settlement and one hour of filesystem quiet, unless an open turn,
 a process reference or unavailable safety evidence prevents it, except for
-identity-bound isolated preview roles and Windows access-denied processes guarded
-by exclusive delete handles. Preview private roots are protected, but isolation
+identity-bound isolated preview roles, service-UID PostgreSQL chains proven to
+belong to the supervisor, and Windows access-denied processes guarded by exclusive
+delete handles. Preview private roots are protected, but isolation
 is not a filesystem sandbox and an opaque preview can lose path access to quiet
 settled scratch outside those roots. Each pass logs its results and exemptions.
 An unsettle or
