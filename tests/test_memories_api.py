@@ -204,6 +204,56 @@ def test_when_only_edit_makes_copies_opened_before_it_stale(world):
     assert remove(client, entry.id, entry.revision).status_code == 204
 
 
+def test_replica_conflict_at_the_same_revision_makes_open_copies_stale(world, tmp_path):
+    client, root = world
+    store = store_at(root)
+    entry = save(store, text="The nightly build publishes at two.")
+    other = store_at(tmp_path / "other-worker")
+    other._facts.merge(store._facts.export())
+    theirs = next(e for e in other._facts.export()["entries"])
+    other.save_memory("The nightly build publishes at three.", memory_id=theirs["id"],
+                      expected_revision=theirs["revision"], provenance="user", protected=True)
+    mine = edit(client, entry, text="The nightly build publishes at four.")
+    assert mine.status_code == 200 and mine.json()["revision"] == 2
+    opened = mine.json()["metadata_version"]
+
+    store._facts.merge(other._facts.export())
+
+    item = client.get(BASE).json()["items"][0]
+    assert item["revision"] == 2 and item["needs_review"]
+    assert item["metadata_version"] != opened
+    before = store.memories_path.read_bytes()
+    stale_save = client.put(f"{BASE}/{entry.id}", json={
+        "text": "A stale correction.", "when": None, "expected_revision": 2,
+        "expected_metadata_version": opened,
+    })
+    assert stale_save.status_code == 409
+    assert remove(client, entry.id, 2, version=opened).status_code == 409
+    assert store.memories_path.read_bytes() == before
+
+
+def test_a_new_replacement_link_makes_open_copies_stale(world):
+    client, root = world
+    store = store_at(root)
+    entry = save(store)
+    opened = opened_version(client, entry.id)
+    doc = store._facts._load()
+    doc["entries"][0]["superseded_by"] = "worker:m9"
+    store._facts._write(doc)
+    assert opened_version(client, entry.id) != opened
+
+
+def test_usage_does_not_make_an_open_copy_stale(world):
+    client, root = world
+    store = store_at(root)
+    entry = save(store)
+    opened = opened_version(client, entry.id)
+    doc = store._facts._load()
+    doc["entries"][0].update(uses=7, last_recalled_at=1.8e9)
+    store._facts._write(doc)
+    assert opened_version(client, entry.id) == opened
+
+
 @pytest.mark.parametrize("archived", [False, True])
 def test_when_only_edit_at_explicit_cap_and_archive_reactivation(world, monkeypatch, archived):
     client, root = world

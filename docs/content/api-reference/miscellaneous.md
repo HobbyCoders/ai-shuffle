@@ -45,8 +45,9 @@ to another worker are excluded.
 Each item contains:
 
 - `id`, `revision`, `metadata_version`, `text`, and `when` (null if no written
-  applicability line). `metadata_version` is an opaque token for the fact's
-  when-line and apply-to-every-chat flag.
+  applicability line). `metadata_version` is an opaque token for what
+  `revision` does not count: the when-line, apply-to-every-chat flag, and
+  replica conflict and replacement state.
 - `status`: `active` or `archived`; `tier`: `user` (owner-saved, no expiry),
   `agent` (durable), or `learned`.
 - `source`: `user`, `tool`, `session`, or `manual`.

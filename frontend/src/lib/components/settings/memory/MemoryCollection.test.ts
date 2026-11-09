@@ -134,11 +134,17 @@ describe('memory rules', () => {
 		model.ensure('m1');
 		model.forms.m1.text = 'A draft';
 		releaseMemoryModel(model);
+		const closing = new Event('beforeunload', { cancelable: true });
+		window.dispatchEvent(closing);
+		expect(closing.defaultPrevented).toBe(true);
 		const back = acquireMemoryModel();
 		expect(back.forms.m1.text).toBe('A draft');
 		back.discard('m1');
 		releaseMemoryModel(back);
 		expect(acquireMemoryModel()).not.toBe(back);
+		const clean = new Event('beforeunload', { cancelable: true });
+		window.dispatchEvent(clean);
+		expect(clean.defaultPrevented).toBe(false);
 	});
 
 	it('flags a newer saved version without touching the draft', async () => {

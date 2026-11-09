@@ -23,7 +23,7 @@ export type MemoryFilter = 'active' | 'archived' | 'review' | 'all';
 export interface MemoryItem {
 	id: string;
 	revision: number;
-	/** Moves when the when-line changes; `revision` only counts the text. */
+	/** Moves with what `revision` misses: the when-line, sync conflicts, replacement links. */
 	metadata_version: string;
 	text: string;
 	when: string | null;
@@ -422,12 +422,22 @@ export class MemoryModel {
  */
 let retained: MemoryModel | null = null;
 
+/** The page's own unload warning ends with it, but a kept draft is still only in memory. */
+function warnAboutRetainedDraft(event: BeforeUnloadEvent): void {
+	if (!retained?.anyDirty) return;
+	event.preventDefault();
+	event.returnValue = '';
+}
+
 export function acquireMemoryModel(): MemoryModel {
 	const model = retained ?? new MemoryModel();
 	retained = null;
+	window.removeEventListener('beforeunload', warnAboutRetainedDraft);
 	return model;
 }
 
 export function releaseMemoryModel(model: MemoryModel): void {
 	retained = model.anyDirty ? model : null;
+	if (retained) window.addEventListener('beforeunload', warnAboutRetainedDraft);
+	else window.removeEventListener('beforeunload', warnAboutRetainedDraft);
 }

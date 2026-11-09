@@ -60,11 +60,16 @@ def _visible(entry, store_id):
 
 
 def _metadata_version(entry):
-    # The store's revision counts the fact's value only: when-line and always
-    # edits replicate by their own stamps and leave it alone. An owner's open
-    # form needs both, or a stale save restores an older when-line unnoticed.
-    stamps = [facts.metadata_stamp(entry, field) for field in facts.METADATA_FIELDS]
-    return facts.fingerprint(repr(stamps))[:_VERSION_CHARS]
+    # The store's revision is too coarse for an owner's open form. When-line and
+    # always edits replicate by their own stamps and leave it alone; a replica
+    # conflict can keep it equal; and a supersession link needs no bump. A save
+    # replaces or clears all of these, so a form must have seen them first.
+    # Usage counters are left out: a Recall must not make a form stale.
+    state = [[facts.metadata_stamp(entry, field) for field in facts.METADATA_FIELDS],
+             sorted((entry.get("clock") or {}).items()), bool(entry.get("conflicted")),
+             sorted(entry.get("alternatives") or []), entry.get("superseded_by"),
+             bool(entry.get("supersession_confirmed"))]
+    return facts.fingerprint(repr(state))[:_VERSION_CHARS]
 
 
 def _require_metadata_version(entry, expected):
