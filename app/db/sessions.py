@@ -1212,10 +1212,13 @@ def adopt_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
     ownership + placement dual-write is identical whichever direction the user
     drives it from.
     """
+    from app.core.global_away_mode import release_session_after_commit
+
     _ph = ph()
     now = datetime.now(timezone.utc).isoformat()
     placement_json = json.dumps({"where": f"runner:{instance_id}"})
     with get_db() as conn:
+        release_session_after_commit(conn, session_id)
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET instance_id = {_ph}, placement = {_ph}, "
@@ -1241,9 +1244,12 @@ def adopt_session_follow(session_id: str, instance_id: str) -> Optional[SessionR
     ``updated_at`` IS bumped, mirroring adopt. Returns the updated row, or
     ``None`` if no such session exists.
     """
+    from app.core.global_away_mode import release_session_after_commit
+
     _ph = ph()
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
+        release_session_after_commit(conn, session_id)
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET instance_id = {_ph}, updated_at = {_ph} "
@@ -1262,9 +1268,12 @@ def unpin_session(session_id: str, instance_id: str) -> Optional[SessionRow]:
     ``updated_at`` is bumped, mirroring adopt. Returns the updated row, or
     ``None`` if no such session exists.
     """
+    from app.core.global_away_mode import release_session_after_commit
+
     _ph = ph()
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
+        release_session_after_commit(conn, session_id)
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET instance_id = {_ph}, placement = {_ph}, "
@@ -1294,9 +1303,12 @@ def pin_session_placement(session_id: str, runner_id: str) -> bool:
     user-visible edit and must not resort the board. Returns True if a row was
     updated.
     """
+    from app.core.global_away_mode import release_session_after_commit
+
     _ph = ph()
     placement_json = json.dumps({"where": f"runner:{runner_id}"})
     with get_db() as conn:
+        release_session_after_commit(conn, session_id)
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET placement = {_ph}, instance_id = {_ph} "

@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { tick } from 'svelte';
 
 const mocks = vi.hoisted(() => ({ pushState: vi.fn(), supportCaps: vi.fn() }));
@@ -35,6 +35,7 @@ import { registerSearchShortcut } from '$lib/services/search-shortcut';
 import { FEATURE_PANEL_CONTEXT } from '$lib/components/layout/feature-panel-context';
 import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
 import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
+import { loadCollection } from '../pages';
 import SettingsShell from './SettingsShell.svelte';
 import PanelHost from '../../layout/view/test-fixtures/PanelHost.svelte';
 
@@ -271,6 +272,10 @@ describe('SettingsShell Ctrl+K', () => {
 });
 
 describe('SettingsShell read-only', () => {
+	// The banner's link opens a lazily imported page. Import it first, so this
+	// test measures the link and not how busy the runner is.
+	beforeAll(async () => { await loadCollection('devices'); }, 60_000);
+
 	it('shows the approval banner and disables controls', async () => {
 		admin.set(false);
 		render(SettingsShell);
@@ -418,6 +423,85 @@ describe('SettingsShell stacked mode', () => {
 		await waitFor(() => expect(settingsNav.stacked).toBe(true));
 		await waitFor(() => expect(settingsNav.view).toBe('detail'));
 		expect(mocks.pushState.mock.calls.map(([, state]) => state.settingsView)).toEqual(['page', 'detail']);
+	});
+
+	describe('every later narrowing goes through the same rule', () => {
+		const provider = encodeTarget({ category: 'providers', item: 'provider:claude' });
+		const settings = () => mocks.pushState.mock.calls.map(([, state]) => state);
+
+		beforeEach(() => {
+			mocks.pushState.mockImplementation((_url, state) => { page.state = state; });
+			platform.set('mobile');
+		});
+
+		it('a deep link, then widen, pick another page and narrow: Back reaches the list', async () => {
+			const go = vi.spyOn(history, 'go').mockImplementation(() => {});
+			const view = render(SettingsShell, { initialItemId: provider });
+			await waitFor(() => expect(settingsNav.view).toBe('detail'));
+			await view.rerender({ initialItemId: undefined }); // the app clears a target once it lands
+			expect(settingsNav.depth).toBe(2);
+
+			platform.set('desktop');
+			await waitFor(() => expect(settingsNav.stacked).toBe(false));
+			settingsNav.selectCategory('cloud');
+			await tick();
+			platform.set('mobile');
+			await waitFor(() => expect(settingsNav.stacked).toBe(true));
+			await tick();
+
+			expect(settingsNav.category).toBe('cloud');
+			expect(settingsNav.view).toBe('page');
+			expect(settingsNav.depth).toBe(3);
+			expect(settings().at(-1)).toMatchObject({ settingsView: 'page', settingsCategory: 'cloud', settingsDepth: 3, settingsStaleBelow: 3 });
+
+			page.state = settings()[1];
+			await tick();
+			expect(settingsNav.view).toBe('index');
+			expect(settingsNav.category).toBe('cloud');
+			expect(go).toHaveBeenCalledWith(-2);
+		});
+
+		it('rotating with nothing changed keeps the deep link and adds no entry', async () => {
+			const view = render(SettingsShell, { initialItemId: provider });
+			await waitFor(() => expect(settingsNav.view).toBe('detail'));
+			await view.rerender({ initialItemId: undefined }); // the app clears a target once it lands
+			const entries = settings().length;
+
+			for (const width of ['desktop', 'mobile', 'desktop', 'mobile'] as const) {
+				platform.set(width);
+				await tick();
+			}
+			await waitFor(() => expect(settingsNav.stacked).toBe(true));
+
+			expect(settings()).toHaveLength(entries);
+			expect(settingsNav.view).toBe('detail');
+			expect(settingsNav.depth).toBe(2);
+		});
+
+		it('a deep link that lands before the width is known still gets its Back steps', async () => {
+			platform.set('desktop');
+			const view = render(SettingsShell, { initialItemId: provider });
+			await waitFor(() => expect(settingsNav.view).toBe('detail'));
+			await view.rerender({ initialItemId: undefined });
+			expect(mocks.pushState).not.toHaveBeenCalled();
+
+			platform.set('mobile');
+			await waitFor(() => expect(settingsNav.stacked).toBe(true));
+			await tick();
+
+			expect(settings().map((state) => state.settingsView)).toEqual(['page', 'detail']);
+			expect(settingsNav.depth).toBe(2);
+			expect(settingsNav.view).toBe('detail');
+		});
+
+		it('a chat opened behind a hidden Settings leaves the open page alone', async () => {
+			const view = render(SettingsShell, { initialItemId: provider });
+			await waitFor(() => expect(settingsNav.view).toBe('detail'));
+			await view.rerender({ initialItemId: undefined }); // the app clears a target once it lands
+			settingsNav.followHistory({ ...settings()[1], chatSession: 'chat-b' }, false);
+			expect(settingsNav.view).toBe('detail');
+			expect(settingsNav.depth).toBe(0);
+		});
 	});
 
 	it('shows one pane at a time and pushes a history entry per step', async () => {

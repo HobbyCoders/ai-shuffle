@@ -1,11 +1,11 @@
-"""The preview cookie and owner-only project management.
+"""The preview cookie and owner-only project and agent changes.
 
 On an installed worker the agent-browser preview cookie is read-only on owner
-(``require_admin``) routes: it can neither add a project nor set one up on
-another worker. On a launcher-owned throwaway instance (the dev loop, a branch
-preview) that cookie is the only way in, so there it may manage projects, and
-nothing else owner-only; the mutation ceiling and the same-origin rule still
-apply.
+(``require_admin``) routes: it can neither add a project, set one up on another
+worker, nor edit an agent. On a launcher-owned throwaway instance (the dev
+loop, a branch preview) that cookie is the only way in, so there it may manage
+projects and create or update agents, and nothing else owner-only; the
+mutation ceiling and the same-origin rule still apply.
 """
 
 from __future__ import annotations
@@ -59,7 +59,9 @@ def client(data):
 
     for path in ("/api/v1/projects", "/api/v1/projects/setup", "/api/v1/projects/setup/op-1/cancel",
                  "/api/v1/automations", "/api/v1/projects/demo/git/worktrees/wt-1/forget",
-                 "/api/v1/projects/demo", "/api/v1/projects/demo/link"):
+                 "/api/v1/projects/demo", "/api/v1/projects/demo/link",
+                 "/api/v1/agents", "/api/v1/agents/import", "/api/v1/agents/dev-agent",
+                 "/api/v1/agents/dev-agent/restore", "/api/v1/agents/dev-agent/enabled-agents"):
         api.add_api_route(path, lambda principal=Depends(auth.require_admin): {"principal": principal},
                           methods=["POST", "GET", "PUT", "DELETE"])
     api.add_api_route("/api/v1/projects/workers/peer-1",
@@ -76,6 +78,8 @@ OWNER_PROJECT_CHANGES = [
     ("POST", "/api/v1/projects/setup"),
     ("POST", "/api/v1/projects/setup/op-1/cancel"),
     ("DELETE", "/api/v1/projects/workers/peer-1"),
+    ("POST", "/api/v1/agents"),
+    ("PUT", "/api/v1/agents/dev-agent"),
 ]
 
 
@@ -108,6 +112,11 @@ def test_a_throwaway_instance_still_refuses_other_owner_changes(client, data, mo
     # relinking a project stays owner-only even on a throwaway instance.
     for method, path in (("DELETE", "/api/v1/projects/demo"), ("PUT", "/api/v1/projects/demo"),
                          ("POST", "/api/v1/projects/demo/link"), ("DELETE", "/api/v1/projects/setup")):
+        assert client.request(method, path, headers={"Origin": ORIGIN}).status_code == 403, (method, path)
+    # Agents: create and update only. Delete, import, restore and sub-routes stay owner-only.
+    for method, path in (("DELETE", "/api/v1/agents/dev-agent"), ("POST", "/api/v1/agents/import"),
+                         ("POST", "/api/v1/agents/dev-agent/restore"),
+                         ("PUT", "/api/v1/agents/dev-agent/enabled-agents")):
         assert client.request(method, path, headers={"Origin": ORIGIN}).status_code == 403, (method, path)
 
 

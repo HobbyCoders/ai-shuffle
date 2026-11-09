@@ -386,6 +386,80 @@ it("disconnects and removes a probe that falls back after missed samples", async
   } finally { await page.close(); }
 });
 
+it("removes the probe host when the observer's disconnect throws", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-ui-state="chat"></main>');
+    await page.evaluate(recorderSource());
+    await page.evaluate(() => (window as any).__flightRecorder.start({ persist: false }));
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().stats.paintedSamples > 0, undefined, { timeout: 5000 });
+    const rec = await page.evaluate(() => {
+      ResizeObserver.prototype.disconnect = () => { throw new Error("hostile disconnect"); };
+      return (window as any).__flightRecorder.stop();
+    });
+    expect(rec.ok).toBe(true);
+    expect(rec.stats.internalErrors).toBeGreaterThan(0);
+    expect(await page.locator("flight-recorder-probe").count()).toBe(0);
+  } finally { await page.close(); }
+});
+
+it("retries a probe host that could not be removed on the next start", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main data-ui-state="chat"></main>');
+    await page.evaluate(recorderSource());
+    await page.evaluate(() => (window as any).__flightRecorder.start({ persist: false }));
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().stats.paintedSamples > 0, undefined, { timeout: 5000 });
+    const rec = await page.evaluate(() => {
+      const parent = document.documentElement as any;
+      parent.removeChild = () => { throw new Error("hostile removeChild"); };
+      const result = (window as any).__flightRecorder.stop();
+      delete parent.removeChild;
+      return result;
+    });
+    expect(rec.ok).toBe(true);
+    expect(await page.locator("flight-recorder-probe").count()).toBe(1);
+    await page.evaluate(() => (window as any).__flightRecorder.start({ persist: false }));
+    await page.waitForFunction(() => (window as any).__flightRecorder.snapshot().stats.paintedSamples > 0, undefined, { timeout: 5000 });
+    // Only the new recording's probe is left.
+    expect(await page.locator("flight-recorder-probe").count()).toBe(1);
+    await page.evaluate(() => (window as any).__flightRecorder.stop());
+    expect(await page.locator("flight-recorder-probe").count()).toBe(0);
+  } finally { await page.close(); }
+});
+
+it("keeps an in-flight XHR with its recording when a later send is refused", async () => {
+  const page = await browser.newPage();
+  try {
+    let release = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route("http://recorder.test/", (route) => route.fulfill({ contentType: "text/html", body: '<main data-ui-state="chat"></main>' }));
+    await page.route("http://recorder.test/slow", async (route) => { await held; await route.fulfill({ status: 503, body: "busy" }); });
+    await page.goto("http://recorder.test/");
+    await page.evaluate(recorderSource());
+    const refused = await page.evaluate(() => {
+      const api = (window as any).__flightRecorder;
+      api.start({ persist: false });
+      // Wrapped after start, so stop has to leave the recorder's hooks installed.
+      const wrappedError = console.error;
+      console.error = function (...args: unknown[]) { return wrappedError.apply(console, args); };
+      const xhr = new XMLHttpRequest();
+      (window as any).xhr = xhr;
+      xhr.open("GET", "/slow");
+      xhr.send();
+      api.stop();
+      api.start({ persist: false });
+      try { xhr.send(); return null; } catch (error) { return (error as DOMException).name; }
+    });
+    expect(refused).toBe("InvalidStateError");
+    release();
+    await page.waitForFunction(() => (window as any).xhr.readyState === 4, undefined, { timeout: 5000 });
+    const rec = await page.evaluate(() => (window as any).__flightRecorder.stop());
+    expect(rec.stats.failedRequests).toBe(0);
+    expect(rec.timeline.filter((e: any) => e.kind === "request")).toEqual([]);
+  } finally { await page.close(); }
+});
+
 it("drops an old error event when its message getter restarts recording", async () => {
   const page = await browser.newPage();
   try {

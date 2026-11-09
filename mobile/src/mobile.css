@@ -46,6 +46,13 @@ html:root[data-platform='mobile'] {
 		height: 36px;
 	}
 
+	/* Drawn at 36px, reachable at 44px. */
+	.notif-btn::after {
+		content: '';
+		position: absolute;
+		inset: -4px;
+	}
+
 	.notif-panel {
 		position: fixed;
 		top: 58px;

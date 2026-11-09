@@ -31,6 +31,16 @@ describe('workerGitTargetKey', () => {
 			.toEqual({ workerId: 'local', branch: 'feat/x' });
 	});
 
+	it('does not target a real branch whose checkout the first send creates (#949)', () => {
+		const draft = { projectV2Id: 'pv2-a' };
+		const staged = { ...draft, worktreeBranch: 'feat/picked', worktreeCheckoutPending: true };
+		expect(workerGitTargetKey(staged)).toBe(workerGitTargetKey(draft));
+		expect(workerGitTargetFromKey(workerGitTargetKey(staged))).toEqual({ workerId: 'local', branch: null });
+		// An existing checkout picked from the list is still targeted.
+		expect(workerGitTargetFromKey(workerGitTargetKey({ ...staged, worktreeCheckoutPending: false })))
+			.toEqual({ workerId: 'local', branch: 'feat/picked' });
+	});
+
 	it('has no worker target for a started chat or a legacy worktree draft', () => {
 		expect(workerGitTargetKey({ sessionId: 's1', projectV2Id: 'pv2-a' })).toBeNull();
 		expect(workerGitTargetKey({ projectV2Id: 'pv2-a', worktreeId: 'wt-1' })).toBeNull();

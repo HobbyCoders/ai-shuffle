@@ -78,6 +78,32 @@ def session_upload_dir(session_id: str) -> Path:
     return settings.effective_workspace_dir / "session-uploads" / key
 
 
+def stage_session_upload(session_id: str, filename: str, content: bytes) -> Dict[str, Any]:
+    """Write bytes into the session's staging area; the send lifts them from there."""
+    from app.core.config import settings
+    from app.core.confined_files import upload
+
+    workspace = settings.effective_workspace_dir
+    stage = session_upload_dir(session_id).relative_to(workspace).as_posix()
+    destination = upload(workspace, stage, filename, content)
+    return {
+        "filename": destination.name,
+        "path": destination.relative_to(workspace).as_posix(),
+        "full_path": destination.as_posix(),
+        "size": len(content),
+    }
+
+
+def split_session_staged_paths(paths: List[str], session_id: str) -> tuple[List[str], List[str]]:
+    """Separate this session's staged files from files in a project checkout."""
+    root = session_upload_dir(session_id).resolve()
+    staged: List[str] = []
+    others: List[str] = []
+    for raw in paths:
+        (staged if _is_under(Path(raw).resolve(), root) else others).append(raw)
+    return staged, others
+
+
 def validate_upload_paths(paths: List[str], session: Dict[str, Any]) -> None:
     """Admit provenance only from this session's attachment staging areas.
 
@@ -239,11 +265,19 @@ def lift_send_uploads(paths: List[str], project_id: Optional[str], session_id: s
     from app.core import project_resolver
     from app.db import database
 
+    # Where each file was staged decides how it lifts. The composer can still
+    # name its local project for a chat whose files are session-staged.
+    staged, paths = split_session_staged_paths(paths, session_id)
     if not project_id:
+        staged, paths = staged + paths, []
+    blob_ids: List[str] = []
+    if staged:
         session = database.get_session(session_id)
         if not session or not session.get("project_v2_id"):
             raise UploadLiftError("Attachments need a project session.")
-        return lift_session_paths_to_blobs(paths, session)
+        blob_ids = lift_session_paths_to_blobs(staged, session)
+    if not paths:
+        return blob_ids
     project = database.get_project(project_id)
     if not project:
         raise UploadLiftError(f"Project not found: {project_id}")
@@ -253,7 +287,7 @@ def lift_send_uploads(paths: List[str], project_id: Optional[str], session_id: s
         project_v2_id = (resolved or {}).get("id")
     except Exception:  # noqa: BLE001 — the v2 id is bookkeeping, not a gate
         logger.debug("Upload lift: project_v2 resolve failed for %s", project_id, exc_info=True)
-    return lift_paths_to_blobs(paths, project, session_id, project_v2_id)
+    return blob_ids + lift_paths_to_blobs(paths, project, session_id, project_v2_id)
 
 
 def lift_session_paths_to_blobs(paths: List[str], session: Dict[str, Any]) -> List[str]:

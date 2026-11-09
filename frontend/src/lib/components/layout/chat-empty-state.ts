@@ -48,6 +48,8 @@ export interface ChatSurfaceInput {
 	/** Loading ended without the server confirming any history (the feed's
 	 *  ceiling or a failed request; ActiveSessionState.historyStall). */
 	historyStalled?: boolean;
+	/** The first turn is held for database room: not in history yet, not cleared (#583). */
+	startQueued?: boolean;
 }
 
 /**
@@ -57,11 +59,11 @@ export interface ChatSurfaceInput {
  * unbound empty session is a genuine 'new' chat.
  */
 export function classifyChatSurface(input: ChatSurfaceInput): ChatSurface {
-	const { sessionId, messageCount, isRestoringSession, isLoadingSession, historyStalled } = input;
+	const { sessionId, messageCount, isRestoringSession, isLoadingSession, historyStalled, startQueued } = input;
 	if (messageCount > 0) return 'active';
 	// Only a completed response or a clear proves a chat empty (#913).
 	if (isRestoringSession || isLoadingSession || historyStalled) return 'loading';
-	if (sessionId) return 'cleared';
+	if (sessionId) return startQueued ? 'active' : 'cleared';
 	return 'new';
 }
 

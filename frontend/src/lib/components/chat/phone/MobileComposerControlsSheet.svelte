@@ -77,7 +77,7 @@
 		effortKnown = true, effortDefaultValue = null,
 		fastSupported = false, fastEnabled = false, fastPending = false, fastWaitsForNextMessage = false, onToggleFast, showCodeControls = true,
 		showSetup = true, permissionOptions, permissionValue, permissionPending = false, permissionUpdating = false, onPermissionSelect,
-		awayEnabled = false, awayAvailable = false, awayBusy = false, onToggleAway,
+		awayEnabled = false, awayAvailable = false, awayBusy = false, awayGlobal = false, onToggleAway,
 		onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
 	}: Props = $props();
 	const uid = $props.id();
@@ -153,7 +153,8 @@
 	const accessIcons: Record<string, typeof Hand> = { default: Hand, auto: Sparkles, acceptEdits: FilePen, bypassPermissions: ShieldOff };
 	const awayShown = $derived(accessShown && !!onToggleAway);
 	/** Away as the quick bar shows it: the desktop composer's "· Away" badge. */
-	const awayOn = $derived(awayShown && awayEnabled && awayAvailable);
+	const awayChecked = $derived(awayGlobal || (awayEnabled && awayAvailable));
+	const awayOn = $derived(awayShown && awayChecked);
 	const fastShown = $derived(fastSupported && !modelLocked);
 
 	const runningTasks = $derived(($activeSession.activeTasks ?? []).filter((t) => t.status === 'running'));
@@ -736,7 +737,7 @@
 	}
 
 	function toggleAway() {
-		if (awayAvailable && !awayBusy) onToggleAway?.();
+		if (!awayGlobal && awayAvailable && !awayBusy) onToggleAway?.();
 	}
 
 	function pickPanelEffort(value: string) {
@@ -1000,10 +1001,10 @@
 									{/if}
 								</div>
 								{#if awayShown}
-									<button type="button" class="mcp-row" role="switch" aria-label="Away mode" aria-checked={awayEnabled && awayAvailable}
-										aria-disabled={!awayAvailable || awayBusy || undefined} onclick={toggleAway}>
+									<button type="button" class="mcp-row" role="switch" aria-label={awayGlobal ? 'Away mode, on for all chats' : 'Away mode'} aria-checked={awayChecked}
+										aria-disabled={awayGlobal || !awayAvailable || awayBusy || undefined} onclick={toggleAway}>
 										<span class="mcp-ic" aria-hidden="true"><Moon size={18} /></span>
-										<span class="mcp-lbl"><span>Away mode</span><small>{awayAvailable ? 'Takes recommended defaults' : 'Available after the first message'}</small></span>
+										<span class="mcp-lbl"><span>Away mode</span><small>{awayGlobal ? 'On for all chats' : awayAvailable ? 'Takes recommended defaults' : 'Available after the first message'}</small></span>
 										{#if awayBusy}<LoaderCircle size={18} class="mcc-spin mcp-chev" aria-hidden="true" />{:else}<span class="mcp-sw" aria-hidden="true"></span>{/if}
 									</button>
 								{/if}

@@ -51,7 +51,8 @@ describe('no assistant mode anywhere', () => {
 
 	it('keeps the header download and Git on every chat', () => {
 		expect(mainPanel).toContain("{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}");
-		expect(mainPanel).toContain('{#if activeTab && shouldShowHeaderGitActions({');
+		expect(mainPanel).toContain('const gitUiVisible = $derived(!!activeTab && shouldShowHeaderGitActions(headerGitInput));');
+		expect(mainPanel).toContain('{#if activeTab && gitUiVisible}');
 	});
 
 	it('keeps the context chips and the browser toggle in every composer', () => {
@@ -76,9 +77,10 @@ describe('background work beside the composer, in every chat', () => {
 	});
 });
 
-describe('approvals asked in words, in every chat', () => {
-	it('keeps marked approvals out of the dialog and asks them in the transcript', () => {
-		expect(chatView).toContain('const dialogPermissions = $derived(($activeSession.pendingPermissions ?? []).filter((request) => !isAssistantConfirm(request)));');
+describe('permission requests, in every chat', () => {
+	it('answers every request on the prompt and keeps old in-words requests readable', () => {
+		expect(chatView).toContain('const dialogPermissions = $derived($activeSession.pendingPermissions ?? []);');
+		expect(chatView).not.toContain('isAssistantConfirm');
 		expect(chatView).toContain('<PermissionQueue requests={dialogPermissions}');
 		expect(messageArea).toContain('const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));');
 		// The question stands in for the working dots in any chat.

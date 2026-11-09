@@ -373,7 +373,7 @@ def test_grace_resets_when_new_work_appears(repository, monkeypatch):
     assert path.exists()
 
 
-def test_automatic_schedule_is_delayed_and_low_frequency(monkeypatch):
+def test_automatic_schedule_is_delayed_then_runs_every_five_minutes(monkeypatch):
     delays = []
     passes = []
 
@@ -389,7 +389,7 @@ def test_automatic_schedule_is_delayed_and_low_frequency(monkeypatch):
     monkeypatch.setattr(rc, "automatic_pass", one_pass)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(rc.periodic_reclaim())
-    assert passes == [True] and delays == [60, 2 * 3600]
+    assert passes == [True] and delays == [60, 5 * 60]
 
 
 def test_setting_defaults_on_and_supports_opt_out(monkeypatch):

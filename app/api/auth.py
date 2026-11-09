@@ -254,40 +254,44 @@ def _preview_may_read(request: Request) -> bool:
     listener the grant is all it has, and without this the Assistant and
     Settings pages render as "Owner access required". Reads only: a preview
     never changes an owner-only route, whichever prefix it lives under, except
-    project management on a throwaway instance
-    (:func:`_preview_may_manage_projects`).
+    the few listed changes on a throwaway instance
+    (:func:`_preview_may_change_dev_data`).
     """
     if getattr(request, 'method', 'GET') not in ('GET', 'HEAD', 'OPTIONS') \
-            and not _preview_may_manage_projects(request):
+            and not _preview_may_change_dev_data(request):
         return False
     return preview_access.grant(request) is not None
 
 
-# The project changes a throwaway instance's preview cookie may make.
-_PREVIEW_PROJECT_CHANGE = re.compile(
+# The owner-only changes a throwaway instance's preview cookie may make.
+_PREVIEW_DEV_CHANGE = re.compile(
     r"(POST /api/v1/projects"
     r"|POST /api/v1/projects/setup"
     r"|POST /api/v1/projects/setup/[^/]+/cancel"
-    r"|DELETE /api/v1/projects/workers/[^/]+)"
+    r"|DELETE /api/v1/projects/workers/[^/]+"
+    r"|POST /api/v1/agents"
+    r"|PUT /api/v1/agents/[^/]+"
+    r"|PUT /api/v1/away-mode)"
 )
 
 
-def _preview_may_manage_projects(request: Request) -> bool:
-    """Whether a preview may change projects here: a disposable instance only.
+def _preview_may_change_dev_data(request: Request) -> bool:
+    """Whether a preview may make this owner-only change: a disposable instance only.
 
     The dev loop's and branch previews' only way in is the preview cookie, so
-    without this nobody can add a project there or set one up on a paired dev
-    worker. ``disposable_preview_data`` is true only on the launcher's marked
-    throwaway data directory, never on an installed worker, so the live
-    worker's preview cookie stays read-only on owner routes. The mutation
-    ceiling (``preview_access.mutation_allowed``) and same-origin rule still
-    apply.
+    without this nobody can add a project there, set one up on a paired dev
+    worker, or test the Agents page's autosave. ``disposable_preview_data`` is
+    true only on the launcher's marked throwaway data directory, never on an
+    installed worker, so the live worker's preview cookie stays read-only on
+    owner routes. The mutation ceiling (``preview_access.mutation_allowed``)
+    and same-origin rule still apply.
 
-    Only these four changes: add a project, set one up on a worker, cancel
-    that setup, and remove a worker's copy. Every other owner-only project
-    change (delete, relink, settings, memory) stays refused even here.
+    Only these changes: add a project, set one up on a worker, cancel that
+    setup, remove a worker's copy, create or update an agent, and toggle global
+    Away. Every other owner-only change (deleting or relinking a project;
+    deleting, importing or restoring an agent) stays refused even here.
     """
-    if not _PREVIEW_PROJECT_CHANGE.fullmatch(
+    if not _PREVIEW_DEV_CHANGE.fullmatch(
             f"{getattr(request, 'method', 'GET')} {request.url.path.rstrip('/')}"):
         return False
     try:

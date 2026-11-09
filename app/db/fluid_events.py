@@ -2,11 +2,12 @@
 
 The log is append-only and the engine persists every bus event to it
 unfiltered, so streaming deltas dominate it by volume. Left alone the table becomes the
-largest thing in the database, and it has no timestamp column or secondary
-index to make that cheap to live with.
+largest thing in the database. It has no timestamp column; maintenance dates
+sessions first, then walks bounded ranges of the existing (session_id, seq)
+primary key, including nonmatching rows so sparse deltas cannot cause a full scan.
 
 Only PURE STREAMING DELTAS are prunable, plus ``ProviderAlive``, a content-free
-liveness signal that only matters while its model call is running. A delta
+signal that only matters while its model call is running. A delta
 carries an incremental fragment of something the record already holds in
 completed form:
 
@@ -34,10 +35,12 @@ or recently active session's replay is never touched.
 """
 
 import logging
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Tuple
 
-from app.db.retention import BATCH_SIZE, delete_batches
+from app.db import retention
+from app.db.retention import BATCH_SIZE, set_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -87,35 +90,79 @@ def prune_fluid_delta_events(
     ).isoformat()
 
     placeholders = ", ".join(["%s"] * len(PRUNABLE_EVENT_CLASSES))
-    sql = (
-        "DELETE FROM fluid_session_events WHERE (session_id, seq) IN ("
-        "SELECT session_id, seq FROM fluid_session_events "
-        "WHERE (%s IS NULL OR (session_id, seq) > (%s, %s)) "
-        f"AND event ->> '_cls' IN ({placeholders}) "
-        "AND session_id IN ("
-        "    SELECT sdk_session_id FROM sessions "
-        "    WHERE sdk_session_id IS NOT NULL AND updated_at < %s"
-        ") ORDER BY session_id, seq LIMIT %s) RETURNING session_id, seq"
-    )
-    filters = (*PRUNABLE_EVENT_CLASSES, cutoff, BATCH_SIZE)
+    total = 0
+    after_session = None
+    failures = 0
+    while stop is None or not stop.is_set():
+        with nullcontext(None) if cursor is not None else retention.get_db() as conn:
+            cur = cursor if cursor is not None else conn.cursor()
+            set_timeout(cur)
+            session_boundary = " AND sdk_session_id > %s" if after_session is not None else ""
+            session_params = (cutoff, after_session) if after_session is not None else (cutoff,)
+            cur.execute(
+                "SELECT DISTINCT sdk_session_id FROM sessions "
+                "WHERE sdk_session_id IS NOT NULL AND updated_at < %s"
+                + session_boundary + " ORDER BY sdk_session_id LIMIT %s",
+                (*session_params, BATCH_SIZE),
+            )
+            sessions = cur.fetchall()
+        if not sessions:
+            break
+        for session in sessions:
+            after_session = session["sdk_session_id"]
+            after_seq = None
+            while stop is None or not stop.is_set():
+                try:
+                    with nullcontext(None) if cursor is not None else retention.get_db() as conn:
+                        cur = cursor if cursor is not None else conn.cursor()
+                        set_timeout(cur)
+                        # Bound EXAMINED rows, not just matching rows. The old
+                        # global class/idle filter could scan millions of retained
+                        # events to find the next 5,000 deltas (or none at all).
+                        boundary = " AND seq > %s" if after_seq is not None else ""
+                        params = (after_session, after_seq) if after_seq is not None else (after_session,)
+                        cur.execute(
+                            "SELECT seq FROM fluid_session_events WHERE session_id = %s"
+                            + boundary + " ORDER BY seq LIMIT %s",
+                            (*params, BATCH_SIZE),
+                        )
+                        keys = cur.fetchall()
+                        if not keys:
+                            break
+                        high = keys[-1]["seq"]
+                        cur.execute(
+                            "DELETE FROM fluid_session_events WHERE session_id = %s "
+                            "AND seq >= %s AND seq <= %s "
+                            f"AND event ->> '_cls' IN ({placeholders}) "
+                            # Recheck idleness in the mutation, not just selection.
+                            "AND EXISTS (SELECT 1 FROM sessions WHERE sdk_session_id = %s "
+                            "AND updated_at < %s)",
+                            (after_session, keys[0]["seq"], high, *PRUNABLE_EVENT_CLASSES,
+                             after_session, cutoff),
+                        )
+                        changed = cur.rowcount or 0
+                    total += changed
+                    after_seq = high
+                    if len(keys) < BATCH_SIZE:
+                        break
+                except Exception:
+                    if cursor is not None:
+                        raise  # The caller owns rollback of its transaction.
+                    failures += 1
+                    logger.exception("fluid_events: delta pruning failed for one session; "
+                                     "committed batches survive and other sessions will continue")
+                    break
+        if len(sessions) < BATCH_SIZE:
+            break
+    if failures:
+        raise RuntimeError(f"fluid delta pruning failed for {failures} session(s); "
+                           f"pruned {total} rows in committed batches; will retry next pass")
 
-    def advance(cur):
-        rows = cur.fetchall()
-        # RETURNING order is unspecified. Every eligible key through this
-        # batch's database-order maximum is gone, so any returned key is safe
-        # to advance past (even if the database uses a different collation).
-        session_id, seq = max(((r["session_id"], r["seq"]) for r in rows),
-                              default=(None, None))
-        return session_id, session_id, seq, *filters
-
-    deleted = delete_batches(sql, (None, None, None, *filters),
-                             cursor=cursor, advance=advance, stop=stop)
-
-    if deleted:
+    if total:
         logger.info(
             "fluid_events: pruned %s streaming-delta rows from sessions idle "
             "more than %s days",
-            deleted,
+            total,
             older_than_days,
         )
-    return deleted
+    return total

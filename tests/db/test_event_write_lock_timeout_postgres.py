@@ -1434,6 +1434,7 @@ print("UPGRADED")
 
 def test_an_install_on_the_previous_schema_upgrades_and_a_stop_cancels_its_wake(cluster):
     """The real boot path, on a database shaped as version 94 left it."""
+    from app.db.database import SCHEMA_VERSION
     from app.db.schema_postgres import create_postgres_schema
 
     admin = psycopg2.connect(host="127.0.0.1", port=cluster["port"], user="postgres", dbname="postgres")
@@ -1446,6 +1447,7 @@ def test_an_install_on_the_previous_schema_upgrades_and_a_stop_cancels_its_wake(
     try:
         with conn, conn.cursor() as cursor:
             create_postgres_schema(cursor)
+            cursor.execute("DROP TABLE query_recovery")
             cursor.execute("DROP TABLE session_stops")
             cursor.execute("ALTER TABLE pending_wakeups DROP COLUMN stop_seq")
             cursor.execute("ALTER TABLE background_tasks DROP COLUMN turn_order")
@@ -1463,7 +1465,9 @@ def test_an_install_on_the_previous_schema_upgrades_and_a_stop_cancels_its_wake(
 
         with conn, conn.cursor() as cursor:
             cursor.execute("SELECT version FROM schema_version")
-            assert cursor.fetchone()["version"] == 95
+            assert cursor.fetchone()["version"] == SCHEMA_VERSION
+            cursor.execute("SELECT count(*) AS pending FROM query_recovery")
+            assert cursor.fetchone()["pending"] == 0
             cursor.execute("SELECT prompt, stop_seq FROM pending_wakeups WHERE id='kept'")
             assert dict(cursor.fetchone()) == {"prompt": "armed before the upgrade", "stop_seq": 0}
             cursor.execute("SELECT column_name FROM information_schema.columns "

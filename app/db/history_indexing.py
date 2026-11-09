@@ -1,13 +1,20 @@
 """Online, restart-safe GIN isolation for hand-off history.
 
-0 = ordinary live write, 1 = imported/pending, 2 = imported/indexed. History
-GINs have their own bounded pending lists. Live inserts and updates always use
-state 0, never those lists. No setting on a live GIN is changed. The state is the
-persistent work queue; each promotion transaction commits independently.
+0 = ordinary live write, 2 = imported, in the history GINs. 1 = imported by an
+older build and still waiting for promotion; nothing writes it any more, but
+those rows drain through the durable queue. Live inserts and updates always use
+state 0 and never touch a history GIN, so no setting on a live GIN is changed.
+
+Imports only append to a large, history-only pending list, which keeps the
+expensive GIN merge out of the move. Imported text is searchable at once and the
+list is merged in the background, between foreground turns.
 """
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import threading
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
@@ -35,6 +42,31 @@ INDEXES = (
     "idx_session_recall_text_trgm_e",
     "idx_sse_fts", "idx_session_messages_fts",
 )
+IMPORT_STATE = "2"
+# Just below 2 GiB: Windows PostgreSQL caps this option at 2097151 KB. A list of
+# this size holds about three copies of the 78 MB all-text load-test chat, and
+# reaching the limit would make the importer merge it inline, using work_mem.
+HISTORY_PENDING_KB = 2_096_128
+_HISTORY_OPTIONS = f"fastupdate=on, gin_pending_list_limit={HISTORY_PENDING_KB}"
+# Let a move finish before merging what it wrote.
+FLUSH_QUIET_SECONDS = 5.0
+# When something last wrote to a history list; None once merged. Starts dirty so
+# the first pass after a restart merges whatever the previous process left behind.
+_unmerged_at: float | None = 0.0
+# Imports running right now: a single table's publish can outlast the quiet time.
+_active_imports = 0
+_imports_lock = threading.Lock()
+# An import that takes a list past its limit merges the whole list itself. It
+# blocks only that import: live writes use other indexes. So give it longer than
+# the ordinary 30s and the memory the background cleaner gets (PostgreSQL's inline
+# merge uses work_mem, which took over 10 minutes where the cleaner took under one).
+IMPORT_STATEMENT_TIMEOUT = "10min"
+# A rebuild retains the original index until it is finished, and WAL-logs the copy.
+BUILD_RESERVE_BYTES = 1024 ** 3
+BUILD_RETRY_SECONDS = 600.0
+_retry_build_at = 0.0
+# Indexes already logged as left on their own tablespace, so each pass stays quiet.
+_left_alone: set[str] = set()
 _DEFAULT = f"COALESCE(NULLIF(current_setting('{SETTING}', true), ''), '0')::smallint"
 
 
@@ -64,21 +96,52 @@ def search_table(
     return f"({arms}) {alias or table}"
 
 
+def note_history_write() -> None:
+    """Record that a history GIN's pending list has something to merge.
+
+    Call it after the write, so a merge either saw the entries or leaves this set.
+    """
+    global _unmerged_at
+    _unmerged_at = time.monotonic()
+
+
 @contextmanager
 def importing(cursor: Any, table: str) -> Iterator[bool]:
     """Scope deferral to hand-off INSERTs, never the rest of publication."""
+    global _active_imports
     active = table in TABLES and enabled(cursor)
     if active:
-        cursor.execute("SELECT set_config(%s, '1', true)", (SETTING,))
+        with _imports_lock:
+            _active_imports += 1
+        note_history_write()
+    previous = None
     try:
+        if active:
+            # OFFSET keeps the old values' read ahead of the set_config calls.
+            cursor.execute(
+                "SELECT old.timeout, old.memory, set_config(%s, %s, true), "
+                "set_config('statement_timeout', %s, true), "
+                "set_config('work_mem', current_setting('maintenance_work_mem'), true) FROM "
+                "(SELECT current_setting('statement_timeout') AS timeout, "
+                "current_setting('work_mem') AS memory OFFSET 0) old",
+                (SETTING, IMPORT_STATE, IMPORT_STATEMENT_TIMEOUT),
+            )
+            previous = cursor.fetchone()
         yield active
     finally:
         if active:
+            # The quiet time starts now, so stamp this before the scope ends.
+            note_history_write()
+            with _imports_lock:
+                _active_imports -= 1
             # On a failed statement the caller rolls back the entire transaction.
             # Do not mask that exception with a command in an aborted transaction.
             import sys
             if sys.exc_info()[0] is None:
-                cursor.execute("SELECT set_config(%s, '0', true)", (SETTING,))
+                cursor.execute("SELECT set_config(%s, '0', true), "
+                               "set_config('statement_timeout', %s, true), "
+                               "set_config('work_mem', %s, true)",
+                               (SETTING, previous["timeout"], previous["memory"]))
 
 
 def _valid(cursor: Any, name: str) -> bool:
@@ -135,20 +198,133 @@ def _online_cursor() -> Iterator[Any]:
         pass
 
 
+def _concurrent_ddl(cur: Any, table: str, statement: str) -> None:
+    """Check the metadata lock quickly, then let the statement wait for anyone.
+
+    CONCURRENTLY also uses lock_timeout for its waits on writers and old
+    snapshots, so 250ms would fail it behind ordinary traffic and leave an
+    INVALID index. Those waits block nobody: its ShareUpdateExclusive lock does
+    not conflict with DML, and production's own timeouts end long transactions.
+    Keep the build free of any statement limit too; restarting the heap scans
+    could starve a slow worker for ever.
+    """
+    cur.execute("BEGIN")
+    try:
+        cur.execute(f"LOCK TABLE {table} IN SHARE UPDATE EXCLUSIVE MODE")
+    except BaseException:
+        cur.execute("ROLLBACK")
+        raise
+    cur.execute("COMMIT")
+    cur.execute("SET lock_timeout = '0'")
+    cur.execute("SET statement_timeout = '0'")
+    try:
+        cur.execute(statement)
+    finally:
+        cur.execute("SET lock_timeout = '250ms'")
+        cur.execute("SET statement_timeout = '1h'")
+
+
+def _rebuild_size(cur: Any, name: str) -> int | None:
+    """Bytes a rebuild of this index copies; None to leave the index where it is.
+
+    Only the database's own default location, in the cluster's data directory,
+    is rebuilt. Those builds name no tablespace, so nothing done to an index or
+    a tablespace after this read can send one anywhere the disk check did not
+    measure. CREATE INDEX takes a tablespace by name, so a build that named one
+    could not promise that. The app never creates tablespaces: a moved index is
+    an operator's choice, and it is still valid and searched where it is.
+    """
+    cur.execute("SELECT pg_relation_size(c.oid) AS bytes, "
+                "c.reltablespace = 0 AND pg_tablespace_location(0) = '' AS on_default "
+                "FROM pg_class c WHERE c.oid = to_regclass(%s)", (name,))
+    row = cur.fetchone()
+    if not row:
+        return 0
+    return int(row["bytes"]) if row["on_default"] else None
+
+
+def _disk(path: Any) -> tuple[int, int]:
+    """(device, free bytes) of the filesystem holding this path."""
+    return os.stat(path).st_dev, shutil.disk_usage(path).free
+
+
+def _volumes(cur: Any, size: int) -> list[tuple[str, int, int, int]]:
+    """(label, device, free bytes, bytes needed) of each place a rebuild writes."""
+    from app.core.config import settings
+    from app.core.private_storage import service_files
+    from app.maintenance.session_recall_cache import managed_data_directory
+
+    data = managed_data_directory(cur, settings.effective_data_dir)
+    places = [("data", data, size), ("WAL", data / "pg_wal", size)]
+    with service_files():
+        return [(label, *_disk(path), need) for label, path, need in places]
+
+
+def _space_problem(cur: Any, size: int) -> str | None:
+    """Why rebuilding this index now is unsafe for the PostgreSQL volumes, if so."""
+    from app.maintenance.session_recall_cache import ManagedDataDirectoryError
+
+    try:
+        volumes = _volumes(cur, size)
+    except (ManagedDataDirectoryError, OSError, ValueError):
+        return ("its free disk space cannot be measured, because PostgreSQL is not "
+                "this worker's own managed database")
+    need_by_device: dict[int, int] = {}
+    for _, device, _, need in volumes:
+        need_by_device[device] = need_by_device.get(device, 0) + need
+    for label, device, free, _ in volumes:
+        need = need_by_device[device] + BUILD_RESERVE_BYTES
+        if free < need:
+            return (f"the {label} volume has {free / 1024 ** 3:.1f} GiB free and this step "
+                    f"needs {need / 1024 ** 3:.1f} GiB; free some disk space")
+    return None
+
+
+def _index_table(name: str) -> str:
+    return next(t for t in TABLES if (
+        (t == "fluid_session_nodes" and "fluid" in name)
+        or (t == "session_store_entries" and "sse" in name)
+        or (t == "session_recall_text" and "session_recall_text" in name)
+        or (t == "session_events" and "events" in name)
+        or (t == "session_messages" and "session_messages" in name)))
+
+
+def _reclaim_replacements(cur: Any, name: str) -> None:
+    """Drop what an interrupted build left beside an original that is staying.
+
+    Only call this with the full original still valid: it already covers every
+    row, so nothing depends on these, and each one left costs a whole index of
+    live-write work for good.
+    """
+    for replacement in (name + "_h0", name + "_h2"):
+        cur.execute("SELECT to_regclass(%s) AS found", (replacement,))
+        if cur.fetchone()["found"]:
+            _concurrent_ddl(cur, _index_table(name),
+                            f"DROP INDEX CONCURRENTLY IF EXISTS {replacement}")
+            logger.info("Removed unfinished history index %s", replacement)
+
+
 def migrate() -> bool:
     """One online migration pass. No startup transaction or table rewrite.
 
-    Lock acquisition is capped at 250ms. Concurrent builds survive cancellation
+    Metadata locks are capped at 250ms; see _concurrent_ddl for the builds.
+    Concurrent builds survive cancellation
     as invalid indexes, which the next pass drops and retries. The original
     index remains usable until *both* replacement indexes are valid. An advisory
     lock serializes migrators, not writers. Imports defer only after publication
     of the final ready marker. Ordinary old rows stay state 0 without a backfill.
     """
+    global _retry_build_at
+    if time.monotonic() < _retry_build_at:
+        return False
     with _online_cursor() as cur:
         if cur is None:
             return False
         cur.execute("SET lock_timeout = '250ms'")
-        cur.execute("SET statement_timeout = '15min'")
+        cur.execute("SET statement_timeout = '1h'")
+        # Replacements stay in the database's default location, the place
+        # _volumes measures, whatever a role or database setting says.
+        cur.execute("SET default_tablespace = ''")
         cur.execute("CREATE TABLE IF NOT EXISTS history_index_migrations "
                     "(name text PRIMARY KEY, tail text NOT NULL)")
         for table in TABLES:
@@ -197,10 +373,21 @@ def migrate() -> bool:
                 cur.execute("SELECT reloptions FROM pg_class WHERE oid=to_regclass(%s)",
                             (name + "_h2",))
                 options = cur.fetchone()["reloptions"] or []
-                wanted = {"fastupdate=on", "gin_pending_list_limit=4096"}
+                wanted = set(_HISTORY_OPTIONS.split(", "))
                 if not wanted.issubset(options):
-                    cur.execute(f"ALTER INDEX {name}_h2 SET "
-                                "(fastupdate=on, gin_pending_list_limit=4096)")
+                    cur.execute(f"ALTER INDEX {name}_h2 SET ({_HISTORY_OPTIONS})")
+                continue
+            size = _rebuild_size(cur, name)
+            if size is None:
+                if row and not partial and _valid(cur, name):
+                    _reclaim_replacements(cur, name)
+                # Decided again each pass, so moving it back is picked up by itself.
+                if name not in _left_alone:
+                    _left_alone.add(name)
+                    logger.info("History index %s stays where it is: it is on its own "
+                                "tablespace, and only indexes on the database's default "
+                                "one are upgraded. Moving long chats stays slower for it.",
+                                name)
                 continue
             if row and not partial:
                 tail = row["ddl"].split(" USING gin ", 1)[1]
@@ -214,34 +401,37 @@ def migrate() -> bool:
             # PostgreSQL supplies this expression/predicate, not external input.
             expression, sep, original_predicate = tail.partition(" WHERE ")
             expression, has_options, original_options = expression.partition(" WITH ")
-            table = next(t for t in TABLES if (
-                (t == "fluid_session_nodes" and "fluid" in name)
-                or (t == "session_store_entries" and "sse" in name)
-                or (t == "session_recall_text" and "session_recall_text" in name)
-                or (t == "session_events" and "events" in name)
-                or (t == "session_messages" and "session_messages" in name)))
+            table = _index_table(name)
             for state in (0, 2):
                 replacement = name + f"_h{state}"
                 if not _valid(cur, replacement):
-                    cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {replacement}")
+                    _concurrent_ddl(cur, table, f"DROP INDEX CONCURRENTLY IF EXISTS {replacement}")
+                    # Only the live half holds existing rows; history starts empty.
+                    problem = _space_problem(cur, size) if state == 0 else None
+                    if problem:
+                        _retry_build_at = time.monotonic() + BUILD_RETRY_SECONDS
+                        logger.warning("History index upgrade for %s is waiting: %s. Moving "
+                                       "long chats stays slower until then; it retries by itself.",
+                                       name, problem)
+                        return False
                     where = f"({original_predicate}) AND " if sep else ""
                     if state == 2:
-                        options = " WITH (fastupdate=on, gin_pending_list_limit=4096)"
+                        options = f" WITH ({_HISTORY_OPTIONS})"
                     else:
                         options = " WITH " + original_options if has_options else ""
-                    cur.execute(f"CREATE INDEX CONCURRENTLY {replacement} ON {table} "
-                                f"USING gin {expression}{options} WHERE "
-                                f"{where}{COLUMN} = {state}")
-            cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+                    _concurrent_ddl(cur, table, f"CREATE INDEX CONCURRENTLY {replacement} ON {table} "
+                                    f"USING gin {expression}{options} WHERE "
+                                    f"{where}{COLUMN} = {state}")
+            _concurrent_ddl(cur, table, f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
             cur.execute(f"ALTER INDEX {name}_h0 RENAME TO {name}")
             # Yield between indexes. A restart resumes from the valid ones.
             return False
         for table, (keys, _) in TABLES.items():
             queue = f"idx_{table}_history_pending"
             if not _valid(cur, queue):
-                cur.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {queue}")
-                cur.execute(f"CREATE INDEX CONCURRENTLY {queue} ON {table} ({keys}) "
-                            f"WHERE {COLUMN} = 1")
+                _concurrent_ddl(cur, table, f"DROP INDEX CONCURRENTLY IF EXISTS {queue}")
+                _concurrent_ddl(cur, table, f"CREATE INDEX CONCURRENTLY {queue} ON {table} ({keys}) "
+                                f"WHERE {COLUMN} = 1")
         cur.execute("INSERT INTO system_settings(key,value) VALUES (%s,'ready') "
                     "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", (KEY,))
         return True
@@ -297,6 +487,64 @@ def promote_batch(
     return count
 
 
+def flush_pending(
+    *, can_work: Callable[[], bool] = lambda: True,
+    quiet: float | None = None, poll: float = 1.0,
+) -> bool:
+    """Merge the history GINs' pending lists; True once nothing is left to merge.
+
+    Live writers never use these lists. PostgreSQL applies a merge as physical
+    index changes, so a cancelled or crashed one keeps what it finished and the
+    rest stays searchable in the list. That is what makes it safe to cancel the
+    statement as soon as a foreground turn or another import starts, and to
+    retry later.
+    """
+    global _unmerged_at
+    started = _unmerged_at
+    if started is None:
+        return True
+
+    def clear_to_run() -> bool:
+        return not _active_imports and can_work()
+
+    if time.monotonic() - started < (FLUSH_QUIET_SECONDS if quiet is None else quiet) or not clear_to_run():
+        return False
+    try:
+        with _online_cursor() as cur:
+            if cur is None:
+                return False
+            cur.execute("SET lock_timeout = '0'")
+            cur.execute("SET statement_timeout = '10min'")
+            for name in INDEXES:
+                cur.execute("SELECT to_regclass(%s) AS name", (name + "_h2",))
+                if not cur.fetchone()["name"]:
+                    continue
+                if not clear_to_run():
+                    return False
+                done = threading.Event()
+
+                def cancel_on_foreground() -> None:
+                    while not done.wait(poll):
+                        if not clear_to_run():
+                            cur.connection.cancel()
+                            return
+
+                watcher = threading.Thread(target=cancel_on_foreground, daemon=True)
+                watcher.start()
+                try:
+                    cur.execute("SELECT gin_clean_pending_list(%s::regclass)", (name + "_h2",))
+                finally:
+                    done.set()
+                    watcher.join()
+    except psycopg2.Error:
+        # A foreground turn, the time limit or a lost connection. Retry later.
+        logger.info("History index merge deferred; will retry", exc_info=True)
+        return False
+    if _unmerged_at == started:
+        _unmerged_at = None
+    return True
+
+
 def run_pass(
     *, seconds: float = 5.0, pause: float = 0.1, can_work: Callable[[], bool] = lambda: True,
 ) -> bool:
@@ -307,13 +555,20 @@ def run_pass(
                     "AND value IN ('building','ready')", (KEY,))
         if not cur.fetchone():
             return True  # Experimental: no online DDL or deferral without opt-in.
-    if not can_work() or not migrate():
+    try:
+        if not can_work() or not migrate():
+            return False
+    except psycopg2.Error:
+        # A busy table, cancellation or a lost connection: invalid leftovers are
+        # repaired by the next pass, which must not wait out startup's back-off.
+        logger.info("History index migration deferred; will retry", exc_info=True)
         return False
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if not can_work():
             return False
         if not promote_batch(can_work=can_work):
-            return can_work()
+            return flush_pending(can_work=can_work)
+        note_history_write()
         time.sleep(pause)
     return False

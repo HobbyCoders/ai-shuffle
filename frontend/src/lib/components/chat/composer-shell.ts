@@ -141,6 +141,8 @@ export interface ComposerSheetProps {
 	/** False until the chat has started (Away is stored per session). */
 	awayAvailable?: boolean;
 	awayBusy?: boolean;
+	/** Away for all chats is on: this chat's own setting is held and shown as on. */
+	awayGlobal?: boolean;
 	onToggleAway?: () => void;
 	/** The usage details opened or closed (the dock polls provider limits while open). */
 	onUsageOpenChange?: (open: boolean) => void;

@@ -10,7 +10,7 @@
 	 * - Existing .prose CSS styling
 	 */
 	import { tick } from 'svelte';
-	import { marked } from 'marked';
+	import { marked, type Renderer, type Tokens } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { layout } from '$lib/stores/layout.svelte';
 	import type { DocSection } from '$lib/docs/types';
@@ -28,7 +28,7 @@
 
 	// Custom renderer for heading IDs
 	const renderer = new marked.Renderer();
-	renderer.heading = ({ text, depth }: { text: string; depth: number }) => {
+	renderer.heading = function (this: Renderer, { text, tokens, depth }: Tokens.Heading) {
 		const slug = text
 			.toLowerCase()
 			.replace(/<[^>]*>/g, '')
@@ -36,7 +36,8 @@
 			.replace(/\s+/g, '-')
 			.replace(/-+/g, '-')
 			.trim();
-		return `<h${depth} id="${slug}">${text}</h${depth}>`;
+		// Inline markup renders: a heading's `curl` is code, not literal backticks.
+		return `<h${depth} id="${slug}">${this.parser.parseInline(tokens)}</h${depth}>`;
 	};
 
 	// Enhanced code blocks with copy button. The markup goes through the

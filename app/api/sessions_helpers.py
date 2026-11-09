@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 import threading
 import time
 
+from app.core import start_admission
 from app.db import database
 from app.db.async_database import run_sync
 from app.db.api_users import get_api_users_by_ids
@@ -863,12 +864,15 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
     presence = get_running_task_presence(session_ids)
     failed = sessions_with_failed_latest_turn(session_ids)
+    start_queued = start_admission.admission.queued_sessions()
 
     for session in sessions:
         sid = session["id"]
         session["tags"] = tags_by_session.get(sid, [])
         session["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
         session["last_turn_failed"] = sid in failed
+        if sid in start_queued:
+            session["start_queued"] = True
         fork_info = fork_info_by_session.get(sid)
         session["has_forks"] = fork_info["has_forks"] if fork_info else False
         if session.get("api_user_id"):
@@ -1373,8 +1377,9 @@ def attach_event_positions(messages: list[dict], session_id: str) -> None:
                 message["seq"], message["epoch"] = event["seq"], event["epoch"]
 
 
-# An approval asked in words (``assistant_confirm``) is one transcript card per
-# request id, settled in place. Mirrors the frontend reducer's projection
+# An approval an older version asked in words (``assistant_confirm``) is one
+# transcript card per request id, settled in place. New requests use the
+# regular prompt and never reach this. Mirrors the frontend reducer's projection
 # (frontend/src/lib/utils/assistant-confirm.ts) so a reload reads the same (#483).
 APPROVAL_CARD_SUBTYPE = "assistant_confirm_request"
 # Earlier outcomes that make a same-question card a retry ("Asked again").

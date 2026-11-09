@@ -42,10 +42,11 @@ The composer's worker picker lists every online worker. Pick one, and the chat r
 Deferred history indexing is experimental and **off by default**: load tests
 still showed live-write latency outliers. On a disposable candidate only, an
 operator can request it with `python -m app.maintenance.history_indexing --apply`
-from that worker's source and interpreter. Its online index upgrade and indexing
-resume after restarts. After the upgrade, moved history is indexed in background
-batches; older text can be absent from search and agent recall until catch-up,
-but remains readable in the conversation. Ordinary live writes use separate
+from that worker's source and interpreter. Its online index upgrade resumes after
+restarts and waits, saying why in the worker log, while the disk is too full for
+it. After the upgrade, moved history is searchable as soon as the move finishes,
+and its search index is finished off afterwards in the background, waiting while
+any chat is working on the receiving worker. Ordinary live writes use separate
 indexes. Do not enable it on a production worker until the latency follow-up passes.
 
 From any other worker you can read that chat, send messages, answer prompts and stop it. Attachments are passed along too. Git buttons (Commit, Push, Pull, Create PR, Finish and Ship It) act on the owning worker's copy of the project.

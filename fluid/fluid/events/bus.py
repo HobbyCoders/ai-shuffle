@@ -24,6 +24,10 @@ Semantics:
   is ever lost — only buffered late).
 - ``subscribe(since_seq=N)`` replays the log from N before streaming live —
   reconnect support for WS bridges and TUIs.
+- A ``LIVE_ONLY_EVENTS`` signal is outside all of that: it goes to the current
+  subscribers with ``seq`` left at -1, takes no number, enters no log and is
+  never replayed. A subscriber that has moved past the point it was sent at
+  drops it. The numbered stream stays contiguous without it.
 
 Lookups never create state: ``log`` and ``last_seq`` for a session the bus has
 not seen return empty/0 without recording the id, and a session's subscriber
@@ -46,7 +50,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import fields, is_dataclass, replace
 from functools import lru_cache
 
-from fluid.events.model import Event
+from fluid.events.model import LIVE_ONLY_EVENTS, Event
 
 _CLOSE = object()
 
@@ -91,6 +95,17 @@ def _retained_size(value) -> int:
 
 
 ReplaySource = Callable[[str, int], Awaitable[list[Event]]]
+
+
+class _LiveSignal:
+    """A live-only event in a subscriber's queue, and where the stream stood."""
+
+    __slots__ = ("event", "after_seq")
+    seq = -1  # Reads as "already delivered" wherever the queue is drained for gaps.
+
+    def __init__(self, event: Event, after_seq: int) -> None:
+        self.event = event
+        self.after_seq = after_seq
 
 
 class _Subscriber:
@@ -181,6 +196,8 @@ class EventBus:
     # ─── publish / subscribe ─────────────────────────────────────────────
     async def publish(self, event: Event) -> Event:
         """Assign seq and ts, append to the log, fan out. Returns the sequenced event."""
+        if isinstance(event, LIVE_ONLY_EVENTS):
+            return self._hand_to_listeners(event)
         sid = event.session_id
         seq = self._last_seq.get(sid, 0) + 1
         # Stamp both facts about the event's place in the stream together: its
@@ -211,6 +228,19 @@ class EventBus:
             except asyncio.QueueFull:
                 sub.lagging = True  # stop buffering; iterator falls back to the log
         return sequenced
+
+    def _hand_to_listeners(self, event: Event) -> Event:
+        """Give a live-only signal to current subscribers. It joins no stream."""
+        live = replace(event, seq=-1, ts=event.ts or time.time())
+        signal = _LiveSignal(live, self._last_seq.get(event.session_id, 0))
+        for sub in self._subs.get(event.session_id, ()):
+            if sub.lagging:
+                continue
+            try:
+                sub.queue.put_nowait(signal)
+            except asyncio.QueueFull:
+                pass  # Nothing to re-sync: the next signal replaces this one.
+        return live
 
     def _trim_log(self, sid: str) -> None:
         ring = self._logs.get(sid)
@@ -360,6 +390,13 @@ class EventBus:
                             sub.cursor = event.seq
                             yield event
                     return
+                if isinstance(item, _LiveSignal):
+                    # A listener catching up reads the log first, so a signal
+                    # can surface after the events that followed it. It would
+                    # then describe a moment the stream has already left.
+                    if item.after_seq == sub.cursor:
+                        yield item.event
+                    continue
                 event = item
                 if event.seq <= sub.cursor:
                     continue  # already delivered via log catch-up

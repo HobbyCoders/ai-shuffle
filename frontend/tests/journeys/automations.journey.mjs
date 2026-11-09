@@ -24,7 +24,17 @@ function formCase(native = false) {
   },
   async act({ page, mark }) {
    await mark('open a new automation and validate the required fields');
-   await page.getByRole('button', { name: 'New automation', exact: true }).first().click();
+   const phone = page.viewportSize().width < 600;
+   const start = page.getByRole('button', { name: 'New automation', exact: true }).first();
+   const startBox = await start.boundingBox();
+   await start.click();
+   if (phone) {
+    await page.touchscreen.tap(startBox.x + startBox.width / 2, startBox.y + startBox.height / 2);
+    await page.waitForTimeout(450);
+    expect(await page.evaluate(() => !document.activeElement?.matches('input, textarea, select')), 'the second tap of a double tap does not land in a form field');
+    // From the list header that same spot is the form's More button, which is harmless.
+    if (await page.locator('details.detail-more[open]').count()) await page.locator('details.detail-more summary').click();
+   }
    const collapse = page.getByRole('button', { name: 'Collapse trigger', exact: true });
    expect((await collapse.innerText()).trim() === '', 'trigger collapse is an icon-only control');
    await collapse.click();
@@ -47,11 +57,35 @@ function formCase(native = false) {
    await trigger.getByRole('button', { name: 'Show expression', exact: true }).click();
    await page.getByRole('textbox', { name: 'Cron expression', exact: true }).fill('*/15 * * * *');
    await trigger.getByRole('heading', { name: 'Every 15 minutes', exact: true }).waitFor();
+   if (phone) {
+    // Drawn at 32px, but reachable across the full 44px.
+    for (const name of ['Add trigger', 'Add action step', 'Show expression', 'Hide expression']) {
+     const button = page.getByRole('button', { name, exact: true }).first();
+     if (!await button.count()) continue;
+     const misses = await button.evaluate(async el => {
+      el.scrollIntoView({ block: 'center', behavior: 'instant' });
+      await new Promise(requestAnimationFrame);
+      const box = el.getBoundingClientRect();
+      return [box.top - 5.5, box.bottom + 5.5].map(y => document.elementFromPoint(box.left + box.width / 2, y))
+       .filter(hit => !el.contains(hit)).map(hit => hit ? `${hit.tagName}.${hit.className}` : 'nothing');
+     });
+     expect(!misses.length, `${name} reaches a full finger's height (missed: ${misses})`);
+    }
+    const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
+    const agentRow = agent.locator('xpath=ancestor::div[contains(@class,"st-row")][1]');
+    expect(Math.abs((await agent.boundingBox()).width - (await agentRow.locator('.st-rc').boundingBox()).width) < 1, 'the Agent select fills its phone row');
+    const tops = await page.getByRole('group', { name: 'Trigger type', exact: true }).getByRole('button').evaluateAll(all => all.map(el => Math.round(el.getBoundingClientRect().top)));
+    expect(Object.values(Object.groupBy(tops, top => top)).every(row => row.length > 1), `no trigger type sits alone on a row (${tops})`);
+   }
    const actions = page.locator('details.detail-more');
    if (await actions.isVisible()) await actions.locator('summary').click();
    await page.getByRole('button', { name: 'Create', exact: true }).click();
    await page.getByRole('alert').filter({ hasText: 'Name is required' }).waitFor();
-   await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Preview form validation');
+   const nameField = page.getByRole('textbox', { name: 'Name', exact: true });
+   const border = locator => locator.evaluate(el => getComputedStyle(el).borderTopColor);
+   expect(await nameField.getAttribute('aria-invalid') === 'true', 'the refused Name field says so');
+   expect(await border(nameField) !== await border(page.getByRole('textbox', { name: 'Prompt', exact: true })), 'the refused Name field looks refused');
+   await nameField.fill('Preview form validation');
    await page.getByRole('button', { name: 'Create', exact: true }).click();
    await page.getByRole('alert').filter({ hasText: 'Either a prompt or at least one action step is required' }).waitFor();
    await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('No provider work is triggered.');

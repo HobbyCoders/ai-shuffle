@@ -18,16 +18,19 @@ export interface DraftGitTab {
 	worktreeBranch?: string | null;
 	/** `worktreeBranch` names a branch the first send creates, not an existing one. */
 	worktreeCreateNewBranch?: boolean;
+	/** `worktreeBranch` is a real branch whose checkout the first send creates. */
+	worktreeCheckoutPending?: boolean;
 	selectedWorktreeBranch?: string | null;
 }
 
 /** A value key for the draft's worker Git target, or null when it has none. */
 export function workerGitTargetKey(tab: DraftGitTab | null | undefined): string | null {
 	if (!tab || tab.sessionId) return null;
-	// A branch the first send will create has no checkout yet: asking for its
-	// Git state answers 409 until the chat exists (#803). Its session scope
-	// takes over once the send binds the chat.
-	const branch = tab.worktreeCreateNewBranch ? null : tab.worktreeBranch || null;
+	// A branch staged for a new worktree has no checkout yet, whether the first
+	// send creates the branch too (#803) or it already exists (#949): asking for
+	// its Git state answers 409 until the chat exists. Its session scope takes
+	// over once the send binds the chat.
+	const branch = tab.worktreeCreateNewBranch || tab.worktreeCheckoutPending ? null : tab.worktreeBranch || null;
 	const scoped = tab.deviceIntent
 		|| (tab.projectV2Id && !tab.worktreeId)
 		|| (branch && !tab.worktreeId);

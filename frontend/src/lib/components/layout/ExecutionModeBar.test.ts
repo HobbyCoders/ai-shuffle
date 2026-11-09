@@ -394,13 +394,13 @@ describe('ExecutionModeBar merged worktree branch chip', () => {
 		await vi.waitFor(() => expect(activeSession.current.worktreeBranch).toBe('live/1528-explicit'));
 		expect(activeSession.current.worktreeCreateNewBranch).toBe(false);
 		expect(composerPreferences.current.checkout).toEqual({ kind: 'branch', projectId: 'repo', projectV2Id: null,
-			branch: 'live/1528-explicit', baseBranch: 'main', createNew: false });
+			branch: 'live/1528-explicit', baseBranch: 'main', createNew: false, checkoutPending: true });
 
 		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
 		await fireEvent.click(screen.getByText('develop'));
 		expect(activeSession.current.worktreeBranch).toBe('develop');
 		expect(composerPreferences.current.checkout).toEqual({ kind: 'branch', projectId: 'repo', projectV2Id: null,
-			branch: 'develop', baseBranch: 'main', createNew: false });
+			branch: 'develop', baseBranch: 'main', createNew: false, checkoutPending: true });
 	});
 
 	it('does not render the new-worktree folder chip', () => {

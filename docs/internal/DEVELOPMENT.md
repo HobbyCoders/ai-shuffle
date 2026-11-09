@@ -36,7 +36,25 @@ the slug on the canonical project/base checkout across worktrees; standalone Flu
 and has no app dependency. Report receipts are absolute and use normal Read
 permissions, not a blanket allow. Legacy cwd ledger/notes are copied exclusively
 on first access; existing canonical files (including empty cleared state) win.
-Old files and owner scratch are left intact. Project `.fluid/` remains a load
+Legacy files and owner scratch are left intact. Designated session scratch is
+cleared after settlement and one hour of filesystem quiet, unless an open turn,
+a process reference or unavailable safety evidence prevents it, except for
+live app-UID ancestors, identity-bound isolated preview roles, service-UID
+PostgreSQL-only chains to proven non-init ancestors, and Windows access-denied
+processes guarded by exclusive delete handles. Ancestor proof uses live start
+identities, not launcher spelling. An opaque ancestor can hold external scratch.
+Preview private roots are protected, but isolation is not a filesystem sandbox;
+opaque ancestors and previews can lose path access to quiet settled scratch.
+Each pass logs its results and exemptions.
+An unsettle or
+handoff recreates temporary files on demand; ledger, notes and reports survive.
+Cleanup is paced: two-second slices stop at 512 entries or 256 MiB and wait
+30 seconds before resuming. A single indivisible file can exceed the byte budget.
+Storage telemetry warns above 100 GiB; there is no size cap on agent files.
+Settled task checkouts use a 15-minute grace and five-minute cleanup passes;
+unmerged worker work is verified under `refs/fluid-archive/` before the existing
+safe worktree removal path runs. Missing-session worker checkouts need seven days.
+Project `.fluid/` remains a load
 scope for skills, agents, commands, plugins and settings, plus app-managed
 worktrees; explicit skill/plugin authoring and worktree lifecycle are unchanged.
 Standalone scratch guidance is CLI-owned context: native turns carry a removable

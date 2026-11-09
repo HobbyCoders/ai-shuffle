@@ -65,6 +65,22 @@
 	],
 	"rules": [
 		{
+			"why": "the Away for all chats switch, its always-on band and the per-chat control it locks: real taps, a real layout and a second browser are what these depend on",
+			"journeys": [
+				"away-all-chats"
+			],
+			"globs": [
+				"frontend/tests/journeys/away-all-chats.journey.mjs",
+				"frontend/src/lib/stores/away-mode.svelte.ts",
+				"frontend/src/lib/components/layout/AwayAllChatsSwitch.svelte",
+				"frontend/src/lib/components/layout/AwayAllChatsEdge.svelte",
+				"frontend/src/lib/components/layout/StudioTopBar.svelte",
+				"frontend/src/lib/components/chat/ControlsDock.svelte",
+				"frontend/src/lib/components/chat/phone/MobileComposerControlsSheet.svelte",
+				"mobile/src/shell/AppTopBar.svelte"
+			]
+		},
+		{
 			"why": "the real-editor input driver must preserve literal multiline text without command or mention completion submitting early",
 			"journeys": ["composer-helper"],
 			"globs": ["frontend/tests/journeys/composer-helper.journey.mjs", "frontend/src/lib/components/CommandAutocomplete.svelte", "frontend/src/lib/components/FileAutocomplete.svelte"]
@@ -197,10 +213,11 @@
 			]
 		},
 		{
-			"why": "rewind and fork must reseed Claude Code in the same session cwd used for resume",
-			"journeys": ["claude-rewind-cwd"],
+			"why": "Claude Code rewind must close an active reply promptly and reseed retained history in the session cwd used for resume",
+			"journeys": ["claude-rewind-cwd", "claude-close-active"],
 			"globs": [
 				"frontend/tests/journeys/claude-rewind-cwd.journey.mjs",
+				"frontend/tests/journeys/claude-close-active.journey.mjs",
 				"app/api/commands.py",
 				"app/api/command_context.py",
 				"app/api/sessions_fork.py",
@@ -244,10 +261,34 @@
 			]
 		},
 		{
+			"why": "the browser makes its own ids on a plain-HTTP address, where it has no crypto.randomUUID",
+			"journeys": ["insecure-context-ids"],
+			"globs": [
+				"frontend/tests/journeys/insecure-context-ids.journey.mjs",
+				"frontend/src/routes/pair/+page.svelte",
+				"frontend/src/lib/services/first-agent-run.ts",
+				"frontend/src/lib/utils/id.ts"
+			]
+		},
+		{
+			"why": "an agent's edits save through the preview cookie a dev instance is reached with, and read back after a reload",
+			"journeys": ["agent-model-pin"],
+			"globs": [
+				"frontend/tests/journeys/agent-model-pin.journey.mjs",
+				"frontend/src/lib/components/deck/cards/ProfileCard.svelte",
+				"frontend/src/lib/components/deck/cards/profiles/AgentModelsTab.svelte",
+				"app/api/agents.py",
+				"app/api/auth.py",
+				"app/core/preview_access.py"
+			]
+		},
+		{
 			"why": "rewinding a message: its dialog, its request and what the transcript does through it",
 			"journeys": ["rewind-transcript"],
 			"globs": [
 				"frontend/tests/journeys/rewind-transcript.journey.mjs",
+				"frontend/tests/journeys/lib/retained-geometry.mjs",
+				"scripts/devloop/fake_claude/scenarios/rewind*.json",
 				"frontend/src/lib/components/chat/MessageActions.svelte",
 				"frontend/src/lib/api/rewind.ts",
 				"app/api/commands.py",
@@ -389,6 +430,11 @@
 				"app/core/model_override.py",
 				"app/core/model_registry.py"
 			]
+		},
+		{
+			"why": "the live thinking estimate reaches the working line, keeps climbing and never lands in the transcript, across the real stream and a reload",
+			"journeys": ["thinking-progress"],
+			"globs": ["frontend/tests/journeys/thinking-progress.journey.mjs", "frontend/src/lib/components/chat/TurnActivity.svelte", "app/core/system_message_filter.py", "scripts/devloop/fake_claude/scenarios/long-think.json"]
 		},
 		{
 			"why": "stopping a turn",

@@ -17,7 +17,7 @@ type ProjectPick = { projectId: string; projectV2Id: string | null };
 // one-time: the first session created on it spends it (#1528), so the next new
 // chat falls back to Auto. A legacy `existing` worktree-ID pick still persists.
 type CheckoutPick = ProjectPick & ({kind:'existing'; worktreeId:string; branch:string}
- | {kind:'branch'; branch:string; baseBranch:string; createNew:boolean});
+ | {kind:'branch'; branch:string; baseBranch:string; createNew:boolean; checkoutPending?:boolean});
 interface Picks {
  profile: string; project: ProjectPick; checkout: CheckoutPick | null;
  model: string | null; effort: string | null; modelEfforts: Record<string, string | null>; permissionMode: string | null;
@@ -39,7 +39,7 @@ function sameCheckout(a: CheckoutPick | null, b: CheckoutPick | null) {
  if (!a || !b || a.kind !== b.kind || a.projectId !== b.projectId
   || a.projectV2Id !== b.projectV2Id || a.branch !== b.branch) return false;
  return a.kind === 'branch' && b.kind === 'branch'
-  ? a.baseBranch === b.baseBranch && a.createNew === b.createNew
+  ? a.baseBranch === b.baseBranch && a.createNew === b.createNew && !!a.checkoutPending === !!b.checkoutPending
   : a.kind === 'existing' && b.kind === 'existing' && a.worktreeId === b.worktreeId;
 }
 const listeners = new Set<() => void>();

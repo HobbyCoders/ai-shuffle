@@ -853,6 +853,12 @@ class DevClaude(script.Fake):
                 self.compact("auto", None)
             self.poll(latency / 1000 if latency else 0.01)
             self.start_message()
+            for estimate in step.get("thinking_tokens") or []:
+                if self.interrupted:
+                    break
+                self.emit({"type": "system", "subtype": "thinking_tokens",
+                           "uuid": str(uuid.uuid4()), "estimated_tokens": estimate})
+                self.poll(fake_ai._number(step.get("thinking_gap_ms"), 1000.0) / 1000)
             if "error" in step:
                 error = step["error"]
                 self.end_message("end_turn", 1)

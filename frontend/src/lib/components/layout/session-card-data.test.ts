@@ -82,6 +82,12 @@ describe('owner runtime state', () => {
 		expect(deriveStatus({ remoteRuntimeState, streaming: true, backgroundWork: true,
 			parked: true, attention: { count: 1, kind: 'permission' }, isActive: true })).toBe(expected);
 	});
+	it('a turn held for database room is queued, not working (#583)', () => {
+		expect(deriveStatus({ streaming: true, startQueued: true, attention: null, isActive: true })).toBe('queued');
+		expect(deriveStatus({ streaming: true, startQueued: false, attention: null, isActive: true })).toBe('working');
+		expect(STATUS_LABELS.queued).toBe('Queued (database busy)');
+		expect(RUNTIME_STATUS_WORDS.queued).toBe('Queued');
+	});
 	it('a send from this tab wins over a stale remote idle', () => {
 		// The owner republishes "working" only after it claims the turn; until
 		// then the card must not fall back to Idle/Done right after sending.

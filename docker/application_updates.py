@@ -1064,9 +1064,14 @@ class ContainerUpdates:
             self.publish("idle", "Application updated. Some old build files could not be removed.")
         self.prune_dependencies()
 
+    def require_resolved_first_boot(self):
+        if self.state.get("booting"):
+            raise UpdateError("The update is still starting. Wait for its first start to finish before restarting again.")
+
     def launch(self, env, activate=False):
         revision = self.state.get("active")
         if activate:
+            self.require_resolved_first_boot()
             if not self.allowed():
                 raise UpdateError("Application updates are disabled")
             revision = self.state.get("pending")
@@ -1139,6 +1144,7 @@ class ContainerUpdates:
         # After the old app stopped, before anything could migrate the DB: copy
         # it, then record the first start. A failed copy raises before booting
         # is saved, and the old version is started again over the same data.
+        self.require_resolved_first_boot()
         revision = self.state["pending"]
         snapshot = None
         if self.database is not None:
@@ -1831,7 +1837,7 @@ class ContainerUpdates:
         self.prune_dependencies()
         self.publish("ready", "Update ready. Choose Update and restart.")
 
-    def service(self):
+    def service(self, requested_only=False):
         try:
             action = None
             try:
@@ -1845,13 +1851,14 @@ class ContainerUpdates:
                 # Refuse stale request.json writers too, without setting a restart intent.
                 raise UpdateError("In-app updater refresh is unavailable. Reloading the updater requires a separately approved container restart.")
             if action == "install":
+                self.require_resolved_first_boot()
                 if not self.allowed():
                     raise UpdateError("Application updates are disabled")
                 if not self.state.get("pending"):
                     raise UpdateError("No application update is ready")
                 self.install_requested.set()
                 return
-            if action in ("check", "download") or time.monotonic() >= self.next_check:
+            if action in ("check", "download") or (not requested_only and time.monotonic() >= self.next_check):
                 self.next_check = time.monotonic() + CHECK_INTERVAL_SECONDS
                 if self.allowed():
                     self.check(download=action == "download")
@@ -1859,9 +1866,10 @@ class ContainerUpdates:
             self.publish("ready" if self.state.get("pending") else "error",
                          error=str(exc) if isinstance(exc, UpdateError) else "Application update failed; current version is unchanged")
 
-    def tick(self):
+    def tick(self, requested_only=False):
         if not self.thread or not self.thread.is_alive():
-            self.thread = threading.Thread(target=self.service, daemon=True, name="application-updates")
+            self.thread = threading.Thread(target=self.service, args=(requested_only,),
+                                           daemon=True, name="application-updates")
             self.thread.start()
 
     def close(self):

@@ -404,7 +404,7 @@
 
 		// Stage the branch — the worktree is created at send time
 		// (POST /sessions/with-worktree in message-sender).
-		activeSession.setWorktreeBranch(branchName);
+		activeSession.setWorktreeBranch(branchName, { checkoutPending: true });
 		activeSession.setWorktreeMode('new');
 		activeSession.setWorktreeCreateNewBranch(false);
 	}
@@ -464,7 +464,7 @@
 		// Branch was already created by CreateBranchModal; stage it as the worktree
 		// branch (create_new_branch=false). The worktree itself is created at send
 		// time (POST /sessions/with-worktree in message-sender).
-		activeSession.setWorktreeBranch(branchName);
+		activeSession.setWorktreeBranch(branchName, { checkoutPending: true });
 		activeSession.setWorktreeMode('new');
 		activeSession.setWorktreeCreateNewBranch(false);
 	}

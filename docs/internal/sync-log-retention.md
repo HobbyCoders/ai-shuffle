@@ -1,5 +1,11 @@
 # Transcript sync-log retention
 
+For the current read-only measurements, remaining missing-materialization leak,
+and an approval-gated offline file-shrink runbook, see
+[database-retention.md](database-retention.md). Ordinary settled rows are still
+eligible; settling is not a retention pin. Do not infer a whole-table plateau
+from the bounded policy while compacted fragments still lack retirement evidence.
+
 This changes the **duplicate operation log**, not chat retention. Maintenance
 never deletes `session_events`, Fluid stores, legacy transcripts, search text,
 `sync_records`, membership certificates or pending envelopes. No physical

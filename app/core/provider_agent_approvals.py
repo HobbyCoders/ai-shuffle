@@ -385,17 +385,17 @@ def assistant_route(
 def _assistant_confirm(
     target: Optional[str], kwargs: Dict[str, Any], route: Optional[WorkerApprovalRoute],
 ) -> Optional[Dict[str, Any]]:
-    """The ``assistant_confirm`` marker when the prompt lands on an owner chat:
-    the owner answers it in the conversation (app/core/owner_confirm).
-    None for every other session, and for a provider safety check, which
-    keeps its buttons (``owner_confirm.asks_in_words``). Never raises."""
+    """The owner-approval marker when the prompt lands on an owner chat
+    (app/core/owner_confirm). None for every other session, and for a provider
+    safety check, which keeps its buttons
+    (``owner_confirm.is_owner_approval``). Never raises."""
     if not target:
         return None
     try:
         from app.core import owner_confirm
         from app.core.session_orchestration import is_owner_session
 
-        if not owner_confirm.asks_in_words(kwargs.get("tool_name"), kwargs.get("tool_input")):
+        if not owner_confirm.is_owner_approval(kwargs.get("tool_name"), kwargs.get("tool_input")):
             return None
         if not is_owner_session(target):
             return None

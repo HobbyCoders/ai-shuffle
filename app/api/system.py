@@ -18,7 +18,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fluid.tools.child_env import scrub_child_env
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from app.api.auth import require_admin, require_auth
 from app.api.common import reset_served_roots_cache
@@ -33,6 +33,25 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter(tags=["System"])
+
+
+class GlobalAwayUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    away: StrictBool
+
+
+@router.get("/api/v1/away-mode")
+async def get_global_away_mode(_: str = Depends(require_admin)):
+    from app.core.away_mode import global_away_enabled
+
+    return {"away": await run_sync(global_away_enabled)}
+
+
+@router.put("/api/v1/away-mode")
+async def update_global_away_mode(body: GlobalAwayUpdate, _: str = Depends(require_admin)):
+    from app.core import global_away_mode
+
+    return await global_away_mode.apply(body.away)
 
 
 # The desktop app starts its worker with a random attach token and adopts a

@@ -292,8 +292,11 @@ Default models shows and changes the remembered choice per kind.
 ## Confirmation contract
 
 The threshold is **USD 0.10**. Either a per-item price or a batch total above
-that threshold requires an explicit approved retry. No budget is reserved and
-no provider is called when returning this result:
+that threshold needs your approval. In a chat in the app, the regular permission
+prompt asks you and the tool waits for your answer. A typed "yes" is an ordinary
+message and approves nothing; if you decline, the tool returns `refused` with
+`reason: "declined"` and nothing is charged. A caller with no prompt to show gets
+this result instead, with no budget reserved and no provider called:
 
 ```json
 {

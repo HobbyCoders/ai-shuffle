@@ -10,6 +10,8 @@ how long ANOTHER install's write to the shared database can go unnoticed.
 
 from __future__ import annotations
 
+import pytest
+
 from app.db import settings as settings_db
 from app.db import database
 
@@ -75,6 +77,28 @@ def test_get_or_create_invalidates(mock_db):
     assert settings_db.get_system_setting_cached("seeded-key") is None
     settings_db.get_or_create_system_setting("seeded-key", lambda: "seed")
     assert settings_db.get_system_setting_cached("seeded-key") == "seed"
+
+
+@pytest.mark.parametrize("invalidate_key", ["global_away_mode", None])
+@pytest.mark.parametrize("newer_read", [False, True])
+def test_invalidation_fences_an_in_flight_read(monkeypatch, invalidate_key, newer_read):
+    """The old caller can see its snapshot, but must never republish it."""
+    calls = []
+
+    def read(key):
+        calls.append(key)
+        if len(calls) == 1:
+            settings_db.invalidate_system_setting_memo(invalidate_key)
+            if newer_read:
+                assert settings_db.get_system_setting_cached(key) == "1"
+            return "0"
+        return "1"
+
+    monkeypatch.setattr(settings_db, "get_system_setting", read)
+    assert settings_db.get_system_setting_cached("global_away_mode") == "0"
+    assert settings_db.get_system_setting_cached("global_away_mode") == "1"
+    assert settings_db.get_system_setting_cached("global_away_mode") == "1"
+    assert calls == ["global_away_mode", "global_away_mode"]
 
 
 def test_ttl_expiry_re_reads(mock_db, monkeypatch):

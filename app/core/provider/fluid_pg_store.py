@@ -761,6 +761,8 @@ def _fold_events(rows: List[Dict[str, Any]]) -> List[RecallMessage]:
     from app.db.session_events import _parse_payload
 
     out: List[RecallMessage] = []
+    # Joined at the end: growing one long message piece by piece recopies it.
+    pieces: Dict[int, List[str]] = {}
     open_msg: Optional[RecallMessage] = None
     last_delta = False
     for row in rows:
@@ -784,10 +786,10 @@ def _fold_events(rows: List[Dict[str, Any]]) -> List[RecallMessage]:
                 open_msg = RecallMessage(role="assistant", ts=ts)
                 out.append(open_msg)
                 last_delta = False
-            if delta and last_delta:
-                open_msg.text += piece
-            else:
-                open_msg.text = f"{open_msg.text}\n{piece}" if open_msg.text else piece
+            parts = pieces.setdefault(id(open_msg), [])
+            if parts and not (delta and last_delta):
+                parts.append("\n")
+            parts.append(piece)
             last_delta = delta
         elif etype == "tool.use":
             if open_msg is None or open_msg.role != "assistant":
@@ -809,6 +811,9 @@ def _fold_events(rows: List[Dict[str, Any]]) -> List[RecallMessage]:
             preview = str(payload.get("content_preview") or "") or "(no text)"
             open_msg.tools.append(_clip(f"{marker} {preview}", _TOOL_LINE_CAP))
             last_delta = False
+    for message in out:
+        if id(message) in pieces:
+            message.text = "".join(pieces[id(message)])
     return out
 
 

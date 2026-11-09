@@ -1,0 +1,8 @@
+{
+  "description": "A short reply of fixed length for rewind-transcript: two of these turns are a little taller than a phone's transcript, one fits with room to spare, so a rewind closes the transcript up rather than leaving a screenful behind. Like rewind, its height cannot change when a scenario is added or removed.",
+  "steps": [
+    {
+      "text": "Fake Claude Code CLI here (no model, no network). You said: “{summary}”\n\nThis reply stays short and the same length on every run, whichever scenarios this instance ships. It is one plain paragraph with nothing to click and nothing that streams once the turn has finished, so a rewind removes a known, small amount of transcript. One turn of it fits on a phone with room to spare, and two turns are a little taller than the room between the header and the composer, which is the shape where a rewind has to close the rows up rather than leave a full screen behind."
+    }
+  ]
+}

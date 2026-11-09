@@ -14,6 +14,20 @@ from websockets.sync.client import connect
 from app.serve import IngressApplication, bind_listener, configured_remote_port
 
 
+def _recording_server(calls):
+    # serve.run() subclasses Server to signal passive streams before draining.
+    # Preserve the class boundary while recording constructor/run arguments.
+    class RecordingServer(uvicorn.Server):
+        def __init__(self, config):
+            calls(config)
+            super().__init__(config)
+
+        def run(self, **kwargs):
+            calls.return_value.run(**kwargs)
+
+    return RecordingServer
+
+
 @pytest.fixture(autouse=True)
 def _isolated_preview_listener(monkeypatch):
     # serve.run() records both globals. Restoring only the port leaks a
@@ -202,7 +216,7 @@ def test_supervisor_selects_protected_port_without_changing_trust(
     monkeypatch.delenv("SHUFFLE_PREVIEW_PORT", raising=False)
     monkeypatch.setattr(preview_access, "_listener_port", None)  # run() records the port
     server = MagicMock()
-    monkeypatch.setattr(uvicorn, "Server", server)
+    monkeypatch.setattr(uvicorn, "Server", _recording_server(server))
     serve.run(None, SimpleNamespace(host="127.0.0.1", port=18000, log_level="error"))
     # Local, protected, then the agent browser's preview-only listener.
     assert binds == [
@@ -249,7 +263,7 @@ def test_worker_starts_without_the_preview_listener(monkeypatch, failure):
     monkeypatch.setattr(serve, "bind_listener", bind)
     monkeypatch.setattr(preview_access, "_listener_port", 9)
     server = MagicMock()
-    monkeypatch.setattr(uvicorn, "Server", server)
+    monkeypatch.setattr(uvicorn, "Server", _recording_server(server))
     serve.run(None, SimpleNamespace(host="127.0.0.1", port=18000, log_level="error"))
     assert binds == [("127.0.0.1", 18000), ("127.0.0.1", 8001)]
     assert server.call_args.args[0].app.preview_port is None

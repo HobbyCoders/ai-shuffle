@@ -3,6 +3,7 @@
 from app.core.system_message_filter import (
     HIDDEN_SYSTEM_SUBTYPES,
     is_hidden_system_subtype,
+    thinking_progress_frame,
 )
 
 
@@ -110,3 +111,38 @@ class TestDbLoaderTimestampSerializable:
         }
         msg = _transform_row(row)
         assert msg["metadata"]["timestamp"] == "2026-06-18T09:22:40Z"
+
+
+def test_a_live_estimate_reaches_the_working_line():
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from fluid.events.model import ThinkingProgress
+
+    adapter = HarnessAdapter()
+    adapter._turn_floor = 10
+
+    # Unnumbered, as the bus delivers it: the turn floor has nothing to judge.
+    [message] = adapter._translate(ThinkingProgress(session_id="s", estimated_tokens=900))
+    assert (message.subtype, message.data) == ("thinking_tokens", {"estimated_tokens": 900})
+
+
+class TestThinkingProgressFrame:
+    """Live thinking estimates move the working line without entering the log (#1271)."""
+
+    def test_builds_a_frame_of_its_own_type(self):
+        frame = thinking_progress_frame({"estimated_tokens": 12400})
+        assert frame == {"type": "thinking_progress", "estimated_tokens": 12400}
+
+    def test_ignores_a_frame_with_no_usable_estimate(self):
+        for data in ({}, None, {"estimated_tokens": 0}, {"estimated_tokens": "12"}, {"estimated_tokens": True}):
+            assert thinking_progress_frame(data) is None
+
+    def test_reaches_the_socket_and_is_never_recorded(self):
+        from app.core.session_runtime import _is_trimmed_render_frame
+        from app.core.turn_recorder import _translate_shared
+
+        frame = {"type": "thinking_progress", "estimated_tokens": 12400}
+        assert not _is_trimmed_render_frame(frame["type"])
+        assert _translate_shared(frame, "session-1") == []
+
+    def test_reload_still_hides_the_raw_subtype(self):
+        assert is_hidden_system_subtype("thinking_tokens")

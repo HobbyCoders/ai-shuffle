@@ -2865,7 +2865,9 @@ class HarnessAdapter(ProviderAdapter):
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
 
-        async for event in raw_engine_events(self._engine.events(since_seq=self._event_cursor)):
+        async for event in raw_engine_events(
+            self._engine.events(since_seq=self._event_cursor), on_shutdown=self.abandon_turn,
+        ):
             # Advance the cursor even for untranslated events so the next turn
             # never replays this one.
             if getattr(event, "seq", -1) >= 0:
@@ -3617,7 +3619,7 @@ class HarnessAdapter(ProviderAdapter):
         thread), so a subagent never spends the main chat's one-shot pass.
 
         The approver routes it to the assistant's conversation, where only
-        the owner's firm yes approves it (``app.core.owner_confirm``).
+        the owner's approval on its prompt counts (``app.core.owner_confirm``).
         With no approver attached nobody can be asked, so it is denied.
         """
         from types import SimpleNamespace
@@ -4808,6 +4810,14 @@ class HarnessAdapter(ProviderAdapter):
             if lowered:
                 data["lowered_effort"] = lowered
             return [SystemMessage(subtype="provider_retry", data=data)]
+
+        if cls == "ThinkingProgress":
+            # The live thinking estimate. query_engine turns it into a working
+            # line frame; it never becomes a transcript row. The bus delivers
+            # it only to current listeners, so it can never arrive as replay.
+            return [SystemMessage(subtype="thinking_tokens", data={
+                "estimated_tokens": getattr(event, "estimated_tokens", 0),
+            })]
 
         if cls == "ProviderAlive":
             # fluid: the provider accepted this model call and its stream is

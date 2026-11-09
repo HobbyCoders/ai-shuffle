@@ -67,6 +67,16 @@ def test_updater_candidate_fixture_is_internal_only():
     assert name not in basesettings_names((ROOT / "app/core/config.py").read_text())
 
 
+def test_supervisor_stop_budget_is_internal_metadata_not_user_configuration():
+    name = "SHUFFLE_SUPERVISOR_STOP_SECONDS"
+    allowed = json.loads((ROOT / "scripts/ci/env_allowlist.json").read_text())
+    entry = allowed[name]
+    assert entry["kind"] == "internal"
+    assert entry["base_settings"] is False
+    assert entry["reason"].strip()
+    assert name not in basesettings_names((ROOT / "app/core/config.py").read_text())
+
+
 def test_scanner_wake_kill_switch_is_internal_only():
     allowed = json.loads((ROOT / "scripts/ci/env_allowlist.json").read_text())
     entry = allowed["AI_SHUFFLE_PERF_SCAN_WAKE"]

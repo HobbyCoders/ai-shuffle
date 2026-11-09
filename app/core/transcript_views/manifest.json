@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "fingerprint": "01569280fa26f7bbecf08b020c413c2a04a293e5fa1e9d61ac3e33661d628987",
-  "bundle_sha256": "b892602653b38bd87c6a5071daf582bbf7b15026202d1e747803c316f03b3ed0",
+  "fingerprint": "ed60449f327833b9051c41ee615b99c57022a0ffd7e0fb37fa0f9920b7f64c44",
+  "bundle_sha256": "c7b2dc7866ae6c141f6d0f9ea53819496048faba4a1b05dff1aef328fb21b3ae",
   "minimum_node_major": 22,
   "canonical_sources": {
-    "app/api/events.py": "e26e2627ab616f7e49a7fba5314173d100ef5c14ad082ed040444061a6fe66c0",
+    "app/api/events.py": "9e17b660b9587237efcb2f036f6fc13ad75c5a2348f1328e13c2f247953a9871",
     "app/core/harness_reminders.py": "367bcc7ea3f88b890da5c129ba20c8524e92c8b226ff1c1aaac837597f8b2bc4",
     "app/core/transcript_replay.py": "23af5359c20a185b2968f2ed6c8b44ece9142a3787eb3e92579ba13548884e2f",
     "app/core/transcript_views/preprocess.py": "488153378d7d27aa2fc71823268b4a5eaf7963c5208219694ebe4f3a7a76fefe",

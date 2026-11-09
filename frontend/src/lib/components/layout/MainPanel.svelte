@@ -14,6 +14,7 @@
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { pendingDeepLink } from '$lib/stores/pending-deep-link';
 	import { activeSession } from '$lib/stores/active-session';
+	import { newChatSetupNeed } from '$lib/stores/project-setup';
 	import { get } from 'svelte/store';
 	import { askAgentUnavailableReason } from '$lib/review/scope';
 	import {
@@ -389,6 +390,7 @@
 	// target really changes (see worker-git-target.ts).
 	const selectedWorkerTargetKey = $derived(workerGitTargetKey(activeTab));
 	const selectedWorkerTarget = $derived(workerGitTargetFromKey(selectedWorkerTargetKey));
+	const workerSetupPending = $derived(!!$newChatSetupNeed);
 	const activeWorktreeId = $derived(
 		!selectedWorkerTarget && (activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeWorktreeDeleted
 			? (activeTab.worktreeId ?? null)
@@ -459,6 +461,7 @@
 		const isRemote = activeIsRemote;
 		const workerTarget = selectedWorkerTarget;
 		const subagent = activeIsSubagent;
+		const setupPending = workerSetupPending;
 		// Track session ID so the effect re-fires on every tab switch,
 		// even when two sessions share the same project/worktree.
 		// This ensures git state is always fresh after a session change.
@@ -475,7 +478,9 @@
 		// UI. GitHub-backed actions consult `githubFeaturesAvailable` instead.
 		// A subagent's chat has no Git surface, so it loads nothing (the server
 		// refuses session Git for it).
-		if (project && !subagent) {
+		// A new chat on a worker still waiting for this project has no checkout:
+		// asking would answer 409 and contradict the setup banner.
+		if (project && !subagent && !setupPending) {
 			git.setWorkerTarget(workerTarget);
 			git.setRemoteSession(sessionId, isRemote);
 			// IMMEDIATE: restore cached state so UI updates within the same frame.
@@ -555,7 +560,8 @@
 		worktreeDeleted: activeWorktreeDeleted,
 		isRemote: activeIsRemote,
 		sessionMode: activeTab?.mode,
-		isSubagent: activeIsSubagent
+		isSubagent: activeIsSubagent,
+		workerSetupPending
 	});
 	const gitUiVisible = $derived(!!activeTab && shouldShowHeaderGitActions(headerGitInput));
 
@@ -1072,16 +1078,7 @@
 			<ChatAccess sessionId={activeTab.sessionId} />
 		{/key}
 	{/if}
-	{#if activeTab && shouldShowHeaderGitActions({
-		viewType: $activeView?.type,
-		hasProject: !!activeProject,
-		githubAuthenticated: $githubAuthenticated,
-		githubAvailable: activeGithubAvailable,
-		worktreeDeleted: activeWorktreeDeleted,
-		isRemote: activeIsRemote,
-		sessionMode: activeTab.mode,
-		isSubagent: activeIsSubagent
-	})}
+	{#if activeTab && gitUiVisible}
 		<div class="git-actions-host">
 			<GitHeaderActions
 				sessionId={activeTab.sessionId}

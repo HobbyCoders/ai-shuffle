@@ -677,6 +677,7 @@
 		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return false;
 		const file = pastedTextFile(text);
 		isUploading = true;
+		errorMessage = '';
 		uploadComposerFile(file)
 			.then(result => {
 				editorRef?.insertFileChip({
@@ -1570,6 +1571,7 @@
 		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return;
 
 		isUploading = true;
+		errorMessage = '';
 		try {
 			for (const file of Array.from(files)) {
 				const result = await uploadComposerFile(file);
@@ -1679,6 +1681,7 @@
 		}
 
 		isUploading = true;
+		errorMessage = '';
 		try {
 			for (const file of Array.from(e.dataTransfer.files)) {
 				const result = await uploadComposerFile(file);

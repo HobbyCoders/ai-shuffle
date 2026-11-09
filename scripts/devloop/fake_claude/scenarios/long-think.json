@@ -1,0 +1,10 @@
+{
+  "description": "Thinks silently for a while, sending live thinking-token estimates, then answers.",
+  "steps": [
+    {
+      "thinking_tokens": [800, 2400, 5200, 9000, 12400, 16800, 21000, 26000],
+      "thinking_gap_ms": 1500,
+      "text": "Done thinking. You said: \u201c{summary}\u201d"
+    }
+  ]
+}

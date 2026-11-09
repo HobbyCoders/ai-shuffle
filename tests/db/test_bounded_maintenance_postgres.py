@@ -74,6 +74,12 @@ def pg(cluster, monkeypatch):
 
     with psycopg2.connect(**args) as conn:
         conn.cursor().execute("CREATE SCHEMA " + schema)
+    # Plain vacuum checks out directly, outside get_db's transaction. Keep that
+    # path on this disposable PostgreSQL too, never the process-global shim/pool.
+    from app.db import base
+    monkeypatch.setattr(database, "get_connection", lambda: psycopg2.connect(
+        **args, options=f"-c search_path={schema}", cursor_factory=Cursor))
+    monkeypatch.setattr(base, "_close_connection", lambda conn: conn.close())
     for module in (retention, network, session_events, database, auth, assistant,
                    background_tasks, mobile_tools, session_runtime):
         monkeypatch.setattr(module, "get_db", connect)

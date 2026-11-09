@@ -44,9 +44,38 @@ authentication, HTTP bodies, SSE and WebSockets remain unchanged.
 
 With pausing enabled only, `scripts.devloop.child` runs the normal `app.main`
 `__main__` startup with an ASGI activity observer, a short pause admission gate,
-and a **five-second Uvicorn graceful-shutdown timeout**. That timeout only applies after shutdown
-starts: lingering passive streams are cancelled, then normal lifespan teardown
-runs. These are the only intentional differences from `python -m app.main`.
+and a **five-second Uvicorn graceful-shutdown timeout** after the pause gate
+confirms no finite request remains. The normal app ends passive event
+subscriptions immediately and allows 6.5 seconds by default for finite requests
+and active query streams. The Python container supervisor passes its unchanged
+30-second stop budget through `SHUFFLE_SUPERVISOR_STOP_SECONDS`; that makes the
+finite drain 23.5 seconds and the query-settlement reserve 4.5 seconds, keeping
+its 15% share of the supplied budget and leaving two seconds for lifespan. Missing, invalid or outside-10-to-30-second budget
+metadata retains the safe default. At the drain deadline only raw query engine
+reads are retired, allowing interrupted queries to save terminal turns and
+publish memory before lifespan teardown. The dev-only timeout remains a
+fallback after admission is closed, not permission to cancel request-owned work.
+
+**Known limit:** the shortest normal stop budget is 10 seconds, lifespan
+`stop_running_sessions` can take 25 seconds, and adapter disconnect can take
+5 seconds, so a slow database write or stalled disconnect can exceed the
+reserve. This is not worst-case cancellation-safe settlement. An idle full-app
+shutdown measured 0.282 seconds and the delayed real-query check settled/exited
+in 6.856 seconds. On the ten-second budget, a controlled two-second
+memory-publication tail exceeds the 1.5-second reserve: terminal history is
+persisted and lifespan reached, but the HTTP request fails and replication is
+unpublished. Already-written local legacy memory files remain durable. The next
+qualifying native/project turn preserves local-only/newer files in reconcile
+and uploads them in its end-of-turn push; app startup alone does not retry it.
+This requires sync to be enabled and the original files still present. The
+separate durable `Remember` fact store is not this legacy replication tail;
+already-issued `run_sync` writes may finish after awaiter cancellation. Docker's
+larger reserve lets the controlled two-second tail finish within its 30 seconds.
+Coordinator and launcher-budget work is tracked in
+[#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305), not implemented
+here. Forced disposable dev-loop teardown still has its separate
+four-second budget; it is not the normal app's graceful-stop guarantee.
+
 It tracks unknown
 HTTP requests, non-heartbeat client frames and voice/unknown sockets without
 buffering or changing requests. A private process-identified receipt is written
@@ -56,7 +85,7 @@ whole lease using its process identity, even during long waits. Durable active
 runs, running/interrupting/draining turns, background tasks and queued/running
 git operations prevent pausing. A failed busy check keeps it awake. No live
 app or database is consulted. CI and `--no-pause` retain `python -m app.main`
-without the observer or dev-only shutdown timeout.
+without the observer or the dev-only timeout.
 
 Before SIGTERM, the child atomically closes admission only if no finite request
 or new foreground activity appeared since the idle decision. The launcher then
@@ -174,8 +203,9 @@ clone those URLs without GitHub or real Git credentials: setting a project
 up on another worker clones the project's own recorded remote, which may be a
 local path outside the workspace (typed clone URLs in the Git panel still may
 not). On a dev instance the preview cookie may add projects and set them up,
-cancel or remove them on the other worker (Projects → Workers); other
-owner-only changes stay refused. The two apps run as
+cancel or remove them on the other worker (Projects → Workers), and it may
+create or update an agent (the Agents page's autosave); other owner-only
+changes stay refused. The two apps run as
 the same OS user: this exercises real pairing, encrypted sync, cross-worker
 API calls and separate project installations, not host isolation or Unix
 permissions between different users.

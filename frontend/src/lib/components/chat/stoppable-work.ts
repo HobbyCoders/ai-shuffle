@@ -6,11 +6,11 @@ import type { Task } from '$lib/stores/types';
  * or mutate the transcript reducer. Use them only to expose the control. */
 export function hasStoppableWork(
 	state: { sessionId: string | null; isStreaming: boolean; activeTasks: Task[] },
-	row?: Pick<Session, 'id' | 'is_remote' | 'controllable' | 'remote_runtime_state' | 'has_running_tasks'>
+	row?: Pick<Session, 'id' | 'is_remote' | 'controllable' | 'remote_runtime_state' | 'has_running_tasks' | 'start_queued'>
 ): boolean {
 	if (state.isStreaming || state.activeTasks.some(task => task.status === 'running')) return true;
 	if (!state.sessionId || row?.id !== state.sessionId || row.controllable === false) return false;
-	if (row.has_running_tasks) return true;
+	if (row.has_running_tasks || row.start_queued) return true;
 	if (!row.is_remote) return false;
 	return row.remote_runtime_state === 'working'
 		|| row.remote_runtime_state === 'parked'

@@ -16,7 +16,6 @@
 	import BackgroundWorkStrip from '$lib/components/chat/BackgroundWorkStrip.svelte';
 	import { tabRestoreTarget } from '$lib/stores/session/session-init';
 	import { rememberEmptyChat, wasLastSeenEmpty } from '$lib/stores/session/empty-chat-memory';
-	import { isAssistantConfirm } from '$lib/utils/assistant-confirm';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
@@ -75,9 +74,22 @@
 	// chat empty, so it never turns into the cleared hero or moves the composer.
 	const historyUnconfirmed = $derived(!!$activeSession.historyStall
 		&& $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0) === 0);
+	const openChatQueued = $derived(!!$sessions.find((s) => s.id === $activeSession.sessionId)?.start_queued);
+	// The row stops saying queued on one channel and the first message arrives
+	// on another, so hold the layout across that gap instead of flashing "cleared".
+	const QUEUED_HANDOVER_MS = 1500;
+	let queuedChatId = $state<string | null>(null);
+	$effect(() => {
+		const id = $activeSession.sessionId ?? null;
+		if (openChatQueued) { queuedChatId = id; return; }
+		const timer = setTimeout(() => { queuedChatId = null; }, QUEUED_HANDOVER_MS);
+		return () => clearTimeout(timer);
+	});
+	const holdQueuedLayout = $derived(openChatQueued || (!!queuedChatId && queuedChatId === $activeSession.sessionId));
 	const chatSurface = $derived(
 		classifyChatSurface({
 			sessionId: $activeSession.sessionId,
+			startQueued: holdQueuedLayout,
 			// Pending peers belong in the transcript, even before its first message.
 			messageCount: $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0),
 			isRestoringSession: $activeSession.isRestoringSession,
@@ -311,11 +323,10 @@
 	// the agent's respond_approval finds nothing to answer. So the modal's
 	// permission leg is suppressed for exactly the sessions/timespan the spoken
 	// leg covers; it returns the moment the call ends. Questions are unaffected.
-	// A request the agent asks in words (`assistant_confirm`, raised on any
-	// owner chat) never opens the dialog: it reads as the agent's question in
-	// the transcript and is answered by typing or saying yes or no
-	// (MessageArea renders it). Every other request keeps the dialog.
-	const dialogPermissions = $derived(($activeSession.pendingPermissions ?? []).filter((request) => !isAssistantConfirm(request)));
+	// Every request in every chat is answered on these controls. A typed "yes"
+	// is an ordinary message. A request an older version raised as a transcript
+	// question opens here too, so it can still be answered.
+	const dialogPermissions = $derived($activeSession.pendingPermissions ?? []);
 	const showPermissionModal = $derived(!voiceCallActive && dialogPermissions.length > 0);
 	// A shell prompt dock answers permissions, private access and questions
 	// above the composer, so it replaces the modal and the question tray.
@@ -584,7 +595,7 @@
 				<!-- The sync check itself runs at the top of this view (mirrorSync),
 				     so it started even if the chat opened in the hero layout. -->
 				<MirrorSyncGate sync={mirrorSync} deviceName={mirrorDevice}>
-					<TranscriptHydrationBoundary mirrorPending={mirrorSync.waiting}
+					<TranscriptHydrationBoundary mirrorPending={mirrorSync.waiting} startQueued={holdQueuedLayout}
 						navigationOverlayOpen={navigationOverlayOpen ?? (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed)}
 						onSurface={(surface, count, id) => { transcriptSurface = surface; transcriptMessageCount = count; transcriptSessionId = id; }}>
 						<MessageArea />

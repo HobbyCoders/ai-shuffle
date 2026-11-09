@@ -24,7 +24,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterator, Optional, Set, Tuple
 
 from app.core.detached_tasks import spawn_detached
 
@@ -43,6 +44,11 @@ _listener_registered = False
 # The first one pauses the session's working-time clock, the last one out
 # resumes it (sessions.work_ms, #1619).
 _blocked: Dict[str, int] = {}
+
+# Interaction ids a call in THIS process has opened and is still seeing through,
+# from before anyone can see the prompt until the call stops waiting. A mirrored
+# or orphaned pending row is never here, so an answer to it would reach nobody.
+_awaited: Set[str] = set()
 
 
 def _on_gateway_tick(session_id: str) -> None:
@@ -103,6 +109,27 @@ def has_waiters(session_id: str) -> bool:
     """
     with _lock:
         return bool(_waiters.get(session_id))
+
+
+def is_awaited(interaction_id: str) -> bool:
+    """True while a call in THIS process will take the answer to ``interaction_id``."""
+    with _lock:
+        return interaction_id in _awaited
+
+
+@contextmanager
+def awaiting(interaction_id: str) -> Iterator[None]:
+    """Mark a request this call just opened as live, around showing its prompt
+    and waiting for the answer. A prompt can be answered the moment it is
+    visible, while its delivery is still returning, so this has to start first.
+    """
+    with _lock:
+        _awaited.add(interaction_id)
+    try:
+        yield
+    finally:
+        with _lock:
+            _awaited.discard(interaction_id)
 
 
 def unregister_waiter(session_id: str, event: asyncio.Event) -> None:

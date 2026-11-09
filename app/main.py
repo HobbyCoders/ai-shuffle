@@ -285,6 +285,16 @@ async def lifespan(app: FastAPI):
     from app.db.session_archive_migration import reconcile as reconcile_archive_retirement
     await reconcile_archive_retirement()
 
+    # Prior-process request queries have no scheduler lease to reap. Recover
+    # their durable terminal receipts before admitting any new work. Receipts
+    # are scoped to this install; failed recovery leaves them for the next boot.
+    if runner_approved:
+        try:
+            from app.db import query_recovery
+            await run_sync(query_recovery.recover)
+        except Exception:
+            logger.exception("Request-query terminal recovery failed; receipts retained")
+
     # Install scheduler seams before the ordinary boot recovery sweep, whose
     # recovered turns need turn_scheduler.kick(). This also starts turn claims.
     from app.core.startup import install_v2_turns_wiring
@@ -333,6 +343,8 @@ async def lifespan(app: FastAPI):
         if os.environ.get("AI_SHUFFLE_SCRATCH_REAPER") != "0":
             from app.core.scratch_reaper import maintain_scratch
             bg_tasks.append(asyncio.create_task(maintain_scratch(), name="scratch-maintenance"))
+            from app.core.session_scratch import maintain_session_scratch
+            bg_tasks.append(asyncio.create_task(maintain_session_scratch(), name="session-scratch-maintenance"))
         else:
             logger.info("Owned scratch maintenance disabled by AI_SHUFFLE_SCRATCH_REAPER=0")
         from app.core.fluid_memory import maintain_memories
@@ -381,6 +393,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # A retired query's HTTP owner may already be gone. Let its isolated
+        # finalizer use the remaining absolute drain deadline before DB teardown.
+        from app.core import query_shutdown
+        await query_shutdown.finish()
         try:
             if transcript_producer is not None:
                 await transcript_producer.stop()

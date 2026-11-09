@@ -58,11 +58,20 @@ describe('Stats shared view', () => {
    expect(screen.queryByRole('button', { name: 'Export usage by provider as CSV' })).toBeNull();
   }
  });
+ it('marks where a Jump to landed when nothing can scroll (#1220)', async () => {
+  api.summary.mockResolvedValue(null); api.providers.mockRejectedValue(new Error('offline'));
+  Element.prototype.scrollIntoView = vi.fn();
+  const view = render(StatsCard);
+  await screen.findByText('Provider breakdown unavailable');
+  const row = screen.getAllByText('Usage by provider')[0].closest('[role="option"], button') as HTMLElement;
+  await fireEvent.click(row);
+  await waitFor(() => expect(view.container.querySelector('.stats-jumped')).toBeTruthy());
+ });
  it('shows unavailable provider data separately from zero usage', async () => {
   api.summary.mockResolvedValue(null); api.providers.mockRejectedValue(new Error('offline'));
   render(StatsCard);
   expect(await screen.findByText('Provider breakdown unavailable')).toBeTruthy();
-  expect(screen.getByText('No chats')).toBeTruthy();
+  expect(screen.getByText('No chat costs in this range')).toBeTruthy();
   expect(screen.getAllByText('$0.00')).toHaveLength(2);
  });
  it('offers 90 days from the empty state and drops the offer once it is the range', async () => {
@@ -78,7 +87,7 @@ describe('Stats shared view', () => {
   await screen.findByRole('group', { name: /^Daily spend/ });
   expect(screen.queryByText(/^No usage in the last/)).toBeNull();
   const rows = [...view.container.querySelectorAll('.stats-empty-row')].map(r => r.textContent);
-  expect(rows).toEqual(['Usage by providerNo usage in this range', 'Cost by profileNo profile costs in this range', 'Top chats by costNo chats']);
+  expect(rows).toEqual(['Usage by providerNo usage in this range', 'Cost by profileNo profile costs in this range', 'Top chats by costNo chat costs in this range']);
  });
  it('draws one bar per day of the range, with zero days in the gaps and today last', async () => {
   // The API returns only days with usage: three of the 31, and not today.

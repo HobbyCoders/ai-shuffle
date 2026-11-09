@@ -9,7 +9,44 @@ from __future__ import annotations
 
 import asyncio
 
+import anyio
 from starlette.requests import ClientDisconnect
+from starlette.responses import StreamingResponse
+
+
+class PassiveEventResponse(StreamingResponse):
+    """A read-only event subscription, not a request that owns a query/turn.
+
+    Close it when the server begins draining HTTP, before lifespan teardown.
+    Ordinary StreamingResponse instances (including query SSE) do not opt in.
+    """
+
+    async def __call__(self, scope, receive, send):
+        self._shutdown_event = scope.get("shuffle.http_shutdown")
+        await super().__call__(scope, receive, send)
+
+    async def stream_response(self, send):
+        if self._shutdown_event is None:
+            return await super().stream_response(send)
+        completed = False
+        async with anyio.create_task_group() as group:
+            async def stop_on_shutdown():
+                await self._shutdown_event.wait()
+                group.cancel_scope.cancel()
+
+            group.start_soon(stop_on_shutdown)
+            try:
+                await super().stream_response(send)
+                completed = True
+            finally:
+                group.cancel_scope.cancel()
+        if not completed:
+            # Cancellation is confined to this passive reader. Let its normal
+            # generator finalizers detach the subscription, then end the body.
+            # A non-reading peer must not hold shutdown on the final send.
+            with anyio.move_on_after(1):
+                await self.body_iterator.aclose()
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
 def is_client_disconnect(exc: BaseException) -> bool:

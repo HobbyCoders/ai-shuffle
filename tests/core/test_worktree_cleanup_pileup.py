@@ -445,17 +445,14 @@ def test_abandoned_worker_checkout_is_snapshotted_then_removed(repository, monke
 
 
 @pytest.mark.parametrize("case,expected", [
-    ("worker-recent", "not archived: worker last active 3 day(s) ago"),
-    ("parent-recent", "not archived: parent session last active 1 day(s) ago"),
+    ("worker-recent", "15-minute freshness guard"),
     ("chat", "uncommitted changes (2 files)"),
     ("open-pr", "open PR head branch"),
     ("active", "bound to an active or running session"),
 ])
 def test_checkouts_in_use_or_not_worker_scratch_are_never_archived(repository, monkeypatch, case, expected):
-    recent = lambda days: datetime.fromtimestamp(time.time() - days * 86400 - 60, timezone.utc).isoformat()  # noqa: E731
     kwargs = {
-        "worker-recent": {"worker_age": recent(3)},
-        "parent-recent": {"parent_age": recent(1)},
+        "worker-recent": {"worker_age": datetime.fromtimestamp(time.time() - 60, timezone.utc).isoformat()},
         "chat": {"name": "chore/chat-abcdef12"},
         "open-pr": {"pr_state": "open", "pr_number": 5},
         "active": {"is_active": True},
@@ -601,7 +598,7 @@ def test_report_folds_history_drops_retired_rows_and_shows_the_sweeper_verdict(m
     assert row["merged_into_default"].startswith("squash-merged")
     assert "unpushed" not in row["reason"] and "not merged" not in row["reason"]
     assert row["reclaimable"] is True
-    assert row["cleanup"].startswith("removed automatically after the 24h grace")
+    assert row["cleanup"].startswith("removed automatically after the 15-minute grace")
     preview = asyncio.run(rc.reclaim(project["id"]))
     planned = next(i for i in preview["items"] if i["path"] == str(live.resolve()))
     assert planned["decision"] == "remove"  # the report's verdict is the sweeper's
@@ -663,7 +660,7 @@ def test_every_pass_visits_every_project(repository, tmp_path, monkeypatch):
     now += rc.GRACE_SECONDS + 1
     asyncio.run(rc.automatic_pass())
     assert not first.exists() and not path.exists()  # one broken project starved neither
-    assert rc.INTERVAL_SECONDS == 2 * 3600
+    assert rc.INTERVAL_SECONDS == 5 * 60
 
 
 

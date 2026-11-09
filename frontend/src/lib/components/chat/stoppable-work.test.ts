@@ -6,6 +6,11 @@ const idle = { sessionId: 'remote-session', isStreaming: false, activeTasks: [] 
 const remote = { id: 'remote-session', is_remote: true, controllable: true };
 
 describe('session Stop visibility', () => {
+	it('keeps Stop for a turn held for database room after a reload (#583)', () => {
+		expect(hasStoppableWork(idle, { id: 'remote-session', is_remote: false, start_queued: true })).toBe(true);
+		expect(hasStoppableWork(idle, { id: 'other', is_remote: false, start_queued: true })).toBe(false);
+	});
+
 	it.each(['working', 'parked', 'permission', 'question'] as const)(
 		'exposes Stop for an owner-reported %s session without faking streaming', remote_runtime_state => {
 			expect(hasStoppableWork(idle, { ...remote, remote_runtime_state })).toBe(true);

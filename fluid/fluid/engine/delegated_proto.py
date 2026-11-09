@@ -91,6 +91,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -107,6 +108,7 @@ from fluid.events.model import (
     RateLimit,
     TextDelta,
     ThinkingDelta,
+    ThinkingProgress,
     ToolResult,
     ToolUse,
     TurnComplete,
@@ -575,6 +577,9 @@ class Mapped:
 
 
 # Claude Code's refusal and fallback system frames (see _on_model_guardrail).
+# The CLI can send its thinking estimate many times a second.
+_THINKING_PROGRESS_SECONDS = 1.0
+
 _GUARDRAIL_SUBTYPES = frozenset({
     "model_refusal_no_fallback", "model_refusal_fallback", "model_fallback",
 })
@@ -727,6 +732,8 @@ class StreamJsonMapper:
         # and the model this turn asked for when it differs from ``model`` (an
         # approved safety-check retry runs on another model).
         self._served_model: str | None = None
+        # When the live thinking estimate last went out (throttle).
+        self._thinking_progress_at = float("-inf")
         self.requested_model: str | None = None
 
     @property
@@ -1028,6 +1035,8 @@ class StreamJsonMapper:
             return self._on_compact_boundary(frame)
         if subtype in _GUARDRAIL_SUBTYPES:
             return self._on_model_guardrail(frame, subtype)
+        if subtype == "thinking_tokens":
+            return self._on_thinking_tokens(frame)
         if subtype != "init":
             return Mapped()
         self.cli_session_id = frame.get("session_id") or self.cli_session_id
@@ -1094,6 +1103,29 @@ class StreamJsonMapper:
             rerouted=rerouted, reason=reason if rerouted else None,
             category=category if rerouted else None,
         )]
+
+    def _on_thinking_tokens(self, frame: dict[str, Any]) -> Mapped:
+        """The CLI's live thinking estimate, at most once a second.
+
+        A long think can report many times a second and every event reaches
+        the store's stream batch; a subagent's thinking is not this turn's.
+        """
+        estimate = frame.get("estimated_tokens")
+        if (
+            frame.get("parent_tool_use_id") is not None
+            or isinstance(estimate, bool)
+            or not isinstance(estimate, (int, float))
+            or estimate <= 0
+        ):
+            return Mapped()
+        now = time.monotonic()
+        if now - self._thinking_progress_at < _THINKING_PROGRESS_SECONDS:
+            return Mapped()
+        self._thinking_progress_at = now
+        return Mapped(events=[ThinkingProgress(
+            session_id=self.session_id, turn_id=self.turn_id,
+            estimated_tokens=int(estimate),
+        )])
 
     def _on_model_guardrail(self, frame: dict[str, Any], subtype: str) -> Mapped:
         """The CLI's refusal and fallback reports (Claude Code 2.1.3xx).
