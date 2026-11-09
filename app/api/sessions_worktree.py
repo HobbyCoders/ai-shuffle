@@ -7,6 +7,7 @@ included in the main sessions router for backward compatibility.
 
 import asyncio
 import contextlib
+import shutil
 import uuid
 import weakref
 from pathlib import Path
@@ -125,10 +126,8 @@ def _migrate_uploads_to_dir(
     target_dir: Path,
     file_paths: List[str],
     migrated_paths: Optional[dict] = None,
-    *,
-    session_id: Optional[str] = None,
 ) -> List[str]:
-    """Migrate uploaded files from the project dir into ``target_dir``.
+    """Copy uploaded files from the project dir into ``target_dir``.
 
     Shared core of the upload-migration flow: ``target_dir`` is a worktree dir
     for the worktree flow, or the project's own main checkout for the
@@ -151,9 +150,7 @@ def _migrate_uploads_to_dir(
     for file_path in file_paths:
         try:
             upload_transfer.validate_upload_paths([file_path], base_session)
-            src = Path(file_path)
-            if src.is_symlink():
-                raise upload_transfer.UploadLiftError("Cannot migrate a symlink attachment")
+            src = Path(file_path).resolve()
             if not src.exists():
                 errors.append(f"File not found: {file_path}")
                 continue
@@ -166,22 +163,8 @@ def _migrate_uploads_to_dir(
             if not upload_transfer._is_under(dest.resolve(), target_dir.resolve()):
                 raise upload_transfer.UploadLiftError("Upload destination escapes the checkout")
             if dest.resolve() != src:
-                from app.core.confined_files import attachment_identity, open_attachment, upload, remove_verified_upload
-                from app.db import upload_blobs
-
-                with open_attachment(project_dir, src) as stream:
-                    identity = attachment_identity(stream)
-                    data = stream.read()
-                dest = upload(target_dir, rel.parent.as_posix(), src.name, data)
-                with open_attachment(target_dir, dest) as stream:
-                    if stream.read() != data:
-                        raise upload_transfer.UploadLiftError("Migrated copy does not match the attachment")
-                # Preserve the actual collision-renamed destination before cleanup.
-                if session_id:
-                    blob = upload_blobs.create_blob(None, session_id, file_path, src.name, len(data), data)
-                    upload_blobs.remember_source_identity(blob, identity)
-                    upload_blobs.clear_data(blob, str(dest))
-                    remove_verified_upload(project_dir, src, data, expected_identity=identity)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dest))
             if migrated_paths is not None:
                 migrated_paths[file_path] = str(dest)
         except Exception as e:  # noqa: BLE001
@@ -463,11 +446,6 @@ async def _create_remote_branch_session(
     # Keep the submitted text even if the owner takes longer than the request
     # timeout. A timeout does not mean the remote session was never created.
     _broadcast_session_created(session_id)
-    migration_errors = None
-    if upload_blob_ids:
-        migration_errors = await run_sync(
-            upload_transfer.stage_lifted_compose_uploads, upload_blob_ids, project, session_id,
-        ) or None
     if prompt:
         await _persist_and_broadcast_first_message(session_id, prompt, profile_id)
     from app.network import control, engine, git as network_git
@@ -539,8 +517,6 @@ async def _create_remote_branch_session(
     query_started = False
     if prompt:
         try:
-            if migration_errors:
-                raise upload_transfer.UploadLiftError("; ".join(migration_errors))
             payload: dict = {}
             if api_user_id:
                 payload["api_user_id"] = api_user_id
@@ -578,7 +554,7 @@ async def _create_remote_branch_session(
         worktree_path=None,
         status="active",
         query_started=query_started,
-        upload_migration_errors=migration_errors,
+        upload_migration_errors=None,
     )
 
 
@@ -764,7 +740,6 @@ async def _create_v2_branch_session(
                 Path(checkout_path),
                 body.pending_upload_paths,
                 migrated_paths,
-                session_id=session_id,
             ) or None
             if upload_migration_errors:
                 logger.warning(

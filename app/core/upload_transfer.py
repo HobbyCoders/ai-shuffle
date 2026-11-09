@@ -94,111 +94,39 @@ def stage_session_upload(session_id: str, filename: str, content: bytes) -> Dict
     }
 
 
-def _finish_compose_original(source: str, expected: bytes, session: Dict[str, Any], identity: str) -> None:
-    """Retry failed cleanup without deleting a new draft that reused the name."""
+def resolve_upload_target(session: Dict[str, Any]) -> tuple[Optional[str], bool]:
+    """Read-only admission shared by both upload routes and direct writers.
+
+    Return (existing local cwd, needs per-session staging). A remote or new
+    checkout may stage; an expected, registered local checkout must be usable,
+    with the same diagnostic as Send. Never create a checkout while uploading.
+    """
     from app.core import project_resolver
-    from app.core.confined_files import attachment_identity, open_attachment, remove_verified_upload
+    from app.core.config import settings
+    from app.core.placement import resolve_placement
+    from app.core.query_options import worktree_unavailable_error
+    from app.network.control import owner_of
 
-    path = Path(source)
-    if not identity or not path.exists():
-        return
-    # The base checkout is a pure read; never infer an authority from the path.
-    base = project_resolver.resolve_existing_cwd({
-        **session, "branch": None, "worktree_branch": None,
-        "worktree_id": None, "worktree_path": None,
-    })
-    if not base or not _is_under(path.resolve(), Path(base).resolve() / UPLOADS_SUBDIR):
-        return
-    with open_attachment(Path(base), path) as stream:
-        if attachment_identity(stream) != identity or stream.read() != expected:
-            return  # another draft now owns this name, even with identical bytes
-    remove_verified_upload(Path(base), path, expected, expected_identity=identity)
-
-
-def branch_uploads_need_lift(paths: List[str], session: Dict[str, Any]) -> bool:
-    """Local pending/failed migration sources also need checkout materialization."""
-    if not (session.get("branch") or session.get("worktree_branch")):
-        return False
-    staged, others = split_session_staged_paths(paths, session["id"])
-    if staged:
-        return True
-    from app.db import database
-    project = database.get_project(session["project_id"]) if session.get("project_id") else None
-    if not project:
-        return False
-    return any(_is_under(Path(path).resolve(), _project_dir(project) / UPLOADS_SUBDIR) for path in others)
+    decision = resolve_placement(session)
+    remote = owner_of(session) or (
+        decision.kind == "runner" and decision.runner_id != settings.effective_instance_id
+    )
+    cwd = project_resolver.resolve_existing_cwd(session) if not remote else None
+    bound = bool(session.get("branch") or session.get("worktree_branch")
+                 or session.get("worktree_id") or session.get("worktree_path"))
+    staging = bound and bool(remote or decision.kind == "none")
+    if not staging and not cwd:
+        error = worktree_unavailable_error(session)
+        if error and project_resolver.resolve_local_checkout(session):
+            raise error
+        staging = bool(error)
+    return cwd, staging
 
 
-def migrated_upload_paths(paths: List[str], session: Dict[str, Any]) -> Dict[str, str]:
-    """Resolve only this session's removed compose originals from durable blobs.
-
-    Promptless compose and failed-send retry still carry the old chip path.
-    Never guess a destination by name or borrow another session's mapping.
-    """
-    from app.db import upload_blobs
-
-    mapping = {}
-    missing = set(paths)
-    if not missing:
-        return mapping
-    # An original name may have been reused by another chat after cleanup.
-    # This session's exact alias still wins over the new file at that spelling.
-    # A mirror may no longer have the legacy project that admitted the original.
-    # Trust only the durable, session-scoped alias, then validate its destination;
-    # unchanged/unknown paths still face the normal send-path validator.
-    for blob in reversed(upload_blobs.list_blobs_for_session(session["id"])):
-        source = blob["source_path"]
-        if source not in missing or source in mapping:
-            continue
-        destination = blob.get("materialized_path")
-        if destination and Path(destination).is_file():
-            validate_upload_paths([destination], session)
-            from app.core import project_resolver
-            from app.core.confined_files import open_attachment
-            root = (session_upload_dir(session["id"]) if _is_under(Path(destination).resolve(), session_upload_dir(session["id"]).resolve())
-                    else Path(project_resolver.resolve_existing_cwd(session)))
-            with open_attachment(root, Path(destination)) as stream:
-                _finish_compose_original(source, stream.read(), session, blob.get("source_identity"))
-            mapping[source] = destination
-            continue
-        data = upload_blobs.get_blob_data(blob["id"])
-        if data is not None:
-            staged = stage_session_upload(session["id"], blob["filename"], data)
-            _finish_compose_original(source, data, session, blob.get("source_identity"))
-            mapping[source] = staged["full_path"]
-    return mapping
-
-
-def stage_lifted_compose_uploads(blob_ids: List[str], project: Dict[str, Any], session_id: str) -> List[str]:
-    """Keep first-message remote originals out of main after a durable lift.
-
-    The blob retains source_path for the receiver's rewrite. Keep a verified
-    per-session disk copy too, so refused-submit retry does not need main.
-    """
-    from app.db import upload_blobs
-    from app.core.confined_files import attachment_identity, open_attachment, remove_verified_upload
-
-    base = _project_dir(project)
-    errors = []
-    for blob in upload_blobs.get_blobs(blob_ids):
-        source = Path(blob["source_path"])
-        if not source.exists() or not _is_under(source.resolve(), base / UPLOADS_SUBDIR):
-            continue
-        try:
-            with open_attachment(base, source) as stream:
-                identity = attachment_identity(stream)
-                data = stream.read()
-            if (blob.get("source_identity") and blob["source_identity"] != identity) or upload_blobs.get_blob_data(blob["id"]) != data:
-                raise UploadLiftError("Compose attachment changed after it was lifted")
-            upload_blobs.remember_source_identity(blob["id"], identity)
-            staged = stage_session_upload(session_id, source.name, data)
-            with open_attachment(session_upload_dir(session_id), Path(staged["full_path"])) as stream:
-                if stream.read() != data:
-                    raise UploadLiftError("Staged copy does not match the attachment")
-            remove_verified_upload(base, source, data, expected_identity=identity)
-        except Exception as exc:  # noqa: BLE001 — retain originals on every failure
-            errors.append(f"Failed to stage {source}: {exc}")
-    return errors
+def stage_admitted_session_upload(session: Dict[str, Any], filename: str, data: bytes) -> Dict[str, Any]:
+    """Recheck the read-only admission immediately before a staging write."""
+    resolve_upload_target(session)
+    return stage_session_upload(session["id"], filename, data)
 
 
 def split_session_staged_paths(paths: List[str], session_id: str) -> tuple[List[str], List[str]]:
@@ -469,10 +397,7 @@ def lift_paths_to_blobs(
                 f"device (limit {limit // (1024 * 1024)}MB)."
             )
         try:
-            from app.core.confined_files import attachment_identity, open_attachment
-            with open_attachment(project_dir, resolved) as stream:
-                identity = attachment_identity(stream)
-                data = stream.read()
+            data = resolved.read_bytes()
         except Exception as exc:  # noqa: BLE001
             raise UploadLiftError(f"Could not read {resolved.name}: {exc}") from exc
         blob_ids.append(
@@ -488,7 +413,6 @@ def lift_paths_to_blobs(
                 data=data,
             )
         )
-        upload_blobs_db.remember_source_identity(blob_ids[-1], identity)
     logger.info(
         "Lifted %d upload(s) to blobs for session %s", len(blob_ids), session_id
     )

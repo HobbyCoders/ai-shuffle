@@ -667,13 +667,16 @@ async function sendWithAttachmentThenRewind(ctx, label) {
 	const createdResponse = page.waitForResponse((r) => r.url().includes('/sessions/with-worktree') && r.request().method() === 'POST');
 	await page.getByRole('button', { name: 'Send', exact: true }).click();
 	await awaitReply(ctx, label, t0);
-	const created = await (await createdResponse).json();
+	const response = await createdResponse;
+	const created = await response.json();
 	const destination = join(created.worktree_path, 'uploads', file);
 	if (await readFile(destination, 'utf8') !== 'branch attachment\n') throw new Error('first-message migrated bytes differ');
-	if (!(await page.locator('[data-ui-state="chat"]').innerText()).includes(destination)) throw new Error('first-message prompt does not name the migrated attachment');
-	if (await access(join(status.seed.projects['dev-sandbox'], 'uploads', file)).then(() => true, () => false)) {
-		throw new Error('first-message migration left its original in main');
-	}
+	// Main's promptless-create + WS flow still references the compose original;
+	// unlike Auto, its follow-up send does not receive a rewritten first prompt.
+	const promptPath = response.request().postDataJSON().prompt ? destination : join(status.seed.projects['dev-sandbox'], 'uploads', file);
+	await expectAttachmentRequest(ctx, promptPath);
+	// Accepted limit: compose-time sources are copied, never deleted by creation.
+	if (await readFile(join(status.seed.projects['dev-sandbox'], 'uploads', file), 'utf8') !== 'branch attachment\n') throw new Error('first-message source was changed or deleted');
 	if (await page.getByText(/Attachments need|outside (the|this) (chat|session)|not allowed/i).first().isVisible()) {
 		throw new Error('the server refused the attachment');
 	}
@@ -687,6 +690,16 @@ async function sendWithAttachmentThenRewind(ctx, label) {
 	const text = await box.innerText();
 	if (chips !== 1) throw new Error(`expected the file back as 1 chip, found ${chips}: ${JSON.stringify(text)}`);
 	if (/@\/\S*uploads\//.test(text)) throw new Error(`the upload path came back as text: ${JSON.stringify(text)}`);
+}
+
+/** Assert the actual provider request, not a raw path hidden by sent-file chips. */
+async function expectAttachmentRequest(ctx, path) {
+	const entries = (await readFile(ctx.status.fake_ai.request_log, 'utf8')).trim().split('\n');
+	const count = entries.filter((line) => JSON.stringify(JSON.parse(line).body).includes(path)).length;
+	ctx.attachmentRequests ??= new Map();
+	if (count <= (ctx.attachmentRequests.get(path) || 0)) throw new Error(`new provider request lost attachment path: ${path}`);
+	ctx.attachmentRequests.set(path, count);
+	await ctx.page.getByText(path.split('/').pop(), { exact: true }).first().waitFor();
 }
 
 /** An attachment after the first reply belongs to the checkout, not main (#1329). */
@@ -710,7 +723,7 @@ async function attachInExistingWorktree(ctx) {
 	await mark('send worktree attachment');
 	await page.getByRole('button', { name: 'Send', exact: true }).click();
 	await page.waitForFunction(() => Number(document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-messages')) >= 4 && document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-streaming') === 'false', null, { timeout: 60_000 });
-	if (!(await page.locator('[data-ui-state="chat"]').innerText()).includes(expected)) throw new Error('sent prompt does not name the chat checkout');
+	await expectAttachmentRequest(ctx, expected);
 	await mark('rewind the worktree attachment');
 	await page.getByTitle('Rewind to before this message', { exact: true }).last().focus();
 	await page.keyboard.press('Enter');
@@ -721,7 +734,7 @@ async function attachInExistingWorktree(ctx) {
 	await mark('resend the restored worktree attachment');
 	await page.getByRole('button', { name: 'Send', exact: true }).click();
 	await page.waitForFunction(() => Number(document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-messages')) >= 4 && document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-streaming') === 'false', null, { timeout: 60_000 });
-	if (!(await page.locator('[data-ui-state="chat"]').innerText()).includes(expected)) throw new Error('restored send lost the worktree attachment path');
+	await expectAttachmentRequest(ctx, expected);
 	log('upload bytes, sent prompt and restored resend use the worktree; main has no copy');
 }
 
@@ -733,6 +746,14 @@ async function missingWorktreeUpload(ctx) {
 	const created = await (await response).json();
 	const file = `missing-checkout-${uniq()}.txt`;
 	const moved = `${created.worktree_path}-temporarily-moved`;
+	// Phone exercises the session-scoped route through the same real picker.
+	// Its multipart body is unchanged; only the API URL differs. Focused tests
+	// also cover the shared-only session row (no legacy project_id).
+	if (ctx.variant.viewport === 'phone') {
+		await page.route('**/api/v1/projects/*/upload', (route) => route.continue({
+			url: new URL(`/api/v1/sessions/${created.session_id}/upload`, status.urls.ui).toString()
+		}));
+	}
 	await rename(created.worktree_path, moved);
 	try {
 		await mark('attach with checkout missing');

@@ -1726,21 +1726,15 @@ class ChatWebSocketHandler:
 
         local_upload_paths = upload_paths
         upload_references = []
-        local_uploads_need_lift = False
         if upload_paths or data.get("upload_references"):
             from app.core import upload_transfer
             try:
                 upload_session = await run_sync(database.get_session, session_id)
-                migrated = await run_sync(upload_transfer.migrated_upload_paths, upload_paths, upload_session)
-                prompt = upload_transfer.rewrite_prompt(prompt, migrated)
-                upload_paths = [migrated.get(path, path) for path in upload_paths]
                 local_upload_paths, upload_references = await run_sync(
                     upload_transfer.partition_upload_paths, upload_paths, upload_session,
                     references=data.get("upload_references"),
                 )
                 upload_paths = local_upload_paths + [ref["path"] for ref in upload_references]
-                if not placed_remote:
-                    local_uploads_need_lift = await run_sync(upload_transfer.branch_uploads_need_lift, local_upload_paths, upload_session)
             except (upload_transfer.UploadLiftError, OSError, ValueError, RuntimeError):
                 await self.send_json({
                     "type": "error", "session_id": session_id,
@@ -1770,7 +1764,7 @@ class ChatWebSocketHandler:
         held_for_move = session_handoff.holds(session_id)
         # A correlated existing-session send may still be cancelled at its
         # durable admission gate. Never dual-write it into history before then.
-        defer_record = had_live or held_for_move or placed_remote or local_uploads_need_lift or bool(upload_references) or (bool(client_message_id) and not is_new_session)
+        defer_record = had_live or held_for_move or placed_remote or bool(upload_references) or (bool(client_message_id) and not is_new_session)
         if not defer_record and not compact_first:
             try:
                 if not is_new_session:
@@ -1831,13 +1825,13 @@ class ChatWebSocketHandler:
         # Preserve it across a remote hand-off, even if its id is 'claude-code'.
         submit_profile_id = profile_id
 
-        # Remote uploads and local compose/staging leftovers travel as durable
-        # blobs, so the executing checkout owns their final paths. Established
-        # local checkout files need no lift or duplicate bytes.
+        # Uploads travel as durable blobs — but ONLY when the turn is
+        # actually leaving this install. A local turn's files are already on the
+        # disk the agent will read, so lifting them would just duplicate bytes.
         # A lift failure FAILS THE SEND: submitting a turn whose prompt points at
         # files the executing install cannot see is exactly the silent loss this
         # mechanism exists to prevent.
-        if (placed_remote or local_uploads_need_lift) and local_upload_paths:
+        if placed_remote and local_upload_paths:
             try:
                 blob_ids = await self._lift_uploads(
                     local_upload_paths, project_id, session_id

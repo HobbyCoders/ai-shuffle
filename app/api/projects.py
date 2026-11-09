@@ -847,30 +847,15 @@ def _perform_project_upload(
     session_cwd = None
     worktree = None
     if session_id:
-        from app.core import project_resolver, upload_transfer
-        from app.core.query_options import worktree_unavailable_error
-        from app.core.placement import resolve_placement
-        from app.network.control import owner_of
+        from app.core import upload_transfer
+        from app.core.query_options import WorktreeUnavailableError
 
         session = database.get_session(session_id)
         if session:
-            decision = resolve_placement(session)
-            remote = owner_of(session) or (
-                decision.kind == "runner" and decision.runner_id != settings.effective_instance_id
-            )
-            session_cwd = project_resolver.resolve_existing_cwd(session) if not remote else None
-            # A remote branch chat must not dirty the sender's main checkout.
-            # Non-worktree chats retain their existing main-upload behaviour.
-            worktree_bound = bool(session.get("branch") or session.get("worktree_branch")
-                                  or session.get("worktree_id") or session.get("worktree_path"))
-            staging = worktree_bound and (remote or decision.kind == "none")
-            if not staging and not session_cwd:
-                error = worktree_unavailable_error(session)
-                if error and project_resolver.resolve_local_checkout(session):
-                    raise HTTPException(status_code=409, detail=str(error))
-                # A queued/new/handoff checkout may not be registered yet. Send
-                # can prepare it; upload must not create it or fall back to main.
-                staging = bool(error)
+            try:
+                session_cwd, staging = upload_transfer.resolve_upload_target(session)
+            except WorktreeUnavailableError as exc:
+                raise HTTPException(status_code=409, detail={"message": str(exc), "reason": "worktree_unavailable"}) from exc
             if staging:
                 if path:
                     raise HTTPException(status_code=409, detail="This session's checkout is not available here for a path upload.")
@@ -984,6 +969,14 @@ async def upload_file(
     # same 500 — the project read must NOT be inside that handler.
     project, session = await run_sync(_load_project)
 
+    from app.core.upload_transfer import resolve_upload_target, stage_admitted_session_upload
+    from app.core.query_options import WorktreeUnavailableError
+
+    if session:
+        try:
+            await run_sync(resolve_upload_target, session)
+        except WorktreeUnavailableError as exc:
+            raise HTTPException(status_code=409, detail={"message": str(exc), "reason": "worktree_unavailable"}) from exc
     # Read the bytes (enforcing the size limit) before deciding local vs relay so
     # oversized files are rejected here and never carried over the peer channel.
     content = await _read_upload_within_limit(file)
@@ -995,10 +988,11 @@ async def upload_file(
         safe_filename = Path(file.filename or "upload").name
         if not safe_filename or safe_filename.startswith("."):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
-        from app.core.upload_transfer import stage_session_upload
-
         async with api_error_handler("save uploaded file"):
-            staged = await run_sync(stage_session_upload, session_id, safe_filename, content)
+            try:
+                staged = await run_sync(stage_admitted_session_upload, session, safe_filename, content)
+            except WorktreeUnavailableError as exc:
+                raise HTTPException(status_code=409, detail={"message": str(exc), "reason": "worktree_unavailable"}) from exc
         return {**staged, "sizeFormatted": format_file_size(len(content))}
 
     async with api_error_handler("save uploaded file"):
