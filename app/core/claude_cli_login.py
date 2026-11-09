@@ -126,6 +126,9 @@ class LoginTerminal:
             proc.wait(1)
             self._exit_code = proc.exit_code
             self._ended_at = time.monotonic()
+            from app.core import claude_subscriptions
+
+            claude_subscriptions.invalidate_identity()
             claude_cli_status.invalidate()
         elif proc.running and time.monotonic() - self._started_at > _IDLE_LIMIT_SECONDS:
             proc.terminate()

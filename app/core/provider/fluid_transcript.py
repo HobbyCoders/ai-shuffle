@@ -1372,11 +1372,14 @@ def cli_project_dir_name(path: str) -> str:
     ``jsonl_parser.get_project_dir_name`` keeps ``.``, ``_`` and other symbols,
     so for a cwd such as ``...\\.claude\\worktrees\\a_b`` it names a directory
     the CLI never looks in. Names longer than :data:`CLI_PROJECT_DIR_MAX` are
-    returned whole; the CLI shortens those with a hash this module does not
-    reproduce (see :func:`_cli_project_dir`).
+    returned whole; :func:`_cli_project_dir` applies the CLI's shortening.
+    Like JavaScript's non-Unicode regex, replace each UTF-16 code unit (an
+    astral character becomes two hyphens).
     """
+    units = str(path).encode("utf-16-le", errors="surrogatepass")
     return "".join(
-        ch if ch.isascii() and ch.isalnum() else "-" for ch in str(path)
+        chr(code) if code < 128 and chr(code).isalnum() else "-"
+        for lo, hi in zip(units[::2], units[1::2]) for code in [lo | hi << 8]
     )
 
 
@@ -1385,25 +1388,22 @@ def _cli_project_dir(root: Path, working_dir: str) -> Path:
     name = cli_project_dir_name(working_dir)
     if len(name) <= CLI_PROJECT_DIR_MAX:
         return root / name
-    prefix = name[:CLI_PROJECT_DIR_MAX]
-    try:
-        matches = [
-            child for child in root.iterdir()
-            if child.is_dir() and child.name.startswith(prefix)
-        ]
-    except OSError:
-        matches = []
-    if len(matches) == 1:
-        return matches[0]
-    from app.core.jsonl_parser import get_project_dir_name
-
-    fallback = get_project_dir_name(working_dir)
-    logger.info(
-        "CLI project dir for a %d-character cwd is hashed and %d existing dirs "
-        "match its first %d characters; writing under %s",
-        len(name), len(matches), CLI_PROJECT_DIR_MAX, fallback,
-    )
-    return root / fallback
+    # Claude Code 2.1.319: a signed 32-bit (31 * hash + charCodeAt) hash
+    # of the ORIGINAL cwd, absolute value, base 36. Never select a sibling by
+    # prefix: even a unique foreign handle may fail its first --resume.
+    hashed = 0
+    units = str(working_dir).encode("utf-16-le", errors="surrogatepass")
+    for lo, hi in zip(units[::2], units[1::2]):
+        hashed = (31 * hashed + (lo | hi << 8)) & 0xFFFFFFFF
+    if hashed & 0x80000000:
+        hashed -= 0x100000000
+    value = abs(hashed)
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    suffix = ""
+    while value:
+        value, digit = divmod(value, 36)
+        suffix = digits[digit] + suffix
+    return root / f"{name[:CLI_PROJECT_DIR_MAX]}-{suffix or '0'}"
 
 
 def cli_projects_root(env: Optional[Dict[str, str]] = None) -> Path:
@@ -1426,9 +1426,8 @@ def find_cli_transcript(
 ) -> Optional[Path]:
     """The ``<handle>.jsonl`` file ``--resume <handle>`` would load, or None.
 
-    With a runtime cwd, only accept that cwd's project dirs (absolute or
-    resolved); for hashed long names, the handle must uniquely identify a
-    file within the encoded-cwd prefix. A newly reseeded handle has no CLI
+    With a runtime cwd, only accept that cwd's exact project dirs (absolute
+    or resolved), including the hash of a long cwd. A newly reseeded handle has no CLI
     index yet: even a UNIQUE
     global match can fail its first --resume from another folder. Accepting
     that match masks cwd changes and prevents connect-time self-healing.
@@ -1447,16 +1446,9 @@ def find_cli_transcript(
         for cwd in dict.fromkeys(
             (os.path.abspath(working_dir), os.path.realpath(working_dir))
         ):
-            encoded = cli_project_dir_name(cwd)
-            if len(encoded) > CLI_PROJECT_DIR_MAX:
-                # Unlike a writer choosing a folder for a new handle, a reader
-                # can disambiguate hashed siblings by the exact existing handle.
-                candidates = root.glob(f"{encoded[:CLI_PROJECT_DIR_MAX]}*/{name}")
-            else:
-                candidates = [root / encoded / name]
-            found = [candidate for candidate in candidates if candidate.is_file()]
-            if found:
-                return found[0] if len(found) == 1 else None
+            candidate = _cli_project_dir(root, cwd) / name
+            if candidate.is_file():
+                return candidate
         return None
     found = [c for c in root.glob(f"*/{name}") if c.is_file()]
     return found[0] if len(found) == 1 else None
