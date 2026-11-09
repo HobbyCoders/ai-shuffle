@@ -313,7 +313,7 @@ await runJourney({
 			prepare: async () => {}
 		}),
 		// The words of a "Not sent" row join a typed draft, and both go at once.
-		sendCase({ name: 'restored-row-send', setup: openStopChat, prepare: restoreNotSentRowIntoADraft })
+		sendCase({ name: 'restored-row-send', viewports: ['phone'], setup: openStopChat, prepare: restoreNotSentRowIntoADraft })
 	],
 	allow: [...DEV_INSTANCE_NOISE]
 });

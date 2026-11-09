@@ -200,7 +200,8 @@ await runJourney({
 						await mark(`close ${label} with a tap outside`);
 						// The tall sheet covers the transcript: outside is the strip above it.
 						if (inControls) await page.touchscreen.tap(vp.width / 2, 8);
-						else await page.getByRole('log', { name: 'Conversation messages' }).tap({ position: { x: 20, y: 20 } });
+						// Clear of the turn rail, which takes taps along the transcript's left edge.
+						else await page.getByRole('log', { name: 'Conversation messages' }).tap({ position: { x: 60, y: 20 } });
 					}
 					await opened.waitFor({ state: 'hidden', timeout: 5000 });
 					await page.waitForTimeout(400);
