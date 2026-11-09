@@ -807,24 +807,30 @@ def _no_app_error_log_handler(_auto_db_shim, monkeypatch, request):
     listener = handler.listener
     thread = listener._thread  # close() clears this even when its join times out.
     listener.handlers = ()  # Discard backlog, including a full queue, not DB writes.
+    cleanup_completed = False
     try:
         error_logging.uninstall_error_log_handler()
-    finally:
         if thread is not None and thread.is_alive():
-            thread.join(timeout=0.1)
-            if thread.is_alive():
-                # Detaching targets cannot stop emit() already inside a target. It
-                # may resolve record_error (or a DB mock) only AFTER its current wait.
-                # pytest.fail/exit would continue teardown, potentially hanging on
-                # that thread's DB lock; terminate only this contaminated test process.
-                try:
-                    capture = request.config.pluginmanager.getplugin("capturemanager")
-                    if capture is not None:
-                        capture.suspend(in_=True)
-                    os.write(2, (f"\nERROR {request.node.nodeid}: app error-log listener still alive "
-                                 "after bounded teardown; refusing to run another test\n").encode())
-                finally:
-                    os._exit(int(pytest.ExitCode.TESTS_FAILED))
+            # CI observed a 91s DB hold in this listener. Allow the full 120s
+            # per-test CI timeout after production's 2s join, not another 0.1s.
+            # join returns as soon as the thread stops; finished threads skip it.
+            thread.join(timeout=120)
+        cleanup_completed = True
+    finally:
+        if thread is not None and (not cleanup_completed or thread.is_alive()):
+            # An interrupted wait (including pytest-timeout) must also fail closed.
+            # Detaching targets cannot stop emit() already inside a target. It
+            # may resolve record_error (or a DB mock) only AFTER its current wait.
+            # pytest.fail/exit would continue teardown, potentially hanging on
+            # that thread's DB lock; terminate only this contaminated test process.
+            try:
+                capture = request.config.pluginmanager.getplugin("capturemanager")
+                if capture is not None:
+                    capture.suspend(in_=True)
+                os.write(2, (f"\nERROR {request.node.nodeid}: app error-log listener still alive "
+                             "after bounded teardown; refusing to run another test\n").encode())
+            finally:
+                os._exit(int(pytest.ExitCode.TESTS_FAILED))
 
 
 @pytest.fixture(autouse=True)

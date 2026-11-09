@@ -21,7 +21,7 @@ from app.core import error_log_handler
 state = {}
 
 
-def test_interrupted_logging_owner():
+def test_interrupted_logging_owner(monkeypatch):
     root = logging.getLogger()
     unrelated = logging.NullHandler()
     root.addHandler(unrelated)
@@ -31,6 +31,14 @@ def test_interrupted_logging_owner():
     handler = error_log_handler._handler
     state["handler"] = handler
     state["thread"] = handler.listener._thread
+    state["joins"] = []
+    real_join = state["thread"].join
+
+    def join(timeout=None):
+        state["joins"].append(timeout)
+        return real_join(timeout)
+
+    monkeypatch.setattr(state["thread"], "join", join)
     assert handler in root.handlers
     assert state["thread"].is_alive()
 
@@ -43,6 +51,8 @@ def test_next_test_has_no_app_db_logging_listener(caplog):
         assert error_log_handler._handler is None
         assert not state["thread"].is_alive()
         assert handler.listener._thread is None
+        # A finished listener needs only production close, never the 120s join.
+        assert state["joins"] == [2]
         # Cleanup must preserve pytest/caplog and any unrelated logging sinks.
         assert state["unrelated"] in root.handlers
         with caplog.at_level(logging.WARNING):
@@ -59,14 +69,68 @@ def test_next_test_has_no_app_db_logging_listener(caplog):
     result.assert_outcomes(passed=2)
 
 
-@pytest.mark.parametrize(("blocked_at", "backlog", "release_on_join"), [
-    ("persist", 1, True),
-    ("format", 1, True),
-    ("persist", 1024, True),
-    ("format", 1024, False),
+def test_finite_slow_listener_finishes_before_next_test(pytester, monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("PYTHONPATH", str(root))
+    pytester.makeini("[pytest]\nasyncio_mode=auto")
+    pytester.makeconftest('pytest_plugins = ["tests.conftest"]')
+    pytester.makepyfile("""
+import logging
+import threading
+
+from app.core import error_log_handler as elh
+from app.db import error_logs
+
+state = {}
+
+
+def test_slow_source(monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    state["old_rows"] = []
+
+    def persist(**row):
+        entered.set()
+        assert release.wait(10), "independent release did not fire"
+        state["old_rows"].append(row)
+
+    monkeypatch.setattr(error_logs, "record_error", persist)
+    elh.install_error_log_handler()
+    handler = elh._handler
+    state["handler"], state["thread"] = handler, handler.listener._thread
+    handler.handle(logging.LogRecord("test.source", logging.ERROR, __file__, 1,
+                                     "slow source", (), None))
+    assert entered.wait(2)
+    # Real elapsed time releases persistence; join() is deliberately NOT patched.
+    timer = threading.Timer(3, release.set)
+    timer.daemon = True
+    state["timer"] = timer
+    timer.start()
+
+
+def test_next_test_starts_only_after_slow_emit_finishes(monkeypatch):
+    state["timer"].join(timeout=1)
+    assert not state["thread"].is_alive()
+    assert len(state["old_rows"]) == 1
+    assert elh._handler is None
+    assert state["handler"] not in logging.getLogger().handlers
+    rows = []
+    monkeypatch.setattr(error_logs, "record_error", lambda **row: rows.append(row))
+    logging.getLogger("fluid.providers._transport").error("next test")
+    assert rows == []
+""")
+    result = pytester.runpytest_subprocess("-q", "-p", "no:randomly", timeout=30)
+    result.assert_outcomes(passed=2)
+
+
+@pytest.mark.parametrize(("blocked_at", "backlog", "join_result"), [
+    ("persist", 1, "release"),
+    ("format", 1, "release"),
+    ("persist", 1024, "release"),
+    ("format", 1024, "timeout"),
+    ("format", 1, "interrupt"),
 ])
 def test_blocked_listener_cannot_reach_next_tests_mocks(
-    pytester, monkeypatch, blocked_at, backlog, release_on_join,
+    pytester, monkeypatch, blocked_at, backlog, join_result,
 ):
     root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv("PYTHONPATH", str(root))
@@ -119,10 +183,16 @@ def test_blocked_source(monkeypatch):
 
     real_join = thread.join
     def join(timeout=None):
-        # Production close's 2s join expires. Only the teardown's separate,
-        # short final join can release this record before the next test.
-        if {release_on_join!r} and timeout is not None and timeout < 2:
-            release.set()
+        # Production close's 2s join expires. Check the worker-only budget,
+        # but simulate its exhaustion rather than actually waiting 120s here.
+        if timeout != 2:
+            assert timeout >= 120
+            if {join_result!r} == "release":
+                release.set()
+            elif {join_result!r} == "interrupt":
+                raise KeyboardInterrupt("simulated interrupted cleanup wait")
+            else:
+                return
         return real_join(timeout)
     monkeypatch.setattr(thread, "join", join)
 
@@ -144,7 +214,7 @@ def test_next_test_uses_fresh_mocks(monkeypatch):
         state["release"].set()
 """)
     result = pytester.runpytest_subprocess("-q", "-p", "no:randomly", timeout=15)
-    if release_on_join:
+    if join_result == "release":
         result.assert_outcomes(passed=2)
     else:
         assert result.ret == pytest.ExitCode.TESTS_FAILED
