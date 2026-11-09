@@ -570,11 +570,27 @@ async def unlink_project(project_id: str, token: str = Depends(require_admin)):
     return await run_sync(_unlink)
 
 
+def _is_shared_copy_of_project(session: dict, project_id: str) -> bool:
+    """Whether a session with no local project id belongs to this project.
+
+    A chat that runs on another worker is keyed by the shared project id only,
+    while this worker's composer still names its own copy of the same project.
+    """
+    if session.get("project_id") or not session.get("project_v2_id"):
+        return False
+    from app.core.project_resolver import origin_for_legacy_project
+    from app.db import projects_v2
+
+    project = database.get_project(project_id)
+    shared = projects_v2.get_project_v2(session["project_v2_id"])
+    return bool(project and shared) and origin_for_legacy_project(project) == shared["origin"]
+
+
 def _get_project_session(session_id: str, project_id: str, api_user: Optional[dict]) -> Optional[dict]:
     """Load a session for a project-scoped route; 404 if it is another project's, 403 if denied."""
     session = database.get_session(session_id)
     if session:
-        if session.get("project_id") != project_id:
+        if session.get("project_id") != project_id and not _is_shared_copy_of_project(session, project_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Session not found: {session_id}"
@@ -912,22 +928,40 @@ async def upload_file(
             )
         # The destination may come from session_id / worktree_id; both must
         # belong to this project, or the file lands in another project's checkout.
-        if session_id:
-            _get_project_session(session_id, project_id, api_user)
+        session = _get_project_session(session_id, project_id, api_user) if session_id else None
+        # Same refusal as the session upload route: a Chat session cannot read staged files.
+        if session and not session.get("project_id") and session.get("mode") == "chat":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attachments need a code or voice project session.",
+            )
         if worktree_id:
             _get_project_worktree(worktree_id, project_id)
-        return project
+        return project, session
 
     # TWO hops here, deliberately: the 404 is decided before the body is read
     # (unchanged ordering) and the body read is a real await that cannot happen
     # inside a worker thread. The second hop is the write, and it must stay
     # inside ``api_error_handler`` so a filesystem failure keeps mapping to the
     # same 500 — the project read must NOT be inside that handler.
-    project = await run_sync(_load_project)
+    project, session = await run_sync(_load_project)
 
     # Read the bytes (enforcing the size limit) before deciding local vs relay so
     # oversized files are rejected here and never carried over the peer channel.
     content = await _read_upload_within_limit(file)
+
+    # A chat with no local project id runs from the shared project: this
+    # worker's checkout is not an attachment area for it (validate_upload_paths),
+    # so its attachment goes where the send can carry it to the owning worker.
+    if session and not session.get("project_id") and not path:
+        safe_filename = Path(file.filename or "upload").name
+        if not safe_filename or safe_filename.startswith("."):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
+        from app.core.upload_transfer import stage_session_upload
+
+        async with api_error_handler("save uploaded file"):
+            staged = await run_sync(stage_session_upload, session_id, safe_filename, content)
+        return {**staged, "sizeFormatted": format_file_size(len(content))}
 
     async with api_error_handler("save uploaded file"):
         return await run_sync(
