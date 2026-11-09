@@ -120,8 +120,11 @@
 	function centreNav(force = false) {
 		const host = nav?.parentElement;
 		if (!nav || !host || (scrubbing && !force)) return;
-		const centred = Math.max(0, Math.round((host.clientHeight - nav.offsetHeight) / 2));
-		if (force || navTop === null || Math.abs(centred - navTop) > RECENTRE_DRIFT_PX) navTop = centred;
+		const available = host.clientHeight;
+		const height = nav.offsetHeight;
+		const centred = Math.max(0, Math.round((available - height) / 2));
+		const overflows = navTop !== null && navTop + height > available;
+		if (force || navTop === null || overflows || Math.abs(centred - navTop) > RECENTRE_DRIFT_PX) navTop = centred;
 	}
 
 	// A different chat centres exactly; a new turn only moves past the drift.
@@ -241,6 +244,8 @@
 		scrub = null;
 		if (!active) return;
 		scrubbing = false;
+		// Anything the gesture held the rail still for applies now.
+		centreNav();
 		hoveredIndex = null;
 		// The gesture's own click (if the browser still sends one) must not
 		// select the tick the finger started on. Other ticks stay tappable.
@@ -409,7 +414,9 @@
 	.turn-nav {
 		position: absolute;
 		left: 6px;
-		/* `top` is set inline: vertically centred, see centreNav(). */
+		/* `top` is set inline: vertically centred, see centreNav(). A transcript
+		   shorter than the rail makes the rail scroll, not run under the composer. */
+		max-height: 100%;
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
