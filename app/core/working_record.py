@@ -216,7 +216,8 @@ def summary(session_id: str, *, owner_row: dict[str, Any] | None = None) -> str:
     def short(text: Any) -> str:
         return str(text).encode("utf-8")[:180].decode("utf-8", errors="ignore")
 
-    groups = [[{"kind": kind, "id": row["id"], "session": row["source_session_id"], "text": short(row["content"])}
+    groups = [[{"kind": kind, "id": row["id"], "session": row["source_session_id"], "created_at": row.get("created_at"),
+               "updated_at": row.get("updated_at"), "text": short(row["content"])}
                for row in store.items(kind=kind, limit=11)]
               for kind in ("needs_owner", "decision", "pending", "goal", "report")]
     groups.insert(0, [{**row, "goal": short(row["goal"])} for row in sessions])

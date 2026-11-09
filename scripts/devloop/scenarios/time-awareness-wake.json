@@ -1,0 +1,7 @@
+{
+  "description": "Short real Monitor completion for the owner-time producing-path regression journey.",
+  "steps": [
+    {"text": "Starting the time probe.", "tool_calls": [{"name": "Monitor", "input": {"command": "sleep 8", "wait_seconds": 0}}]},
+    {"text": "Waiting for the time probe."}
+  ]
+}

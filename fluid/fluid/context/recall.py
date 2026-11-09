@@ -102,7 +102,10 @@ class HistoryRecall:
             if node_id in self._archived_ids:
                 continue
             self._archived_ids.add(node_id)
-            node = SessionNode(node_id, None, Message(role, [Text(text)]))
+            from fluid.context.time_awareness import as_utc
+
+            sent = as_utc(entry.get("ts"))
+            node = SessionNode(node_id, None, Message(role, [Text(text)]), ts=sent.timestamp() if sent else 0)
             if (role, text) in self._archived_keys:
                 self._aliases[node_id] = node
                 continue
@@ -250,6 +253,7 @@ def expand_ref(
     *,
     offset: int = 0,
     max_chars: int = DEFAULT_EXPAND_CHARS,
+    zone: str | None = "UTC",
 ) -> tuple[str, bool]:
     """Verbatim text for a node or node range on the path.
 
@@ -280,7 +284,20 @@ def expand_ref(
     offset = max(0, offset)
 
     def header_for(size: int) -> str:
-        header = f"[history {ref} — {len(text)} chars total"
+        from fluid.context.time_awareness import absolute_time
+
+        # Metadata belongs in the header: persisted receipt offsets still address
+        # the unchanged body, even after a timezone preference changes.
+        stamps = "; ".join(f"{n.node_id} sent {absolute_time(n.ts, zone) if n.ts else 'unknown time'}"
+                           for n in nodes[i:j + 1][:20])
+        if j - i >= 20:
+            stamps += "; more send times: expand a smaller node range"
+        # Bound metadata independently of the requested text page. At most
+        # twenty stamps, and never enough to crowd a small page out entirely.
+        stamp_budget = max(0, max_chars // 2 - 100)
+        if len(stamps) > stamp_budget:
+            stamps = "send times: expand a smaller range"
+        header = f"[history {ref} — {len(text)} chars total; {stamps}"
         if offset or len(text) > offset + size:
             shown_end = min(len(text), offset + size)
             header += f"; showing {offset}..{shown_end}"
@@ -299,6 +316,8 @@ def expand_ref(
             break
         size = fitted
     header = header_for(size)
+    if len(header) + 1 >= max_chars:
+        return header[:max_chars], False
     return f"{header}\n{text[offset : offset + size]}", False
 
 
@@ -308,6 +327,7 @@ class Hit:
     role: str
     snippet: str
     matches: int
+    ts: float = 0
 
 
 def calling_node_ids(
@@ -384,23 +404,26 @@ def search_path(
                 role=node.message.role,
                 snippet=snippet,
                 matches=occurrences,
+                ts=node.ts,
             ),
         ))
     scored.sort(key=lambda item: item[:3])
     return [hit for _t, _o, _p, hit in scored[: max(1, max_results)]]
 
 
-def render_hits(hits: list[Hit], query: str) -> str:
+def render_hits(hits: list[Hit], query: str, zone: str | None = "UTC") -> str:
     if not hits:
         return f'no matches for "{query}" anywhere in this session\'s history'
     lines = [
         f'{len(hits)} match(es) for "{query}" — re-read any with '
         'HistoryExpand("<node_id>"):'
     ]
+    from fluid.context.time_awareness import absolute_time
+
     for hit in hits:
         lines.append(
             f"- {hit.node_id} ({hit.role}, {hit.matches} occurrence(s)): "
-            f"{hit.snippet}"
+            f"[sent {absolute_time(hit.ts, zone) if hit.ts else 'unknown time'}] {hit.snippet}"
         )
     out = "\n".join(lines)
     if len(out) > _SEARCH_OUTPUT_CAP:

@@ -9,6 +9,9 @@ against the session store and returns the ORIGINAL content. The engine injects
 from __future__ import annotations
 
 from typing import Any
+import asyncio
+
+from fluid.tools.time_context import history_zone
 
 from fluid.context.recall import DEFAULT_EXPAND_CHARS, expand_ref, recall_nodes
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
@@ -68,5 +71,6 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         ref,
         offset=int(input.get("offset") or 0),
         max_chars=int(input.get("max_chars") or DEFAULT_EXPAND_CHARS),
+        zone=await asyncio.to_thread(history_zone, ctx.extra),
     )
     return ToolOutcome(text=text, is_error=is_error)

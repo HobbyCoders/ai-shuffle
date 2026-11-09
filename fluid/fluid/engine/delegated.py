@@ -2747,6 +2747,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         return
             op, question_ids = await self._question_turn_content(op)
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
+            from fluid.tools.time_context import delegated_wake_time
+
+            content = await asyncio.to_thread(delegated_wake_time, content, self.ctx.extra, op.source)
             content, context_pin = await self._fresh_turn_content(content, op.context_pin)
             user_node = SessionNode(
                 node_id=new_id("node"),

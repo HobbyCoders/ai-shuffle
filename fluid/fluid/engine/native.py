@@ -2671,12 +2671,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ))
                 self._active_turn_id = None
                 return
-            if op.context_note:
+            # Preserve saved nodes byte-for-byte; refreshed time rides a new tail node.
+            self.ctx.extra["time_turn_source"] = "wakeup"
+            fresh_time = await self._environment_reminder()
+            context_note = "\n\n".join(n for n in (op.context_note, fresh_time) if n)
+            if context_note:
                 head = SessionNode(
                     node_id=new_id("node"), parent_id=head.node_id,
                     message=Message(
-                        role="user", content=[Text(op.context_note)],
-                    ).pin_context(op.context_note),
+                        role="user", content=[Text(context_note)],
+                    ).pin_context(context_note),
                 )
                 await self._append_node(sid, head)
             await self._emit(TurnStarted(
@@ -2729,6 +2733,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             notes = self._notes_reminder()
             if notes is not None:
                 content.append(Text(notes))
+        self.ctx.extra["time_turn_source"] = op.source
         env_note = await self._environment_reminder()
         if env_note is not None:
             content.append(Text(env_note))
@@ -3346,7 +3351,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         from fluid.context.runtime_facts import runtime_facts
 
         facts = runtime_facts(self.ctx.cwd)
-        note = environment_note(self.ctx.cwd) if full else None
+        time_context = self.ctx.extra.get("time_context")
+        try:
+            values = time_context(self.ctx.extra.get("time_turn_source", "wakeup")) if callable(time_context) else {}
+        except Exception:
+            values = {}
+        note = environment_note(self.ctx.cwd, time_context=values or {}) if full else None
         self._harvest_runtime_facts()
         return note, facts
 

@@ -49,7 +49,7 @@ describe('timezonePreference', () => {
 			expect(tz.current).toBe('local');
 			expect(tz.resolveTimezone()).toBe('Asia/Tokyo');
 		} finally {
-			spy.mockRestore();
+		spy.mockRestore();
 		}
 	});
 
@@ -66,7 +66,7 @@ describe('timezonePreference', () => {
 			expect(tz.resolveTimezone()).toBe('UTC');
 			expect(() => new Date().toLocaleString(undefined, { timeZone: tz.resolveTimezone() })).not.toThrow();
 		} finally {
-			spy.mockRestore();
+		spy.mockRestore();
 		}
 	});
 
@@ -95,11 +95,25 @@ describe('timezonePreference', () => {
 	});
 
 	it('load and syncFromServer refresh the server key', async () => {
+		const real = Intl.DateTimeFormat.prototype.resolvedOptions;
+		const spy = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(function (this: Intl.DateTimeFormat) {
+			return { ...real.call(this), timeZone: 'America/New_York' };
+		});
 		const tz = await load();
 		await tz.load();
 		await tz.syncFromServer();
 		expect(sync.refresh).toHaveBeenCalledTimes(2);
 		expect(sync.refresh).toHaveBeenCalledWith('timezone');
+		expect(sync.save).toHaveBeenCalledWith('timezone_resolved', 'America/New_York');
+		spy.mockRestore();
+	});
+
+	it('detected zone never overwrites an explicit timezone', async () => {
+		const tz = await load();
+		tz.setTimezone('America/New_York');
+		await tz.load();
+		sync.bindings.get('timezone_resolved')!.apply('Asia/Tokyo');
+		expect(tz.current).toBe('America/New_York');
 	});
 
 	it('applies a valid synced zone and caches it', async () => {

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import datetime
+from fluid.context.time_awareness import absolute_time
+from fluid.tools.time_context import history_zone
 from typing import Any
 
 from fluid.store.base import clip_text
@@ -156,10 +157,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     worker = getattr(window, "worker", None)
     if worker:
         title += f" [on {worker}]"
-    stamp = (
-        datetime.fromtimestamp(window.last_ts).strftime("%Y-%m-%d")
-        if window.last_ts else "unknown date"
-    )
+    zone = await asyncio.to_thread(history_zone, ctx.extra)
+    stamp = absolute_time(window.last_ts, zone) if window.last_ts else "unknown date"
     if not window.messages:
         return ToolOutcome(
             text=(
@@ -169,14 +168,14 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             )
         )
     if text_offset is not None:
-        return _text_page(window, int(text_offset), title, stamp)
+        return _text_page(window, int(text_offset), title, stamp, zone)
     show = str(input.get("show") or "all").strip().lower()
     if show not in _SHOW_MODES:
         show = "all"
     blocks = [
         (window.start + i, block)
         for i, msg in enumerate(window.messages)
-        if (block := _render(window.start + i, msg, show))
+        if (block := _render(window.start + i, msg, show, zone))
     ]
     # A tail window (the default, or a negative offset) keeps its newest
     # messages when the budget runs out; a forward page keeps its earliest.
@@ -218,7 +217,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     return ToolOutcome(text=text)
 
 
-def _text_page(window: Any, start: int, title: str, stamp: str) -> ToolOutcome:
+def _text_page(window: Any, start: int, title: str, stamp: str, zone: str | None = "UTC") -> ToolOutcome:
     """Lossless character paging; metadata and continuation fit the same budget."""
     msg = window.messages[0]
     if start > len(msg.text):
@@ -228,7 +227,7 @@ def _text_page(window: Any, start: int, title: str, stamp: str) -> ToolOutcome:
         f"message {window.start}, text from character {start} of {len(msg.text)}:",
         1_000,
     )
-    prefix = f"{heading}\n[{window.start} {msg.role}] "
+    prefix = f"{heading}\n[{window.start} {msg.role}] [sent {absolute_time(msg.ts, zone)}] "
     budget = _OUTPUT_CAP - len(prefix) - _FOOTER_RESERVE
     end = min(len(msg.text), start + budget)
     footer = (
@@ -238,18 +237,19 @@ def _text_page(window: Any, start: int, title: str, stamp: str) -> ToolOutcome:
     return ToolOutcome(text=prefix + msg.text[start:end] + "\n" + footer)
 
 
-def _render(index: int, msg: Any, show: str) -> list[str]:
+def _render(index: int, msg: Any, show: str, zone: str | None = "UTC") -> list[str]:
     """One message's printed lines under ``show``; [] when it shows nothing."""
+    sent = absolute_time(msg.ts, zone) if msg.ts else "unknown time"
     text = clip_text(msg.text, _TEXT_CAP) if msg.text.strip() else ""
     if text and len(msg.text) > _TEXT_CAP and show != "tools":
         text += f" [text preview clipped — read with offset={index}, count=1, text_offset=0]"
     if show == "conversation":
-        return [f"[{index} {msg.role}] {text}"] if text else []
+        return [f"[{index} {msg.role}] [sent {sent}] {text}"] if text else []
     if show == "tools":
         if not msg.tools:
             return []
         text = ""
-    lines = [f"[{index} {msg.role}] {text}".rstrip()]
+    lines = [f"[{index} {msg.role}] [sent {sent}] {text}".rstrip()]
     for tool_line in msg.tools[:_TOOLS_SHOWN]:
         lines.append(f"    {tool_line}")
     if len(msg.tools) > _TOOLS_SHOWN:

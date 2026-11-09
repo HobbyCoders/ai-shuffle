@@ -740,9 +740,10 @@ class JsonlStore:
                     if not isinstance(message, dict):
                         continue  # parsable but not a node record; the loader skips it too
                     try:
-                        hit.last_ts = max(hit.last_ts, float(node.get("ts") or 0.0))
+                        sent_ts = float(node.get("ts") or 0.0)
+                        hit.last_ts = max(hit.last_ts, sent_ts)
                     except (TypeError, ValueError):
-                        pass
+                        sent_ts = 0.0
                     try:
                         texts = message_texts(message)
                     except TypeError:  # content that is not a list of blocks
@@ -756,9 +757,11 @@ class JsonlStore:
                         role = message.get("role", "?")
                         if len(hit.texts) < _MAX_MATCHES_PER_SESSION:
                             hit.texts.append((role, text))
+                            hit.text_times.append(sent_ts)
                         elif n_hit > hit.best:
                             # Keep the text that holds the most terms visible.
                             hit.texts[-1] = (role, text)
+                            hit.text_times[-1] = sent_ts
                         hit.best = max(hit.best, n_hit)
         except OSError:
             return SessionSearchHit(session_id=session_id, score=0)

@@ -32,19 +32,19 @@ def _hash(text: str) -> str:
 
 
 def test_turn_note_carries_the_date_and_the_branch(monkeypatch):
-    monkeypatch.setattr("app.core.environment._today", lambda: "2026-09-04")
+    monkeypatch.setattr("fluid.context.time_awareness.turn_time_lines", lambda **_kw: ["Current time: 2026-09-04"])
     note = generate_turn_environment_note(branch="claude/one")
     assert TURN_ENV_HEADER in note
-    assert "Today's date: 2026-09-04" in note
+    assert "Current time: 2026-09-04" in note
     assert "Current branch: claude/one" in note
     # A worktree's base branch is session-stable: it sits in the prompt.
     assert "Base branch" not in note
 
 
 def test_turn_note_without_a_branch_is_just_the_date(monkeypatch):
-    monkeypatch.setattr("app.core.environment._today", lambda: "2026-09-04")
+    monkeypatch.setattr("fluid.context.time_awareness.turn_time_lines", lambda **_kw: ["Current time: 2026-09-04"])
     note = generate_turn_environment_note()
-    assert "Today's date: 2026-09-04" in note
+    assert "Current time: 2026-09-04" in note
     assert "Current branch" not in note
 
 
@@ -145,7 +145,7 @@ class _RecordingEngine:
 async def test_send_query_appends_the_volatile_context(
     tmp_path, memory_store, memory_session_id, monkeypatch
 ):
-    monkeypatch.setattr("app.core.environment._today", lambda: "2026-09-04")
+    monkeypatch.setattr("fluid.context.time_awareness.turn_time_lines", lambda **_kw: ["Current time: 2026-09-04"])
     memory_store.save_memory("the deploy script lives in ops/deploy.sh")
 
     adapter = HarnessAdapter()
@@ -166,7 +166,7 @@ async def test_send_query_appends_the_volatile_context(
 
     sent = engine.ops[0].content
     assert sent.startswith("do the thing")
-    assert "Today's date: 2026-09-04" in sent
+    assert "Current time: 2026-09-04" in sent
     assert "Current branch: claude/one" in sent
     assert "ops/deploy.sh" in sent
 
@@ -188,7 +188,8 @@ async def test_send_query_adds_no_second_date_note(tmp_path, delegated):
 
     content = engine.ops[0].content
     assert content.startswith("do the thing")
-    assert TURN_ENV_HEADER not in content and "claude/two" not in content
+    assert (TURN_ENV_HEADER in content) is delegated
+    assert ("claude/two" in content) is delegated
     # The only other rider is the memory reminder, which is not an env block
     # (fluid renders a placeholder for an empty store since audit round 9).
     assert content.replace("do the thing", "", 1).strip().startswith("<system-reminder>") or content == "do the thing"

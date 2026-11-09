@@ -1883,6 +1883,7 @@ class HarnessAdapter(ProviderAdapter):
         # older than this turn. The memory snapshot rides only when the model
         # does not already hold it (see _memory_turn_note).
         source = self._take_turn_source()
+        self._time_source = source
         # Claude Code takes its own slash commands as typed; a native session takes
         # only a bare "/compact", which its engine runs as a compaction.
         command = (
@@ -2156,6 +2157,8 @@ class HarnessAdapter(ProviderAdapter):
         """Let AskUser answer at once with recommended defaults while away."""
         from app.core.away_mode import make_question_auto_answer
 
+        ctx.extra["time_context"] = self._time_context
+        ctx.extra["time_rule_in_prefix"] = self._delegated_replaces_preset or not self._is_delegated
         ctx.extra["auto_answer_questions"] = make_question_auto_answer(
             self._resolve_app_session_id
         )
@@ -2647,7 +2650,7 @@ class HarnessAdapter(ProviderAdapter):
         fluid's own per-turn reminder (``NativeLoop._environment_reminder``)
         and a preset keeps the CLI's, so neither gets a second copy here.
         """
-        if not self._delegated_replaces_preset:
+        if not self._is_delegated:
             return None
         return self._checkout_env_note()
 
@@ -2659,10 +2662,20 @@ class HarnessAdapter(ProviderAdapter):
             )
 
             cwd = getattr(self._options, "cwd", None)
-            return generate_turn_environment_note(branch=checkout_branch(cwd))
+            return generate_turn_environment_note(
+                branch=checkout_branch(cwd), time_context=self._time_context(),
+                include_rule=not self._delegated_replaces_preset,
+            )
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] turn env note failed", exc_info=True)
             return None
+
+    def _time_context(self, source: str | None = None) -> dict:
+        from app.core.time_awareness import session_time_context
+
+        return session_time_context(
+            self._resolve_app_session_id(), source or getattr(self, "_time_source", "wakeup"),
+        )
 
     def _away_note(self) -> Optional[str]:
         """The Away-mode (or assistant-started chat) reminder, else ``None``."""

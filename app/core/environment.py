@@ -1196,10 +1196,6 @@ def worker_identity_text() -> Optional[str]:
     return "\n".join(lines) if lines else None
 
 
-def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
 TURN_ENV_HEADER = "Environment facts that change while a session runs"
 
 
@@ -1220,7 +1216,8 @@ def checkout_branch(working_dir: Optional[str]) -> Optional[str]:
     return branch or None
 
 
-def generate_turn_environment_note(*, branch: Optional[str] = None) -> str:
+def generate_turn_environment_note(*, branch: Optional[str] = None, time_context: Optional[dict] = None,
+                                   include_rule: bool = False) -> str:
     """Today's date and the branch, rendered fresh for one turn.
 
     This rides the turn's user message instead of the system prompt: it sits
@@ -1237,7 +1234,11 @@ def generate_turn_environment_note(*, branch: Optional[str] = None) -> str:
     worktree's base branch is session-stable and sits in the prompt instead
     (:func:`session_runtime_lines`).
     """
-    lines = [f"Today's date: {_today()}"]
+    from fluid.context.time_awareness import RELATIVE_TIME_RULE, turn_time_lines
+
+    lines = turn_time_lines(**(time_context or {}))
+    if include_rule:
+        lines.append(RELATIVE_TIME_RULE)
     if branch:
         lines.append(f"Current branch: {branch}")
     body = "\n".join(lines)

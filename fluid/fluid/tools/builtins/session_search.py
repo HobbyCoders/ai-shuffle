@@ -25,7 +25,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
-from datetime import datetime
+from fluid.context.time_awareness import absolute_time
+from fluid.tools.time_context import history_zone
 from typing import Any
 
 from fluid.store.base import project_root_for, same_project
@@ -113,8 +114,8 @@ SPEC = ToolSpec(
 )
 
 
-def _stamp(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "unknown date"
+def _stamp(ts: float, zone: str | None = "UTC") -> str:
+    return absolute_time(ts, zone) if ts else "unknown date"
 
 
 def _label(session_id: str, title: str | None, worker: str | None = None) -> str:
@@ -132,7 +133,7 @@ def _snippet(text: str, term: str) -> str:
     return f"{prefix}{flat}{suffix}"
 
 
-def _snippet_lines(texts: list[tuple[str, str]], terms: list[str]) -> list[str]:
+def _snippet_lines(texts: list[tuple[str, str]], terms: list[str], times=(), zone="UTC") -> list[str]:
     """Up to ``_MAX_MATCHES_PER_SESSION`` *distinct* snippets for one session.
 
     A session that says the same thing in every matching message — a repeated
@@ -143,13 +144,14 @@ def _snippet_lines(texts: list[tuple[str, str]], terms: list[str]) -> list[str]:
     """
     lines: list[str] = []
     seen: set[str] = set()
-    for role, text in texts:
+    for index, (role, text) in enumerate(texts):
         term = next((t for t in terms if t in text.lower()), "")
         snippet = _snippet(text, term)
         if snippet in seen:
             continue
         seen.add(snippet)
-        lines.append(f"  [{role}] {snippet}")
+        stamp = _stamp(times[index], zone) if index < len(times) and times[index] else "unknown time"
+        lines.append(f"  [{role}] [sent {stamp}] {snippet}")
         if len(lines) >= _MAX_MATCHES_PER_SESSION:
             break
     return lines
@@ -249,10 +251,11 @@ async def _list_recent(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         f"{len(rows[:limit])} recent session(s), newest first:"
         + _elsewhere_note(hidden)
     ]
+    zone = await asyncio.to_thread(history_zone, ctx.extra)
     for row in rows[:limit]:
         count = f", {row.message_count} messages" if row.message_count else ""
         label = _label(row.session_id, row.title, getattr(row, "worker", None))
-        lines.append(f"{label} ({_stamp(row.last_ts)}{count})")
+        lines.append(f"{label} ({_stamp(row.last_ts, zone)}{count})")
         if row.preview:
             lines.append(f"  last: {row.preview}")
     text = "\n".join(lines)
@@ -309,12 +312,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         else f"{len(hits)} session(s) matched; best first:"
     )
     lines: list[str] = [header + _elsewhere_note(hidden)]
+    zone = await asyncio.to_thread(history_zone, ctx.extra)
     for hit in shown:
         lines.append(
             f"{_label(hit.session_id, hit.title, getattr(hit, 'worker', None))} "
-            f"({_stamp(hit.last_ts)}, score {hit.score}):"
+            f"({_stamp(hit.last_ts, zone)}, score {hit.score}):"
         )
-        lines.extend(_snippet_lines(hit.texts, terms))
+        lines.extend(_snippet_lines(hit.texts, terms, getattr(hit, "text_times", ()), zone))
     text = "\n".join(lines)
     if len(text) > _OUTPUT_CAP:
         text = text[:_OUTPUT_CAP] + "\n[output capped — narrow the query]"

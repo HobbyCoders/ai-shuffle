@@ -1037,6 +1037,12 @@ def _intent_pin(
     ]
     if not found:
         return []
+    from fluid.context.time_awareness import absolute_time
+
+    stamps = {node.node_id: absolute_time(node.ts, "UTC") for node, _ in found}
+    def sent(node_id):
+        return f" [sent {stamps[node_id]}]" if config.render_version >= 4 else ""
+
     requests = [(node.node_id, text) for node, text in found]
     cap = config.user_turn_text_cap
     budget = config.intent_pin_tokens * 4
@@ -1048,7 +1054,7 @@ def _intent_pin(
     lines = [
         "Pinned intent: the user's own requests in these folded turns, "
         "verbatim (a later user message outranks them).",
-        f"original request ({first_id}):",
+        f"original request ({first_id}){sent(first_id)}:",
         first,
     ]
     later = requests[1:][::-1]
@@ -1063,7 +1069,7 @@ def _intent_pin(
             )
             break
         budget -= len(clipped)
-        lines.extend([f"later request ({node_id}):", clipped])
+        lines.extend([f"later request ({node_id}){sent(node_id)}:", clipped])
     return lines
 
 
@@ -1231,7 +1237,10 @@ def render_span_digest(
                     line = _clip_verbatim(user_text, config.peer_turn_text_cap)
                 else:
                     line = _clip(user_text, cap)
-                lines.append(f"user ({node.node_id}): {line}")
+                from fluid.context.time_awareness import absolute_time
+
+                sent = f" [sent {absolute_time(node.ts, 'UTC')}]" if config.render_version >= 4 else ""
+                lines.append(f"user ({node.node_id}){sent}: {line}")
         elif message.role == "assistant":
             texts = [b for b in message.content if isinstance(b, Text)]
             if texts:  # the last text block is the conclusion

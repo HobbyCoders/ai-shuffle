@@ -333,7 +333,7 @@ async def test_delegated_leg_puts_the_turn_note_back_after_a_compaction(monkeypa
         assert {"environment", "away"} <= {s.name for s in sections}
         note = await _packed(loop)
         assert note == adapter._turn_context_note()
-        assert "Today's date" in note and "feature-note" in note and "AWAY MODE" in note
+        assert "Current time" in note and "feature-note" in note and "AWAY MODE" in note
         # Rendered on every call: Away mode turned off mid-turn is not put back.
         away["text"] = None
         assert "AWAY MODE" not in await _packed(loop)
@@ -357,9 +357,9 @@ async def test_compaction_note_carries_date_and_branch_for_a_preset_profile(monk
     adapter = ha.HarnessAdapter()
     await adapter.connect(_preset_options(repo))
     try:
-        assert adapter._env_note() is None
+        assert "Current time:" in adapter._env_note()
         note = await _packed(adapter._engine)
-        assert "Today's date: " in note and "Current branch: feature-x" in note
+        assert "Current time: " in note and "Current branch: feature-x" in note
     finally:
         await adapter.disconnect()
 
@@ -399,7 +399,7 @@ async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_
         content = await _sent_user_turn(adapter, monkeypatch)
         assert content.startswith("do the thing")
         assert content.count(TURN_ENV_HEADER) == 1
-        assert "Today's date: " in content
+        assert "Current time: " in content
         assert "Current branch: feature-turn" in content
         # Live, not frozen at connect: a checkout switch shows on the next turn.
         subprocess.run(["git", "checkout", "-q", "-b", "feature-next"], cwd=repo, check=True)
@@ -420,8 +420,8 @@ async def test_preset_profile_user_turn_has_no_app_date_note(monkeypatch, tmp_pa
     await adapter.connect(_preset_options(_git_repo(tmp_path, "feature-preset")))
     try:
         content = await _sent_user_turn(adapter, monkeypatch)
-        assert TURN_ENV_HEADER not in content
-        assert "feature-preset" not in content
+        assert TURN_ENV_HEADER in content
+        assert "Current time:" in content and "feature-preset" in content
     finally:
         await adapter.disconnect()
 

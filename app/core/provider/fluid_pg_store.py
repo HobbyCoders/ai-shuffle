@@ -639,11 +639,11 @@ def _accumulate(
         slot["last_ts"] = max(slot["last_ts"], ts)
         kept = slot["texts"]
         if len(kept) < _SEARCH_TEXTS_PER_SESSION:
-            kept.append((n_hit, role, text))
+            kept.append((n_hit, role, text, ts))
         else:
             weakest = min(range(len(kept)), key=lambda i: kept[i][0])
             if n_hit > kept[weakest][0]:
-                kept[weakest] = (n_hit, role, text)
+                kept[weakest] = (n_hit, role, text, ts)
 
 
 def _titles_for(cur, session_ids: List[str]) -> Dict[str, str]:
@@ -1298,8 +1298,10 @@ def _search_sync(
             session_id=sid,
             score=slot["score"],
             last_ts=slot["last_ts"],
-            texts=[(role, text) for _n, role, text in
+            texts=[(role, text) for _n, role, text, _ts in
                    sorted(slot["texts"], key=lambda t: -t[0])],
+            text_times=[ts for _n, _role, _text, ts in
+                        sorted(slot["texts"], key=lambda t: -t[0])],
             best=slot["best"],
         )
         for sid, slot in acc.items()

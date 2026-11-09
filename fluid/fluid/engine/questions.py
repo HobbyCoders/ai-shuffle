@@ -161,7 +161,7 @@ class QuestionLifecycleMixin:
             return
         # Reserve the turn synchronously, just like BackgroundLifecycleMixin.
         delivered_before = len(self._question_delivered)
-        self._turn_task = asyncio.create_task(self._run_turn(UserTurn(content=[])))
+        self._turn_task = asyncio.create_task(self._run_turn(UserTurn(content=[], source="unpark")))
         await self._turn_task
         self._question_wake_task = None
         # A failed turn leaves answers durable for an explicit retry, rather

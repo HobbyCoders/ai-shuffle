@@ -181,9 +181,7 @@ def test_failed_lookup_keeps_the_last_good_line(monkeypatch):
 
 def test_worker_line_sits_in_the_stable_half_and_is_byte_identical(monkeypatch, tmp_path):
     _network(monkeypatch)
-    monkeypatch.setattr(env_mod, "_today", lambda: "2026-01-01")
     one = _block(tmp_path)
-    monkeypatch.setattr(env_mod, "_today", lambda: "2026-01-02")
     two = _block(tmp_path)
     assert "Worker: ServerWorker" in one
     assert hashlib.sha256(one.encode()).digest() == hashlib.sha256(two.encode()).digest()

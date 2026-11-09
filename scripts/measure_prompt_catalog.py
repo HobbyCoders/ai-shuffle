@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "fluid")]
 
 
-def compile_fixture(*, native=True):
+def compile_fixture(*, native=True, environment_text=None):
     from app.core import agent_provider_models as agents
     from app.core.config import settings
     from app.core.provider import harness_adapter as ha
@@ -50,7 +50,8 @@ def compile_fixture(*, native=True):
             "fluid.context.agents.discover_agents": [],
             "fluid.context.compiler.build_instruction_blocks": [],
             "fluid.context.compiler.discover_skills": [],
-            "fluid.context.compiler.environment_block": "# Environment\nWorking directory: /fixture\nPlatform: linux",
+            "fluid.context.compiler.environment_block": (environment_text if environment_text is not None else
+                "# Environment\nWorking directory: /fixture\nPlatform: linux"),
             "app.core.provider.harness_adapter._agent_context": (None, {}),
             "app.core.provider.harness_adapter._learned_guidance_blocks": (),
             "app.core.provider.harness_adapter._recall_backend_available": True,

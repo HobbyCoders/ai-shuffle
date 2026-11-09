@@ -570,7 +570,10 @@ def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optiona
 
 def _handoff_context(pending: PendingHandoff, label: str) -> str:
     reason = ", as you requested with HandOffSession." if pending.by == "agent" else " at the owner's request."
-    prompt = f"[hand-off] Moved from {_self_label()} to {label}{reason}"
+    from fluid.context.time_awareness import absolute_time
+    from datetime import datetime, timezone
+
+    prompt = f"[hand-off] At {absolute_time(datetime.now(timezone.utc), 'UTC')}, moved from {_self_label()} to {label}{reason}"
     if pending.note:
         prompt += f" Your hand-off note: {pending.note}"
     return prompt

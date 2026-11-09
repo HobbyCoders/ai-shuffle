@@ -29,9 +29,9 @@ def test_no_worker_text_renders_no_line(tmp_path):
 
 
 def test_worker_line_is_byte_identical_across_turns(tmp_path, monkeypatch):
-    monkeypatch.setattr(env_mod, "_today", lambda: "2026-01-01")
+    monkeypatch.setattr(env_mod, "turn_time_lines", lambda **_kw: ["Current time: 2026-01-01"])
     one = environment_block(tmp_path, include_volatile=False, worker=WORKER)
-    monkeypatch.setattr(env_mod, "_today", lambda: "2026-01-02")
+    monkeypatch.setattr(env_mod, "turn_time_lines", lambda **_kw: ["Current time: 2026-01-02"])
     two = environment_block(tmp_path, include_volatile=False, worker=WORKER)
     assert one.encode() == two.encode()
     # The per-turn note is the volatile half; the worker is not in it.

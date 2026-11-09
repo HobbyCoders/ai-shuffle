@@ -42,7 +42,9 @@ from fluid.store.base import SessionNode
 # were made under, so an old session keeps rendering exactly as it did.
 RENDER_VERSION_LEGACY = 1
 RENDER_VERSION_V2 = 2
-CURRENT_RENDER_VERSION = 3
+# Version 4 anchors carried requests to their immutable send times. Old
+# decisions retain their version, so cached history bytes do not change.
+CURRENT_RENDER_VERSION = 4
 
 
 @dataclass(frozen=True, kw_only=True)

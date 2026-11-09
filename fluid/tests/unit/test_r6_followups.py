@@ -289,17 +289,17 @@ def test_static_environment_block_omits_the_volatile_facts(git_repo: Path) -> No
     block = environment_block(git_repo, include_volatile=False)
     assert "Working directory:" in block
     assert "Git repository: yes" in block
-    assert "Today's date:" not in block
+    assert "Current time:" not in block
     assert "Current branch:" not in block
     assert "Recent commits:" not in block
     full = environment_block(git_repo)
-    assert "Today's date:" in full and "Current branch: main" in full
+    assert "Current time:" in full and "Current branch: main" in full
 
 
 def test_environment_note_carries_the_date_and_git_state(git_repo: Path) -> None:
     note = environment_note(git_repo)
     assert note.startswith("<system-reminder>") and note.endswith("</system-reminder>")
-    assert "Today's date:" in note
+    assert "Current time:" in note
     assert "Current branch: main" in note
     assert "Working tree: clean" in note
     assert "init" in note  # the recent commit
@@ -313,7 +313,7 @@ def test_compiled_environment_section_is_the_fixed_half(git_repo: Path) -> None:
     ))
     env = [s for s in compiled.sections if s.kind == "environment"]
     assert len(env) == 1
-    assert "Today's date:" not in env[0].text
+    assert "Current time:" not in env[0].text
     assert "Current branch:" not in env[0].text
     assert "Git repository: yes" in env[0].text
 
@@ -326,7 +326,7 @@ async def test_native_loop_reminds_the_volatile_environment_per_turn(git_repo: P
     ))
     loop = _loop(system=compiled.text, system_sections=compiled, ctx=ToolCtx(cwd=str(git_repo)))
     note = await loop._environment_reminder()
-    assert note is not None and "Today's date:" in note and "Current branch: main" in note
+    assert note is not None and "Current time:" in note and "Current branch: main" in note
 
 
 async def test_no_environment_section_means_no_reminder(git_repo: Path) -> None:
@@ -340,7 +340,7 @@ async def test_no_environment_section_means_no_reminder(git_repo: Path) -> None:
     # Round 9: the runtime facts ride their own block (first turn only), but
     # the volatile date/git note stays tied to the environment section.
     assert note is not None and "Runtime facts" in note
-    assert "Today's date:" not in note and "Current branch" not in note
+    assert "Current time:" not in note and "Current branch" not in note
     assert await loop._environment_reminder() is None  # unchanged facts: nothing
     # And a host that passed a bare string (no sections at all) is left alone.
     assert await _loop(system="plain")._environment_reminder() is None
