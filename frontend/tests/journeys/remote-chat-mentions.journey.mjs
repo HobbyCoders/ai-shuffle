@@ -15,6 +15,8 @@
 //   lists-after-reload   the menu shows the running worker's files, before and
 //                        after a reload; a saved draft holding an @ opens
 //                        nothing by itself; a pick inserts its relative path
+//   typed-before-metadata the @ is typed while the reloaded chat's details are
+//                        still loading; the menu opens when they arrive
 //   worker-offline       the worker cannot answer: the menu says so, keeps the
 //                        Quick Access folders, and Try again recovers
 //   selected-file-and-upload a picked file and a real attachment in one message:
@@ -64,6 +66,9 @@ async function simulateRemoteChat(page, status, key, { offline = false, keepLoca
 			window.fetch = async (input, init) => {
 				const url = urlOf(input);
 				const method = (init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+				if (url.pathname === `/api/v1/sessions/${id}/live` && sessionStorage.getItem('journey:delayLive')) {
+					await new Promise((done) => setTimeout(done, 1500));
+				}
 				if (/\/subagents\/all$/.test(url.pathname)) window.__subagentLists.push(url.searchParams.get('project_id'));
 				if (url.pathname === `/api/v1/sessions/${id}/sync-status`) {
 					return json({ state: 'current', scope: 'session', initial_caught_up: true, pending_updates: 0 });
@@ -196,6 +201,22 @@ await runJourney({
 				await page.locator(MENU).getByText(ON_PEER).click();
 				await page.locator(MENU).waitFor({ state: 'detached', timeout: 5_000 });
 				await page.locator('.ProseMirror').getByText(ON_PEER).first().waitFor({ timeout: 5_000 });
+				await clearComposer(page);
+				await draftSaved(page);
+			}
+		},
+		{
+			name: 'typed-before-metadata',
+			setup: start('long', SEEDED.long, {}),
+			async act({ page, mark }) {
+				await page.evaluate(() => sessionStorage.setItem('journey:delayLive', '1'));
+				await mark('reload');
+				await page.reload({ waitUntil: 'domcontentloaded' });
+				await nextFrames(page);
+				await mark('type @ while the chat details load');
+				await typeAt(page);
+				await expectRunningWorkerFiles(page);
+				await page.evaluate(() => sessionStorage.removeItem('journey:delayLive'));
 				await clearComposer(page);
 				await draftSaved(page);
 			}
