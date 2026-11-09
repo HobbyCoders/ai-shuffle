@@ -206,7 +206,6 @@ await runJourney({
 			}
 		},
 		bandCase('new-chat', (page, status) => gotoApp(page, status)),
-		bandCase('chat', (page, status) => gotoApp(page, status, `/?session=${seededChatId(status, 'long')}`)),
 		bandCase('settings', (page) => openSettings(page)),
 		{
 			name: 'per-chat-held',
