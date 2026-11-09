@@ -36,6 +36,8 @@
 //                   shown whole whenever the row has room for it
 import { fakeAiTag, runJourney } from './runner.mjs';
 import { pick, withChatSetup } from './lib/app.mjs';
+import { readFile, access, rename } from 'node:fs/promises';
+import { join } from 'node:path';
 import { expectComposerPositions } from './lib/timeline.mjs';
 
 const PROJECT = 'Dev sandbox';
@@ -647,7 +649,7 @@ function chipWideOrdinary(branch) {
  * its upload path (#1084).
  */
 async function sendWithAttachmentThenRewind(ctx, label) {
-	const { page, variant, mark } = ctx;
+	const { page, variant, mark, status } = ctx;
 	const words = `${label}-${uniq()}`;
 	const file = `note-${uniq()}.txt`;
 	const box = page.getByRole('textbox', { name: 'Message' });
@@ -662,8 +664,19 @@ async function sendWithAttachmentThenRewind(ctx, label) {
 	if ((await box.locator('[data-file-chip]').count()) !== 1) throw new Error('the chip left the composer before Send');
 	await mark('send');
 	const t0 = Date.now();
+	const createdResponse = page.waitForResponse((r) => r.url().includes('/sessions/with-worktree') && r.request().method() === 'POST');
 	await page.getByRole('button', { name: 'Send', exact: true }).click();
 	await awaitReply(ctx, label, t0);
+	const response = await createdResponse;
+	const created = await response.json();
+	const destination = join(created.worktree_path, 'uploads', file);
+	if (await readFile(destination, 'utf8') !== 'branch attachment\n') throw new Error('first-message migrated bytes differ');
+	// Main's promptless-create + WS flow still references the compose original;
+	// unlike Auto, its follow-up send does not receive a rewritten first prompt.
+	const promptPath = response.request().postDataJSON().prompt ? destination : join(status.seed.projects['dev-sandbox'], 'uploads', file);
+	await expectAttachmentRequest(ctx, promptPath);
+	// Accepted limit: compose-time sources are copied, never deleted by creation.
+	if (await readFile(join(status.seed.projects['dev-sandbox'], 'uploads', file), 'utf8') !== 'branch attachment\n') throw new Error('first-message source was changed or deleted');
 	if (await page.getByText(/Attachments need|outside (the|this) (chat|session)|not allowed/i).first().isVisible()) {
 		throw new Error('the server refused the attachment');
 	}
@@ -677,6 +690,83 @@ async function sendWithAttachmentThenRewind(ctx, label) {
 	const text = await box.innerText();
 	if (chips !== 1) throw new Error(`expected the file back as 1 chip, found ${chips}: ${JSON.stringify(text)}`);
 	if (/@\/\S*uploads\//.test(text)) throw new Error(`the upload path came back as text: ${JSON.stringify(text)}`);
+}
+
+/** Assert the actual provider request, not a raw path hidden by sent-file chips. */
+async function expectAttachmentRequest(ctx, path) {
+	const entries = (await readFile(ctx.status.fake_ai.request_log, 'utf8')).trim().split('\n');
+	const count = entries.filter((line) => JSON.stringify(JSON.parse(line).body).includes(path)).length;
+	ctx.attachmentRequests ??= new Map();
+	if (count <= (ctx.attachmentRequests.get(path) || 0)) throw new Error(`new provider request lost attachment path: ${path}`);
+	ctx.attachmentRequests.set(path, count);
+	await ctx.page.getByText(path.split('/').pop(), { exact: true }).first().waitFor();
+}
+
+/** An attachment after the first reply belongs to the checkout, not main (#1329). */
+async function attachInExistingWorktree(ctx) {
+	const { page, mark, log, status } = ctx;
+	const createdResponse = page.waitForResponse((r) => r.url().includes('/sessions/with-worktree') && r.request().method() === 'POST');
+	await sendFirstMessage(ctx, 'worktree-upload');
+	const created = await (await createdResponse).json();
+	if (!created.worktree_path) throw new Error('new chat did not create a local worktree');
+	const file = `after-reply-${uniq()}.txt`;
+	await mark('attach after the first reply');
+	const uploadedResponse = page.waitForResponse((r) => r.url().includes('/upload') && r.request().method() === 'POST');
+	await page.locator('input[type="file"]').first().setInputFiles({ name: file, mimeType: 'text/plain', buffer: Buffer.from('worktree attachment\n') });
+	const uploaded = await (await uploadedResponse).json();
+	const expected = join(created.worktree_path, 'uploads', file);
+	if (uploaded.full_path !== expected) throw new Error(`attachment landed outside the chat checkout: ${uploaded.full_path}; expected ${expected}`);
+	if (await readFile(expected, 'utf8') !== 'worktree attachment\n') throw new Error('attachment bytes differ');
+	const inMain = await access(join(status.seed.projects['dev-sandbox'], 'uploads', file)).then(() => true, () => false);
+	if (inMain) throw new Error('attachment also polluted main');
+	await page.getByRole('textbox', { name: 'Message' }).locator('[data-file-chip]').waitFor();
+	await mark('send worktree attachment');
+	await page.getByRole('button', { name: 'Send', exact: true }).click();
+	await page.waitForFunction(() => Number(document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-messages')) >= 4 && document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-streaming') === 'false', null, { timeout: 60_000 });
+	await expectAttachmentRequest(ctx, expected);
+	await mark('rewind the worktree attachment');
+	await page.getByTitle('Rewind to before this message', { exact: true }).last().focus();
+	await page.keyboard.press('Enter');
+	await page.getByRole('dialog').getByRole('button', { name: 'Rewind', exact: true }).click();
+	const restored = page.getByRole('textbox', { name: 'Message' }).locator('[data-file-chip]');
+	await restored.waitFor({ timeout: 30_000 });
+	if (!(await restored.innerText()).includes(file)) throw new Error('rewind lost the worktree attachment chip');
+	await mark('resend the restored worktree attachment');
+	await page.getByRole('button', { name: 'Send', exact: true }).click();
+	await page.waitForFunction(() => Number(document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-messages')) >= 4 && document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-streaming') === 'false', null, { timeout: 60_000 });
+	await expectAttachmentRequest(ctx, expected);
+	log('upload bytes, sent prompt and restored resend use the worktree; main has no copy');
+	// Reuse this established session: refusal needs the same checkout state,
+	// not a second identical new-session setup in the hosted budget.
+	await missingWorktreeUpload(ctx, created);
+}
+
+/** A disappeared local checkout must fail at upload, before any main write. */
+async function missingWorktreeUpload(ctx, created) {
+	const { page, mark, status } = ctx;
+	const file = `missing-checkout-${uniq()}.txt`;
+	const moved = `${created.worktree_path}-temporarily-moved`;
+	// Phone exercises the session-scoped route through the same real picker.
+	// Its multipart body is unchanged; only the API URL differs. Focused tests
+	// also cover the shared-only session row (no legacy project_id).
+	if (ctx.variant.viewport === 'phone') {
+		await page.route('**/api/v1/projects/*/upload', (route) => route.continue({
+			url: new URL(`/api/v1/sessions/${created.session_id}/upload`, status.urls.ui).toString()
+		}));
+	}
+	await rename(created.worktree_path, moved);
+	try {
+		await mark('attach with checkout missing');
+		await page.getByRole('textbox', { name: 'Message' }).click();
+		const uploaded = page.waitForResponse((r) => r.url().includes('/upload') && r.request().method() === 'POST');
+		await page.locator('input[type="file"]').first().setInputFiles({ name: file, mimeType: 'text/plain', buffer: Buffer.from('must not land in main\n') });
+		const result = await uploaded;
+		if (result.status() !== 409) throw new Error(`missing checkout upload returned ${result.status()}: ${await result.text()}`);
+		await page.getByText(/Refusing to run.*main checkout/).first().waitFor();
+		if (await access(join(status.seed.projects['dev-sandbox'], 'uploads', file)).then(() => true, () => false)) throw new Error('missing checkout upload dirtied main');
+	} finally {
+		await rename(moved, created.worktree_path);
+	}
 }
 
 const settled = (setup) => async (ctx) => {
@@ -750,6 +840,23 @@ await runJourney({
 				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'new-branch')
+		},
+		{
+			name: 'existing-worktree-attachment',
+			viewports: ['desktop', 'phone'],
+			// Slow covers the attach/send/rewind races at both viewport sizes;
+			// avoid duplicate fast I/O checks within the fixed hosted budget.
+			throttles: ['slow'],
+			setup: settled(async (ctx) => {
+				const hero = await openNewChat(ctx);
+				await pickProject(ctx.page, hero);
+				await worktreeOn(ctx.page, hero);
+			}),
+			act: attachInExistingWorktree,
+			allow: [
+				{ kind: 'errors', message: /Upload failed:.*working directory for this session/, reason: 'this negative step asserts the missing-checkout upload refusal and its visible composer error' },
+				{ kind: 'failed_requests', status: 409, url: /\/upload(\?|$)/, reason: 'this negative step requires HTTP 409 and verifies that main has no attachment' }
+			]
 		},
 		{
 			name: 'auto-attachment',

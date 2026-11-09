@@ -841,12 +841,35 @@ def _perform_project_upload(
     always rooted on a disk the session's agent can read. Synchronous (filesystem
     + DB) — call via ``run_sync`` from async contexts.
     """
-    # Determine base path: use worktree path if session or worktree_id resolves one
+    # Branch-bound v2 chats have no legacy worktree_id. Use the same pure-read,
+    # branch-validating resolver as the file browser before legacy fallbacks.
     base_project_path = project["path"]
+    session_cwd = None
     worktree = None
     if session_id:
-        worktree = database.get_worktree_by_session(session_id)
-    if not worktree and worktree_id:
+        from app.core import upload_transfer
+        from app.core.query_options import WorktreeUnavailableError
+
+        session = database.get_session(session_id)
+        if session:
+            try:
+                session_cwd, staging = upload_transfer.resolve_upload_target(session)
+            except WorktreeUnavailableError as exc:
+                raise HTTPException(status_code=409, detail={"message": str(exc), "reason": "worktree_unavailable"}) from exc
+            if staging:
+                if path:
+                    raise HTTPException(status_code=409, detail="This session's checkout is not available here for a path upload.")
+                _refuse_git_metadata(path, filename)
+                safe = Path(filename).name
+                if not safe or safe.startswith("."):
+                    raise HTTPException(status_code=400, detail="Invalid filename")
+                result = upload_transfer.stage_session_upload(session_id, safe, content)
+                return {**result, "sizeFormatted": format_file_size(len(content))}
+        if session_cwd:
+            base_project_path = session_cwd
+        else:
+            worktree = database.get_worktree_by_session(session_id)
+    if not session_cwd and not worktree and worktree_id:
         worktree = database.get_worktree(worktree_id)
     if worktree and worktree.get("worktree_path"):
         # Verify the worktree directory actually exists on disk
@@ -946,6 +969,14 @@ async def upload_file(
     # same 500 — the project read must NOT be inside that handler.
     project, session = await run_sync(_load_project)
 
+    from app.core.upload_transfer import resolve_upload_target, stage_admitted_session_upload
+    from app.core.query_options import WorktreeUnavailableError
+
+    if session:
+        try:
+            await run_sync(resolve_upload_target, session)
+        except WorktreeUnavailableError as exc:
+            raise HTTPException(status_code=409, detail={"message": str(exc), "reason": "worktree_unavailable"}) from exc
     # Read the bytes (enforcing the size limit) before deciding local vs relay so
     # oversized files are rejected here and never carried over the peer channel.
     content = await _read_upload_within_limit(file)
@@ -957,10 +988,11 @@ async def upload_file(
         safe_filename = Path(file.filename or "upload").name
         if not safe_filename or safe_filename.startswith("."):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid filename")
-        from app.core.upload_transfer import stage_session_upload
-
         async with api_error_handler("save uploaded file"):
-            staged = await run_sync(stage_session_upload, session_id, safe_filename, content)
+            try:
+                staged = await run_sync(stage_admitted_session_upload, session, safe_filename, content)
+            except WorktreeUnavailableError as exc:
+                raise HTTPException(status_code=409, detail={"message": str(exc), "reason": "worktree_unavailable"}) from exc
         return {**staged, "sizeFormatted": format_file_size(len(content))}
 
     async with api_error_handler("save uploaded file"):

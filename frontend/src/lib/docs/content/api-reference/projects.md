@@ -130,9 +130,11 @@ curl -X POST http://localhost:8000/api/v1/projects/proj123/upload \
 | Field | Type | Description |
 |-------|------|-------------|
 | `file` | file | The file to upload (required) |
-| `path` | string | Target directory within the project (default: root) |
-| `session_id` | string | Associate with a session |
-| `worktree_id` | string | Upload to specific worktree |
+| `path` | string | Target directory within the checkout (default: `uploads/`) |
+| `session_id` | string | Use this session's existing checkout. Worktree chats on another worker, awaiting checkout registration, or with a matching queued or fresh-running checkout operation stage in their per-session workspace folder instead of main. Other registered local checkouts that are missing or on the wrong branch are refused with HTTP 409, even when no capable worker is available. Main-branch and legacy chat behaviour is unchanged. |
+| `worktree_id` | string | Legacy worktree fallback when the session does not resolve an existing checkout |
+
+Before a new worktree session exists, compose-time files use the project's `uploads/`. Creation copies these files into the checkout as before; it does not delete the originals or remember aliases for old paths. The returned `full_path` is the attachment path; preview and image chips must not assume a project-relative location. Both project and session upload routes check local checkout availability before saving, independently of placement capability. A matching queued or fresh-running checkout operation allows staging while Send prepares the checkout; otherwise a registered missing or wrong-branch checkout is refused. Uploading never creates or repairs a worktree, or claims a checkout operation.
 
 ### GET /api/v1/projects/{project_id}/files/download
 

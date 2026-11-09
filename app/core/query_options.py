@@ -406,6 +406,31 @@ class WorktreeUnavailableError(Exception):
         )
 
 
+def worktree_unavailable_error(session_row: Dict[str, Any]) -> Optional[WorktreeUnavailableError]:
+    """The common upload/send refusal for a bound, unavailable checkout.
+
+    Pure diagnosis only: callers decide when an existing checkout was required;
+    this never prepares a checkout or changes placement.
+    """
+    from app.core import project_resolver
+
+    branch = session_row.get("branch") or session_row.get("worktree_branch")
+    if not (branch or session_row.get("worktree_id") or session_row.get("worktree_path")):
+        return None
+    mismatch = None
+    try:
+        mismatch = project_resolver.describe_checkout_mismatch(session_row)
+    except Exception:  # noqa: BLE001 — diagnosis only; still refuse
+        logger.debug("checkout mismatch diagnosis failed", exc_info=True)
+    project = project_resolver.resolve_project_v2(session_row)
+    return WorktreeUnavailableError(
+        session_row.get("id"), branch_name=branch,
+        reason="its checkout is not materialized on this device (or could not be prepared — see server logs)",
+        mismatch=mismatch,
+        checkout_error=_last_checkout_error(project["id"], branch) if project and branch else None,
+    )
+
+
 def _resolve_checkout_for_options(session_row: Dict[str, Any]) -> Optional[str]:
     from app.core import project_resolver
 
@@ -1030,22 +1055,7 @@ def build_options_from_profile(
                     ):
                         retry_cwd = _resolve_checkout_for_options(session_row)
                     if retry_cwd is None:
-                        mismatch = None
-                        if session_row:
-                            try:
-                                mismatch = project_resolver.describe_checkout_mismatch(session_row)
-                            except Exception:  # noqa: BLE001 — diagnosis only; still refuse
-                                logger.debug("checkout mismatch diagnosis failed", exc_info=True)
-                        raise WorktreeUnavailableError(
-                            session_id,
-                            branch_name=branch,
-                            reason=(
-                                "its checkout is not materialized on this device "
-                                "(or could not be prepared — see server logs)"
-                            ),
-                            mismatch=mismatch,
-                            checkout_error=_last_checkout_error(project_v2["id"], branch) if branch else None,
-                        )
+                        raise worktree_unavailable_error(row)
                     working_dir = retry_cwd
                     working_dir_source = "project-v2"
                 else:
