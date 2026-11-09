@@ -190,6 +190,50 @@ def list_confined(root: Path, relative: str):
             return result
 
 
+def attachment_identity(stream) -> str:
+    info = os.fstat(stream.fileno())
+    return f"{info.st_dev}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}:{info.st_ctime_ns}"
+
+
+def remove_verified_upload(root: Path, path: Path, expected: bytes, *, expected_identity: str = None) -> None:
+    """Remove only the exact in-root staging entry whose bytes we copied.
+
+    Pin its parent as for uploads, so an ancestor swapped for a symlink cannot
+    redirect cleanup. Refuse a concurrently changed entry instead of deleting it.
+    """
+    root = Path(os.path.abspath(root))
+    names = _relative(path.relative_to(root).as_posix())
+    with ExitStack() as stack:
+        if os.name == 'nt':
+            parent = stack.enter_context(_windows_directory(root, names[:-1]))
+            target = parent / names[-1]
+            with open_attachment(root, path) as stream:
+                info = os.fstat(stream.fileno())
+                if expected_identity and attachment_identity(stream) != expected_identity:
+                    raise AccessDenied("Staged attachment was replaced after migration.")
+                if stream.read() != expected:
+                    raise AccessDenied("Staged attachment changed during migration.")
+            current = target.stat(follow_symlinks=False)
+            if (current.st_ino, current.st_size, current.st_mtime_ns) != (info.st_ino, info.st_size, info.st_mtime_ns):
+                raise AccessDenied("Staged attachment changed during migration.")
+            target.unlink()
+        else:
+            root_fd = stack.enter_context(_linux_root(root))
+            parent = stack.enter_context(chat_files.directory(root_fd, names[:-1]))
+            fd = chat_files.confined_open(parent, names[-1], os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(fd, 'rb') as stream:
+                info = os.fstat(stream.fileno())
+                chat_files.regular(info)
+                if expected_identity and attachment_identity(stream) != expected_identity:
+                    raise AccessDenied("Staged attachment was replaced after migration.")
+                if stream.read() != expected:
+                    raise AccessDenied("Staged attachment changed during migration.")
+            current = os.stat(names[-1], dir_fd=parent, follow_symlinks=False)
+            if (current.st_ino, current.st_size, current.st_mtime_ns) != (info.st_ino, info.st_size, info.st_mtime_ns):
+                raise AccessDenied("Staged attachment changed during migration.")
+            os.unlink(names[-1], dir_fd=parent)
+
+
 @contextmanager
 def open_attachment(root: Path, path: Path):
     """Resolve in-root aliases, then open the resolved entry without following links.

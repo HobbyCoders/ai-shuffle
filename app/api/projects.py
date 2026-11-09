@@ -847,11 +847,39 @@ def _perform_project_upload(
     session_cwd = None
     worktree = None
     if session_id:
-        from app.core.project_resolver import resolve_existing_cwd
+        from app.core import project_resolver, upload_transfer
+        from app.core.query_options import worktree_unavailable_error
+        from app.core.placement import resolve_placement
+        from app.network.control import owner_of
 
         session = database.get_session(session_id)
         if session:
-            session_cwd = resolve_existing_cwd(session)
+            decision = resolve_placement(session)
+            remote = owner_of(session) or (
+                decision.kind == "runner" and decision.runner_id != settings.effective_instance_id
+            )
+            session_cwd = project_resolver.resolve_existing_cwd(session) if not remote else None
+            # A remote branch chat must not dirty the sender's main checkout.
+            # Non-worktree chats retain their existing main-upload behaviour.
+            worktree_bound = bool(session.get("branch") or session.get("worktree_branch")
+                                  or session.get("worktree_id") or session.get("worktree_path"))
+            staging = worktree_bound and (remote or decision.kind == "none")
+            if not staging and not session_cwd:
+                error = worktree_unavailable_error(session)
+                if error and project_resolver.resolve_local_checkout(session):
+                    raise HTTPException(status_code=409, detail=str(error))
+                # A queued/new/handoff checkout may not be registered yet. Send
+                # can prepare it; upload must not create it or fall back to main.
+                staging = bool(error)
+            if staging:
+                if path:
+                    raise HTTPException(status_code=409, detail="This session's checkout is not available here for a path upload.")
+                _refuse_git_metadata(path, filename)
+                safe = Path(filename).name
+                if not safe or safe.startswith("."):
+                    raise HTTPException(status_code=400, detail="Invalid filename")
+                result = upload_transfer.stage_session_upload(session_id, safe, content)
+                return {**result, "sizeFormatted": format_file_size(len(content))}
         if session_cwd:
             base_project_path = session_cwd
         else:

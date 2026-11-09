@@ -2656,6 +2656,9 @@ def _run_column_migrations(cursor: Any) -> None:
     if not column_exists(cursor, "upload_blobs", "materialized_path"):
         cursor.execute("ALTER TABLE upload_blobs ADD COLUMN materialized_path TEXT")
         migrations_applied.append("upload_blobs.materialized_path")
+    if not column_exists(cursor, "upload_blobs", "source_identity"):
+        cursor.execute("ALTER TABLE upload_blobs ADD COLUMN source_identity TEXT")
+        migrations_applied.append("upload_blobs.source_identity")
 
     # session_moves (#1819) — a queued move to another worker and the owner's
     # messages held for it, so a restart resumes the move. Same idempotent

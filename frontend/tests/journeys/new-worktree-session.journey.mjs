@@ -36,7 +36,7 @@
 //                   shown whole whenever the row has room for it
 import { fakeAiTag, runJourney } from './runner.mjs';
 import { pick, withChatSetup } from './lib/app.mjs';
-import { readFile, access } from 'node:fs/promises';
+import { readFile, access, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expectComposerPositions } from './lib/timeline.mjs';
 
@@ -649,7 +649,7 @@ function chipWideOrdinary(branch) {
  * its upload path (#1084).
  */
 async function sendWithAttachmentThenRewind(ctx, label) {
-	const { page, variant, mark } = ctx;
+	const { page, variant, mark, status } = ctx;
 	const words = `${label}-${uniq()}`;
 	const file = `note-${uniq()}.txt`;
 	const box = page.getByRole('textbox', { name: 'Message' });
@@ -664,8 +664,16 @@ async function sendWithAttachmentThenRewind(ctx, label) {
 	if ((await box.locator('[data-file-chip]').count()) !== 1) throw new Error('the chip left the composer before Send');
 	await mark('send');
 	const t0 = Date.now();
+	const createdResponse = page.waitForResponse((r) => r.url().includes('/sessions/with-worktree') && r.request().method() === 'POST');
 	await page.getByRole('button', { name: 'Send', exact: true }).click();
 	await awaitReply(ctx, label, t0);
+	const created = await (await createdResponse).json();
+	const destination = join(created.worktree_path, 'uploads', file);
+	if (await readFile(destination, 'utf8') !== 'branch attachment\n') throw new Error('first-message migrated bytes differ');
+	if (!(await page.locator('[data-ui-state="chat"]').innerText()).includes(destination)) throw new Error('first-message prompt does not name the migrated attachment');
+	if (await access(join(status.seed.projects['dev-sandbox'], 'uploads', file)).then(() => true, () => false)) {
+		throw new Error('first-message migration left its original in main');
+	}
 	if (await page.getByText(/Attachments need|outside (the|this) (chat|session)|not allowed/i).first().isVisible()) {
 		throw new Error('the server refused the attachment');
 	}
@@ -715,6 +723,29 @@ async function attachInExistingWorktree(ctx) {
 	await page.waitForFunction(() => Number(document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-messages')) >= 4 && document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-streaming') === 'false', null, { timeout: 60_000 });
 	if (!(await page.locator('[data-ui-state="chat"]').innerText()).includes(expected)) throw new Error('restored send lost the worktree attachment path');
 	log('upload bytes, sent prompt and restored resend use the worktree; main has no copy');
+}
+
+/** A disappeared local checkout must fail at upload, before any main write. */
+async function missingWorktreeUpload(ctx) {
+	const { page, mark, status } = ctx;
+	const response = page.waitForResponse((r) => r.url().includes('/sessions/with-worktree') && r.request().method() === 'POST');
+	await sendFirstMessage(ctx, 'missing-worktree-upload');
+	const created = await (await response).json();
+	const file = `missing-checkout-${uniq()}.txt`;
+	const moved = `${created.worktree_path}-temporarily-moved`;
+	await rename(created.worktree_path, moved);
+	try {
+		await mark('attach with checkout missing');
+		await page.getByRole('textbox', { name: 'Message' }).click();
+		const uploaded = page.waitForResponse((r) => r.url().includes('/upload') && r.request().method() === 'POST');
+		await page.locator('input[type="file"]').first().setInputFiles({ name: file, mimeType: 'text/plain', buffer: Buffer.from('must not land in main\n') });
+		const result = await uploaded;
+		if (result.status() !== 409) throw new Error(`missing checkout upload returned ${result.status()}: ${await result.text()}`);
+		await page.getByText(/Refusing to run.*main checkout/).first().waitFor();
+		if (await access(join(status.seed.projects['dev-sandbox'], 'uploads', file)).then(() => true, () => false)) throw new Error('missing checkout upload dirtied main');
+	} finally {
+		await rename(moved, created.worktree_path);
+	}
 }
 
 const settled = (setup) => async (ctx) => {
@@ -788,6 +819,20 @@ await runJourney({
 				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'new-branch')
+		},
+		{
+			name: 'missing-worktree-upload',
+			viewports: ['desktop', 'phone'],
+			setup: settled(async (ctx) => {
+				const hero = await openNewChat(ctx);
+				await pickProject(ctx.page, hero);
+				await worktreeOn(ctx.page, hero);
+			}),
+			act: missingWorktreeUpload,
+			allow: [
+				{ kind: 'errors', message: /Upload failed:.*working directory for this session/, reason: 'this negative case asserts the missing-checkout upload refusal and its visible composer error' },
+				{ kind: 'failed_requests', status: 409, url: /\/upload(\?|$)/, reason: 'this negative case requires HTTP 409 and verifies that main has no attachment' }
+			]
 		},
 		{
 			name: 'existing-worktree-attachment',

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Metadata columns, excluding the ``data`` BYTEA blob (note_attachments idiom).
 _META_COLS = (
     "id, project_v2_id, session_id, source_path, filename, size, "
-    "created_at, materialized_at, materialized_path"
+    "created_at, materialized_at, materialized_path, source_identity"
 )
 
 
@@ -56,6 +56,15 @@ def create_blob(
             (blob_id, project_v2_id, session_id, source_path, filename, size, data),
         )
     return blob_id
+
+
+def remember_source_identity(blob_id: str, identity: str) -> None:
+    """Bind retry cleanup to the original inode, not a later draft at its name."""
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE upload_blobs SET source_identity = %s WHERE id = %s",
+            (identity, blob_id),
+        )
 
 
 def get_blob(blob_id: str) -> Optional[Dict[str, Any]]:
