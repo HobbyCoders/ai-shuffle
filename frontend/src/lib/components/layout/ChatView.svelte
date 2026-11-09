@@ -74,9 +74,22 @@
 	// chat empty, so it never turns into the cleared hero or moves the composer.
 	const historyUnconfirmed = $derived(!!$activeSession.historyStall
 		&& $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0) === 0);
+	const openChatQueued = $derived(!!$sessions.find((s) => s.id === $activeSession.sessionId)?.start_queued);
+	// The row stops saying queued on one channel and the first message arrives
+	// on another, so hold the layout across that gap instead of flashing "cleared".
+	const QUEUED_HANDOVER_MS = 1500;
+	let queuedChatId = $state<string | null>(null);
+	$effect(() => {
+		const id = $activeSession.sessionId ?? null;
+		if (openChatQueued) { queuedChatId = id; return; }
+		const timer = setTimeout(() => { queuedChatId = null; }, QUEUED_HANDOVER_MS);
+		return () => clearTimeout(timer);
+	});
+	const holdQueuedLayout = $derived(openChatQueued || (!!queuedChatId && queuedChatId === $activeSession.sessionId));
 	const chatSurface = $derived(
 		classifyChatSurface({
 			sessionId: $activeSession.sessionId,
+			startQueued: holdQueuedLayout,
 			// Pending peers belong in the transcript, even before its first message.
 			messageCount: $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0),
 			isRestoringSession: $activeSession.isRestoringSession,
@@ -582,7 +595,7 @@
 				<!-- The sync check itself runs at the top of this view (mirrorSync),
 				     so it started even if the chat opened in the hero layout. -->
 				<MirrorSyncGate sync={mirrorSync} deviceName={mirrorDevice}>
-					<TranscriptHydrationBoundary mirrorPending={mirrorSync.waiting}
+					<TranscriptHydrationBoundary mirrorPending={mirrorSync.waiting} startQueued={holdQueuedLayout}
 						navigationOverlayOpen={navigationOverlayOpen ?? (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed)}
 						onSurface={(surface, count, id) => { transcriptSurface = surface; transcriptMessageCount = count; transcriptSessionId = id; }}>
 						<MessageArea />

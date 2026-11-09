@@ -33,6 +33,11 @@ describe('shouldShowHeaderGitActions', () => {
 		expect(shouldShowHeaderGitActions(base({ isRemote: true }))).toBe(true);
 	});
 
+	it('hides while the chosen worker is still waiting for this project', () => {
+		expect(shouldShowHeaderGitActions(base({ workerSetupPending: true }))).toBe(false);
+		expect(shouldShowGithubGitActions(base({ workerSetupPending: true }))).toBe(false);
+	});
+
 	it('hides when not a session view', () => {
 		expect(shouldShowHeaderGitActions(base({ viewType: 'board' }))).toBe(false);
 		expect(shouldShowHeaderGitActions(base({ viewType: undefined }))).toBe(false);
@@ -127,6 +132,12 @@ describe('shouldShowGithubGitActions', () => {
 describe('chat header private access and swarms', () => {
 	const mainPanel = readFileSync(resolve(process.cwd(), 'src/lib/components/layout/MainPanel.svelte'), 'utf8')
 		.replace(/<!--[\s\S]*?-->/g, '');
+
+	it('asks no worker for Git while the setup banner says the project is not there yet', () => {
+		expect(mainPanel).toContain('const workerSetupPending = $derived(!!$newChatSetupNeed);');
+		expect(mainPanel).toContain('if (project && !subagent && !setupPending) {');
+		expect(mainPanel).toContain('{#if activeTab && gitUiVisible}');
+	});
 
 	it('gives every session its own private-access control', () => {
 		expect(mainPanel).toContain('<ChatAccess sessionId={activeTab.sessionId} />');

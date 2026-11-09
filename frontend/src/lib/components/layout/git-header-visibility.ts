@@ -36,6 +36,12 @@ export interface HeaderGitActionsInput {
 	 * rail; the server refuses owner Git actions for it too.
 	 */
 	isSubagent?: boolean;
+	/**
+	 * A new chat's project is not on the chosen worker yet and the first send
+	 * sets it up (the banner above the composer says so). There is no checkout
+	 * to report on until then.
+	 */
+	workerSetupPending?: boolean;
 }
 
 /** Session-scoped Git requests execute on the owning worker, local or remote. */
@@ -44,6 +50,7 @@ export function shouldShowHeaderGitActions(input: HeaderGitActionsInput): boolea
 
 	if (viewType !== 'session') return false;
 	if (input.isSubagent) return false;
+	if (input.workerSetupPending) return false;
 	if (!hasProject) return false;
 	if (worktreeDeleted) return false;
 	// Chat lane has no repository. Do NOT also require isMobile: that blanked

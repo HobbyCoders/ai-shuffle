@@ -390,11 +390,42 @@ async function stageNames(ctx, width, names = LONG) {
 }
 
 /** A desktop window whose chat column (beside the open sidebar) is `chat` px wide. */
+/**
+ * Run a branch pick and fail if the app asks for the Git state of a checkout
+ * that only the first send will create (#949). The recorder starts after a
+ * case's setup, so it cannot see this request.
+ */
+async function withoutCheckoutRefusal(page, pick) {
+	const refused = [];
+	const listen = (response) => {
+		if (response.status() === 409 && /\/git\/status(\?|$)/.test(response.url())) refused.push(response.url());
+	};
+	page.on('response', listen);
+	try {
+		await pick();
+		// The header reloads its Git state just after the chip changes.
+		await page.waitForTimeout(1500);
+	} finally {
+		page.off('response', listen);
+	}
+	if (refused.length) throw new Error(`a staged branch's Git status was refused ${refused.length}x: ${refused[0]}`);
+	if (await page.getByText('Git unavailable').first().isVisible()) throw new Error('the header says Git unavailable for a staged branch');
+}
+
 function narrowChips(chat) {
 	return {
 		name: `narrow-chips-${chat}`,
 		viewports: ['desktop'],
 		throttles: ['fast'],
+		// At 480 the window is narrow enough that the open sidebar is a large share
+		// of it: the first send's new row measured 0.046-0.054 there. Only that one
+		// sidebar move is excused; every other shift is still judged.
+		...(chat === 480 ? { expectShift: [{
+			step: 'send',
+			moved: /^div\.scard-frame$/,
+			maxValue: 0.06,
+			reason: 'the first send adds this chat to the open sidebar, pushing the rows below it down'
+		}] } : {}),
 		setup: settled(async (ctx) => {
 			await chipProbe(ctx.page, `fix/long-staged-branch-generated-from-message-${uniq()}`);
 			await stageNames(ctx, chat + 320);
@@ -415,6 +446,28 @@ function narrowChips(chat) {
 			if (auto.length !== 1 || generated.length !== 1 || auto[0] !== generated[0]) {
 				throw new Error(`staged chip row geometry changed across Send:\n  Auto: ${auto.join('\n        ')}\n  generated: ${generated.join('\n             ')}`);
 			}
+			// Once bound, the same long names sit in the session's own chip row (#1228).
+			await page.locator('.context-pill-bar:not(.sheet-mode) .ctx-chip.runner').waitFor({ timeout: 30000 });
+			await page.waitForTimeout(800);
+			const bound = await page.evaluate(() => {
+				const bar = document.querySelector('.context-pill-bar:not(.sheet-mode)');
+				const clip = document.querySelector('.chat-island').getBoundingClientRect();
+				const out = [];
+				const chips = [...bar.querySelectorAll('.ctx-chip')].filter((el) => el.offsetParent && !el.closest('[role="menu"]'));
+				for (const el of chips) {
+					const r = el.getBoundingClientRect();
+					const name = el.textContent.trim().slice(0, 20);
+					const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+					if (r.width < 40) out.push(`${name} is ${Math.round(r.width)}px wide`);
+					if (r.left < clip.left - 0.5 || r.right > clip.right + 0.5) out.push(`${name} leaves the composer`);
+					if (!hit || !(hit === el || el.contains(hit))) out.push(`${name} is covered at its centre by ${hit?.tagName}.${hit?.className}`);
+				}
+				const tops = new Set(chips.map((el) => Math.round(el.getBoundingClientRect().top)));
+				if (tops.size > 1) out.push(`the row wrapped onto ${tops.size} lines`);
+				return { out, count: chips.length, widths: chips.map((el) => `${el.className.toString().replace(/svelte-\w+/g, '').trim()}:${Math.round(el.getBoundingClientRect().left)}+${Math.round(el.getBoundingClientRect().width)}`) };
+			});
+			if (bound.count < 3) throw new Error(`the bound row showed ${bound.count} chips`);
+			if (bound.out.length) throw new Error(`bound chip row: ${bound.out.join('; ')} (widths ${bound.widths.join(', ')})`);
 		}
 	};
 }
@@ -690,8 +743,10 @@ await runJourney({
 					await menu.getByRole('button', { name: /New branch/ }).click();
 					const branch = `journey/${uniq()}`;
 					await page.getByPlaceholder('Enter a branch name').fill(branch);
-					await page.getByRole('button', { name: 'Continue', exact: true }).click();
-					await expectBranch(page, hero, `Worktree branch: ${branch}`, { timeout: 20_000 });
+					await withoutCheckoutRefusal(page, async () => {
+						await page.getByRole('button', { name: 'Continue', exact: true }).click();
+						await expectBranch(page, hero, `Worktree branch: ${branch}`, { timeout: 20_000 });
+					});
 				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'new-branch')
@@ -735,8 +790,10 @@ await runJourney({
 				await worktreeOn(page, hero);
 				await withChatSetup(page, async () => {
 					const menu = await openBranchMenu(page, hero);
-					await menu.getByRole('button', { name: SEEDED_BRANCH, exact: true }).click();
-					await expectBranch(page, hero, `Worktree branch: ${SEEDED_BRANCH}`, { timeout: 20_000 });
+					await withoutCheckoutRefusal(page, async () => {
+						await menu.getByRole('button', { name: SEEDED_BRANCH, exact: true }).click();
+						await expectBranch(page, hero, `Worktree branch: ${SEEDED_BRANCH}`, { timeout: 20_000 });
+					});
 				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'existing-branch')

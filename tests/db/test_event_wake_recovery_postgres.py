@@ -231,3 +231,103 @@ def test_released_nested_savepoint_callbacks_still_belong_to_outer(session_id, m
                 raise ValueError("roll back released inner callbacks as well")
         catalog.after_event_mirrored(cur, {"session_id": session_id, "seq": 10})
     assert calls == [(session_id, 7), (session_id, 10)]
+
+
+def test_lock_retry_discards_failed_callbacks_without_touching_outer_savepoints(
+    connect, session_id, monkeypatch,
+):
+    from app.core.global_events import global_events
+    from app.db import composer_suggestions, sessions
+
+    wakes, writes, published, registered, delivered, outer = [], [], [], [], [], []
+    monkeypatch.setattr(session_events, "send_wake", lambda *a, **k: wakes.append(a))
+    monkeypatch.setattr(session_events, "notify_session_write", lambda *a: writes.append(a))
+    monkeypatch.setattr(global_events, "lifecycle", lambda *a, **k: published.append(a))
+    monkeypatch.setattr(session_events, "LOCK_RETRY_DELAYS_SECONDS", (0,))
+    record = sessions._record_user_message
+    supersede = composer_suggestions.supersede
+    attempts = 0
+
+    def observe_callback(*args, **kwargs):
+        callback = record(*args, **kwargs)
+        assert callback is not None
+        attempt = len(registered) + 1
+        registered.append(attempt)
+
+        def notify():
+            delivered.append(attempt)
+            callback()
+
+        return notify
+
+    def contend_after_callback(conn, sid):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            # The user-activity callback is already registered. Fail on a REAL
+            # lock timeout later in the same transaction, not a mocked append.
+            assert registered == [1]
+            cursor = conn.cursor()
+            cursor.execute("SET LOCAL lock_timeout = '100ms'")
+            cursor.execute("SELECT pg_advisory_xact_lock(191734)")
+        return supersede(conn, sid)
+
+    holder = connect()
+    holder.cursor().execute("SELECT pg_advisory_xact_lock(191734)")
+
+    def release_for_retry(_delay):
+        assert delivered == published == wakes == writes == []
+        assert session_events.get_events(session_id) == []
+        assert outer == []
+        holder.rollback()
+
+    monkeypatch.setattr(sessions, "_record_user_message", observe_callback)
+    monkeypatch.setattr(composer_suggestions, "supersede", contend_after_callback)
+    monkeypatch.setattr(session_events.time, "sleep", release_for_retry)
+    try:
+        with base.transaction() as conn:
+            base.after_commit(conn, lambda: outer.append("kept"))
+            with pytest.raises(ValueError, match="outer savepoint"):
+                with database._savepoint(conn.cursor(), "around_retry"):
+                    base.after_commit(conn, lambda: outer.append("abandoned"))
+                    assert session_events.append_events_with_lock_retry(session_id, [{
+                        "id": "retry-" + session_id, "type": "message.user",
+                        "payload": {"content": "already submitted"},
+                    }]) == (1, 1)
+                    assert outer == []
+                    assert registered == [1, 2] and delivered == [2]
+                    assert len(published) == 1
+                    assert wakes == [(session_id, 1)]
+                    assert writes == [(session_id, "session_events")]
+                    raise ValueError("outer savepoint rolls back, not independent retry")
+            assert outer == []
+        assert outer == ["kept"]
+        assert attempts == 2 and delivered == [2]
+        assert [row["id"] for row in session_events.get_events(session_id)] == ["retry-" + session_id]
+    finally:
+        holder.rollback()
+
+
+@pytest.mark.parametrize("context", [base.get_db, base.transaction])
+@pytest.mark.parametrize("rollback", [False, True])
+def test_caller_append_reader_wakes_follow_savepoint_outcome(session_id, monkeypatch, context, rollback):
+    wakes = []
+    monkeypatch.setattr(session_events, "send_wake", lambda *a, **k: wakes.append(a))
+
+    def append(conn, label):
+        session_events.append_events(session_id, [{
+            "type": "system.note", "payload": {"text": label},
+        }], _conn=conn)
+
+    with context() as conn:
+        append(conn, "before")
+        with pytest.raises(ValueError) if rollback else nullcontext():
+            with database._savepoint(conn.cursor(), "reader_wake"):
+                append(conn, "inside")
+                if rollback:
+                    raise ValueError("discard inner append and reader wake")
+        append(conn, "after")
+        assert wakes == []
+    labels = ["before", "after"] if rollback else ["before", "inside", "after"]
+    assert [row["payload"]["text"] for row in session_events.get_events(session_id)] == labels
+    assert wakes == [(session_id, seq) for seq in range(1, len(labels) + 1)]

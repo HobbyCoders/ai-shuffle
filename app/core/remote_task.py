@@ -2115,14 +2115,24 @@ async def tracking_loop() -> None:
     their targets every :data:`TRACK_SECONDS`. Runs until cancelled."""
     await asyncio.sleep(5.0)
     reattached = False
+    recovered = False
     while True:
         try:
             if not reattached:
                 await reattach_all()
-                from app.core import remote_task_approvals
-
-                await remote_task_approvals.restore_proxies()
                 reattached = True
+            if not recovered:
+                # Retry until BOTH relay restoration and the sweep are clean.
+                # Even an incomplete restore must not hold up local questions.
+                try:
+                    from app.core import remote_task_approvals
+                    from app.core.global_away_mode import release_if_enabled
+
+                    restoration = await remote_task_approvals.restore_proxies(report_status=True)
+                    await release_if_enabled(strict=True)
+                    recovered = restoration.complete
+                except Exception:  # noqa: BLE001 — recovery must not stop tracking
+                    logger.warning("Could not release global Away prompts at startup", exc_info=True)
             await deliver_stops()
             await check_targets()
         except asyncio.CancelledError:

@@ -17,10 +17,12 @@
 import { fakeAiTag, runJourney } from './runner.mjs';
 import { mobileShell } from './lib/stop-queue.mjs';
 import {
+	PROJECT,
 	composer,
 	countUserRows,
 	expect,
 	gotoApp,
+	openNewChat,
 	pickAgent,
 	seededChatId,
 	sendButton,
@@ -164,6 +166,9 @@ function expectMenuFillsPage(state, what) {
 	expect(menuBox.left >= pageBox.left - 1 && menuBox.right <= pageBox.right + 1, `${what}: the menu stays inside the page (${JSON.stringify({ menuBox, pageBox })})`);
 }
 
+// --mobile-shell runs chip-survives-typing in the built /mobile/ app.
+const mobileShell = process.argv.includes('--mobile-shell');
+
 await runJourney({
 	name: 'phone-composer',
 	viewports: PHONE_SIZES,
@@ -194,6 +199,48 @@ await runJourney({
 				const after = await composerGeometry(page);
 				expectSameBottom(start, after, 'after the send');
 				expectComposerFits(after, 'after the send');
+			}
+		},
+		{
+			name: 'chip-survives-typing',
+			// Slow copies only: the fast ones add no signal and cost hosted shard time.
+			throttles: ['slow'],
+			async setup(ctx) {
+				if (mobileShell) {
+					const { page, status } = ctx;
+					await page.goto(new URL(`/mobile/?session=${encodeURIComponent(seededChatId(status, 'other_project'))}`, status.urls.ui).toString());
+					await composer(page).waitFor({ timeout: 90_000 });
+					await waitChatOpen(page, { messagesAtLeast: 1, hold: 1000 });
+					expect(new URL(page.url()).pathname === '/mobile/', 'this run must exercise the real mobile shell');
+				} else await openNewChat(ctx, { project: PROJECT });
+				ctx.state = { file: `note-${uniq()}.txt`, words: `kept-${uniq()}` };
+			},
+			async act({ page, mark, state }) {
+				const box = composer(page);
+				await mark('attach a file');
+				await page.locator('input[type="file"]').setInputFiles({ name: state.file, mimeType: 'text/plain', buffer: Buffer.from('keep me\n') });
+				const chip = box.locator('[data-file-chip]');
+				await chip.first().waitFor({ timeout: 20_000 });
+
+				await mark('tap the chip, then type');
+				const bounds = await chip.first().locator('.file-chip-name').boundingBox();
+				await page.touchscreen.tap(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+				await page.waitForTimeout(300);
+				expect((await chip.first().getAttribute('class')).includes('ProseMirror-selectednode') === false, 'a tap does not select the chip');
+				await page.keyboard.type(state.words, { delay: 5 });
+				expect((await chip.count()) === 1, `the chip is still there after typing (found ${await chip.count()})`);
+				const text = await box.innerText();
+				expect(text.includes(state.words), `the words were typed: ${JSON.stringify(text)}`);
+				expect(text.indexOf(state.file) < text.indexOf(state.words), `the caret went after the chip: ${JSON.stringify(text)}`);
+
+				await mark('type over everything, then undo');
+				await page.keyboard.press('ControlOrMeta+a');
+				await page.keyboard.type('x');
+				await page.waitForTimeout(200);
+				expect((await chip.count()) === 0, 'typing over the selection took the chip');
+				await page.getByRole('button', { name: 'Undo', exact: true }).tap({ timeout: 5_000 });
+				await chip.first().waitFor({ timeout: 5_000 });
+				expect((await chip.count()) === 1, `Undo brought back the chip (found ${await chip.count()})`);
 			}
 		},
 		{

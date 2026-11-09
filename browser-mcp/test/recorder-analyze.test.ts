@@ -218,6 +218,75 @@ describe("reversal across a scope change (path, session)", () => {
   });
 });
 
+describe("reversal of a per-chat count", () => {
+  const rapidSwitch = [
+    state(0, 0, { surface: "active", session: "s:aaaaaa", messages: "2" }),
+    state(3889, 230, { messages: "4" }),
+  ];
+
+  it("does not compare one chat's count with another's, even in a quick switch", () => {
+    const rec = recording([...rapidSwitch, state(4035, 238, { session: "s:bbbbbb", messages: "2" })]);
+    expect(detectReversals(rec)).toEqual([]);
+  });
+
+  it("does not seed a newly opened chat from the chat before it", () => {
+    const rec = recording([
+      ...rapidSwitch,
+      state(4035, 238, { session: "s:bbbbbb", messages: "6" }),
+      state(4060, 240, { messages: "4" }),
+    ]);
+    expect(detectReversals(rec)).toEqual([]);
+  });
+
+  it("still flags the same chat going backwards", () => {
+    const rec = recording([...rapidSwitch, state(4035, 238, { messages: "2" })]);
+    const [anomaly] = detectReversals(rec);
+    expect(anomaly.field).toBe("messages");
+    expect(anomaly.path).toEqual(["2", "4", "2"]);
+    expect(anomaly.scope_changed).toBeUndefined();
+  });
+
+  it("still flags the new chat going backwards after a switch", () => {
+    const rec = recording([
+      ...rapidSwitch,
+      state(4035, 238, { session: "s:bbbbbb", messages: "7" }),
+      state(4060, 240, { messages: "9" }),
+      state(4080, 241, { messages: "7" }),
+    ]);
+    const [anomaly] = detectReversals(rec);
+    expect(anomaly.path).toEqual(["7", "9", "7"]);
+  });
+
+  it("still flags a chat that comes back short after a quick switch away", () => {
+    const rec = recording([
+      ...rapidSwitch,
+      state(4035, 238, { session: "s:bbbbbb", messages: "7" }),
+      state(4100, 242, { session: "s:aaaaaa", messages: "2" }),
+    ]);
+    const anomaly = detectReversals(rec).find((item: { field: string }) => item.field === "messages");
+    expect(anomaly?.path).toEqual(["2", "4", "2"]);
+  });
+
+  it("still flags the session field itself flickering", () => {
+    const rec = recording([
+      ...rapidSwitch,
+      state(4035, 238, { session: "s:bbbbbb", messages: "7" }),
+      state(4050, 239, { session: "s:aaaaaa", messages: "4" }),
+    ]);
+    expect(detectReversals(rec).map((item: { field: string }) => item.field)).toEqual(["session"]);
+  });
+
+  it("applies to other fields only when asked", () => {
+    const rec = recording([
+      state(0, 0, { session: "s:aaaaaa", tab: "a" }),
+      state(10, 1, { tab: "b" }),
+      state(20, 2, { session: "s:bbbbbb", tab: "a" }),
+    ]);
+    expect(detectReversals(rec)).toHaveLength(1);
+    expect(detectReversals(rec, { perChat: ["tab"] })).toEqual([]);
+  });
+});
+
 describe("remount", () => {
   it("flags an unmount followed by a mount in one step", () => {
     const rec = recording([

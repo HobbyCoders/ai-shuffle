@@ -511,10 +511,14 @@ def test_app_mcp_browser_plugin_and_connector_envs_do_not_inherit_cloud_auth(sto
             assert not set(worker_environment()) & ALL_CLOUD_NAMES
             browser = mcp_config._build_browser_server_env(HOST)
             assert not set(browser) & ALL_CLOUD_NAMES
-            run = Mock(return_value=Mock(returncode=0))
+            revision = "a" * 40
+            run = Mock(return_value=Mock(returncode=0, stdout=revision + "\n", stderr=""))
             monkeypatch.setattr(plugin_install.subprocess, "run", run)
-            plugin_install._clone_plugin_source(None, {"source": "url", "url": "https://github.com/fake/plugin.git"}, tmp_path)
-            assert not set(run.call_args.kwargs["env"]) & ALL_CLOUD_NAMES
+            assert plugin_install._clone_plugin_source(
+                None, {"source": "url", "url": "https://github.com/fake/plugin.git"}, tmp_path,
+            ) == revision
+            for call in run.call_args_list:
+                assert not set(call.kwargs["env"]) & ALL_CLOUD_NAMES
 
 
 @pytest.mark.parametrize("method", tuple(cloud.CLI_ENV_ALLOWLISTS))

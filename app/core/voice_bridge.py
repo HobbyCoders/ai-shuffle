@@ -942,6 +942,8 @@ class VoiceBridge:
         # material, and folding them into ``_pending_user`` is what made
         # "[call started] The user just joined the call…" a session title.
         self._pending_user: List[str] = []
+        # Validated attachments typed into the exchange being assembled.
+        self._pending_uploads: List[str] = []
         self._pending_notes: List[str] = []
         self._pending_assistant: List[str] = []
         self._typed_user_items: set[str] = set()
@@ -1481,7 +1483,7 @@ class VoiceBridge:
                     if not text.lstrip().startswith(CONTEXT_SEED_MARKER):
                         self._pending_notes.append(text)
                 else:
-                    self._pending_user.append(text)
+                    self._pending_user.append(await self._admit_typed_uploads(text))
             return
 
         if etype == "conversation.item.input_audio_transcription.completed":
@@ -1621,6 +1623,27 @@ class VoiceBridge:
 
     # -- persistence -------------------------------------------------------
 
+    async def _admit_typed_uploads(self, text: str) -> str:
+        """The words of typed text, its attachment note lifted out if it checks out.
+
+        The provider already has this text, so a path that fails the check
+        cannot refuse the send. It just never becomes a recorded attachment.
+        """
+        from app.core import upload_transfer
+        from app.core.voice_prompts import split_attachment_note
+
+        words, paths = split_attachment_note(text)
+        if not paths:
+            return text
+        try:
+            row = await run_sync(database.get_session, self.session_id)
+            await run_sync(upload_transfer.validate_turn_uploads, {"upload_paths": paths}, row)
+        except (upload_transfer.UploadLiftError, OSError, ValueError, RuntimeError) as exc:
+            logger.warning("Voice: typed attachments on %s are not recorded: %s", self.session_id, exc)
+            return text
+        self._pending_uploads.extend(path for path in paths if path not in self._pending_uploads)
+        return words or " ".join(f"@{path}" for path in paths)
+
     async def _flush_exchange(self, usage: Dict[str, Any]) -> None:
         """Persist the assembled exchange and reset the buffers.
 
@@ -1632,7 +1655,9 @@ class VoiceBridge:
         user_text = " ".join(self._pending_user).strip() or None
         note_text = "\n".join(self._pending_notes).strip() or None
         assistant_text = " ".join(self._pending_assistant).strip() or None
+        uploads = self._pending_uploads if user_text else []
         self._pending_user = []
+        self._pending_uploads = []
         self._pending_notes = []
         self._pending_assistant = []
         if not user_text and not assistant_text and not note_text:
@@ -1672,6 +1697,7 @@ class VoiceBridge:
             model=self.model,
             usage={"voice_realtime": usage} if usage else {},
             system_text=_cap(note_text),
+            upload_paths=uploads,
         )
 
     # -- tool servicing ----------------------------------------------------

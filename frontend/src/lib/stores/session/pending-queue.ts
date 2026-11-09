@@ -164,7 +164,7 @@ interface CancellationState {
 const cancellations = new Map<string | null, CancellationState>();
 /** A withdrawn or refused send's words, with the attachments it carried. */
 interface WithdrawnDraft { content: string; uploads?: SendUploads }
-interface SendUploads { paths: string[]; references: UploadReference[] }
+interface SendUploads { sessionId: string | null; paths: string[]; references: UploadReference[] }
 /** What a confirmed withdrawal hands back to the composer. */
 export interface WithdrawnRestore { prompt: string; uploadPaths: string[]; uploadReferences: UploadReference[] }
 type RestoreSlots = { pendingRestorePrompt?: string | null; pendingRestoreUploadPaths?: string[]; pendingRestoreUploadReferences?: UploadReference[] };
@@ -182,7 +182,8 @@ export function restoredDraftFields(s: RestoreSlots, restore: WithdrawnRestore |
 // back the file chips and upload fields too, or the resend cannot transfer the file.
 // Never capped: a send still waiting to run keeps them. Every terminal outcome
 // removes its entry instead (receipt, delivery verdict, withdrawal verdict or
-// receipt, refusal, a frame that never left; see forgetSendUploads).
+// receipt, refusal, a frame that never left, the chat's deletion; see
+// forgetSendUploads, settleWithdrawalReceipt and forgetSession).
 const sendUploads = new Map<string, SendUploads>();
 function draftOf(key: string, content: string): WithdrawnDraft {
 	const uploads = sendUploads.get(key);
@@ -332,10 +333,10 @@ export const pendingQueue = {
 	},
 
 	/** Remember a send's attachments until its receipt or a confirmed withdrawal. */
-	noteSendUploads(key: string, paths: string[] = [], references: UploadReference[] = []): void {
+	noteSendUploads(id: string | null, key: string, paths: string[] = [], references: UploadReference[] = []): void {
 		sendUploads.delete(key);
 		if (!paths.length && !references.length) return;
-		sendUploads.set(key, { paths: [...paths], references: [...references] });
+		sendUploads.set(key, { sessionId: id, paths: [...paths], references: [...references] });
 	},
 
 	/** Test/diagnostic hook: whether a send's attachments are still kept. */
@@ -350,6 +351,38 @@ export const pendingQueue = {
 	forgetSendUploads(key: string): void {
 		for (const state of cancellations.values()) if (state.removals.has(key)) return;
 		sendUploads.delete(key);
+	},
+
+	/**
+	 * The durable receipt that a send was withdrawn. It proves what a socket
+	 * verdict would say, and the verdict can be lost after Unsend timed out, so
+	 * a withdrawal this page asked for settles here: the words and files move to
+	 * the draft, and a verdict arriving later finds nothing left to do. True when
+	 * it settled one, so the caller can hand the draft to an open composer.
+	 *
+	 * A receipt for an older attempt must not end the cancellation of a newer
+	 * server re-queue of the same command; it leaves that attempt's files alone.
+	 */
+	settleWithdrawalReceipt(key: string, createdAt: string | undefined, live: boolean): boolean {
+		for (const [id, state] of cancellations) {
+			const removal = state.removals.get(key);
+			if (!removal) continue;
+			const answeredAt = createdAt ? Date.parse(createdAt) : NaN;
+			if (!answeredByReceipt(removal, answeredAt) && !(live && !Number.isFinite(answeredAt))) return false;
+			this.applyRemovalVerdict(id, key, 'withdrawn');
+			return true;
+		}
+		sendUploads.delete(key);
+		return false;
+	},
+
+	/** The chat was deleted: nothing it held can still run or be handed back. */
+	forgetSession(id: string): void {
+		for (const timer of cancellations.get(id)?.timers.values() ?? []) clearTimeout(timer);
+		cancellations.delete(id);
+		parked.delete(id);
+		for (const [key, send] of recoverySends) if (send.sessionId === id) recoverySends.delete(key);
+		for (const [key, uploads] of sendUploads) if (uploads.sessionId === id) sendUploads.delete(key);
 	},
 
 	/**
@@ -507,6 +540,9 @@ export const pendingQueue = {
 		const keys = new Set(commandIds);
 		for (const [key, send] of recoverySends) {
 			if (send.sessionId === null && keys.has(key)) send.sessionId = id;
+		}
+		for (const [key, uploads] of sendUploads) {
+			if (uploads.sessionId === null && keys.has(key)) uploads.sessionId = id;
 		}
 	},
 

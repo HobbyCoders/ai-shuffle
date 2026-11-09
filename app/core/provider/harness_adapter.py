@@ -4811,6 +4811,14 @@ class HarnessAdapter(ProviderAdapter):
                 data["lowered_effort"] = lowered
             return [SystemMessage(subtype="provider_retry", data=data)]
 
+        if cls == "ThinkingProgress":
+            # The live thinking estimate. query_engine turns it into a working
+            # line frame; it never becomes a transcript row. The bus delivers
+            # it only to current listeners, so it can never arrive as replay.
+            return [SystemMessage(subtype="thinking_tokens", data={
+                "estimated_tokens": getattr(event, "estimated_tokens", 0),
+            })]
+
         if cls == "ProviderAlive":
             # fluid: the provider accepted this model call and its stream is
             # open, during a stretch that may stream nothing else (encrypted-

@@ -86,6 +86,12 @@ describe('voice owner lifecycle', () => {
   expect(track.enabled).toBe(true);
   expect(streamed.muteInput).toHaveBeenLastCalledWith(false);
  });
+ it('hands attachments to a streamed call as fields, unwritten in the words', async () => {
+  await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+  const uploads = { paths: ['/workspace/uploads/report.pdf'] };
+  expect(await sendVoiceText('owner', 'Inspect this', uploads)).toBe(true);
+  expect(streamed.sendText).toHaveBeenCalledWith('Inspect this', uploads);
+ });
  it('reports unsupported PersonaPlex text accurately without losing the draft', async () => {
   await startCall('owner', { client_secret: 'test', model: 'fal-ai/personaplex/realtime' });
   expect(() => sendVoiceText('owner', 'Keep me')).toThrow('does not support text or attachments');

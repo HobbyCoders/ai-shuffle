@@ -935,7 +935,8 @@ class SyncEngine:
         self,
         user_id: str,
         message: Dict[str, Any],
-        source_device_id: Optional[str] = None
+        source_device_id: Optional[str] = None,
+        relay: bool = True,
     ):
         """Send a message to all devices for a user, excluding source device.
 
@@ -969,7 +970,9 @@ class SyncEngine:
                         audience = "admin" if owner_id is None else "api_user"
                 except Exception:
                     logger.debug("Global lifecycle owner lookup failed", exc_info=True)
-            global_events.lifecycle(owner_id, message, user_type=audience)
+            global_events.lifecycle(
+                owner_id, message, user_type=audience, **({} if relay else {"relay": False}),
+            )
         # Snapshot connections under lock, then release before fan-out
         async with self._user_lock:
             by_bucket = {
@@ -1150,7 +1153,8 @@ class SyncEngine:
         user_id: str,
         session_id: str,
         updates: Dict[str, Any],
-        source_device_id: Optional[str] = None
+        source_device_id: Optional[str] = None,
+        relay: bool = True,
     ):
         """Broadcast a session metadata change to all of a user's devices.
 
@@ -1158,6 +1162,9 @@ class SyncEngine:
         to be watching the session — which is exactly the voice command-session
         case: its hidden backfill must reach lists on devices that never opened
         the session (nobody ever watches a wake-word one-shot).
+
+        ``relay=False`` stays on this worker: other installs are told through
+        the database, so a change that exists only here has nothing to tell them.
         """
         await self._broadcast_user_message(
             user_id=user_id,
@@ -1166,7 +1173,8 @@ class SyncEngine:
                 "session_id": session_id,
                 "updates": updates,
             },
-            source_device_id=source_device_id
+            source_device_id=source_device_id,
+            relay=relay,
         )
 
     async def broadcast_user_session_cleared(

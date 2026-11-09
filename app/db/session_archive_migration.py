@@ -87,10 +87,10 @@ async def reconcile():
         _disarm([wake["id"] for wake in json.loads(row["cancelled_wakes"])])
         peers = json.loads(row["cancelled_peers"])
         if peers:
-            from app.db.session_events import append_events
+            from app.db.session_events import append_events_with_lock_retry
             event_id = str(uuid5(NAMESPACE_URL,
                 f"archive-retired:{row['session_id']}:{row['membership_epoch']}:{row['membership_revision']}"))
-            await run_sync(append_events, row["session_id"], [{"id": event_id,
+            await run_sync(append_events_with_lock_retry, row["session_id"], [{"id": event_id,
                 "type": "queue.cancelled", "payload": {"cancelled_turn_ids": peers}}])
         await dismiss_owner_waits(row["session_id"], expected_revision={
             "membership_revision": row["membership_revision"], "membership_epoch": row["membership_epoch"]})

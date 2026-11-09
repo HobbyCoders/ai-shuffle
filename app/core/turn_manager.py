@@ -729,11 +729,14 @@ def _interrupt_turn(session_id, mode, stop_background=False, turn_id=None, sourc
     # A dead runner cannot observe interrupt intent. Settle its turn and append
     # the terminal event so connected clients also leave their working state.
     if mode == "stop":
-        recovered = turns.stop_orphaned_turns(session_id, turn_id)
+        recovered = turns.stop_orphaned_turns(
+            session_id, turn_id, stop_background=stop_background,
+            capture_input=stop_background and source in (None, *turns.USER_STOP_SOURCES),
+        )
         if recovered:
-            from app.db.session_events import append_events
+            from app.db.session_events import append_events_with_lock_retry
 
-            append_events(session_id, [
+            append_events_with_lock_retry(session_id, [
                 {"type": "turn.aborted", "turn_id": row["id"],
                  "payload": {"reason": "interrupt", "message": "Session stopped"}}
                 for row in recovered
@@ -818,21 +821,11 @@ async def interrupt_async(
     return row
 
 
-def stop_reaches_background_work(
+def capture_stop_receipt(
     session_id: str, turn_id: Optional[str], flipped: Optional[Dict[str, Any]],
-) -> bool:
-    """Whether a Stop goes on to end the chat's background work and queue.
-
-    Turn-scoped so a delayed Stop for a finished turn spares its successor. A
-    turn parked on background work matched nothing to interrupt, but it is still
-    the chat's current turn and that work is what the person is stopping.
-    """
-    if flipped is not None or turn_id is None:
-        return True
-    # Queued/cancelled rows never owned the work. Only an actually started
-    # successor makes this Stop stale (#585); queue history must not hide P.
-    latest = turns.get_latest_started_turn(session_id)
-    return bool(latest and latest["id"] == turn_id and latest["state"] == "parked")
+) -> Optional[dict]:
+    """One guarded admission/receipt, not check-then-act cleanup permission."""
+    return turns.capture_stop_receipt(session_id, turn_id, flipped)
 
 
 def stop_target_finished(session_id: str, turn_id: Optional[str]) -> bool:

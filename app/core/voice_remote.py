@@ -70,7 +70,7 @@ def command_id(call_key: str, request_key: str) -> str:
 
 async def submit(owner: str, row: Dict[str, Any], transcript: str, *, instructions: str,
                  spoken: Optional[str] = None, command: Optional[str] = None,
-                 caller: Optional[str] = None) -> Optional[str]:
+                 caller: Optional[str] = None, uploads: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """Forward one voice request to the owner. Returns the owner's turn id.
 
     Nothing is written here. The owner records the message (the payload does
@@ -78,6 +78,7 @@ async def submit(owner: str, row: Dict[str, Any], transcript: str, *, instructio
     mode, and steers it into a running turn as it does any forwarded send.
     The call's context rides the engine-only voice note, never the stored
     message. ``command`` (:func:`command_id`) makes a repeat safe.
+    ``uploads`` are the payload fields a chat send forwards for its attachments.
 
     ``caller`` is who started the call as this worker authenticated them
     (``session_modes.caller_of``). It is the top-level field a typed send
@@ -96,7 +97,7 @@ async def submit(owner: str, row: Dict[str, Any], transcript: str, *, instructio
     note = instructions
     if prompt != transcript.strip():
         note = f"{instructions}\n\n{transcript.strip()}"
-    payload: Dict[str, Any] = {turn_manager.VOICE_DELEGATION: True, VOICE_INSTRUCTIONS: note}
+    payload: Dict[str, Any] = {turn_manager.VOICE_DELEGATION: True, VOICE_INSTRUCTIONS: note, **(uploads or {})}
     result = await control.submit_turn(
         owner, row["id"], prompt=prompt, source=SOURCE,
         profile_id=row.get("profile_id"), project_id=row.get("project_id"),

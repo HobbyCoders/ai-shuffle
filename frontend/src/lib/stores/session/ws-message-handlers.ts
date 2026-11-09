@@ -193,6 +193,8 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'pr_state',
 	'pull_requests',
 	'parked_task_kind',
+	// The turn is held until the database has room: the row says Queued, not Working.
+	'start_queued',
 	'has_running_tasks',
 	// A turn started or ended: a sidebar not watching that chat learns here
 	// whether its latest turn failed.
@@ -387,6 +389,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 	// ── Handler: done ────────────────────────────────────────────────
 
+	/** Drop the estimate of this chat's turn. Another chat's estimate stays. */
+	function clearLiveThinking(sessionId: string | null | undefined): void {
+		if (sessionId && getState().liveThinking?.sessionId === sessionId) update(s => ({ ...s, liveThinking: null }));
+	}
+
 	function handleDone(data: Record<string, unknown>): void {
 		const metadata = data.metadata as Record<string, unknown>;
 		const sessionId = data.session_id as string;
@@ -397,6 +404,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const currentState = getState();
 		const isActiveSession = !sessionId || sessionId === currentState.sessionId;
 		const doneSessionId = sessionId || currentState.sessionId;
+		clearLiveThinking(doneSessionId);
 
 		if (isActiveSession) {
 			clearStopTimeout();
@@ -462,6 +470,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const currentState = getState();
 		const isActiveSession = !sessionId || sessionId === currentState.sessionId;
 		const stoppedSessionId = sessionId || currentState.sessionId;
+		clearLiveThinking(stoppedSessionId);
 
 		if (isActiveSession) {
 			clearStopTimeout();
@@ -761,6 +770,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 			// After the switch away, which records the leaving session.
 			forgetProseQuestion(sessionId);
+			pendingQueue.forgetSession(sessionId);
 			return;
 		}
 
@@ -945,6 +955,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// (e.g. a pending message becoming the next turn) must not wipe its
 				// live task strip.
 				const startAdoptsNewSession = currentState.sessionId !== sessionId;
+				// A new turn of this chat owes nothing to the last one's estimate.
+				clearLiveThinking(sessionId);
 				if (acceptStart) {
 					if (startAwaitingMatch) pendingQueue.adoptSession(sessionId, currentState.messages.map(m => m.commandId));
 					internal.awaitingNewSession = false;
@@ -993,6 +1005,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				if (!tuSessionId || tuSessionId !== getState().sessionId) break;
 				const toolId = data.id as string;
 				if (toolId) internal.pendingTools.add(toolId);
+				clearLiveThinking(tuSessionId);
+				break;
+			}
+
+			case 'thinking_progress': {
+				const thinkingSessionId = data.session_id as string | undefined;
+				const tokens = Number(data.estimated_tokens);
+				if (!thinkingSessionId || thinkingSessionId !== getState().sessionId) break;
+				if (!Number.isFinite(tokens) || tokens <= 0) break;
+				update(s => ({ ...s, liveThinking: { sessionId: thinkingSessionId, tokens, at: Date.now() } }));
 				break;
 			}
 
@@ -1156,6 +1178,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// moved past raises nothing.
 					const frameTurnId = typeof data.turn_id === 'string' && data.turn_id ? data.turn_id : null;
 					if (erroredSessionId && feedController.raiseTurnError(erroredSessionId, errMessage, frameTurnId) === 'outlived') break;
+					clearLiveThinking(erroredSessionId);
 					update(s => ({
 						...s,
 						error: errMessage,

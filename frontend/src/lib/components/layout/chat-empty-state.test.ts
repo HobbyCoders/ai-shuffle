@@ -85,6 +85,17 @@ describe('classifyChatSurface', () => {
 	});
 });
 
+describe('classifyChatSurface while a first turn waits for database room (#583)', () => {
+	const bound = { sessionId: 's', messageCount: 0, isRestoringSession: false, isLoadingSession: false };
+	it('is not a cleared conversation', () => {
+		expect(classifyChatSurface({ ...bound, startQueued: true })).toBe('active');
+		expect(classifyChatSurface(bound)).toBe('cleared');
+	});
+	it('still waits for a history load', () => {
+		expect(classifyChatSurface({ ...bound, isLoadingSession: true, startQueued: true })).toBe('loading');
+	});
+});
+
 describe('isClearedSession', () => {
 	it('is true ONLY for a bound, settled, empty session', () => {
 		expect(isClearedSession(clearedSession())).toBe(true);

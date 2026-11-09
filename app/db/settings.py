@@ -231,11 +231,16 @@ SYSTEM_SETTING_MEMO_TTL_SECONDS = 5.0
 # key -> (expires_at_monotonic, value)
 _setting_memo: Dict[str, tuple] = {}
 _setting_memo_lock = threading.Lock()
+# Any invalidation fences in-flight reads, including a full-cache clear. Other
+# keys keep their cached entries; at worst an unrelated in-flight read misses once.
+_setting_memo_generation = 0
 
 
 def invalidate_system_setting_memo(key: Optional[str] = None) -> None:
     """Drop memoized system settings (one key, or all when ``key`` is None)."""
+    global _setting_memo_generation
     with _setting_memo_lock:
+        _setting_memo_generation += 1
         if key is None:
             _setting_memo.clear()
         else:
@@ -258,11 +263,13 @@ def get_system_setting_cached(
         entry = _setting_memo.get(key)
         if entry is not None and entry[0] > now:
             return entry[1]
+        generation = _setting_memo_generation
 
     value = get_system_setting(key)
 
     with _setting_memo_lock:
-        _setting_memo[key] = (time.monotonic() + ttl, value)
+        if generation == _setting_memo_generation:
+            _setting_memo[key] = (time.monotonic() + ttl, value)
     return value
 
 

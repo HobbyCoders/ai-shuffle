@@ -170,10 +170,11 @@
 	const attention = $derived(isAttentionStatus(status));
 	const failed = $derived(status === 'failed');
 	const parked = $derived(status === 'parked');
+	const queued = $derived(status === 'queued');
 	const offline = $derived(status === 'offline');
 	// Only these rows speak up: the open one, and any that is running or waiting
 	// on someone.
-	const running = $derived(status === 'working' || parked);
+	const running = $derived(status === 'working' || parked || queued);
 	const emphasized = $derived(active || running || attention || failed);
 
 	// ── Git state ───────────────────────────────────────────────────────
@@ -665,7 +666,7 @@
 			<span class="lead {leadTone}" aria-hidden="true" title={leadTip}>
 				{#if status === 'working'}
 					<span class="pip" class:compacting></span>
-				{:else if parked}
+				{:else if parked || queued}
 					<span class="pip held"></span>
 				{:else if failed}
 					<span class="pip warn failed"></span>

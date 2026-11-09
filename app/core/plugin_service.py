@@ -19,11 +19,13 @@ import json
 import logging
 import re
 import threading
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, NoReturn, Optional, Dict, Any
 
 from app.core.mcp_service import McpConfigUnreadable
+from app.core.plugin_locks import serialized_plugin, serialized_state, serialized_marketplace, state_lock
 
 # Re-export all models and helpers for backward compatibility
 from app.core.plugin_models import (  # noqa: F401
@@ -434,15 +436,27 @@ class PluginService:
         existing file that cannot be read as a JSON object.
         """
         self._check_replaceable(path)
+        temp_path = None
         try:
-            temp_path = path.with_suffix('.tmp')
-            with open(temp_path, 'w', encoding='utf-8') as f:
+            # Independent writers must never share a temporary inode: one may
+            # otherwise rename the other's still-being-written JSON into place.
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix=f".{path.name}-", suffix=".tmp",
+                dir=path.parent, delete=False,
+            ) as f:
+                temp_path = Path(f.name)
                 json.dump(data, f, indent=2)
             temp_path.replace(path)
             return True
         except IOError as e:
             logger.error(f"Error writing {path}: {e}")
             return False
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Could not remove unused plugin JSON temporary file")
 
     # =========================================================================
     # Marketplace Management (delegated to plugin_marketplace module)
@@ -477,6 +491,7 @@ class PluginService:
         """
         return _mp_mod.remove_marketplace(self, marketplace_id)
 
+    @serialized_marketplace
     def sync_marketplace(self, marketplace_id: str) -> bool:
         """
         Sync a marketplace with its remote repository.
@@ -490,15 +505,18 @@ class PluginService:
         try:
             result = _mp_mod.sync_marketplace(self, marketplace_id)
         except (RuntimeError, OSError):
-            data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
-            if marketplace_id in data:
-                # Do not persist git stderr: it may contain private remote details.
-                data[marketplace_id]["syncError"] = "the download failed; check your connection and source URL"
-                self._write_json_file(self.MARKETPLACES_FILE, data)
+            with state_lock(self):
+                data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
+                if marketplace_id in data:
+                    # Do not persist git stderr: it may contain private remote details.
+                    data[marketplace_id]["syncError"] = "the download failed; check your connection and source URL"
+                    self._write_json_file(self.MARKETPLACES_FILE, data)
             raise
-        data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
-        if marketplace_id in data and data[marketplace_id].pop("syncError", None):
-            self._write_json_file(self.MARKETPLACES_FILE, data)
+        with state_lock(self):
+            data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
+            if marketplace_id in data and data[marketplace_id].pop("syncError", None):
+                if self._write_json_file(self.MARKETPLACES_FILE, data) is False:
+                    raise OSError("Could not save plugin source refresh state")
         return result
 
     def sync_all_marketplaces(self) -> Dict[str, bool]:
@@ -748,6 +766,28 @@ class PluginService:
             records = [records]
         return [record for record in records if isinstance(record, dict)] if isinstance(records, list) else []
 
+    def _installed_plugin_info(self, plugin_id, install, enabled) -> PluginInfo:
+        """Parse one complete revision; also used before committing an install."""
+        parts = plugin_id.rsplit("@", 1)
+        name = parts[0]
+        marketplace = parts[1] if len(parts) > 1 else "local"
+        install_path = Path(install.get("installPath", ""))
+        installed_at = None
+        if install.get("installedAt"):
+            try:
+                installed_at = datetime.fromisoformat(install["installedAt"].replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                pass
+        record = plugin_record(install_path, name, marketplace, install.get("version"))
+        return PluginInfo(
+            id=plugin_id, name=name, marketplace=marketplace,
+            description=record_description(record, install_path),
+            version=install.get("version", "unknown"), scope=install.get("scope", "user"),
+            install_path=str(install_path), installed_at=installed_at, enabled=enabled,
+            trust=_trust_for(marketplace), approval=_pending(install),
+            **record_summary(record, install_path),
+        )
+
     def get_installed_plugins(self) -> List[PluginInfo]:
         """Get all installed plugins"""
         installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
@@ -770,39 +810,7 @@ class PluginService:
                 install = installation_data[0] if installation_data else None
                 if not install:
                     continue
-            parts = plugin_id.rsplit("@", 1)
-            name = parts[0]
-            marketplace = parts[1] if len(parts) > 1 else "local"
-
-            install_path = Path(install.get("installPath", ""))
-
-            # Parse dates
-            installed_at = None
-            if install.get("installedAt"):
-                try:
-                    installed_at = datetime.fromisoformat(
-                        install["installedAt"].replace("Z", "+00:00")
-                    )
-                except (ValueError, TypeError):
-                    pass
-
-            record = plugin_record(install_path, name, marketplace, install.get("version"))
-            summary = record_summary(record, install_path)
-
-            plugins.append(PluginInfo(
-                id=plugin_id,
-                name=name,
-                marketplace=marketplace,
-                description=record_description(record, install_path),
-                version=install.get("version", "unknown"),
-                scope=install.get("scope", "user"),
-                install_path=str(install_path),
-                installed_at=installed_at,
-                enabled=enabled_plugins.get(plugin_id, False),
-                trust=_trust_for(marketplace),
-                approval=_pending(install),
-                **summary,
-            ))
+            plugins.append(self._installed_plugin_info(plugin_id, install, enabled_plugins.get(plugin_id, False)))
 
         from app.core import connector_packages
         plugins.extend(connector_packages.installed())
@@ -966,11 +974,11 @@ class PluginService:
         """Find a plugin entry in a marketplace's marketplace.json."""
         return _inst_mod._find_plugin_in_manifest(self, marketplace_id, plugin_name)
 
-    def _clone_plugin_source(self, source: Dict[str, Any], dest: Path) -> None:
+    def _clone_plugin_source(self, source: Dict[str, Any], dest: Path) -> Optional[str]:
         """Clone an external plugin source to a destination directory."""
         return _inst_mod._clone_plugin_source(self, source, dest)
 
-    def _clone_git_subdir_source(self, source: Dict[str, Any], dest: Path) -> None:
+    def _clone_git_subdir_source(self, source: Dict[str, Any], dest: Path) -> Optional[str]:
         """Clone a git repo and extract a specific subdirectory."""
         return _inst_mod._clone_git_subdir_source(self, source, dest)
 
@@ -1035,6 +1043,8 @@ class PluginService:
     # Plugin Enable/Disable
     # =========================================================================
 
+    @serialized_plugin
+    @serialized_state
     def enable_plugin(self, plugin_id: str, content_hash: Optional[str] = None) -> bool:
         """Enable a plugin globally.
 
@@ -1063,6 +1073,8 @@ class PluginService:
             self._clear_pending(plugin_id)
         return written
 
+    @serialized_plugin
+    @serialized_state
     def _clear_pending(self, plugin_id: str) -> None:
         """The owner enabled an agent-installed plugin: it no longer waits
         for review. Who asked stays in the record."""
@@ -1078,6 +1090,8 @@ class PluginService:
         if changed:
             self._write_json_file(self.INSTALLED_FILE, installed)
 
+    @serialized_plugin
+    @serialized_state
     def disable_plugin(self, plugin_id: str) -> bool:
         """Disable a plugin globally"""
         from app.core import connector_packages
@@ -1236,6 +1250,8 @@ class PluginService:
         """
         return _inst_mod.uninstall_project_plugin(self, plugin_id)
 
+    @serialized_plugin
+    @serialized_state
     def enable_project_plugin(self, plugin_id: str) -> bool:
         """Enable a plugin in its Fluid project/local settings file."""
         scope = self._scope_from_project_plugin_id(plugin_id)
@@ -1245,6 +1261,8 @@ class PluginService:
         settings["enabledPlugins"][plugin_id] = True
         return self._write_project_settings(settings, scope)
 
+    @serialized_plugin
+    @serialized_state
     def disable_project_plugin(self, plugin_id: str) -> bool:
         """Disable a plugin in its Fluid project/local settings file."""
         scope = self._scope_from_project_plugin_id(plugin_id)
@@ -1296,16 +1314,21 @@ class PluginService:
         """Read a plugin's version from its .claude-plugin/plugin.json manifest."""
         return _inst_mod._get_plugin_manifest_version(self, local_dir)
 
-    def check_for_updates(self) -> List[PluginUpdateInfo]:
+    def check_for_updates(self, refresh_sources: bool = False) -> List[PluginUpdateInfo]:
         """
         Check all installed plugins for available updates.
 
         Returns:
             List of plugins with available updates
         """
-        return _upd_mod.check_for_updates(self)
+        return self.get_update_report(refresh_sources=refresh_sources)["updates"]
 
-    def update_plugin(self, plugin_id: str) -> PluginInfo:
+    def get_update_report(self, refresh_sources: bool = False) -> Dict[str, Any]:
+        """Updates plus successful, unchecked and failed comparison outcomes."""
+        errors = _upd_mod.refresh_update_sources(self) if refresh_sources else None
+        return _upd_mod.get_update_report(self, allow_remote=refresh_sources, source_errors=errors)
+
+    def update_plugin(self, plugin_id: str, refresh_source: bool = True) -> PluginInfo:
         """
         Update a single installed plugin to the latest version.
 
@@ -1319,7 +1342,7 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.install(kind)
-        return _upd_mod.update_plugin(self, plugin_id)
+        return _upd_mod.update_plugin(self, plugin_id, refresh_source=refresh_source)
 
     def update_all_plugins(self) -> List[PluginInfo]:
         """

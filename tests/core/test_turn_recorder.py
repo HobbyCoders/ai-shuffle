@@ -1610,6 +1610,15 @@ async def test_recorded_agents_status_is_context_not_a_second_voice_write(mock_d
     assert call.upstream.send.await_count == len(sent)
 
 
+async def test_record_voice_exchange_keeps_typed_attachments_on_the_user_row(mock_db):
+    _mk_session()
+    await tr.record_voice_exchange(SID, "Read this", "Done", user_source="typed", upload_paths=["/up/a.pdf"])
+    rows = {e["event_type"]: e["payload"] for e in se.get_events(SID)}
+    assert rows["message.user"]["upload_paths"] == ["/up/a.pdf"]
+    assert rows["message.user"]["upload_owner_id"]  # What a rewind mints chip identities from.
+    assert "upload_paths" not in rows["message.assistant"]
+
+
 async def test_record_voice_exchange_tolerates_missing_user_text(mock_db):
     # A model-initiated response (or a transcription that never arrived) simply
     # omits the message.user event.

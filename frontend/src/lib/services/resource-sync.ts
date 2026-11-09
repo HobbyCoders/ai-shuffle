@@ -8,7 +8,7 @@
  * subscriber once. A subscriber that only drops a local cache (no request) can
  * opt into hidden delivery with `{ whileHidden: true }`.
  */
-export const RESOURCE_NAMES = ['sessions', 'projects', 'agents', 'tags', 'notes', 'templates', 'settings', 'connectors', 'automations', 'plugins', 'hooks', 'mcp', 'notifications', 'api_users', 'network', 'chat-access', 'assistant'] as const;
+export const RESOURCE_NAMES = ['sessions', 'projects', 'agents', 'tags', 'notes', 'templates', 'settings', 'connectors', 'automations', 'plugins', 'hooks', 'mcp', 'notifications', 'api_users', 'network', 'chat-access', 'assistant', 'away_mode'] as const;
 export type ResourceName = typeof RESOURCE_NAMES[number];
 type Subscriber = { names: readonly string[]; refresh: () => void | Promise<unknown>; dirty: boolean; running: boolean; alive: boolean; whileHidden: boolean };
 const hidden = () => typeof document !== 'undefined' && document.hidden;

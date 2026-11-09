@@ -72,7 +72,7 @@
 		{ label: 'Sources', value: model.marketplaces.length },
 		{ label: 'Updates', value: model.updates.length },
 		{ label: 'Auto-update', value: auto ? (auto.enabled ? 'On' : 'Off') : null },
-		{ label: 'Last check', value: auto ? ago(auto.last_check) : null }
+		{ label: 'Last check', value: ago(model.lastUpdateCheck) }
 	]);
 </script>
 
@@ -108,6 +108,12 @@
 	{#if model.actionError}
 		<InlineBanner tone="warn"><span role="alert">{model.actionError}</span></InlineBanner>
 	{/if}
+	{#if model.updateCheckError}
+		<InlineBanner tone="warn"><span role="alert">{model.updateCheckError} Showing last-known results.</span></InlineBanner>
+	{/if}
+	{#each model.updateChecks.filter((check) => check.status === 'failed') as check (check.plugin_id)}
+		<InlineBanner tone="warn"><span role="alert">{check.name}: {check.error} Showing last-known results.</span></InlineBanner>
+	{/each}
 {/snippet}
 
 <DetailPane
@@ -120,7 +126,7 @@
 	item="sources"
 >
 	<RowGroup title="Updates" count={model.updates.length || undefined}>
-		<SettingRow id="plugins.updates" hint={model.updates.length ? `${model.updates.length} available` : 'Up to date'}>
+		<SettingRow id="plugins.updates" hint={model.updateSummary}>
 			<button type="button" class="st-btn sm" disabled={model.checking} onclick={() => model.checkUpdates()}>
 				<RefreshCw />{model.checking ? 'Checking…' : 'Check'}
 			</button>

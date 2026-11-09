@@ -18,7 +18,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -69,6 +69,11 @@ class StartAdmission:
         with self._lock:
             return len(self._queue)
 
+    def queued_sessions(self) -> set[str]:
+        """Sessions whose new turn is held here right now; reads memory only."""
+        with self._lock:
+            return {w.session_id for w in self._queue.values()}
+
     def cancel(self, turn_id: str) -> None:
         with self._lock:
             waiter = self._queue.pop(turn_id, None)
@@ -112,7 +117,13 @@ class StartAdmission:
 
     async def wait(
         self, turn_id: str, session_id: str, cancelled: Callable[[], bool],
+        on_change: Callable[[bool], Awaitable[None]] | None = None,
     ) -> Result:
+        """Hold a new turn until the database can take it.
+
+        ``on_change`` hears True once this turn really waits and False when it
+        stops: never for a duplicate kick, a turn admitted at once or an overflow.
+        """
         if cancelled():
             return "cancelled"
         now = time.monotonic()
@@ -130,6 +141,7 @@ class StartAdmission:
         logger.info("New turn %s for %s: Queued (database busy)", turn_id, session_id)
         deadline = now + settings.db_start_wait_seconds
         try:
+            await _tell(on_change, True)
             while True:
                 if waiter.cancelled.is_set() or cancelled():
                     return "cancelled"
@@ -148,6 +160,21 @@ class StartAdmission:
             with self._lock:
                 if self._queue.get(turn_id) is waiter:
                     self._queue.pop(turn_id)
+                # cancel() leaves this waiter asleep for up to one poll. A newer
+                # turn of this chat may have joined and said so; do not undo it.
+                replaced = any(w.session_id == session_id for w in self._queue.values())
+            if not replaced:
+                await _tell(on_change, False)
+
+
+async def _tell(on_change: Callable[[bool], Awaitable[None]] | None, queued: bool) -> None:
+    """A status update must never decide whether a turn starts."""
+    if on_change is None:
+        return
+    try:
+        await on_change(queued)
+    except Exception:  # noqa: BLE001
+        logger.debug("Start admission status update failed", exc_info=True)
 
 
 admission = StartAdmission()

@@ -64,6 +64,8 @@ GRACE_SECONDS = 30.0
 #: Bounds on the TTL a parent may announce (seconds).
 MIN_TTL_SECONDS = 10
 MAX_TTL_SECONDS = 15 * 60
+#: Retry restored waiters after transient interaction reads, within the row's deadline.
+RELAY_WAIT_RETRY_SECONDS = 3.0
 
 MAX_TOOL_NAME = 200
 MAX_TITLE = 300
@@ -378,6 +380,8 @@ class _Request:
 #: approval ids this process has shown, so a replayed request raises nothing.
 _SEEN: "OrderedDict[str, None]" = OrderedDict()
 _SEEN_LIMIT = 10_000
+#: Relays queued or running here; unlike replay history, liveness must never be evicted.
+_ACTIVE_RELAYS: set[str] = set()
 #: approval ids the target took back; their proxy wakes without answering.
 _WITHDRAWN: "OrderedDict[str, None]" = OrderedDict()
 
@@ -600,9 +604,27 @@ async def _follow_existing(request: _Request, row: Mapping[str, Any]) -> None:
     """Wait on a proxy prompt a previous process raised, then answer (restore)."""
     from app.core import interaction_wait
 
+    final = None
     with interaction_wait.awaiting(row["id"]):
-        final = await interaction_wait.await_interaction(row["id"], request.root_session_id,
-                                                         max(1.0, _seconds_left(row.get("expires_at"))))
+        while (remaining := _seconds_left(row.get("expires_at"))) > 0:
+            try:
+                final = await interaction_wait.await_interaction(
+                    row["id"], request.root_session_id, remaining)
+                break
+            except Exception:  # cancellation propagates; shutdown must not send a denial
+                logger.warning("remote approvals: wait for %s failed; retrying",
+                               request.approval_id, exc_info=True)
+                await asyncio.sleep(min(RELAY_WAIT_RETRY_SECONDS,
+                                        max(0.0, _seconds_left(row.get("expires_at")))))
+    if final is None:
+        # The deadline can pass with no successful read: a saved answer still counts.
+        from app.db import interactions
+
+        try:
+            final = await asyncio.to_thread(interactions.get_interaction, row["id"])
+        except Exception:  # noqa: BLE001 — the timed-out denial below is the fallback
+            logger.warning("remote approvals: final read for %s failed", request.approval_id,
+                           exc_info=True)
     state = (final or {}).get("state")
     answer = (final or {}).get("answer") or {}
     if state == "answered" and answer.get("decision") == "allow":
@@ -610,6 +632,11 @@ async def _follow_existing(request: _Request, row: Mapping[str, Any]) -> None:
     elif state == "answered":
         decision, message = "deny", ("The owner denied permission" if answer.get("decision") == "deny"
                                      else "Not approved")
+        # A global Away sweep may answer a durable proxy restored after a
+        # restart. Preserve the Away marker so the target records a deferral,
+        # not a decision the owner never made (same mapping as _decision_of).
+        if str(answer.get("message") or "").startswith("Owner away"):
+            message = AWAY_MESSAGE
     elif state == "cancelled":
         decision, message = "deny", CANCELLED_MESSAGE
     else:
@@ -622,6 +649,28 @@ def _spawn(coro, name: str) -> None:
     from app.core.detached_tasks import spawn_detached
 
     spawn_detached(coro, name=name)
+
+
+def _start_relay(approval_id: str, run, *args, name: str) -> None:
+    """Track a relay before dispatch, including when tests queue it to run later."""
+    async def follow() -> None:
+        try:
+            await run(*args)
+        finally:
+            _ACTIVE_RELAYS.discard(approval_id)
+
+    _note(_SEEN, approval_id)
+    _ACTIVE_RELAYS.add(approval_id)
+    # Construct the body only when the wrapper runs: closing an unstarted
+    # wrapper (a spawn failure or test seam) must not leak an inner coroutine.
+    coro = follow()
+    try:
+        _spawn(coro, name)
+    except BaseException:
+        _ACTIVE_RELAYS.discard(approval_id)
+        _SEEN.pop(approval_id, None)
+        coro.close()
+        raise
 
 
 def _proxy_rows(root_session_id: str, worker_session_id: Optional[str] = None,
@@ -673,30 +722,42 @@ async def handle_task_approval(body: Dict[str, Any], from_device: str) -> Dict[s
     route = _route(request)
     confirm = await run_sync(_confirm_marker, request, route)
     ttl = _ttl_for(confirm)
-    if request.approval_id in _SEEN:
+    if request.approval_id in _SEEN or has_live_relay(request.approval_id):
         return {"accepted": True, "duplicate": True, "ttl_seconds": ttl}
-    _note(_SEEN, request.approval_id)
-    _spawn(_proxy(request, confirm), f"task-approval-{request.approval_id[:8]}")
+    _start_relay(request.approval_id, _proxy, request, confirm,
+                 name=f"task-approval-{request.approval_id[:8]}")
     logger.info("remote approvals: %s asks for %s for subagent %s", request.worker_name,
                 request.tool_name, request.worker_session_id)
     return {"accepted": True, "ttl_seconds": ttl}
 
 
-async def restore_proxies() -> int:
+@dataclass(frozen=True)
+class ProxyRestoration:
+    restored: int
+    complete: bool
+
+
+def has_live_relay(approval_id: str) -> bool:
+    """Whether a relay is queued or running for this remote approval here."""
+    return approval_id in _ACTIVE_RELAYS
+
+
+async def restore_proxies(*, report_status: bool = False) -> int | ProxyRestoration:
     """Re-attach proxy prompts still open after this worker restarted.
 
     The rows are durable on the root sessions; their waiters died with the old
     process. Each gets a waiter again, so an answer still reaches the child
-    while it waits. Returns how many were restored. Never raises.
+    while it waits. Returns how many were restored, or counts and completeness
+    when startup requests status. Never raises; incomplete passes can be retried.
     """
     from app.db import remote_tasks
 
-    restored = 0
+    restored, complete = 0, True
     try:
         dispatches = await asyncio.to_thread(remote_tasks.tracked_dispatches)
-    except Exception:  # noqa: BLE001 — nothing to restore
+    except Exception:  # noqa: BLE001 — retry on the next tracking pass
         logger.debug("remote approvals: restore read failed", exc_info=True)
-        return 0
+        return ProxyRestoration(0, False) if report_status else 0
     for dispatch in dispatches:
         try:
             rows = await asyncio.to_thread(_proxy_rows, dispatch["root_session_id"],
@@ -704,7 +765,7 @@ async def restore_proxies() -> int:
             for row in rows:
                 tag = (row.get("payload") or {}).get("provider_agent") or {}
                 approval_id = tag.get("remote_approval_id")
-                if not approval_id or approval_id in _SEEN:
+                if not approval_id or has_live_relay(approval_id):
                     continue
                 request = _Request(
                     approval_id=approval_id, worker_session_id=dispatch["worker_session_id"],
@@ -713,13 +774,14 @@ async def restore_proxies() -> int:
                     root_session_id=dispatch["root_session_id"], label="", asker=None,
                     tool_name="", title=None, display_name=None, description=None,
                     decision_reason=None, tool_input={})
-                _note(_SEEN, approval_id)
-                _spawn(_follow_existing(request, row), f"task-approval-restore-{approval_id[:8]}")
+                _start_relay(approval_id, _follow_existing, request, row,
+                             name=f"task-approval-restore-{approval_id[:8]}")
                 restored += 1
         except Exception:  # noqa: BLE001 — one child never blocks the others
+            complete = False
             logger.warning("remote approvals: could not restore prompts of %s",
                            dispatch.get("worker_session_id"), exc_info=True)
-    return restored
+    return ProxyRestoration(restored, complete) if report_status else restored
 
 
 def drop_proxies(root_session_id: str, worker_session_id: str) -> int:
@@ -736,4 +798,5 @@ def reset() -> None:
     with _waiting_lock:
         _WAITING.clear()
     _SEEN.clear()
+    _ACTIVE_RELAYS.clear()
     _WITHDRAWN.clear()

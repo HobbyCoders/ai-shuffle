@@ -45,7 +45,7 @@ def svc(tmp_path, monkeypatch):
         ],
     }))
     service._write_json_file(service.MARKETPLACES_FILE, {"mp": {
-        "source": {"source": "git", "url": "https://example.invalid/mp.git"},
+        "source": {"source": "directory", "path": str(mp)},
         "installLocation": str(mp),
     }})
     toolkit = mp / "plugins" / "toolkit"

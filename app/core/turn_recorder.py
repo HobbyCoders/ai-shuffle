@@ -61,7 +61,7 @@ USAGE_COALESCE_SECONDS = 2.0   # at most one turn.usage append per window
 # applies per lock, so an attempt queued behind another writer of the same row
 # can wait twice, for about 78 s in all. The fenced writer holds its run row only
 # during attempts: the longer waits here leave lease renewal room to land.
-_LOCK_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
+_LOCK_RETRY_DELAYS_SECONDS = session_events_db.LOCK_RETRY_DELAYS_SECONDS
 
 # turn.provider_alive: the first of a turn is always recorded; a later one only
 # after this long with nothing appended at all. A turn that streams content
@@ -1882,6 +1882,14 @@ def _is_voice_system_note(text: str) -> bool:
         return False
 
 
+def _voice_upload_fields(upload_paths: Optional[List[str]]) -> Dict[str, Any]:
+    """The attachment fields of a voice ``message.user``, as a chat send carries."""
+    if not upload_paths:
+        return {}
+    from app.core.upload_transfer import upload_owner_id
+    return {"upload_paths": list(upload_paths), "upload_owner_id": upload_owner_id()}
+
+
 async def record_voice_exchange(
     session_id: str,
     user_text: Optional[str],
@@ -1891,6 +1899,7 @@ async def record_voice_exchange(
     usage: Optional[Dict[str, Any]] = None,
     system_text: Optional[str] = None,
     user_source: str = "voice",
+    upload_paths: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Persist ONE completed voice exchange as a synthetic turn.
 
@@ -1905,6 +1914,8 @@ async def record_voice_exchange(
     event; with no ``assistant_text`` the ``message.assistant`` event is
     omitted too (an empty one showed as an empty reply). ``user_source`` tags the
     user message: ``voice`` for speech, ``typed`` for text typed into the call.
+    ``upload_paths`` are attachments the caller's intake already validated,
+    recorded as a chat send's are so a rewind can hand them back.
     ``system_text`` is a note the bridge injected into the call, kept
     apart from the user's words throughout (see
     :func:`_voice_exchange_side_effects`). Returns the synthetic turn id, or
@@ -1933,7 +1944,7 @@ async def record_voice_exchange(
             rows.append(_build_event(
                 contract.MessageUser, session_id, turn_id=turn_id,
                 content=user_text, kind="text",
-                extra_payload={"source": user_source},
+                extra_payload={"source": user_source, **_voice_upload_fields(upload_paths)},
             ))
         if assistant_text:
             rows.append(_build_event(

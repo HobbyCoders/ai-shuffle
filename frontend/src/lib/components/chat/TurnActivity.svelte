@@ -1,6 +1,9 @@
 <script lang="ts" module>
 	import type { LiveCompaction } from '$lib/stores/session/v2/reducer';
 
+	/** How long a thinking estimate counts as live: past this it says Working again. */
+	export const THINKING_FRESH_MS = 15000;
+
 	/** How long a failed compaction's reason stays on the activity line. */
 	export const COMPACTION_FAILURE_VISIBLE_MS = 8000;
 
@@ -28,6 +31,7 @@
 	 * conversation is being compacted it says so instead of "Working". */
 	import { onDestroy, onMount } from 'svelte';
 	import { formatDuration } from '$lib/utils/work-log';
+	import { formatTokenCount } from './context-usage';
 
 	interface Props {
 		startedAt?: string | null;
@@ -35,9 +39,13 @@
 		/** False when only a compaction may show: with nothing to report the
 		 *  line renders nothing instead of "Working…". */
 		working?: boolean;
+		/** The turn is held until the database has room, so nothing is working yet. */
+		queued?: boolean;
+		/** The model's latest live thinking estimate and when it arrived. */
+		thinking?: { tokens: number; at: number } | null;
 	}
 
-	let { startedAt = null, compaction = null, working = true }: Props = $props();
+	let { startedAt = null, compaction = null, working = true, queued = false, thinking = null }: Props = $props();
 	let now = $state(Date.now());
 	let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -60,6 +68,11 @@
 	const shownCompaction = $derived(compactionVisible(compaction, now) ? compaction : null);
 	const label = $derived.by(() => {
 		const c = shownCompaction;
+		if (!c && queued) return 'Queued (database busy)';
+		if (!c && thinking && now - thinking.at < THINKING_FRESH_MS) {
+			const tokens = `${formatTokenCount(thinking.tokens)} tokens`;
+			return elapsed ? `Thinking for ${elapsed} · ${tokens}` : `Thinking… ${tokens}`;
+		}
 		if (!c) return elapsed ? `Working for ${elapsed}` : 'Working…';
 		const reason = compactionReason(c);
 		if (c.phase === 'failed') {
@@ -76,7 +89,7 @@
 	class:compacting={shownCompaction?.phase === 'running'}
 	class:compaction-failed={shownCompaction?.phase === 'failed'}
 	role="status"
-	aria-label={shownCompaction ? 'Context compaction' : 'Assistant is working'}
+	aria-label={shownCompaction ? 'Context compaction' : queued ? 'Waiting for the database' : 'Assistant is working'}
 	data-testid="turn-activity"
 >
 	<span class="activity-dot" aria-hidden="true"></span>

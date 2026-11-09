@@ -106,6 +106,8 @@
  .doc-inline-toggle :global(.doc-inline-chev) { flex: none; transition: transform 150ms ease; }
  .doc-inline-toggle[aria-expanded='true'] :global(.doc-inline-chev) { transform: rotate(90deg); }
  .doc-inline-list { margin-top: 8px; max-width: 360px; }
+ /* Folded into the article, the list is part of the page, not a scroller inside it. */
+ .doc-inline-list :global(.docs-toc) { max-height: none; overflow: visible; }
  @media (pointer: coarse) { .doc-inline-toggle { min-height: 44px; } }
  @media (prefers-reduced-motion: reduce) { .doc-inline-toggle :global(.doc-inline-chev) { transition: none; } }
  /* A 1600px canvas measures about 1570 inside: the slot keeps a stable scrollbar gutter on both edges. */

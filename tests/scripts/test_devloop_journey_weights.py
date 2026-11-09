@@ -59,8 +59,9 @@ def test_steer_lifecycle_keeps_slow_desktop_and_phone_coverage():
     )
     assert result.returncode == 0, result.stderr
     cases = set(result.stdout.splitlines())
-    for name in ("refused-idle-send", "refused-steer", "unadmitted-unsend", "lost-verdict", "delivery-wins"):
+    for name in ("refused-idle-send", "refused-steer", "unadmitted-unsend", "delivery-wins"):
         assert {f"{name}@desktop-slow", f"{name}@phone-slow"} <= cases
+    assert {"lost-verdict@desktop-slow", "lost-cancel-request@phone-slow"} <= cases
     assert {"touch-unsend-targets@phone-slow", "touch-unsend-targets@fold-inner-slow"} <= cases
     assert len(cases) == 12  # no redundant fast copies at the expense of retry headroom
 

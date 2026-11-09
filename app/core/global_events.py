@@ -168,10 +168,13 @@ class GlobalEvents:
         for socket_id in list(self.connections):
             await self.unregister(socket_id)
 
-    def publish(self, message, *, user_type="admin", user_id=None):
+    def publish(self, message, *, user_type="admin", user_id=None, relay=True):
+        """Deliver here, and tell other installs through the database unless ``relay`` is off."""
         if message.get('type') == 'preferences_changed' and not user_id:
             return  # A preference invalidation always has an exact principal.
         self._deliver_local(message, user_type=user_type, user_id=user_id)
+        if not relay:
+            return
         invalidation = self._invalidation(message)
         loop = self._loop
         if invalidation is None or loop is None or not self._ingress.acquire(blocking=False):
@@ -224,11 +227,11 @@ class GlobalEvents:
             self.publish({"type": "preferences_changed", "keys": [key]},
                          user_type=user_type, user_id=user_id)
 
-    def resources_changed(self, *resources, user_type="admin", user_id=None):
+    def resources_changed(self, *resources, user_type="admin", user_id=None, relay=True):
         self.publish({"type": "resources_changed", "resources": list(resources)},
-                     user_type=user_type, user_id=user_id)
+                     user_type=user_type, user_id=user_id, **({} if relay else {"relay": False}))
 
-    def lifecycle(self, user_id, message, *, user_type=None):
+    def lifecycle(self, user_id, message, *, user_type=None, relay=True):
         if message.get("type") not in {
             "user_session_created", "user_session_updated", "user_session_deleted",
             "user_session_cleared", "notification",
@@ -237,17 +240,18 @@ class GlobalEvents:
         # Managed accounts and direct-paired clients never receive legacy admin
         # payloads; they still need a signal to refetch their authorized lists.
         resource = "notifications" if message["type"] == "notification" else "sessions"
+        local_only = {} if relay else {"relay": False}
         for kind in ('account', 'paired'):
-            self.resources_changed(resource, user_type=kind)
+            self.resources_changed(resource, user_type=kind, **local_only)
         if user_type in {"admin", "api_user"}:
             self.publish(message, user_type=user_type,
-                         user_id=None if user_type == "admin" else user_id)
+                         user_id=None if user_type == "admin" else user_id, **local_only)
         else:
             # Legacy callers provide an untyped ID (and deleted sessions have
             # no owner row). Never guess a role or disclose their payload.
             resource = "notifications" if message["type"] == "notification" else "sessions"
             for kind in ("admin", "api_user"):
-                self.resources_changed(resource, user_type=kind)
+                self.resources_changed(resource, user_type=kind, **local_only)
 
 
 global_events = GlobalEvents()

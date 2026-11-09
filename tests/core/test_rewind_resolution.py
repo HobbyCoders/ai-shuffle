@@ -27,6 +27,7 @@ from app.api.commands import (
 from app.core.jsonl_rewind import Checkpoint, RewindResult
 from app.db import session_events as se
 from tests.rewind_helpers import execute_rewind_and_wait
+from tests.shared_fixtures import seed_session
 
 SID = "sess-rewind"
 SDK = "sdk-rewind"
@@ -1125,3 +1126,57 @@ async def test_real_standalone_peer_rewind_native_and_logical_boundaries(
     assert [m["content"] for m in native if m["role"] == "assistant"] == [f"Reply {i+1}" for i in range(retained)]
     kept = [row for row in se.get_events(sid) if row["seq"] < cut]
     assert "".join(row["payload"]["text"] for row in kept if row["event_type"] == "assistant.text_delta") == "".join(f"Reply {i+1}" for i in range(retained))
+
+
+def _call_checkpoint_text(words, label="Typed message:\n"):
+    """A streamed call's delegated request, as the chat agent's transcript holds it."""
+    from app.core.voice_prompts import LIVE_CONTEXT_OPENER, voice_turn_note
+    return f"{LIVE_CONTEXT_OPENER}user: {label}{words}\n\n{voice_turn_note('')}"
+
+
+def _call_row(words, source):
+    row = _user_ev(words)
+    row["payload"]["source"] = source
+    return row
+
+
+def _rewind_by(by_content, words, uuid):
+    if by_content:
+        return RewindRequestV2(target_content=words, target_occurrence=0, include_response=False)
+    return RewindRequestV2(target_uuid=uuid, include_response=False)
+
+
+@pytest.mark.parametrize("by_content", [True, False])
+@pytest.mark.parametrize("source, label", [("typed", "Typed message:\n"), ("voice", "")])
+async def test_a_message_from_a_call_is_refused_and_neither_history_changes(
+    rewind_env, monkeypatch, source, label, by_content,
+):
+    """A wrapped request has no row with its text, so neither lookup may pick one."""
+    seed_session(SID)
+    se.append_events(SID, [_user_ev("before"), _asst_ev("a1", uuid="a1"), _call_row("hello", source), _asst_ev("a2", uuid="a2")])
+    _patch_checkpoints(monkeypatch, [_cp("before-cp", "before"), _cp("call-cp", _call_checkpoint_text("hello", label), index=1)])
+    before = se.get_events(SID)
+
+    resp = await execute_rewind_and_wait(SID, _rewind_by(by_content, "hello", "call-cp"))
+
+    assert resp.success is False
+    assert "content guard" in (resp.error or "")
+    assert rewind_env.truncate_calls == []
+    assert se.get_events(SID) == before
+
+
+@pytest.mark.parametrize("by_content", [True, False])
+async def test_a_call_message_stays_refused_after_its_wrapped_text_is_pasted(rewind_env, monkeypatch, by_content):
+    """The later paste carries the call's checkpoint text; the call message stays refused."""
+    wrapped = _call_checkpoint_text("hello")
+    seed_session(SID)
+    se.append_events(SID, [_call_row("hello", "typed"), _asst_ev("a1", uuid="a1"), _user_ev(wrapped), _asst_ev("a2", uuid="a2")])
+    _patch_checkpoints(monkeypatch, [_cp("call-cp", wrapped), _cp("paste-cp", wrapped, index=1)])
+    before = se.get_events(SID)
+
+    resp = await execute_rewind_and_wait(SID, _rewind_by(by_content, "hello", "paste-cp"))
+
+    assert resp.success is False
+    assert "content guard" in (resp.error or "")
+    assert rewind_env.truncate_calls == []
+    assert se.get_events(SID) == before

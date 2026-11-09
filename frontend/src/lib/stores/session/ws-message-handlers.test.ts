@@ -117,6 +117,7 @@ function createMockDeps(overrides?: Partial<MessageHandlerDeps>): MessageHandler
 
 function mockState(): ActiveSessionState {
 	return {
+		worktreeCheckoutPending: false,
 		sessionId: 'session-1',
 		mode: 'code',
 		title: '',
@@ -1211,6 +1212,50 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('the live thinking estimate belongs to one chat (#1271)', () => {
+		const estimate = (sessionId: string) => ({ sessionId, tokens: 1200, at: 1 });
+		function withEstimate(active: string, owner: string) {
+			const state = { ...mockState(), sessionId: active, liveThinking: estimate(owner) } as ActiveSessionState;
+			deps = createMockDeps({ getState: vi.fn(() => state), update: vi.fn((fn) => Object.assign(state, fn(state))) });
+			handlers = createMessageHandlers(deps);
+			return state;
+		}
+		const ending: [string, Record<string, unknown>][] = [
+			['done', { type: 'done', metadata: {} }],
+			['stopped', { type: 'stopped' }],
+			['interrupted', { type: 'interrupted' }],
+			['start', { type: 'start' }],
+			['tool_use', { type: 'tool_use', id: 'tool-1', name: 'Read' }],
+			['error', { type: 'error', message: 'boom' }],
+		];
+
+		it.each(ending)('%s of the open chat clears its estimate', (_name, frame) => {
+			const state = withEstimate('session-a', 'session-a');
+			handlers.handleMessage({ ...frame, session_id: 'session-a' });
+			expect(state.liveThinking).toBeNull();
+		});
+
+		it.each(ending)('%s of another chat leaves the open chat\'s estimate alone', (_name, frame) => {
+			const state = withEstimate('session-a', 'session-a');
+			handlers.handleMessage({ ...frame, session_id: 'session-b' });
+			expect(state.liveThinking).toEqual(estimate('session-a'));
+		});
+
+		it('a chat finishing in the background drops its own left-behind estimate', () => {
+			const state = withEstimate('session-b', 'session-a');
+			handlers.handleMessage({ type: 'done', session_id: 'session-a', metadata: {} });
+			expect(state.liveThinking).toBeNull();
+		});
+
+		it('takes an estimate only from the open chat', () => {
+			const state = withEstimate('session-a', 'session-a');
+			handlers.handleMessage({ type: 'thinking_progress', session_id: 'session-b', estimated_tokens: 9000 });
+			expect(state.liveThinking).toEqual(estimate('session-a'));
+			handlers.handleMessage({ type: 'thinking_progress', session_id: 'session-a', estimated_tokens: 9000 });
+			expect(state.liveThinking).toMatchObject({ sessionId: 'session-a', tokens: 9000 });
+		});
+	});
+
 	describe('tool tracking', () => {
 		it('should add tool_id to pendingTools on tool_use', () => {
 			const state = mockState();
@@ -2012,6 +2057,15 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	it('patches the admission wait onto the row and clears it (#583)', () => {
+		for (const value of [true, null]) {
+			deps = createMockDeps();
+			handlers = createMessageHandlers(deps);
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: { start_queued: value } });
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { start_queued: value });
+		}
+	});
+
 	describe.each(['session_updated', 'user_session_updated'])('%s handler (parked task kind)', (type) => {
 		it.each(['agent', 'shell', null])('patches parked_task_kind=%s without a list reload', async (parkedTaskKind) => {
 			vi.useFakeTimers();
@@ -2776,6 +2830,14 @@ describe('ws-message-handlers', () => {
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+
+		it('clears the attachments of a send queued in the deleted chat', () => {
+			pendingQueue.noteSendUploads('other-session', 'client-gone', ['/uploads/gone.pdf']);
+
+			handlers.handleMessage({ type: 'user_session_deleted', session_id: 'other-session' });
+
+			expect(pendingQueue.hasSendUploads('client-gone')).toBe(false);
 		});
 
 		it('stays put when a different session was deleted', () => {

@@ -37,6 +37,7 @@ from contextlib import nullcontext
 import json
 import logging
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Collection, Dict, List, Optional
@@ -648,6 +649,87 @@ def _park_identity(row: Dict[str, Any]) -> Dict[str, Any]:
             "ended_at": ended_at.isoformat() if hasattr(ended_at, "isoformat") else ended_at}
 
 
+def _stop_owner(cursor: Any, session_id: str) -> tuple[dict, Optional[dict]]:
+    """Identity of the latest ownership/start, including released run history."""
+    cursor.execute("SELECT * FROM turns WHERE session_id=%s AND started_at IS NOT NULL "
+                   "ORDER BY started_at DESC, insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1",
+                   (session_id,))
+    latest = _row(cursor.fetchone())
+    cursor.execute("SELECT id FROM runs WHERE session_id=%s ORDER BY fence_token DESC LIMIT 1", (session_id,))
+    run = cursor.fetchone()
+    owner = {"run_id": run["id"] if run else None, "turn": None}
+    if latest:
+        owner["turn"] = {"id": latest["id"], "run_id": latest.get("run_id"),
+                         "started_at": str(latest["started_at"]),
+                         "input_order": latest["payload"].get("accepted_input_order", latest["insert_order"])}
+    return owner, latest
+
+
+def _lock_stop_admission(cursor: Any, session_id: str) -> bool:
+    # S only: start/enqueue and terminal delivery share it. No run/counter
+    # writes here, and a writer waiting on C may already hold R. Owner reads
+    # are MVCC snapshots; an ownership claim cannot start a turn through S.
+    cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+    return cursor.fetchone() is not None
+
+
+def capture_stop_receipt(
+    session_id: str, turn_id: Optional[str], flipped: Optional[dict],
+) -> Optional[dict]:
+    """Admit cleanup AND capture its input/ownership boundary, or refuse it.
+
+    Reuse the flip's receipt (including an empty one), never a fresh boundary
+    after that flip. Parked/failure-owned and idle Stops capture under the same
+    admission lock that enqueue/start take. No marker or terminal intent moves.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if not _lock_stop_admission(cursor, session_id):
+            return None
+        owner, latest = _stop_owner(cursor, session_id)
+        target = flipped["id"] if flipped is not None else turn_id
+        if target is not None:
+            if not latest or latest["id"] != target:
+                return None
+            if owner["run_id"] is not None and owner["run_id"] != latest.get("run_id"):
+                return None
+            if flipped is None and not (latest["state"] == "parked" or (
+                    latest["state"] == "draining" and latest.get("stop_reason") == "recording_failed")):
+                return None
+        captured = ((flipped or {}).get("payload") or {}).get(STOP_RECEIPT_KEY)
+        if captured is not None:
+            return {"cleanup_guard": owner, **captured}
+        return _stop_receipt(cursor, session_id)
+
+
+def apply_stop_receipt(session_id: str, receipt: dict, apply: Callable[[bool], Any]) -> Any:
+    """Keep captured input authority, latching only while no newer input exists.
+
+    The callback is synchronous and runs under S, so start/enqueue cannot slip
+    between revalidation and latching. No lock survives this call or any await.
+    Legacy receipts have only a cutoff: never let those latch a later start.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if not _lock_stop_admission(cursor, session_id):
+            return None
+        owner, latest = _stop_owner(cursor, session_id)
+        if "cleanup_guard" in receipt and owner != receipt["cleanup_guard"]:
+            return None
+        if latest and owner["run_id"] is not None and owner["run_id"] != latest.get("run_id"):
+            return None
+        cutoff = receipt.get("input_cutoff")
+        if cutoff is None:
+            return None
+        if latest and latest["payload"].get("accepted_input_order", latest["insert_order"]) > cutoff:
+            return None
+        cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND insert_order>%s "
+                       "AND source IN ('user','queue','resume') LIMIT 1", (session_id, cutoff))
+        # Newer queued input lifts the latch, not this Stop's authority over
+        # older captured words. Only an ownership change discards the receipt.
+        return apply(cursor.fetchone() is None)
+
+
 def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
     """Records this Stop, then reads what it applies to.
 
@@ -679,7 +761,7 @@ def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:
                    (session_id,))
     handoffs = [row["token"] for row in cursor.fetchall()]
     receipt = {"input_cutoff": cutoff, "stop_seq": stop_seq, "queued": queued, "parks": parks,
-               "wakes": wakes, "handoffs": handoffs}
+               "wakes": wakes, "handoffs": handoffs, "cleanup_guard": _stop_owner(cursor, session_id)[0]}
     from app.db import stop_receipts
     receipt["cleanup_receipts"] = stop_receipts.publish(cursor, session_id, receipt)
     return receipt
@@ -1303,12 +1385,13 @@ def start_turn(
 
 def stop_orphaned_turns(
     session_id: str, turn_id: Optional[str] = None, *, _conn: Any = None,
-    stop_background: bool = True,
+    stop_background: bool = True, capture_input: bool = False,
 ) -> List[Dict[str, Any]]:
     """Stop stranded live turns, never a session with a valid execution lease.
 
     The lease guard is part of the UPDATE, not an earlier read. A late Stop
-    remains bound to its original turn and cannot stop a successor.
+    remains bound to its original turn and cannot stop a successor. A durable
+    recording-failure intent already owns its close: leave its marker intact.
     """
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
@@ -1327,10 +1410,16 @@ def stop_orphaned_turns(
             )
             fence_params.append(turn_id)
         cursor.execute(fence_sql, tuple(fence_params))
+        if capture_input:
+            # Capture the orphan flip's boundary before releasing its slot,
+            # not after the standalone closing append's potentially long wait.
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+            cursor.fetchone()
         sql = (
             "UPDATE turns SET state='aborted', stop_reason='interrupted', "
             "interrupt_mode='stop', stop_background=%s, ended_at=NOW() "
             "WHERE session_id=%s AND state IN ('running','interrupting','draining') "
+            "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') "
             "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.session_id=turns.session_id "
             "AND r.state='active' AND r.lease_expires_at >= NOW())"
         )
@@ -1340,6 +1429,12 @@ def stop_orphaned_turns(
             params.append(turn_id)
         cursor.execute(sql + " RETURNING *", tuple(params))
         stopped = _rows(cursor.fetchall())
+        if stopped and capture_input:
+            receipt = _stop_receipt(cursor, session_id)
+            for row in stopped:
+                row["payload"][STOP_RECEIPT_KEY] = receipt
+                cursor.execute("UPDATE turns SET payload=%s WHERE id=%s",
+                               (json.dumps(row["payload"]), row["id"]))
     def bank():
         for row in stopped:
             _bank_live_segment(row.get("session_id"), row.get("started_at"), _dead_runner_end(row))
@@ -1570,15 +1665,53 @@ def settle_turn(
     recorded its message: the queue sweep can no longer see it, so its words
     become a "Not sent" row here, as in ``remove_queued_turn``.
 
+    A ``recording_failed`` abort first commits the guarded row-only transition
+    to ``draining`` and a stable terminal intent in the existing notice outbox.
+    The live slot stays occupied until the close commits, so a late terminal
+    cannot close a successor's stream. This needs no transcript counter, so
+    even exhausted receipt retries cannot requeue work already performed.
+    The notice observer finishes
+    the terminal after contention clears, including across process restarts.
+
     Returns the settled turn row on the transition that actually settles it.
     """
+    from app.db.session_events import LOCK_RETRY_DELAYS_SECONDS
+
+    # Persist non-replayable intent BEFORE any wait on the transcript counter.
+    # An uncertain intent commit is not replayed; its committed outbox, if any,
+    # is sufficient for the observer to recover it without re-executing work.
+    result = _settle_turn_once(turn_id, outcome, stop_reason, error, run_id,
+                               keep_unsent_words=keep_unsent_words)
+    if result and outcome == "aborted" and stop_reason == "recording_failed":
+        from app.db import stop_notices
+        for delay in (*LOCK_RETRY_DELAYS_SECONDS, None):
+            try:
+                # Each owned delivery atomically closes the saved intent,
+                # appends + acknowledges; it never replays the recorder.
+                stop_notices.deliver("recording-failed:" + turn_id)
+                result["state"] = "aborted"
+                break
+            except psycopg2.errors.LockNotAvailable:
+                if delay is None:
+                    logger.warning("recording-failure receipt deferred for %s; durable intent retained", turn_id)
+                    break
+                time.sleep(delay)
+    return result
+
+
+def _settle_turn_once(
+    turn_id: str, outcome: str, stop_reason: Optional[str], error: Optional[str],
+    run_id: Optional[str], *, keep_unsent_words: bool,
+) -> Optional[Dict[str, Any]]:
     if outcome not in ("completed", "aborted"):
         raise ValueError(f"settle_turn outcome must be completed|aborted, got {outcome!r}")
     sql = (
         "UPDATE turns SET state=%s, stop_reason=%s, error=%s, ended_at=NOW() "
         "WHERE id=%s AND state NOT IN ('completed','aborted','parked') "
+        "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') "
     )
-    params: tuple = (outcome, stop_reason, error, turn_id)
+    recording_failed = outcome == "aborted" and stop_reason == "recording_failed"
+    params: tuple = ("draining" if recording_failed else outcome, stop_reason, error, turn_id)
     if run_id is not None:
         sql += "AND run_id=%s "
         params += (run_id,)
@@ -1587,12 +1720,16 @@ def settle_turn(
     with get_db() as conn:
         cursor = conn.cursor()
         queued_peer = False
-        if keep_unsent_words:
+        if keep_unsent_words and not recording_failed:
             cursor.execute("SELECT session_id FROM turns WHERE id=%s", (turn_id,))
             target = cursor.fetchone()
             if target:
                 _lock_for_event_write(cursor, target["session_id"])
-        if outcome == "aborted" and run_id is None:
+        if recording_failed:
+            # A stale runtime must not abort a row already requeued for a new
+            # owner. The guarded UPDATE rechecks run_id after any row wait.
+            sql += "AND state IN ('running','interrupting','draining') "
+        if outcome == "aborted" and run_id is None and not recording_failed:
             cursor.execute("SELECT source, state FROM turns WHERE id=%s", (turn_id,))
             target = cursor.fetchone()
             if target and target["source"] == "agent_message":
@@ -1609,7 +1746,12 @@ def settle_turn(
         else:
             cursor.execute(sql + "RETURNING *", params)
             row = cursor.fetchone()
-            if row and keep_unsent_words:
+            if row and recording_failed:
+                from app.db import stop_notices
+                stop_notices.save("recording-failed:" + turn_id, row["session_id"], {
+                    "run_id": row["run_id"], "keep_unsent_words": keep_unsent_words,
+                }, _conn=conn)
+            elif row and keep_unsent_words:
                 kept_words = _keep_unsent_words(cursor, conn, _row(row))
     result = _row(row)
     if cancelled_peer or kept_words:
@@ -1618,6 +1760,39 @@ def settle_turn(
     # A queued row settled without ever starting has no interval to bank.
     _bank_ended(result)
     return result
+
+
+def _deliver_recording_failure(conn: Any, session_id: str, notice_id: str, data: dict) -> None:
+    """Finish one saved abort, never replay a prompt or stop a successor.
+
+    The caller owns transition + append + outbox acknowledgement. Match the
+    shared lock order, then guard the captured run and pending intent state.
+    Deleted or replaced targets consume stale intent without creating an event.
+    """
+    from app.db import session_events
+
+    cursor = conn.cursor()
+    _lock_for_event_write(cursor, session_id)
+    turn_id = notice_id.removeprefix("recording-failed:")
+    guard = "run_id=%s" if data.get("run_id") is not None else "run_id IS NULL"
+    params = (turn_id, session_id) + ((data["run_id"],) if data.get("run_id") is not None else ())
+    cursor.execute(
+        "UPDATE turns SET state='aborted' WHERE id=%s AND session_id=%s AND state='draining' "
+        "AND stop_reason='recording_failed' AND " + guard + " RETURNING *", params,
+    )
+    row = _row(cursor.fetchone())
+    if row is None:
+        return
+    if data.get("keep_unsent_words"):
+        _keep_unsent_words(cursor, conn, row)
+    session_events.append_events(session_id, [{
+        "id": notice_id, "type": "turn.aborted", "turn_id": turn_id,
+        "payload": {
+            "reason": "error", "stop_reason": "recording_failed",
+            "message": "The reply stopped because a database write failed. "
+                       "You can send another message to continue.",
+        },
+    }], _conn=conn)
 
 
 def _holds_unsent_owner_words(row: Optional[Dict[str, Any]]) -> bool:
@@ -1883,6 +2058,7 @@ def park_turn(
     runtime cannot park a turn that was requeued and started by a new owner.
     ``error`` is what went wrong when the foreground stream ended in a failure:
     the row stays parked on its background work, and still failed once that ends.
+    A recording-failure intent already owns its terminal; it must not be parked.
     """
     task_ids = list(task_ids or [])
     with get_db() as conn:
@@ -1898,6 +2074,7 @@ def park_turn(
         sql = (
             "UPDATE turns SET state='parked', payload=%s, error=%s, ended_at=NOW() "
             "WHERE id=%s AND state IN ('running','interrupting','draining') "
+            "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') "
         )
         params: tuple = (json.dumps(payload), error, turn_id)
         if run_id is not None:
@@ -2164,7 +2341,7 @@ def requeue_turn(turn_id: str) -> Optional[Dict[str, Any]]:
             "UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL, "
             "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE, overrides=%s "
             "WHERE id=%s AND state IN ('running','interrupting','draining') "
-            "RETURNING *",
+            "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') RETURNING *",
             (json.dumps(overrides), turn_id),
         )
         row = cursor.fetchone()
@@ -2492,6 +2669,7 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
             "SELECT t.* FROM turns t "
             "LEFT JOIN runs r ON t.run_id = r.id "
             "WHERE t.state IN ('running','interrupting','draining') "
+            "AND (t.stop_reason IS NULL OR t.stop_reason <> 'recording_failed') "
             "AND (r.id IS NULL OR r.state <> 'active' OR r.lease_expires_at < NOW())",
         )
         skip = set(skip_turn_ids)
@@ -2508,7 +2686,8 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
                 cursor.execute(
                     "UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL, "
                     "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE, overrides=%s "
-                    "WHERE id=%s AND state IN ('running','interrupting','draining')",
+                    "WHERE id=%s AND state IN ('running','interrupting','draining') "
+                    "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed')",
                     (json.dumps(overrides), turn["id"]),
                 )
                 banked.append((turn["session_id"], None))
@@ -2517,6 +2696,7 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
                     "UPDATE turns SET state='aborted', stop_reason='lease_expired', "
                     "ended_at=NOW() "
                     "WHERE id=%s AND state IN ('running','interrupting','draining') "
+                    "AND (stop_reason IS NULL OR stop_reason <> 'recording_failed') "
                     "RETURNING started_at, ended_at",
                     (turn["id"],),
                 )

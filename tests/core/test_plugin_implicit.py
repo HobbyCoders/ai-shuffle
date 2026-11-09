@@ -216,13 +216,15 @@ def test_available_details_lists_skills_before_install(svc):
     assert details.skills == ["foo"]
 
 
-def test_check_for_updates_skips_implicit_plugin(svc):
+def test_check_for_updates_implicit_plugin_only_when_content_changes(svc):
     clone = _register_marketplace(svc, "remotion")
     _write_skill(clone / ".claude" / "skills", "foo")
     svc.install_plugin("remotion@remotion")
 
     updates = check_for_updates(svc)
     assert all(u.plugin_id != "remotion@remotion" for u in updates)
+    _write_skill(clone / ".claude" / "skills", "foo", "Changed upstream")
+    assert [u.plugin_id for u in check_for_updates(svc)] == ["remotion@remotion"]
 
 
 @_requires_symlinks

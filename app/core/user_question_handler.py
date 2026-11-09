@@ -456,6 +456,12 @@ class UserQuestionHandler:
             session_id, interaction_id, request_id, QUESTION_KIND, payload,
         )
 
+        # A toggle can land between the preflight check and this insert.
+        # Recheck with the row visible so the global/local sweep cannot miss it.
+        from app.core.away_mode import answers_questions_async, release_pending_questions
+        if await answers_questions_async(session_id):
+            await release_pending_questions(session_id)
+
         if nonblocking:
             # Nothing in the turn counts a posted question, so publish the
             # durable count or no other device ever shows "Has question".

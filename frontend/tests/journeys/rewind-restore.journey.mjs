@@ -17,7 +17,8 @@
 //   attachment-chip       (#1084) a rewound message with an attached file comes
 //                         back with its chip, not the raw upload path. The
 //                         server names the uploads; the browser never reads them
-//                         out of the text.
+//                         out of the text. Before the rewind, the sent bubble
+//                         shows that same file as a chip (#1264).
 import { fakeAiTag, runJourney } from './runner.mjs';
 import { PROJECT, SEEDED, api, composer, countUserRows, expect, openFromSidebar, openNewChat, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -259,6 +260,11 @@ await runJourney({
 				expect(await box.locator('[data-file-chip]').count() === 1, 'the chip is still in the composer when sending');
 				await page.getByRole('button', { name: 'Send', exact: true }).click();
 				await waitTurnSettled(page, { messagesAtLeast: 4, text: `You said:` });
+				await mark('the sent bubble shows a chip');
+				const bubble = page.locator('.attachment-chip').filter({ hasText: state.file }).last();
+				await bubble.waitFor({ timeout: 15_000 });
+				const row = (await bubble.locator('xpath=ancestor::*[contains(@class,"user-message") or @data-role="user"][1]').innerText().catch(() => '')) || (await bubble.innerText());
+				expect(!/@?\/\S*uploads\//.test(row), `no raw upload path in the sent bubble: ${JSON.stringify(row)}`);
 				await mark('rewind the message with the attachment');
 				await confirmRewindOfLastUserMessage(page);
 				await waitChat(page, { messages: '2' }, { timeout: 30_000 });

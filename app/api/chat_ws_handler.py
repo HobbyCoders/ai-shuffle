@@ -1147,47 +1147,7 @@ class ChatWebSocketHandler:
         """
         from app.core import upload_transfer
 
-        # Where each file was staged decides how it lifts. The composer can
-        # still name its local project for a chat whose files are session-staged.
-        staged, upload_paths = await run_sync(
-            upload_transfer.split_session_staged_paths, upload_paths, session_id
-        )
-        if not project_id:
-            staged, upload_paths = staged + upload_paths, []
-        blob_ids: List[str] = []
-        if staged:
-            session = await run_sync(database.get_session, session_id)
-            if not session or not session.get("project_v2_id"):
-                raise upload_transfer.UploadLiftError("Attachments need a project session.")
-            blob_ids = await run_sync(upload_transfer.lift_session_paths_to_blobs, staged, session)
-        if not upload_paths:
-            return blob_ids
-        project = await run_sync(database.get_project, project_id)
-        if not project:
-            raise upload_transfer.UploadLiftError(
-                f"Project not found: {project_id}"
-            )
-        project_v2_id = None
-        try:
-            from app.core import project_resolver
-
-            resolved = await run_sync(
-                project_resolver.resolve_project_v2,
-                {"project_id": project_id, "id": session_id},
-            )
-            project_v2_id = (resolved or {}).get("id")
-        except Exception:  # noqa: BLE001 — the v2 id is bookkeeping, not a gate
-            logger.debug(
-                "Upload lift: project_v2 resolve failed for %s", project_id,
-                exc_info=True,
-            )
-        return blob_ids + await run_sync(
-            upload_transfer.lift_paths_to_blobs,
-            upload_paths,
-            project,
-            session_id,
-            project_v2_id,
-        )
+        return await run_sync(upload_transfer.lift_send_uploads, upload_paths, project_id, session_id)
 
     async def _authorize_mobile_session(self, session_id, *, claim=False):
         from app.core.mobile_tool_identity import bind_session
@@ -2049,7 +2009,16 @@ class ChatWebSocketHandler:
                 # unnamed source too); computer use reports it as theirs.
                 source="user_stop",
             )
-            if await run_sync(turn_manager.stop_reaches_background_work, session_id, target_turn_id, flipped):
+            try:
+                receipt = await run_sync(turn_manager.capture_stop_receipt, session_id, target_turn_id, flipped)
+            except Exception:  # noqa: BLE001 — no admission means no cleanup authority.
+                logger.warning("Stop: receipt capture failed for %s", session_id, exc_info=True)
+                await self.send_json({"type": "error", "session_id": session_id,
+                                      "message": "Stop cleanup could not be admitted. Press Stop again; "
+                                                 "background cleanup has not been confirmed."})
+                await self._v2_broadcast_queue(session_id)
+                return  # A committed flip's durable receipt still retries independently.
+            if receipt is not None:
                 # A session-scoped Stop also quiesces queued/blocked work with
                 # no live turn. A stale TURN-scoped Stop still spares successors.
                 # Mark canceled-task wakes suppressed and stop all owned tasks.
@@ -2057,7 +2026,7 @@ class ChatWebSocketHandler:
                 # not cancel a successor's work.
                 results = await stop_all_background_tasks(
                     session_id, user_stop=True, scope=scope,
-                    receipt=((flipped or {}).get("payload") or {}).get(turns_db.STOP_RECEIPT_KEY),
+                    receipt=receipt,
                 )
                 if any(result.get("incomplete") for result in results):
                     from app.core.scoped_remote_stop import incomplete_text

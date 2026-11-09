@@ -553,6 +553,9 @@ class PermissionHandler:
             # wedges the turn.
             # A mode update can race the insert/broadcast above. Recheck after the
             # row is visible, as well as sweeping existing rows from the setter.
+            from app.core.away_mode import answers_questions_async, release_pending_approvals
+            if await answers_questions_async(session_id):
+                await release_pending_approvals(session_id)
             if payload.get("mode_managed"):
                 from app.core.session_pool import get_session_pool
                 state = get_session_pool().peek(session_id)
@@ -960,6 +963,12 @@ class PermissionHandler:
                 session_id, new_interaction_id, rid, PERMISSION_KIND, payload,
             )
 
+        # A manual re-show is another prompt-creation path. With Away on it
+        # must not leave a fresh card parked after the toggle sweep ran.
+        from app.core.away_mode import answers_questions_async, release_pending_approvals
+        if await answers_questions_async(session_id):
+            await release_pending_approvals(session_id)
+            return []
         return requeued_ids
 
     async def _broadcast_permission_request(

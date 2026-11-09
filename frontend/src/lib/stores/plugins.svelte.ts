@@ -414,7 +414,7 @@ export const plugins = {
 		_update((state) => ({ ...state, checkingUpdates: true, error: null }));
 
 		try {
-			const updatesAvailable = await pluginsApi.checkForUpdates();
+			const updatesAvailable = await pluginsApi.checkForUpdates(true);
 			_update((state) => ({ ...state, updatesAvailable, checkingUpdates: false }));
 			return updatesAvailable;
 		} catch (e) {

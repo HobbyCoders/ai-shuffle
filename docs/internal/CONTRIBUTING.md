@@ -134,7 +134,26 @@ also live under that global project root. Project `.fluid/` is a load scope
 (skills, agents, commands, plugins and settings) and the host's worktree area;
 explicit skill/plugin authoring remains supported. Do not delete legacy owner
 strays as part of a fix: old ledger/notes are copied only when canonical state is
-absent, and old scratch/reports are not migrated or cleaned automatically.
+absent. Legacy checkout scratch/reports are not migrated or cleaned automatically.
+Designated per-session scratch is temporary: settled sessions are swept every
+five minutes after an hour of filesystem quiet, with fresh session/open-turn and
+process-use checks. Missing-session folders need seven days of quiet. Ledger,
+notes and Task reports are not scratch and are never swept. Narrow live-receipted
+preview exceptions protect their private roots, not arbitrary external handles;
+quiet settled scratch has no promised path lifetime. Windows uses exclusive
+delete handles to retain open files even when process inspection is denied.
+Strict scans exempt live app-UID ancestors without relying on launcher spelling.
+Managed PostgreSQL requires the established split service identity and a
+PostgreSQL-only chain to a proven non-init ancestor. Agent-owned databases do not
+get that PostgreSQL exemption. An opaque ancestor can still hold external scratch;
+ancestry is a launch relationship, not proof that it has no descriptors.
+Each pass logs removed bytes, retained reasons (at most eight named holders) and
+preview exemptions. Unknown safety facts
+retain files; symlinks are never followed and Windows reparse trees are retained.
+Backlogs resume in slices of at most two seconds, 512 entries or 256 MiB, with
+30 seconds between slices (one indivisible oversized file may exceed the byte
+budget). Storage logs incrementally measure scratch and checkout logical bytes;
+usage above 100 GiB warns without imposing a size cap or deleting unknown files.
 
 ### Before Committing
 
