@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { isUploadChip, restoreMessageDocument, serializeToMessage } from './serialization';
+import { afterEach, describe, expect, it } from 'vitest';
+import { Editor, type JSONContent } from '@tiptap/core';
+import StarterKit from '@tiptap/starter-kit';
+import { FileChipNode } from './FileChipNode';
+import { extractFileChips, isUploadChip, joinDrafts, restoreMessageDocument, serializeToMessage } from './serialization';
 const serialize = (text: string, paths: string[]) => {
     const doc = restoreMessageDocument(text, paths);
     return serializeToMessage({ getJSON: () => doc } as Parameters<typeof serializeToMessage>[0]);
@@ -35,6 +38,60 @@ describe('restored words with a typed upload path (#1084)', () => {
         expect(serialize(text, [])).toBe(text);
     });
 });
+describe('a chip keeps what it is through the real editor', () => {
+    const attrs = (fullPath: string, extra: object = {}) => ({ path: fullPath, filename: fullPath.split(/[/\\]/).pop()!, fullPath, size: 0, type: 'file' as const, ...extra });
+    const docWith = (chipAttrs: object): JSONContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'fileChip', attrs: chipAttrs }] }] });
+    const editors: Editor[] = [];
+    const open = (content: JSONContent | string = '') => {
+        const editor = new Editor({ extensions: [StarterKit, FileChipNode], content });
+        editors.push(editor);
+        return editor;
+    };
+    const uploads = (editor: Editor) => extractFileChips(editor).filter(isUploadChip).map(c => c.fullPath);
+    const picked = (fullPath: string) => {
+        const editor = open();
+        editor.commands.insertFileChip(attrs(fullPath, { mention: true }));
+        return editor;
+    };
+    afterEach(() => editors.splice(0).forEach(editor => editor.destroy()));
+
+    it.each(['C:/notes.txt', 'C:\\notes.txt', '/etc/hosts', '\\\\host\\share\\a.txt', 'README.md'])(
+        'never uploads a chip picked from the @ menu: %s', (path) => {
+            expect(uploads(picked(path))).toEqual([]);
+        });
+
+    it('still sends the picked path as text', () => {
+        expect(serializeToMessage(picked('C:/notes.txt'))).toBe('@C:/notes.txt');
+    });
+
+    it('stays a mention after a draft round trip, joined drafts and a copy within the composer', () => {
+        const editor = picked('C:/notes.txt');
+        const draft = JSON.stringify(editor.getJSON());
+        expect(uploads(open(JSON.parse(draft)))).toEqual([]);
+        const joined = open(JSON.parse(joinDrafts(draft, draft)));
+        expect(extractFileChips(joined)).toHaveLength(2);
+        expect(uploads(joined)).toEqual([]);
+        const copied = open(editor.getHTML());
+        expect(extractFileChips(copied)).toHaveLength(1);
+        expect(uploads(copied)).toEqual([]);
+    });
+
+    it.each(['C:\\work\\uploads\\photo.png', 'C:/work/uploads/photo.png', '\\\\server\\share\\photo.png', '/workspace/app/uploads/photo.png'])(
+        'delivers a genuine upload through the same round trip: %s', (path) => {
+            const editor = open();
+            editor.commands.insertFileChip(attrs(path));
+            expect(uploads(editor)).toEqual([path]);
+            expect(uploads(open(JSON.parse(JSON.stringify(editor.getJSON()))))).toEqual([path]);
+            expect(uploads(open(editor.getHTML()))).toEqual([path]);
+        });
+
+    it('falls back to the path for a draft saved before the mark existed', () => {
+        expect(uploads(open(docWith(attrs('README.md'))))).toEqual([]);
+        expect(uploads(open(docWith(attrs('/workspace/app/uploads/old.png'))))).toEqual(['/workspace/app/uploads/old.png']);
+        expect(uploads(open(docWith(attrs('C:/work/uploads/old.png'))))).toEqual(['C:/work/uploads/old.png']);
+    });
+});
+
 describe('telling uploads from @ mentions', () => {
     const chip = (type: 'file' | 'chat_history' | 'note' | 'subagent', fullPath: string) => ({ type, fullPath });
 

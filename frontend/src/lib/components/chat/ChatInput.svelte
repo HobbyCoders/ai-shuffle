@@ -1527,7 +1527,8 @@
 			filename: file.name,
 			fullPath: file.path,
 			size: file.size || 0,
-			type: chipType
+			type: chipType,
+			mention: true
 		});
 
 		// Update inputValue to reflect text after chip insertion (for autocomplete state)
