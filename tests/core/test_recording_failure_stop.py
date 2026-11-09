@@ -86,13 +86,17 @@ async def stop(transport, turn_id, monkeypatch, *, finished=False):
 
 
 @pytest.mark.parametrize("transport", ["ws", "peer"])
-@pytest.mark.parametrize("ownership", ["same", "released", "replaced", "replacement-released"])
+@pytest.mark.parametrize("ownership", [
+    "same", "released", "replaced", "replacement-released", "replacement-expired",
+])
 async def test_failure_owned_stop_quiesces_only_the_current_run(monkeypatch, monitor, transport, ownership):
     lease, turn, queued = fail_recording(monkeypatch)
     if ownership != "same":
         assert runs.release_run(lease["id"], lease["fence_token"])
-    if ownership in ("replaced", "replacement-released"):
-        replacement = runs.claim_run(SESSION, "replacement-runner", 60)
+    if ownership in ("replaced", "replacement-released", "replacement-expired"):
+        replacement = runs.claim_run(
+            SESSION, "replacement-runner", -1 if ownership == "replacement-expired" else 60,
+        )
         assert replacement and replacement["id"] != lease["id"]
         if ownership == "replacement-released":
             assert runs.release_run(replacement["id"], replacement["fence_token"])
