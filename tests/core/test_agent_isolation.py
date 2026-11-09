@@ -769,8 +769,14 @@ def test_start_app_off_is_the_plain_popen(runtime, monkeypatch, capsys):
     process = SimpleNamespace(pid=123)
     monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: calls.append((a, k)) or process)
     command = [sys.executable, "-m", "app.main"]
-    assert runtime.start_app(command, "/cwd", {"A": "1"}, Path("/data/application-updates")) is process
-    assert calls == [((command,), {"cwd": "/cwd", "env": {"A": "1"}, "start_new_session": True})]
+    env = {"A": "1"}
+    assert runtime.start_app(command, "/cwd", env, Path("/data/application-updates")) is process
+    assert calls == [((command,), {
+        "cwd": "/cwd",
+        "env": dict(env, SHUFFLE_SUPERVISOR_STOP_SECONDS=str(runtime.APP_STOP_SECONDS)),
+        "start_new_session": True,
+    })]
+    assert env == {"A": "1"}
     assert calls[0][0][0] is command
     assert "application child spawned pid=123" in capsys.readouterr().err
 
@@ -837,6 +843,11 @@ def test_start_app_on_uses_the_launcher(runtime, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: calls.append((a, k)) or process)
     assert runtime.start_app(["/py", "-m", "app.main"], None, {}, tmp_path) is process
     assert calls[0][0][0] == ["/py", "-s", "-c", module.APP_SHIM] and seen == [tmp_path]
+    assert calls[0][1] == {
+        "cwd": None,
+        "env": {"SHUFFLE_SUPERVISOR_STOP_SECONDS": str(runtime.APP_STOP_SECONDS)},
+        "start_new_session": True,
+    }
     assert "application child spawned pid=123" in capsys.readouterr().err
 
 
