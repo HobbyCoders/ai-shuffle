@@ -151,6 +151,23 @@ async def test_nonblocking_question_ws_forwards_to_owner_without_local_answer(mo
     assert sent_frames(handler, "user_question_response_ack")[0]["success"] is True
 
 
+@pytest.mark.parametrize("failure", ["RunnerUnreachable", "ControlRefused"])
+async def test_undelivered_question_answer_acks_retryable(mock_db, failure):
+    """The UI closes the card on the tap; only this ack brings it back."""
+    from app.network import control
+    handler = _make_handler()
+    handler._network_owner = AsyncMock(return_value="owner-device")
+    handler._authorize_mobile_session = AsyncMock(return_value=True)
+    with patch.object(control, "answer_question", AsyncMock(side_effect=getattr(control, failure)("down"))):
+        await handler.handle_user_question_response({
+            "request_id": "q-remote", "session_id": "remote", "answers": {}, "skipped": ["Q"],
+        })
+    assert sent_frames(handler, "user_question_response_ack") == [{
+        "type": "user_question_response_ack", "session_id": "remote", "request_id": "q-remote",
+        "success": False, "reason": "relay_offline",
+    }]
+
+
 def test_peer_queue_legacy_rows_keep_attribution_separate_from_user_controls(mock_db):
     from fluid.context.peer import format_peer_message
     _make_session("legacy-peer")
