@@ -614,18 +614,22 @@ class TestOnlyARequestThisWorkerCanActOnIsAnswered:
 
     @pytest.mark.asyncio
     async def test_following_a_restored_proxy_prompt_keeps_it_answerable(self, mock_db):
+        from datetime import datetime, timedelta, timezone
+
         from app.core import interaction_wait, remote_task_approvals
 
         seen = []
 
         async def stop_at_the_wait(interaction_id, *_args, **_kwargs):
             seen.append(interaction_wait.is_awaited(interaction_id))
-            raise LookupError("stop here")
+            # Ordinary errors are retried until the deadline; only cancellation leaves the wait.
+            raise asyncio.CancelledError
 
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
         with patch.object(interaction_wait, "await_interaction", side_effect=stop_at_the_wait), \
-                pytest.raises(LookupError):
+                pytest.raises(asyncio.CancelledError):
             await remote_task_approvals._follow_existing(
-                MagicMock(root_session_id="sess-1"), {"id": "row-1", "expires_at": None})
+                MagicMock(root_session_id="sess-1"), {"id": "row-1", "expires_at": expires_at})
 
         assert seen == [True]
         assert not interaction_wait.is_awaited("row-1")
