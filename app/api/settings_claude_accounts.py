@@ -100,6 +100,13 @@ async def add_another(token: str = Depends(require_admin)) -> dict[str, Any]:
     return {**await _result(), "login": login}
 
 
+@router.post("/subscription/{account_id}/sign-in")
+async def saved_sign_in(account_id: str, token: str = Depends(require_admin)) -> dict[str, Any]:
+    """Return folder-scoped CLI login commands; do not activate this saved account."""
+    login = await _call(accounts.saved_sign_in_commands, account_id)
+    return {"login": login}
+
+
 @router.post("/subscription/cancel-login")
 async def cancel(token: str = Depends(require_admin)) -> dict[str, Any]:
     """Stop a pending add-another sign-in and remove its unfinished folder.

@@ -1120,6 +1120,7 @@ Which credential Claude Code agents run on: your Claude subscription (the signed
 | `POST /subscription/cancel-login` | none | Stop a pending add-another sign-in and delete its unfinished folder. If the CLI had already finished signing in there, the sign-in is kept and made active instead, and its id comes back as `account_id`. |
 | `PATCH /subscription/{id}` | `{"label":"Work"}` | Rename; at most 120 characters. |
 | `POST /subscription/{id}/activate` | none | Make this sign-in the one Claude Code uses; the other subscription turns off. |
+| `POST /subscription/{id}/sign-in` | none | Return `{"login": {...}}` with folder-scoped external terminal commands for a `saved` entry, even when inactive. Does not activate it or start an in-app login; run the returned command on this worker. |
 | `DELETE /subscription/{id}` | none | Forget the entry. A `saved` entry is signed out with `claude auth logout` in its folder and its folder is deleted; a `default` entry is only forgotten (Claude Code's own folder and sign-in stay). |
 
 Mutations return `{"accounts":{…}}`; add-key and save-current also return
@@ -1145,7 +1146,11 @@ Each saved subscription is a Claude Code CLI sign-in on **this worker**. The
 list and the active choice are kept per worker in `claude_cli_logins:<instance
 id>` and never sync: every worker keeps its own CLI sign-ins. AI Shuffle never
 reads, copies or stores CLI credentials; email, plan and organization come only
-from running `claude auth status` against an entry's folder.
+from running `claude auth status` against an entry's folder. Account listings
+refresh that result at most every 30 seconds, and an in-app login completion or
+account switch invalidates the cached result. If deletion cannot remove a saved
+folder, its app-owned id stays in a worker-local cleanup queue and startup retries
+it without touching listed accounts, a pending login, or shared link targets.
 
 - `kind: "default"` is Claude Code's own folder (the worker's
   `CLAUDE_CONFIG_DIR`, else `~/.claude`), the sign-in from `claude auth login`.

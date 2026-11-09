@@ -394,13 +394,8 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
         return None
 
     repo = database.get_git_repository_by_project(project_id)
-    if repo:
-        _auto_link_from_repo(project_id, repo)
-        _repo_record_cache[project_id] = (repo, now)
-        return repo
-
-    # Create a new record
-    repo_id = f"repo-{uuid.uuid4().hex[:12]}"
+    # Refresh from Git after the cache expires, even for an existing row. A
+    # repository commonly gains its origin only after its first status load.
     # The row (and the 60 s cache the UI reads) never holds a clone token.
     remote_url = strip_url_userinfo(git_service.get_remote_url(working_dir))
     default_branch = git_service.get_default_branch(working_dir)
@@ -423,6 +418,17 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
             except (IndexError, ValueError) as e:
                 logger.warning(f"Failed to parse GitHub repo name from URL '{remote_url}': {e}")
 
+    if repo:
+        if (repo.get("remote_url") or "") != (remote_url or ""):
+            repo = database.update_git_repository(
+                repo["id"], remote_url=remote_url or "",
+                default_branch=default_branch, github_repo_name=github_repo_name or "",
+            )
+        _auto_link_from_repo(project_id, repo)
+        _repo_record_cache[project_id] = (repo, now)
+        return repo
+
+    repo_id = f"repo-{uuid.uuid4().hex[:12]}"
     # A v2-only session can have a checkout without a legacy projects row.
     # Its Git metadata is still usable; do not insert a dangling foreign key.
     if not database.get_project(project_id):
