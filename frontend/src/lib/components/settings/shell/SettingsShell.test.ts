@@ -134,7 +134,8 @@ describe('SettingsShell index', () => {
 		expect(screen.getByRole('separator', { name: 'Resize list' })).toBeTruthy();
 		await waitFor(() => expect(document.activeElement).toBe(heading));
 		expect(within(nav()).getByRole('button', { name: 'Logs' }).getAttribute('aria-current')).toBe('page');
-	});
+		// The cold lazy import alone has passed 5s on a loaded hosted runner.
+	}, 30_000);
 
 	it('shows an attention count from a category module', async () => {
 		const { MODULES } = await import('$lib/settings/registry');
