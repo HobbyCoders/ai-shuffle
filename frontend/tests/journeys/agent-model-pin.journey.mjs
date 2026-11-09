@@ -58,6 +58,8 @@ let seeded;
 
 await runJourney({
 	name: 'agent-model-pin',
+	// A slower CPU does not change whether a save is allowed; keep the hosted shard budget.
+	throttles: ['fast'],
 	cases: [{
 		name: 'pin-saves-and-reopens',
 		async setup({ page, status, variant }) {
