@@ -1,24 +1,22 @@
 <script lang="ts">
 	/**
-	 * ApprovalRequestCard — one request asked in words (`assistant_confirm`), at
-	 * the point in the transcript where it was raised (#483).
+	 * ApprovalRequestCard — the record of a request an older version asked in
+	 * words (`assistant_confirm`), at the point in the transcript where it was
+	 * raised (#483). New requests use the regular permission prompt and never
+	 * produce one; this keeps old transcripts readable.
 	 *
-	 * The owner answers by typing or saying yes or no; the app decides. This card
-	 * is the only place the request is shown: the model is told not to repeat it,
-	 * and nothing floats after the transcript. It is keyed by request id and its
-	 * status is settled in place by the durable `interaction.*` events, so it
-	 * keeps its position and its outcome live, after a reload, and when several
-	 * jobs ask at once. `active` marks the one the owner's next reply answers
-	 * (the oldest still waiting); others that wait read "Next".
+	 * It is keyed by request id and its status is settled in place by the durable
+	 * `interaction.*` events, so it keeps its position and outcome live and after
+	 * a reload. `active` marks the oldest one still waiting; others read "Next".
 	 *
-	 * No buttons, deliberately: the decision comes from the owner's own message.
+	 * No buttons: one still waiting is answered on the permission prompt.
 	 */
 	import '../deck/cards/card-design-system.css';
 	import type { ApprovalCardData, ApprovalStatus } from '$lib/utils/assistant-confirm';
 
 	interface Props {
 		data: ApprovalCardData;
-		/** The request the owner's next yes or no answers. */
+		/** The oldest request still waiting. */
 		active?: boolean;
 	}
 
@@ -106,7 +104,7 @@
 	{/if}
 
 	{#if waiting && active}
-		<p class="hint">Reply <strong>yes</strong> or <strong>no</strong> in the message box. Other messages go to the agent and leave this open.</p>
+		<p class="hint">Answer on the permission prompt. Messages go to the agent and leave this open.</p>
 	{:else if waiting}
 		<p class="hint">Asked after the request before it. Answer that one first.</p>
 	{/if}
@@ -228,7 +226,6 @@
 		color: var(--muted-foreground);
 	}
 
-	.hint strong { color: var(--foreground); font-weight: 600; }
 
 	@media (prefers-reduced-motion: reduce) {
 		.approval { transition: none; }
