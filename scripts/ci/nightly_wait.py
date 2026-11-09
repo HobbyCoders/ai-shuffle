@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import calendar
 import importlib.util
 import json
 from pathlib import Path
@@ -40,6 +41,7 @@ gate = _load("edge_publication_gate")
 RUNS_URL = f"https://github.com/{gate.REPOSITORY}/actions/workflows/main-suite.yml"
 PUBLISHER_URL = f"https://github.com/{gate.REPOSITORY}/actions/workflows/desktop-source.yml"
 ACTIVE = ("queued", "in_progress", "waiting", "pending", "requested")
+MAIN_EVENTS = ("push", "workflow_dispatch")
 # A pushed commit's run takes a moment to register, and a failed run may be
 # re-run: a state with nothing in flight must persist this long before exit 1.
 SETTLE_SECONDS = 300
@@ -72,59 +74,84 @@ def resolve(api, commit=None, pr=None):
         return pull["merge_commit_sha"]
     if not re.fullmatch(r"[a-f0-9]{7,40}", commit or ""):
         raise ValueError("Give a commit SHA (7-40 hex characters) or --pr <number>")
-    return api(f"commits/{commit}")["sha"]
+    sha = api(f"commits/{commit}")["sha"]
+    if not contains(api, sha, "main"):
+        raise ValueError(f"{sha[:9]} is not on main; merge it first")
+    return sha
 
 
-def contains(api, commit, revision):
-    """True when ``revision`` is ``commit`` or a descendant of it."""
-    return commit == revision or api(f"compare/{commit}...{revision}").get("status") in ("ahead", "identical")
+def contains(api, commit, revision, cache=None):
+    """True when ``revision`` is ``commit`` or a descendant of it.
+
+    Ancestry between two SHAs never changes, so a per-wait cache is safe.
+    """
+    if commit == revision:
+        return True
+    if cache is not None and revision in cache:
+        return cache[revision]
+    result = api(f"compare/{commit}...{revision}").get("status") in ("ahead", "identical")
+    if cache is not None:
+        cache[revision] = result
+    return result
 
 
-def covering(api, commit):
-    """The commit and every later main commit: a pass on any of them proves it."""
-    comparison = api(f"compare/{commit}...main")
-    if comparison.get("status") not in ("ahead", "identical"):
-        raise ValueError(f"{commit[:9]} is not on main; merge it first")
-    # GitHub returns at most 250 commits here. Runs on later ones are not
-    # recognised, so a very long backlog can only end in exit 1/2, never a false 0.
-    return {commit} | {item["sha"] for item in comparison.get("commits") or []}
+def _runs(api, workflow, status, events=None):
+    listing = api(f"actions/workflows/{workflow}/runs?branch=main&status={status}&per_page=100")
+    runs = [run for run in listing.get("workflow_runs") or []
+            if run.get("head_branch") == "main" and (events is None or run.get("event") in events)]
+    return sorted(runs, key=lambda run: run.get("id", 0), reverse=True)
 
 
-def suite_state(api, commit, *, now):
-    """(state, detail). States: testing, publishing, unpublished, failed, none."""
-    shas = covering(api, commit)
-    listing = api("actions/workflows/main-suite.yml/runs?branch=main&per_page=100")
-    newest = {}
-    for run in listing.get("workflow_runs") or []:
-        sha = run.get("head_sha")
-        if (sha in shas and run.get("head_branch") == "main"
-                and run.get("event") in ("push", "workflow_dispatch")
-                and run.get("id", 0) > newest.get(sha, {}).get("id", 0)):
-            newest[sha] = run
-    runs = sorted(newest.values(), key=lambda run: run["id"], reverse=True)
-    active = [run for run in runs if run.get("status") in ACTIVE]
-    if active:
-        run = active[0]
-        return "testing", f"main-suite is {run['status'].replace('_', ' ')} on {run['head_sha'][:9]}: {run['html_url']}"
-    passed = [run for run in runs if run.get("status") == "completed" and run.get("conclusion") == "success"]
+def _active(api, workflow, events=None):
+    # Asked for by status, never read off the newest page: a re-run keeps its old
+    # ID and position, so an active run can sit behind 100 newer finished ones.
+    return [run for status in ACTIVE for run in _runs(api, workflow, status, events)]
+
+
+def suite_state(api, commit, *, now, cache=None):
+    """(state, detail). States: testing, publishing, unpublished, failed, none.
+
+    A run covers the commit when its head is the commit or a descendant. That is
+    asked of each run's own head, never of a commit list read earlier: a merge
+    landing mid-poll must not make its replacement run look unrelated.
+    """
+    cache = {} if cache is None else cache
+    for run in _active(api, "main-suite.yml", MAIN_EVENTS):
+        if contains(api, commit, run["head_sha"], cache):
+            return "testing", f"main-suite is {run['status'].replace('_', ' ')} on {run['head_sha'][:9]}: {run['html_url']}"
+    finished, seen = [], set()
+    for run in _runs(api, "main-suite.yml", "completed", MAIN_EVENTS):
+        sha = run["head_sha"]
+        if sha in seen:
+            continue  # newest run per commit, as the publication gate reads it
+        seen.add(sha)
+        if not contains(api, commit, sha, cache):
+            break  # main is linear: every older run is on an older revision
+        finished.append(run)
+    passed = next((run for run in finished if run.get("conclusion") == "success"), None)
+    age = now - _epoch(passed.get("updated_at")) if passed else 0
+    if passed and age < PUBLISH_SECONDS:
+        return "publishing", f"main-suite passed on {passed['head_sha'][:9]}; waiting for the publisher"
+    # The publisher also runs on a schedule, on owner dispatch and from an owner
+    # local pass: while one is in flight the commit may still ship.
+    publishers = _active(api, "desktop-source.yml")
+    if publishers:
+        return "publishing", f"A nightly publisher run is in flight: {publishers[0]['html_url']}"
     if passed:
-        run = passed[0]
-        age = now - _epoch(run.get("updated_at"))
-        if age < PUBLISH_SECONDS:
-            return "publishing", f"main-suite passed on {run['head_sha'][:9]}; waiting for the publisher"
-        return "unpublished", (f"main-suite passed on {run['head_sha'][:9]} {int(age // 60)} minutes ago but no nightly "
+        return "unpublished", (f"main-suite passed on {passed['head_sha'][:9]} {int(age // 60)} minutes ago but no nightly "
                                f"contains it. Check the publisher's latest run for a refusal: {PUBLISHER_URL}")
-    if runs:
-        run = runs[0]
-        return "failed", (f"The newest main-suite run covering this commit ended {run.get('conclusion') or run.get('status')} "
+    # A replaced waiting run ("cancelled") is not a failure; only report a run that ran.
+    run = next((run for run in finished if run.get("conclusion") != "cancelled"), None)
+    if run:
+        return "failed", (f"The newest main-suite run covering this commit ended {run.get('conclusion')} "
                           f"on {run['head_sha'][:9]} and nothing newer is waiting: {run['html_url']}\n"
                           "The nightly waits for the next green main run: fix or re-run it.")
-    return "none", f"No main-suite run covers this commit yet: {RUNS_URL}"
+    return "none", f"No main-suite run in flight covers this commit yet: {RUNS_URL}"
 
 
 def _epoch(stamp):
     try:
-        return time.mktime(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
     except (TypeError, ValueError):
         return 0.0
 
@@ -134,10 +161,11 @@ def wait(api, commit, *, fetch=nightly.fetch, timeout=7200, interval=60, once=Fa
     deadline = clock() + timeout
     last = stalled = None
     failed = 0
+    cache = {}
     version = "unknown"
     while True:
         try:
-            code, last, stalled, version = _poll(api, commit, fetch, last, stalled, clock, say)
+            code, last, stalled, version = _poll(api, commit, fetch, last, stalled, clock, say, cache)
             failed = 0
         except READ_ERRORS as error:
             failed += 1
@@ -158,12 +186,12 @@ def wait(api, commit, *, fetch=nightly.fetch, timeout=7200, interval=60, once=Fa
         sleep(interval)
 
 
-def _poll(api, commit, fetch, last, stalled, clock, say):
+def _poll(api, commit, fetch, last, stalled, clock, say, cache):
     revision, version = published(fetch)
-    if contains(api, commit, revision):
+    if contains(api, commit, revision, cache):
         say(f"Published: nightly {version} ({revision[:9]}) contains {commit[:9]}.")
         return 0, last, stalled, version
-    state, detail = suite_state(api, commit, now=clock())
+    state, detail = suite_state(api, commit, now=clock(), cache=cache)
     if state != last:
         say(detail if state != "testing" else f"Not in a nightly yet (live: {version}). {detail}")
         last, stalled = state, clock()

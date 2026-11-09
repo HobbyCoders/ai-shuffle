@@ -28,21 +28,29 @@ def run(run_id, sha, status="completed", conclusion=None, age=0, event="push", b
 
 
 class Api:
-    """Linear main history OLD < MINE < NEWER < TIP with a scripted run list."""
+    """Linear main history OLD < MINE < NEWER < TIP with scripted run lists."""
 
-    def __init__(self, runs=()):
+    def __init__(self, runs=(), publishers=(), hidden=()):
         self.runs = list(runs)
+        self.publishers = list(publishers)
+        self.hidden = list(hidden)  # real runs GitHub's newest-100 page would not show
+        self.calls = []
 
     def __call__(self, endpoint):
+        self.calls.append(endpoint)
         if endpoint.startswith("compare/"):
             base, head = endpoint[len("compare/"):].split("...")
-            head = TIP if head == "main" else head
-            distance = ORDER.index(head) - ORDER.index(base)
-            status = "identical" if distance == 0 else "ahead" if distance > 0 else "behind"
-            return {"status": status, "commits": [{"sha": sha} for sha in ORDER[ORDER.index(base) + 1:ORDER.index(head) + 1]]}
-        if endpoint.startswith("actions/workflows/main-suite.yml/runs"):
-            return {"workflow_runs": self.runs}
-        raise AssertionError(endpoint)
+            distance = ORDER.index(TIP if head == "main" else head) - ORDER.index(base)
+            return {"status": "identical" if distance == 0 else "ahead" if distance > 0 else "behind"}
+        workflow, _, query = endpoint.partition("/runs?")
+        status = dict(item.split("=") for item in query.split("&"))["status"]
+        if workflow == "actions/workflows/main-suite.yml":
+            pool = self.runs + (self.hidden if status != "completed" else [])
+        elif workflow == "actions/workflows/desktop-source.yml":
+            pool = self.publishers
+        else:
+            raise AssertionError(endpoint)
+        return {"workflow_runs": [item for item in pool if item["status"] == status]}
 
 
 class Clock:
@@ -132,7 +140,7 @@ def test_a_run_that_has_not_registered_yet_gets_time_to_appear():
 
     code, said, _ = wait(api, fetch, timeout=900)
     assert code == 2
-    assert said[0].startswith("No main-suite run covers") and "queued" in said[1]
+    assert said[0].startswith("No main-suite run in flight covers") and "queued" in said[1]
 
 
 def test_a_pass_the_publisher_never_ships_is_reported():
@@ -176,27 +184,71 @@ def test_brief_read_outages_do_not_end_the_wait():
         wait(api, down)
 
 
-def test_commit_must_be_on_main_and_pointer_must_be_nightly():
-    with pytest.raises(ValueError, match="not on main"):
-        waiter.suite_state(BehindApi(), MINE, now=NOW)
+def test_pointer_must_be_nightly():
     payload = base64.b64encode(json.dumps({"channel": "stable", "revision": MINE}).encode()).decode()
     with pytest.raises(ValueError, match="nightly pointer"):
         waiter.published(lambda: json.dumps({"payload": payload}))
 
 
-class BehindApi:
-    def __call__(self, endpoint):
-        return {"status": "diverged", "commits": []}
+def test_a_merge_landing_mid_poll_is_never_reported_as_a_failure():
+    """Coverage is asked of each run's own head, so a brand-new head still counts."""
+    api = Api([run(2, TIP, status="queued"), run(1, MINE, conclusion="cancelled")])
+    assert waiter.suite_state(api, MINE, now=NOW)[0] == "testing"
+    # Even with nothing registered yet, a replaced run is not called a failure.
+    state, detail = waiter.suite_state(Api([run(1, MINE, conclusion="cancelled")]), MINE, now=NOW)
+    assert state == "none" and "cancel" not in detail.lower() and "fail" not in detail.lower()
+    # A real failure under a replaced run is still the thing to report.
+    api = Api([run(2, TIP, conclusion="cancelled"), run(1, NEWER, conclusion="failure")])
+    state, detail = waiter.suite_state(api, MINE, now=NOW)
+    assert state == "failed" and "runs/1" in detail and "ended failure" in detail
+
+
+def test_an_active_rerun_behind_a_page_of_newer_failures_still_counts():
+    api = Api([run(9, TIP, conclusion="failure")], hidden=[run(1, NEWER, status="in_progress")])
+    state, detail = waiter.suite_state(api, MINE, now=NOW)
+    assert state == "testing" and NEWER[:9] in detail
+
+
+@pytest.mark.parametrize("runs", [[run(3, TIP, conclusion="failure")], [],
+                                  [run(1, MINE, conclusion="success", age=waiter.PUBLISH_SECONDS + 60)]])
+def test_an_in_flight_publisher_keeps_the_wait_alive(runs):
+    """A schedule, owner dispatch or owner local pass can still ship the commit."""
+    api = Api(runs, publishers=[run(5, TIP, status="in_progress", event="schedule")])
+    state, detail = waiter.suite_state(api, MINE, now=NOW)
+    assert state == "publishing" and "runs/5" in detail
+    api.publishers[0] = run(5, TIP, conclusion="success", event="schedule")
+    assert waiter.suite_state(api, MINE, now=NOW)[0] in ("failed", "none", "unpublished")
+
+
+def test_run_times_are_utc_in_any_local_zone(monkeypatch):
+    if not hasattr(waiter.time, "tzset"):
+        pytest.skip("tzset is POSIX-only")
+    monkeypatch.setenv("TZ", "America/New_York")
+    waiter.time.tzset()
+    try:
+        assert waiter._epoch("2026-07-01T12:00:00Z") == 1782907200
+        assert waiter._epoch("2026-01-01T12:00:00Z") == 1767268800
+    finally:
+        monkeypatch.undo()
+        waiter.time.tzset()
+
+
+def test_ancestry_is_asked_once_per_revision():
+    api = Api([run(3, TIP, status="queued")])
+    wait(api, pointer(OLD), timeout=600, interval=60)
+    compares = [call for call in api.calls if call.startswith("compare/")]
+    assert sorted(compares) == sorted(set(compares))
 
 
 def test_resolve_accepts_a_merged_pr_or_a_short_sha():
     pulls = {"pulls/7": {"merged": True, "merge_commit_sha": MINE, "base": {"ref": "main"}},
              "pulls/8": {"merged": False, "merge_commit_sha": None, "base": {"ref": "main"}},
              "pulls/9": {"merged": True, "merge_commit_sha": MINE, "base": {"ref": "release"}},
-             "commits/aaaaaaa": {"sha": MINE}}
+             "commits/aaaaaaa": {"sha": MINE}, f"compare/{MINE}...main": {"status": "ahead"},
+             "commits/ddddddd": {"sha": "d" * 40}, f"compare/{'d' * 40}...main": {"status": "diverged"}}
     assert waiter.resolve(pulls.__getitem__, pr=7) == MINE
     assert waiter.resolve(pulls.__getitem__, "aaaaaaa") == MINE
-    for options in ({"pr": 8}, {"pr": 9}, {"commit": "main"}):
+    for options in ({"pr": 8}, {"pr": 9}, {"commit": "main"}, {"commit": "ddddddd"}):
         with pytest.raises(ValueError):
             waiter.resolve(pulls.__getitem__, **options)
 
