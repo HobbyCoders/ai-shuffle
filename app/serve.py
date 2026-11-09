@@ -209,11 +209,24 @@ def run(app, settings) -> None:
             timeout_graceful_shutdown=0.1,
         )
         class StreamDrainingServer(uvicorn.Server):
+            def handle_exit(self, sig, frame):
+                from app.core import query_shutdown
+                query_shutdown.begin_shutdown()
+                shutdown_event.set()
+                return super().handle_exit(sig, frame)
+
             async def shutdown(self, sockets=None):
                 from app.core import query_shutdown
 
                 shutdown_event.set()  # Passive subscriptions close immediately.
-                await query_shutdown.settle(http_tasks=set(self.server_state.tasks))
+                settled = await query_shutdown.settle(http_tasks=set(self.server_state.tasks))
+                if not settled:
+                    logging.getLogger(__name__).warning(
+                        "Query finalization continues beyond HTTP drain; durable recovery retained")
                 await super().shutdown(sockets=sockets)
+                # Also covers embedders whose lifespan does not use app.main.
+                if not await query_shutdown.finish():
+                    logging.getLogger(__name__).warning(
+                        "Query finalization reached stop deadline; terminal receipts retained")
 
         StreamDrainingServer(config).run(sockets=sockets)

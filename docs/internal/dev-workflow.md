@@ -39,25 +39,40 @@ This is deployment metadata, not a user setting; absent, invalid or out-of-range
 values retain the 6.5-second default. The Windows desktop pre-stop route also
 settles headless API queries, which do not belong to the session pool.
 
-**Known limit:** the shortest normal stop budget is 10 seconds, lifespan
-`stop_running_sessions` can take 25 seconds, and adapter disconnect can take
-5 seconds, so a slow database write or stalled disconnect can exceed the
-reserve. This is not worst-case cancellation-safe settlement. An idle full-app
-shutdown measured 0.282 seconds and a delayed real query settled/exited in
-6.856 seconds, but on the ten-second budget a controlled two-second
-memory-publication tail exceeded the 1.5-second reserve and was cancelled: the
-terminal turn was persisted and lifespan reached, but the HTTP request failed
-and memory replication was unpublished. The already-written local memory file
-remains durable. `push_memory` is legacy native per-project file replication,
+The first signal or Windows pre-stop establishes one absolute query-drain
+deadline; subsequent waiters cannot renew it. Retirement ends provider reads,
+not query-owned finalization. An HTTP disconnect can no longer cancel the
+retired query between its issued persistence, terminal record and memory push.
+Lifespan waits on the same deadline before database teardown, rather than
+cancelling the finalizer when the initial HTTP-drain reserve expires.
+
+Each non-scheduler API query commits a `query_recovery` receipt before sending
+the provider prompt. The caller allocates the terminal ID before issuing that
+write, so cancellation of its awaiter cannot create a second identity. Inserting
+the terminal and consuming the receipt share one database transaction. A killed
+process leaves either its terminal or a receipt; approved worker startup recovers
+prior-process receipts for this install as aborted terminals, never runnable
+work. A normal terminal wins unchanged on replay. The additive schema migration
+does not infer outcomes for pre-upgrade history. This path is also portable to
+Windows, where the launcher may terminate the process tree without SIGTERM.
+
+**Remaining limit:** the shortest normal stop budget is 10 seconds, lifespan
+`stop_running_sessions` can take 25 seconds and adapter disconnect can take
+5 seconds. Thus full lifecycle cleanup can still exceed an outer kill budget;
+terminal durability is not a guarantee that every shutdown write completes.
+An idle full-app shutdown measured 0.282 seconds. The retained controlled
+two-second memory-publication case now finishes on both 10- and 30-second
+budgets despite HTTP-owner cancellation. A legacy memory-mirror push stalled
+past the absolute deadline can still be unpublished, but the already-written
+local file is durable. `push_memory` is native per-project file replication,
 not the durable `Remember` fact store: the next qualifying native/project turn
-reconciles without overwriting local-only/newer files, then its end-of-turn push
-uploads them. App startup alone does not retry that push; sync must be enabled
-and the original files still present. Already-issued `run_sync` writes may also
-finish after their awaiter is cancelled. The larger Docker settlement reserve
-allows the controlled two-second tail to finish before the 30-second stop.
-The shared coordinator and launcher-budget work is tracked in
-[#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305); launcher stop
-budgets are unchanged here.
+reconciles without overwriting local-only/newer files, then uploads them.
+Startup terminal recovery does not retry that mirror push; sync must remain
+enabled and the original files present (normal last-write-wins rules apply).
+Real stalled PostgreSQL/adapter teardown and real-provider or cross-worker
+shutdown have not been verified. Remaining lifecycle-budget and legacy mirror
+work is tracked in [#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305);
+launcher budgets are unchanged here.
 
 ## The loop
 

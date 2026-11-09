@@ -589,7 +589,7 @@ async def execute_query(
     session_id = session_id or str(uuid.uuid4())
     from app.core import query_shutdown
 
-    async with query_shutdown.turn():
+    async def owned():
         lease = await session_admission.acquire(session_id, stoppable=False)
         try:
             return await _execute_query_turn(
@@ -598,6 +598,8 @@ async def execute_query(
             )
         finally:
             await session_admission.close_and_wait(lease)
+
+    return await query_shutdown.run(owned)
 
 
 async def _execute_query_turn(
@@ -757,6 +759,7 @@ async def _execute_query_turn(
     from app.core.provider.factory import make_adapter
     adapter = make_adapter()
     plan_scope = AsyncExitStack()
+    query_receipt = None
 
     try:
         # A rewind that gave up waiting may hold the chat; a claim now would undo it.
@@ -768,6 +771,16 @@ async def _execute_query_turn(
         # Book the credential account actually bound by lazy client construction.
         metadata[USAGE_PROVIDER_KEY] = getattr(options, "aih_provider_id", None)
         recorder = await plan_scope.enter_async_context(recorded_turn(session_id, prompt, profile_id))
+        from app.db import query_recovery
+        # Allocate before issuing the write: even a cancelled begin awaiter must
+        # finalize with the same identity as its still-running database write.
+        query_receipt = {"id": "turn-" + uuid.uuid4().hex}
+        await run_sync(
+            query_recovery.begin, session_id, "automation_step" if automation_id else "api_query",
+            turn_id=query_receipt["id"], prompt=prompt, profile_id=profile_id, project_id=project_id,
+            started_at=turn_started_at, overrides=overrides or None,
+            payload={"api_user_id": api_user_id} if api_user_id else None,
+        )
         await adapter.send_query(prompt)
 
         async for message in adapter.receive_events():
@@ -940,6 +953,7 @@ async def _execute_query_turn(
             turns_db.record_adhoc_turn,
             session_id,
             "automation_step" if automation_id else "api_query",
+            turn_id=query_receipt["id"] if query_receipt else None,
             outcome="aborted" if _is_error else "completed",
             prompt=prompt,
             profile_id=profile_id,
@@ -1500,6 +1514,7 @@ async def _stream_query_turn(
         raise
 
     plan_scope = AsyncExitStack()
+    query_receipt = None
     try:
         recorder = await plan_scope.enter_async_context(recorded_turn(session_id, prompt, profile_id))
         prepare_completions = getattr(
@@ -1517,6 +1532,14 @@ async def _stream_query_turn(
         set_emergency = getattr(state.adapter, "set_emergency_compaction", None)
         if callable(set_emergency):
             set_emergency(bool(getattr(options, "aih_emergency_compaction", False)))
+        from app.db import query_recovery
+        query_receipt = {"id": "turn-" + uuid.uuid4().hex}
+        await run_sync(
+            query_recovery.begin, session_id, "api_stream",
+            turn_id=query_receipt["id"], prompt=prompt, profile_id=profile_id, project_id=project_id,
+            started_at=turn_started_at, overrides=overrides or None,
+            payload={"api_user_id": api_user_id} if api_user_id else None,
+        )
         await state.adapter.send_query(prompt)
 
         async for message in state.adapter.receive_events():
@@ -1792,6 +1815,7 @@ async def _stream_query_turn(
             turns_db.record_adhoc_turn,
             session_id,
             "api_stream",
+            turn_id=query_receipt["id"] if query_receipt else None,
             outcome="aborted" if _aborted else "completed",
             prompt=prompt,
             profile_id=profile_id,

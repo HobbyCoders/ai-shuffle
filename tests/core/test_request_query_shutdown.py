@@ -188,3 +188,29 @@ async def test_windows_does_not_acknowledge_clean_stop_with_unfinished_writes(mo
     finally:
         release.set()
         await task
+
+
+async def test_finalization_waiters_share_one_absolute_deadline(monkeypatch):
+    monkeypatch.setattr(shutdown, "configured_stop_budget", lambda: .3)
+    writing, release = asyncio.Event(), asyncio.Event()
+
+    async def pending_write():
+        async with shutdown.turn():
+            writing.set()
+            await release.wait()
+
+    owner = asyncio.create_task(pending_write())
+    await writing.wait()
+    try:
+        assert not await shutdown.settle(grace=0)
+        deadline = shutdown.begin_shutdown()
+        assert not await shutdown.finish()
+        assert shutdown.begin_shutdown(grace=99) == deadline
+        # A second waiter cannot obtain a fresh timeout, nor cancel the write.
+        started = asyncio.get_running_loop().time()
+        assert not await shutdown.finish()
+        assert asyncio.get_running_loop().time() - started < .05
+        assert not owner.done()
+    finally:
+        release.set()
+        await owner

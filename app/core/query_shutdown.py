@@ -5,8 +5,10 @@ query settlement and two seconds for lifespan (idle measurement: 0.282s). A
 Python supervisor can supply its larger budget; the settlement share scales
 with it, retaining two seconds for lifespan. These are shared deadlines, not a
 fresh timeout for every query. Only raw engine reads are cancelled here.
-Slow app writes/disconnect can still exceed the reserve: see issue #1305.
-This is not worst-case cancellation-safe settlement.
+The absolute drain deadline is set once when stopping. Retired non-streaming
+finalization outlives its HTTP reader, while durable receipts cover process death
+or writes that cannot finish before that deadline. See issue #1305 for legacy
+memory-mirror publication and lifecycle work beyond the supervisor budget.
 """
 from __future__ import annotations
 
@@ -39,6 +41,39 @@ _turns: set[_Turn] = set()
 _current: ContextVar[_Turn | None] = ContextVar("request_query_shutdown", default=None)
 _closing_loop: asyncio.AbstractEventLoop | None = None
 _retired: set[asyncio.Task] = set()
+_owned: set[asyncio.Task] = set()
+_stop_deadline: float | None = None
+_retire_at: float | None = None
+_settle_at: float | None = None
+
+
+async def run(factory):
+    """Retired saving belongs to the query, not to its disconnected HTTP reader."""
+    work = None
+
+    async def invoke():
+        nonlocal work
+        async with turn() as work:
+            return await factory()
+
+    task = asyncio.create_task(invoke())
+    _owned.add(task)
+
+    def done(completed):
+        _owned.discard(completed)
+        if not completed.cancelled():
+            completed.exception()
+
+    task.add_done_callback(done)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Before retirement a disconnect still stops provider execution. After
+        # retirement, another cancel must not cut an issued write off from its
+        # terminal/memory continuation. Process death is covered by the receipt.
+        if work is None or not work.interrupt.is_set():
+            task.cancel()
+        raise
 
 
 @asynccontextmanager
@@ -49,7 +84,7 @@ async def turn():
     _turns.add(work)
     token = _current.set(work)
     try:
-        yield
+        yield work
     finally:
         _current.reset(token)
         _turns.discard(work)
@@ -118,25 +153,47 @@ def configured_grace_seconds(environ=None):
             - CLEANUP_RESERVE_SECONDS)
 
 
+def begin_shutdown(*, grace=None):
+    """Close admission and set one absolute deadline, never renewed by a waiter."""
+    global _closing_loop, _stop_deadline, _retire_at, _settle_at
+    loop = asyncio.get_running_loop()
+    if _closing_loop is not loop:
+        _closing_loop = loop
+        now = loop.time()
+        # The existing final Uvicorn scheduling tick stays inside the budget.
+        _stop_deadline = now + configured_stop_budget() - 0.1
+        _retire_at = min(_stop_deadline, now + (
+            configured_grace_seconds() if grace is None else grace))
+        _settle_at = min(_stop_deadline, _retire_at + configured_settle_seconds())
+    return _stop_deadline
+
+
+async def finish(*, deadline=None):
+    """Wait for retired finalization without cancelling it or extending the stop."""
+    if _closing_loop is not asyncio.get_running_loop():
+        return True
+    deadline = _stop_deadline if deadline is None else min(deadline, _stop_deadline)
+    turns = list(_turns)
+    if not turns:
+        return True
+    waits = {asyncio.create_task(work.finished.wait()) for work in turns}
+    _, pending = await asyncio.wait(
+        waits, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+    for task in pending:
+        task.cancel()
+    return not pending
+
+
 async def settle(*, grace=None, http_tasks=()):
-    """Close admission, drain finite requests, then retire remaining engine reads."""
-    if grace is None:
-        grace = configured_grace_seconds()
-    global _closing_loop
-    _closing_loop = asyncio.get_running_loop()
+    """Drain finite requests, retire reads, then share the absolute stop deadline."""
+    begin_shutdown(grace=grace)
     watched = set(http_tasks) | {work.owner for work in _turns}
     watched.discard(asyncio.current_task())
     if watched:
-        await asyncio.wait(watched, timeout=grace)
-    turns = list(_turns)
-    for work in turns:
+        await asyncio.wait(watched, timeout=max(
+            0, _retire_at - asyncio.get_running_loop().time()))
+    for work in list(_turns):
         work.interrupt.set()
-    if turns:
-        waits = {asyncio.create_task(work.finished.wait()) for work in turns}
-        _, pending = await asyncio.wait(waits, timeout=configured_settle_seconds())
-        for task in pending:
-            task.cancel()
-        if pending:
-            logger.error("%d query settlements exceeded the shutdown reserve", len(pending))
-            return False
-    return True
+    # Enter lifespan on the existing schedule even if a tail is slow. Lifespan
+    # waits for it before closing the DB; both waits consume this SAME deadline.
+    return await finish(deadline=_settle_at)

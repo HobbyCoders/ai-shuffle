@@ -54,8 +54,14 @@ async def record_sync(fn, *args, **kwargs):
 qe.run_sync = record_sync
 
 async def persist(**kwargs):
-    await asyncio.sleep(.15)  # An issued write must finish, not inherit engine cancellation.
-    (root / 'persisted.json').write_text(json.dumps(kwargs))
+    from app.db.async_database import run_sync
+    import time
+
+    def issued_write():
+        (root / 'persistence-started').touch()
+        time.sleep(PERSIST_DELAY)
+        (root / 'persisted.json').write_text(json.dumps(kwargs))
+    await run_sync(issued_write)
 qe._persist_turn_results = persist
 async def memory(*args):
     # Controlled delay before replication; local memory was already written.
@@ -97,9 +103,9 @@ query._stream_query_with_failover = real_stream
 
 
 def run_query_shutdown_probe(tmp_path, mode, budget, query_path, *, container_supervised=False,
-                             memory_delay=.15, expect_memory=True):
+                             memory_delay=.15, expect_memory=True, persist_delay=.15):
     script = tmp_path / "server.py"
-    setup = QUERY_SETUP + f"\nMODE = {mode!r}\nMEMORY_DELAY = {memory_delay!r}\n" + REAL_QUERY_SETUP
+    setup = QUERY_SETUP + f"\nMODE = {mode!r}\nMEMORY_DELAY = {memory_delay!r}\nPERSIST_DELAY = {persist_delay!r}\n" + REAL_QUERY_SETUP
     script.write_text(SERVER.replace("serve.run(app,", setup + "\nserve.run(app,"))
     env = dict(os.environ, SHUFFLE_PREVIEW_PORT="off", PYTHONPATH=str(ROOT))
     env.pop("SHUFFLE_SUPERVISOR_STOP_SECONDS", None)
@@ -131,7 +137,7 @@ def run_query_shutdown_probe(tmp_path, mode, budget, query_path, *, container_su
             stop_group(process, budget)
             elapsed = time.monotonic() - started
             assert process.returncode != -signal.SIGKILL, f"killed at {elapsed:.3f}s; {log.read_text()}"
-            assert elapsed < (29 if container_supervised else 9), log.read_text()
+            assert elapsed < budget, log.read_text()
             assert (tmp_path / "cleanup-completed").exists(), log.read_text()
             assert (tmp_path / "query-settled").exists(), log.read_text()
             assert (tmp_path / "engine-fenced").exists() is (mode != "finite-15"), log.read_text()
@@ -139,6 +145,11 @@ def run_query_shutdown_probe(tmp_path, mode, budget, query_path, *, container_su
             assert (tmp_path / "local-memory.md").read_text() == "durable local memory"
             if query_path == "/api/v1/query":
                 assert (tmp_path / "query-owner-ended").exists(), log.read_text()
+                if persist_delay == 2 and budget == 10:
+                    # Uvicorn disconnected the request BEFORE the terminal.
+                    # The query-owned finalizer still saved, published and exited.
+                    assert ((tmp_path / "query-owner-ended").stat().st_mtime_ns
+                            < (tmp_path / "terminal-turn.json").stat().st_mtime_ns)
             if not expect_memory:
                 # Uvicorn may have already closed the connection before its
                 # cancelled request task can send a 500; neither is success.

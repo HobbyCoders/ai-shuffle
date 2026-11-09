@@ -969,6 +969,7 @@ def record_adhoc_turn(
     started_at=None,
     payload: Optional[Dict[str, Any]] = None,
     overrides: Optional[Dict[str, Any]] = None,
+    turn_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Write a TERMINAL history row for a turn that already ran outside the
     scheduler (ad-hoc REST calls, automation steps, headless background runs).
@@ -993,12 +994,21 @@ def record_adhoc_turn(
         raise ValueError(
             f"record_adhoc_turn outcome must be completed|aborted, got {outcome!r}"
         )
-    turn_id = f"turn-{uuid.uuid4().hex}"
+    recovering = turn_id is not None
+    turn_id = turn_id or f"turn-{uuid.uuid4().hex}"
     with get_db() as conn:
         cursor = conn.cursor()
         # Share enqueue's lock: ad-hoc records participate in the same history
         # even though they never claim a live slot or a run lease.
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        if recovering:
+            cursor.execute("SELECT * FROM turns WHERE id=%s", (turn_id,))
+            existing = _row(cursor.fetchone())
+            if existing is not None:
+                if existing["session_id"] != session_id:
+                    raise ValueError("Query terminal identity belongs to another session")
+                cursor.execute("DELETE FROM query_recovery WHERE id=%s", (turn_id,))
+                return existing
         _initialize_insert_order(cursor, session_id)
         cursor.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 AS pos, "
@@ -1035,6 +1045,9 @@ def record_adhoc_turn(
         row = _row(cursor.fetchone())
         if row is None:  # INSERT ... RETURNING always yields the new row
             raise RuntimeError(f"record_adhoc_turn: INSERT returned no row for {turn_id}")
+        if recovering:
+            # Same transaction as the terminal: a kill cannot erase both copies.
+            cursor.execute("DELETE FROM query_recovery WHERE id=%s", (turn_id,))
     # The ad-hoc paths refuse to run while a turn is live (busy-write guard),
     # so their interval never overlaps one the scheduler already banked. One
     # recorded while the session is parked leaves the park's open segment be.
