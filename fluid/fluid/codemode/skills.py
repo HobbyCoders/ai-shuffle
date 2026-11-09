@@ -883,11 +883,13 @@ def validate_skill(name: str, source: str) -> str | None:
 
 
 class SkillStore:
-    def __init__(self, root: str | Path | None = None, *, owner: str = "local") -> None:
+    def __init__(self, root: str | Path | None = None, *, owner: str = "local",
+                 initialize: bool = True) -> None:
         from fluid.codemode.facts import FactStore
         self.root = Path(root) if root is not None else DEFAULT_SKILLS_ROOT
         self._facts = FactStore(self.root, owner)
-        self.root.mkdir(parents=True, exist_ok=True)
+        if initialize:
+            self.root.mkdir(parents=True, exist_ok=True)
         self._meta_path = self.root / "meta.json"
         self._journal_path = self.root / "journal.jsonl"
         # O(1) journal length: the count is cached against the file size it
@@ -905,7 +907,8 @@ class SkillStore:
         # before removal. Metadata failure disables only workflow learning.
         from fluid.codemode.workflow_loss import initialize_loss
         try:
-            initialize_loss(self.root, self._journal_path)
+            if initialize:
+                initialize_loss(self.root, self._journal_path)
         except OSError:
             _log.warning("Workflow completeness metadata unavailable; prose learning disabled")
 

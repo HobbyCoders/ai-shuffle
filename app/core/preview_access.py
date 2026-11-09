@@ -120,6 +120,7 @@ MUTATION_DENY_PREFIXES = (
     "/api/v1/claude",
     "/api/v1/github",
     "/api/v1/settings",
+    "/api/v1/memories",
     "/api/settings",
     "/api/v1/internal",
     "/api/v1/cluster",
