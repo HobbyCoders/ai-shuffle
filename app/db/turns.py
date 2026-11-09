@@ -695,8 +695,8 @@ def capture_stop_receipt(
         return _stop_receipt(cursor, session_id)
 
 
-def apply_stop_receipt(session_id: str, receipt: dict, apply: Callable[[], Any]) -> Any:
-    """Apply a local latch only while the captured owner/input is still current.
+def apply_stop_receipt(session_id: str, receipt: dict, apply: Callable[[bool], Any]) -> Any:
+    """Keep captured input authority, latching only while no newer input exists.
 
     The callback is synchronous and runs under S, so start/enqueue cannot slip
     between revalidation and latching. No lock survives this call or any await.
@@ -718,9 +718,9 @@ def apply_stop_receipt(session_id: str, receipt: dict, apply: Callable[[], Any])
             return None
         cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND insert_order>%s "
                        "AND source IN ('user','queue','resume') LIMIT 1", (session_id, cutoff))
-        if cursor.fetchone() is not None:
-            return None
-        return apply()
+        # Newer queued input lifts the latch, not this Stop's authority over
+        # older captured words. Only an ownership change discards the receipt.
+        return apply(cursor.fetchone() is None)
 
 
 def _stop_receipt(cursor: Any, session_id: str) -> Dict[str, Any]:

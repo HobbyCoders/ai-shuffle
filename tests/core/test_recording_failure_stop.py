@@ -24,7 +24,8 @@ async def test_idle_stop_captures_empty_work_without_recapturing(monkeypatch, tr
     assert task_registry.is_user_stopped(SESSION)
 
 
-async def test_durable_cleanup_replay_cannot_latch_successor(monkeypatch):
+@pytest.mark.parametrize("takeover", [False, True])
+async def test_durable_cleanup_replay_cannot_latch_newer_input(monkeypatch, takeover):
     from app.core import stop_receipts as recovery
     from app.core.scoped_remote_stop import retry_incomplete_notes
     from app.db import stop_receipts as receipts
@@ -35,13 +36,16 @@ async def test_durable_cleanup_replay_cannot_latch_successor(monkeypatch):
     assert saved["receipt"]["cleanup_guard"] == receipt["cleanup_guard"]
     await retry_incomplete_notes()
     assert runs.release_run(lease["id"], lease["fence_token"])
-    owner = runs.claim_run(SESSION, "replacement-runner", 60)
-    successor = turns.enqueue_turn(SESSION, "user", prompt="replacement work")
-    assert turns.start_turn(successor["id"], owner["id"], "replacement-runner")
+    if takeover:
+        owner = runs.claim_run(SESSION, "replacement-runner", 60)
+        successor = turns.enqueue_turn(SESSION, "user", prompt="replacement work")
+        assert turns.start_turn(successor["id"], owner["id"], "replacement-runner")
     newer = turns.enqueue_turn(SESSION, "queue", prompt="new words")
     monkeypatch.setattr(turns, "read_stop_receipt", Mock(side_effect=AssertionError("must not recapture")))
     await recovery.consume(saved)
-    assert turns.get_turn(successor["id"])["state"] == "running"
+    if takeover:
+        assert turns.get_turn(successor["id"])["state"] == "running"
+    assert turns.get_turn(_queued["id"])["state"] == ("queued" if takeover else "aborted")
     assert turns.get_turn(newer["id"])["state"] == "queued"
     assert not task_registry.is_user_stopped(SESSION)
     assert receipts.get(saved["id"])["consumed_at"] is not None
@@ -67,6 +71,7 @@ async def test_captured_receipt_never_expands_to_later_input(monkeypatch, transp
 
     monkeypatch.setattr(lifecycle, "stop_all_background_tasks", after_admission)
     await stop(transport, turn["id"], monkeypatch)
+    assert turns.get_turn(_queued["id"])["state"] == ("queued" if empty else "aborted")
     assert turns.get_turn(newer["id"])["state"] == "queued"
     assert not task_registry.is_user_stopped(SESSION)
     assert turns.get_turn(turn["id"])["stop_reason"] == "recording_failed"

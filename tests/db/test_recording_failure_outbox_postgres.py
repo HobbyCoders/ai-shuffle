@@ -37,15 +37,19 @@ async def test_stop_capture_and_latch_need_no_run_or_counter_lock(session_id, co
         receipt = await asyncio.wait_for(asyncio.to_thread(
             turns.capture_stop_receipt, session_id, turn['id'], None), 1)
         assert receipt is not None
-        def latch_under_admission():
+        def latch_under_admission(latch):
             # The synchronous latch is protected against enqueue/start, not a
             # plain check followed by an awaited side effect.
             with pytest.raises(LockNotAvailable):
                 rival.cursor().execute('SELECT id FROM sessions WHERE id=%s FOR UPDATE NOWAIT', (session_id,))
             rival.rollback()
-            return 'latched'
+            return latch
         assert await asyncio.wait_for(asyncio.to_thread(
-            turns.apply_stop_receipt, session_id, receipt, latch_under_admission), 1) == 'latched'
+            turns.apply_stop_receipt, session_id, receipt, latch_under_admission), 1) is True
+        newer = turns.enqueue_turn(session_id, 'queue', prompt='after admission')
+        assert await asyncio.wait_for(asyncio.to_thread(
+            turns.apply_stop_receipt, session_id, receipt, latch_under_admission), 1) is False
+        assert turns.get_turn(newer['id'])['state'] == 'queued'
         assert turns.get_turn(turn['id'])['state'] == 'draining'
         assert stop_notices.pending() == ['recording-failed:' + turn['id']]
     finally:

@@ -536,7 +536,9 @@ async def _begin_captured_user_stop(session_id: str, receipt: Optional[dict]) ->
     from app.core.task_registry import task_registry
     from app.db import turns as turns_db
 
-    def begin() -> _UserStop:
+    def begin(latch: bool = True) -> _UserStop:
+        if not latch:
+            return _UserStop(session_id, -1, False, receipt)
         stop = _begin_user_stop(session_id, receipt)
         # This too is session-wide, so it shares the latch's guarded instant.
         try:

@@ -130,8 +130,9 @@ Background tasks stop by captured incarnation; queued words become restorable
 "Not sent" messages and cannot run when terminal delivery releases the slot.
 The session-wide user-stop/Swarm latch is set only under a fresh ownership and
 input check holding the admission lock: late cleanup cannot latch a successor
-or discover its input. Empty captured receipts never trigger a fresh read. No
-admission lock is held into async cleanup, and admission needs neither the run
+or discover its input. Newer queued input disables the latch but does not spare
+older captured words while ownership is unchanged. Empty captured receipts
+never trigger a fresh read. No admission lock is held into async cleanup, and admission needs neither the run
 nor transcript-counter lock. A newer run (even released) or started successor makes turn-scoped
 admission stale. The marker and closing intent stay untouched;
 the page gets no false "nothing stopped" response and waits for the close. Delivery
