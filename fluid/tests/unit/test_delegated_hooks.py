@@ -962,7 +962,8 @@ async def test_the_note_comes_back_in_stream_order_end_to_end(tmp_path, trigger)
     try:
         await loop._ensure_session()
         expected_ledger = await _add_ledger(loop, tmp_path)
-        await loop.submit(UserTurn(content="/compact" if trigger == "manual" else "go"))
+        await loop.submit(UserTurn(content="/compact" if trigger == "manual" else "go",
+                                   accepted_at=1_700_000_000.0))
         await loop.wait_turn()
         events = loop.bus.log(loop.session_id)
     finally:
@@ -971,12 +972,16 @@ async def test_the_note_comes_back_in_stream_order_end_to_end(tmp_path, trigger)
     assert isinstance(events[-1], TurnComplete)
     # With no Fluid answer, Claude Code's summarizer wrote this compaction and may
     # have dropped the brief, so it goes back too (#996). "/compact" is no brief.
-    brief = "" if trigger == "manual" else f"{INSTRUCTIONS_LEAD}\nYour original brief:\ngo\n\n"
+    brief = "" if trigger == "manual" else (
+        f"{INSTRUCTIONS_LEAD}\nYour original brief:\n"
+        "[sent/delivered 2023-11-14 22:13:20 UTC +0000 (UTC)]\ngo\n\n"
+    )
     assert answers == {
         "cli_hook_sub": expected_ledger,
         "cli_hook_main": f"{expected_ledger}\n\n{brief}{_NOTE}",
         "cli_hook_late": expected_ledger,
     }
+    assert list(answers) == ["cli_hook_sub", "cli_hook_main", "cli_hook_late"]
     assert calls == [1]
 
 

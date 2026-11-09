@@ -24,6 +24,24 @@ def node(text="ExampleWorker tomorrow", ts="2026-11-08T23:00:00+00:00"):
     return SessionNode("node_0123456789ab", None, Message(role="user", content=[Text(text)]), ts=dt(ts).timestamp())
 
 
+@pytest.mark.parametrize("accepted_at", [None, 1_700_000_000.0, 0.0])
+def test_legacy_delivery_bytes_and_real_acceptance_times_round_trip(accepted_at):
+    from fluid.messages.content import SteerDelivery, ToolResultBlock
+
+    delivery = SteerDelivery(text="keep this", id="queued", accepted_at=accepted_at)
+    message = Message(role="user", content=[ToolResultBlock(
+        tool_use_id="call", content=[Text("ok")], delivered_steers=[delivery],
+        delivery_metadata_version=1)])
+    data = message.to_dict()
+    expected = {"text": "keep this", "origin": "user", "sender": None, "id": "queued"}
+    if accepted_at is not None:
+        expected["accepted_at"] = accepted_at
+    assert data["content"][0]["delivered_steers"] == [expected]
+    restored = Message.from_dict(data)
+    assert restored.to_dict() == data
+    assert restored.content[0].delivered_steers == [delivery]
+
+
 def test_clock_est_and_dst_fold():
     assert clock.turn_time_lines(zone="America/New_York", now=dt("2026-11-09T17:48:00+00:00")) == [
         "Current time: Mon Nov 9, 2026, 12:48 PM EST (America/New_York)"]
@@ -31,6 +49,8 @@ def test_clock_est_and_dst_fold():
     after = clock.absolute_time(dt("2026-11-01T06:30:00+00:00"), "America/New_York")
     assert "01:30:00 EDT -0400" in before
     assert "01:30:00 EST -0500" in after
+    assert clock.absolute_time(dt("2026-11-01T05:30:00Z"), "America/New_York", compact=True) == "2026-11-01T01:30:00-04:00"
+    assert clock.absolute_time(dt("2026-11-01T06:30:00Z"), "America/New_York", compact=True) == "2026-11-01T01:30:00-05:00"
 
 
 @pytest.mark.parametrize("zone", [None, "local", "", "Mars/NotAZone", "../bad"])
@@ -229,8 +249,8 @@ def test_recall_per_message_zone_and_expansion_offsets_are_stable():
     assert text.split("\n", 1)[1] == utc.split("\n", 1)[1]
     assert "18:00:00 EST" in render_hits(search_path([n], "ExampleWorker"), "ExampleWorker", "America/New_York")
     msg = RecallMessage(role="user", text=n.message.text(), ts=n.ts)
-    for show in ["all", "text"]:
-        assert "2026-11-08 18:00:00 EST -0500" in "\n".join(_render(0, msg, show, "America/New_York"))
+    for show in ["all", "conversation"]:
+        assert "[sent 2026-11-08T18:00:00-05:00]" in "\n".join(_render(0, msg, show, "America/New_York"))
 
 async def test_native_producing_loop_owner_and_idle_wake(tmp_path):
     from fluid.context.compiler import PromptInputs, compile_prompt
@@ -335,7 +355,8 @@ async def test_search_snippets_preserve_individual_send_times(tmp_path):
     hits = await store.search(["exampleworker"])
     hit = hits[0]
     snippets = "\n".join(_snippet_lines(hit.texts, ["exampleworker"], hit.text_times, "America/New_York"))
-    assert "2026-11-08 18:00:00 EST" in snippets and "2026-11-09 18:00:00 EST" in snippets
+    assert "[sent 2026-11-08T18:00:00-05:00]" in snippets
+    assert "[sent 2026-11-09T18:00:00-05:00]" in snippets
 
 
 @pytest.mark.parametrize("layout", ["one_text", "split_text", "image"])

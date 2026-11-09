@@ -36,7 +36,7 @@ _COLD = dict(gap_s=600.0)
 
 
 def _node(nid: str, role: str, blocks: list) -> SessionNode:
-    return SessionNode(node_id=nid, parent_id=None,
+    return SessionNode(node_id=nid, parent_id=None, ts=1_700_000_000.0,
                        message=Message(role=role, content=blocks))
 
 

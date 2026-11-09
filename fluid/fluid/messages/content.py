@@ -74,7 +74,10 @@ class ToolResultBlock(ContentBlock):
 
     def to_dict(self) -> dict[str, Any]:
         return {**super().to_dict(),
-                "delivered_steers": [dict(s.__dict__) for s in self.delivered_steers]}
+                # Preserve pre-timestamp receipt bytes when replaying old chats.
+                "delivered_steers": [
+                    {k: v for k, v in s.__dict__.items() if k != "accepted_at" or v is not None}
+                    for s in self.delivered_steers]}
 
 
 @dataclass

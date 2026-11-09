@@ -16,8 +16,9 @@ async def test_reconstruct_message_through_bounded_text_pages(tmp_path, length):
     meta = await store.create_session()
     text = "  " + ("line 🦋\n" * length)[:length] + "\nfinal bullet: keep this too  "
     await store.append(meta.session_id, SessionNode(node_id="long", parent_id=None,
-        message=Message(role="assistant", content=[Text(text=text)])))
-    ctx = ToolCtx(extra={"session_view": store.session_slice})
+        message=Message(role="assistant", content=[Text(text=text)]), ts=1_700_000_000.0))
+    ctx = ToolCtx(extra={"session_view": store.session_slice,
+                         "time_context": lambda _: {"zone": "America/New_York"}})
     preview = await session_view.handler({"session_id": meta.session_id, "count": 1}, ctx)
     assert "text preview clipped" in preview.text
     assert "offset=0, count=1, text_offset=0" in preview.text
@@ -29,7 +30,9 @@ async def test_reconstruct_message_through_bounded_text_pages(tmp_path, length):
             "offset": 0, "text_offset": position}, ctx)
         assert not result.is_error, result.text
         assert len(result.text) <= session_view._OUTPUT_CAP
-        body, footer = result.text.split("\n[0 assistant] ", 1)[1].rsplit("\n[", 1)
+        heading, paged = result.text.split("\n[0 assistant] ", 1)
+        assert "message 0 sent 2023-11-14T17:13:20-05:00" in heading
+        body, footer = paged.rsplit("\n[", 1)
         parts.append(body)
         continuation = re.search(r"text_offset=(\d+)", footer)
         if continuation is None:
@@ -40,6 +43,22 @@ async def test_reconstruct_message_through_bounded_text_pages(tmp_path, length):
         position = next_position
     assert "".join(parts) == text
     assert (len(parts) > 1) is (len(text) > 16_000)
+
+
+@pytest.mark.parametrize("ts,expected", [(1_700_000_000.0, "2023-11-14T22:13:20+00:00"),
+                                         (0.0, "unknown time")])
+def test_text_page_time_survives_a_clipped_title_without_entering_the_body(ts, expected):
+    from types import SimpleNamespace
+    from fluid.store.base import RecallMessage
+
+    text = "  Tomorrow\n[keep this literal] 🦋  "
+    window = SimpleNamespace(messages=[RecallMessage(role="user", text=text, ts=ts)],
+                             start=7, total=8, session_id="example")
+    result = session_view._text_page(window, 0, "x" * 2_000, "session time")
+    heading, body = result.text.split("\n[7 user] ", 1)
+    assert len(result.text) <= session_view._OUTPUT_CAP
+    assert f"message 7 sent {expected}" in heading
+    assert body == text + "\n[end of message text]"
 
 
 async def test_text_page_selects_one_message_and_validates_ranges(tmp_path):

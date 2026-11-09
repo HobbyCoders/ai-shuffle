@@ -35,12 +35,14 @@ def as_utc(value) -> datetime | None:
         return None
 
 
-def absolute_time(value, zone: str | None = None) -> str:
-    """Stable absolute send-time rendering, including offset across DST folds."""
+def absolute_time(value, zone: str | None = None, *, compact: bool = False) -> str:
+    """Absolute send time; compact ISO offsets retain the date and DST fold."""
     dt = as_utc(value)
     if dt is None:
         return "unknown time"
     tz, label = time_zone(zone)
+    if compact:
+        return dt.astimezone(tz).isoformat(timespec="seconds")
     return f"{dt.astimezone(tz):%Y-%m-%d %H:%M:%S %Z %z} ({label})"
 
 

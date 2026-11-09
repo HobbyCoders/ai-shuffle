@@ -222,12 +222,16 @@ def _text_page(window: Any, start: int, title: str, stamp: str, zone: str | None
     msg = window.messages[0]
     if start > len(msg.text):
         return ToolOutcome(text=f"text_offset exceeds message length ({len(msg.text)} characters).", is_error=True)
+    sent = absolute_time(msg.ts, zone, compact=True) if msg.ts else "unknown time"
     heading = clip_text(
-        f"session {window.session_id}{title} — {stamp}, {window.total} messages; "
-        f"message {window.start}, text from character {start} of {len(msg.text)}:",
+        f"message {window.start} sent {sent}; "
+        f"text from character {start} of {len(msg.text)}; "
+        f"session {window.session_id}{title} — {stamp}, {window.total} messages:",
         1_000,
     )
-    prefix = f"{heading}\n[{window.start} {msg.role}] [sent {absolute_time(msg.ts, zone)}] "
+    # Offsets address only the original text, never host metadata. Keep the
+    # timestamp before the clipped session title so every page identifies it.
+    prefix = f"{heading}\n[{window.start} {msg.role}] "
     budget = _OUTPUT_CAP - len(prefix) - _FOOTER_RESERVE
     end = min(len(msg.text), start + budget)
     footer = (
@@ -239,7 +243,7 @@ def _text_page(window: Any, start: int, title: str, stamp: str, zone: str | None
 
 def _render(index: int, msg: Any, show: str, zone: str | None = "UTC") -> list[str]:
     """One message's printed lines under ``show``; [] when it shows nothing."""
-    sent = absolute_time(msg.ts, zone) if msg.ts else "unknown time"
+    sent = absolute_time(msg.ts, zone, compact=True) if msg.ts else "unknown time"
     text = clip_text(msg.text, _TEXT_CAP) if msg.text.strip() else ""
     if text and len(msg.text) > _TEXT_CAP and show != "tools":
         text += f" [text preview clipped — read with offset={index}, count=1, text_offset=0]"

@@ -295,6 +295,7 @@ async def test_cancel_side_call_accounts_partial_usage():
 def test_prompt_budget_and_duplicate_paragraphs():
     # Fixed fixture + small allowance: edits must consciously re-budget the side prompt.
     assert len(CHECKPOINT_SYSTEM) <= 700
+    assert "Keep absolute timestamps; resolve relative dates at send time." in CHECKPOINT_SYSTEM
     paragraphs = [p.strip() for p in CHECKPOINT_SYSTEM.split("\n\n") if p.strip()]
     assert len(paragraphs) == len(set(paragraphs))
     for section in ("User requests and constraints", "Decisions", "Exact identifiers", "Completed work",

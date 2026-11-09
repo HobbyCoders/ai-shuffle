@@ -150,7 +150,8 @@ def _snippet_lines(texts: list[tuple[str, str]], terms: list[str], times=(), zon
         if snippet in seen:
             continue
         seen.add(snippet)
-        stamp = _stamp(times[index], zone) if index < len(times) and times[index] else "unknown time"
+        stamp = (absolute_time(times[index], zone, compact=True)
+                 if index < len(times) and times[index] else "unknown time")
         lines.append(f"  [{role}] [sent {stamp}] {snippet}")
         if len(lines) >= _MAX_MATCHES_PER_SESSION:
             break

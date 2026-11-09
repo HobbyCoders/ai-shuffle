@@ -189,7 +189,8 @@ async def test_session_search_formats_host_injected_hits() -> None:
     assert "1 session(s) matched" in outcome.text
     assert "session ses_from_sql 'Terraform cleanup' (" in outcome.text
     assert "score 3)" in outcome.text
-    assert "[assistant] the terraform plan is clean" in outcome.text
+    # A session's last_ts is not this message's send time.
+    assert "[assistant] [sent unknown time] the terraform plan is clean" in outcome.text
 
 
 async def test_session_search_without_a_backend_is_an_error() -> None:
@@ -268,18 +269,18 @@ async def test_session_view_shows_tail_with_tool_lines(tmp_path) -> None:
     store = JsonlStore(tmp_path)
     meta = await store.create_session()
     first = SessionNode(
-        node_id="n1", parent_id=None,
+        node_id="n1", parent_id=None, ts=1_700_000_000.0,
         message=Message(role="user", content=[Text(text="run the tests")]),
     )
     second = SessionNode(
-        node_id="n2", parent_id="n1",
+        node_id="n2", parent_id="n1", ts=1_700_000_060.0,
         message=Message(role="assistant", content=[
             Text(text="Running them now."),
             ToolUseBlock(id="t1", name="Bash", input={"command": "pytest -q"}),
         ]),
     )
     third = SessionNode(
-        node_id="n3", parent_id="n2",
+        node_id="n3", parent_id="n2", ts=1_700_000_120.0,
         message=Message(role="user", content=[
             ToolResultBlock(tool_use_id="t1", content=[Text(text="2 passed")]),
         ]),
@@ -296,8 +297,8 @@ async def test_session_view_shows_tail_with_tool_lines(tmp_path) -> None:
     assert not outcome.is_error
     assert f"session {meta.session_id} 'run the tests'" in outcome.text
     assert "3 messages; showing 0–2" in outcome.text
-    assert "[0 user] run the tests" in outcome.text
-    assert "[1 assistant] Running them now." in outcome.text
+    assert "[0 user] [sent 2023-11-14T22:13:20+00:00] run the tests" in outcome.text
+    assert "[1 assistant] [sent 2023-11-14T22:14:20+00:00] Running them now." in outcome.text
     assert 'Bash({"command": "pytest -q"})' in outcome.text
     assert "-> 2 passed" in outcome.text
 
@@ -352,7 +353,7 @@ async def test_session_view_formats_host_injected_slice() -> None:
     outcome = await registry.dispatch("SessionView", {"session_id": "ses_sql"}, ctx)
     assert not outcome.is_error
     assert "session ses_sql 'SQL session'" in outcome.text
-    assert "[1 assistant] done" in outcome.text
+    assert "[1 assistant] [sent unknown time] done" in outcome.text
     assert "Read(f.py)" in outcome.text
 
 
@@ -391,12 +392,13 @@ async def test_jsonl_store_search_ranks_the_fullest_text_first(tmp_path) -> None
     assert hits[0].best == 3 and hits[1].best == 1
 
 
-def _long_slice(total: int, text_len: int = 600):
+def _long_slice(total: int, text_len: int = 600, *, dated: bool = False):
     def fake_slice(session_id, *, start=-10, count=10):
         messages = [
             RecallMessage(role="user" if i % 2 else "assistant",
                           text=f"m{i} " + "x" * text_len,
-                          tools=[f"Bash(step {i})"] if i % 2 == 0 else [])
+                          tools=[f"Bash(step {i})"] if i % 2 == 0 else [],
+                          ts=1_700_000_000.0 + i * 60 if dated else 0.0)
             for i in range(total)
         ]
         first = max(0, total + start) if start < 0 else min(start, total)
@@ -416,7 +418,7 @@ async def test_session_view_large_tail_window_keeps_the_newest_within_budget() -
     assert not outcome.is_error
     assert "[on DesktopWorker]" in outcome.text.splitlines()[0]
     assert "[149 assistant]" not in outcome.text  # 149 is odd: a user message
-    assert "[149 user] m149" in outcome.text  # the newest message is kept
+    assert "[149 user] [sent unknown time] m149" in outcome.text  # the newest message is kept
     assert "[0 assistant]" not in outcome.text  # the oldest falls to the budget
     assert "output budget reached" in outcome.text and "offset=0" in outcome.text
     assert len(outcome.text) <= 16_000
@@ -429,11 +431,36 @@ async def test_session_view_forward_page_keeps_the_earliest_and_says_where_to_re
     outcome = await registry.dispatch(
         "SessionView", {"session_id": "s", "offset": 0, "count": 200}, ctx
     )
-    assert "[0 assistant] m0" in outcome.text
+    assert "[0 assistant] [sent unknown time] m0" in outcome.text
     assert "[149 user]" not in outcome.text
     resume = outcome.text.rsplit("continue with offset=", 1)[1].rstrip("]")
     assert f"[{resume} " not in outcome.text  # the next page starts where this ended
     assert f"[{int(resume) - 1} " in outcome.text
+
+
+async def test_dated_session_view_pages_recover_every_message_within_budget() -> None:
+    import re
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(extra={"session_view": _long_slice(150, dated=True)})
+    seen, cursor = [], 0
+    for _ in range(150):
+        result = await registry.dispatch(
+            "SessionView", {"session_id": "example", "offset": cursor, "count": 150}, ctx)
+        assert not result.is_error and len(result.text) <= 16_000
+        indexes = [int(i) for i in re.findall(r"^\[(\d+) (?:user|assistant)\]", result.text, re.M)]
+        assert indexes == list(range(cursor, indexes[-1] + 1))
+        for i in indexes:
+            assert f"m{i} " + "x" * 600 in result.text
+        seen.extend(indexes)
+        if indexes[-1] == 149:
+            break
+        continuation = re.search(r"continue with offset=(\d+)", result.text)
+        assert continuation is not None
+        cursor = int(continuation[1])
+        assert cursor == indexes[-1] + 1
+    assert seen == list(range(150))
 
 
 async def test_session_view_show_modes() -> None:
@@ -444,11 +471,27 @@ async def test_session_view_show_modes() -> None:
         "SessionView", {"session_id": "s", "show": "conversation"}, ctx
     )
     assert "(conversation only)" in talk.text
-    assert "[1 user] m1" in talk.text and "Bash(" not in talk.text
+    assert "[1 user] [sent unknown time] m1" in talk.text and "Bash(" not in talk.text
     tools = await registry.dispatch("SessionView", {"session_id": "s", "show": "tools"}, ctx)
     assert "(tools only)" in tools.text
     assert "Bash(step 0)" in tools.text and "Bash(step 2)" in tools.text
     assert "m0" not in tools.text and "[1 user]" not in tools.text
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+@pytest.mark.parametrize("show", ["all", "conversation", "tools"])
+def test_session_view_dates_each_message_once_not_each_tool_line(role, show):
+    from fluid.tools.builtins.session_view import _render
+
+    message = RecallMessage(role=role, text="tomorrow", ts=1_700_000_000.0,
+                            tools=["Bash(first)", "Bash(second)"])
+    lines = _render(0, message, show, "America/New_York")
+    expected = f"[0 {role}] [sent 2023-11-14T17:13:20-05:00]"
+    if show != "tools":
+        expected += " tomorrow"
+    assert lines[0] == expected
+    assert sum(line.count("[sent ") for line in lines) == 1
+    assert ("Bash(first)" in "\n".join(lines)) is (show != "conversation")
 
 
 async def test_jsonl_recent_sessions_orders_and_summarizes(tmp_path) -> None:
