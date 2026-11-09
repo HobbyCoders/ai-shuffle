@@ -1,5 +1,7 @@
 """@-mention lists come from the worker running the chat (issue 1330)."""
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.api import projects, session_files
 from app.api.auth import require_auth
-from app.network import control
+from app.network import control, transport
 
 
 SHARED = "pv2-shared"
@@ -237,3 +239,41 @@ async def test_owner_chat_history_uses_the_session_directory(owner, monkeypatch)
 
 def test_action_is_registered():
     assert control.known_action("session-files")
+
+
+class _StalledLink(transport.PeerLink):
+    """A peer that hangs during authentication until told to answer."""
+
+    stalled = True
+    cancelled = False
+
+    async def authenticate(self, client, ctx, *, at=None):
+        if not self.stalled:
+            return
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+    async def _request(self, client, method, path, **kwargs):
+        return {"status": 200, "result": {"files": []}}
+
+
+async def test_deadline_covers_authentication_and_leaves_the_link_usable(monkeypatch):
+    context = SimpleNamespace(device_id="me", member=lambda device: None)
+    monkeypatch.setattr(control.engine, "require_context", lambda: context)
+    link = _StalledLink("peer", ["http://peer.invalid"])
+    monkeypatch.setitem(transport._links, "peer", link)
+    monkeypatch.setattr(session_files, "FORWARD_SECONDS", 0.05)
+    before = transport.connect_timeout.get()
+
+    with pytest.raises(HTTPException) as refused:
+        await asyncio.wait_for(session_files.forward("peer", SESSION, "list", {}), timeout=5)
+
+    assert (refused.value.status_code, refused.value.detail) == (503, session_files.WORKER_UNREACHABLE)
+    assert link.cancelled is True
+    assert transport.connect_timeout.get() is before
+
+    link.stalled = False
+    assert await session_files.forward("peer", SESSION, "list", {}) == {"files": []}

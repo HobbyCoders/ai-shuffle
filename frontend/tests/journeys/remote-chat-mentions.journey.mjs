@@ -22,25 +22,37 @@
 //                        Quick Access folders, and Try again recovers
 //   local-chat-unchanged a chat on this worker still lists its own files
 //   no-project-no-menu   a chat with no project at all opens no menu
+//   selected-file-sends  a file picked from the menu sends, and the model is
+//                        given its relative path (a pick is not an upload)
+//   selected-file-sends-after-reload the same chip, restored from the saved
+//                        draft of a chat that already has a turn
+//   selected-file-and-upload a pick and a real attachment in one message
+//   remote-chat-keeps-local-agents a chat on another worker still holding its
+//                        local project lists that project's agents
 import { runJourney } from './runner.mjs';
-import { SEEDED, composer, expect, gotoApp, isPhone, openFromSidebar, seededChatId, showSidebar, waitChat, waitChatOpen } from './lib/app.mjs';
+import { readFileSync } from 'node:fs';
+import { PROJECT, SEEDED, composer, expect, gotoApp, isPhone, openFromSidebar, openNewChat, seededChatId, sendButton, showSidebar, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const PEER = 'Peer worker';
 const ON_PEER = 'ONLY_ON_RUNNING_WORKER.md';
 const OFFLINE = 'The worker running this chat is offline or unreachable.';
 const MENU = '.file-autocomplete-panel';
+const CHIP = '.ProseMirror [data-file-chip]';
+const REFUSED = 'Message not sent';
 
 /**
  * Make the page see seeded chat `key` as running on PEER, and script the file
  * list that worker answers with. In the page, not page.route: the built app's
  * service worker makes the requests page.route would see.
  */
-async function simulateRemoteChat(page, status, key, { offline = false } = {}) {
+async function simulateRemoteChat(page, status, key, { offline = false, keepLocalId = false } = {}) {
 	await page.addInitScript(
-		({ id, peer, file, offline, offlineDetail }) => {
+		({ id, peer, file, offline, offlineDetail, keepLocalId }) => {
 			const original = window.fetch.bind(window);
 			window.__fileLists = [];
+			window.__subagentLists = [];
+			const local = () => (keepLocalId ? {} : { project_id: null });
 			window.__workerOffline = offline;
 			const urlOf = (input) => new URL(typeof input === 'string' ? input : input.url, location.href);
 			const markRemote = (value) => {
@@ -48,7 +60,7 @@ async function simulateRemoteChat(page, status, key, { offline = false } = {}) {
 				if (!value || typeof value !== 'object') return value;
 				const out = {};
 				for (const [k, v] of Object.entries(value)) out[k] = markRemote(v);
-				if (out.id === id) Object.assign(out, { is_remote: true, device_name: peer, project_id: null });
+				if (out.id === id) Object.assign(out, { is_remote: true, device_name: peer, ...local() });
 				return out;
 			};
 			const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -58,6 +70,7 @@ async function simulateRemoteChat(page, status, key, { offline = false } = {}) {
 				if (url.pathname === `/api/v1/sessions/${id}/live` && sessionStorage.getItem('journey:delayLive')) {
 					await new Promise((done) => setTimeout(done, 1500));
 				}
+				if (/\/subagents\/all$/.test(url.pathname)) window.__subagentLists.push(url.searchParams.get('project_id'));
 				if (url.pathname === `/api/v1/sessions/${id}/sync-status`) {
 					return json({ state: 'current', scope: 'session', initial_caught_up: true, pending_updates: 0 });
 				}
@@ -74,12 +87,12 @@ async function simulateRemoteChat(page, status, key, { offline = false } = {}) {
 				// /live describes the open chat without repeating its id.
 				const patched = markRemote(body);
 				if (url.pathname === `/api/v1/sessions/${id}/live` && patched && typeof patched === 'object' && 'project_id' in patched) {
-					Object.assign(patched, { project_id: null, is_remote: true, device_name: peer });
+					Object.assign(patched, { ...local(), is_remote: true, device_name: peer });
 				}
 				return new Response(JSON.stringify(patched), { status: response.status, headers: response.headers });
 			};
 		},
-		{ id: seededChatId(status, key), peer: PEER, file: ON_PEER, offline, offlineDetail: OFFLINE }
+		{ id: seededChatId(status, key), peer: PEER, file: ON_PEER, offline, offlineDetail: OFFLINE, keepLocalId }
 	);
 }
 
@@ -123,6 +136,34 @@ async function expectRunningWorkerFiles(page) {
 		await menu.getByText(folder, { exact: false }).first().waitFor({ timeout: 5_000 });
 	}
 }
+
+/** Real keystrokes: type the name, take the highlighted row with Enter. */
+async function pickReadme(page) {
+	await composer(page).click();
+	await page.keyboard.type('@README');
+	const menu = page.locator(MENU);
+	await menu.getByText('README.md').waitFor({ timeout: 15_000 });
+	await page.keyboard.press('Enter');
+	await menu.waitFor({ state: 'detached', timeout: 5_000 });
+	await page.locator(CHIP).first().waitFor({ timeout: 5_000 });
+}
+
+/** What the model was sent for the message carrying `token`. */
+function promptWith(status, token) {
+	return readFileSync(status.fake_ai.request_log, 'utf8').split('\n').filter((line) => line.includes(token)).pop() ?? '';
+}
+
+/** Send with the button, then require a reply rather than a refusal. */
+async function sendAndExpectReply(page, status, token, messagesAtLeast) {
+	await sendButton(page).click();
+	await waitTurnSettled(page, { messagesAtLeast, timeout: 30_000 });
+	expect(await page.getByText(REFUSED, { exact: false }).count() === 0, 'the message was not refused');
+	const prompt = promptWith(status, token);
+	expect(prompt, `the model received the message carrying ${token}`);
+	return prompt;
+}
+
+const startNewChat = async ({ page, status }) => { await openNewChat({ page, status }, { project: PROJECT }); };
 
 await runJourney({
 	name: 'remote-chat-mentions',
@@ -236,6 +277,78 @@ await runJourney({
 				await page.waitForTimeout(1000);
 				expect(await page.locator(MENU).count() === 0, 'a chat with no project opens no file menu');
 				await clearComposer(page);
+			}
+		},
+		{
+			name: 'selected-file-sends',
+			setup: startNewChat,
+			async act({ page, mark, status }) {
+				const token = uniq();
+				await mark('type @README and take the file');
+				await pickReadme(page);
+				await page.keyboard.type(` check ${token}`);
+				await mark('send the message');
+				const prompt = await sendAndExpectReply(page, status, token, 2);
+				expect(prompt.includes('@README.md'), `the model is given the relative path, got ${prompt.slice(0, 400)}`);
+			}
+		},
+		{
+			name: 'selected-file-sends-after-reload',
+			setup: startNewChat,
+			async act({ page, mark, status }) {
+				await mark('a first turn, so the chat exists');
+				await typeAndSend(page, `hello ${uniq()}`);
+				await waitTurnSettled(page, { messagesAtLeast: 2 });
+				await mark('take the file and let the draft save');
+				await pickReadme(page);
+				await draftSaved(page);
+				await mark('reload');
+				await page.reload({ waitUntil: 'domcontentloaded' });
+				await nextFrames(page);
+				await mark('page reloaded');
+				await waitChat(page, { surface: 'active', loading: 'false', session: /^s:/, messagesAtLeast: 2 }, { timeout: 60_000 });
+				await page.locator(CHIP).first().waitFor({ timeout: 10_000 });
+				const token = uniq();
+				// Focus without a tap: on a phone the tap lands on the chip, selecting it.
+				await composer(page).press('ControlOrMeta+End');
+				await page.keyboard.type(` again ${token}`);
+				await mark('send the restored chip');
+				const prompt = await sendAndExpectReply(page, status, token, 4);
+				expect(prompt.includes('@README.md'), `the restored chip still names the file, got ${prompt.slice(0, 400)}`);
+			}
+		},
+		{
+			name: 'selected-file-and-upload',
+			setup: startNewChat,
+			async act({ page, mark, status }) {
+				const token = uniq();
+				const name = `attached-${token}.txt`;
+				await mark('take the file');
+				await pickReadme(page);
+				await mark('attach a real file');
+				await page.locator('input[type="file"]').first().setInputFiles({ name, mimeType: 'text/plain', buffer: Buffer.from('attached body') });
+				await page.locator(CHIP).nth(1).waitFor({ timeout: 15_000 });
+				// Focus without a tap: on a phone the tap lands on the chip, selecting it.
+				await composer(page).press('ControlOrMeta+End');
+				await page.keyboard.type(` both ${token}`);
+				await mark('send both');
+				const prompt = await sendAndExpectReply(page, status, token, 2);
+				expect(prompt.includes('@README.md'), `the pick keeps its relative path, got ${prompt.slice(0, 400)}`);
+				expect(prompt.includes(`/${name}`) || prompt.includes(`\\\\${name}`), `the attachment keeps its full path, got ${prompt.slice(0, 400)}`);
+			}
+		},
+		{
+			name: 'remote-chat-keeps-local-agents',
+			setup: start('long', SEEDED.long, { keepLocalId: true }),
+			async act({ page, mark }) {
+				await mark('open Subagents in a chat on another worker that still holds its local project');
+				await composer(page).click();
+				await page.keyboard.type('@Subagents/');
+				await page.waitForFunction(() => window.__subagentLists.length > 0, undefined, { timeout: 15_000 });
+				const asked = await page.evaluate(() => window.__subagentLists);
+				expect(asked.every((id) => id && !id.startsWith('pv2-')), `agents are listed for the local project, got ${JSON.stringify(asked)}`);
+				await clearComposer(page);
+				await draftSaved(page);
 			}
 		}
 	],

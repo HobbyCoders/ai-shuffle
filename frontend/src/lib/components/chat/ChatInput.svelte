@@ -87,7 +87,7 @@
 	import NewSessionSentence from '$lib/components/layout/NewSessionSentence.svelte';
 	import { ArrowUp, Plus } from 'lucide-svelte';
 	import { composerCircles, createWrapWatcher } from './composer-wrap';
-	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
+	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips, isUploadChip } from './tiptap/serialization';
 
 	interface Command {
 		name: string;
@@ -1282,7 +1282,8 @@
             // Identity is carried by restored chips. A new chip at the same path
             // is still a fresh upload and must lift its own bytes.
             pendingReferences = chips.flatMap(c => c.uploadReference ? [c.uploadReference] : []);
-            const chipPaths = chips.filter(c => !c.uploadReference).map(c => c.fullPath).filter(Boolean);
+            // An @ mention is text for the agent, never an upload: the server refuses it here.
+            const chipPaths = chips.filter(c => !c.uploadReference && isUploadChip(c)).map(c => c.fullPath);
 			const legacyPaths = uploadedFiles.map(f => f.full_path);
 			const allPaths = [...new Set([...chipPaths, ...legacyPaths])];
 			pendingPaths = allPaths.length ? allPaths : undefined;
@@ -1862,7 +1863,7 @@
 							bind:this={fileAutocompleteRef}
 							inputValue={plainTextValue}
 							projectId={mentionProjectId}
-							subagentProjectId={$activeSession.isRemote ? undefined : $activeSession.project || undefined}
+							subagentProjectId={$activeSession.project || undefined}
 							profileId={$activeSession.profile}
 							worktreeId={mentionWorktreeId}
 							sessionId={$activeSession.sessionId ?? undefined}

@@ -7,6 +7,7 @@ control channel; the running worker checks it owns the session and resolves
 the session's own directory. A peer never supplies a directory, only a path
 that is checked against that one.
 """
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -75,10 +76,13 @@ async def forward(owner: str, session_id: str, action: str, params: Dict[str, An
     """Ask the worker running the chat; its refusals reach the menu as written."""
     capped = transport.connect_timeout.set(CONNECT_SECONDS)
     try:
-        result = await control.call(owner, "session-files", {
-            "action": action, "session_id": session_id, "params": params,
-        }, timeout=FORWARD_SECONDS)
-    except control.RunnerUnreachable as exc:
+        # control.call's timeout covers the action request alone; authentication
+        # runs before it, per address and with its own limits.
+        async with asyncio.timeout(FORWARD_SECONDS):
+            result = await control.call(owner, "session-files", {
+                "action": action, "session_id": session_id, "params": params,
+            }, timeout=FORWARD_SECONDS)
+    except (control.RunnerUnreachable, TimeoutError) as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, WORKER_UNREACHABLE) from exc
     except control.ControlRefused as exc:
         detail = WORKER_OUTDATED if _UNKNOWN_ACTION in str(exc) else str(exc)

@@ -160,6 +160,19 @@ export function extractFileChips(editor: Editor): FileChipAttributes[] {
 }
 
 /**
+ * Whether a chip is an uploaded attachment rather than an @ mention.
+ *
+ * Every upload endpoint answers with an absolute path, and the server admits
+ * nothing else in `upload_paths`. A mention is text for the agent to read: a
+ * project-relative path, or a chat history, note or subagent entry. Read from
+ * the attributes every chip already has, so a draft saved earlier sorts the
+ * same way.
+ */
+export function isUploadChip(chip: Pick<FileChipAttributes, 'type' | 'fullPath'>): boolean {
+	return chip.type === 'file' && /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(chip.fullPath ?? '');
+}
+
+/**
  * Check if the editor content is effectively empty.
  *
  * Returns true if the editor contains only whitespace and no file chips.

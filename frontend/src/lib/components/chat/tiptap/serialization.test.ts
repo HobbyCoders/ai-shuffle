@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { restoreMessageDocument, serializeToMessage } from './serialization';
+import { isUploadChip, restoreMessageDocument, serializeToMessage } from './serialization';
 const serialize = (text: string, paths: string[]) => {
     const doc = restoreMessageDocument(text, paths);
     return serializeToMessage({ getJSON: () => doc } as Parameters<typeof serializeToMessage>[0]);
@@ -33,5 +33,48 @@ describe('restored words with a typed upload path (#1084)', () => {
         const doc = restoreMessageDocument(text);
         expect(JSON.stringify(doc)).not.toContain('fileChip');
         expect(serialize(text, [])).toBe(text);
+    });
+});
+describe('telling uploads from @ mentions', () => {
+    const chip = (type: 'file' | 'chat_history' | 'note' | 'subagent', fullPath: string) => ({ type, fullPath });
+
+    it.each([
+        ['a project upload', '/workspace/app/uploads/photo.png'],
+        ['a chat upload', '/data/workspace/.chat/uploads/notes.txt'],
+        ['a Windows upload', 'C:\\work\\app\\uploads\\photo.png'],
+        ['a Windows upload with forward slashes', 'C:/work/app/uploads/photo.png'],
+        ['an upload on a network share', '\\\\server\\share\\photo.png'],
+    ])('keeps %s', (_name, path) => {
+        expect(isUploadChip(chip('file', path))).toBe(true);
+    });
+
+    it.each([
+        ['a project file', chip('file', 'README.md')],
+        ['a nested project file', chip('file', 'src/lib/api.ts')],
+        ['a file in the uploads folder picked by name', chip('file', 'uploads/photo.png')],
+        ['a chat history entry', chip('chat_history', 'Chat History/session.jsonl')],
+        ['a note at an absolute path', chip('note', '/data/notes/plan.md')],
+        ['a note without a file', chip('note', 'Notes/abc')],
+        ['a subagent', chip('subagent', 'Subagents/reviewer')],
+        ['an empty chip', chip('file', '')],
+    ])('leaves out %s', (_name, attrs) => {
+        expect(isUploadChip(attrs)).toBe(false);
+    });
+
+    it('treats a chip restored from a sent upload as an upload, with or without its reference', () => {
+        const path = '/workspace/app/uploads/photo.png';
+        const reference = { owner_id: 'owner', event_id: 'sent-event', index: 0, path };
+        for (const references of [[], [reference]]) {
+            const restored = restoreMessageDocument(`read @${path}`, [path], references);
+            const attrs = JSON.parse(JSON.stringify(restored)).content[0].content[1].attrs;
+            expect(isUploadChip(attrs)).toBe(true);
+        }
+    });
+
+    it('leaves a mention in restored text as text, beside a restored upload', () => {
+        const path = '/workspace/app/uploads/photo.png';
+        const restored = restoreMessageDocument(`see @README.md and @${path}`, [path]);
+        expect(restored.content?.[0].content?.map(node => node.type)).toEqual(['text', 'fileChip']);
+        expect(serialize(`see @README.md and @${path}`, [path])).toBe(`see @README.md and @${path}`);
     });
 });

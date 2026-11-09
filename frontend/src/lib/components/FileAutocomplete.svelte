@@ -924,6 +924,13 @@
     max-height: 14rem;
   }
 
+  /* The composer is narrow on a phone: the name matters, and the icon already says the kind. */
+  @media (max-width: 480px) {
+    .file-autocomplete-panel .autocomplete-badge {
+      display: none;
+    }
+  }
+
   .file-load-error {
     color: var(--muted-foreground);
   }
