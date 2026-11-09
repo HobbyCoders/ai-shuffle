@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import TurnNavigator from './TurnNavigator.svelte';
 import type { ChatMessage } from '$lib/stores/types';
@@ -216,6 +216,83 @@ describe('TurnNavigator', () => {
 			vi.advanceTimersByTime(1000);
 			expect(onSelect).not.toHaveBeenCalled();
 			expect(container.querySelector('.is-hovered')).toBeNull();
+		});
+
+		describe('with a sheet or picker open', () => {
+			let trigger: HTMLButtonElement;
+			beforeEach(() => {
+				trigger = document.createElement('button');
+				trigger.setAttribute('aria-haspopup', 'dialog');
+				trigger.setAttribute('aria-expanded', 'true');
+				document.body.append(trigger);
+			});
+			afterEach(() => trigger.remove());
+			const touch = { pointerType: 'touch', isPrimary: true, pointerId: 2 };
+
+			it('a tap that closes it does not select the tick, and leaves it unlit', async () => {
+				const onSelect = vi.fn();
+				render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+				const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
+				tick.focus();
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick);
+				expect(onSelect).not.toHaveBeenCalled();
+				expect(document.activeElement).not.toBe(tick);
+			});
+
+			it('a slide that closes it neither scrubs nor selects', async () => {
+				vi.useFakeTimers();
+				const onSelect = vi.fn();
+				const { container } = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+				const rail = layOut(container);
+				const tick = screen.getAllByRole('button', { name: /^Turn/ })[0];
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(0) });
+				await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
+				expect(container.querySelector('.is-scrubbing')).toBeNull();
+				vi.advanceTimersByTime(1000);
+				await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick);
+				expect(onSelect).not.toHaveBeenCalled();
+			});
+
+			it('still counts as open when the popup closes itself earlier in the same press', async () => {
+				const close = () => trigger.setAttribute('aria-expanded', 'false');
+				document.addEventListener('pointerdown', close, true);
+				const onSelect = vi.fn();
+				render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+				const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				document.removeEventListener('pointerdown', close, true);
+				expect(trigger.getAttribute('aria-expanded')).toBe('false');
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick);
+				expect(onSelect).not.toHaveBeenCalled();
+			});
+
+			it('the very next tap, once it has closed, selects as usual', async () => {
+				const onSelect = vi.fn();
+				render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+				const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick);
+				trigger.setAttribute('aria-expanded', 'false');
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick);
+				expect(onSelect).toHaveBeenCalledTimes(1);
+				expect(onSelect).toHaveBeenLastCalledWith(3);
+			});
+
+			it('leaves a mouse click alone', async () => {
+				const onSelect = vi.fn();
+				render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+				const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
+				await fireEvent.pointerDown(tick, { pointerType: 'mouse', isPrimary: true, pointerId: 1 });
+				await fireEvent.click(tick);
+				expect(onSelect).toHaveBeenLastCalledWith(3);
+			});
 		});
 
 		it('leaves a mouse drag to hover and click', async () => {

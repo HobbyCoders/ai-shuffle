@@ -132,12 +132,17 @@
 		startTick: number;
 		/** Timestamp of the previous edge-scroll frame (0: not scrolling). */
 		lastFrame: number;
+		/** This press closes an open sheet or picker, so the rail does nothing with it. */
+		dismissing: boolean;
 	}
 	let scrub: Scrub | null = null;
 	let scrubbing = $state(false);
 	let dwellTimer: ReturnType<typeof setTimeout> | undefined;
 	let edgeFrame = 0;
 	let suppressClick = { index: -1, until: 0 };
+	/** Was a sheet or picker open as this press began? Read at the window, ahead of
+	 *  the popup's own outside-press handling, which closes it during this press. */
+	let popupOpenAtPress = false;
 
 	/** The tick nearest a viewport y, clamped to the rail's visible box. */
 	function indexAtY(clientY: number): number | null {
@@ -201,11 +206,13 @@
 	function endScrub(commit: boolean) {
 		const active = scrub?.active ?? false;
 		const startTick = scrub?.startTick ?? -1;
+		const dismissing = scrub?.dismissing ?? false;
 		clearTimeout(dwellTimer);
 		if (edgeFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(edgeFrame);
 		edgeFrame = 0;
 		if (active && commit && hoveredIndex !== null) selectFromScrub(hoveredIndex);
 		scrub = null;
+		if (dismissing) suppressClick = { index: startTick, until: Date.now() + 400 };
 		if (!active) return;
 		scrubbing = false;
 		hoveredIndex = null;
@@ -220,6 +227,7 @@
 	function onRailPointerDown(event: PointerEvent) {
 		if (event.pointerType === 'mouse' || event.isPrimary === false) return;
 		endScrub(false);
+		suppressClick = { index: -1, until: 0 };
 		const landed = event.target instanceof Element ? event.target.closest('.tick') : null;
 		scrub = {
 			pointerId: event.pointerId,
@@ -228,12 +236,13 @@
 			active: false,
 			selected: null,
 			startTick: landed && rail ? Array.prototype.indexOf.call(rail.children, landed) : -1,
-			lastFrame: 0
+			lastFrame: 0,
+			dismissing: popupOpenAtPress
 		};
 	}
 
 	function onRailPointerMove(event: PointerEvent) {
-		if (!scrub || event.pointerId !== scrub.pointerId) return;
+		if (!scrub || scrub.dismissing || event.pointerId !== scrub.pointerId) return;
 		scrub.y = event.clientY;
 		if (!scrub.active) {
 			if (Math.abs(scrub.y - scrub.startY) < SCRUB_SLOP_PX) return;
@@ -296,6 +305,10 @@
 	}
 </script>
 
+<svelte:window
+	onpointerdowncapture={() => (popupOpenAtPress = document.querySelector('[aria-haspopup][aria-expanded="true"]') !== null)}
+/>
+
 <nav
 	bind:this={nav}
 	class="turn-nav"
@@ -334,8 +347,7 @@
 				aria-current={index === resolvedIndex ? 'true' : undefined}
 				tabindex={index === (focusedTick ?? resolvedIndex) ? 0 : -1}
 				onclick={(event) => {
-					if (index === suppressClick.index && Date.now() < suppressClick.until) return;
-					onSelect(index);
+					if (index !== suppressClick.index || Date.now() >= suppressClick.until) onSelect(index);
 					// A tap focuses the tick, which would keep it lit as if it were
 					// the current turn after the reader scrolls on.
 					if (lastPointerType === 'touch') event.currentTarget.blur();
