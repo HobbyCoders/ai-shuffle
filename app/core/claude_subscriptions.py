@@ -290,8 +290,15 @@ def _tag(account_id: str) -> str:
 def payload() -> dict[str, Any]:
     """The ``subscription`` part of the saved-accounts envelope."""
     with _lock:
+        refresh_error = {}
         try:
             _poll_pending()
+        except Exception:  # noqa: BLE001 — a failed mutation need not prevent reading
+            logger.warning("Could not update a pending Claude sign-in", exc_info=True)
+            refresh_error["subscription_error"] = "storage_unavailable"
+        try:
+            # Polling mutates its own loaded copy. Always read durable state,
+            # including when an adoption or failed-status write did not commit.
             state = _load()
         except Exception:  # noqa: BLE001 — keys still list; the error is named
             logger.warning("Could not read saved Claude sign-ins", exc_info=True)
@@ -319,7 +326,6 @@ def payload() -> dict[str, Any]:
                 "checked_at": account.get("checked_at"),
                 "needs_sign_in": not folder_ok or account.get("signed_in") is False,
             })
-        refresh_error = {}
         if identities_changed:
             try:
                 _save(state)
