@@ -145,6 +145,29 @@ test('a row that passes its old position on the way up has not returned', () => 
 	assert.equal(transcriptMovements(frames(rows, { content, composer })), 0);
 });
 
+test('a near-return is not the named correction, so a later bounce from its end still counts', () => {
+	const rows = [100, 108.5, 102.1, 108.1, 102.1, 102.1];
+	const composer = [592, 600.5, 600.5, 600.5, 600.5, 600.5];
+	const content = [2000, 2000, 2008.5, 2008.5, 2014.5, 2014.5];
+	const frames = rows.map((row, i) => ({ row, composer: composer[i], content: content[i], gap: 0 }));
+	assert.ok(transcriptMovements(frames, { knownCorrection: 8.5 }) >= 2);
+	const rested = [...frames, ...Array.from({ length: 24 }, () => frames.at(-1))];
+	assert.ok(transcriptMovements(rested, { knownCorrection: 8.5 }) >= 2);
+});
+
+test('a correction that ends within the tolerance is forgiven, and a bounce from its end still counts', () => {
+	const rows = [100, 108.5, 101.5, 101.5];
+	const composer = [592, 600.5, 600.5, 600.5];
+	const content = [2000, 2000, 2008.5, 2008.5];
+	const frames = rows.map((row, i) => ({ row, composer: composer[i], content: content[i], gap: 0 }));
+	assert.equal(transcriptMovements(frames, { knownCorrection: 8.5 }), 0);
+	const rows2 = [100, 108.5, 102, 108, 102, 102];
+	const composer2 = [592, 600.5, 600.5, 600.5, 600.5, 600.5];
+	const content2 = [2000, 2000, 2008.5, 2008.5, 2014.5, 2014.5];
+	const frames2 = rows2.map((row, i) => ({ row, composer: composer2[i], content: content2[i], gap: 0 }));
+	assert.ok(transcriptMovements(frames2, { knownCorrection: 8.5 }) >= 2);
+});
+
 test('a return is read against where the row rested, including its drift', () => {
 	const rows = [68, 70, 154, 124, 72, 72];
 	const content = [2000, 2000, 2000, 2030, 2082, 2082];

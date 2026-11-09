@@ -69,6 +69,8 @@ function findReturns(rows, tolerance) {
  * The frames with the named correction taken out of row, composer and content,
  * as if it never happened. Doing this first means forgiving it cannot change
  * what any bounce is measured from, or leave its height to explain a later step.
+ * Only a correction that ends where it began is one: removing it then leaves
+ * every other stop in place, because the step it flattens is too small to count.
  */
 function withoutCorrection(frames, size, tolerance) {
 	const matches = (change) => Math.abs(change - size) <= CORRECTION_MARGIN;
@@ -77,6 +79,7 @@ function withoutCorrection(frames, size, tolerance) {
 		const start = Math.max(0, from - CATCH_UP_FRAMES);
 		const gave = frames[to].composer - frames[start].composer;
 		const added = frames[to].content - frames[start].content;
+		if (Math.abs(frames[to].row - frames[from].row) > tolerance) continue;
 		if (!matches(Math.max(...path) - Math.min(...path)) || !matches(gave) || !matches(added)) continue;
 		return frames.map((frame, i) => i <= start ? frame : {
 			...frame,
