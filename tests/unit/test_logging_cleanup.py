@@ -6,7 +6,8 @@ pytest_plugins = ["pytester"]
 
 def test_interrupted_lifespan_logging_is_cleaned_before_next_test(pytester, monkeypatch):
     root = Path(__file__).resolve().parents[2]
-    monkeypatch.setenv("PYTHONPATH", f"{root}:{root / 'fluid'}")
+    # tests.conftest adds this checkout's Fluid path on every platform.
+    monkeypatch.setenv("PYTHONPATH", str(root))
     pytester.makeini("[pytest]\nasyncio_mode=auto")
     # Load the real shared teardown, not a copy of the cleanup implementation.
     pytester.makeconftest('pytest_plugins = ["tests.conftest"]')
