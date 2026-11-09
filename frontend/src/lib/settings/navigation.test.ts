@@ -203,17 +203,19 @@ describe('keeping the reader\'s place in one pane (#1043)', () => {
 	describe('a resize never brings back an old page', () => {
 		const security = { settingsView: 'page', settingsDepth: 1, settingsCategory: 'security' } as const;
 
-		it('keeps the page chosen while wide, on the entry already there, with Back to the index', () => {
+		it('keeps the page chosen while wide, above the old entry, with Back to the index', () => {
+			const go = vi.spyOn(history, 'go').mockImplementation(() => {});
 			settingsNav.selectCategory('cloud');
 			settingsNav.stacked = true;
 			settingsNav.startStack(security);
 			expect(settingsNav.view).toBe('page');
 			expect(settingsNav.category).toBe('cloud');
-			expect(settingsNav.depth).toBe(1);
-			expect(nav.pushState).not.toHaveBeenCalled();
-			expect(nav.replaceState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'page', settingsDepth: 1, settingsCategory: 'cloud' }));
-			settingsNav.followHistory({});
+			expect(settingsNav.depth).toBe(2);
+			expect(nav.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'page', settingsDepth: 2, settingsCategory: 'cloud', settingsStaleBelow: 2 }));
+			expect(nav.replaceState).not.toHaveBeenCalled();
+			settingsNav.followHistory(security);
 			expect(settingsNav.view).toBe('index');
+			expect(go).toHaveBeenCalledWith(-1);
 		});
 
 		it('keeps the entry when the reader is still on its page', () => {
@@ -226,7 +228,7 @@ describe('keeping the reader\'s place in one pane (#1043)', () => {
 			expect(nav.pushState).not.toHaveBeenCalled();
 		});
 
-		it('takes over a reload entry the wide layout has since moved on from', () => {
+		it('keeps the current page over a reload entry the wide layout has moved on from', () => {
 			settingsNav.selectCategory('cloud');
 			const reloaded = new SettingsNavigation();
 			reloaded.stacked = true;
@@ -240,9 +242,10 @@ describe('keeping the reader\'s place in one pane (#1043)', () => {
 			settingsNav.stacked = true;
 			settingsNav.startStack(security);
 			expect(settingsNav.view).toBe('detail');
-			expect(nav.replaceState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'page', settingsCategory: 'providers', settingsDepth: 1 }));
-			expect(nav.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'detail', settingsItem: 'anthropic', settingsDepth: 2 }));
-			settingsNav.followHistory({ settingsView: 'page', settingsDepth: 1, settingsCategory: 'providers' });
+			expect(nav.replaceState).not.toHaveBeenCalled();
+			expect(nav.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'page', settingsCategory: 'providers', settingsDepth: 2 }));
+			expect(nav.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'detail', settingsItem: 'anthropic', settingsDepth: 3 }));
+			settingsNav.followHistory({ settingsView: 'page', settingsDepth: 2, settingsCategory: 'providers', settingsStaleBelow: 2 });
 			expect(settingsNav.view).toBe('page');
 			expect(settingsNav.category).toBe('providers');
 		});
@@ -251,12 +254,13 @@ describe('keeping the reader\'s place in one pane (#1043)', () => {
 			const go = vi.spyOn(history, 'go').mockImplementation(() => {});
 			settingsNav.selectCategory('cloud');
 			settingsNav.stacked = true;
-			settingsNav.startStack({ settingsView: 'detail', settingsDepth: 2, settingsCategory: 'providers', settingsItem: 'old' });
-			expect(settingsNav.depth).toBe(2);
-			settingsNav.followHistory({ settingsView: 'page', settingsDepth: 1, settingsCategory: 'providers' });
+			const old = { settingsView: 'detail', settingsDepth: 2, settingsCategory: 'providers', settingsItem: 'old' } as const;
+			settingsNav.startStack(old);
+			expect(settingsNav.depth).toBe(3);
+			settingsNav.followHistory(old);
 			expect(settingsNav.view).toBe('index');
 			expect(settingsNav.category).toBe('cloud');
-			expect(go).toHaveBeenCalledWith(-1);
+			expect(go).toHaveBeenCalledWith(-2);
 			settingsNav.followHistory({});
 			expect(settingsNav.view).toBe('index');
 			expect(settingsNav.depth).toBe(0);

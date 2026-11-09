@@ -608,10 +608,18 @@ class ThinkingProgress(Event):
 
     The Claude CLI reports it during thinking that shows no text, so a host can
     tell a long think from a hung call. It is progress only: nothing in a
-    transcript comes from it, and losing one costs nothing.
+    transcript comes from it, and losing one costs nothing. See
+    ``LIVE_ONLY_EVENTS``: it is never numbered, stored or replayed.
     """
 
     estimated_tokens: int
+
+
+# Signals that mean something only to whoever is listening at that moment. The
+# bus hands them to current subscribers and gives them no seq; the store never
+# sees them. Numbering one without storing it would leave a permanent hole that
+# makes every durable replay across it wait out REPLAY_GAP_GRACE_SECONDS.
+LIVE_ONLY_EVENTS = (ThinkingProgress,)
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -86,8 +86,6 @@
 	});
 
 	let stackStarted = false;
-	/** A deep link already moved the stack: the width settling later must not reset it. */
-	let targetLanded = false;
 	$effect(() => {
 		const s = stacked;
 		untrack(() => {
@@ -97,7 +95,7 @@
 				// the page the reader was on stays open (#1043).
 				stackStarted = true;
 				if (initialItemId) settingsNav.resetStack('index', page.state as SettingsHistoryState);
-				else if (!targetLanded) settingsNav.startStack(page.state as SettingsHistoryState);
+				else settingsNav.startStack(page.state as SettingsHistoryState);
 			} else if (!s) {
 				stackStarted = false;
 				settingsNav.depth = 0;
@@ -115,10 +113,7 @@
 		untrack(() => {
 			const target = decodeTarget(raw);
 			settingsNav.stacked = stacked;
-			if (target) {
-				settingsNav.go(target);
-				targetLanded = true;
-			}
+			if (target) settingsNav.go(target);
 			layout.clearFeatureItemId();
 		});
 	});
@@ -135,7 +130,7 @@
 			firstHistory = false;
 			return;
 		}
-		untrack(() => settingsNav.followHistory(state));
+		untrack(() => settingsNav.followHistory(state, active));
 	});
 
 	// Ctrl+K while Settings is on screen: the app's one Ctrl+K owner
