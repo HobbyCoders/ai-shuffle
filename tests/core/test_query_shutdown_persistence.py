@@ -49,14 +49,17 @@ async def test_retired_query_delayed_persistence_survives_owner_disconnect(monke
     async def no_plan(*args, **kwargs):
         yield None
 
-    with ExitStack() as stack:
+    # Undo fixture patches before the harness restores its own boundaries.
+    # Reversing those owners leaks the harness's fake DB dispatcher to later
+    # tests, so real API producers would appear to create non-existent chats.
+    with ExitStack() as stack, monkeypatch.context() as patches:
         adapter = fresh_adapter()
         boundaries = engine_patches(stack, cwd=str(tmp_path), adapter=adapter)
         adapter.receive_events = messages
-        monkeypatch.setattr(sdk_options, "build_session_options", lambda **kw: (boundaries.options, {}))
-        monkeypatch.setattr(credential_gate, "refusal_for_options_async", AsyncMock(return_value=None))
-        monkeypatch.setattr(qe, "recorded_turn", no_plan)
-        monkeypatch.setattr(qe, "_record_query_message", AsyncMock())
+        patches.setattr(sdk_options, "build_session_options", lambda **kw: (boundaries.options, {}))
+        patches.setattr(credential_gate, "refusal_for_options_async", AsyncMock(return_value=None))
+        patches.setattr(qe, "recorded_turn", no_plan)
+        patches.setattr(qe, "_record_query_message", AsyncMock())
         patched_sync = qe.run_sync
 
         async def dispatch(fn, *args, **kwargs):
@@ -70,9 +73,9 @@ async def test_retired_query_delayed_persistence_survives_owner_disconnect(monke
         async def push(*args):
             published.set()
 
-        monkeypatch.setattr(qe, "run_sync", dispatch)
-        monkeypatch.setattr(qe, "_persist_turn_results", persist)
-        monkeypatch.setattr(qe, "push_memory", push)
+        patches.setattr(qe, "run_sync", dispatch)
+        patches.setattr(qe, "_persist_turn_results", persist)
+        patches.setattr(qe, "push_memory", push)
         owner = asyncio.create_task(qe.execute_query("save this work", "claude-code"))
         draining = None
         try:
