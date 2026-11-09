@@ -36,9 +36,9 @@ test('the row landing a frame after the content or composer is still explained',
 });
 
 test('that same return is a bounce when the correction is not named, as on a phone', () => {
-	const rows = [68, 68, 68, 76, 68, -322, -322];
-	const content = [3650, 3650, 3658, 3658, 3658, 4048, 4048];
-	const composer = [744, 744, 752, 752, 752, 752, 752];
+	const rows = [68, 68, 68, 76, 68, 68, -322, -322];
+	const content = [3650, 3650, 3658, 3658, 3658, 3658, 4048, 4048];
+	const composer = [744, 744, 752, 752, 752, 752, 752, 752];
 	assert.equal(transcriptMovements(frames(rows, { content, composer })), 2);
 });
 
@@ -186,6 +186,26 @@ test('a forgiven correction uses up what explained it', () => {
 	const content = [2000, 2000, 2008, 2008, 2008, 2008];
 	const composer = [744, 752, 752, 752, 752, 752];
 	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 2);
+});
+
+test('a bounce around a one-frame turning point counts', () => {
+	const rows = [68, 98, 38, 58, 38, 38];
+	const content = [2000, 2000, 2060, 2060, 2080, 2080];
+	const composer = [592, 622, 622, 622, 622, 622];
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 2);
+});
+
+test('a one-frame turn is a place the row can return to, at the start, middle or end', () => {
+	assert.equal(transcriptMovements(frames([68, 98, 68, 68, 68, 68])), 2);
+	assert.equal(transcriptMovements(frames([68, 68, 98, 68, 68, 68])), 2);
+	assert.equal(transcriptMovements(frames([68, 68, 68, 68, 98, 68])), 2);
+});
+
+test('a frame landing near the old place while the row carries on past it is not a return', () => {
+	const rows = [100, 186, 150, 101, 60, 0, -60, -60];
+	const content = [2000, 2000, 2036, 2085, 2126, 2186, 2246, 2246];
+	const composer = [592, 678, 678, 678, 678, 678, 678, 678];
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 0);
 });
 
 test('a follow that stops short by the measured room below it is the same movement', () => {

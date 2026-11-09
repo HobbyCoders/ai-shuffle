@@ -29,49 +29,38 @@ const CATCH_UP_FRAMES = 3;
 /** How far a return may differ from a named correction's size and still be that correction. */
 const CORRECTION_MARGIN = 1;
 
-/** The row rested here: the start of the path, or a frame with a still neighbour. */
-function restedAt(rows, i, tolerance) {
-	return i === 0 || Math.abs(rows[i] - rows[i - 1]) <= tolerance || Math.abs(rows[i + 1] - rows[i]) <= tolerance;
-}
-
-/** The row stopped travelling here: it rested, ran out of path, or turned around. */
+/** The row stopped here: the send began or ended, it held still, or it reversed. */
 function stoppedAt(rows, i, tolerance) {
-	return i === rows.length - 1 || restedAt(rows, i, tolerance) || Math.sign(rows[i] - rows[i - 1]) !== Math.sign(rows[i + 1] - rows[i]);
+	if (i === 0 || i === rows.length - 1) return true;
+	const into = beyondStill(rows[i] - rows[i - 1], tolerance);
+	const out = beyondStill(rows[i + 1] - rows[i], tolerance);
+	return Math.sign(into) * Math.sign(out) <= 0;
 }
 
 /**
- * The frame the row left a resting place from, if frame `at` is the row back at
- * that place. Reads every earlier resting place straight from the path, so drift
- * while resting and the steps taken on the way cannot hide a return. Back means
- * within the tolerance, or stopped within a quarter of how far the row went. A
- * frame only passing near the place on its way somewhere else is not back.
+ * Each bounce as `{ from, to }`. A bounce is the row reversing and stopping back
+ * at a place it stopped at earlier: within the tolerance, or within a quarter of
+ * how far it went. Going on past that place without stopping there is not one.
+ * Each frame belongs to one bounce, so a place reached by one can start the next.
  */
-function leftFrom(rows, at, tolerance) {
-	let low = Infinity;
-	let high = -Infinity;
-	for (let from = at - 1; from >= 0; from--) {
-		const far = Math.max(high - rows[from], rows[from] - low, 0);
-		const off = Math.abs(rows[at] - rows[from]);
-		if (restedAt(rows, from, tolerance) && far - off > tolerance && (off <= tolerance || (stoppedAt(rows, at, tolerance) && off <= far / 4))) return from;
-		low = Math.min(low, rows[from]);
-		high = Math.max(high, rows[from]);
-	}
-	return null;
-}
-
-/** Each time the row left a place and came back: `{ from, to }`, to the first frame back, however long it stays. */
 function findReturns(rows, tolerance) {
 	const returns = [];
-	let stillBack = -1;
+	let since = 0;
 	for (let at = 1; at < rows.length; at++) {
-		if (stillBack === at - 1 && Math.abs(rows[at] - rows[at - 1]) <= tolerance) {
-			stillBack = at;
-			continue;
+		if (!stoppedAt(rows, at, tolerance)) continue;
+		let low = Infinity;
+		let high = -Infinity;
+		for (let from = at - 1; from >= since; from--) {
+			const far = Math.max(high - rows[from], rows[from] - low, 0);
+			const off = Math.abs(rows[at] - rows[from]);
+			if (stoppedAt(rows, from, tolerance) && far - off > tolerance && off <= Math.max(tolerance, far / 4)) {
+				returns.push({ from, to: at });
+				since = at;
+				break;
+			}
+			low = Math.min(low, rows[from]);
+			high = Math.max(high, rows[from]);
 		}
-		const from = leftFrom(rows, at, tolerance);
-		if (from === null) continue;
-		returns.push({ from, to: at });
-		stillBack = at;
 	}
 	return returns;
 }
