@@ -12,11 +12,11 @@ In development since January 2026 and open-sourced in October 2026.
 
 ## Why AI Shuffle
 
-- **Use the AI you already pay for.** Claude, ChatGPT or SuperGrok subscriptions, or API keys for Claude, OpenAI, OpenRouter, xAI and local models. Your provider bills you directly; we add no markup and never see your prompts.
+- **Use the AI you already pay for.** Subscriptions for Claude, ChatGPT, SuperGrok, Kimi Code, MiniMax M Plan or OpenCode Go, or API keys for Claude, OpenAI, OpenRouter, xAI, Kimi, MiniMax, OpenCode and local models. Claude also runs through Amazon Bedrock, Google Vertex AI or Microsoft Foundry. Your provider bills you directly; we add no markup and never see your prompts.
 - **Runs on your hardware.** Code, chats and keys stay on your machines. No account needed.
 - **Mix models freely.** Any signed-in model can hand work to any other. A Claude session can delegate to a ChatGPT model, or the other way round.
 - **All your machines, one app.** Connect your desktop, laptop and server, move chats between them, and check in from the Android app.
-- **All your usage in one place.** See what's left on every plan, with reset times, without visiting each provider's site.
+- **All your usage in one place.** See what's left on your Claude, ChatGPT and SuperGrok plans, with reset times, without visiting each provider's site. Kimi, MiniMax and OpenCode plans don't have usage meters yet.
 - **A smarter harness.** Every session runs on [Fluid](#fluid-our-own-agent-harness), our own agent engine: compaction that forgets nothing, memory that learns, and batched tool calls.
 - **Free and open source.** AGPL-3.0, with no license key, trial or usage cap.
 
@@ -49,9 +49,9 @@ Next, follow [first run](docs/content/getting-started/first-run.md) to connect y
 - **Work across machines.** A [worker network](docs/content/features/worker-network.md) shares settings, keys and chats. Move a chat mid-task, or let an agent start and run chats on your other machines for you.
 - **Automate.** [Automations](docs/content/features/automations.md) run agents on a schedule, a timer, a webhook or an incoming message, with spending limits and approval steps.
 - **Connect your apps.** [Connectors](docs/content/connectors/_index.md) for Telegram, Discord, Slack, WhatsApp, Signal, iMessage, Gmail, Home Assistant, Philips Hue, Spotify and more, plus any MCP server and [plugins](docs/content/features/plugins.md).
-- **Talk and create.** Live [voice calls](docs/content/features/voice.md) on OpenAI's realtime voice models, dictation, and images, video and audio from fal.ai's model library. Higgsfield support is coming soon.
+- **Talk and create.** Live [voice calls](docs/content/features/voice.md) on OpenAI's GPT Live or xAI's Grok Voice, with an API key or your ChatGPT or SuperGrok subscription. Dictation. Images, video and audio from fal.ai's model library, plus images from your OpenAI or xAI account and video from SuperGrok. Higgsfield support is coming soon.
 - **Stay in control.** Choose what each agent may do, approve risky steps, and block commands with [hooks](docs/content/features/hooks.md).
-- **And more.** [Terminals](docs/content/features/terminals.md) beside the chat, [notes](docs/content/features/notes.md), and a [REST API](docs/content/api-reference/_index.md).
+- **And more.** [Terminals](docs/content/features/terminals.md) beside the chat, a browser agents can drive while you watch, computer use on the desktop app, code review with line comments you send back to the agent, [notes](docs/content/features/notes.md), and a [REST API](docs/content/api-reference/_index.md).
 
 ![Phone worker list in the mobile app](docs/images/readme/phone-workers.png)
 
@@ -71,19 +71,20 @@ Fluid is the engine that runs your agents: it talks to the model, runs tools, as
 
 **Why not just wrap each provider's agent?** Claude Code, Codex and the rest each have their own tools, permissions, memory and limits. Wrapping them would mean features that differ by provider and bugs we can't fix. With Fluid, an agent works the same way whichever model you pick.
 
-**The exception: Claude subscriptions.** Anthropic only allows Claude Pro and Max subscriptions through its own Claude Code, so for those Fluid drives the official Claude Code CLI and never reuses your sign-in elsewhere. Those sessions keep AI Shuffle's tools, connectors and memory, but compaction and tool calling are Claude Code's own. For Claude fully inside Fluid, use an Anthropic API key.
+**The exception: Claude.** Anthropic only allows Claude Pro and Max subscriptions through its own Claude Code, so Fluid drives the official Claude Code CLI for those and never reuses your sign-in elsewhere. By default the app runs Claude on an Anthropic API key, Amazon Bedrock, Google Vertex AI or Microsoft Foundry the same way. These sessions keep AI Shuffle's tools, connectors and memory, and they use Fluid's compaction by default (Claude Code 2.1.287 or newer; switch it off with **Smarter compaction** in Settings). Claude Code's own summary only steps in when an automatic compaction can't free enough room or can't reach Fluid. Turning repeated work into skills needs a ChatGPT, SuperGrok, Kimi, MiniMax or OpenCode plan connected to do the learning. Tool calling stays Claude Code's own, so batched tool calls are not available there. For Claude models fully inside Fluid, reach them through OpenRouter or a custom gateway, or run the standalone [`fluid`](fluid/README.md) command line with an Anthropic API key.
 
 <details>
 <summary>How each provider runs</summary>
 
 | Provider | How Fluid runs it | Sign-in |
 | --- | --- | --- |
-| Anthropic (Claude) API | Fluid's own loop | API key |
 | OpenAI | Fluid's own loop | API key or ChatGPT subscription |
 | xAI | Fluid's own loop | API key or SuperGrok subscription |
-| OpenRouter and OpenAI-compatible gateways | Fluid's own loop | API key |
+| Kimi, MiniMax and OpenCode | Fluid's own loop | API key, or a Kimi Code, MiniMax M Plan or OpenCode Go plan key |
+| OpenRouter and custom gateways (OpenAI- or Anthropic-compatible) | Fluid's own loop | API key |
 | Local models (llama.cpp, Ollama and similar) | Fluid's own loop | Optional key |
 | Claude Pro or Max subscription | Official Claude Code CLI, driven by Fluid | Claude Code's own sign-in |
+| Claude on an Anthropic API key, Amazon Bedrock, Google Vertex AI, Microsoft Foundry or an LLM gateway set up under Claude | Official Claude Code CLI, driven by Fluid | Key or cloud credentials saved in Settings |
 
 </details>
 

@@ -1,13 +1,12 @@
 <script lang="ts">
 	/**
-	 * The six-character confirmation code of a peer-terminal request (#196),
-	 * drawn the same way on both workers so the owner can compare them at a
-	 * glance: two groups of three keycaps over a draining countdown line.
-	 * The code is a comparison aid, not a secret and not authority.
+	 * A device's link code (#674), in groups of four keycaps over a draining
+	 * countdown line. Shown only on the device it belongs to and typed on the
+	 * receiving worker, so a worker relaying a different key cannot match it.
 	 */
 	import { codeGroups, countdown } from '$lib/terminal/peer';
 
-	let { code, left = null, total = 120, label = 'Confirmation code' }: {
+	let { code, left = null, total = 600, label = 'Confirmation code' }: {
 		code: string;
 		/** Seconds until the request expires, or null when unknown. */
 		left?: number | null;
@@ -17,7 +16,7 @@
 	} = $props();
 
 	const groups = $derived(codeGroups(code));
-	// Read letter by letter: "K 7 Q, 2 X M".
+	// Read letter by letter: "K 7 Q 2, X M A B".
 	const spoken = $derived(`${label}: ${groups.map((g) => g.split('').join(' ')).join(', ')}`);
 	const ratio = $derived(left === null ? 1 : Math.max(0, Math.min(1, left / total)));
 	const low = $derived(left !== null && left <= 20);
@@ -26,10 +25,11 @@
 <div class="peer-code" role="group" aria-label={label}>
 	<div class="caps" role="img" aria-label={spoken}>
 		{#each groups as group, g}
-			{#if g}<span class="gap" aria-hidden="true"></span>{/if}
-			{#each group.split('') as ch, i (g * 3 + i)}
-				<span class="cap" aria-hidden="true" style:--i={g * 3 + i}>{ch}</span>
-			{/each}
+			<span class="group" aria-hidden="true">
+				{#each group.split('') as ch, i (g * 4 + i)}
+					<span class="cap" style:--i={g * 3 + i}>{ch}</span>
+				{/each}
+			</span>
 		{/each}
 	</div>
 	{#if left !== null}
@@ -42,13 +42,14 @@
 
 <style>
 	.peer-code { display: grid; gap: 8px; justify-items: start; }
-	.caps { display: flex; align-items: center; gap: 4px; }
-	.gap { width: 8px; }
+	/* A narrow screen wraps between groups, never inside one. */
+	.caps { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 11px; }
+	.group { display: inline-flex; gap: 3px; }
 	.cap {
-		display: grid; place-items: center; width: 30px; height: 38px; box-sizing: border-box;
+		display: grid; place-items: center; width: 22px; height: 32px; box-sizing: border-box;
 		border:1px solid var(--border);
 		border-radius: 7px; background: var(--code-bg); color: var(--foreground);
-		font: 600 19px/1 var(--st-mono); letter-spacing: 0;
+		font: 600 15px/1 var(--st-mono); letter-spacing: 0;
 		box-shadow: inset 0 1px 0 color-mix(in oklch, var(--foreground) 6%, transparent);
 		animation: cap-in 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both; animation-delay: calc(var(--i) * 35ms);
 	}
@@ -60,6 +61,6 @@
 	time { font-variant-numeric: tabular-nums; color: var(--foreground); }
 	.clock.low time { color: var(--warning); }
 	@keyframes cap-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
-	@media (max-width: 700px) { .cap { width: 34px; height: 42px; font-size: 21px; } }
+	@media (max-width: 700px) { .cap { width: 20px; height: 38px; font-size: 16px; } }
 	@media (prefers-reduced-motion: reduce) { .cap { animation: none; } .fill { transition: none; } }
 </style>

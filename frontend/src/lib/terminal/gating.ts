@@ -17,7 +17,11 @@ export type ProbeState =
 	/** The probe answered with an error code (for example chat_on_other_worker). */
 	| { status: 'error'; code: string; message: string }
 	| { status: 'ready'; targets?: TerminalTarget[]; supported: boolean; reason: string | null; worker: string; shells: string[];
-		defaultShell: string | null; folder: string | null; folderSource: string | null; open: number; limit: number };
+		defaultShell: string | null; folder: string | null; folderSource: string | null; open: number; limit: number;
+		/** The chat's own worker, when that isn't this worker. */
+		chatWorkerId?: string | null;
+		/** Why this browser can't hold the key a peer shell needs, or null when it can. */
+		deviceKeyProblem?: string | null };
 
 export type Access =
 	/** Show no terminal controls at all. */
@@ -26,7 +30,13 @@ export type Access =
 	| { kind: 'disabled'; reason: string }
 	| { kind: 'ready' };
 
-const ON_OTHER_WORKER = 'That chat runs on another worker. Terminals open on this worker only for now.';
+const ON_OTHER_WORKER = 'That chat runs on another worker. Turn on Terminals on other workers in Settings to open a shell there.';
+
+/** The chat's own worker row, when the chat runs on another worker. */
+export function chatWorkerTarget(probe: ProbeState): TerminalTarget | null {
+	if (probe.status !== 'ready' || !probe.chatWorkerId) return null;
+	return (probe.targets ?? []).find((target) => target.kind === 'worker' && target.worker_id === probe.chatWorkerId) ?? null;
+}
 
 /** Whether the panel toggle and command buttons show, and whether they work. */
 export function terminalAccess(probe: ProbeState): Access {
@@ -41,6 +51,12 @@ export function terminalAccess(probe: ProbeState): Access {
 			if (probe.code === 'chat_on_other_worker') return { kind: 'disabled', reason: probe.message || ON_OTHER_WORKER };
 			return { kind: 'hidden' };
 		case 'ready':
+			if (probe.chatWorkerId) {
+				// The chat's worker decides, not this one. A shell there needs this device's key.
+				const row = chatWorkerTarget(probe);
+				if (!row || !row.available) return { kind: 'disabled', reason: row?.reason || ON_OTHER_WORKER };
+				return probe.deviceKeyProblem ? { kind: 'disabled', reason: probe.deviceKeyProblem } : { kind: 'ready' };
+			}
 			if (!probe.supported) return { kind: 'disabled', reason: probe.reason || 'Terminals are not supported on this worker yet.' };
 			return { kind: 'ready' };
 	}
@@ -55,11 +71,15 @@ export function blockAccess(block: CommandBlock, probe: ProbeState): Access {
 	const base = terminalAccess(probe);
 	if (base.kind !== 'ready' || probe.status !== 'ready') return base;
 	if (block.host) return { kind: 'disabled', reason: 'Host shells are not supported yet. Terminals open on this worker only for now.' };
-	if (block.on && block.on.toLowerCase() !== probe.worker.toLowerCase()) {
-		return { kind: 'disabled', reason: `This command is for ${block.on}. Terminals open on ${probe.worker} only for now.` };
+	// A chat on another worker opens there, so that worker is the one to match
+	// (and it refuses a shell it doesn't have; this worker can't tell).
+	const peer = chatWorkerTarget(probe);
+	const workerName = peer?.name ?? probe.worker;
+	if (block.on && block.on.toLowerCase() !== workerName.toLowerCase()) {
+		return { kind: 'disabled', reason: `This command is for ${block.on}. Terminals open on ${workerName} only for now.` };
 	}
-	if (block.shell && !probe.shells.includes(block.shell)) {
-		return { kind: 'disabled', reason: `${block.shell} isn't available on ${probe.worker}.` };
+	if (!peer && block.shell && !probe.shells.includes(block.shell)) {
+		return { kind: 'disabled', reason: `${block.shell} isn't available on ${workerName}.` };
 	}
 	const problem = block.cwd ? cwdProblem(block.cwd) : null;
 	if (problem) return { kind: 'disabled', reason: problem };
@@ -177,7 +197,7 @@ export function blockTarget(block: CommandBlock, probe: ProbeState): BlockTarget
 	const fromFence = !!block.cwd;
 	const path = block.cwd ?? probe.folder ?? '';
 	return {
-		worker: block.on ?? probe.worker,
+		worker: block.on ?? chatWorkerTarget(probe)?.name ?? probe.worker,
 		shell: block.shell ?? probe.defaultShell ?? '',
 		folder: fromFence ? path : folderName(path),
 		path,

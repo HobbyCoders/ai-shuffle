@@ -10,6 +10,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
+	import { terminalsApi } from '$lib/api/terminals';
 	import { fetchOwnerStatus, setTrustedLan, type OwnerStatus, type OwnerStatusFailure } from '$lib/api/owner';
 	import { ownerAccess } from '$lib/stores/owner-access.svelte';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
@@ -22,6 +23,7 @@
 	import SettingRow from '../rows/SettingRow.svelte';
 	import Switch from '../rows/Switch.svelte';
 	import ValueText from '../rows/ValueText.svelte';
+	import PeerDeviceLinks from '$lib/components/terminal/PeerDeviceLinks.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import OwnerPasswordForm from './editors/OwnerPasswordForm.svelte';
@@ -282,14 +284,55 @@
 					: 'Loading…'
 	);
 
+	/* ---------- terminals on other workers ---------- */
+
+	let peerTerminalsOn = $state<boolean | null>(null);
+	let peerBusy = $state(false);
+	let peerError = $state('');
+	let workerName = $state('this worker');
+
+	async function loadPeerTerminals() {
+		try {
+			const policy = await api.get<{ network_peer_terminals: boolean }>('/settings/owner-policy');
+			peerTerminalsOn = policy.network_peer_terminals === true;
+			peerError = '';
+		} catch (e: unknown) {
+			if (isForbidden(e)) peerTerminalsOn = false;
+			else peerError = getErrorMessage(e, 'Could not load this setting.');
+		}
+		try {
+			const worker = await terminalsApi.list();
+			workerName = worker.worker?.name || 'this worker';
+		} catch {
+			// The list is only for the worker's name; the default words still work.
+		}
+	}
+
+	async function setPeerTerminals(on: boolean) {
+		peerBusy = true;
+		peerError = '';
+		try {
+			const saved = await api.put<{ network_peer_terminals: boolean }>('/settings/owner-policy', { network_peer_terminals: on });
+			peerTerminalsOn = saved.network_peer_terminals === true;
+			flashSaved();
+		} catch (e: unknown) {
+			peerError = isForbidden(e) ? FORBIDDEN_TEXT : getErrorMessage(e, 'Could not save this setting.');
+		} finally {
+			peerBusy = false;
+		}
+	}
+
 	/* ---------- lifecycle ---------- */
 
 	onMount(() => {
 		void loadOwner();
 		void loadInstructions();
+		void loadPeerTerminals();
 	});
-	watchResources(['settings'], () => loadInstructions(true));
+	watchResources(['settings'], () => { void loadInstructions(true); void loadPeerTerminals(); });
 </script>
+
+{#snippet peerDevices()}<PeerDeviceLinks workerName={workerName} full />{/snippet}
 
 <PreferencePage category="security">
 	<RowGroup title="Sign-in">
@@ -392,6 +435,14 @@
 		</SettingRow>
 	</RowGroup>
 	{#if instrError && !instrOpen}<p class="st-msg err" role="alert">{instrError}</p>{/if}
+
+	<RowGroup title="Terminals on other workers">
+		<SettingRow id="security.peerTerminals" dim={peerTerminalsOn === null} value={peerTerminalsOn ?? undefined} onReset={() => void setPeerTerminals(false)}
+			expanded={peerTerminalsOn ? peerDevices : undefined}>
+			<Switch checked={peerTerminalsOn === true} disabled={peerBusy || peerTerminalsOn === null} onchange={(on) => void setPeerTerminals(on)} />
+		</SettingRow>
+	</RowGroup>
+	{#if peerError}<p class="st-msg err" role="alert">{peerError}</p>{/if}
 </PreferencePage>
 
 {#snippet ownerForm()}

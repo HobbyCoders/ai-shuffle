@@ -134,6 +134,7 @@ class ExchangeRequest(BaseModel):
     limit: int = Field(default=500, ge=1, le=2000)
     lane: Optional[str] = None
     incarnation: Optional[int] = Field(default=None, ge=1)
+    generation: Optional[int] = Field(default=None, ge=0)
     endpoints: List[str] = Field(default_factory=list, max_length=8)
     capabilities: Dict[str, Any] = Field(default_factory=dict)
     version: Optional[str] = Field(default=None, max_length=40)
@@ -588,7 +589,9 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
     with request_metrics.metrics.measure("tunnel", "POST /peer/exchange"):
         ctx = engine.require_context()
         transport.note_contact(device_id)
-        transport.note_watermarks(device_id, body.watermarks, catalog_backlog=body.catalog_backlog)
+        transport.note_watermarks(device_id, body.watermarks, catalog_backlog=body.catalog_backlog,
+                                  binding=transport.acknowledgement_binding(ctx, device_id, body.incarnation,
+                                                                            body.generation))
 
         def _work():
             store.touch_member(device_id, capabilities=body.capabilities or {}, endpoints=body.endpoints or None,
@@ -609,7 +612,7 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
                     "key_version": ctx.key_version, "incarnation": ctx.identity.incarnation,
                     "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
                     "version": settings.version, "snapshot_required": snapshot,
-                    "peer_state": 1, "flushed": body.flush,
+                    "peer_state": 1, "retention_ack": transport.RETENTION_ACK, "flushed": body.flush,
                     **({"token_binding_proof": tokens.binding_support_proof(ctx)}
                        if settings.network_token_binding_enabled else {}),
                     "session_watermarks": catalog.transcript_watermarks(body.session_ids, ctx=ctx),

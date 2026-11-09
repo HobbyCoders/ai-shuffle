@@ -61,7 +61,7 @@ export function connectionWorkers(
 		const running = sessions.filter((s) => {
 			if (s.parent_session_id || !sessionRunning(s, streaming)) return false;
 			if (install.is_self) return !s.is_remote;
-			return keys.includes(s.owner_device_id ?? '') || keys.includes(s.instance_id ?? '');
+			return keys.includes(s.owner_device_id || s.instance_id || '');
 		}).length;
 		return {
 			id: install.id,
