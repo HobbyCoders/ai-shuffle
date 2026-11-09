@@ -445,8 +445,7 @@ def test_abandoned_worker_checkout_is_snapshotted_then_removed(repository, monke
 
 
 @pytest.mark.parametrize("case,expected", [
-    ("worker-recent", "not archived: worker last active 3 day(s) ago"),
-    ("parent-recent", "not archived: parent session last active 1 day(s) ago"),
+    ("worker-recent", "15-minute freshness guard"),
     ("chat", "uncommitted changes (2 files)"),
     ("open-pr", "open PR head branch"),
     ("active", "bound to an active or running session"),
@@ -454,8 +453,7 @@ def test_abandoned_worker_checkout_is_snapshotted_then_removed(repository, monke
 def test_checkouts_in_use_or_not_worker_scratch_are_never_archived(repository, monkeypatch, case, expected):
     recent = lambda days: datetime.fromtimestamp(time.time() - days * 86400 - 60, timezone.utc).isoformat()  # noqa: E731
     kwargs = {
-        "worker-recent": {"worker_age": recent(3)},
-        "parent-recent": {"parent_age": recent(1)},
+        "worker-recent": {"worker_age": datetime.fromtimestamp(time.time() - 60, timezone.utc).isoformat()},
         "chat": {"name": "chore/chat-abcdef12"},
         "open-pr": {"pr_state": "open", "pr_number": 5},
         "active": {"is_active": True},

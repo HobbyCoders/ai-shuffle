@@ -134,7 +134,12 @@ also live under that global project root. Project `.fluid/` is a load scope
 (skills, agents, commands, plugins and settings) and the host's worktree area;
 explicit skill/plugin authoring remains supported. Do not delete legacy owner
 strays as part of a fix: old ledger/notes are copied only when canonical state is
-absent, and old scratch/reports are not migrated or cleaned automatically.
+absent. Legacy checkout scratch/reports are not migrated or cleaned automatically.
+Designated per-session scratch is temporary: settled sessions are swept every
+five minutes after an hour of filesystem quiet, with fresh session/open-turn and
+process-use checks. Missing-session folders need seven days of quiet. Ledger,
+notes and Task reports are not scratch and are never swept. Unknown safety facts
+retain files; symlinks are never followed and Windows reparse trees are retained.
 
 ### Before Committing
 

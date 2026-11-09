@@ -96,7 +96,7 @@ def _is_ancestor(base, proc):
     return False
 
 
-def _references(proc, deadline, *, protected_prefixes=None):
+def _references(proc, deadline, *, protected_prefixes=None, strict=False):
     references = set()
     count = 0
     descriptor_count = 0
@@ -110,6 +110,7 @@ def _references(proc, deadline, *, protected_prefixes=None):
                 return _disabled("process scan limit reached")
             base = Path(process.path)
             try:
+                references.add(os.fsdecode((base / "cmdline").read_bytes()).replace("\0", " "))
                 links = [base / "cwd", base / "root"]
                 with os.scandir(base / "fd") as descriptors:
                     for descriptor in descriptors:
@@ -128,7 +129,7 @@ def _references(proc, deadline, *, protected_prefixes=None):
                 continue  # exited during observation
             except PermissionError:
                 try:
-                    if _uninspectable_is_unrelated(base, proc, protected_prefixes):
+                    if not strict and _uninspectable_is_unrelated(base, proc, protected_prefixes):
                         continue
                 except (FileNotFoundError, ProcessLookupError):
                     continue
