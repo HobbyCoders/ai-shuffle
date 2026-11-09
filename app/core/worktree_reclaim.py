@@ -7,8 +7,8 @@ dry-run verdicts (:func:`plan_preview`), so the two never disagree.
 
 Besides integrated checkouts, a pass also removes: worker checkouts a reviewer
 left on a pushed commit (their own branch untouched), local branches with no
-worktree that are proven integrated or pushed with a finished PR, and, after
-a week of idleness, abandoned worker checkouts, snapshotted first under
+worktree that are proven integrated or pushed with a finished PR, and settled
+worker checkouts after a short grace (or week-old orphan checkouts), snapshotted first under
 ``refs/fluid-archive/<branch>`` so nothing is lost.
 """
 from __future__ import annotations
@@ -33,15 +33,16 @@ from app.core.git_service import git_service
 from app.core.git_worktree_ops import forget_stale_worktree_metadata, repo_worktree_lock
 
 logger = logging.getLogger(__name__)
-GRACE_SECONDS = 24 * 3600
+GRACE_SECONDS = 15 * 60
 # Every pass visits every local project; each stays bounded by MAX_ITEMS and
 # PASS_SECONDS. A pass costs about one PR lookup per candidate.
-INTERVAL_SECONDS = 2 * 3600
+INTERVAL_SECONDS = 5 * 60
 MAX_ITEMS = 50
 PASS_SECONDS = 120
-# Abandoned worker scratch is archived only after both the worker and its
-# parent have been idle this long.
-ARCHIVE_IDLE_SECONDS = 7 * 24 * 3600
+# Settled worker work is snapshotted promptly, not kept for a week. Missing
+# session rows still require a week of checkout/registration age.
+ARCHIVE_IDLE_SECONDS = GRACE_SECONDS
+ORPHAN_IDLE_SECONDS = 7 * 24 * 3600
 ARCHIVE_REF_PREFIX = "refs/fluid-archive/"
 ARCHIVE_IDENTITY = {"GIT_AUTHOR_NAME": "AI Shuffle", "GIT_AUTHOR_EMAIL": "noreply@hobbycoders.com",
                     "GIT_COMMITTER_NAME": "AI Shuffle", "GIT_COMMITTER_EMAIL": "noreply@hobbycoders.com"}
@@ -110,10 +111,14 @@ def _project_sessions(source):
         placeholders = ",".join("%s" for _ in rows)
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT session_id, MAX(ended_at) AS finished_at FROM turns "
-                           f"WHERE session_id IN ({placeholders}) AND ended_at IS NOT NULL GROUP BY session_id", list(rows))
-            finished = {r["session_id"]: r["finished_at"] for r in cursor.fetchall()}
+            cursor.execute(f"SELECT session_id, MAX(ended_at) AS finished_at, "
+                           f"MAX(CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END) AS open_turn FROM turns "
+                           f"WHERE session_id IN ({placeholders}) GROUP BY session_id", list(rows))
+            turns = [dict(r) for r in cursor.fetchall()]
+            finished = {r["session_id"]: r["finished_at"] for r in turns}
     busy = {s["id"] for s in active_git_sessions(list(rows.values()))}
+    if rows:
+        busy.update(r["session_id"] for r in turns if r["open_turn"])
     return [{**s, "running": s["id"] in busy, "finished_at": finished.get(s["id"])} for s in rows.values()]
 
 
@@ -316,37 +321,34 @@ def _session_activity(session_id):
     return row
 
 
-def _abandon_blocker(context, branch, sessions):
-    """Why a worker checkout is not (yet) abandoned scratch, or None when it is.
+def _abandon_blocker(context, branch, sessions, registered):
+    """Settled task work is archived, never discarded; its parent may stay busy.
 
-    Abandoned: the worker session and its parent are both idle for
-    ARCHIVE_IDLE_SECONDS, neither is running and no bound session is active.
-    Open PRs are refused earlier by the planner.
+    Bound users are checked independently by path/branch and fresh DB reads.
+    A missing worker row is NOT proof of settlement: require seven days instead.
     """
     worker_id = _worker_session_id(branch)
     if not worker_id:
         return "not a worker checkout"
     worker = next((s for s in context["sessions"] if s.get("id") == worker_id), None)
     if worker is None:
-        return "its worker session was not found"
+        try:
+            stamps = [Path(registered["path"]).stat().st_mtime]
+            stamps.extend(_activity_time(value) for value in registered.get("created_times", []))
+            if not all(math.isfinite(stamp) for stamp in stamps):
+                return "orphan checkout age unavailable"
+            if time.time() - max(stamps) < ORPHAN_IDLE_SECONDS:
+                return "missing worker session; orphan checkout retained for seven days"
+        except (OSError, ValueError, TypeError):
+            return "orphan checkout age unavailable"
+        return None
     if any(s.get("is_active") or s.get("running") for s in [worker, *sessions]):
         return "its worker session is active"
-    days = ARCHIVE_IDLE_SECONDS // 86400
-    age = _activity_age(worker) if worker.get("finished_at") else None
+    age = _activity_age(worker) if (worker.get("finished_at") or worker.get("is_active") in (False, 0)) else None
     if age is None:
         return "worker activity time unavailable"
     if age < ARCHIVE_IDLE_SECONDS:
-        return f"worker last active {int(age // 86400)} day(s) ago; archived after {days} idle days"
-    parent_id = worker.get("parent_session_id")
-    parent = _session_activity(parent_id) if parent_id else None
-    if parent:
-        if parent.get("running"):
-            return "its parent session is running"
-        parent_age = _activity_age(parent)
-        if parent_age is None:
-            return "parent session activity time unavailable"
-        if parent_age < ARCHIVE_IDLE_SECONDS:
-            return f"parent session last active {int(parent_age // 86400)} day(s) ago; archived after {days} idle days"
+        return "worker activity within the 15-minute freshness guard"
     return None
 
 
@@ -451,11 +453,19 @@ def _activity_time(value):
 def _session_grace_reason(sessions):
     for session in sessions:
         if not session.get("finished_at"):
-            return "bound session has no finished turn; dispatch may still be pending"
+            # Failed/cancelled dispatch can settle without ever opening a turn.
+            # Keep the dispatch window, not the checkout forever.
+            try:
+                old_settled = (session.get("is_active") in (False, 0)
+                               and time.time() - _activity_time(session.get("updated_at")) >= GRACE_SECONDS)
+            except (ValueError, TypeError):
+                old_settled = False
+            if not old_settled:
+                return "bound session has no finished turn; dispatch may still be pending"
         try:
-            last = max(_activity_time(session.get("updated_at")), _activity_time(session["finished_at"]))
+            last = max(_activity_time(v) for v in (session.get("updated_at"), session.get("finished_at")) if v)
             if time.time() - last < GRACE_SECONDS:
-                return "bound session has activity within the 24-hour freshness guard"
+                return "bound session has activity within the 15-minute freshness guard"
         except (ValueError, TypeError):
             return "bound session activity time unavailable"
     return None
@@ -471,7 +481,7 @@ def _checkout_grace_reason(target, registered):
         if not all(math.isfinite(stamp) for stamp in stamps):
             return "checkout creation time unavailable"
         if time.time() - max(stamps) < GRACE_SECONDS:
-            return "no commits of its own; checkout within the 24-hour freshness guard"
+            return "no commits of its own; checkout within the 15-minute freshness guard"
     except (OSError, ValueError, TypeError):
         return "checkout creation time unavailable"
     return None
@@ -497,6 +507,17 @@ def _is_link(target):
 def _js_build_output(target):
     manifest = target.parent / "package.json"
     return target.name in JS_BUILD_DIRS and manifest.is_file() and not _is_link(manifest)
+
+
+def _build_output(target):
+    if _js_build_output(target):
+        return True
+    manifest = target.parent / "Cargo.toml"
+    if target.name == "target" and manifest.is_file() and not _is_link(manifest):
+        return True
+    if target.name == "Intermediate":
+        return any(p.is_file() and not _is_link(p) for p in target.parent.glob("*.uproject"))
+    return False
 
 
 def _describe_kept(root, kept, limit=5):
@@ -544,13 +565,14 @@ def _ignored_reason(path):
         # ".gitignore" of "*") is listed file by file. Git never lists paths
         # through a link, so a cache ancestor here is a real directory.
         for depth, part in enumerate(relative.parts[:-1], 1):
-            if part in CACHE_DIRS and not _is_link(Path(path).joinpath(*relative.parts[:depth])):
+            ancestor = Path(path).joinpath(*relative.parts[:depth])
+            if not _is_link(ancestor) and (part in CACHE_DIRS or _build_output(ancestor)):
                 return
         if _is_link(target):
             kept.append(relative)
             return
         if target.is_dir():
-            if target.name in CACHE_DIRS or _js_build_output(target):
+            if target.name in CACHE_DIRS or _build_output(target):
                 return
             # --directory also collapses *unignored* parents containing only
             # ignored children. Descend those, but never an unknown ignored dir
@@ -689,7 +711,7 @@ def _plan(source, registered, context, *, pulls=None):
             return keep(reason)
         # Abandoned worker scratch is archived (snapshot, then removed), never
         # dropped. Chat checkouts and named branches never take this path.
-        blocker = _abandon_blocker(context, branch, sessions)
+        blocker = _abandon_blocker(context, branch, sessions, registered)
         if blocker:
             return keep(f"{reason}; not archived: {blocker}")
         if not branch_head or head != branch_head:
@@ -699,8 +721,8 @@ def _plan(source, registered, context, *, pulls=None):
             # commits and edits would be lost with the folder.
             return keep(f"{reason}; not archived: holds a nested Git repository: {', '.join(nested[:5])}")
         return {**row, "decision": "archive",
-                "reason": f"{reason}; abandoned worker checkout (worker and parent idle "
-                          f"{ARCHIVE_IDLE_SECONDS // 86400}+ days): snapshot kept at {ARCHIVE_REF_PREFIX}{branch}"}
+                "reason": f"{reason}; settled or old orphan worker checkout: "
+                          f"snapshot kept at {ARCHIVE_REF_PREFIX}{branch}"}
     if branch_head and head != branch_head:
         return keep("branch moved away from checkout HEAD")
     reflog = wr._git(repo, "reflog", "show", "--format=%H", f"refs/heads/{branch}") if branch else None
@@ -1008,7 +1030,7 @@ def _observe(observations, key, row, old_activity, now):
     if not old_activity:
         previous["since"] = now
     if now - previous["since"] < GRACE_SECONDS or not old_activity:
-        return {**row, "decision": "keep", "reason": "automatic 24-hour integration/activity grace period"}
+        return {**row, "decision": "keep", "reason": "automatic 15-minute integration/activity grace period"}
     return row
 
 
@@ -1232,7 +1254,7 @@ async def reclaim_branches(project_id, *, dry_run=True, limit=MAX_ITEMS, offset=
     """Delete local branches that have no worktree and hold nothing unique.
 
     Bounded like :func:`reclaim`; ``observations`` (automatic pass only) adds
-    the same 24-hour grace. Every delete is a compare-and-delete.
+    the same 15-minute grace. Every delete is a compare-and-delete.
     """
     if not _pass_lock.acquire(blocking=False):
         raise ValueError("another reclaim pass is in progress")
@@ -1378,10 +1400,10 @@ def _when(observed, row, now):
     if observed and observed.get("head") == row["head_sha"] and observed.get("since"):
         due = observed["since"] + GRACE_SECONDS
         if due <= now:
-            return "on the next automatic pass (every 2 hours)"
+            return "on the next automatic pass (every 5 minutes)"
         stamp = datetime.fromtimestamp(due, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        return f"after the 24h grace, around {stamp}"
-    return "after the 24h grace that starts at the next automatic pass"
+        return f"after the 15-minute grace, around {stamp}"
+    return "after the 15-minute grace that starts at the next automatic pass"
 
 
 def describe_cleanup(row, observed=None, now=None):
