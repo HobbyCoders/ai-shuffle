@@ -223,6 +223,9 @@ def test_unreachable_source_is_reported_then_retry_recovers(first_boot, monkeypa
 
     monkeypatch.setattr(plugin_marketplace.subprocess, "run", fail)
     service = first_boot()
+    unfetched = service.MARKETPLACES_DIR / plugin_marketplace.DEFAULT_SOURCE_ID
+    assert not unfetched.exists()
+    assert service._discover_implicit_components(unfetched)["any"] is False
     text = find_plugins("design")
     assert "search is incomplete" in text
     assert "claude-plugins-official is unavailable" in text

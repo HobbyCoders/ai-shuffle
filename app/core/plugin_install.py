@@ -404,7 +404,9 @@ def discover_implicit_components(svc, root: Path) -> Dict[str, Any]:
     Returns per-component resolved source Paths plus has_* booleans and an "any"
     convenience flag.
     """
-    root = root.resolve(strict=True)
+    # An unfetched/unavailable source is empty for catalog discovery. Actual
+    # enumeration and copying still require a strictly resolved, pinned root.
+    root = root.resolve()
     skills_dir = _resolve_implicit_component_dir(root, "skills")
     commands_dir = _resolve_implicit_component_dir(root, "commands")
     agents_dir = _resolve_implicit_component_dir(root, "agents")
