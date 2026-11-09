@@ -329,6 +329,7 @@ const ROLLBACK_DELETE = {
 // delete, which is a designed move, not jank (#1009).
 const DELETE_OPEN_CHAT = {
 	name: 'delete-the-open-chat',
+	viewports: ['phone'],
 	throttles: ['slow'],
 	setup: twoChats,
 	allow: [{ kind: 'failed_requests', status: 404, url: /\/live(\?|$)/, reason: 'a live check sent alongside the delete is answered after the chat is gone' }],

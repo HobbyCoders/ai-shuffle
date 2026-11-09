@@ -5,7 +5,7 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 await runJourney({ name: 'settings-detail-link', allow: DEV_INSTANCE_NOISE, cases: [{
  // Responsive desktop only: the real /mobile/ shell has no window to shrink.
- name: 'keeps-the-open-page-at-phone-width', viewports: mobileShell ? [] : ['desktop'],
+ name: 'keeps-the-open-page-at-phone-width', viewports: mobileShell ? [] : ['desktop'], throttles: ['slow'],
  allow: [{kind:'failed_requests',status:403,url:/\/terminals(\?|$)/,reason:'the preview cookie may not use terminals (require_terminal_owner refuses preview access by design)'},{kind:'layout_shift',reason:'known bug #1301: Settings > Security adds rows after a reload, unrelated to which page is kept'}],
  async setup({page,status}) { await gotoApp(page,status); },
  async act({page,mark}) {

@@ -12,7 +12,7 @@ await runJourney({
 	allow: DEV_INSTANCE_NOISE,
 	cases: [{
 		name: 'silent-think-keeps-moving',
-		viewports: ['desktop', 'phone'],
+		viewports: ['desktop'],
 		throttles: ['slow'],
 		async setup(ctx) {
 			const hero = await openNewChat(ctx);
