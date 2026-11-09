@@ -140,6 +140,10 @@ five minutes after an hour of filesystem quiet, with fresh session/open-turn and
 process-use checks. Missing-session folders need seven days of quiet. Ledger,
 notes and Task reports are not scratch and are never swept. Unknown safety facts
 retain files; symlinks are never followed and Windows reparse trees are retained.
+Backlogs resume in slices of at most two seconds, 512 entries or 256 MiB, with
+30 seconds between slices (one indivisible oversized file may exceed the byte
+budget). Storage logs incrementally measure scratch and checkout logical bytes;
+usage above 100 GiB warns without imposing a size cap or deleting unknown files.
 
 ### Before Committing
 

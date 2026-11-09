@@ -128,6 +128,45 @@ def _identity(info):
     return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)]
 
 
+def _remove_entry(root, path, info, root_identity):
+    """Anchor POSIX unlinks to directory descriptors, never a raced symlink."""
+    if os.name == "posix" and hasattr(os, "O_NOFOLLOW"):
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        descriptor = os.open(root, flags)
+        try:
+            if _identity(os.fstat(descriptor)) != root_identity:
+                raise ValueError("state root changed")
+            for part in path.parent.relative_to(root).parts:
+                child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            owner = os.fstat(descriptor)
+            if not owner.st_mode & stat.S_IWUSR:
+                if owner.st_uid != os.getuid():
+                    raise ValueError("read-only foreign directory")
+                os.fchmod(descriptor, owner.st_mode | stat.S_IWUSR)
+            current = os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
+            if _identity(current) != _identity(info):
+                raise ValueError("entry changed")
+            if stat.S_ISDIR(info.st_mode):
+                os.rmdir(path.name, dir_fd=descriptor)
+            else:
+                os.unlink(path.name, dir_fd=descriptor)
+        finally:
+            os.close(descriptor)
+        return
+    # Windows: individual leaf operations only. All ancestors and reparse
+    # attributes were checked by the caller; never recurse via rmtree.
+    parent = path.parent
+    owner = parent.lstat()
+    if not owner.st_mode & stat.S_IWUSR:
+        os.chmod(parent, owner.st_mode | stat.S_IWUSR)
+    if stat.S_ISDIR(info.st_mode):
+        path.rmdir()
+    else:
+        path.unlink()
+
+
 @contextmanager
 def _manifest():
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stream:
@@ -188,7 +227,7 @@ class ScratchSweep:
                     "manifest": stack.enter_context(_manifest()),
                     "deleting": False, "validated": False, "bytes": 0,
                     "cutoff": time.time() - quiet, "root_modified": info.st_mtime_ns,
-                    "own_changes": {}}
+                    "own_changes": {}, "state_identity": _identity(self.root.lstat())}
 
     def _guard(self, job, deadline):
         path = job["path"]
@@ -273,7 +312,6 @@ class ScratchSweep:
                     # Read-only generated folders are common. Only chmod real,
                     # owned directories; never follow a link to make it writable.
                     parent = path.parent
-                    owner = parent.lstat()
                     for ancestor in (parent, *parent.parents):
                         if ancestor != job["path"] and job["path"] not in ancestor.parents:
                             break
@@ -281,14 +319,7 @@ class ScratchSweep:
                         if (current.st_mtime > job["cutoff"]
                                 and job["own_changes"].get(str(ancestor)) != current.st_mtime_ns):
                             raise ValueError("directory changed since scan")
-                    if not owner.st_mode & stat.S_IWUSR:
-                        if hasattr(os, "getuid") and owner.st_uid != os.getuid():
-                            raise ValueError("read-only foreign directory")
-                        os.chmod(parent, owner.st_mode | stat.S_IWUSR)
-                    if stat.S_ISDIR(info.st_mode):
-                        path.rmdir()
-                    else:
-                        path.unlink()
+                    _remove_entry(self.root, path, info, job["state_identity"])
                     job["own_changes"].pop(str(path), None)
                     job["own_changes"][str(parent)] = parent.lstat().st_mtime_ns
                     if parent == job["path"]:

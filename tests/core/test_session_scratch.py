@@ -176,12 +176,12 @@ def test_one_failed_folder_does_not_starve_siblings(world, monkeypatch):
     root, _, sweep = world
     bad = folder(root, "bad")
     good = folder(root, "good")
-    original = Path.unlink
-    def unlink(path, *args, **kwargs):
+    original = ss._remove_entry
+    def unlink(root, path, info, identity):
         if path.parent == bad:
             raise PermissionError("foreign owner")
-        return original(path, *args, **kwargs)
-    monkeypatch.setattr(Path, "unlink", unlink)
+        return original(root, path, info, identity)
+    monkeypatch.setattr(ss, "_remove_entry", unlink)
     assert sweep.step() == 1
     assert bad.exists() and not good.exists()
 
@@ -281,3 +281,80 @@ def test_database_settle_producer_and_open_turn_guard(mock_db, tmp_path, monkeyp
         assert sweep.step() == 1 and not path.exists()
     finally:
         sweep.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX no-follow descriptor operations")
+def test_raced_parent_symlink_cannot_redirect_unlink(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    parent = root / "parent"
+    parent.mkdir(parents=True)
+    payload = parent / "data"
+    payload.write_text("original")
+    info = payload.lstat()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data").write_text("keep")
+    original = os.open
+    swapped = False
+    def open_path(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "parent" and not swapped:
+            swapped = True
+            parent.rename(root / "saved")
+            parent.symlink_to(outside, target_is_directory=True)
+        return original(path, flags, *args, **kwargs)
+    monkeypatch.setattr(ss.os, "open", open_path)
+    with pytest.raises(OSError):
+        ss._remove_entry(root, payload, info, ss._identity(root.lstat()))
+    assert (outside / "data").read_text() == "keep"
+    assert (root / "saved" / "data").read_text() == "original"
+
+
+def test_changes_during_resumable_scan_abort_before_any_unlink(world, monkeypatch):
+    root, _, sweep = world
+    path = folder(root, count=5)
+    monkeypatch.setattr(ss, "MAX_SCAN_ENTRIES", 1)
+    sweep.step()
+    (path / "0").write_text("changed after observation")
+    for _ in range(15):
+        sweep.step()
+        if sweep.candidates is None:
+            break
+    assert len(list(path.iterdir())) == 5
+
+
+@pytest.mark.asyncio
+async def test_maintenance_paces_slices_and_warns_without_size_eviction(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.services import notification_service
+
+    waits = []
+    closed = []
+    class Sweep:
+        candidates = True
+        def __init__(self, root):
+            pass
+        def step(self):
+            return 0
+        def close(self):
+            closed.append("sweep")
+    class Usage(Sweep):
+        def step(self):
+            return {"scratch": 101 * 1024**3, "checkouts": 0}
+    async def sleep(seconds):
+        waits.append(seconds)
+        if len(waits) == 2:
+            raise asyncio.CancelledError
+    notify = AsyncMock()
+    monkeypatch.setattr(ss, "ScratchSweep", Sweep)
+    monkeypatch.setattr(ss, "StorageUsage", Usage)
+    monkeypatch.setattr(ss.asyncio, "sleep", sleep)
+    monkeypatch.setattr(notification_service, "emit_notification", notify)
+    with pytest.raises(asyncio.CancelledError):
+        await ss.maintain_session_scratch()
+    assert waits == [60, ss.SLICE_PAUSE_SECONDS]
+    assert len(closed) == 2
+    notify.assert_awaited_once()
+    assert notify.call_args.kwargs["category"] == "agent_storage"

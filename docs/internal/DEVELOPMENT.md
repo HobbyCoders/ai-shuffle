@@ -40,6 +40,9 @@ Legacy files and owner scratch are left intact. Designated session scratch is
 cleared after settlement and one hour of filesystem quiet, unless an open turn,
 a process reference or unavailable safety evidence prevents it. An unsettle or
 handoff recreates temporary files on demand; ledger, notes and reports survive.
+Cleanup is paced: two-second slices stop at 512 entries or 256 MiB and wait
+30 seconds before resuming. A single indivisible file can exceed the byte budget.
+Storage telemetry warns above 100 GiB; there is no size cap on agent files.
 Settled task checkouts use a 15-minute grace and five-minute cleanup passes;
 unmerged worker work is verified under `refs/fluid-archive/` before the existing
 safe worktree removal path runs. Missing-session worker checkouts need seven days.
