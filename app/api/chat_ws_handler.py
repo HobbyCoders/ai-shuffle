@@ -2637,7 +2637,16 @@ class ChatWebSocketHandler:
                         answered_by_device=self.device_id, dismissed=dismissed, skipped=skipped)
                     result = bool(forwarded.get("success"))
                 except (control.RunnerUnreachable, control.ControlRefused) as exc:
-                    await self.send_json({"type": "error", "session_id": response_session_id, "message": str(exc)})
+                    # Still unanswered: this ack brings back the card the UI
+                    # closed on the tap, so the owner can try again.
+                    logger.warning("Could not deliver question answer %s: %s", request_id, exc)
+                    await self.send_json({
+                        "type": "user_question_response_ack",
+                        "session_id": response_session_id,
+                        "request_id": request_id,
+                        "success": False,
+                        "reason": "relay_offline",
+                    })
                     return
             else:
                 result = await user_question_handler.respond(

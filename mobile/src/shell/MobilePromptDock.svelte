@@ -10,13 +10,14 @@
 	 * a choice of how long the answer lasts above them (Once, This chat,
 	 * Always) when the server offers one. An access request that needs private
 	 * inputs opens the header's access panel (a bottom sheet) through Review. A question shows
-	 * its options as large buttons plus "Type an answer"; a multi-part or
-	 * multi-select question falls back to the shared question form. Several
-	 * waiting items show "1 of N", which cycles.
+	 * its options as large buttons plus "Type an answer" and "Skip this
+	 * question"; a multi-part, multi-select or model-picker question falls back
+	 * to the shared question form. Several waiting items show "1 of N", which
+	 * cycles.
 	 */
 	import { untrack } from 'svelte';
 	import { get } from 'svelte/store';
-	import { ChevronRight, KeyRound, ShieldAlert, MessageCircleQuestionMark, Pencil, SendHorizontal, Terminal, Check, X } from 'lucide-svelte';
+	import { ChevronRight, KeyRound, ShieldAlert, MessageCircleQuestionMark, Pencil, SendHorizontal, SkipForward, Terminal, Check, X } from 'lucide-svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import type { QuestionDraft, QuestionResponse, UserQuestionData } from '$lib/components/UserQuestion.svelte';
 	import type { PermissionRequestData } from '$lib/components/PermissionRequest.svelte';
@@ -212,10 +213,15 @@
 	}
 
 	// ── Question ──────────────────────────────────────────────────────────
-	/** One single-choice question with options: answered by a tap. */
+	/** One single-choice question: answered by a tap or a typed line. A model question needs its picker. */
 	function simple(request: UserQuestionData): boolean {
 		const qs = request.questions ?? [];
-		return qs.length === 1 && !qs[0].multiSelect;
+		return qs.length === 1 && !qs[0].multiSelect && !qs[0].picker;
+	}
+
+	function questionKey(request: UserQuestionData): string {
+		const q = request.questions[0];
+		return q.question || q.header || 'question_0';
 	}
 
 	function answerQuestion(request: UserQuestionData, answer: string) {
@@ -223,14 +229,26 @@
 		if (!text || answered || !connected) return;
 		answered = true;
 		keep(`q:${request.request_id}`, { sent: true });
-		const q = request.questions[0];
 		onQuestion({
 			request_id: request.request_id,
 			tool_use_id: request.tool_use_id,
-			answers: { [q.question || q.header || 'question_0']: text },
+			answers: { [questionKey(request)]: text },
 			skipped: []
 		});
 		showResult(true, 'Answer sent');
+	}
+
+	function skipQuestion(request: UserQuestionData) {
+		if (answered || !connected || !armed) return;
+		answered = true;
+		keep(`q:${request.request_id}`, { sent: true });
+		onQuestion({
+			request_id: request.request_id,
+			tool_use_id: request.tool_use_id,
+			answers: {},
+			skipped: [questionKey(request)]
+		});
+		showResult(true, 'Question skipped');
 	}
 
 	function sendForm(response: QuestionResponse) {
@@ -369,10 +387,13 @@
 							<button type="button" class="q-opt type" disabled={!connected || answered} onclick={startTyping}><Pencil size={15} aria-hidden="true" />Type an answer</button>
 						</div>
 					{/if}
+					<div class="q-foot">
+						<button type="button" class="q-skip" disabled={!connected || answered || !armed} onclick={() => skipQuestion(request)}><SkipForward size={15} aria-hidden="true" />Skip this question</button>
+					</div>
 				{:else}
 					<div class="q-form">
 						{#key request.request_id}
-							<UserQuestion data={request} onRespond={sendForm} disabled={!connected}
+							<UserQuestion touch data={request} onRespond={sendForm} disabled={!connected}
 								draft={drafts.get(current.id)?.form} onDraft={(requestId, form) => keep(`q:${requestId}`, { form })} />
 						{/key}
 					</div>
@@ -392,7 +413,9 @@
 		border: 1px solid var(--border-strong);
 		border-bottom: 0;
 		border-radius: calc(var(--radius) * 1.6) calc(var(--radius) * 1.6) 0 0;
-		background: color-mix(in oklch, var(--card) 55%, var(--muted));
+		/* The shared form's pinned action row paints this surface. */
+		--q-surface: color-mix(in oklch, var(--card) 55%, var(--muted));
+		background: var(--q-surface);
 		color: var(--foreground);
 		max-height: min(46dvh, 26rem);
 		overflow-y: auto;
@@ -445,7 +468,7 @@
 	.p-from { margin: 2px 2px 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--muted-foreground); }
 	.p-from strong { font-weight: 600; color: var(--foreground); }
 	.p-body { margin: 4px 2px 6px; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
-	.q-text { font-weight: 550; }
+	.q-text { margin: 6px 2px 0; font-size: 14.5px; font-weight: 550; }
 	.p-note { margin: 6px 2px 0; font-size: 12.5px; color: var(--muted-foreground); }
 	/* Provider safety check: the heading wraps (it is the message), the
 	   models line reads requested → suggested. */
@@ -469,15 +492,15 @@
 	.p-result.no { color: var(--destructive); }
 	.review-btn { width: 100%; min-height: 48px; margin-top: 8px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--muted); color: var(--foreground); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
 	.review-btn:hover { background: var(--accent); }
-	.q-opts { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+	.q-opts { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 	.q-opt {
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
 		justify-content: center;
-		gap: 2px;
-		min-height: 48px;
-		padding: 6px 12px;
+		gap: 3px;
+		min-height: 52px;
+		padding: 10px 14px;
 		border: 1px solid var(--border);
 		border-radius: var(--radius);
 		background: var(--card);
@@ -491,7 +514,7 @@
 	.q-opt:hover:not(:disabled) { background: var(--hover-overlay); }
 	.q-opt:disabled { cursor: default; opacity: 0.7; }
 	.q-opt.type { flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; border-style: dashed; color: var(--muted-foreground); }
-	.q-type { display: flex; gap: 6px; margin-top: 8px; }
+	.q-type { display: flex; gap: 8px; margin-top: 12px; }
 	.q-type input {
 		flex: 1;
 		min-width: 0;
@@ -507,15 +530,22 @@
 	.q-type input:focus { outline: 2px solid var(--ring); outline-offset: 1px; }
 	.q-send { display: grid; place-items: center; width: 44px; height: 44px; border: 0; border-radius: var(--radius); background: var(--primary); color: var(--primary-foreground); cursor: pointer; }
 	.q-send:disabled { background: var(--muted); color: var(--subtle-foreground); cursor: default; }
-	.q-form { margin-top: 6px; }
-	.count:focus-visible, .scope-chip:focus-visible, .review-btn:focus-visible, .q-opt:focus-visible, .q-send:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.q-foot { display: flex; justify-content: flex-end; margin-top: 4px; }
+	.q-skip { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 2px; border: 0; background: none; color: var(--muted-foreground); font: inherit; font-size: 13px; cursor: pointer; }
+	.q-skip:hover:not(:disabled) { color: var(--foreground); }
+	.q-skip:disabled { cursor: default; opacity: 0.6; }
+	.q-form { margin-top: 10px; }
+	/* The shared form holds more than a tap card; let it fit without scrolling. */
+	.prompt:has(.q-form) { max-height: min(56dvh, 30rem); }
+	.count:focus-visible, .scope-chip:focus-visible, .review-btn:focus-visible, .q-opt:focus-visible, .q-send:focus-visible, .q-skip:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 	/* Typing with the keyboard up: keep the decision, drop to one line of context. */
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .cmd,
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .scope-row,
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .scope-hint,
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .p-note,
-	:global(.input-slot:has(.ProseMirror-focused)) .prompt .q-opts { display: none; }
+	:global(.input-slot:has(.ProseMirror-focused)) .prompt .q-opts,
+	:global(.input-slot:has(.ProseMirror-focused)) .prompt .q-foot { display: none; }
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .inline-cmd { display: block; }
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .what { display: none; }
 
