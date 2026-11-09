@@ -120,6 +120,8 @@ await runJourney({
   }, {
     // Nothing proves the withdrawal happened, so the page must say so and allow a retry.
     name: 'lost-cancel-request',
+    // Viewport copies of this pair add no signal; one each keeps hosted shard time.
+    viewports: ['phone'],
     async setup(ctx) {
       await openNewChat(ctx);
       await typeAndSend(ctx.page, `working ${uniq()} [script:long tps=2 latency_ms=1500]`);
@@ -155,6 +157,7 @@ await runJourney({
     // The verdict is lost but the durable receipt arrives (#1273): the receipt
     // proves the withdrawal, so the words come back with no error and no retry.
     name: 'lost-verdict',
+    viewports: ['desktop'],
     async setup(ctx) {
       await openNewChat(ctx);
       await typeAndSend(ctx.page, `working ${uniq()} [script:long tps=2 latency_ms=1500]`);

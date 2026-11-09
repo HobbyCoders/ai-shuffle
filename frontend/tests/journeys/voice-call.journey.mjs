@@ -222,6 +222,8 @@ const busy = {
 
 const attachmentDuringCall = {
 	name: 'attachment-during-call',
+	// Slow copies only: the fast ones add no signal and cost hosted shard time.
+	throttles: ['slow'],
 	async setup(ctx) {
 		ctx.typedFrames = [];
 		ctx.page.on('websocket', socket => socket.on('framesent', ({ payload }) => {

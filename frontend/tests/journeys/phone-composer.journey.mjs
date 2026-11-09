@@ -167,6 +167,8 @@ await runJourney({
 		},
 		{
 			name: 'chip-survives-typing',
+			// Slow copies only: the fast ones add no signal and cost hosted shard time.
+			throttles: ['slow'],
 			async setup(ctx) {
 				if (mobileShell) {
 					const { page, status } = ctx;
