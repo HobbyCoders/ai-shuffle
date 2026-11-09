@@ -9,8 +9,9 @@ resulting frames out to every client on that session.
 Session event delivery must never depend on this gateway: the SSE route also polls
 ``get_max_seq`` on a keepalive timer, so if PostgreSQL is unreachable the
 gateway degrades to "no notifies, warnings logged" and the app keeps working.
-The listener runs on a single dedicated (non-pool) connection in a daemon
-thread, reconnecting with capped exponential backoff on any error.
+The listener's dedicated (non-pool) connection runs in an isolated child.
+A daemon thread reads bounded shared memory, reconnecting with capped
+exponential backoff on any error; no driver call can freeze the worker's GIL.
 
 Typed connector lifecycle messages share this connection. Those messages are
 best effort and have no replay after a listener disconnect.
@@ -21,12 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import select
 import threading
 from typing import Callable, Dict, List, Set, Tuple
 
-import psycopg2
-
+from app.core.event_listener import NotificationListener
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -234,21 +233,26 @@ class EventGateway:
         while not self._stop:
             conn = None
             try:
-                conn = psycopg2.connect(**settings.get_database_connection())
-                # LISTEN must run outside a transaction.
-                conn.autocommit = True
-                cursor = conn.cursor()
-                cursor.execute(f"LISTEN {LISTEN_CHANNEL}")
-                backoff = 1.0  # Reset on a successful connect.
-                consecutive_failures = 0
-                self._connected = True
+                conn = NotificationListener(settings.get_database_connection())
+                established = False
                 while not self._stop:
-                    if select.select([conn], [], [], 5.0) == ([], [], []):
-                        continue
-                    conn.poll()
-                    while conn.notifies:
-                        notify = conn.notifies.pop(0)
-                        self._handle_payload(notify.payload)
+                    payloads, overflow = conn.read()
+                    self._connected = conn.connected
+                    if self._connected and not established:
+                        backoff = 1.0
+                        consecutive_failures = 0
+                        established = True
+                        # Reconnects can lose the last wake too. Check every
+                        # held log once, not only when its max_seq increases.
+                        overflow = True
+                    if overflow:
+                        with self._lock:
+                            sessions = list(self._subscribers)
+                        for sid in sessions:
+                            self._dispatch(sid, LOG_RECHECK)
+                    for payload in payloads:
+                        self._handle_payload(payload)
+                    self._stop_event.wait(0.025)
             except Exception as e:  # noqa: BLE001 — must never crash the app.
                 self._connected = False
                 logger.warning(

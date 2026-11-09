@@ -12,9 +12,9 @@ describe('peer target rules', () => {
 		expect(targets.map((t) => isPeerTarget(t, local))).toEqual([false, true, false]);
 	});
 
-	it('lets the owner pick a usable or approvable worker only', () => {
-		expect(selectable(row({ reason_code: 'recipient_approval_required' }))).toBe(true);
-		expect(selectable(row({ available: true, authorization_id: 'x' }))).toBe(true);
+	it('lets the owner pick an available worker only, and only when this browser can sign', () => {
+		expect(selectable(row({ available: true }))).toBe(true);
+		expect(selectable(row({ available: true }), 'No key here')).toBe(false);
 		for (const code of ['peer_offline', 'peer_terminals_disabled', 'peer_unsupported_or_disabled', 'not_supported', 'https_required', 'peer_unavailable']) {
 			expect(selectable(row({ reason_code: code }))).toBe(false);
 		}
@@ -24,18 +24,15 @@ describe('peer target rules', () => {
 		expect(peerChip(row({ reason_code: 'peer_offline' }))).toEqual({ label: 'Offline', tone: 'off' });
 		expect(peerChip(row({ reason_code: 'https_required' })).label).toBe('Needs HTTPS');
 		expect(peerChip(row({ reason_code: 'something_new' })).label).toBe('Unavailable');
-		expect(peerChip(row({ available: true, authorization_id: 'x' })).label).toBe('Approved');
+		expect(peerChip(row({ available: true })).label).toBe('Ready');
 		expect(peerReason(row({ reason_code: 'peer_offline', reason: 'The peer worker is offline.' }))).toBe('The peer worker is offline.');
-		expect(peerReason(row({ reason_code: 'recipient_approval_required' }))).toBe('Approve on B to open one shell.');
 	});
 
-	it("shows the owner's live request on the row instead of the last target list", () => {
-		const approvable = row({ reason_code: 'recipient_approval_required' });
-		expect(peerRow(approvable)).toEqual({ chip: { label: 'Needs approval', tone: 'wait' }, reason: 'Approve on B to open one shell.' });
-		expect(peerRow(approvable, 'requesting').chip).toEqual({ label: 'Waiting', tone: 'wait' });
-		expect(peerRow(approvable, 'pending')).toEqual({ chip: { label: 'Waiting', tone: 'wait' }, reason: 'Waiting for approval on B. Compare the code below.' });
-		expect(peerRow(approvable, 'approved')).toEqual({ chip: { label: 'Approved', tone: 'ok' }, reason: 'Approved for one shell. Open it below.' });
-		// An ended request leaves the row to what the worker reports.
+	it('says why this browser cannot sign, and shows a link in progress on the row', () => {
+		const ready = row({ available: true });
+		expect(peerRow(ready)).toEqual({ chip: { label: 'Ready', tone: 'ok' }, reason: null });
+		expect(peerRow(ready, null, 'No key here')).toEqual({ chip: { label: 'Needs a secure connection', tone: 'warn' }, reason: 'No key here' });
+		expect(peerRow(ready, 'linking')).toEqual({ chip: { label: 'Linking', tone: 'wait' }, reason: 'Waiting for the code to be entered on B.' });
 		expect(peerRow(row({ reason_code: 'peer_offline', reason: 'Offline.' }), 'ended')).toEqual({ chip: { label: 'Offline', tone: 'off' }, reason: 'Offline.' });
 	});
 });
@@ -50,13 +47,14 @@ describe('formatting', () => {
 		expect(age(64)).toBe('1m 4s ago');
 	});
 
-	it('splits the code into two groups of three', () => {
-		expect(codeGroups('k7q2xm')).toEqual(['K7Q', '2XM']);
+	it('splits the link code into groups of four', () => {
+		expect(codeGroups('abcd2345efgh')).toEqual(['ABCD', '2345', 'EFGH']);
 	});
 
 	it('explains failed opens without losing the server message', () => {
 		expect(openErrorMessage('peer_unavailable', 'x', 'B')).toBe('B stopped answering before the shell opened.');
-		expect(openErrorMessage('recipient_approval_required', 'x', 'B')).toBe('The approval on B expired or was revoked.');
+		expect(openErrorMessage('device_link_required', 'x', 'B')).toBe('This device is no longer linked to B. Open it again to link.');
+		expect(openErrorMessage('device_proof_invalid', 'x', 'B')).toBe("B refused this device's signature. Try again.");
 		expect(openErrorMessage('other', '', 'B')).toBe("The shell on B didn't open.");
 	});
 });

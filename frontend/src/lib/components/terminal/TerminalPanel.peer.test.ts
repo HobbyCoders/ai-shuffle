@@ -2,15 +2,19 @@
  * TerminalPanel with peer terminals (#196): feature off leaves the panel as
  * it was, a peer shell names the worker it runs on and never offers an
  * in-place restart, a failed peer open is explained in the picker, and the
- * receiving worker lists requests only when peer terminals are on.
+ * receiving worker lists devices waiting to link only when peer terminals are on.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 
 const api = vi.hoisted(() => ({
 	list: vi.fn(), targets: vi.fn(), create: vi.fn(), get: vi.fn(), close: vi.fn(), restart: vi.fn(), paste: vi.fn(),
-	requestPeer: vi.fn(), peerAuthorization: vi.fn(), revokePeerAuthorization: vi.fn(), peerRequests: vi.fn(),
-	approvePeerRequest: vi.fn(), revokePeerRequest: vi.fn(),
+	peerChallenge: vi.fn(), requestPeerLink: vi.fn(), deviceLinks: vi.fn(), approveDeviceLink: vi.fn(),
+}));
+vi.mock('$lib/terminal/device-key', () => ({
+	deviceKey: vi.fn(async () => ({ keyId: 'kid', publicKey: 'pub', code: 'ABCD2345EFGH', sign: async () => 'sig' })),
+	deviceKeyProblem: () => null,
+	deviceLabel: () => 'Chrome on Linux',
 }));
 vi.mock('$lib/api/terminals', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/api/terminals')>();
@@ -37,7 +41,7 @@ vi.mock('$lib/terminal/connection', () => ({
 import TerminalPanel from './TerminalPanel.svelte';
 import { TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
 import { terminals } from '$lib/stores/terminals.svelte';
-import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
+import { LINK_POLL_MS, peerTerminals } from '$lib/stores/peer-terminals.svelte';
 import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 
 const info = (id: string, over: Partial<TerminalInfo> = {}): TerminalInfo => ({
@@ -52,9 +56,10 @@ const base: TerminalTargets = {
 };
 const withPeer = (over: Record<string, unknown> = {}): TerminalTargets => ({
 	...base,
-	targets: [...base.targets, { kind: 'worker', worker_id: 'dev_b', name: 'Desk', available: false,
-		reason_code: 'recipient_approval_required', reason: 'The owner must approve this terminal directly on the receiving worker.', ...over }],
+	targets: [...base.targets, { kind: 'worker', worker_id: 'dev_b', name: 'Desk', available: true, ...over }],
 });
+const linked = { status: 'linked', receiver: 'dev_b', via: 'w', challenge: 'c1', expires_in: 60 };
+const provenTarget = expect.objectContaining({ kind: 'worker', worker_id: 'dev_b', proof: expect.objectContaining({ key_id: 'kid', signature: 'sig' }) });
 
 beforeEach(() => {
 	terminals.reset();
@@ -63,7 +68,8 @@ beforeEach(() => {
 	Object.values(api).forEach((fn) => fn.mockReset());
 	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
-	api.peerRequests.mockResolvedValue({ requests: [] });
+	api.deviceLinks.mockResolvedValue({ links: [], requests: [] });
+	api.peerChallenge.mockResolvedValue(linked);
 });
 afterEach(() => {
 	cleanup();
@@ -81,21 +87,21 @@ async function mount(targets: TerminalTargets, listed: TerminalInfo[] = []) {
 }
 
 describe('peer terminals off (the default)', () => {
-	it('keeps the picker as it was and never asks for peer requests', async () => {
+	it('keeps the picker as it was and never asks for waiting devices', async () => {
 		const view = await mount(base);
 		const form = view.getByRole('form', { name: 'New terminal' });
 		expect(form.querySelector('input[name="terminal-target"]')).toBeNull();
 		expect(within(form).queryByLabelText('Target')).toBeNull();
-		expect(within(form).queryByText(/approval/i)).toBeNull();
+		expect(within(form).queryByText(/link/i)).toBeNull();
 		expect(within(form).getByRole('button', { name: 'Open terminal' })).toBeTruthy();
-		expect(view.queryByRole('region', { name: 'Terminal requests from other workers' })).toBeNull();
-		expect(api.peerRequests).not.toHaveBeenCalled();
+		expect(view.queryByRole('region', { name: 'Devices linked to ServerWorker' })).toBeNull();
+		expect(api.deviceLinks).not.toHaveBeenCalled();
 	});
 });
 
 describe('a shell on a peer worker', () => {
 	it('names the peer worker in the status line, not this worker', async () => {
-		const view = await mount(withPeer({ available: true, reason_code: null, reason: null, authorization_id: 'a'.repeat(24) }),
+		const view = await mount(withPeer(),
 			[info('t1', { target: { kind: 'worker', worker_id: 'dev_b' }, cwd: '/home/owner' })]);
 		const status = view.container.querySelector('.status .meta')!;
 		expect(status.textContent).toContain('Desk');
@@ -107,7 +113,6 @@ describe('a shell on a peer worker', () => {
 		const view = await mount(withPeer(), [info('t1', { target: { kind: 'worker', worker_id: 'dev_b' }, state: 'exited', exit_code: 0 })]);
 		const ended = await view.findByRole('group', { name: 'Shell exited' });
 		expect(within(ended).queryByRole('button', { name: /Restart/ })).toBeNull();
-		expect(within(ended).getByText(/asks for approval again/)).toBeTruthy();
 	});
 
 	it('closes a peer shell through the same route as a local one, from the tab or the exited card', async () => {
@@ -136,15 +141,13 @@ describe('a shell on a peer worker', () => {
 		expect(within(ended).getByRole('button', { name: /Restart/ })).toBeTruthy();
 	});
 
-	it('shows a rejected folder in the picker, keeps the approval and retries the same target', async () => {
-		const approved = withPeer({ available: true, reason_code: null, reason: null, authorization_id: 'a'.repeat(24) });
-		const view = await mount(approved);
+	it('shows a rejected folder in the picker and retries the same target with a new signature', async () => {
+		const view = await mount(withPeer());
 		api.create.mockRejectedValueOnce(new TerminalApiError("The folder /nope doesn't exist on this worker.", 400, 'bad_folder'));
 		await fireEvent.click(view.getByRole('radio', { name: /Desk/ }));
 		await fireEvent.input(view.getByRole('textbox'), { target: { value: '/nope' } });
 		await fireEvent.click(view.getByRole('button', { name: 'Open terminal' }));
-		const target = { kind: 'worker', worker_id: 'dev_b', authorization_id: 'a'.repeat(24) };
-		expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/nope', shell: null, target }));
+		await waitFor(() => expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/nope', shell: null, target: provenTarget })));
 		const alert = await view.findByRole('alert');
 		expect(alert.textContent).toContain("The folder /nope doesn't exist");
 		expect(view.container.querySelector('.notice')).toBeNull();
@@ -152,30 +155,73 @@ describe('a shell on a peer worker', () => {
 		api.create.mockResolvedValueOnce(info('t1', { target: { kind: 'worker', worker_id: 'dev_b' }, cwd: '/home/owner' }));
 		await fireEvent.input(view.getByRole('textbox'), { target: { value: '' } });
 		await fireEvent.click(view.getByRole('button', { name: 'Open terminal' }));
-		expect(api.create).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: null, target }));
+		await waitFor(() => expect(api.create).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: null, target: provenTarget })));
+		expect(api.peerChallenge).toHaveBeenCalledTimes(2);
 		await waitFor(() => expect(view.container.querySelector('.status .meta')?.textContent).toContain('Desk'));
 	});
 
 	it('explains any other refused peer open in the picker, not the notice bar', async () => {
-		const view = await mount(withPeer({ available: true, reason_code: null, reason: null, authorization_id: 'a'.repeat(24) }));
+		const view = await mount(withPeer());
 		api.create.mockRejectedValue(new TerminalApiError('The terminal worker is unavailable or owner access expired.', 503, 'peer_unavailable'));
-		api.targets.mockResolvedValue(withPeer());
 		await fireEvent.click(view.getByRole('radio', { name: /Desk/ }));
 		await fireEvent.click(view.getByRole('button', { name: 'Open terminal' }));
 		expect((await view.findByText("The shell on Desk didn't open")).closest('[role="alert"]')).toBeTruthy();
 		expect(view.container.querySelector('.notice')).toBeNull();
 		await waitFor(() => expect(api.targets).toHaveBeenCalledTimes(2));
-		expect(await view.findByRole('button', { name: 'Request again' })).toBeTruthy();
+		expect(await view.findByRole('button', { name: 'Try again' })).toBeTruthy();
+	});
+});
+
+describe('a chat on another worker', () => {
+	const onDesk = (over: Record<string, unknown> = {}): TerminalTargets => ({ ...withPeer(over), chat_worker_id: 'dev_b' });
+
+	it("opens a command block's paste on the chat's worker, signed for that action", async () => {
+		api.paste.mockResolvedValue({ pasted: true });
+		api.create.mockResolvedValue(info('t1', { target: { kind: 'worker', worker_id: 'dev_b' }, cwd: '/home/owner', shell: 'bash' }));
+		const view = await mount(onDesk());
+		terminals.request('s1', 'paste', { command: 'echo hi', cwd: null, shell: 'bash', on: null, host: false } as never);
+		await waitFor(() => expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ target: provenTarget })));
+		const sent = api.create.mock.calls[0][0] as { target: { proof: { payload: string } } };
+		expect(JSON.parse(sent.target.proof.payload)).toMatchObject({ action: 'terminal.open_and_paste', receiver: 'dev_b',
+			target: { session_id: 's1' } });
+		await waitFor(() => expect(view.container.querySelector('.status .meta')?.textContent).toContain('Desk'));
+	});
+
+	it('keeps one link card through a second press, and that press finishes the job', async () => {
+		const block = { command: 'echo hi', cwd: null, shell: 'bash', on: null, host: false } as never;
+		api.peerChallenge.mockResolvedValueOnce({ status: 'unlinked', receiver: 'dev_b', via: 'w' })
+			.mockResolvedValue({ status: 'pending', receiver: 'dev_b', via: 'w', expires_in: 590 });
+		api.requestPeerLink.mockResolvedValue({ status: 'pending', key_id: 'kid', expires_in: 600 });
+		api.paste.mockResolvedValue({ pasted: true });
+		api.create.mockResolvedValue(info('t1', { target: { kind: 'worker', worker_id: 'dev_b' }, cwd: '/home/owner', shell: 'bash' }));
+		const view = await mount(onDesk());
+		const cards = () => view.container.querySelectorAll('.link-card').length;
+		terminals.request('s1', 'paste', block);
+		await waitFor(() => expect(cards()).toBe(1));
+		terminals.request('s1', 'paste', block);
+		// The first press wakes from its poll, finds itself replaced and must leave the card alone.
+		await new Promise((resolve) => setTimeout(resolve, LINK_POLL_MS + 500));
+		expect(cards()).toBe(1);
+		api.peerChallenge.mockResolvedValue(linked);
+		await waitFor(() => expect(api.create).toHaveBeenCalledTimes(1), { timeout: LINK_POLL_MS * 3 });
+		await waitFor(() => expect(cards()).toBe(0));
+	}, 15_000);
+
+	it("shows the worker's own reason when the chat's worker can't open a shell", async () => {
+		const view = await mount(onDesk({ available: false, reason_code: 'peer_offline', reason: 'The peer worker is offline.' }));
+		expect(await view.findByText('The peer worker is offline.')).toBeTruthy();
+		expect(api.create).not.toHaveBeenCalled();
 	});
 });
 
 describe('the receiving worker', () => {
-	it('lists requests from other workers above the terminals while peer terminals are on', async () => {
-		api.peerRequests.mockResolvedValue({ requests: [{ request_id: 'r1', worker_id: 'dev_b', status: 'pending', used: false,
-			expires_in: 100, confirmation_code: 'K7Q2XM', source_name: 'Desk', age_seconds: 20 }] });
+	it('shows devices waiting to link, with no code, while peer terminals are on', async () => {
+		api.deviceLinks.mockResolvedValue({ links: [], requests: [{ request_id: 'r1', label: 'Chrome on Linux', worker_id: 'dev_b', worker_name: 'Desk',
+			age_seconds: 20, expires_in: 500 }] });
 		const view = await mount(withPeer());
-		const region = await view.findByRole('region', { name: 'Terminal requests from other workers' });
-		expect(within(region).getByText('Desk wants a shell on ServerWorker')).toBeTruthy();
-		expect(within(region).getByRole('img', { name: 'Code from Desk: K 7 Q, 2 X M' })).toBeTruthy();
+		const region = await view.findByRole('region', { name: 'Devices linked to ServerWorker' });
+		expect(within(region).getByText('Chrome on Linux')).toBeTruthy();
+		expect(within(region).getByLabelText('Code shown on the device')).toBeTruthy();
+		expect(region.textContent).not.toMatch(/[A-Z2-7]{12}/);
 	});
 });

@@ -1041,13 +1041,14 @@ export const appData = {
 	 * them because enrichment no longer resolves a device name.
 	 */
 	dropDeviceSessions(instanceId: string) {
+		// The owner decides, as on the row: instance_id can name a former worker.
 		const removedSessionIds = new Set(
-			_state.sessions.filter(session => session.instance_id === instanceId).map(session => session.id)
+			_state.sessions.filter(session => (session.owner_device_id || session.instance_id) === instanceId).map(session => session.id)
 		);
 		if (removedSessionIds.size === 0) return;
 		_update(s => ({
 			...s,
-			sessions: s.sessions.filter(session => session.instance_id !== instanceId),
+			sessions: s.sessions.filter(session => !removedSessionIds.has(session.id)),
 			sessionsTotal: Math.max(0, s.sessionsTotal - removedSessionIds.size),
 		}));
 		// Hold the hide across any load already in flight; the next load started

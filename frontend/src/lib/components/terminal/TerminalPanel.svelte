@@ -18,14 +18,16 @@
 	import TerminalView from './TerminalView.svelte';
 	import MonitorWatch from './MonitorWatch.svelte';
 	import NewTerminalPicker from './NewTerminalPicker.svelte';
-	import PeerRequestList from './PeerRequestList.svelte';
+	import PeerDeviceLinks from './PeerDeviceLinks.svelte';
+	import PeerLinkCard from './PeerLinkCard.svelte';
 	import TerminalKeyBar from './TerminalKeyBar.svelte';
 	import { terminals, WORKER_TERMINALS, type TerminalRequest } from '$lib/stores/terminals.svelte';
-	import { terminalAccess, blockAccess, folderName } from '$lib/terminal/gating';
+	import { terminalAccess, blockAccess, chatWorkerTarget, folderName } from '$lib/terminal/gating';
 	import { pasteNeedsConfirm, pasteConfirmLabel, pasteHint, normalizePaste, pasteLines, pasteRefusal } from '$lib/terminal/paste';
 	import { mayTakeFocus } from '$lib/terminal/focus';
-	import { isPeerTarget, localWorkerId, type OpenResult } from '$lib/terminal/peer';
-	import type { CreateTerminal, TerminalInfo } from '$lib/api/terminals';
+	import { ACTION_OPEN, ACTION_OPEN_AND_PASTE, isPeerTarget, localWorkerId, openErrorMessage, type OpenResult } from '$lib/terminal/peer';
+	import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
+	import type { CreateTerminal, TerminalInfo, TerminalTarget } from '$lib/api/terminals';
 	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	import { resourceSync } from '$lib/services/resource-sync';
 	import { terminalSnippet } from '$lib/terminal/to-chat';
@@ -41,7 +43,9 @@
 	type View = ReturnType<typeof TerminalView>;
 	let views = $state<Record<string, View | undefined>>({});
 	let pickerOpen = $state(false);
-	let detailOpen = $state(false);
+	// A device waiting to link goes straight to the code box on a narrow screen,
+	// where Review would otherwise land on a list row that hides it.
+	let detailOpen = $state(peerTerminals.requests.length > 0);
 	let newTerminal = $state(false);
 	let watching = $state(false);
 	let creating = $state(false);
@@ -126,6 +130,7 @@
 		destroyed = true;
 		stopNetworkSync?.();
 		terminals.dropRequest(sessionId);
+		if (blockLink) peerTerminals.cancel(blockLink);
 	});
 
 	// ── Focus ──────────────────────────────────────────────────────────────
@@ -138,6 +143,10 @@
 	}
 
 	// ── Requests from command blocks ───────────────────────────────────────
+	/** The worker a command block's terminal is waiting to link to. */
+	let blockLink = $state<string | null>(null);
+	let blockAttempt = 0;
+	const blockFlow = $derived(blockLink ? peerTerminals.flow(blockLink) : null);
 	const pending = $derived(terminals.pendingRequest(sessionId));
 	$effect(() => {
 		const request = pending;
@@ -166,6 +175,8 @@
 				terminals.setNotice(sessionId, gate.kind === 'disabled' ? gate.reason : 'Terminals are unavailable here.');
 				return;
 			}
+			const peer = chatWorkerTarget(ready);
+			if (peer) { await handlePeerRequest(taken, peer); return; }
 			const cwd = taken.block.cwd ?? ready.folder;
 			const shell = taken.block.shell ?? ready.defaultShell;
 			if (taken.action === 'paste') {
@@ -193,6 +204,56 @@
 		} finally {
 			requestOrigin = null;
 		}
+	}
+
+	/**
+	 * A command block on a chat that runs on another worker: the shell opens
+	 * there. An open shell there can be reused to show it, but a paste always
+	 * goes to a fresh one, so it can't add to whatever is at the prompt.
+	 */
+	async function handlePeerRequest(taken: TerminalRequest, peer: TerminalTarget) {
+		const workerId = peer.worker_id!;
+		const paste = taken.action === 'paste';
+		if (paste) {
+			const refusal = pasteRefusal(taken.block.command, taken.block.shell);
+			if (refusal && taken.block.shell) { terminals.setNotice(sessionId, refusal); return; }
+		}
+		const reusable = (id: string) => {
+			const info = terminals.terminal(id);
+			return !!info && info.state === 'live' && !info.busy && info.target?.worker_id === workerId
+				&& (!taken.block.cwd || info.cwd === taken.block.cwd) && (!taken.block.shell || info.shell === taken.block.shell);
+		};
+		let id = paste ? null : activeId && reusable(activeId) ? activeId : tabState.ids.findLast(reusable) ?? null;
+		if (!id) {
+			const attempt = ++blockAttempt;
+			blockLink = workerId;
+			const cwd = taken.block.cwd ?? null;
+			const shell = taken.block.shell ?? null;
+			const proof = await peerTerminals.authorize(workerId, peer.name, paste ? ACTION_OPEN_AND_PASTE : ACTION_OPEN, { session_id: sessionId, cwd, shell });
+			// A newer press took over: the card and the outcome are now its own.
+			if (destroyed || attempt !== blockAttempt) return;
+			blockLink = null;
+			if (!proof) {
+				const flow = peerTerminals.flow(workerId);
+				if (flow?.phase === 'ended') {
+					terminals.setNotice(sessionId, `${paste ? 'Nothing was pasted.' : 'No terminal opened.'} ${flow.message}`);
+					peerTerminals.clear(workerId);
+				}
+				return;
+			}
+			const result = await terminals.open(sessionId, { cwd, shell, target: { kind: 'worker', worker_id: workerId, proof } });
+			if (destroyed) return;
+			if (!('info' in result)) {
+				terminals.setNotice(sessionId, `${paste ? 'Nothing was pasted.' : 'No terminal opened.'} ${openErrorMessage(result.code, result.message, peer.name)}`);
+				return;
+			}
+			id = result.info.id;
+			await tick();
+			views[id]?.markFresh();
+		}
+		terminals.select(sessionId, id);
+		if (paste) await queuePaste(id, taken.block.command);
+		else { await tick(); focusView(id); }
 	}
 
 	// ── Paste: confirm multi-line, send through the paste route ────────────
@@ -237,9 +298,9 @@
 	// ── Tabs ───────────────────────────────────────────────────────────────
 	async function openTerminal(choice: CreateTerminal): Promise<OpenResult> {
 		creating = true;
-		// A peer open reports its failure to the picker (the approval is spent),
-		// and the targets are probed again so the row shows what is left.
-		const peer = !!choice.target?.authorization_id;
+		// A peer open reports its failure to the picker, and the targets are
+		// probed again so the row shows what the worker now reports.
+		const peer = !!choice.target?.proof;
 		const result = peer ? await terminals.open(sessionId, choice) : null;
 		const info = result ? ('info' in result ? result.info : null) : await terminals.create(sessionId, choice);
 		creating = false;
@@ -376,7 +437,7 @@
 					}}><Plus size={16} /></button>
 				{#if pickerOpen}
 					<div class="popover">
-						<NewTerminalPicker probe={ready} busy={creating} disabledReason={capReason}
+						<NewTerminalPicker linkCardShownFor={blockLink} probe={ready} chatId={chatless ? null : sessionId} busy={creating} disabledReason={capReason}
 							onOpen={openTerminal} onTargetsChanged={() => terminals.ensureProbe(sessionId, true)} onCancel={() => (pickerOpen = false)} />
 					</div>
 				{/if}
@@ -424,7 +485,8 @@
 		</div>
 	{/if}
 
-	{#if peerTerminalsOn && ready && !watching}<PeerRequestList workerName={ready.worker} />{/if}
+	{#if peerTerminalsOn && ready && !watching}<PeerDeviceLinks workerName={ready.worker} />{/if}
+	{#if blockFlow?.phase === 'linking' && !watching}<div class="block-link"><PeerLinkCard flow={blockFlow} /></div>{/if}
 
 	{#if watching}<MonitorWatch {sessionId} />{/if}
 	<div class="stage" class:watch-hidden={watching}>
@@ -441,7 +503,7 @@
 			<!-- Backstop for a missed change: using the picker re-probes once the answer is stale. -->
 			<div class="state empty" onfocusin={() => void terminals.ensureProbe(sessionId)}>
 				{#if tabState.error}<p class="err" role="alert">{tabState.error}</p>{/if}
-				<NewTerminalPicker inline probe={ready} busy={creating} disabledReason={capReason} {blurb} onOpen={openTerminal} onTargetsChanged={() => terminals.ensureProbe(sessionId, true)} />
+				<NewTerminalPicker inline linkCardShownFor={blockLink} probe={ready} chatId={chatless ? null : sessionId} busy={creating} disabledReason={capReason} {blurb} onOpen={openTerminal} onTargetsChanged={() => terminals.ensureProbe(sessionId, true)} />
 			</div>
 		{/if}
 		{#if ready}

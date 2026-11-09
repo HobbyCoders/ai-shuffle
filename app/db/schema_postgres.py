@@ -99,6 +99,8 @@ def create_postgres_schema(cursor: Any) -> None:
     # Account hub tables have no ordering dependencies.
     from app.db.mobile_hub import create_schema as create_mobile_hub_schema
     create_mobile_hub_schema(cursor)
+    from app.db.terminal_device_links import create_schema as create_terminal_device_links_schema
+    create_terminal_device_links_schema(cursor)
     # Worker-network tables (device membership, sync log, conflicts). Local
     # to this worker's database; nothing in them depends on other tables.
     from app.db.network import create_schema as create_network_schema

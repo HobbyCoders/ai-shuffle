@@ -80,18 +80,15 @@ def _drive_listen_loop(monkeypatch, gateway, connect_effects, max_sleeps=10):
     connect_calls = []
     effects = list(connect_effects)
 
-    def fake_connect(*args, **kwargs):
-        connect_calls.append((args, kwargs))
+    def fake_connect(kwargs):
+        connect_calls.append(((), kwargs))
         effect = effects.pop(0) if effects else "fail"
         if effect == "fail":
             raise OSError('could not translate host name "Xyz@192.0.2.10"')
         conn = MagicMock()
+        conn.connected = True
+        conn.read.side_effect = [([], False), RuntimeError("connection dropped")]
         return conn
-
-    # A successful connect enters the notify wait; make it blow up immediately
-    # so the loop returns to the reconnect path instead of blocking.
-    def fake_select(*args, **kwargs):
-        raise RuntimeError("connection dropped")
 
     sleeps = []
 
@@ -105,8 +102,7 @@ def _drive_listen_loop(monkeypatch, gateway, connect_effects, max_sleeps=10):
         "host": "127.0.0.1", "hostaddr": "127.0.0.1", "port": 6543,
         "user": "aihub", "password": "p@ssXyz", "dbname": "aihub",
     })
-    monkeypatch.setattr(eg.psycopg2, "connect", fake_connect)
-    monkeypatch.setattr(eg.select, "select", fake_select)
+    monkeypatch.setattr(eg, "NotificationListener", fake_connect)
     monkeypatch.setattr(gateway, "_sleep", fake_sleep)
     monkeypatch.setattr("app.db.error_logs.record_error", record)
     gateway._listen_loop()
@@ -167,7 +163,7 @@ def test_stop_joins_running_listener_thread_promptly(monkeypatch):
     def fake_connect(*args, **kwargs):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(eg.psycopg2, "connect", fake_connect)
+    monkeypatch.setattr(eg, "NotificationListener", fake_connect)
     monkeypatch.setattr("app.db.error_logs.record_error", lambda *a, **k: None)
 
     g._ensure_listener()
