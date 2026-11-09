@@ -15,8 +15,9 @@
 //   lists-after-reload   the menu shows the running worker's files, before and
 //                        after a reload; a saved draft holding an @ opens
 //                        nothing by itself; a pick inserts its relative path
-//   typed-before-metadata the @ is typed while the reloaded chat's details are
-//                        still loading; the menu opens when they arrive
+//   typed-before-metadata the @ is typed while nothing has named the reloaded
+//                        chat's project; the menu opens when the details
+//                        arrive, with no further keystroke
 //   worker-offline       the worker cannot answer: the menu says so, keeps the
 //                        Quick Access folders, and Try again recovers
 //   selected-file-and-upload a picked file and a real attachment in one message:
@@ -49,6 +50,23 @@ async function simulateRemoteChat(page, status, key, { offline = false, keepLoca
 	await page.addInitScript(
 		({ id, peer, file, offline, offlineDetail, keepLocalId }) => {
 			const original = window.fetch.bind(window);
+			// typed-before-metadata: nothing may name this chat's project until the
+			// journey says so. The tab's saved snapshot would, at once, so it is put
+			// back to what a chat saved without a project holds (the chat lane, or
+			// the device's default project would be filled in). The session list
+			// and /live are held below.
+			const holding = !!sessionStorage.getItem('journey:holdMetadata');
+			let releaseMetadata = () => {};
+			const metadata = new Promise((done) => { releaseMetadata = done; });
+			window.__liveHeld = 0;
+			window.__releaseMetadata = () => {
+				sessionStorage.removeItem('journey:holdMetadata');
+				releaseMetadata();
+			};
+			if (holding) {
+				const saved = JSON.parse(sessionStorage.getItem('ai-shuffle-active-session'));
+				sessionStorage.setItem('ai-shuffle-active-session', JSON.stringify({ ...saved, mode: 'chat', project: '', projectV2Id: null }));
+			}
 			window.__fileLists = [];
 			window.__subagentLists = [];
 			const local = () => (keepLocalId ? {} : { project_id: null });
@@ -66,8 +84,10 @@ async function simulateRemoteChat(page, status, key, { offline = false, keepLoca
 			window.fetch = async (input, init) => {
 				const url = urlOf(input);
 				const method = (init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
-				if (url.pathname === `/api/v1/sessions/${id}/live` && sessionStorage.getItem('journey:delayLive')) {
-					await new Promise((done) => setTimeout(done, 1500));
+				if (holding && method === 'GET') {
+					const isLive = url.pathname === `/api/v1/sessions/${id}/live`;
+					if (isLive) window.__liveHeld++;
+					if (isLive || url.pathname === '/api/v1/sessions/cursor') await metadata;
 				}
 				if (/\/subagents\/all$/.test(url.pathname)) window.__subagentLists.push(url.searchParams.get('project_id'));
 				if (url.pathname === `/api/v1/sessions/${id}/sync-status`) {
@@ -209,14 +229,27 @@ await runJourney({
 			name: 'typed-before-metadata',
 			setup: start('long', SEEDED.long, {}),
 			async act({ page, mark }) {
-				await page.evaluate(() => sessionStorage.setItem('journey:delayLive', '1'));
+				await page.evaluate(() => sessionStorage.setItem('journey:holdMetadata', '1'));
 				await mark('reload');
 				await page.reload({ waitUntil: 'domcontentloaded' });
 				await nextFrames(page);
-				await mark('type @ while the chat details load');
+				await mark('page reloaded');
+				// The details are asked for, and the gate has not let them through.
+				await page.waitForFunction(() => window.__liveHeld > 0, undefined, { timeout: 30_000 });
+
+				await mark('type @ while the chat details are held');
 				await typeAt(page);
+				await composer(page).getByText('@').waitFor({ timeout: 10_000 });
+				// Long enough for a menu that should not be there to show itself.
+				await page.waitForTimeout(1000);
+				expect(await page.locator(MENU).count() === 0, 'no menu before anything names the project');
+				expect((await fileLists(page)).length === 0, 'no file list is asked for before anything names the project');
+
+				await mark('release the chat details, with no further keystroke');
+				await page.evaluate(() => window.__releaseMetadata());
 				await expectRunningWorkerFiles(page);
-				await page.evaluate(() => sessionStorage.removeItem('journey:delayLive'));
+				expect((await fileLists(page)).length > 0, 'the file list is asked for once the details arrive');
+
 				await clearComposer(page);
 				await draftSaved(page);
 			}
