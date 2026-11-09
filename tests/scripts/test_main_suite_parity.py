@@ -39,7 +39,7 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
     gate = jobs["main-suite"]
     assert gate["name"] == "Main suite"
     assert gate["if"] == "always()"
-    assert set(gate["needs"]) == set(suite.REQUIRED) == set(jobs) - {"main-suite", "journey-issues", "source-ui"}
+    assert set(gate["needs"]) == set(suite.REQUIRED) == set(jobs) - {"main-suite", "journey-issues", "source-ui", "stop-on-failure"}
     expected = {
         "backend": "ci-backend", "javascript": "ci-frontend", "fluid": "ci-fluid",
         "windows": "windows-suite", "browser-workspace": "ci-browser-workspace",
@@ -68,7 +68,7 @@ def test_main_suite_has_no_test_secrets_or_paid_runners():
         assert "secrets" not in (ROOT / ".github/workflows" / name).read_text()
         for name, job in config["jobs"].items():
             assert "environment" not in job
-            if name == "journey-issues":
+            if name in ("journey-issues", "stop-on-failure"):
                 assert job["continue-on-error"] == "true"
             else:
                 assert "continue-on-error" not in job
@@ -100,6 +100,27 @@ def test_journey_reporter_is_main_push_only_advisory_and_has_the_only_issue_writ
                     if step.get("name") == "Upload journey timelines")
     assert uploader["with"]["name"] == "ui-journeys-${{ matrix.shard }}"
     assert uploader["with"]["path"] == "${{ runner.temp }}/ui-journeys/"
+
+
+def test_stop_on_failure_is_advisory_and_holds_the_only_actions_write_permission():
+    jobs = workflow()["jobs"]
+    watcher = jobs["stop-on-failure"]
+    assert watcher["if"] == "github.event_name == 'push' || github.ref == 'refs/heads/main'"
+    assert watcher["continue-on-error"] == "true"
+    assert "needs" not in watcher and "stop-on-failure" not in jobs["main-suite"]["needs"]
+    assert watcher["permissions"] == {"contents": "read", "actions": "write"}
+    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("actions") == "write"] == ["stop-on-failure"]
+    step = watcher["steps"][-1]
+    assert step["run"] == "python3 scripts/ci/stop_on_failure.py"
+    assert step["continue-on-error"] == "true"
+    # The names the watcher ignores must be the jobs that cannot fail the run.
+    spec = importlib.util.spec_from_file_location("stop_on_failure", ROOT / "scripts/ci/stop_on_failure.py")
+    stop = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stop)
+    assert stop.is_advisory(watcher["name"]) and stop.is_advisory(jobs["journey-issues"]["name"])
+    assert stop.is_advisory("source-ui / build") and stop.GATE == jobs["main-suite"]["name"]
+    for name in suite.REQUIRED:
+        assert not stop.is_advisory(f"{name} / anything") and not stop.is_advisory(name)
 
 
 def test_parity_jobs_reuse_local_commands_and_strict_reach(monkeypatch):

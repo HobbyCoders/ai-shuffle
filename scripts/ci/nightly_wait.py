@@ -140,13 +140,21 @@ def suite_state(api, commit, *, now, cache=None):
     if passed:
         return "unpublished", (f"main-suite passed on {passed['head_sha'][:9]} {int(age // 60)} minutes ago but no nightly "
                                f"contains it. Check the publisher's latest run for a refusal: {PUBLISHER_URL}")
-    # A replaced waiting run ("cancelled") is not a failure; only report a run that ran.
-    run = next((run for run in finished if run.get("conclusion") != "cancelled"), None)
+    # A replaced waiting run ("cancelled", no jobs) is not a failure; only report
+    # a run that ran. A run stopped on its first failed job is also "cancelled".
+    run = next((run for run in finished if run.get("conclusion") != "cancelled" or _started(api, run)), None)
     if run:
-        return "failed", (f"The newest main-suite run covering this commit ended {run.get('conclusion')} "
+        ended = ("was stopped after a job failed (or cancelled by hand)" if run.get("conclusion") == "cancelled"
+                 else f"ended {run.get('conclusion')}")
+        return "failed", (f"The newest main-suite run covering this commit {ended} "
                           f"on {run['head_sha'][:9]} and nothing newer is waiting: {run['html_url']}\n"
                           "The nightly waits for the next green main run: fix or re-run it.")
     return "none", f"No main-suite run in flight covers this commit yet: {RUNS_URL}"
+
+
+def _started(api, run):
+    """True when a cancelled run had jobs: a replaced waiting run has none."""
+    return bool(api(f"actions/runs/{run['id']}/jobs?per_page=1").get("total_count"))
 
 
 def _epoch(stamp):

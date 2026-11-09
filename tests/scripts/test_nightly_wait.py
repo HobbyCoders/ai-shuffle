@@ -42,6 +42,9 @@ class Api:
             base, head = endpoint[len("compare/"):].split("...")
             distance = ORDER.index(TIP if head == "main" else head) - ORDER.index(base)
             return {"status": "identical" if distance == 0 else "ahead" if distance > 0 else "behind"}
+        if endpoint.startswith("actions/runs/"):
+            run_id = int(endpoint.split("/")[2])
+            return {"total_count": next(item.get("jobs", 0) for item in self.runs if item["id"] == run_id)}
         workflow, _, query = endpoint.partition("/runs?")
         status = dict(item.split("=") for item in query.split("&"))["status"]
         if workflow == "actions/workflows/main-suite.yml":
@@ -201,6 +204,13 @@ def test_a_merge_landing_mid_poll_is_never_reported_as_a_failure():
     api = Api([run(2, TIP, conclusion="cancelled"), run(1, NEWER, conclusion="failure")])
     state, detail = waiter.suite_state(api, MINE, now=NOW)
     assert state == "failed" and "runs/1" in detail and "ended failure" in detail
+
+
+def test_a_run_stopped_on_its_first_failure_is_reported_not_mistaken_for_a_replaced_run():
+    """Both end "cancelled"; only the stopped run started jobs."""
+    stopped = dict(run(2, TIP, conclusion="cancelled"), jobs=64)
+    state, detail = waiter.suite_state(Api([stopped, run(1, MINE, conclusion="cancelled")]), MINE, now=NOW)
+    assert state == "failed" and "runs/2" in detail and "stopped after a job failed" in detail
 
 
 def test_an_active_rerun_behind_a_page_of_newer_failures_still_counts():
