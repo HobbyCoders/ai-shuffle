@@ -136,9 +136,12 @@ never trigger a fresh read. If receipt validation fails before its guarded
 callback, it grants no queue or latch authority, but captured task incarnations
 still stop. Validation and quiescing failures stay retryable: an incomplete
 warning does not checkpoint or consume the durable receipt, so the owner
-observer retries its original boundary. Replayed task scopes use the durable
-producer's incarnation tokens, never a resumed task's current identity.
-A completed read-only validation is
+observer retries its original boundary. The owning process keeps the first
+local task-incarnation scope for an unfinished receipt, rather than recapturing
+a resumed task. Its live ownership proof also covers older tasks whose durable
+mirror has not flushed yet. Restart hydration retains its existing captured
+rows and logical input bounds; local process-incarnation scopes do not survive
+a restart. A completed read-only validation is
 still valid if only its transaction release fails. Capture failure, before any
 authority exists, instead reports that Stop was not admitted and asks for a new
 Stop; it cannot safely kill a possibly newer owner's scope. A committed flip's

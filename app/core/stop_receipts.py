@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import replace
 
 logger = logging.getLogger(__name__)
 _running: dict[str, asyncio.Task] = {}
+# One local incarnation snapshot per unfinished receipt. A task mirror may not
+# have flushed at publication, so the first owner observation can add proven
+# older local work, but retries must never recapture a resumed incarnation.
+_scopes: dict[str, object] = {}
 
 
 def _start_consume(row: dict, *, scope=None) -> asyncio.Task:
@@ -33,12 +36,13 @@ async def _consume(row: dict, *, scope=None) -> list[dict]:
     from app.core.query_session_lifecycle import capture_stop_scope, stop_all_background_tasks
     from app.core.task_registry import task_registry
     from app.db import stop_receipts
-    from app.db.base import parse_jsonb
 
     current = await asyncio.to_thread(stop_receipts.get, row["id"])
     if current is None:
+        _scopes.pop(row["id"], None)
         return []
     if current["consumed_at"] is not None:
+        _scopes.pop(row["id"], None)
         return (current["result"] or {}).get("results") or []
     row = current
     sid, receipt = row["session_id"], row["receipt"]
@@ -48,23 +52,10 @@ async def _consume(row: dict, *, scope=None) -> list[dict]:
         # A deletion may already have removed the mutable mirrors. Keep the
         # captured identities available, but never overwrite a newer local run.
         task_registry.hydrate_rows(sid, receipt.get("tasks") or [])
+        scope = _scopes.get(row["id"], scope)
         if scope is None:
             scope = capture_stop_scope(sid, before_turn=int(row["input_cutoff"]) + 1)
-            # Retry must not recapture a task resumed under the same turn/id.
-            # Durable producer identities, not today's registry, own this Stop.
-            captured = {task["task_id"]: task for task in receipt.get("tasks") or []}
-            unknown = set(scope.runs) - captured.keys()
-            scope = replace(scope,
-                active=[task for task in scope.active if task.get("id") in captured],
-                worker_sessions=[tid for tid in scope.worker_sessions if tid in captured],
-                worker_shells={tid: ids for tid, ids in scope.worker_shells.items() if tid in captured},
-                runs={tid: captured[tid].get("started_at") for tid in scope.runs if tid in captured},
-                orders={tid: (captured[tid]["turn_order"] if captured[tid].get("turn_order") is not None
-                              else captured[tid].get("turn_order_upper_bound"))
-                        for tid in scope.runs if tid in captured},
-                remote_scopes={tid: parse_jsonb(captured[tid].get("remote_stop_scope"))
-                               for tid in scope.runs if tid in captured},
-                unattributed=tuple(sorted(set(scope.unattributed) | unknown)))
+        _scopes.setdefault(row["id"], scope)
         try:
             results = await asyncio.wait_for(stop_all_background_tasks(
                 sid, user_stop=True, scope=scope, receipt=receipt, _receipt_consumer=True,
@@ -95,6 +86,7 @@ async def _consume(row: dict, *, scope=None) -> list[dict]:
         return results
     # Consume only after a committed warning (if needed), never a queued write.
     await asyncio.to_thread(stop_receipts.finish, row["id"], result)
+    _scopes.pop(row["id"], None)
     return results
 
 

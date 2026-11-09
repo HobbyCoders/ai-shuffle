@@ -124,16 +124,19 @@ async def test_unexpected_cleanup_error_does_not_checkpoint_receipt(monkeypatch)
     assert receipts.get(saved["id"])["consumed_at"] is not None
 
 
-async def test_validation_retry_does_not_recapture_resumed_task(monkeypatch, monitor):
+@pytest.mark.parametrize("flush_task_mirror", [False, True])
+async def test_validation_retry_does_not_recapture_resumed_task(monkeypatch, monitor, flush_task_mirror):
     from app.core import task_persistence
 
     _lease, turn, _queued = fail_recording(monkeypatch)
     task_registry.note_turn_live(SESSION, turn["insert_order"])
     task_registry.resume_task(SESSION, monitor[1])  # a task attributed to this turn
-    await task_persistence.flush()
+    if flush_task_mirror:
+        await task_persistence.flush()
     receipt = turns.capture_stop_receipt(SESSION, turn["id"], None)
     saved = receipts.get(receipt["cleanup_receipts"][0])
-    assert any(task["task_id"] == monitor[1] for task in saved["receipt"]["tasks"])
+    if flush_task_mirror:
+        assert any(task["task_id"] == monitor[1] for task in saved["receipt"]["tasks"])
     with monkeypatch.context() as blocked:
         blocked.setattr(turns, "apply_stop_receipt", Mock(side_effect=LockNotAvailable()))
         await recovery.consume(saved)  # reconstruct the original incarnation
