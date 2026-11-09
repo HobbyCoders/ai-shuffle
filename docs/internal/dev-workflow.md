@@ -56,6 +56,21 @@ work. A normal terminal wins unchanged on replay. The additive schema migration
 does not infer outcomes for pre-upgrade history. This path is also portable to
 Windows, where the launcher may terminate the process tree without SIGTERM.
 
+Recovery is historical evidence, not a new execution. Recovered terminals keep
+`ended_at=NULL`: the crash leaves no trustworthy completion time, and startup
+must not charge the offline interval as work. Their original start dates
+`created_at` and slots them below later immutable history without renumbering
+existing turns. Execution-context and usage-hold readers use the original start
+when an end is unknown; an observed completion wins an exact-time tie. Thus an
+older recovered receipt cannot replace newer model/provider/permission settings,
+while a newest recovered query still hands its context to the next wake. Missing
+legacy receipt timing uses the earliest retained history/session timestamp as a
+conservative ordering anchor, not as a measured execution interval.
+No event timestamp or sequence is rewritten, and recovery invents no completion
+event, fresh unread/settle marker, usage booking, or session-activity timestamp.
+Work-time backfill also skips the unknown interval. Both terminal/receipt
+atomicity and normal-completion accounting remain unchanged.
+
 **Remaining limit:** the shortest normal stop budget is 10 seconds, lifespan
 `stop_running_sessions` can take 25 seconds and adapter disconnect can take
 5 seconds. Thus full lifecycle cleanup can still exceed an outer kill budget;

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 
 from app.db.base import get_db
 
@@ -30,6 +31,7 @@ def begin(session_id, source, *, turn_id=None, instance_id=None, process_id=None
     from app.core.config import settings
 
     turn_id = turn_id or "turn-" + uuid.uuid4().hex
+    record.setdefault("started_at", datetime.now(timezone.utc))
     record.update(outcome="aborted", stop_reason="server_shutdown",
                   error="Worker stopped before query finalization finished")
     with get_db() as conn:
@@ -48,6 +50,8 @@ def recover(*, instance_id=None, process_id=None):
     Replay uses the original terminal ID. A terminal committed by the normal path
     wins unchanged, including when recovery is retried after another crash.
     Pre-upgrade history has no receipts and is never inferred/reclassified here.
+    Recovery knows the original start, not a completion time: replay must not
+    become newer execution context or charge the interval spent offline.
     """
     from app.core.config import settings
     from app.db.turns import record_adhoc_turn
@@ -63,5 +67,5 @@ def recover(*, instance_id=None, process_id=None):
     for row in rows:
         record = json.loads(row["record"])
         source = record.pop("source")
-        record_adhoc_turn(row["session_id"], source, turn_id=row["id"], **record)
+        record_adhoc_turn(row["session_id"], source, turn_id=row["id"], recovered=True, **record)
     return len(rows)

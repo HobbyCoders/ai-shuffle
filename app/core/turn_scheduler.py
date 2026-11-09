@@ -250,7 +250,10 @@ def _latest_context_turn(session_id: str, *, _conn=None) -> Optional[Dict[str, A
                 "SELECT * FROM turns WHERE session_id=%s AND " + state_clause + " "
                 # Neither a steered row nor a held progress note (#960) ran.
                 "AND COALESCE(stop_reason, '') NOT IN ('steered', 'held_progress') "
-                "ORDER BY ended_at DESC NULLS LAST, position DESC, created_at DESC, id DESC "
+                # A crash-recovered query has no observed completion time.
+                # Its original start is context evidence, not its replay time.
+                "ORDER BY COALESCE(ended_at, started_at) DESC NULLS LAST, "
+                "ended_at DESC NULLS LAST, position DESC, created_at DESC, id DESC "
                 "LIMIT 1",
                 (session_id,),
             )

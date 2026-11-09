@@ -970,6 +970,7 @@ def record_adhoc_turn(
     payload: Optional[Dict[str, Any]] = None,
     overrides: Optional[Dict[str, Any]] = None,
     turn_id: Optional[str] = None,
+    recovered: bool = False,
 ) -> Dict[str, Any]:
     """Write a TERMINAL history row for a turn that already ran outside the
     scheduler (ad-hoc REST calls, automation steps, headless background runs).
@@ -987,8 +988,11 @@ def record_adhoc_turn(
     lifecycle computation ignores it. ``run_id``/``instance_id`` stay NULL
     because there was never a lease to point at.
 
-    ``started_at`` is the caller's recorded turn start (defaults to now);
-    ``ended_at`` is stamped at insert. Returns the created turn row.
+    ``started_at`` is the caller's recorded turn start (defaults to now).
+    Normal completion stamps ``ended_at`` at insert. Recovery knows no end:
+    it keeps that NULL (zero banked work), dates creation at the original start,
+    and inserts below later history without renumbering existing ordinals.
+    Returns the created turn row.
     """
     if outcome not in ("completed", "aborted"):
         raise ValueError(
@@ -1017,13 +1021,37 @@ def record_adhoc_turn(
         )
         pos_row = cursor.fetchone()
         position = pos_row["pos"] if pos_row and pos_row.get("pos") is not None else 1
+        insert_order = pos_row["insert_order"]
+        if recovered:
+            # Receipt creation preceded execution, not this replay. Preserve
+            # later permission/caller history as well as execution context.
+            # Missing legacy timing stays behind every known history row.
+            if (started_at := _to_utc(started_at)) is None:
+                cursor.execute("SELECT created_at FROM sessions WHERE id=%s", (session_id,))
+                session_created = _to_utc(cursor.fetchone()["created_at"])
+                cursor.execute("SELECT MIN(COALESCE(started_at, created_at)) AS first_at "
+                               "FROM turns WHERE session_id=%s", (session_id,))
+                first = _to_utc(cursor.fetchone()["first_at"])
+                started_at = min(stamp for stamp in (session_created, first) if stamp is not None)
+            cursor.execute(
+                "SELECT insert_order, position FROM turns WHERE session_id=%s "
+                "AND created_at >= %s ORDER BY insert_order ASC, created_at ASC, id ASC LIMIT 1",
+                (session_id, started_at),
+            )
+            later = cursor.fetchone()
+            if later:
+                # History ordinals need not be unique. Share the preceding
+                # bucket; original created_at orders it after that older row.
+                # This inert row grants no new admission/Stop cutoff.
+                insert_order = max(0, later["insert_order"] - 1)
+                position = later["position"]
         cursor.execute(
             "INSERT INTO turns "
             "(id, session_id, state, source, prompt, profile_id, project_id, "
             "overrides, payload, position, insert_order, stop_reason, error, "
-            "started_at, ended_at) "
+            "started_at, ended_at, created_at) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-            "COALESCE(%s, NOW()), NOW()) "
+            "COALESCE(%s, NOW()), CASE WHEN %s THEN NULL ELSE NOW() END, COALESCE(%s, NOW())) "
             "RETURNING *",
             (
                 turn_id,
@@ -1036,10 +1064,12 @@ def record_adhoc_turn(
                 json.dumps(overrides or {}),
                 json.dumps(payload or {}),
                 position,
-                pos_row["insert_order"],
+                insert_order,
                 stop_reason,
                 error,
                 started_at,
+                recovered,
+                started_at if recovered else None,
             ),
         )
         row = _row(cursor.fetchone())
@@ -1051,10 +1081,11 @@ def record_adhoc_turn(
     # The ad-hoc paths refuse to run while a turn is live (busy-write guard),
     # so their interval never overlaps one the scheduler already banked. One
     # recorded while the session is parked leaves the park's open segment be.
-    _record_session_work(
-        row.get("session_id"), interval_ms(row.get("started_at"), row.get("ended_at")),
-        keep_park=True,
-    )
+    if not recovered:
+        _record_session_work(
+            row.get("session_id"), interval_ms(row.get("started_at"), row.get("ended_at")),
+            keep_park=True,
+        )
     return row
 
 
