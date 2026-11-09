@@ -2202,9 +2202,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                            "on another worker starts from the stored path, compacted to "
                            "fit its window", compaction_id, checkpoint["skipped"])
         if report and not report.get("met"):
-            logger.warning("claude mod compaction (%s) kept ~%d tokens, over its %d target; "
-                           "what is left: %s", trigger, report.get("after_tokens", 0),
-                           report.get("target_tokens", 0), report.get("contributors"))
+            # The target is a soft goal, not the selected context window.
+            # Preserving recent results/instructions can legitimately exceed it.
+            at_limit = (self.compaction_window is not None
+                        and report.get("after_tokens", 0) >= self.compaction_window)
+            log = logger.warning if at_limit else logger.info
+            log("claude mod compaction (%s) kept ~%d tokens, over its %d soft goal; "
+                "what is left: %s", trigger, report.get("after_tokens", 0),
+                report.get("target_tokens", 0), report.get("contributors"))
         if time.monotonic() - received > MOD_COMPACT_WAIT_S:
             # The mod stopped waiting before this answer was ready: it fell
             # back or skipped, so no boundary will ever apply this answer.

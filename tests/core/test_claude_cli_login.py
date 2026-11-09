@@ -47,7 +47,11 @@ def test_clean_terminal_text():
 
 
 def test_login_success_invalidates_probe(fake_cli, monkeypatch):
+    from app.core import claude_subscriptions
+
     invalidated = []
+    identities = []
+    monkeypatch.setattr(claude_subscriptions, "invalidate_identity", lambda: identities.append(1))
     monkeypatch.setattr(cl.claude_cli_status, "invalidate", lambda: invalidated.append(1))
     monkeypatch.delenv("SHUFFLE_DESKTOP", raising=False)
     term = cl.LoginTerminal()
@@ -66,7 +70,7 @@ def test_login_success_invalidates_probe(fake_cli, monkeypatch):
     assert "Login successful." in state["output"]
     # Echo is off: the code typed in never appears in the kept output.
     assert "good#state" not in state["output"]
-    assert invalidated
+    assert invalidated and identities
 
 
 def test_login_failure_and_offsets(fake_cli, monkeypatch):

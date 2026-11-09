@@ -240,7 +240,13 @@ def _remove_tree(path: Path) -> None:
         children = [Path(entry.path) for entry in entries]
     for child in children:
         _remove_tree(child)
-    os.rmdir(path)
+    try:
+        os.rmdir(path)
+    except PermissionError:
+        # Windows may mark the real directory itself read-only too. This is
+        # deliberately below the link check: never chmod a shared target.
+        os.chmod(path, mode | stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        os.rmdir(path)
 
 
 def remove(account_id: str) -> None:

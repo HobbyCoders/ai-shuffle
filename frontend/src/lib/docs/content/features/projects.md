@@ -38,6 +38,10 @@ Setting up a Git project clones its remote on that worker, with that worker's ow
 
 When you start a new chat on a worker that doesn't have the project yet, the new chat says so, and the send button becomes **Set up & send**. It sets the project up there first, then sends your message.
 
+When an existing local-only project gains a Git remote, its next Git status refresh links it to the shared project identity (the repository cache can take up to a minute to expire).
+
+**Older retained branches:** branches created under a local-only identity before first-link history was recorded may not appear in the linked project's worktree list, and project-level Git actions on them are refused. Chats already bound to those checkouts still work; linking does not delete their files. AI Shuffle does not guess ownership from a matching name, path, or reused project ID. There is not yet an owner-approved reattach action; keep using the bound chat until that action is available.
+
 ## Files
 
 Browse, upload, download, rename and delete a project's files from the file browser. See [File Management](/docs/features/file-management).
