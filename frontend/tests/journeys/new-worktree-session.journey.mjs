@@ -736,14 +736,14 @@ async function attachInExistingWorktree(ctx) {
 	await page.waitForFunction(() => Number(document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-messages')) >= 4 && document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-streaming') === 'false', null, { timeout: 60_000 });
 	await expectAttachmentRequest(ctx, expected);
 	log('upload bytes, sent prompt and restored resend use the worktree; main has no copy');
+	// Reuse this established session: refusal needs the same checkout state,
+	// not a second identical new-session setup in the hosted budget.
+	await missingWorktreeUpload(ctx, created);
 }
 
 /** A disappeared local checkout must fail at upload, before any main write. */
-async function missingWorktreeUpload(ctx) {
+async function missingWorktreeUpload(ctx, created) {
 	const { page, mark, status } = ctx;
-	const response = page.waitForResponse((r) => r.url().includes('/sessions/with-worktree') && r.request().method() === 'POST');
-	await sendFirstMessage(ctx, 'missing-worktree-upload');
-	const created = await (await response).json();
 	const file = `missing-checkout-${uniq()}.txt`;
 	const moved = `${created.worktree_path}-temporarily-moved`;
 	// Phone exercises the session-scoped route through the same real picker.
@@ -842,28 +842,21 @@ await runJourney({
 			act: (ctx) => sendFirstMessage(ctx, 'new-branch')
 		},
 		{
-			name: 'missing-worktree-upload',
-			viewports: ['desktop', 'phone'],
-			setup: settled(async (ctx) => {
-				const hero = await openNewChat(ctx);
-				await pickProject(ctx.page, hero);
-				await worktreeOn(ctx.page, hero);
-			}),
-			act: missingWorktreeUpload,
-			allow: [
-				{ kind: 'errors', message: /Upload failed:.*working directory for this session/, reason: 'this negative case asserts the missing-checkout upload refusal and its visible composer error' },
-				{ kind: 'failed_requests', status: 409, url: /\/upload(\?|$)/, reason: 'this negative case requires HTTP 409 and verifies that main has no attachment' }
-			]
-		},
-		{
 			name: 'existing-worktree-attachment',
 			viewports: ['desktop', 'phone'],
+			// Slow covers the attach/send/rewind races at both viewport sizes;
+			// avoid duplicate fast I/O checks within the fixed hosted budget.
+			throttles: ['slow'],
 			setup: settled(async (ctx) => {
 				const hero = await openNewChat(ctx);
 				await pickProject(ctx.page, hero);
 				await worktreeOn(ctx.page, hero);
 			}),
-			act: attachInExistingWorktree
+			act: attachInExistingWorktree,
+			allow: [
+				{ kind: 'errors', message: /Upload failed:.*working directory for this session/, reason: 'this negative step asserts the missing-checkout upload refusal and its visible composer error' },
+				{ kind: 'failed_requests', status: 409, url: /\/upload(\?|$)/, reason: 'this negative step requires HTTP 409 and verifies that main has no attachment' }
+			]
 		},
 		{
 			name: 'auto-attachment',
