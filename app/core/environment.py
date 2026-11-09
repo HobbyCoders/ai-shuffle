@@ -1196,7 +1196,7 @@ def worker_identity_text() -> Optional[str]:
     return "\n".join(lines) if lines else None
 
 
-TURN_ENV_HEADER = "Environment facts that change while a session runs"
+TURN_ENV_HEADER = "Current environment"
 
 
 def checkout_branch(working_dir: Optional[str]) -> Optional[str]:
@@ -1244,8 +1244,7 @@ def generate_turn_environment_note(*, branch: Optional[str] = None, time_context
     body = "\n".join(lines)
     return (
         "<system-reminder>\n"
-        f"{TURN_ENV_HEADER} (current as of this message — any earlier copy in "
-        "this conversation may be out of date):\n"
+        f"{TURN_ENV_HEADER} (earlier copies may be stale):\n"
         f"{body}\n"
         "</system-reminder>"
     )

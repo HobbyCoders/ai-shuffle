@@ -10,7 +10,7 @@ def history_zone(extra) -> str | None:
         return None
 
 
-def delegated_wake_time(content, extra, source, *, host_time_note=False):
+def delegated_wake_time(content, extra, source, *, host_time_note=False, before_context=None):
     """Host submits already carry the note; internal wakes bypass that adapter.
 
     Never edit earlier nodes or a CLI slash command. Only app-bound loops opt in.
@@ -37,4 +37,16 @@ def delegated_wake_time(content, extra, source, *, host_time_note=False):
         lines.append(RELATIVE_TIME_RULE)
     tag = "system" + "-" + "reminder"
     note = f"<{tag}>\n" + "\n".join(lines) + f"\n</{tag}>"
+    # Keep a host-pinned memory snapshot at the tail, contiguous with any
+    # compaction put-back. Only host-owned offsets, never quoted markers, can
+    # select this insertion point. Images and other blocks stay unchanged.
+    if before_context is not None:
+        offset = 0
+        for i, block in enumerate(content):
+            if isinstance(block, Text):
+                if offset <= before_context <= offset + len(block.text):
+                    at = before_context - offset
+                    return [*content[:i], Text(block.text[:at]), Text(note + "\n\n"),
+                            Text(block.text[at:]), *content[i + 1:]]
+                offset += len(block.text)
     return [*content, Text(note)]

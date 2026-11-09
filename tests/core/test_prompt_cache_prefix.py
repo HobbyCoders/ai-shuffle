@@ -48,6 +48,23 @@ def test_turn_note_without_a_branch_is_just_the_date(monkeypatch):
     assert "Current branch" not in note
 
 
+def test_clock_note_stays_small_and_does_not_repeat_paragraphs():
+    from datetime import datetime, timezone
+    from fluid.context.time_awareness import RELATIVE_TIME_RULE
+
+    note = generate_turn_environment_note(time_context={
+        "now": datetime(2026, 11, 9, 18, tzinfo=timezone.utc),
+    }, include_rule=True)
+    # A longer header displaced full memory from the 9500-character restore
+    # hook and made every subsequent request repeat a second full snapshot.
+    assert len(note) <= 330
+    assert note.count(TURN_ENV_HEADER) == 1
+    assert note.count("Current time:") == 1
+    assert note.count(RELATIVE_TIME_RULE) == 1
+    paragraphs = [p for p in note.split("\n\n") if p.strip()]
+    assert len(paragraphs) == len(set(paragraphs))
+
+
 # ─── the compiled system prompt ──────────────────────────────────────────────
 
 

@@ -1249,6 +1249,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # facts text last sent to the model, and whether this engine has
         # already harvested them into the memory store.
         self._runtime_facts_sent: str | None = None
+        self._resume_environment: str | None = None
         self._runtime_facts_harvested = False
         self._runtime_facts_rehydrated = False
         # System text of the request in flight / the last completed one, for
@@ -2598,6 +2599,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return
 
     async def _run_turn_inner(self, op: UserTurn | Resume) -> None:
+        self._resume_environment = None
         self._peer_delivery_sealed = False
         meta = await self._ensure_session()
         sid = meta.session_id
@@ -2671,10 +2673,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ))
                 self._active_turn_id = None
                 return
-            # Preserve saved nodes byte-for-byte; refreshed time rides a new tail node.
+            # A retry still answers this user node. Refresh the clock only in
+            # the request view, never by persisting a second consecutive user.
             self.ctx.extra["time_turn_source"] = "wakeup"
-            fresh_time = await self._environment_reminder()
-            context_note = "\n\n".join(n for n in (op.context_note, fresh_time) if n)
+            self._resume_environment = await self._environment_reminder()
+            context_note = op.context_note
             if context_note:
                 head = SessionNode(
                     node_id=new_id("node"), parent_id=head.node_id,
@@ -3809,6 +3812,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         history: system prompt + tool schemas. Priced with the same estimator
         the usage breakdown uses, so the trigger and the report agree."""
         total = estimate_tokens_of_text(self.system)
+        if self._resume_environment:
+            total += estimate_tokens_of_text("\n\n" + self._resume_environment)
         for api in self._tools_api():
             try:
                 total += estimate_tokens_of_text(json.dumps(api))
@@ -5014,6 +5019,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         self, history: list[Message], *, sticky: bool = True,
         turn_id: str | None = None,
     ) -> ProviderRequest:
+        if self._resume_environment and history and history[-1].role == "user":
+            history = [*history[:-1], replace(
+                history[-1], content=[*history[-1].content, Text("\n\n" + self._resume_environment)],
+            )]
         tools_api = self._tools_api()
         plan = plan_cache(self.provider.caps, has_tools=bool(tools_api))
         sid = self._session.session_id if self._session is not None else None

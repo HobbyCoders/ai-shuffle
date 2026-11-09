@@ -338,6 +338,37 @@ async def test_search_snippets_preserve_individual_send_times(tmp_path):
     assert "2026-11-08 18:00:00 EST" in snippets and "2026-11-09 18:00:00 EST" in snippets
 
 
+@pytest.mark.parametrize("layout", ["one_text", "split_text", "image"])
+def test_delegated_clock_keeps_the_host_pin_and_original_content(layout):
+    from fluid.messages import Image
+
+    owner = "Owner's question — café 😀\n\n"
+    host = "trusted memory snapshot"
+    image = Image(media_type="image/png", data="AAAA")
+    if layout == "one_text":
+        blocks = [Text(owner + host)]
+    elif layout == "split_text":
+        blocks = [Text(owner), Text(host)]
+    else:
+        blocks = [Text(owner), image, Text(host)]
+    original = Message(role="user", content=blocks).pin_context(host)
+    saved = original.to_dict()
+    values = {"zone": "UTC", "now": dt("2026-11-09T18:00:00+00:00")}
+    result = delegated_wake_time(
+        blocks, {"time_context": lambda _source: values}, "unpark",
+        before_context=original.context_pin[0],
+    )
+    rendered = Message(role="user", content=result)
+    added = len(rendered.text()) - len(original.text())
+    rendered.context_pin = tuple(n + added for n in original.context_pin)
+    assert original.to_dict() == saved
+    assert rendered.text().startswith(owner)
+    assert rendered.pinned_text() == host
+    assert rendered.text().count("Current time:") == 1
+    assert rendered.text().endswith(host)
+    assert [b for b in result if isinstance(b, Image)] == ([image] if layout == "image" else [])
+
+
 def test_epoch_pins_have_absolute_send_times_without_rewriting_the_owner():
     from fluid.context.compaction import render_epoch_stub
     owner = node()

@@ -108,9 +108,9 @@ def test_delegated_still_uses_fixed_threshold_and_cli_ratio(monkeypatch, capture
 
 
 @pytest.mark.parametrize("overhead,window,expected_before,expected_projection", [
-    # The first turn is the session's brief: from render version 3 it stays whole.
-    (20_000, 400_000, 370_310, 31_593),
-    (160_000, 1_000_000, 510_310, 171_593),
+    # v4 keeps the opening brief whole, with its absolute send-time heading.
+    (20_000, 400_000, 370_310, 31_606),
+    (160_000, 1_000_000, 510_310, 171_606),
 ])
 def test_real_projector_with_irreducible_overhead(
     monkeypatch, mock_db, overhead, window, expected_before, expected_projection,
@@ -126,7 +126,7 @@ def test_real_projector_with_irreducible_overhead(
         for role in ("user", "assistant"):
             path.append(SessionNode(
                 node_id=f"node_{i}_{role}", parent_id=path[-1].node_id if path else None,
-                message=Message(role=role, content=[Text(text=f"turn {i}: " + "word " * 2000)]),
+                message=Message(role=role, content=[Text(text=f"turn {i}: " + "word " * 2000)]), ts=0,
             ))
     compactor = Compactor(config=replace(
         CompactionConfig(), summary_enabled=True, keep_recent_turns=1,
@@ -138,6 +138,13 @@ def test_real_projector_with_irreducible_overhead(
         path, overhead_tokens=overhead, context_window=window,
     )
     assert (before, projection) == (expected_before, expected_projection)
+    # The only v4 addition is the 53-character heading:
+    # [sent/delivered 1970-01-01 00:00:00 UTC +0000 (UTC)] followed by a newline.
+    # The chars/4 estimator floors the combined rendered view, adding 13 tokens.
+    legacy = Compactor(config=replace(compactor.config, render_version=3))
+    assert legacy.projected_after_compact(
+        path, overhead_tokens=overhead, context_window=window,
+    ) == projection - 13
     # Keep the real DB reader: the snapshot wrapper is written by the producer.
     from app.core import limit_resume
     from app.core.provider import harness_adapter

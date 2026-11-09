@@ -103,6 +103,9 @@ async def test_resume_continues_from_a_tool_result_head(tmp_path) -> None:
     # in-process turn state.
     mark = len(loop.bus.log(sid))
     _rescript(provider, [_text("It is sunny in Paris.")])
+    from unittest.mock import AsyncMock
+    loop._environment_reminder = AsyncMock(return_value="Current time: 2026-11-09T18:00:00+00:00 (UTC)")
+    original = head.message.to_dict()
     await _turn(loop, Resume())
 
     events = _events_since(loop, sid, mark)
@@ -112,6 +115,10 @@ async def test_resume_continues_from_a_tool_result_head(tmp_path) -> None:
     assert any(isinstance(e, TurnComplete) for e in events)
     assert not any(isinstance(e, ErrorEvent) for e in events)
     assert provider.calls == 1
+    request = provider.requests[-1]
+    assert [m.role for m in request.messages] == [n.message.role for n in before]
+    assert request.messages[-1].text().endswith("Current time: 2026-11-09T18:00:00+00:00 (UTC)")
+    assert head.message.to_dict() == original
 
     after = await store.load_path(sid)
     assert len(after) == len(before) + 1  # only the answer was written
@@ -238,6 +245,10 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
 
     mark = len(loop.bus.log(sid))
     _rescript(provider, [_text("4")])
+    from unittest.mock import AsyncMock
+    clock = "Current time: 2026-11-09T18:00:00+00:00 (UTC)"
+    overhead = loop._context_overhead_tokens()
+    loop._environment_reminder = AsyncMock(return_value=clock)
     await _turn(loop, Resume())
 
     events = _events_since(loop, sid, mark)
@@ -251,5 +262,17 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
     assert after[0].node_id == prompt_node.node_id
     assert after[1].parent_id == prompt_node.node_id
     assert after[1].message.text() == "4"
-    # The resumed call saw the same single-message history the failed one did.
+    # The resumed call sees the same user, with a fresh request-local clock.
     assert provider.calls == 1
+    assert [m.role for m in provider.requests[-1].messages] == ["user"]
+    assert provider.requests[-1].messages[0].text() == "what is 2 + 2?\n\n" + clock
+    assert after[0].message.text() == "what is 2 + 2?"
+    from fluid.context.trim import estimate_tokens_of_text
+    assert loop._context_overhead_tokens() == overhead + estimate_tokens_of_text("\n\n" + clock)
+
+    next_clock = "Current time: 2026-11-09T19:00:00+00:00 (UTC)"
+    loop._environment_reminder = AsyncMock(return_value=next_clock)
+    await _turn(loop, UserTurn(content="a new question"))
+    assert provider.requests[-1].messages[-1].text() == "a new question" + next_clock
+    assert not any(clock in m.text() for m in provider.requests[-1].messages)
+    assert loop._context_overhead_tokens() == overhead

@@ -669,6 +669,12 @@ async def test_retry_after_a_reply_cut_off_by_a_provider_error_answers_the_promp
     )
     async with NativeRun(monkeypatch, tmp_path, provider) as run:
         failed = await run.turn("question")
+        from unittest.mock import AsyncMock
+        from copy import deepcopy
+
+        clock_note = "<system-reminder>Current time: 2026-11-09T18:00:00+00:00 (UTC)</system-reminder>"
+        monkeypatch.setattr(run.adapter.engine, "_environment_reminder", AsyncMock(return_value=clock_note))
+        original = (await run.stored())[0].text()
         retried = await _resume(run)
         stored = await run.stored()
 
@@ -678,6 +684,11 @@ async def test_retry_after_a_reply_cut_off_by_a_provider_error_answers_the_promp
     assert _text(retried) == "The full answer"
     assert [m.role for m in stored] == ["user", "assistant"]
     assert stored[0].text().startswith("question")
+    assert stored[0].text() == original  # the send-time receipt is immutable
     assert stored[1].text() == "The full answer"
     assert len(provider.requests) == 2
-    assert provider.requests[1].body == provider.requests[0].body
+    expected = deepcopy(provider.requests[0].body)
+    content = expected["messages"][-1]["content"]
+    cache = content[-1].pop("cache_control")
+    content.append({"type": "text", "text": "\n\n" + clock_note, "cache_control": cache})
+    assert provider.requests[1].body == expected
