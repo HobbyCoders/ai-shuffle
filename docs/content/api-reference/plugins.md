@@ -273,7 +273,7 @@ For a connector plugin, returns `409` if it is not installed or saved connection
 
 ### GET /api/v1/plugins/updates
 
-Compare installed marketplace plugins with their marketplaces and list the ones with a newer version. Sync the marketplace first to see its latest plugins.
+List installed plugins with a newer release or changed source content, including repositories without a marketplace catalog. This passive read never contacts external repositories or syncs marketplace checkouts: local files are compared in place, and external checks use cached results from the last owner refresh or opted-in automatic source sync. Equal-version content changes have a short content identifier appended to `available_version` after `+`. The candidate manifest version is canonical; the catalog version is only a fallback. Exact commit pins do not follow newer branch commits, and changing a pin cannot downgrade the installed release.
 
 **Auth:** Required
 
@@ -298,9 +298,29 @@ curl http://localhost:8000/api/v1/plugins/updates \
 
 `is_local` is `true` when the plugin's files live inside the marketplace repository and `false` when the marketplace points to another source.
 
+### POST /api/v1/plugins/updates/check
+
+Refresh sources with installed plugins and check external repositories at their configured refs, then cache and return the update list. This is the legacy list-only refresh; Settings uses the status-report action below. A source or plugin comparison failure is logged and isolated so healthy plugins still report updates. Local-directory sources are read in place, never re-cloned.
+
+**Auth:** Owner only
+
+No request fields are required.
+
+### GET /api/v1/plugins/updates/status
+
+Return `{ "updates": [...], "checks": [...] }` without contacting external sources. `updates` has the same shape as the legacy update-list endpoint; `checks` includes each tracked plugin's `plugin_id`, `name`, `status` (`unchecked`, `current`, `update` or `failed`), `checked_at` (last successful comparison, or `null`) and `error` (safe failure text, or `null`). A failed check retains its last-known update result, so one unavailable source does not hide healthy updates. An empty legacy update list alone does **not** mean a check succeeded.
+
+**Auth:** Required
+
+### POST /api/v1/plugins/updates/status/check
+
+Owner-triggered source refresh returning the same report, including per-plugin failures. Settings uses this action for **Check**. No request fields are required. Missing installed trees are offered as repairs, including unchanged pinned revisions. Release precedence ignores a `v` prefix, omitted trailing zeros and build metadata, and orders prereleases before the corresponding release.
+
+**Auth:** Owner only
+
 ### POST /api/v1/plugins/update
 
-Update one installed plugin to the marketplace's current version. Its scope and enabled state are kept. For a connector plugin, this installs the release shipped with this AI Shuffle version.
+Refresh the source and reinstall one installed plugin at its configured ref. Its scope and enabled state are kept. For a connector plugin, this installs the release shipped with this AI Shuffle version.
 
 **Auth:** Owner only
 
@@ -317,7 +337,7 @@ Returns the updated plugin (same fields as the installed list), or `400` if the 
 
 ### POST /api/v1/plugins/update/all
 
-Update every plugin that [GET /api/v1/plugins/updates](#get-apiv1pluginsupdates) lists. Plugins that fail to update are skipped. Returns the list of updated plugins.
+Refresh installed sources, then update every plugin that [GET /api/v1/plugins/updates](#get-apiv1pluginsupdates) lists. Plugins that fail to update are skipped. Returns the list of updated plugins.
 
 **Auth:** Owner only
 

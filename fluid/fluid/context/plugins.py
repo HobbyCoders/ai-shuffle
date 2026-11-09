@@ -14,10 +14,10 @@ module only resolves WHERE a plugin lives and what the runtime takes from it.
 
 On-disk layout, in resolution order:
 
-  1. ``~/.fluid/plugins/cache/<marketplace>/<plugin>/<version>/`` — the
-     installed copy; the highest version wins (numeric-aware, so ``1.10.0``
-     beats ``1.2.0``; non-numeric directory names like ``unknown`` sort below
-     every numeric one and are compared lexicographically among themselves).
+  1. The user/global ``installPath`` in ``installed_plugins.json`` — an
+     immutable revision for app-managed installs. Only legacy caches without
+     a record fall back to the highest non-hidden, non-retired version folder
+     (numeric-aware, so ``1.10.0`` beats ``1.2.0``).
   2. ``~/.fluid/plugins/marketplaces/<marketplace>/<plugin>/`` — a marketplace
      clone with the plugin in a subdirectory.
   3. ``~/.fluid/plugins/marketplaces/<marketplace>/`` — the clone root itself,
@@ -53,6 +53,8 @@ never takes the rest of discovery down with it (CE11).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from collections.abc import Mapping
@@ -173,7 +175,13 @@ def _version_key(name: str) -> tuple[int, tuple[int, ...], str]:
 
 def _latest_version_dir(base: Path) -> Path | None:
     try:
-        versions = [d for d in base.iterdir() if d.is_dir()]
+        # App-managed revisions/staging are hidden and require an explicit
+        # installPath. Retired legacy trees must not win the no-record fallback.
+        versions = [
+            d for d in base.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+            and not (base / ".retired" / hashlib.sha256(d.name.encode()).hexdigest()).exists()
+        ]
     except OSError as exc:
         log.warning("cannot list plugin cache dir %s: %s", base, exc)
         return None
@@ -194,6 +202,27 @@ def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None
         return None
 
     cache = home / "cache" / marketplace / name
+    # Hashes are not ordered versions. Follow the installer's current record,
+    # rather than picking an older hash that happens to sort last in the cache.
+    # Authored drafts keep their separate latest-version + approval rule.
+    if marketplace.casefold().rstrip(". ") != AUTHORED_SOURCE:
+        try:
+            installed = json.loads((home / "installed_plugins.json").read_text(encoding="utf-8"))
+            records = installed.get("plugins", {}).get(f"{name}@{marketplace}")
+            if isinstance(records, dict):
+                records = [records]  # Legacy single-record registry.
+            if isinstance(records, list) and records:
+                for record in records:
+                    if not isinstance(record, dict) or record.get("scope") not in (None, "user", "global"):
+                        continue
+                    raw = record.get("installPath")
+                    path = Path(raw) if isinstance(raw, str) and raw else None
+                    if path and path.is_dir() and path.resolve().parent == cache.resolve():
+                        return path, record.get("version") or path.name
+                log.warning("installed plugin %s@%s has no applicable confined cache path", name, marketplace)
+                return None
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass  # Older/CLI-only installs may have only the cache layout.
     if cache.is_dir():
         version_dir = _latest_version_dir(cache)
         if version_dir is not None:

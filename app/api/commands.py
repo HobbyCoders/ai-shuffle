@@ -1264,7 +1264,7 @@ async def _execute_rewind(
             from app.core.turn_recorder import _build_event
             from app.db import session_events as session_events_db
             await asyncio.to_thread(
-                session_events_db.append_events,
+                session_events_db.append_events_with_lock_retry,
                 session_id,
                 [_build_event(
                     contract_events.TranscriptRewound, session_id,

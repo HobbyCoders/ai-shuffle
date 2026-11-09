@@ -36,9 +36,9 @@ class SwarmUnavailableError(RuntimeError):
 
 async def persist(snapshot, *, run_id=None, fence_token=None):
     from app.core.history_backfill import ensure_backfilled
-    from app.db.session_events import append_events
+    from app.db.session_events import append_events_with_lock_retry
     await ensure_backfilled(snapshot["session_id"])
-    await asyncio.to_thread(append_events, snapshot["session_id"], [
+    await asyncio.to_thread(append_events_with_lock_retry, snapshot["session_id"], [
         {"type": "swarm.updated", "payload": {"swarm": snapshot}}],
         run_id=run_id, fence_token=fence_token)
 

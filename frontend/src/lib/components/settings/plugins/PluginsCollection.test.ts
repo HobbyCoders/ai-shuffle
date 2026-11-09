@@ -25,6 +25,7 @@ const m = vi.hoisted(() => ({
 	removeMarketplace: vi.fn(),
 	syncMarketplace: vi.fn(),
 	checkForUpdates: vi.fn(),
+	getUpdateReport: vi.fn(),
 	updatePlugin: vi.fn(),
 	updateAllPlugins: vi.fn(),
 	getAutoUpdateSettings: vi.fn(),
@@ -108,6 +109,9 @@ function detail(): HTMLElement {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	m.getUpdateReport.mockImplementation(async (refresh?: boolean) => ({
+		updates: await m.checkForUpdates(refresh), checks: []
+	}));
 	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
 	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
 	resetPluginsLive();
@@ -126,6 +130,29 @@ beforeEach(() => {
 	m.get.mockResolvedValue([]);
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe('honest update wording', () => {
+	it('shows not checked rather than up to date', async () => {
+		m.getUpdateReport.mockResolvedValue({ updates: [], checks: [
+			{ plugin_id: 'other@mp', name: 'other', status: 'unchecked', checked_at: null }
+		] });
+		await show('sources');
+		await waitFor(() => expect(within(detail()).getByText('Not checked')).toBeTruthy());
+		expect(within(detail()).queryByText('Up to date')).toBeNull();
+	});
+
+	it('shows a failed source alongside healthy update actions', async () => {
+		m.getUpdateReport.mockResolvedValue({
+			updates: [{ plugin_id: 'toolkit@mp', name: 'toolkit', installed_version: '1.0', available_version: '2.0' }],
+			checks: [{ plugin_id: 'other@mp', name: 'other', status: 'failed', error: 'Source unavailable' }]
+		});
+		await show('sources');
+		await waitFor(() => expect(within(detail()).getByText('1 available · Check failed')).toBeTruthy());
+		expect(within(detail()).getByRole('alert').textContent).toContain('other: Source unavailable');
+		expect(within(detail()).getByRole('button', { name: 'Update all (1)' })).toBeTruthy();
+		expect(within(detail()).queryByText('Up to date')).toBeNull();
+	});
+});
 
 describe('background resource refreshes', () => {
 	it('defers hidden invalidations and reloads once on visibility, not after unmount', async () => {

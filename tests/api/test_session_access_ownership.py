@@ -138,6 +138,9 @@ class _Effects:
         self.questions.get_pending_questions = MagicMock(return_value=[{"request_id": "q1"}])
         self.turns = MagicMock()
         self.turns.interrupt_async = AsyncMock(return_value=None)
+        # This file tests authorization, not cleanup admission. An explicitly
+        # captured empty receipt must not leak a MagicMock cutoff into SQL.
+        self.turns.capture_stop_receipt.return_value = {}
         self.turns.submit_async = AsyncMock()
         self.turns.remove_queued = MagicMock()
         self._extra = [

@@ -79,7 +79,7 @@ async def test_peer_stop_returns_incomplete_cleanup(monkeypatch):
 
     monkeypatch.setattr(control, "_require_owned", lambda _sid: None)
     monkeypatch.setattr(turn_manager, "interrupt_async", AsyncMock(return_value=None))
-    monkeypatch.setattr(turn_manager, "stop_reaches_background_work", lambda *_args: True)
+    monkeypatch.setattr(turn_manager, "capture_stop_receipt", lambda *_args: {})
     results = [{"ok": False, "task_id": "legacy", "incomplete": True}]
     monkeypatch.setattr(qsl, "stop_all_background_tasks", AsyncMock(return_value=results))
     result = await control._interrupt({"session_id": SID, "stop_background": True}, "peer")
@@ -100,7 +100,7 @@ async def test_websocket_reports_incomplete_stop(monkeypatch, remote):
     handler._v2_broadcast_queue = AsyncMock()
     monkeypatch.setattr(control, "interrupt", AsyncMock(return_value={"incomplete": True}))
     monkeypatch.setattr(turn_manager, "interrupt_async", AsyncMock(return_value=None))
-    monkeypatch.setattr(turn_manager, "stop_reaches_background_work", lambda *_args: True)
+    monkeypatch.setattr(turn_manager, "capture_stop_receipt", lambda *_args: {})
     monkeypatch.setattr(qsl, "stop_all_background_tasks", AsyncMock(return_value=[{"incomplete": True}]))
     await handler.handle_stop({"session_id": SID})
     errors = [call.args[0] for call in handler.send_json.call_args_list

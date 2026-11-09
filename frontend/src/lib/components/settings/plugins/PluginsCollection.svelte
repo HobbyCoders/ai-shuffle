@@ -138,9 +138,7 @@
 
 	const installedCount = $derived(model.review.length + model.apps.length + model.installedPackages.length);
 	const exploreSummary = $derived(model.loading ? 'Loading' : `${model.availableCount} to add`);
-	const sourcesSummary = $derived(
-		model.updates.length ? plural(model.updates.length, 'update') : plural(model.marketplaces.length, 'source')
-	);
+	const sourcesSummary = $derived(model.updateSummary);
 	const showExplore = $derived(matches('Explore plugins', 'catalog browse install', exploreSummary));
 	const showSources = $derived(!access.readOnly && matches('Sources and updates', 'marketplace', sourcesSummary));
 	const projectsSummary = $derived(

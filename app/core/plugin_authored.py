@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.plugin_models import PluginDetails, PluginInfo
+from app.core.plugin_locks import serialized_plugin, serialized_state
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,8 @@ def details(svc, plugin_id: str) -> Optional[PluginDetails]:
     )
 
 
+@serialized_plugin
+@serialized_state
 def enable(svc, plugin_id: str, content_hash: Optional[str], *, share: bool = True) -> bool:
     """Approve the reviewed content and enable the plugin.
 
@@ -175,6 +178,8 @@ def enable(svc, plugin_id: str, content_hash: Optional[str], *, share: bool = Tr
     return True
 
 
+@serialized_plugin
+@serialized_state
 def disable(svc, plugin_id: str, *, share: bool = True) -> bool:
     """Turn the plugin off and drop its approval, here and (with ``share``) on every device."""
     svc._check_files_replaceable(_approvals_file(svc), svc.SETTINGS_FILE)
@@ -189,6 +194,8 @@ def disable(svc, plugin_id: str, *, share: bool = True) -> bool:
     return done
 
 
+@serialized_plugin
+@serialized_state
 def uninstall(svc, plugin_id: str, *, share: bool = True) -> bool:
     name = plugin_id.rpartition("@")[0]
     folder = _base(svc) / name
@@ -210,6 +217,7 @@ def uninstall(svc, plugin_id: str, *, share: bool = True) -> bool:
     return not folder.exists()
 
 
+@serialized_state
 def _set_enabled(svc, plugin_id: str, value: bool) -> bool:
     settings = svc._read_json_file(svc.SETTINGS_FILE, {}, for_update=True)
     settings.setdefault("enabledPlugins", {})[plugin_id] = value
