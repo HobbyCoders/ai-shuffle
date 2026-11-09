@@ -791,18 +791,40 @@ def _no_host_memory_admission_floor(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_app_error_log_handler(_auto_db_shim, monkeypatch):
-    """Retire lifespan-owned DB logging before the next test borrows the root.
+def _no_app_error_log_handler(_auto_db_shim, monkeypatch, request):
+    """Discard lifespan-owned DB logging before another test borrows the root.
 
-    An interrupted lifespan (e.g. the aborted event-gateway test) never reaches
-    its late uninstall. Its listener would then persist unrelated tests' logs
-    through their DB mocks. Keep both the DB shim and monkeypatches alive until
-    the queue has drained; leave pytest/caplog and other root sinks untouched.
+    Keep DB/mocking fixtures alive until any in-flight emit finishes. Production
+    close deliberately returns after 2s even if the listener is still alive;
+    that shutdown policy cannot authorize running another test in this process.
     """
     yield
     error_logging = sys.modules.get("app.core.error_log_handler")
-    if error_logging is not None:
+    handler = getattr(error_logging, "_handler", None)
+    if handler is None:
+        return  # No installed listener: no joins, timers, or extra imports.
+
+    listener = handler.listener
+    thread = listener._thread  # close() clears this even when its join times out.
+    listener.handlers = ()  # Discard backlog, including a full queue, not DB writes.
+    try:
         error_logging.uninstall_error_log_handler()
+    finally:
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.1)
+            if thread.is_alive():
+                # Detaching targets cannot stop emit() already inside a target. It
+                # may resolve record_error (or a DB mock) only AFTER its current wait.
+                # pytest.fail/exit would continue teardown, potentially hanging on
+                # that thread's DB lock; terminate only this contaminated test process.
+                try:
+                    capture = request.config.pluginmanager.getplugin("capturemanager")
+                    if capture is not None:
+                        capture.suspend(in_=True)
+                    os.write(2, (f"\nERROR {request.node.nodeid}: app error-log listener still alive "
+                                 "after bounded teardown; refusing to run another test\n").encode())
+                finally:
+                    os._exit(int(pytest.ExitCode.TESTS_FAILED))
 
 
 @pytest.fixture(autouse=True)
