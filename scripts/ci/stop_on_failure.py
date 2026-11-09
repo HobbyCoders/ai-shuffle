@@ -59,6 +59,11 @@ def gate_finished(jobs):
     return any(job.get("name") == GATE and job.get("status") == "completed" for job in jobs)
 
 
+def nothing_to_watch(jobs):
+    """True when no job that can fail the run is queued or running."""
+    return not any(job.get("status") != "completed" and not is_advisory(job.get("name", "")) for job in jobs)
+
+
 def report(failed, out=sys.stdout, summary_path=None):
     lines = [f"- {job['name']}: {job.get('html_url', '')}" for job in failed]
     print("::error title=Main suite stopped early::" + "; ".join(job["name"] for job in failed), file=out)
@@ -71,7 +76,7 @@ def report(failed, out=sys.stdout, summary_path=None):
 
 def watch(repository, run, attempt, token, call=request, sleep=time.sleep, out=sys.stdout, summary_path=None):
     """Return "cancelled", "finished" or "unreadable"."""
-    unreadable = 0
+    unreadable = idle = 0
     while True:
         try:
             jobs = jobs_of(repository, run, attempt, token, call)
@@ -89,6 +94,11 @@ def watch(repository, run, attempt, token, call=request, sleep=time.sleep, out=s
             call("POST", f"/repos/{repository}/actions/runs/{run}/cancel", token)
             return "cancelled"
         if gate_finished(jobs):
+            return "finished"
+        # A re-run of only this watcher has no gate in its attempt: the suites
+        # passed earlier. Seen twice, so jobs still registering are not missed.
+        idle = idle + 1 if str(attempt) != "1" and nothing_to_watch(jobs) else 0
+        if idle >= 2:
             return "finished"
         sleep(POLL_SECONDS)
 

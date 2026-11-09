@@ -29,10 +29,10 @@ class Api:
         return {"jobs": poll, "total_count": len(poll)}
 
 
-def watch(api, tmp_path=None):
+def watch(api, tmp_path=None, attempt="2"):
     out = io.StringIO()
     summary = str(tmp_path / "summary.md") if tmp_path else None
-    result = stop.watch("o/r", "7", "2", "t", call=api, sleep=lambda _: None, out=out, summary_path=summary)
+    result = stop.watch("o/r", "7", attempt, "t", call=api, sleep=lambda _: None, out=out, summary_path=summary)
     return result, out.getvalue()
 
 
@@ -87,3 +87,17 @@ def test_reads_recover_and_every_page_is_read():
     api = Paged([])
     assert watch(api)[0] == "cancelled"
     assert [path[-6:] for method, path in api.calls if method == "GET"] == ["page=1", "page=2"]
+
+
+def test_a_rerun_of_only_the_watcher_ends_instead_of_holding_the_lane():
+    """Its attempt has no gate: the required suites passed in an earlier one."""
+    alone = [job("Stop on first failure (non-blocking)", "in_progress")]
+    api = Api([alone, alone, alone])
+    assert watch(api)[0] == "finished"
+    assert len(api.calls) == 2
+    # A first attempt whose jobs have not registered yet keeps watching.
+    api = Api([alone, alone, alone + [job("backend / backend-shard 1", conclusion="failure")]])
+    assert watch(api, attempt="1")[0] == "cancelled"
+    # In a re-run, one quiet poll between jobs is not the end.
+    api = Api([alone, alone + [job("backend / backend-shard 1", "queued")], alone + [job("backend / backend-shard 1", conclusion="failure")]])
+    assert watch(api)[0] == "cancelled"
