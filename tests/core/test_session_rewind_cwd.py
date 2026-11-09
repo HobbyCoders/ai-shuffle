@@ -32,8 +32,7 @@ def test_jsonl_reader_prefers_the_cli_writer_cwd_over_stale_copy(tmp_path, hashe
     stale.mkdir(parents=True)
     (stale / f"{sid}.jsonl").write_text('{"type":"user","message":{"role":"user","content":"stale"}}\n')
     if hashed:
-        # Match the real CLI's existing shortened folder, which the reseed
-        # producer reuses instead of inventing a different hash algorithm.
+        # A same-prefix sibling must not redirect the reseed writer.
         (root / (cli_project_dir_name(cwd)[:CLI_PROJECT_DIR_MAX] + "-hash")).mkdir()
     entries = build_cli_transcript_entries([
         {"type": "user", "message": {"role": "user", "content": "retained"}}

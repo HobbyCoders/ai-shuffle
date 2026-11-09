@@ -55,11 +55,13 @@ FRONTEND = ROOT / "frontend"
 JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
-HOSTED_SHARDS = 11
+HOSTED_SHARDS = 13
 # Clean shards across six main-suite runs on 2026-11-06 had 7–14s step overhead.
-# Keep the existing setup, retry and teardown allowances; the calibration test
-# independently compares step estimates with hosted observations within 120s.
+# Keep the existing setup, retry and teardown allowances. Planning also reserves
+# the 120s error allowed by the independent hosted calibration: point estimates
+# must not spend that uncertainty out of the full retry/teardown reserves.
 SETUP_SECONDS = 30
+CALIBRATION_ERROR_SECONDS = 120
 # Conservative planning budgets, NOT hosted measurements. The new 47-case
 # producer took ~17 minutes in red run 42107295628 (job 127526542398), versus
 # 8.6 minutes from the generic per-case fallback. Reserve 18 minutes until a
@@ -155,6 +157,11 @@ def shard_budget_seconds(runtime: float) -> float:
     return runtime + SETUP_SECONDS + retry.RETRY_SECONDS + retry.TEARDOWN_SECONDS
 
 
+def planning_budget_seconds(runtime: float) -> float:
+    """Keep the calibration's allowed error outside the full operational reserves."""
+    return shard_budget_seconds(runtime) + (CALIBRATION_ERROR_SECONDS if runtime else 0)
+
+
 def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) -> list[list[str]]:
     weights = estimated_seconds(directory, weights_path)
     buckets = partition(weights, shards)
@@ -163,14 +170,15 @@ def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS) 
     lines = ["### Estimated UI journey shard loads", "",
              f"Step estimate includes {SETUP_SECONDS}s setup/normal teardown. "
              f"Retry budget also reserves the full {retry.RETRY_SECONDS}s retry phase "
-             f"and {retry.TEARDOWN_SECONDS}s teardown. "
+             f"and {retry.TEARDOWN_SECONDS}s teardown, plus {CALIBRATION_ERROR_SECONDS}s "
+             "for the calibration's allowed estimate error. "
              "The step deadline stays 25 minutes.", "",
              "| Shard | Journeys | Journey minutes | Step minutes | With retry/reserves | Headroom seconds |",
              "| --- | --- | --- | --- | --- | --- |"]
     for index, bucket in enumerate(buckets, 1):
         runtime = sum(weights[name] for name in bucket)
         step = runtime + SETUP_SECONDS if bucket else 0
-        budget = shard_budget_seconds(runtime)
+        budget = planning_budget_seconds(runtime)
         headroom = retry.STEP_SECONDS - budget
         # stdout is the plan's JSON API, consumed by the workflow's command substitution.
         print(f"[ci] planned shard {index}/{shards}: {step / 60:.1f} estimated step minutes "
