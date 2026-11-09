@@ -36,6 +36,8 @@
 //                   shown whole whenever the row has room for it
 import { fakeAiTag, runJourney } from './runner.mjs';
 import { pick, withChatSetup } from './lib/app.mjs';
+import { readFile, access } from 'node:fs/promises';
+import { join } from 'node:path';
 import { expectComposerPositions } from './lib/timeline.mjs';
 
 const PROJECT = 'Dev sandbox';
@@ -679,6 +681,42 @@ async function sendWithAttachmentThenRewind(ctx, label) {
 	if (/@\/\S*uploads\//.test(text)) throw new Error(`the upload path came back as text: ${JSON.stringify(text)}`);
 }
 
+/** An attachment after the first reply belongs to the checkout, not main (#1329). */
+async function attachInExistingWorktree(ctx) {
+	const { page, mark, log, status } = ctx;
+	const createdResponse = page.waitForResponse((r) => r.url().includes('/sessions/with-worktree') && r.request().method() === 'POST');
+	await sendFirstMessage(ctx, 'worktree-upload');
+	const created = await (await createdResponse).json();
+	if (!created.worktree_path) throw new Error('new chat did not create a local worktree');
+	const file = `after-reply-${uniq()}.txt`;
+	await mark('attach after the first reply');
+	const uploadedResponse = page.waitForResponse((r) => r.url().includes('/upload') && r.request().method() === 'POST');
+	await page.locator('input[type="file"]').first().setInputFiles({ name: file, mimeType: 'text/plain', buffer: Buffer.from('worktree attachment\n') });
+	const uploaded = await (await uploadedResponse).json();
+	const expected = join(created.worktree_path, 'uploads', file);
+	if (uploaded.full_path !== expected) throw new Error(`attachment landed outside the chat checkout: ${uploaded.full_path}; expected ${expected}`);
+	if (await readFile(expected, 'utf8') !== 'worktree attachment\n') throw new Error('attachment bytes differ');
+	const inMain = await access(join(status.seed.projects['dev-sandbox'], 'uploads', file)).then(() => true, () => false);
+	if (inMain) throw new Error('attachment also polluted main');
+	await page.getByRole('textbox', { name: 'Message' }).locator('[data-file-chip]').waitFor();
+	await mark('send worktree attachment');
+	await page.getByRole('button', { name: 'Send', exact: true }).click();
+	await page.waitForFunction(() => Number(document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-messages')) >= 4 && document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-streaming') === 'false', null, { timeout: 60_000 });
+	if (!(await page.locator('[data-ui-state="chat"]').innerText()).includes(expected)) throw new Error('sent prompt does not name the chat checkout');
+	await mark('rewind the worktree attachment');
+	await page.getByTitle('Rewind to before this message', { exact: true }).last().focus();
+	await page.keyboard.press('Enter');
+	await page.getByRole('dialog').getByRole('button', { name: 'Rewind', exact: true }).click();
+	const restored = page.getByRole('textbox', { name: 'Message' }).locator('[data-file-chip]');
+	await restored.waitFor({ timeout: 30_000 });
+	if (!(await restored.innerText()).includes(file)) throw new Error('rewind lost the worktree attachment chip');
+	await mark('resend the restored worktree attachment');
+	await page.getByRole('button', { name: 'Send', exact: true }).click();
+	await page.waitForFunction(() => Number(document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-messages')) >= 4 && document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-streaming') === 'false', null, { timeout: 60_000 });
+	if (!(await page.locator('[data-ui-state="chat"]').innerText()).includes(expected)) throw new Error('restored send lost the worktree attachment path');
+	log('upload bytes, sent prompt and restored resend use the worktree; main has no copy');
+}
+
 const settled = (setup) => async (ctx) => {
 	await setup(ctx);
 	await ctx.page.waitForTimeout(1000);
@@ -750,6 +788,16 @@ await runJourney({
 				});
 			}),
 			act: (ctx) => sendFirstMessage(ctx, 'new-branch')
+		},
+		{
+			name: 'existing-worktree-attachment',
+			viewports: ['desktop', 'phone'],
+			setup: settled(async (ctx) => {
+				const hero = await openNewChat(ctx);
+				await pickProject(ctx.page, hero);
+				await worktreeOn(ctx.page, hero);
+			}),
+			act: attachInExistingWorktree
 		},
 		{
 			name: 'auto-attachment',

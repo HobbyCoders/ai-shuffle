@@ -130,9 +130,9 @@ curl -X POST http://localhost:8000/api/v1/projects/proj123/upload \
 | Field | Type | Description |
 |-------|------|-------------|
 | `file` | file | The file to upload (required) |
-| `path` | string | Target directory within the project (default: root) |
-| `session_id` | string | Associate with a session |
-| `worktree_id` | string | Upload to specific worktree |
+| `path` | string | Target directory within the checkout (default: `uploads/`) |
+| `session_id` | string | Use this session's existing checkout, including branch-bound worktree chats; fall back to the project if unavailable |
+| `worktree_id` | string | Legacy worktree fallback when the session does not resolve an existing checkout |
 
 ### GET /api/v1/projects/{project_id}/files/download
 

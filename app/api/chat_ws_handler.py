@@ -1181,13 +1181,28 @@ class ChatWebSocketHandler:
                 "Upload lift: project_v2 resolve failed for %s", project_id,
                 exc_info=True,
             )
-        return blob_ids + await run_sync(
-            upload_transfer.lift_paths_to_blobs,
-            upload_paths,
-            project,
-            session_id,
-            project_v2_id,
-        )
+        # Established branch chats upload into their checkout, which may be
+        # outside the base project. First-message attachments can still be in
+        # main/uploads, so choose the confined root for each source rather than
+        # replacing the base root for the whole batch.
+        from pathlib import Path
+        from app.core.project_resolver import resolve_existing_cwd
+
+        def _lift_project_paths():
+            session = database.get_session(session_id)
+            cwd = resolve_existing_cwd(session) if session else None
+            checkout = Path(cwd).resolve() if cwd else None
+            lifted = []
+            for source in upload_paths:
+                source_project = project
+                if checkout and upload_transfer._is_under(Path(source).resolve(), checkout):
+                    source_project = {**project, "path": str(checkout)}
+                lifted += upload_transfer.lift_paths_to_blobs(
+                    [source], source_project, session_id, project_v2_id,
+                )
+            return lifted
+
+        return blob_ids + await run_sync(_lift_project_paths)
 
     async def _authorize_mobile_session(self, session_id, *, claim=False):
         from app.core.mobile_tool_identity import bind_session

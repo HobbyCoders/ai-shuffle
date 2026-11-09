@@ -841,12 +841,22 @@ def _perform_project_upload(
     always rooted on a disk the session's agent can read. Synchronous (filesystem
     + DB) — call via ``run_sync`` from async contexts.
     """
-    # Determine base path: use worktree path if session or worktree_id resolves one
+    # Branch-bound v2 chats have no legacy worktree_id. Use the same pure-read,
+    # branch-validating resolver as the file browser before legacy fallbacks.
     base_project_path = project["path"]
+    session_cwd = None
     worktree = None
     if session_id:
-        worktree = database.get_worktree_by_session(session_id)
-    if not worktree and worktree_id:
+        from app.core.project_resolver import resolve_existing_cwd
+
+        session = database.get_session(session_id)
+        if session:
+            session_cwd = resolve_existing_cwd(session)
+        if session_cwd:
+            base_project_path = session_cwd
+        else:
+            worktree = database.get_worktree_by_session(session_id)
+    if not session_cwd and not worktree and worktree_id:
         worktree = database.get_worktree(worktree_id)
     if worktree and worktree.get("worktree_path"):
         # Verify the worktree directory actually exists on disk
