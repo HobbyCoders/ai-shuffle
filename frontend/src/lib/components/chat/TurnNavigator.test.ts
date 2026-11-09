@@ -196,6 +196,40 @@ describe('TurnNavigator', () => {
 			expect(nav.style.top).toBe('0px');
 		});
 
+		it('re-centres when the window changes under a wrapped draft, and sending that draft then leaves it alone', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			setComposer(320);
+			await resizeTo(200);
+			expect(nav.style.top).toBe('150px');
+			await resizeTo(600);
+			expect(nav.style.top).toBe('350px');
+			setComposer(120);
+			await resizeTo(800);
+			expect(nav.style.top).toBe('350px');
+		});
+
+		it('returns to the centre when the window changes after a draft that left it no room is cleared', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			setComposer(420);
+			await resizeTo(100);
+			setComposer(120);
+			await resizeTo(400);
+			expect(nav.style.top).toBe('0px');
+			await resizeTo(600);
+			expect(nav.style.top).toBe('250px');
+		});
+
+		it('holds still on a send that follows a window change', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			await resizeTo(700);
+			expect(nav.style.top).toBe('300px');
+			setComposer(320);
+			await resizeTo(500);
+			setComposer(120);
+			await resizeTo(700);
+			expect(nav.style.top).toBe('300px');
+		});
+
 		it('centres on the rail\'s real height while a tall draft squeezes its box to nothing', async () => {
 			const { nav, resizeTo, container } = await mount(400, 100);
 			expect(nav.style.top).toBe('150px');

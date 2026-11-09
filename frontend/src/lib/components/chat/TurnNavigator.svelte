@@ -119,8 +119,11 @@
 
 	/** The least rail worth keeping above a tall draft. */
 	const MIN_RAIL_PX = 40;
-	/** Height of whatever shares the composer's slot when the rail last moved. */
+	/** The composer height the rail's position is measured against. */
 	let placedComposer = 0;
+	/** Transcript plus composer when last measured. A draft trades height between
+	 *  the two and leaves the sum alone; a window or keyboard change does not. */
+	let placedTotal = 0;
 
 	/** The rail's height with nothing squeezing it. A tall draft shortens the box,
 	 *  down to nothing, and a box read then would look like a rail wanting to move. */
@@ -136,16 +139,24 @@
 		const available = host.clientHeight;
 		const height = restingHeight(nav);
 		const composer = nav.closest('.chat-view')?.querySelector('.input-slot')?.clientHeight ?? 0;
+		// A real change of window height ends the hold a tall draft left behind:
+		// measure against the composer as it rests, so the rail can centre again.
+		if (available + composer !== placedTotal) {
+			placedTotal = available + composer;
+			placedComposer = Math.min(placedComposer, composer);
+		}
 		const cramped = force || navTop === null || available - navTop < Math.min(height, MIN_RAIL_PX);
 		// The composer trades height one for one with the transcript. Measure as if it
-		// had not changed since the rail last moved, or a draft growing or being sent
-		// counts as drift and the rail follows every send (#1094). Only a draft that
-		// leaves the rail no room moves it, and its own bottom gives way before that.
+		// were still the height the rail was placed against, or a draft growing or
+		// being sent counts as drift and the rail follows every send (#1094). Only a
+		// draft that leaves the rail no room moves it, and that alone resets the
+		// height measured against: an ordinary re-centre stays in the same frame, so
+		// the send after it finds the rail where it already is.
 		const room = cramped ? available : available + composer - placedComposer;
 		const centred = Math.max(0, Math.round((room - height) / 2));
+		if (cramped) placedComposer = composer;
 		if (cramped || navTop! + height > room || Math.abs(centred - navTop!) > RECENTRE_DRIFT_PX) {
 			navTop = centred;
-			placedComposer = composer;
 		}
 	}
 
