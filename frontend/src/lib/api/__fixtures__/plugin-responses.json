@@ -143,7 +143,7 @@
 		"has_mcp": false,
 		"has_skills": true,
 		"id": "toolkit@mp",
-		"install_path": "/home/user/fluid/plugins/cache/mp/toolkit/.revision-1.2.0-ab729690914b36ddc8f40fceb746644a6f31a4e5c170311f8a47cd2b65f01e48",
+		"install_path": "/home/user/fluid/plugins/cache/mp/toolkit/.revision-1.2.0-47ee42fc4381f5f81e78d06671d027d87461aa5c91fb4a4668309f3308c4d021",
 		"installed_at": "2026-01-02T03:04:05",
 		"marketplace": "mp",
 		"name": "toolkit",
@@ -158,7 +158,7 @@
 	"file_based_agents": [
 		{
 			"description": "Reviews diffs",
-			"file_path": "/home/user/fluid/plugins/cache/mp/toolkit/.revision-1.2.0-ab729690914b36ddc8f40fceb746644a6f31a4e5c170311f8a47cd2b65f01e48/agents/reviewer.md",
+			"file_path": "/home/user/fluid/plugins/cache/mp/toolkit/.revision-1.2.0-47ee42fc4381f5f81e78d06671d027d87461aa5c91fb4a4668309f3308c4d021/agents/reviewer.md",
 			"id": "toolkit@mp:reviewer",
 			"model": null,
 			"name": "reviewer",
@@ -207,7 +207,7 @@
 			"has_mcp": false,
 			"has_skills": true,
 			"id": "toolkit@mp",
-			"install_path": "/home/user/fluid/plugins/cache/mp/toolkit/.revision-1.2.0-ab729690914b36ddc8f40fceb746644a6f31a4e5c170311f8a47cd2b65f01e48",
+			"install_path": "/home/user/fluid/plugins/cache/mp/toolkit/.revision-1.2.0-47ee42fc4381f5f81e78d06671d027d87461aa5c91fb4a4668309f3308c4d021",
 			"installed_at": "2026-01-02T03:04:05",
 			"marketplace": "mp",
 			"name": "toolkit",
