@@ -188,6 +188,20 @@ test('a forgiven correction uses up what explained it', () => {
 	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 2);
 });
 
+test('forgiving the named correction leaves a bounce around it counted', () => {
+	const rows = [0, 100, 100, 108.5, 100, 100, 0, 0];
+	const composer = [592, 592, 592, 600.5, 600.5, 600.5, 600.5, 600.5];
+	const content = [2000, 2000, 2000, 2000, 2008.5, 2008.5, 2108.5, 2108.5];
+	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 2);
+});
+
+test('the named correction inside a one-way follow leaves that follow at 0', () => {
+	const rows = [100, 100, 108.5, 100, 100, 60, 60];
+	const composer = [592, 592, 600.5, 600.5, 600.5, 600.5, 600.5];
+	const content = [2000, 2000, 2000, 2008.5, 2008.5, 2048.5, 2048.5];
+	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 0);
+});
+
 test('a bounce around a one-frame turning point counts', () => {
 	const rows = [68, 98, 38, 58, 38, 38];
 	const content = [2000, 2000, 2060, 2060, 2080, 2080];

@@ -66,6 +66,29 @@ function findReturns(rows, tolerance) {
 }
 
 /**
+ * The frames with the named correction taken out of row, composer and content,
+ * as if it never happened. Doing this first means forgiving it cannot change
+ * what any bounce is measured from, or leave its height to explain a later step.
+ */
+function withoutCorrection(frames, size, tolerance) {
+	const matches = (change) => Math.abs(change - size) <= CORRECTION_MARGIN;
+	for (const { from, to } of findReturns(frames.map((frame) => frame.row), tolerance)) {
+		const path = frames.slice(from, to + 1).map((frame) => frame.row);
+		const start = Math.max(0, from - CATCH_UP_FRAMES);
+		const gave = frames[to].composer - frames[start].composer;
+		const added = frames[to].content - frames[start].content;
+		if (!matches(Math.max(...path) - Math.min(...path)) || !matches(gave) || !matches(added)) continue;
+		return frames.map((frame, i) => i <= start ? frame : {
+			...frame,
+			row: i > from && i < to ? frames[from].row : frame.row,
+			composer: i < to ? frames[start].composer : frame.composer - gave,
+			content: i < to ? frames[start].content : frame.content - added
+		});
+	}
+	return frames;
+}
+
+/**
  * Spends the newest unspent changes that add up to `size`; false if none do. A row
  * following the bottom can stop short by the empty room `leftBelow` measured below
  * the reader on that frame, so that shortfall is the same change.
@@ -86,47 +109,26 @@ function spend(pool, size, tolerance, leftBelow) {
  * Separate movements of a transcript row that nothing explains, over a whole send.
  * Frames are `{ row: top, content: scrollHeight, composer: top, gap: room below the reader }`.
  *
- * A bounce is a property of the row's whole path, so it is read from the path:
- * a row that left a position and came back to it moved twice, whatever explains
- * each step. `knownCorrection` names the one exception, in pixels, once per send
- * and only when the journey passes it (desktop): the composer gives back that
- * much, the row follows it, and the bottom-follow code takes it back.
+ * `knownCorrection` names the one exception, in pixels, once per send and only when
+ * the journey passes it (desktop): the composer gives back that much, the row
+ * follows it, and the bottom-follow code takes it back. It is removed first.
  *
- * Off those excursions a step only counts when nothing accounts for it. A row
- * moving down must match height the composer gave back, and one moving up must
- * match content added below it, each usable once, within the few frames the row
- * can land behind them.
+ * A bounce is then read from the row's whole path, and any bounce is two movements
+ * however each step is explained. With no bounce, a step only counts when nothing
+ * accounts for it. A row moving down must match height the composer gave back, and
+ * one moving up must match content added below it, each usable once, within the
+ * few frames the row can land behind them.
  */
 export function transcriptMovements(frames, { tolerance = STILL, knownCorrection = null } = {}) {
-	const measured = frames.filter((frame) => Number.isFinite(frame.row) && Number.isFinite(frame.composer));
-	if (measured.length < 2) return 0;
-	const returns = findReturns(measured.map((frame) => frame.row), tolerance);
-	const inReturn = new Set();
-	let bounces = 0;
-	let correctionUsed = false;
-	for (const { from, to } of returns) {
-		for (let i = from + 1; i <= to; i++) inReturn.add(i);
-		const before = measured[Math.max(0, from - CATCH_UP_FRAMES)];
-		const excursion = measured.slice(from, to + 1).map((frame) => frame.row);
-		const matches = (change) => Math.abs(change - knownCorrection) <= CORRECTION_MARGIN;
-		const forgiven = knownCorrection !== null && !correctionUsed
-			&& matches(Math.max(...excursion) - Math.min(...excursion))
-			&& matches(measured[to].composer - before.composer)
-			&& matches(measured[to].content - before.content);
-		correctionUsed ||= forgiven;
-		if (!forgiven) bounces += 2;
-	}
+	const seen = frames.filter((frame) => Number.isFinite(frame.row) && Number.isFinite(frame.composer));
+	if (seen.length < 2) return 0;
+	const measured = knownCorrection === null ? seen : withoutCorrection(seen, knownCorrection, tolerance);
+	const bounces = findReturns(measured.map((frame) => frame.row), tolerance).length;
+	if (bounces > 0) return bounces * 2;
 	const steps = [];
 	const gaveBack = [];
 	const added = [];
 	for (let i = 1; i < measured.length; i++) {
-		// A return is already counted, and whatever explained it is used up.
-		if (inReturn.has(i)) {
-			gaveBack.length = 0;
-			added.length = 0;
-			steps.push(0);
-			continue;
-		}
 		for (const pool of [gaveBack, added]) while (pool.length && i - pool[0].at > CATCH_UP_FRAMES) pool.shift();
 		const composer = measured[i].composer - measured[i - 1].composer;
 		const content = measured[i].content - measured[i - 1].content;
@@ -137,7 +139,7 @@ export function transcriptMovements(frames, { tolerance = STILL, knownCorrection
 		const leftBelow = Math.max(0, (shift > 0 ? measured[i - 1].gap : measured[i].gap) ?? 0);
 		steps.push(shift !== 0 && spend(shift > 0 ? gaveBack : added, Math.abs(shift), tolerance, leftBelow) ? 0 : shift);
 	}
-	return bounces + countRuns(steps);
+	return countRuns(steps);
 }
 
 /**
