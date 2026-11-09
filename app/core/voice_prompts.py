@@ -92,7 +92,7 @@ def typed_request_text(checkpoint_text: str) -> str:
     running the call, inside the call context. A rewind pairs the two by text,
     so it needs the words back out of that wrapping. Text can merely look like
     that wrapping, so a caller must check the words against what was recorded
-    (``commands._checkpoint_candidates``) before believing them.
+    (``commands._checkpoint_matches``) before believing them.
     """
     text = checkpoint_text.strip().partition(_VOICE_NOTE_OPENING)[0].strip()
     at = text.find(TYPED_MESSAGE_PREFIX) if text.startswith(LIVE_CONTEXT_OPENER) else -1

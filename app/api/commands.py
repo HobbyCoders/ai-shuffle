@@ -11,7 +11,9 @@ Rewind uses persisted transcript/checkpoint services rather than terminal parsin
 
 import asyncio
 import logging
+from array import array
 from bisect import bisect_left
+from itertools import chain
 from typing import Any, Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
@@ -466,28 +468,47 @@ def _checkpoint_rows(events: List[dict]) -> List[dict]:
     return [row for row in events if _is_prompt_event(row) or (row.get("payload") or {}).get("kind") == "command"]
 
 
+# Each possible checkpoint-to-row pair costs memory and time while the rewind
+# holds the chat's lease, and identical messages multiply them. Counted first,
+# so a chat over the limit is refused before any of them is built.
+_MAX_ALIGNMENT_PAIRS = 4_000_000
+
 _UNALIGNED_REWIND = (
     "Rewind refused: this message cannot be matched to exactly one entry in "
     "the conversation's transcript, so nothing was changed (content guard)"
 )
 
+_OVERSIZED_REWIND = (
+    "Rewind refused: this chat repeats the same messages too many times to work "
+    "out which one you meant, so nothing was changed (content guard)"
+)
 
-def _checkpoint_candidates(user_cps: list, prompts: List[dict]) -> List[set[int]]:
-    """For each user checkpoint, the positions in ``prompts`` it could be.
+
+def _checkpoint_matches(user_cps: list, rows: List[dict]) -> List[tuple[list, list]]:
+    """For each checkpoint, ``(exact, stand_ins)``: positions in ``rows`` it could be.
+
+    ``exact`` is a list of disjoint sets holding the rows a rewind may land on.
+    ``stand_ins`` are rows it could equally be but that can't be rewound to. They
+    must stay in the alignment even so: drop a message that really happened
+    and whatever remains can look like the only match when it is the wrong one.
 
     A row stamped with a checkpoint's uuid is that checkpoint and nothing else.
     Otherwise provenance decides. An ordinary prompt's checkpoint holds its text
-    verbatim. A message typed into a call is recorded as the words alone while
-    its checkpoint wraps them, so a call's context block can only be a row
-    recorded as typed in a call, and a checkpoint that only gained the voice
-    note can be either kind of row. Calls' own rows never match verbatim:
-    their checkpoint, when there is one, is always wrapped.
+    verbatim. Only a call's request is wrapped, as a call's context block or
+    with the voice note, and its row may hold different words: the caller's
+    speech, or what they typed before a voice model rewrote it. So a wrapped
+    checkpoint with no row typed in exactly those words could be any such row.
+    A context block is only ever spoken; the note also covers Realtime's typed
+    text. A verbatim checkpoint is never a call row. Sets are shared between
+    checkpoints, so nothing here grows with the number of possible pairs.
     """
-    payloads = [row.get("payload") or {} for row in prompts]
+    payloads = [row.get("payload") or {} for row in rows]
     cp_uuids = {cp.uuid for cp in user_cps if cp.uuid}
     stamped = {p["uuid"]: j for j, p in enumerate(payloads) if p.get("uuid") in cp_uuids}
     ordinary: dict[str, set[int]] = {}
     typed: dict[str, set[int]] = {}
+    voice_rows: List[int] = []
+    call_rows: List[int] = []
     for j, payload in enumerate(payloads):
         if payload.get("uuid") in stamped:
             continue
@@ -495,33 +516,42 @@ def _checkpoint_candidates(user_cps: list, prompts: List[dict]) -> List[set[int]
         source = payload.get("source")
         if source == "typed":
             typed.setdefault(content, set()).add(j)
-        elif source != "voice":
+            call_rows.append(j)
+        elif source == "voice":
+            voice_rows.append(j)
+            call_rows.append(j)
+        else:
             ordinary.setdefault(content, set()).add(j)
-    candidates: List[set[int]] = []
+    matches: List[tuple[list, list]] = []
     for cp in user_cps:
         if cp.uuid in stamped:
-            candidates.append({stamped[cp.uuid]})
+            matches.append(([{stamped[cp.uuid]}], []))
             continue
         text = (cp.full_message or "").strip()
-        rows = set(ordinary.get(text, ()))
         words = typed_request_text(text)
-        if words != text:
-            rows |= typed.get(words, set())
-            if not text.startswith(LIVE_CONTEXT_OPENER):
-                rows |= ordinary.get(words, set())
-        candidates.append(rows)
-    return candidates
+        exact = [ordinary.get(text, set())]
+        stand_ins: List[int] = []
+        in_context = text.startswith(LIVE_CONTEXT_OPENER)
+        if in_context or words != text:
+            if words in typed:
+                exact.append(typed[words])
+            else:
+                stand_ins = voice_rows if in_context else call_rows
+            if not in_context and words != text:
+                exact.append(ordinary.get(words, set()))
+        matches.append((exact, stand_ins))
+    return matches
 
 
-def _chain_lengths(candidates: List[List[int]]) -> List[List[int]]:
+def _chain_lengths(candidates: List[array]) -> List[array]:
     """Longest in-order pairing ending at each candidate, shaped like the input.
 
     Each checkpoint's rows must be highest first, so they never extend each other.
     """
     tails: List[int] = []
-    lengths: List[List[int]] = []
+    lengths: List[array] = []
     for rows in candidates:
-        found: List[int] = []
+        found = array("I")
         for j in rows:
             k = bisect_left(tails, j)
             found.append(k + 1)
@@ -533,23 +563,28 @@ def _chain_lengths(candidates: List[List[int]]) -> List[List[int]]:
     return lengths
 
 
-def _align_checkpoints(user_cps: list, rows: List[dict]) -> dict[int, int]:
+def _align_checkpoints(user_cps: list, rows: List[dict]) -> Optional[dict[int, int]]:
     """Map checkpoint positions to the one row each certainly stands for.
 
     Checkpoints and rows are the same conversation in the same order, each with
     a few entries the other lacks: synthetic transcript lines, older data, a
     lost row. So the mapping is the longest in-order pairing, each row used
-    once. A pair is returned only when every longest pairing contains it; a
-    checkpoint left out has no row, or more than one row it could equally be,
-    and a rewind to it must be refused. Both rewind resolvers read this one
-    answer, or the model's transcript and the visible history would be cut at
-    different messages.
+    once. A pair is returned only when every longest pairing contains it and
+    the row can be rewound to; a checkpoint left out has no row, or more than
+    one row it could equally be, and a rewind to it must be refused. Both
+    rewind resolvers read this one answer, or the model's transcript and the
+    visible history would be cut at different messages.
+
+    None when the chat has more possible pairs than ``_MAX_ALIGNMENT_PAIRS``.
     """
-    candidates = [sorted(found, reverse=True) for found in _checkpoint_candidates(user_cps, rows)]
+    matches = _checkpoint_matches(user_cps, rows)
+    if sum(sum(map(len, exact)) + len(stand_ins) for exact, stand_ins in matches) > _MAX_ALIGNMENT_PAIRS:
+        return None
+    candidates = [array("I", sorted(chain(*exact, stand_ins), reverse=True)) for exact, stand_ins in matches]
     last = len(rows) - 1
     forward = _chain_lengths(candidates)
-    backward = _chain_lengths([[last - j for j in reversed(found)] for found in reversed(candidates)])
-    best = max(map(max, filter(None, forward)), default=0)
+    backward = _chain_lengths([array("I", (last - j for j in reversed(found))) for found in reversed(candidates)])
+    best = max((max(found) for found in forward if found), default=0)
     # Every longest pairing has exactly one pair at each length, so a length
     # with one possible pair is a pair they all contain.
     only_pair: dict[int, Optional[tuple[int, int]]] = {}
@@ -559,7 +594,7 @@ def _align_checkpoints(user_cps: list, rows: List[dict]) -> dict[int, int]:
             length = forward[i][n]
             if length + after[len(found) - 1 - n] - 1 == best:
                 only_pair[length] = None if length in only_pair else (i, j)
-    return {pair[0]: pair[1] for pair in only_pair.values() if pair}
+    return {i: j for i, j in filter(None, only_pair.values()) if any(j in group for group in matches[i][0])}
 
 
 def _resolve_checkpoint_uuid_from_content(
@@ -605,6 +640,8 @@ def _resolve_checkpoint_uuid_from_content(
             )
         row_pos = same[target_occurrence]
         aligned = _align_checkpoints(user_cps, rows)
+        if aligned is None:
+            return None, _OVERSIZED_REWIND
         position = next((i for i, j in aligned.items() if j == row_pos), None)
         if position is None:
             return None, _UNALIGNED_REWIND
@@ -684,7 +721,10 @@ def _resolve_rewind_from_seq(
                 f"transcript's user prompts"
             )
         rows = _checkpoint_rows(events)
-        row_pos = _align_checkpoints(user_cps, rows).get(pos)
+        aligned = _align_checkpoints(user_cps, rows)
+        if aligned is None:
+            return None, _OVERSIZED_REWIND
+        row_pos = aligned.get(pos)
         if row_pos is None or not _is_prompt_event(rows[row_pos]):
             return None, _UNALIGNED_REWIND
         target_idx = next(i for i, row in enumerate(events) if row is rows[row_pos])
