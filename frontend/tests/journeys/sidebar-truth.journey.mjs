@@ -29,6 +29,8 @@
 //                     project to the top of a crowded lane, and the rest of the
 //                     lane slides out of the way instead of jumping (#1307)
 //   new-chat-first-send  the same when this page's own first send brings the row
+//   new-chat-glide-has-no-step  a row in the group being pushed down follows the
+//                     glide with no jump in position at any frame (#1307)
 //
 // Hosted journeys build only the shared desktop UI and run it at desktop and
 // phone widths. `--mobile-shell` opens the phone variants of the failed-* cases
@@ -734,8 +736,77 @@ const NEW_CHAT_FIRST_SEND = {
 	}
 };
 
+/** A glide played this slowly moves a row under a pixel a frame, so a real step stands out. */
+const GLIDE_SLOWDOWN = 0.002;
+const GLIDE_MS = 240;
+const GLIDE_STEP_LIMIT_PX = 4;
+
+/**
+ * Records a row's on-screen top in every frame with animations slowed down. At
+ * full speed a 240 ms glide covers 130 px in its first frame, which hides a jump
+ * of a few pixels; the recorder samples layout and cannot see one either, because
+ * the row's offset inside its gliding group changes under a transform.
+ */
+async function traceRowTop(page, id) {
+	const cdp = await page.context().newCDPSession(page);
+	await cdp.send('Animation.enable');
+	await cdp.send('Animation.setPlaybackRate', { playbackRate: GLIDE_SLOWDOWN });
+	await page.evaluate((selector) => {
+		const trace = { frames: [], live: true };
+		window.__rowTrace = trace;
+		const tick = () => {
+			if (!trace.live) return;
+			trace.frames.push({ at: performance.now(), top: document.querySelector(selector)?.getBoundingClientRect().top ?? null });
+			requestAnimationFrame(tick);
+		};
+		requestAnimationFrame(tick);
+	}, CARD(id));
+	return async () => {
+		const frames = await page.evaluate(() => {
+			window.__rowTrace.live = false;
+			return window.__rowTrace.frames;
+		});
+		await cdp.send('Animation.setPlaybackRate', { playbackRate: 1 });
+		await cdp.detach();
+		return frames;
+	};
+}
+
+const NEW_CHAT_GLIDE_HAS_NO_STEP = {
+	name: 'new-chat-glide-has-no-step',
+	// CPU throttling makes the slowed animation clock jump by tens of pixels at
+	// the start of a glide, with or without a step, so only an unthrottled page
+	// can tell the two apart.
+	throttles: ['fast'],
+	setup: crowdedProjects,
+	async act({ page, mark }) {
+		const pushedDown = await page.locator('[data-group="active"] .proj-group').first()
+			.locator('.scard-frame').first().getAttribute('data-session-card');
+		await mark('a new chat lifts its project above the one holding this row');
+		const stop = await traceRowTop(page, pushedDown);
+		const { session_id: id } = await api(page, 'POST', '/sessions', {});
+		await page.locator(CARD(id)).waitFor({ state: 'attached', timeout: 30_000 });
+		await page.waitForTimeout(1500);
+		const frames = await stop();
+		await page.waitForTimeout(1000);
+		await expectLiftedToTop(page, id);
+		expect(frames.length > 10 && frames.every(({ top }) => top !== null), `the row stays mounted through the glide (${frames.length} frames)`);
+		const restTop = (await page.locator(CARD(pushedDown)).boundingBox()).y;
+		const distance = restTop - frames[0].top;
+		// A busy machine can take a long frame just as the glide starts, so the
+		// allowance is the most the glide itself can cover in that frame: its
+		// easing is fastest at the start, at three times its average speed.
+		const pxPerMs = (GLIDE_SLOWDOWN * 3 * distance) / GLIDE_MS;
+		const over = frames.slice(1).map(({ at, top }, i) =>
+			Math.abs(top - frames[i].top) - pxPerMs * (at - frames[i].at));
+		const worst = Math.max(...over);
+		expect(worst <= GLIDE_STEP_LIMIT_PX, `the row moves without a step: ${worst.toFixed(1)} px beyond the glide in frame ${over.indexOf(worst) + 1} of ${frames.length}`);
+		expect(frames.at(-1).top - frames[0].top > 10, `the row is gliding down: ${frames[0].top.toFixed(1)} to ${frames.at(-1).top.toFixed(1)}`);
+	}
+};
+
 await runJourney({
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND, NEW_CHAT_GLIDE_HAS_NO_STEP]
 });

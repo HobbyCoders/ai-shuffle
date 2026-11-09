@@ -1221,7 +1221,7 @@
 	.cards, .proj-group { display: flex; flex-direction: column; gap: 2px; }
 	/* Tiers: the lane label, then this quieter project label, then its rows. */
 	.proj-head {
-		padding: 16px 8px 4px 12px;
+		padding: 4px 8px 4px 12px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1229,7 +1229,10 @@
 		font-weight: 500;
 		color: var(--subtle-foreground);
 	}
-	.proj-group:first-child .proj-head { padding-top: 4px; }
+	/* The space between groups sits outside the group, never in its heading: a
+	   group's rows must keep their place inside it when it changes position,
+	   or they would jump the moment its glide begins. */
+	.proj-group + .proj-group { margin-top: 12px; }
 
 	.sect {
 		position: sticky;
