@@ -2123,6 +2123,15 @@ async def tracking_loop() -> None:
 
                 await remote_task_approvals.restore_proxies()
                 reattached = True
+                # Boot may have missed a global-on sync before the app loop was
+                # ready. Recover parked cards only AFTER restoring their relays.
+                # This task is already owned by startup/shutdown; never hold boot.
+                try:
+                    from app.core.global_away_mode import release_if_enabled
+
+                    await release_if_enabled()
+                except Exception:  # noqa: BLE001 — recovery must not stop tracking
+                    logger.warning("Could not release global Away prompts at startup", exc_info=True)
             await deliver_stops()
             await check_targets()
         except asyncio.CancelledError:

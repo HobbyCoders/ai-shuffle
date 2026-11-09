@@ -39,6 +39,49 @@ def _covered_local(session_id: str) -> bool:
     return local and away_mode.globally_covered(session_id)
 
 
+async def release_session_pending(session_id: str) -> dict:
+    """Best-effort recovery after a chat becomes locally executable."""
+    from app.core.chat_access import broker
+
+    counts = {"released_questions": 0, "deferred_approvals": 0}
+    try:
+        if (await run_sync(away_mode.global_away_enabled)
+                and await run_sync(_covered_local, session_id)):
+            counts["released_questions"] += await away_mode.release_pending_questions(session_id)
+            counts["deferred_approvals"] += await away_mode.release_pending_approvals(session_id)
+            counts["deferred_approvals"] += await broker.defer_pending_away(session_id)
+    except Exception:  # noqa: BLE001 — a broken prompt must never fail a handoff
+        logger.warning("Could not release global Away prompts for %s", session_id, exc_info=True)
+    return counts
+
+
+def release_session_after_commit(conn, session_id: str) -> None:
+    """Schedule on the app loop only after durable ownership/history publication.
+
+    All acceptance paths, including synchronous transfer recovery, use this
+    boundary. Before the app loop exists the startup sweep handles recovery.
+    """
+    import asyncio
+    from app.core.detached_tasks import spawn_detached
+    from app.core.global_events import global_events
+    from app.db.base import after_commit
+
+    def schedule():
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = global_events._loop
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(
+                    lambda: spawn_detached(release_session_pending(session_id),
+                                           name=f"global-away-{session_id}"))
+        except Exception:  # noqa: BLE001 — never fail ownership acceptance
+            logger.warning("Could not schedule global Away recovery for %s", session_id, exc_info=True)
+
+    after_commit(conn, schedule)
+
+
 async def release_local_pending() -> dict:
     """Release only covered chats executed here; repeated/overlapping sweeps are safe.
 
@@ -53,16 +96,9 @@ async def release_local_pending() -> dict:
     ids.update(a.session_id for a in list(broker.actions.values()) if not a.decision.done())
     counts = {"released_questions": 0, "deferred_approvals": 0}
     for session_id in sorted(ids):
-        try:
-            if not await run_sync(away_mode.global_away_enabled):
-                break
-            if not await run_sync(_covered_local, session_id):
-                continue
-            counts["released_questions"] += await away_mode.release_pending_questions(session_id)
-            counts["deferred_approvals"] += await away_mode.release_pending_approvals(session_id)
-            counts["deferred_approvals"] += await broker.defer_pending_away(session_id)
-        except Exception:  # noqa: BLE001 — one broken prompt must not strand other chats
-            logger.warning("Could not release global Away prompts for %s", session_id, exc_info=True)
+        released = await release_session_pending(session_id)
+        for key in counts:
+            counts[key] += released[key]
     return counts
 
 
