@@ -467,9 +467,9 @@ async def release_pending_approvals(session_id: str) -> int:
         # A parked owner_confirm call may already have returned "not run yet".
         # It has no waiter now: use its existing wake path, without an approval
         # pass, so the agent hears that it may continue without this action.
-        if payload.get("assistant_confirm"):
-            from app.core import owner_confirm
+        from app.core import owner_confirm
 
+        if owner_confirm.approval_of(payload):
             answered = await asyncio.to_thread(interactions.get_interaction, row["id"])
             await owner_confirm.answered_elsewhere(session_id, answered, "deny")
     return released
