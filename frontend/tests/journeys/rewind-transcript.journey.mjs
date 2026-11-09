@@ -29,6 +29,7 @@ import {
 	withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { expectRetainedHolds } from './lib/retained-geometry.mjs';
 import { frames, markTime, spans } from './lib/timeline.mjs';
 
 // A deterministic refused write on the private database, not a mocked API reply.
@@ -84,6 +85,7 @@ function rewindDatabase(status, sessionId, stage) {
 
 const mobileShell = process.argv.includes('--mobile-shell');
 const REWIND = 'rewind';
+const SHORT = 'rewind-short';
 const NEXT = 'send after rewind';
 const WARNING = 'The model may still recall the removed turns.';
 
@@ -110,21 +112,21 @@ async function startClaudeChat({ page, status, variant }) {
 }
 
 /**
- * `rewind` is a long reply of fixed length. `expectShift` budgets the move a
- * rewind makes for that turn height, and `default` lists every scenario, so its
- * height follows whatever scenarios exist. A short reply is not covered here.
+ * `rewind` is a long reply of fixed length and `rewind-short` a short one.
+ * `expectShift` budgets the move a rewind makes for that turn height, and
+ * `default` lists every scenario, so its height follows whatever scenarios exist.
  */
-async function sendTurn(page, variant, words, messagesAtLeast) {
-	await typeAndSend(page, `${words} ${scriptTag(variant, 'rewind')}`);
+async function sendTurn(page, variant, words, messagesAtLeast, scenario = 'rewind') {
+	await typeAndSend(page, `${words} ${scriptTag(variant, scenario)}`);
 	await waitTurnSettled(page, { messagesAtLeast, text: `You said: “${words}` });
 }
 
-async function stageTwoTurns(ctx) {
+async function stageTwoTurns(ctx, scenario = 'rewind') {
 	await startClaudeChat(ctx);
 	const retained = `retained-${uniq()}`;
 	const removed = `removed-${uniq()}`;
-	await sendTurn(ctx.page, ctx.variant, retained, 2);
-	await sendTurn(ctx.page, ctx.variant, removed, 4);
+	await sendTurn(ctx.page, ctx.variant, retained, 2, scenario);
+	await sendTurn(ctx.page, ctx.variant, removed, 4, scenario);
 	ctx.state = { retained, removed };
 }
 
@@ -170,6 +172,33 @@ async function rewindUserMessage(page, nth = -1) {
 	const result = await (await answered).json();
 	expect(result.success && result.chat_rewound, `rewind succeeded: ${JSON.stringify(result)}`);
 	await page.getByRole('dialog').waitFor({ state: 'hidden' });
+}
+
+/**
+ * Every painted frame of the rewind: where the retained reply and the composer's
+ * bottom edge are, so the expected shrink can be told from an unwanted jump.
+ */
+async function trackRetainedGeometry(page, retained) {
+	await page.getByText(`You said: “${retained}`).first().evaluate((el) => {
+		const slot = document.querySelector('.input-slot');
+		const frames = (window.__rewindGeometry = []);
+		const tick = () => {
+			if (!el.isConnected) frames.push({ t: performance.now(), gone: true });
+			else {
+				const row = el.getBoundingClientRect();
+				frames.push({ t: performance.now(), top: row.top, height: row.height, bottom: slot.getBoundingClientRect().bottom, viewport: window.innerHeight });
+			}
+			window.__rewindGeometryRaf = requestAnimationFrame(tick);
+		};
+		tick();
+	});
+}
+
+async function readRetainedGeometry(page) {
+	return page.evaluate(() => {
+		cancelAnimationFrame(window.__rewindGeometryRaf);
+		return window.__rewindGeometry;
+	});
 }
 
 /** What the rewind left on screen, and that the chat still answers. */
@@ -326,6 +355,52 @@ await runJourney({
 			},
 			verify({ recording }) {
 				expectOneStepRewind(recording, { from: 6, to: 2, surfaces: ['active'] });
+			}
+		},
+		{
+			name: 'short-reply-latest-turn',
+			viewports: ['phone'],
+			expectShift: rowsLeave(4, 2),
+			async setup(ctx) {
+				await stageTwoTurns(ctx, SHORT);
+			},
+			async act({ page, variant, mark, state }) {
+				await trackRetainedGeometry(page, state.retained);
+				await mark(REWIND);
+				await rewindUserMessage(page);
+				await expectRewound(page, variant, { ...state, messages: 2 });
+				state.geometry = await readRetainedGeometry(page);
+				await mark(NEXT);
+				await sendTurn(page, variant, `next-${uniq()}`, 4, SHORT);
+			},
+			verify({ recording, state, log }) {
+				expectOneStepRewind(recording, { from: 4, to: 2, surfaces: ['active'] });
+				expectRetainedHolds(state.geometry, log);
+			}
+		},
+		{
+			name: 'short-reply-earlier-turn',
+			viewports: ['phone'],
+			expectShift: rowsLeave(6, 2),
+			async setup(ctx) {
+				await stageTwoTurns(ctx, SHORT);
+				const later = `later-${uniq()}`;
+				await sendTurn(ctx.page, ctx.variant, later, 6, SHORT);
+				ctx.state.later = later;
+			},
+			async act({ page, variant, mark, state }) {
+				await trackRetainedGeometry(page, state.retained);
+				await mark(REWIND);
+				await rewindUserMessage(page, 1);
+				await expectRewound(page, variant, { ...state, messages: 2 });
+				state.geometry = await readRetainedGeometry(page);
+				expect((await countText(page, `You said: “${state.later}`)) === 0, 'the later reply left too');
+				await mark(NEXT);
+				await sendTurn(page, variant, `next-${uniq()}`, 4, SHORT);
+			},
+			verify({ recording, state, log }) {
+				expectOneStepRewind(recording, { from: 6, to: 2, surfaces: ['active'] });
+				expectRetainedHolds(state.geometry, log);
 			}
 		},
 		{

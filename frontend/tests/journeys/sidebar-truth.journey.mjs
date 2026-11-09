@@ -25,6 +25,15 @@
 //   stopped           the user's own Stop is not a failure
 //   project-choice-survives  choosing a project and a branch holds while it gains a remote (#1078)
 //   project-once      a project is listed once after its first worktree chat
+//   new-chat-from-elsewhere  a chat arriving from another tab or device lifts its
+//                     project to the top of a crowded lane, and the rest of the
+//                     lane slides out of the way instead of jumping (#1307)
+//   new-chat-first-send  the same when this page's own first send brings the row
+//   new-chat-glide-has-no-step  a row in the group being pushed down follows the
+//                     glide with no jump in position at any frame (#1307)
+//   new-chat-glide-ends-in-place  the list scrolls during that glide and the group
+//                     finishes where it is really laid out, with no jump when
+//                     the animation is removed (#1307)
 //
 // Hosted journeys build only the shared desktop UI and run it at desktop and
 // phone widths. `--mobile-shell` opens the phone variants of the failed-* cases
@@ -36,7 +45,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runJourney } from './runner.mjs';
 import {
-	api, chatIdByToken, chatState, expect, openNewChat, pick, pickAccess, pickProject, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
+	api, chatIdByToken, chatState, expect, openNewChat, pick, pickAccess, pickProject, PROJECT, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
 	waitChat, waitTurnSettled, withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -697,8 +706,206 @@ const PROJECT_ONCE = {
 	}
 };
 
+const FIRST_ROW = '[data-group="active"] .scard-frame';
+const activeHeads = (page) => page.locator('[data-group="active"] .proj-head').allInnerTexts();
+
+/**
+ * A lane crowded enough that its project groups swapping places moves most of
+ * what is on screen: rows in no project, then rows of a project, which leaves the
+ * project on top and "No project" under it. The hosted failure of #1307 needed an
+ * instance earlier journeys had filled the same way; this states that on its own.
+ */
+async function crowdedProjects(ctx) {
+	const { page } = ctx;
+	await openNewChat(ctx);
+	const dev = (await api(page, 'GET', '/projects')).find((p) => p.name === PROJECT);
+	expect(dev, `the seeded project ${PROJECT} exists`);
+	const create = (body, n) => Promise.all(Array.from({ length: n }, () => api(page, 'POST', '/sessions', body)));
+	await create({}, 13);
+	const newest = await create({ project_id: dev.id }, 13);
+	await showSidebar(page);
+	await page.locator(CARD(newest[0].session_id)).waitFor({ state: 'attached', timeout: 30_000 });
+	await page.waitForFunction(() => document.querySelector('[data-group="active"] .proj-head')?.textContent?.trim() === 'Dev sandbox', null, { timeout: 30_000 });
+	await page.waitForTimeout(1200);
+}
+
+/** The new row leads the lane, under its own project, above the project that led it. */
+async function expectLiftedToTop(page, id) {
+	const heads = await activeHeads(page);
+	expect(heads[0] === 'No project' && heads.includes(PROJECT), `the new chat's project leads the lane: ${JSON.stringify(heads)}`);
+	const first = await page.locator(FIRST_ROW).first().getAttribute('data-session-card');
+	expect(first === id, `the new chat is the lane's first row (found ${first})`);
+}
+
+const NEW_CHAT_FROM_ELSEWHERE = {
+	name: 'new-chat-from-elsewhere',
+	setup: crowdedProjects,
+	async act({ page, mark }) {
+		await mark('a chat with no project starts in another tab');
+		// Answered to the journey alone: this page learns of it by its push, as it
+		// would for another tab or device, with no click of its own nearby to
+		// excuse a jump.
+		const { session_id: id } = await api(page, 'POST', '/sessions', {});
+		await page.locator(CARD(id)).waitFor({ state: 'attached', timeout: 30_000 });
+		await page.waitForTimeout(1000);
+		await expectLiftedToTop(page, id);
+	}
+};
+
+const NEW_CHAT_FIRST_SEND = {
+	name: 'new-chat-first-send',
+	viewports: ['desktop'],
+	setup: crowdedProjects,
+	async act({ page, mark, variant }) {
+		await page.waitForTimeout(800);
+		await mark('first send of a chat with no project');
+		const token = `first-send-${uniq()}`;
+		await typeAndSend(page, `${token} ${scriptTag(variant, 'default', { latency_ms: 1500 })}`);
+		await waitTurnSettled(page, { text: `You said: “${token}`, timeout: 120_000 });
+		await expectLiftedToTop(page, await chatIdByToken(page, token));
+	}
+};
+
+/** A glide played this slowly moves a row under a pixel a frame, so a real step stands out. */
+const GLIDE_SLOWDOWN = 0.002;
+const GLIDE_MS = 240;
+const GLIDE_STEP_LIMIT_PX = 4;
+
+/**
+ * Records a row's on-screen top in every frame with animations slowed down. At
+ * full speed a 240 ms glide covers 130 px in its first frame, which hides a jump
+ * of a few pixels; the recorder samples layout and cannot see one either, because
+ * the row's offset inside its gliding group changes under a transform.
+ */
+async function traceRowTop(page, id) {
+	const cdp = await page.context().newCDPSession(page);
+	await cdp.send('Animation.enable');
+	await cdp.send('Animation.setPlaybackRate', { playbackRate: GLIDE_SLOWDOWN });
+	await page.evaluate((selector) => {
+		const trace = { frames: [], live: true };
+		window.__rowTrace = trace;
+		const tick = () => {
+			if (!trace.live) return;
+			trace.frames.push({ at: performance.now(), top: document.querySelector(selector)?.getBoundingClientRect().top ?? null });
+			requestAnimationFrame(tick);
+		};
+		requestAnimationFrame(tick);
+	}, CARD(id));
+	return async () => {
+		const frames = await page.evaluate(() => {
+			window.__rowTrace.live = false;
+			return window.__rowTrace.frames;
+		});
+		await cdp.send('Animation.setPlaybackRate', { playbackRate: 1 });
+		await cdp.detach();
+		return frames;
+	};
+}
+
+const NEW_CHAT_GLIDE_HAS_NO_STEP = {
+	name: 'new-chat-glide-has-no-step',
+	setup: crowdedProjects,
+	async act({ page, mark }) {
+		const pushedDown = await page.locator('[data-group="active"] .proj-group').first()
+			.locator('.scard-frame').first().getAttribute('data-session-card');
+		await mark('a new chat lifts its project above the one holding this row');
+		const stop = await traceRowTop(page, pushedDown);
+		const { session_id: id } = await api(page, 'POST', '/sessions', {});
+		await page.locator(CARD(id)).waitFor({ state: 'attached', timeout: 30_000 });
+		await page.waitForTimeout(1500);
+		const frames = await stop();
+		await page.waitForTimeout(1000);
+		await expectLiftedToTop(page, id);
+		expect(frames.length > 10 && frames.every(({ top }) => top !== null), `the row stays mounted through the glide (${frames.length} frames)`);
+		const restTop = (await page.locator(CARD(pushedDown)).boundingBox()).y;
+		const distance = restTop - frames[0].top;
+		// A busy machine can take a long frame just as the glide starts, so the
+		// allowance is the most the glide itself can cover in that frame: its
+		// easing is fastest at the start, at three times its average speed.
+		const pxPerMs = (GLIDE_SLOWDOWN * 3 * distance) / GLIDE_MS;
+		const over = frames.slice(1).map(({ at, top }, i) =>
+			Math.abs(top - frames[i].top) - pxPerMs * (at - frames[i].at));
+		const worst = Math.max(...over);
+		expect(worst <= GLIDE_STEP_LIMIT_PX, `the row moves without a step: ${worst.toFixed(1)} px beyond the glide in frame ${over.indexOf(worst) + 1} of ${frames.length}`);
+		expect(restTop - frames.at(-1).top > 10, `the glide was still under way when the trace stopped: row at ${frames.at(-1).top.toFixed(1)}, its real place ${restTop.toFixed(1)}`);
+	}
+};
+
+/** Slow enough to scroll inside a glide, quick enough to watch one finish. */
+const GLIDE_END_SLOWDOWN = 0.05;
+const GLIDE_END_STEP_LIMIT_PX = 4;
+const GLIDE_FRAMES_BEFORE_SCROLL = 12;
+
+const NEW_CHAT_GLIDE_ENDS_IN_PLACE = {
+	name: 'new-chat-glide-ends-in-place',
+	setup: crowdedProjects,
+	async act({ page, mark }) {
+		const sinking = await page.locator('[data-group="active"] .proj-group').first()
+			.locator('.scard-frame').first().getAttribute('data-session-card');
+		await mark('the list scrolls while a new chat lifts its project over this row');
+		const cdp = await page.context().newCDPSession(page);
+		await cdp.send('Animation.enable');
+		await cdp.send('Animation.setPlaybackRate', { playbackRate: GLIDE_END_SLOWDOWN });
+		await page.evaluate(({ selector, GLIDE_FRAMES_BEFORE_SCROLL }) => {
+			const row = document.querySelector(selector);
+			const group = row.closest('.proj-group');
+			const list = group.closest('.list');
+			const trace = { frames: [], live: true, scrolled: null, glideFrames: 0 };
+			window.__glideEnd = trace;
+			const tick = () => {
+				if (!trace.live) return;
+				const running = group.getAnimations().length > 0;
+				const offset = running ? new DOMMatrix(getComputedStyle(group).transform).m42 : 0;
+				if (offset) trace.glideFrames += 1;
+				// Once it is under way, scroll just far enough to bring the group's
+				// real place into view, so a glide that ends anywhere else shows.
+				if (trace.glideFrames === GLIDE_FRAMES_BEFORE_SCROLL && !trace.scrolled) {
+					const realTop = group.getBoundingClientRect().top - offset;
+					const bottom = list.getBoundingClientRect().bottom;
+					const before = list.scrollTop;
+					list.scrollTop = before + Math.max(realTop - bottom, 0) + 80;
+					trace.scrolled = { realTop, bottom, by: list.scrollTop - before };
+				}
+				trace.frames.push({ running, top: row.getBoundingClientRect().top, scroll: list.scrollTop });
+				requestAnimationFrame(tick);
+			};
+			requestAnimationFrame(tick);
+		}, { selector: CARD(sinking), GLIDE_FRAMES_BEFORE_SCROLL });
+		const { session_id: id } = await api(page, 'POST', '/sessions', {});
+		await page.locator(CARD(id)).waitFor({ state: 'attached', timeout: 30_000 });
+		await page.waitForFunction(() => {
+			const trace = window.__glideEnd;
+			return trace.scrolled && trace.frames.length > 2 && !trace.frames.at(-1).running;
+		}, null, { timeout: 30_000 }).catch(async () => {
+			const seen = await page.evaluate(() => {
+				const { frames, scrolled, glideFrames } = window.__glideEnd;
+				return { frames: frames.length, glideFrames, last: frames.at(-1), scrolled };
+			});
+			throw new Error(`the glide was not seen finishing: ${JSON.stringify(seen)}`);
+		});
+		await page.waitForTimeout(200);
+		const { frames, scrolled } = await page.evaluate(() => {
+			window.__glideEnd.live = false;
+			return window.__glideEnd;
+		});
+		await cdp.send('Animation.setPlaybackRate', { playbackRate: 1 });
+		await cdp.detach();
+		await expectLiftedToTop(page, id);
+		expect(scrolled.realTop > scrolled.bottom, `the group is headed past the list's bottom edge (${scrolled.realTop} against ${scrolled.bottom})`);
+		expect(scrolled.realTop - scrolled.by < scrolled.bottom, `the scroll brings its real place into view (${scrolled.realTop} less ${scrolled.by}, bottom ${scrolled.bottom})`);
+		// Every end counts: a busy page can play a second, smaller glide after it.
+		const place = ({ top, scroll }) => top + scroll;
+		const steps = frames.flatMap((frame, i) => (i > 0 && frames[i - 1].running && !frame.running
+			? [Math.abs(place(frame) - place(frames[i - 1]))]
+			: []));
+		expect(steps.length > 0, 'the glide was seen finishing');
+		const step = Math.max(...steps);
+		expect(step <= GLIDE_END_STEP_LIMIT_PX, `the row stays put when the glide is removed: it moved ${step.toFixed(1)} px`);
+	}
+};
+
 await runJourney({
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, DELETE_OPEN_CHAT, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, DELETE_OPEN_CHAT, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND, NEW_CHAT_GLIDE_HAS_NO_STEP, NEW_CHAT_GLIDE_ENDS_IN_PLACE]
 });

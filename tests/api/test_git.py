@@ -67,6 +67,9 @@ def mock_git_service():
     # get_status never raises; these say the read succeeded and nothing changed.
     mock.get_status_error.return_value = None
     mock.status_generation.return_value = 0
+    # Known repository records now refresh these real Git reads after the TTL.
+    mock.get_remote_url.return_value = "https://github.com/test/repo.git"
+    mock.get_default_branch.return_value = "main"
     return mock
 
 
@@ -324,6 +327,8 @@ class TestGetGitStatus:
         assert data["unpushed"] == 0
         assert data["repository_id"] == "repo-abc123"
         assert data["default_branch"] == "main"
+        mock_git_service.get_remote_url.assert_called_once()
+        mock_database.update_git_repository.assert_not_called()
 
     def test_get_status_project_not_found(self, app, mock_database, mock_settings):
         """A missing project is unavailable, not a positive non-repository answer."""
@@ -2122,6 +2127,8 @@ class TestHelperFunctions:
 
         existing_repo = {"id": "repo-existing", "project_id": "test-project"}
         mock_git.is_git_repo.return_value = True
+        mock_git.get_remote_url.return_value = None
+        mock_git.get_default_branch.return_value = "main"
         mock_db.get_git_repository_by_project.return_value = existing_repo
 
         with (patch("app.api.git.git_service", mock_git),
