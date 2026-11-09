@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import TurnNavigator from './TurnNavigator.svelte';
@@ -132,7 +132,7 @@ describe('TurnNavigator', () => {
 		const observers: ResizeObserverCallback[] = [];
 
 		/** jsdom has no layout: fixes the transcript and rail heights by hand. */
-		async function mount(hostHeight: number, navHeight: number) {
+		async function mount(hostHeight: number, navHeight: number, composerHeight = 0) {
 			observers.length = 0;
 			vi.stubGlobal('ResizeObserver', class {
 				constructor(callback: ResizeObserverCallback) { observers.push(callback); }
@@ -142,6 +142,11 @@ describe('TurnNavigator', () => {
 			const { container } = render(TurnNavigator, { props: { items, currentIndex: 0, onSelect: vi.fn() } });
 			const nav = container.querySelector('nav') as HTMLElement;
 			Object.defineProperty(nav, 'offsetHeight', { configurable: true, value: navHeight });
+			container.classList.add('chat-view');
+			const slot = container.appendChild(document.createElement('div'));
+			slot.className = 'input-slot';
+			const setComposer = (height: number) => Object.defineProperty(slot, 'clientHeight', { configurable: true, value: height });
+			setComposer(composerHeight);
 			const resizeTo = async (height: number) => {
 				Object.defineProperty(container, 'clientHeight', { configurable: true, value: height });
 				observers.forEach((callback) => callback([], {} as ResizeObserver));
@@ -149,7 +154,7 @@ describe('TurnNavigator', () => {
 			};
 			Object.defineProperty(container, 'clientHeight', { configurable: true, value: hostHeight });
 			await tick();
-			return { nav, resizeTo };
+			return { nav, resizeTo, setComposer, container };
 		}
 
 		afterEach(() => vi.unstubAllGlobals());
@@ -168,6 +173,70 @@ describe('TurnNavigator', () => {
 			expect(nav.style.top).toBe('10px');
 			await resizeTo(385);
 			expect(nav.style.top).toBe('3px');
+		});
+
+		it('holds still while a draft grows and is sent, however far the transcript changes', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			expect(nav.style.top).toBe('150px');
+			setComposer(320);
+			await resizeTo(200);
+			expect(nav.style.top).toBe('150px');
+			setComposer(120);
+			await resizeTo(400);
+			expect(nav.style.top).toBe('150px');
+		});
+
+		it('moves for a draft that leaves it no room, and sending that draft does not move it back', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			setComposer(420);
+			await resizeTo(100);
+			expect(nav.style.top).toBe('0px');
+			setComposer(120);
+			await resizeTo(400);
+			expect(nav.style.top).toBe('0px');
+		});
+
+		it('re-centres when the window changes under a wrapped draft, and sending that draft then leaves it alone', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			setComposer(320);
+			await resizeTo(200);
+			expect(nav.style.top).toBe('150px');
+			await resizeTo(600);
+			expect(nav.style.top).toBe('350px');
+			setComposer(120);
+			await resizeTo(800);
+			expect(nav.style.top).toBe('350px');
+		});
+
+		it('returns to the centre when the window changes after a draft that left it no room is cleared', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			setComposer(420);
+			await resizeTo(100);
+			setComposer(120);
+			await resizeTo(400);
+			expect(nav.style.top).toBe('0px');
+			await resizeTo(600);
+			expect(nav.style.top).toBe('250px');
+		});
+
+		it('holds still on a send that follows a window change', async () => {
+			const { nav, resizeTo, setComposer } = await mount(400, 100, 120);
+			await resizeTo(700);
+			expect(nav.style.top).toBe('300px');
+			setComposer(320);
+			await resizeTo(500);
+			setComposer(120);
+			await resizeTo(700);
+			expect(nav.style.top).toBe('300px');
+		});
+
+		it('centres on the rail\'s real height while a tall draft squeezes its box to nothing', async () => {
+			const { nav, resizeTo, container } = await mount(400, 100);
+			expect(nav.style.top).toBe('150px');
+			Object.defineProperty(nav, 'offsetHeight', { configurable: true, value: 0 });
+			Object.defineProperty(container.querySelector('.turn-rail'), 'scrollHeight', { configurable: true, value: 100 });
+			await resizeTo(410);
+			expect(nav.style.top).toBe('150px');
 		});
 
 		it('applies a resize it held back for a touch scrub once the finger lifts', async () => {
@@ -273,6 +342,267 @@ describe('TurnNavigator', () => {
 			vi.advanceTimersByTime(1000);
 			expect(onSelect).not.toHaveBeenCalled();
 			expect(container.querySelector('.is-hovered')).toBeNull();
+		});
+
+		describe('with a sheet or picker open', () => {
+			let trigger: HTMLButtonElement;
+			beforeEach(() => {
+				trigger = document.createElement('button');
+				trigger.setAttribute('aria-haspopup', 'dialog');
+				trigger.setAttribute('aria-expanded', 'true');
+				document.body.append(trigger);
+			});
+			afterEach(() => trigger.remove());
+			const touch = { pointerType: 'touch', isPrimary: true, pointerId: 2 };
+			const closeTrigger = () => trigger.setAttribute('aria-expanded', 'false');
+
+			/** A touch tap in the order a browser sends it, then the wait for the
+			 *  rail's decision. `detail` is what tells a real press from a keyboard. */
+			async function tap(tick: HTMLElement, index: number) {
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(index) });
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(index) });
+				await fireEvent.mouseDown(tick);
+				await fireEvent.mouseUp(tick);
+				await fireEvent.click(tick, { detail: 1 });
+				await new Promise((resolve) => setTimeout(resolve, 0));
+			}
+			function renderRail() {
+				const onSelect = vi.fn();
+				const view = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+				const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
+				return { ...view, onSelect, tick };
+			}
+
+			// Every way a popup in the app closes on an outside press. The click cases
+			// run after the tick's own handler, which is why the rail has to wait.
+			const closesOn: [string, string, EventTarget][] = [
+				['pointerdown at the document, in capture', 'pointerdown', document],
+				['pointerdown at the window', 'pointerdown', window],
+				['the mousedown a touch sends before its click', 'mousedown', document],
+				['click at the document', 'click', document],
+				['click at the window', 'click', window]
+			];
+			for (const [path, type, target] of closesOn) {
+				it(`a tap that closes it on ${path} only closes it`, async () => {
+					const capture = path.includes('capture');
+					target.addEventListener(type, closeTrigger, capture);
+					const { onSelect, tick } = renderRail();
+					tick.focus();
+					await tap(tick, 3);
+					target.removeEventListener(type, closeTrigger, capture);
+					expect(trigger.getAttribute('aria-expanded')).toBe('false');
+					expect(onSelect).not.toHaveBeenCalled();
+					expect(document.activeElement).not.toBe(tick);
+				});
+			}
+
+			it('a tap that removes the trigger with its popup only closes it', async () => {
+				const remove = () => trigger.remove();
+				document.addEventListener('click', remove);
+				const { onSelect, tick } = renderRail();
+				await tap(tick, 3);
+				document.removeEventListener('click', remove);
+				expect(onSelect).not.toHaveBeenCalled();
+			});
+
+			it('the usage sheet with its ring hidden: the first tap closes, the second selects', async () => {
+				trigger.style.display = 'none';
+				document.addEventListener('click', closeTrigger);
+				const { onSelect, tick } = renderRail();
+				await tap(tick, 3);
+				document.removeEventListener('click', closeTrigger);
+				expect(onSelect).not.toHaveBeenCalled();
+				await tap(tick, 3);
+				expect(onSelect).toHaveBeenCalledTimes(1);
+				expect(onSelect).toHaveBeenLastCalledWith(3);
+			});
+
+			it('a filter the rail cannot close, left behind a collapsed sidebar, never blocks a tap', async () => {
+				const column = document.createElement('div');
+				column.style.display = 'none';
+				column.append(trigger);
+				document.body.append(column);
+				const { onSelect, tick } = renderRail();
+				await tap(tick, 3);
+				expect(onSelect).toHaveBeenCalledTimes(1);
+				await tap(tick, 3);
+				expect(onSelect).toHaveBeenCalledTimes(2);
+				expect(trigger.getAttribute('aria-expanded')).toBe('true');
+				column.remove();
+			});
+
+			it('Settings kept alive behind the chat closes its picker on the press, unseen, and the tap still selects', async () => {
+				const panel = document.createElement('div');
+				panel.setAttribute('inert', '');
+				panel.append(trigger);
+				document.body.append(panel);
+				document.addEventListener('mousedown', closeTrigger);
+				const { onSelect, tick } = renderRail();
+				await tap(tick, 3);
+				document.removeEventListener('mousedown', closeTrigger);
+				expect(trigger.getAttribute('aria-expanded')).toBe('false');
+				expect(onSelect).toHaveBeenCalledTimes(1);
+				panel.remove();
+			});
+
+			it('a slide that closes it on pointerdown neither scrubs nor selects', async () => {
+				vi.useFakeTimers();
+				document.addEventListener('pointerdown', closeTrigger);
+				const { container, onSelect } = renderRail();
+				const rail = layOut(container);
+				const first = screen.getAllByRole('button', { name: /^Turn/ })[0];
+				await fireEvent.pointerDown(first, { ...touch, clientY: centre(0) });
+				document.removeEventListener('pointerdown', closeTrigger);
+				await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
+				expect(container.querySelector('.is-scrubbing')).toBeNull();
+				vi.advanceTimersByTime(1000);
+				await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
+				expect(onSelect).not.toHaveBeenCalled();
+			});
+
+			it('a slide over a popup it does not close scrubs at once', async () => {
+				vi.useFakeTimers();
+				const { container, onSelect } = renderRail();
+				const rail = layOut(container);
+				const first = screen.getAllByRole('button', { name: /^Turn/ })[0];
+				await fireEvent.pointerDown(first, { ...touch, clientY: centre(0) });
+				await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
+				expect(container.querySelector('.is-scrubbing')).not.toBeNull();
+				await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
+				expect(onSelect).toHaveBeenCalledWith(3);
+			});
+
+			describe('the press the rail acts on keeps its own reading', () => {
+				const mouse = { pointerType: 'mouse', isPrimary: true, pointerId: 1 };
+				const secondFinger = { pointerType: 'touch', isPrimary: false, pointerId: 9 };
+				/** A finger lands on the rail and that press closes the popup. */
+				async function pressThatCloses(ticks: HTMLElement[]) {
+					document.addEventListener('pointerdown', closeTrigger, true);
+					await fireEvent.pointerDown(ticks[0], { ...touch, clientY: centre(0) });
+					document.removeEventListener('pointerdown', closeTrigger, true);
+					expect(trigger.getAttribute('aria-expanded')).toBe('false');
+				}
+				function railWithTicks() {
+					const view = renderRail();
+					return { ...view, rail: layOut(view.container), ticks: screen.getAllByRole('button', { name: /^Turn/ }) };
+				}
+
+				it('a second finger does not undo the first finger having closed it', async () => {
+					const { onSelect, rail, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerDown(ticks[2], { ...secondFinger, clientY: centre(2) });
+					await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
+					await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+
+				it('a second finger landing as the first lifts does not free its click', async () => {
+					const { onSelect, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerUp(ticks[0], { ...touch, clientY: centre(0) });
+					await fireEvent.pointerDown(ticks[2], { ...secondFinger, clientY: centre(2) });
+					await fireEvent.click(ticks[0], { detail: 1 });
+					await new Promise((resolve) => setTimeout(resolve, 0));
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+
+				it('a mouse press during the finger does not free its slide', async () => {
+					const { onSelect, rail, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerDown(document.body, mouse);
+					await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
+					await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+
+				it('a mouse press during the finger does not free its tap', async () => {
+					const { onSelect, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerDown(document.body, mouse);
+					await fireEvent.pointerUp(ticks[0], { ...touch, clientY: centre(0) });
+					await fireEvent.click(ticks[0], { detail: 1 });
+					await new Promise((resolve) => setTimeout(resolve, 0));
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+
+				it('a finger whose lift was lost leaves nothing for a later mouse click or tap', async () => {
+					const { onSelect, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerDown(ticks[1], mouse);
+					await fireEvent.click(ticks[1], { detail: 1 });
+					expect(onSelect).toHaveBeenCalledTimes(1);
+					expect(onSelect).toHaveBeenLastCalledWith(1);
+					await tap(ticks[3], 3);
+					expect(onSelect).toHaveBeenCalledTimes(2);
+					expect(onSelect).toHaveBeenLastCalledWith(3);
+				});
+
+				it('a second finger on the rail while the first is elsewhere does nothing and leaves nothing', async () => {
+					const { onSelect, rail, ticks } = railWithTicks();
+					await fireEvent.pointerDown(document.body, { ...touch, clientY: 400 });
+					await fireEvent.pointerDown(ticks[2], { ...secondFinger, clientY: centre(2) });
+					await fireEvent.pointerMove(rail, { ...secondFinger, clientY: centre(4) });
+					await fireEvent.pointerUp(ticks[2], { ...secondFinger, clientY: centre(4) });
+					await fireEvent.pointerUp(document.body, { ...touch, clientY: 400 });
+					expect(onSelect).not.toHaveBeenCalled();
+					expect(rail.closest('nav')?.classList.contains('is-scrubbing')).toBe(false);
+					await tap(ticks[3], 3);
+					expect(onSelect).toHaveBeenCalledTimes(1);
+					expect(onSelect).toHaveBeenLastCalledWith(3);
+				});
+
+				it('a newer press during the wait does not change what the tap closed', async () => {
+					document.addEventListener('click', closeTrigger);
+					const { onSelect, ticks } = railWithTicks();
+					vi.useFakeTimers();
+					await fireEvent.pointerDown(ticks[3], { ...touch, clientY: centre(3) });
+					await fireEvent.pointerUp(ticks[3], { ...touch, clientY: centre(3) });
+					await fireEvent.click(ticks[3], { detail: 1 });
+					document.removeEventListener('click', closeTrigger);
+					await fireEvent.pointerDown(document.body, { ...touch, pointerId: 4, clientY: 400 });
+					vi.advanceTimersByTime(1);
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+			});
+
+			it('does not select after the rail has gone away', async () => {
+				const { onSelect, tick, unmount } = renderRail();
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick, { detail: 1 });
+				unmount();
+				await new Promise((resolve) => setTimeout(resolve, 0));
+				expect(onSelect).not.toHaveBeenCalled();
+			});
+
+			it('leaves a mouse click alone, and selects without waiting', async () => {
+				document.addEventListener('click', closeTrigger);
+				const { onSelect, tick } = renderRail();
+				await fireEvent.pointerDown(tick, { pointerType: 'mouse', isPrimary: true, pointerId: 1 });
+				await fireEvent.click(tick, { detail: 1 });
+				document.removeEventListener('click', closeTrigger);
+				expect(onSelect).toHaveBeenLastCalledWith(3);
+			});
+
+			it('a keyboard press after a touch selects without reading that touch', async () => {
+				document.addEventListener('pointerdown', closeTrigger);
+				const { container, onSelect, tick } = renderRail();
+				const rail = layOut(container);
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				document.removeEventListener('pointerdown', closeTrigger);
+				await fireEvent.pointerCancel(rail, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick);
+				expect(onSelect).toHaveBeenLastCalledWith(3);
+			});
+
+			it('with nothing expanded, a tap selects without waiting', async () => {
+				closeTrigger();
+				const { onSelect, tick } = renderRail();
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick, { detail: 1 });
+				expect(onSelect).toHaveBeenLastCalledWith(3);
+			});
 		});
 
 		it('leaves a mouse drag to hover and click', async () => {

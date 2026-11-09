@@ -117,14 +117,47 @@
 	let navTop = $state<number | null>(null);
 	let centredSession: string | undefined;
 
+	/** The least rail worth keeping above a tall draft. */
+	const MIN_RAIL_PX = 40;
+	/** The composer height the rail's position is measured against. */
+	let placedComposer = 0;
+	/** Transcript plus composer when last measured. A draft trades height between
+	 *  the two and leaves the sum alone; a window or keyboard change does not. */
+	let placedTotal = 0;
+
+	/** The rail's height with nothing squeezing it. A tall draft shortens the box,
+	 *  down to nothing, and a box read then would look like a rail wanting to move. */
+	function restingHeight(navEl: HTMLElement): number {
+		if (!rail) return navEl.offsetHeight;
+		const cap = parseFloat(getComputedStyle(rail).maxHeight) || Infinity;
+		return Math.max(navEl.offsetHeight, Math.min(rail.scrollHeight, cap));
+	}
+
 	function centreNav(force = false) {
 		const host = nav?.parentElement;
 		if (!nav || !host || (scrubbing && !force)) return;
 		const available = host.clientHeight;
-		const height = nav.offsetHeight;
-		const centred = Math.max(0, Math.round((available - height) / 2));
-		const overflows = navTop !== null && navTop + height > available;
-		if (force || navTop === null || overflows || Math.abs(centred - navTop) > RECENTRE_DRIFT_PX) navTop = centred;
+		const height = restingHeight(nav);
+		const composer = nav.closest('.chat-view')?.querySelector('.input-slot')?.clientHeight ?? 0;
+		// A real change of window height ends the hold a tall draft left behind:
+		// measure against the composer as it rests, so the rail can centre again.
+		if (available + composer !== placedTotal) {
+			placedTotal = available + composer;
+			placedComposer = Math.min(placedComposer, composer);
+		}
+		const cramped = force || navTop === null || available - navTop < Math.min(height, MIN_RAIL_PX);
+		// The composer trades height one for one with the transcript. Measure as if it
+		// were still the height the rail was placed against, or a draft growing or
+		// being sent counts as drift and the rail follows every send (#1094). Only a
+		// draft that leaves the rail no room moves it, and that alone resets the
+		// height measured against: an ordinary re-centre stays in the same frame, so
+		// the send after it finds the rail where it already is.
+		const room = cramped ? available : available + composer - placedComposer;
+		const centred = Math.max(0, Math.round((room - height) / 2));
+		if (cramped) placedComposer = composer;
+		if (cramped || navTop! + height > room || Math.abs(centred - navTop!) > RECENTRE_DRIFT_PX) {
+			navTop = centred;
+		}
 	}
 
 	// A different chat centres exactly; a new turn only moves past the drift.
@@ -168,12 +201,54 @@
 		startTick: number;
 		/** Timestamp of the previous edge-scroll frame (0: not scrolling). */
 		lastFrame: number;
+		/** This press closes an open sheet or picker, so the rail does nothing with it. */
+		dismissing: boolean;
+		/** What this press read at the window. The gesture holds its own copy because a
+		 *  mouse press has to replace the shared one, and the rail starts no gesture for it. */
+		expanded: Element[];
 	}
 	let scrub: Scrub | null = null;
 	let scrubbing = $state(false);
 	let dwellTimer: ReturnType<typeof setTimeout> | undefined;
 	let edgeFrame = 0;
 	let suppressClick = { index: -1, until: 0 };
+	let pendingSelect: ReturnType<typeof setTimeout> | undefined;
+	/** Popup triggers expanded as this touch began, read at the window, ahead of any
+	 *  popup's own outside-press handling. A trigger inside `inert` is left out: Settings
+	 *  kept alive behind the chat closes its picker on this press, and nobody saw it. */
+	let expandedAtPress: Element[] = [];
+
+	function readExpandedAtPress(event: PointerEvent) {
+		// The rail ignores a second finger, so it must not replace the first finger's reading.
+		if (event.isPrimary === false) return;
+		expandedAtPress =
+			event.pointerType === 'mouse'
+				? []
+				: [...document.querySelectorAll('[aria-haspopup][aria-expanded="true"]')].filter((t) => !t.closest('[inert]'));
+	}
+
+	/** Did the press that read these triggers close a popup? A press that dismisses one
+	 *  must not also act on what is beneath it. Asking what really closed, not what looks
+	 *  open, lets a popup the rail cannot close (one left behind a collapsed sidebar)
+	 *  never block a tap. */
+	function pressClosedPopup(expanded: Element[]): boolean {
+		return expanded.some((t) => !t.isConnected || t.getAttribute('aria-expanded') !== 'true');
+	}
+
+	function selectFromTap(index: number, event: MouseEvent) {
+		// A keyboard click has no press of its own to read.
+		const expanded = expandedAtPress;
+		if (event.detail === 0 || expanded.length === 0) {
+			onSelect(index);
+			return;
+		}
+		if (pressClosedPopup(expanded)) return;
+		// Many popups close on this same click at the document or window, after this
+		// handler has run, so the answer is only known once the event has finished.
+		pendingSelect = setTimeout(() => {
+			if (!pressClosedPopup(expanded)) onSelect(index);
+		}, 0);
+	}
 
 	/** The tick nearest a viewport y, clamped to the rail's visible box. */
 	function indexAtY(clientY: number): number | null {
@@ -258,6 +333,7 @@
 	function onRailPointerDown(event: PointerEvent) {
 		if (event.pointerType === 'mouse' || event.isPrimary === false) return;
 		endScrub(false);
+		suppressClick = { index: -1, until: 0 };
 		const landed = event.target instanceof Element ? event.target.closest('.tick') : null;
 		scrub = {
 			pointerId: event.pointerId,
@@ -266,15 +342,21 @@
 			active: false,
 			selected: null,
 			startTick: landed && rail ? Array.prototype.indexOf.call(rail.children, landed) : -1,
-			lastFrame: 0
+			lastFrame: 0,
+			dismissing: false,
+			expanded: expandedAtPress
 		};
 	}
 
 	function onRailPointerMove(event: PointerEvent) {
-		if (!scrub || event.pointerId !== scrub.pointerId) return;
+		if (!scrub || scrub.dismissing || event.pointerId !== scrub.pointerId) return;
 		scrub.y = event.clientY;
 		if (!scrub.active) {
 			if (Math.abs(scrub.y - scrub.startY) < SCRUB_SLOP_PX) return;
+			if (pressClosedPopup(scrub.expanded)) {
+				scrub.dismissing = true;
+				return;
+			}
 			scrub.active = true;
 			scrubbing = true;
 			// Capture on the rail so the finger can leave it (to scroll at an
@@ -291,10 +373,15 @@
 
 	function onRailPointerEnd(event: PointerEvent) {
 		if (!scrub || event.pointerId !== scrub.pointerId) return;
+		// The click that follows this lift belongs to this press.
+		expandedAtPress = scrub.expanded;
 		endScrub(event.type === 'pointerup');
 	}
 
-	$effect(() => () => endScrub(false));
+	$effect(() => () => {
+		endScrub(false);
+		clearTimeout(pendingSelect);
+	});
 
 	// The rail rests invisible and shows while the transcript beside it scrolls.
 	let scrolling = $state(false);
@@ -334,6 +421,10 @@
 	}
 </script>
 
+<svelte:window
+	onpointerdowncapture={readExpandedAtPress}
+/>
+
 <nav
 	bind:this={nav}
 	class="turn-nav"
@@ -341,7 +432,7 @@
 	class:is-scrubbing={scrubbing}
 	class:is-scrolling={scrolling}
 	class:needs-you={needsYouIds.length > 0}
-	style="--count: {items.length}; top: {navTop ?? 0}px"
+	style="--count: {items.length}; top: {navTop ?? 0}px; max-height: calc(100% - {navTop ?? 0}px)"
 	aria-label="Navigate user turns"
 	onfocusin={() => (focused = true)}
 	onfocusout={() => (focused = false)}
@@ -372,8 +463,7 @@
 				aria-current={index === resolvedIndex ? 'true' : undefined}
 				tabindex={index === (focusedTick ?? resolvedIndex) ? 0 : -1}
 				onclick={(event) => {
-					if (index === suppressClick.index && Date.now() < suppressClick.until) return;
-					onSelect(index);
+					if (index !== suppressClick.index || Date.now() >= suppressClick.until) selectFromTap(index, event);
 					// A tap focuses the tick, which would keep it lit as if it were
 					// the current turn after the reader scrolls on.
 					if (lastPointerType === 'touch') event.currentTarget.blur();
@@ -401,7 +491,7 @@
 			class="preview"
 			class:is-visible={hoveredIndex !== null}
 			class:is-above={scrubbing}
-			style="top: {previewTop}px" aria-hidden="true">
+			style="top: {previewTop}px; --preview-y: {previewTop}px" aria-hidden="true">
 			<span class="preview-title">{previewItem.title}</span>
 			{#if previewItem.preview}
 				<span class="preview-body">{previewItem.preview}</span>
@@ -414,9 +504,10 @@
 	.turn-nav {
 		position: absolute;
 		left: 6px;
-		/* `top` is set inline: vertically centred, see centreNav(). A transcript
-		   shorter than the rail makes the rail scroll, not run under the composer. */
-		max-height: 100%;
+		/* `top` and `max-height` are set inline: vertically centred, see centreNav().
+		   The height stops at the transcript's bottom, so a tall draft takes room from
+		   the rail's bottom and the rail itself stays where it is (#1094). */
+		--visible-height: var(--app-viewport-height, 100dvh);
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
@@ -438,6 +529,13 @@
 		opacity: 1;
 	}
 
+	.turn-rail::before,
+	.turn-rail::after {
+		content: '';
+		flex: none;
+		height: calc(10px - var(--rail-gap));
+	}
+
 	/* Ticks start at the top and never shrink: a centred, shrinking column is
 	   what pushed the first turns off-screen in long sessions (#1378). */
 	.turn-rail {
@@ -445,12 +543,15 @@
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
-		gap: clamp(3px, calc(42vh / var(--count, 4) - 2px), 9px);
-		max-height: 56vh;
+		--rail-gap: clamp(3px, calc(var(--visible-height) * 0.42 / var(--count, 4) - 2px), 9px);
+		gap: var(--rail-gap);
+		max-height: calc(var(--visible-height) * 0.56);
 		min-height: 0;
 		/* The 2px left pad (the nav sits at left: 0) keeps the focus ring
-		   clear of the rail's horizontal clip. */
-		padding: 10px 12px 10px 2px;
+		   clear of the rail's horizontal clip. The 10px above and below the
+		   ticks are the spacers below, not padding: padding would hold the
+		   rail 20px tall even when a keyboard leaves no transcript at all. */
+		padding: 0 12px 0 2px;
 		overflow-x: hidden;
 		overflow-y: auto;
 		overscroll-behavior: contain;
@@ -566,14 +667,15 @@
 	}
 
 	/* During a touch scrub the thumb covers the space beside the tick, so the
-	   preview rides above the finger instead. */
+	   preview rides above the finger instead, as far as the top of the rail
+	   allows: over the first ticks there is no room left above them. */
 	.preview.is-above {
-		transform: translate(-8px, calc(-100% - 20px)) scale(0.98);
+		transform: translate(-8px, max(calc(-100% - 20px), calc(4px - var(--preview-y)))) scale(0.98);
 		transform-origin: left bottom;
 	}
 
 	.preview.is-above.is-visible {
-		transform: translate(0, calc(-100% - 28px)) scale(1);
+		transform: translate(0, max(calc(-100% - 28px), calc(4px - var(--preview-y)))) scale(1);
 	}
 
 	.preview-title {

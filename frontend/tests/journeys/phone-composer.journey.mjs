@@ -73,13 +73,48 @@ function expectSameBottom(before, after, what) {
 	expect(Math.abs(before.bottom - after.bottom) <= 2, `${what}: the composer's bottom edge stayed put (${before.bottom} → ${after.bottom})`);
 }
 
-const openSeededChat = async (ctx) => {
+const openSeededChat = async (ctx, key = 'no_project') => {
 	const { page, status } = ctx;
-	await gotoApp(page, status, `/?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`);
+	// --mobile-shell runs this in the built /mobile/ app instead of the responsive one.
+	await gotoApp(page, status, `${mobileShell ? '/mobile/' : '/'}?session=${encodeURIComponent(seededChatId(status, key))}`);
 	await waitChatOpen(page, { messagesAtLeast: 2, hold: 1000 });
 	ctx.start = await composerGeometry(page);
 	expectComposerFits(ctx.start, 'at rest');
 };
+
+/** A finger coming down on the turn rail, along the transcript's left edge, with a picker open. */
+const RAIL_PRESSES = {
+	async swipe(page, { x, y }) {
+		const cdp = await page.context().newCDPSession(page);
+		const touch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
+		await touch('touchStart', [{ x, y }]);
+		// Paced like a finger, then held before lifting: Chromium swallows the next
+		// tap after a zero-time flick, which would fail the reopen for the wrong reason.
+		for (const step of [15, 30, 45, 60]) {
+			await touch('touchMove', [{ x, y: y + step }]);
+			await page.waitForTimeout(16);
+		}
+		await page.waitForTimeout(150);
+		await touch('touchEnd', []);
+		await cdp.detach();
+	},
+	tap: (page, { x, y }) => page.touchscreen.tap(x, y)
+};
+
+/** Closes the open picker from a turn rail tick. Only the picker reacts: the reader stays where they are. */
+async function dismissOnTheTurnRail(page, label, press, opened) {
+	const log = page.getByRole('log', { name: 'Conversation messages' });
+	const before = await log.evaluate((el) => Math.round(el.scrollTop));
+	const box = await page.locator('nav.turn-nav').boundingBox();
+	const spot = { x: box.x + box.width / 2, y: box.y + 20 };
+	const onTick = await page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('.tick'), spot);
+	expect(onTick, `${label}: the ${press} lands on a turn rail tick (${JSON.stringify(spot)})`);
+	await RAIL_PRESSES[press](page, spot);
+	await opened.waitFor({ state: 'hidden', timeout: 5000 });
+	await page.waitForTimeout(400);
+	const after = await log.evaluate((el) => Math.round(el.scrollTop));
+	expect(Math.abs(after - before) <= 1, `${label}: a ${press} that closes it leaves the reader where they were (scrollTop ${before} to ${after})`);
+}
 
 /** Sheets the composer opens on a phone: the trigger and what it opens. */
 const SHEETS = [
@@ -209,7 +244,8 @@ await runJourney({
 		},
 		{
 			name: 'sheets',
-			setup: openSeededChat,
+			// A long chat: its turn rail has turns to jump to, so a dismissing tap could move the reader.
+			setup: (ctx) => openSeededChat(ctx, 'long'),
 			async act({ page, mark, start }) {
 				for (const [index, { trigger, optional, inControls, sheet }] of SHEETS.entries()) {
 					const label = String(trigger).replace(/[/^:]/g, '').trim();
@@ -247,7 +283,17 @@ await runJourney({
 						await mark(`close ${label} with a tap outside`);
 						// The tall sheet covers the transcript: outside is the strip above it.
 						if (inControls) await page.touchscreen.tap(vp.width / 2, 8);
-						else await page.getByRole('log', { name: 'Conversation messages' }).tap({ position: { x: 20, y: 20 } });
+						else {
+							for (const press of Object.keys(RAIL_PRESSES)) {
+								await mark(`close ${label} with a ${press} on the turn rail`);
+								await dismissOnTheTurnRail(page, label, press, opened);
+								await button.tap();
+								await opened.waitFor({ timeout: 5000 });
+								await page.waitForTimeout(400);
+							}
+							await mark(`close ${label} with a tap on the transcript`);
+							await page.getByRole('log', { name: 'Conversation messages' }).tap({ position: { x: 60, y: 20 } });
+						}
 					}
 					await opened.waitFor({ state: 'hidden', timeout: 5000 });
 					await page.waitForTimeout(400);

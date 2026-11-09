@@ -1,0 +1,20 @@
+{
+  "description": "Starts one child chat that keeps replying for a few minutes, then answers. The parent's composer shows the running child above the message box.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "StartSession",
+          "input": {
+            "title": "Running child job",
+            "prompt": "[script:long tps=3]",
+            "request_id": "running-child-job"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Started the child."
+    }
+  ]
+}
