@@ -1,6 +1,7 @@
 """Owner-only management of long-term Remember/Recall facts (not AGENTS.md)."""
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Annotated
 
@@ -60,16 +61,20 @@ def _visible(entry, store_id):
 
 
 def _metadata_version(entry):
-    # The store's revision is too coarse for an owner's open form. When-line and
-    # always edits replicate by their own stamps and leave it alone; a replica
-    # conflict can keep it equal; and a supersession link needs no bump. A save
-    # replaces or clears all of these, so a form must have seen them first.
+    # The store's revision is too coarse for an owner's open form. These are
+    # what a replica merge or link repair can change while it stands still, and
+    # a save replaces or clears all of them, so a form must have seen them first.
+    # Older copies carry no stamps, so a merge can change a when-line with no
+    # stamp moving: the values themselves count, exactly as stored. Clock counts
+    # only rise, so they reveal any change; their actor names can't be used,
+    # because a store that predates store_id gets a new random one on each read.
     # Usage counters are left out: a Recall must not make a form stale.
-    state = [[facts.metadata_stamp(entry, field) for field in facts.METADATA_FIELDS],
-             sorted((entry.get("clock") or {}).items()), bool(entry.get("conflicted")),
+    state = [entry.get("when") or "", entry.get("when_basis"), bool(entry.get("always")),
+             [facts.metadata_stamp(entry, field) for field in facts.METADATA_FIELDS],
+             sorted((entry.get("clock") or {}).values()), bool(entry.get("conflicted")),
              sorted(entry.get("alternatives") or []), entry.get("superseded_by"),
              bool(entry.get("supersession_confirmed"))]
-    return facts.fingerprint(repr(state))[:_VERSION_CHARS]
+    return hashlib.sha256(repr(state).encode()).hexdigest()[:_VERSION_CHARS]
 
 
 def _require_metadata_version(entry, expected):

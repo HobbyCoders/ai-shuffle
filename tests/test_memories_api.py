@@ -232,6 +232,62 @@ def test_replica_conflict_at_the_same_revision_makes_open_copies_stale(world, tm
     assert store.memories_path.read_bytes() == before
 
 
+def write_unstamped_when(store, when):
+    doc = store._facts._load()
+    doc["entries"][0]["when"] = when
+    doc["entries"][0].pop("when_at", None)
+    store._facts._write(doc)
+
+
+@pytest.mark.parametrize("local, incoming, settled", [
+    ("When alpha", "When beta", "When beta"),
+    ("When Alpha", "when alpha", "when alpha"),
+])
+def test_unstamped_replica_merge_of_a_when_line_makes_open_copies_stale(
+        world, tmp_path, local, incoming, settled):
+    client, root = world
+    store = store_at(root)
+    entry = save(store)
+    other = store_at(tmp_path / "other-worker")
+    other._facts.merge(store._facts.export())
+    write_unstamped_when(store, local)
+    write_unstamped_when(other, incoming)
+    opened = opened_version(client, entry.id)
+
+    store._facts.merge(other._facts.export())
+
+    item = client.get(BASE).json()["items"][0]
+    assert item["revision"] == entry.revision and item["when"] == settled
+    assert item["metadata_version"] != opened
+    body = {"text": entry.text, "when": local, "expected_revision": entry.revision,
+            "expected_metadata_version": opened}
+    assert client.put(f"{BASE}/{entry.id}", json=body).status_code == 409
+    assert remove(client, entry.id, entry.revision, version=opened).status_code == 409
+    assert client.get(BASE).json()["items"][0]["when"] == settled
+
+
+@pytest.mark.parametrize("action", ["save", "delete"])
+def test_store_from_before_store_ids_stays_writable_after_repeated_reads(world, action):
+    client, root = world
+    root.mkdir()
+    (root / "memories.json").write_text(json.dumps({"entries": [{
+        "id": "m1", "text": "A very old fact.", "protected": True,
+        "provenance": "user", "expires_at": 4e9,
+    }]}))
+    first = client.get(BASE).json()["items"][0]
+    assert client.get(BASE).json()["items"][0]["metadata_version"] == first["metadata_version"]
+
+    if action == "save":
+        result = client.put(f"{BASE}/m1", json={
+            "text": "A corrected old fact.", "when": None, "expected_revision": first["revision"],
+            "expected_metadata_version": first["metadata_version"]})
+        assert result.status_code == 200
+        assert result.json()["text"] == "A corrected old fact."
+    else:
+        assert remove(client, "m1", first["revision"], version=first["metadata_version"]).status_code == 204
+        assert client.get(BASE).json()["items"] == []
+
+
 def test_a_new_replacement_link_makes_open_copies_stale(world):
     client, root = world
     store = store_at(root)
