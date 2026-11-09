@@ -107,3 +107,61 @@ async def test_owner_on_an_older_build_reads_as_off(workers):
             engine.materialize(conn.cursor(), coll, SESSION, record)
         assert database.get_session(SESSION)["title"] == "Renamed by an older owner"
     assert not await _served_away(viewer)
+
+
+async def test_global_away_reaches_an_offline_worker_and_releases_its_local_cards(workers, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.core import away_mode, global_away_mode
+    from app.core.global_events import global_events
+    from app.db import interactions
+    from app.network import startup
+    from tests.core.network.harness import _ACTIVE
+
+    assert policy.is_shared_setting_key("global_away_mode")
+    viewer, owner = _network(workers)
+    from app.db import mobile_tool_identity
+    for worker in (viewer, owner):
+        with worker.active():
+            mobile_tool_identity.init_schema()
+    with owner.active():
+        question = interactions.create_interaction(SESSION, "question", {
+            "request_id": "q", "questions": [{"question": "Track?", "options": ["Stable", "Nightly (Recommended)"]}],
+        }, 300)
+        approval = interactions.create_interaction(SESSION, "permission", {
+            "request_id": "p", "tool_name": "Bash",
+        }, 300)
+    with viewer.active():
+        assert (await global_away_mode.apply(True))["deferred_approvals"] == 0
+        engine.scan_all()
+    # No exchange yet: the worker that owns the cards was offline.
+    with owner.active():
+        database.invalidate_system_setting_memo("global_away_mode")
+        assert not away_mode.global_away_enabled()
+        assert interactions.get_interaction(approval["id"])["state"] == "pending"
+
+    scheduled = []
+    def schedule(coro, loop):
+        scheduled.append((_ACTIVE.get(), coro))
+
+    monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop())
+    monkeypatch.setattr(startup.asyncio, "run_coroutine_threadsafe", schedule)
+    unsubscribe = engine.on_applied(startup._on_applied)
+    try:
+        with patch.object(away_mode, "record_decision", AsyncMock()):
+            converge([viewer, owner])
+            for worker, coro in scheduled:
+                with worker.active():
+                    await coro
+            assert scheduled, "the real sync apply must schedule the release"
+            with owner.active():
+                assert database.get_system_setting("global_away_mode") == "1"
+                assert away_mode.is_away(SESSION)
+                assert interactions.get_interaction(question["id"])["state"] == "answered"
+                assert interactions.get_interaction(approval["id"])["answer"] == {
+                    "decision": "deny", "behavior": "deny", "message": away_mode.DEFERRED_MESSAGE}
+                assert (await global_away_mode.release_local_pending())["deferred_approvals"] == 0
+                assert database.get_session(SESSION)["away_mode"] is None
+    finally:
+        unsubscribe()

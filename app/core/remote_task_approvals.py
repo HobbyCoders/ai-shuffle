@@ -610,6 +610,11 @@ async def _follow_existing(request: _Request, row: Mapping[str, Any]) -> None:
     elif state == "answered":
         decision, message = "deny", ("The owner denied permission" if answer.get("decision") == "deny"
                                      else "Not approved")
+        # A global Away sweep may answer a durable proxy restored after a
+        # restart. Preserve the Away marker so the target records a deferral,
+        # not a decision the owner never made (same mapping as _decision_of).
+        if str(answer.get("message") or "").startswith("Owner away"):
+            message = AWAY_MESSAGE
     elif state == "cancelled":
         decision, message = "deny", CANCELLED_MESSAGE
     else:

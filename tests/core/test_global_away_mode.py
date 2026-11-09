@@ -1,0 +1,393 @@
+"""Global Away applies only to the owner, never grants a pending approval."""
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.core import away_mode, global_away_mode
+from app.db import database, interactions
+from app.db.base import get_db
+
+QUESTIONS = [{"question": "Track?", "options": [{"label": "Stable"},
+              {"label": "Nightly (Recommended)"}]}]
+
+
+def chat(session_id, **fields):
+    database.create_session(session_id=session_id, profile_id="default", project_id=None,
+                            title=session_id, is_active=True)
+    if fields:
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE sessions SET " + ", ".join(f"{key}=%s" for key in fields) + " WHERE id=%s",
+                (*fields.values(), session_id),
+            )
+    return session_id
+
+
+@pytest.mark.parametrize("global_on", [False, True])
+def test_global_coverage_matrix(global_on):
+    database.create_api_user("api", "API user", "hash")
+    database.create_automation("auto", "Automation", "manual", {}, "default")
+    chat("owner")
+    chat("task", is_worker=True, parent_session_id="owner")
+    chat("api", api_user_id="api")
+    chat("api-task", is_worker=True, parent_session_id="api")
+    chat("automation", automation_id="auto")
+    chat("voice", mode="voice")
+    chat("hidden", hidden=True)
+    chat("orphan", is_worker=True)
+    chat("nested", is_worker=True, parent_session_id="task")
+    database.set_system_setting("global_away_mode", "1" if global_on else "0")
+    for session_id in ("owner", "task", "api", "api-task", "automation", "voice", "hidden",
+                       "orphan", "nested", "missing"):
+        assert away_mode.is_away(session_id) == (global_on and session_id in ("owner", "task"))
+
+
+def test_foreign_identity_is_not_the_owner():
+    chat("foreign")
+    with patch("app.core.session_orchestration._principal", return_value={"owner": "paired:foreign"}):
+        database.set_system_setting("global_away_mode", "1")
+        assert not away_mode.is_away("foreign")
+
+
+def test_explicit_flags_win_without_global_ownership_reads():
+    chat("explicit", away_mode=True)
+    chat("task", is_worker=True, parent_session_id="explicit")
+    with patch.object(away_mode, "globally_covered", side_effect=AssertionError("unnecessary read")), \
+            patch.object(away_mode, "global_away_enabled", side_effect=AssertionError("unnecessary read")):
+        assert away_mode.is_away("explicit")
+        assert away_mode.is_away("task")
+    chat("ordinary")
+    with patch.object(away_mode, "globally_covered", side_effect=AssertionError("unnecessary read")):
+        assert not away_mode.is_away("ordinary")
+    with patch.object(away_mode, "global_away_enabled", side_effect=RuntimeError("DB down")):
+        assert not away_mode.is_away("ordinary")
+    assert not away_mode.is_away(None)
+
+
+async def test_flip_preserves_flags_and_owner_back_receipts():
+    chat("owner")
+    chat("explicit", away_mode=True)
+    chat("task", is_worker=True, parent_session_id="owner")
+    before = {sid: database.get_session(sid)["away_mode"] for sid in ("owner", "explicit", "task")}
+    await global_away_mode.apply(True)
+    for sid in ("owner", "task"):
+        note = away_mode.turn_note(sid)
+        assert note == away_mode.CONTEXT_NOTE
+        away_mode.record_context_delivery(sid, note, sid + "-on")
+    await global_away_mode.apply(False)
+    assert {sid: database.get_session(sid)["away_mode"] for sid in before} == before
+    assert away_mode.is_away("explicit")
+    for sid in ("owner", "task"):
+        assert away_mode.turn_note(sid) == away_mode.OWNER_BACK_NOTE
+        away_mode.record_context_delivery(sid, away_mode.OWNER_BACK_NOTE, sid + "-off")
+        assert away_mode.turn_note(sid) is None
+
+
+async def test_turn_on_releases_real_question_and_permission_waiters(monkeypatch):
+    from app.core.permission_handler import PermissionHandler
+    from app.core.user_question_handler import user_question_handler
+
+    chat("owner")
+    question_posted, permission_posted = asyncio.Event(), asyncio.Event()
+
+    from app.core import interaction_wait
+    original_wait = interaction_wait.await_interaction
+
+    async def parked(interaction_id, *args, **kwargs):
+        kind = interactions.get_interaction(interaction_id)["kind"]
+        (question_posted if kind == "question" else permission_posted).set()
+        return await original_wait(interaction_id, *args, **kwargs)
+
+    monkeypatch.setattr(interaction_wait, "await_interaction", parked)
+    question_broadcast = permission_broadcast = AsyncMock()
+
+    question = asyncio.create_task(user_question_handler.request_answers(
+        "q", "tool-q", "owner", QUESTIONS, question_broadcast))
+    permission = asyncio.create_task(PermissionHandler().request_permission(
+        request_id="p", session_id="owner", profile_id="default", tool_name="Bash",
+        tool_input={"command": "pwd"}, broadcast_func=permission_broadcast))
+    try:
+        await asyncio.wait_for(asyncio.gather(question_posted.wait(), permission_posted.wait()), 3)
+        with patch.object(away_mode, "record_decision", AsyncMock()) as record:
+            assert await global_away_mode.apply(True) == {
+                "away": True, "released_questions": 1, "deferred_approvals": 1}
+            answers, denied = await asyncio.wait_for(asyncio.gather(question, permission), 3)
+            assert answers == {"Track?": "Nightly (Recommended)"}
+            assert denied.behavior == "deny" and denied.message == away_mode.DEFERRED_MESSAGE
+            assert {call.args[1]["kind"] for call in record.await_args_list} == {"answered", "deferred"}
+            assert await global_away_mode.release_local_pending() == {
+                "released_questions": 0, "deferred_approvals": 0}
+            assert record.await_count == 2
+        assert interactions.get_pending_interactions("owner") == []
+        assert database.get_permission_rules(profile_id="default") == []
+    finally:
+        for task in (question, permission):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(question, permission, return_exceptions=True)
+
+
+@pytest.mark.parametrize("tag", [{}, {"provider_agent": {"worker_session_id": "task"}},
+    {"provider_agent": {"worker_session_id": "remote", "remote_approval_id": "a"}},
+    {"assistant_confirm": {"question": "Run this?"}}, {"tool_name": "ModelGuardrail"}])
+async def test_every_permission_card_kind_is_away_denied_once(tag):
+    chat("owner")
+    payload = {"request_id": "p", "tool_name": "Bash", **tag}
+    row = interactions.create_interaction("owner", "permission", payload, 300)
+    with patch.object(away_mode, "record_decision", AsyncMock()) as record:
+        assert (await global_away_mode.apply(True))["deferred_approvals"] == 1
+        assert (await global_away_mode.apply(True))["deferred_approvals"] == 0
+        record.assert_awaited_once()
+    answer = interactions.get_interaction(row["id"])["answer"]
+    assert answer == {"decision": "deny", "behavior": "deny", "message": away_mode.DEFERRED_MESSAGE}
+
+
+async def test_sweep_skips_remote_and_excluded_chats_and_off_is_noop():
+    for sid, fields in (("owner", {}), ("voice", {"mode": "voice"}),
+                        ("hidden", {"hidden": True}), ("remote", {"owner_device_id": "peer"})):
+        chat(sid, **fields)
+        interactions.create_interaction(sid, "permission", {"request_id": sid}, 300)
+    assert (await global_away_mode.apply(False))["deferred_approvals"] == 0
+    assert (await global_away_mode.apply(True))["deferred_approvals"] == 1
+    for sid in ("voice", "hidden", "remote"):
+        assert len(interactions.get_pending_interactions(sid)) == 1
+
+
+async def test_private_input_and_action_producing_paths_unblock_with_away_message(monkeypatch):
+    from app.core import chat_access
+
+    chat("owner")
+    broker = chat_access.Broker()
+    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, None, "admin", "owner")))
+    monkeypatch.setattr(chat_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
+    monkeypatch.setattr(broker, "_show_in_main", AsyncMock())
+    monkeypatch.setattr(broker, "_track_attention", lambda _: None)
+    monkeypatch.setattr(broker, "_notify", lambda *a, **kw: None)
+    created = asyncio.Event()
+    original = broker._defer_registered_away
+    checked = []
+
+    async def checked_away(item):
+        await original(item)
+        checked.append(item.id)
+        if len(checked) == 2:
+            created.set()
+
+    monkeypatch.setattr(broker, "_defer_registered_away", checked_away)
+    grant = SimpleNamespace(id="g", session_id="owner", expires_at=10**12, owner=(None,))
+    request = asyncio.create_task(broker.request("owner", "folder", "Read source"))
+    action = asyncio.create_task(broker.approve(grant, "write", {}))
+    try:
+        await asyncio.wait_for(created.wait(), 3)
+        with patch.object(away_mode, "record_decision", AsyncMock()) as record:
+            assert (await global_away_mode.apply(True))["deferred_approvals"] == 2
+            results = await asyncio.wait_for(asyncio.gather(request, action, return_exceptions=True), 3)
+            assert all(isinstance(r, chat_access.AccessDenied) and str(r) == away_mode.DEFERRED_MESSAGE
+                       for r in results)
+            assert record.await_count == 2
+            assert (await global_away_mode.apply(True))["deferred_approvals"] == 0
+        assert broker.grants == {}  # Nothing created or widened.
+    finally:
+        for task in (request, action):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(request, action, return_exceptions=True)
+
+
+async def test_manual_requeue_while_away_cannot_park_another_card():
+    from app.core.permission_handler import PermissionHandler
+
+    chat("owner")
+    row = interactions.create_interaction("owner", "permission", {
+        "request_id": "old", "tool_name": "Bash", "tool_input": {},
+    }, 300)
+    assert interactions.answer_interaction(row["id"], {"decision": "defer"})
+    database.set_system_setting("global_away_mode", "1")
+    with patch.object(away_mode, "record_decision", AsyncMock()) as record:
+        assert await PermissionHandler().requeue_deferred("owner", AsyncMock()) == []
+        record.assert_awaited_once()
+    assert interactions.get_pending_interactions("owner") == []
+    answers = interactions.get_answered_interactions("owner", "permission")
+    assert any(r["answer"].get("message") == away_mode.DEFERRED_MESSAGE for r in answers)
+
+
+def watch_permission_waiter(monkeypatch):
+    from app.core import interaction_wait
+
+    posted, ids = asyncio.Event(), []
+    original = interaction_wait.await_interaction
+
+    async def waiting(interaction_id, *args, **kwargs):
+        ids.append(interaction_id)
+        posted.set()
+        return await original(interaction_id, *args, **kwargs)
+
+    monkeypatch.setattr(interaction_wait, "await_interaction", waiting)
+    return posted, ids
+
+
+async def test_released_owner_confirm_is_woken_without_an_approval_pass(monkeypatch):
+    from app.core import owner_confirm, session_runtime
+    from app.core.permission_handler import PermissionHandler
+
+    chat("owner")
+    posted, ids = watch_permission_waiter(monkeypatch)
+    wake = AsyncMock()
+    monkeypatch.setattr(owner_confirm, "_wake", wake)
+    monkeypatch.setattr(session_runtime, "try_steer_pending", AsyncMock())
+    task = asyncio.create_task(PermissionHandler().request_permission(
+        request_id="own", session_id="owner", profile_id="default", tool_name="Bash",
+        tool_input={"command": "pwd"}, broadcast_func=AsyncMock(),
+        assistant_confirm=owner_confirm.marker("Bash", {"command": "pwd"})))
+    try:
+        await asyncio.wait_for(posted.wait(), 3)
+        assert await owner_confirm.park("owner", ids) == 1
+        assert (await asyncio.wait_for(task, 3)).message == owner_confirm.NOT_RUN_YET
+        with patch.object(away_mode, "record_decision", AsyncMock()):
+            assert (await global_away_mode.apply(True))["deferred_approvals"] == 1
+            assert (await global_away_mode.apply(True))["deferred_approvals"] == 0
+        wake.assert_awaited_once()
+        assert away_mode.DEFERRED_MESSAGE in wake.await_args.args[1]
+        assert wake.await_args.kwargs["extra"] is None  # No one-shot approval pass.
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_provider_worker_routed_to_owner_gets_away_denial(monkeypatch):
+    from collections import OrderedDict
+    from app.core import provider_agent_approvals as approvals
+    from app.core.permission_handler import PermissionHandler
+
+    chat("owner")
+    chat("task", is_worker=True, parent_session_id="owner")
+    monkeypatch.setattr(approvals, "_ROUTES", OrderedDict())
+    approvals.register_route(worker_session_id="task", parent_session_id="owner", label="Task")
+    posted, ids = watch_permission_waiter(monkeypatch)
+    task = asyncio.create_task(approvals.route_permission({
+        "request_id": "worker", "session_id": "task", "profile_id": "default",
+        "tool_name": "Bash", "tool_input": {"command": "pwd"}, "broadcast_func": AsyncMock(),
+    }, PermissionHandler().request_permission))
+    try:
+        await asyncio.wait_for(posted.wait(), 3)
+        assert interactions.get_interaction(ids[0])["session_id"] == "owner"
+        with patch.object(away_mode, "record_decision", AsyncMock()):
+            assert (await global_away_mode.apply(True))["deferred_approvals"] == 1
+        result = await asyncio.wait_for(task, 3)
+        assert result.behavior == "deny" and result.message == away_mode.DEFERRED_MESSAGE
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("restored", [False, True])
+async def test_remote_task_proxy_sends_away_denial_to_the_executing_worker(monkeypatch, restored):
+    from app.core import remote_task_approvals as approvals
+
+    chat("owner")
+    posted, ids = watch_permission_waiter(monkeypatch)
+    send = AsyncMock()
+    monkeypatch.setattr(approvals, "_send_answer", send)
+    request = approvals._Request(
+        approval_id="away-proxy", worker_session_id="remote-child", target_device_id="peer",
+        worker_name="Peer", root_session_id="owner", label="Task", asker=None,
+        tool_name="Bash", title=None, display_name=None, description=None,
+        decision_reason=None, tool_input={"command": "pwd"})
+    task = asyncio.create_task(approvals._proxy(request, None))
+    try:
+        await asyncio.wait_for(posted.wait(), 3)
+        if restored:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            row = interactions.get_interaction(ids[0])
+            posted.clear()
+            task = asyncio.create_task(approvals._follow_existing(request, row))
+            await asyncio.wait_for(posted.wait(), 3)
+        with patch.object(away_mode, "record_decision", AsyncMock()):
+            assert (await global_away_mode.apply(True))["deferred_approvals"] == 1
+        await asyncio.wait_for(task, 3)
+        send.assert_awaited_once_with(request, "deny", approvals.AWAY_MESSAGE)
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.fixture
+def api_client():
+    from app.api import system
+
+    app = FastAPI()
+    app.include_router(system.router)
+    return TestClient(app)
+
+
+def test_api_owner_contract_strict_body_and_notifications(api_client):
+    with patch("app.api.auth.owner_auth.local_access", return_value=True), \
+            patch("app.api.auth.owner_auth.same_origin"), \
+            patch("app.core.global_events.global_events.resources_changed") as emit:
+        assert api_client.get("/api/v1/away-mode").json() == {"away": False}
+        for value in ("true", 1, None):
+            assert api_client.put("/api/v1/away-mode", json={"away": value}).status_code == 422
+        assert api_client.put("/api/v1/away-mode", json={"away": True, "extra": True}).status_code == 422
+        result = api_client.put("/api/v1/away-mode", json={"away": True})
+        assert result.status_code == 200
+        assert result.json() == {"away": True, "released_questions": 0, "deferred_approvals": 0}
+        assert api_client.get("/api/v1/away-mode").json() == {"away": True}
+        away_events = [c for c in emit.call_args_list if c.args == ("away_mode",)]
+        assert {c.kwargs["user_type"] for c in away_events} == {"admin", "api_user", "account", "paired"}
+
+
+@pytest.mark.parametrize("method", ["get", "put"])
+def test_api_refuses_api_key_users(api_client, method):
+    with patch("app.api.auth.owner_auth.local_access", return_value=False), \
+            patch("app.api.auth.owner_auth.owner_session", return_value=None), \
+            patch("app.api.auth.get_paired_client_from_token", return_value=None):
+        kwargs = {"json": {"away": True}} if method == "put" else {}
+        result = getattr(api_client, method)("/api/v1/away-mode", headers={"X-API-Key": "api-key"}, **kwargs)
+    assert result.status_code == 403
+    assert not away_mode.global_away_enabled()
+
+
+def test_preview_global_toggle_is_disposable_only():
+    from starlette.requests import Request
+    from app.api.auth import _preview_may_change_dev_data
+    from app.core.preview_access import mutation_allowed
+
+    request = Request({"type": "http", "method": "PUT", "path": "/api/v1/away-mode", "headers": []})
+    assert mutation_allowed("/api/v1/away-mode", "PUT")
+    for disposable in (True, False):
+        with patch("app.preview_run.disposable_preview_data", return_value=disposable):
+            assert _preview_may_change_dev_data(request) == disposable
+
+
+@pytest.mark.parametrize("on", [True, False])
+async def test_synced_setting_invalidates_cache_notifies_and_only_releases_on(on):
+    from app.core.global_events import global_events
+    from app.network import startup
+
+    # Cache old state, then mimic a raw sync apply that bypassed the local setter.
+    database.set_system_setting("global_away_mode", "0" if on else "1")
+    assert away_mode.global_away_enabled() == (not on)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE system_settings SET value=%s WHERE key='global_away_mode'",
+                              ("1" if on else "0",))
+    scheduled = []
+    with patch.object(global_events, "_loop", asyncio.get_running_loop()), \
+            patch("app.network.startup.asyncio.run_coroutine_threadsafe",
+                  side_effect=lambda coro, loop: scheduled.append(coro)), \
+            patch.object(startup, "_emit_resource") as emit, \
+            patch.object(global_away_mode, "release_local_pending", AsyncMock()) as release:
+        startup._on_applied([("system_settings", "global_away_mode", "upsert")])
+        assert away_mode.global_away_enabled() == on
+        emit.assert_any_call("away_mode")
+        assert len(scheduled) == 1
+        await scheduled[0]
+        assert release.await_count == int(on)
