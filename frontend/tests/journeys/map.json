@@ -120,6 +120,11 @@
 			"globs": ["frontend/tests/journeys/shell-geometry.journey.mjs", "frontend/src/lib/components/settings/shell/PageTitle.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/layout/view/PanelToggle.svelte", "frontend/src/lib/components/layout/AppLayout.svelte"]
 		},
 		{
+			"why": "Settings > Memory lists, edits and deletes saved memories without losing a draft",
+			"journeys": ["settings-memory"],
+			"globs": ["frontend/tests/journeys/settings-memory.journey.mjs", "frontend/src/lib/components/settings/memory/**", "frontend/src/lib/settings/entries/memory.ts"]
+		},
+		{
 			"why": "Settings deep links show the requested phone detail and preserve both Back steps",
 			"journeys": ["settings-detail-link"],
 			"globs": ["frontend/tests/journeys/settings-detail-link.journey.mjs", "frontend/src/lib/components/settings/shell/SettingsShell.svelte", "frontend/src/lib/components/settings/shell/BackRow.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte"]

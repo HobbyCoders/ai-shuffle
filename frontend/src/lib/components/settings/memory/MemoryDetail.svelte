@@ -117,7 +117,7 @@
 				: []}
 		>
 			{#snippet primary()}
-				{#if dirty}
+				{#if dirty && !settingsNav.stacked}
 					<button type="button" class="st-btn ghost" disabled={saving} onclick={() => model.discard(id)}>Discard</button>
 				{/if}
 				<button type="button" class="st-btn primary" disabled={!model.canSave(id)} onclick={save}>
@@ -183,6 +183,12 @@
 						{/snippet}
 					</SettingRow>
 				</RowGroup>
+				{#if dirty && settingsNav.stacked}
+					<!-- In the phone header this button would wrap the title and move the box being typed in. -->
+					<div class="mem-discard">
+						<button type="button" class="st-btn ghost" disabled={saving} onclick={() => model.discard(id)}>Discard</button>
+					</div>
+				{/if}
 			{/snippet}
 		</DetailPane>
 	</div>
@@ -194,6 +200,11 @@
 		max-height: 420px;
 		field-sizing: content;
 		overflow-wrap: anywhere;
+	}
+	.mem-discard {
+		display: flex;
+		justify-content: flex-end;
+		margin-top: 8px;
 	}
 	.mem-foot {
 		display: flex;
@@ -215,6 +226,12 @@
 	.mem-count.over {
 		color: var(--st-destructive);
 		font-weight: 500;
+	}
+	/* "Learned automatically" must read in full in the narrow two-pane strip. */
+	.mem-detail :global(.st-facts dd) {
+		white-space: normal;
+		text-overflow: clip;
+		overflow-wrap: anywhere;
 	}
 	/* The delete question is a full sentence; let it wrap. */
 	.mem-detail :global(.st-ask) {
