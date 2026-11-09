@@ -583,7 +583,7 @@ def _short_dir_limit(monkeypatch):
 def test_a_long_cwd_reuses_the_cli_hashed_project_dir(tmp_path, _short_dir_limit):
     long_cwd = "/w/" + "x" * 30
     name = cli_project_dir_name(long_cwd)
-    hashed = tmp_path / (name[:20] + "-r2jn9i")
+    hashed = fluid_transcript._cli_project_dir(tmp_path, long_cwd)
     hashed.mkdir()
 
     path = fluid_transcript._write_cli_transcript(
@@ -601,7 +601,7 @@ async def test_long_cwd_lookup_uses_the_handle_within_its_prefix(
     prefix = cli_project_dir_name(os.path.abspath(options.cwd))[:20]
     transcript = _write_cli_jsonl(tmp_path, "cli-handle", [
         _user("My codename is PELICAN"), _assistant("Noted: PELICAN"),
-    ], project=prefix + "-hash-one")
+    ], project=fluid_transcript._cli_project_dir(_projects(tmp_path), os.path.abspath(options.cwd)).name)
     if sibling_count == 2:
         _write_cli_jsonl(tmp_path, "other-handle", [_user("other chat")],
                          project=prefix + "-hash-two")
@@ -631,14 +631,13 @@ def test_long_cwd_lookup_does_not_scan_an_unrelated_prefix(tmp_path, _short_dir_
     assert fluid_transcript.find_cli_transcript("cli-handle", _projects(tmp_path), options.cwd) is None
 
 
-def test_a_long_cwd_without_a_cli_dir_keeps_the_old_name(tmp_path, _short_dir_limit):
-    from app.core.jsonl_parser import get_project_dir_name
-
+def test_a_long_cwd_without_a_cli_dir_uses_the_exact_cli_hash(tmp_path, _short_dir_limit):
     long_cwd = "/w/" + "x" * 30
     path = fluid_transcript._write_cli_transcript(
         [{"type": "user"}], "cli-uuid", long_cwd, tmp_path,
     )
-    assert path.parent.name == get_project_dir_name(long_cwd)
+    assert path.parent == fluid_transcript._cli_project_dir(tmp_path, long_cwd)
+    assert len(path.parent.name) < len(cli_project_dir_name(long_cwd))
 
 
 # ─── a transcript carrying the bash-first steer ──────────────────────────────

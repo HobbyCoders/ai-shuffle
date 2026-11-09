@@ -58,8 +58,10 @@ ARCHIVE_REF_HEX = 24
 CHECKPOINT_MAX_CHARS = 400_000
 # Used when the host does not know the model's window.
 DEFAULT_CONTEXT_WINDOW = 200_000
-# How far one compaction aims: the deep target of a known window, at most
-# this many tokens of conversation (a 1M window would otherwise keep 150k).
+# Soft goal, not a hard limit: recent results and instructions stay intact
+# even when they exceed it. The selected context window is a separate limit.
+# Aim at the deep target of a known window, capped here (a 1M window would
+# otherwise keep 150k tokens of conversation).
 TARGET_CAP_TOKENS = 50_000
 # Guarded passes until the target or a fixed point; each pass runs every rung.
 MAX_ROUNDS = 8
