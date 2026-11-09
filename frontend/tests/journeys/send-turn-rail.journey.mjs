@@ -170,8 +170,14 @@ async function firstTickPreview(page) {
 		const send = (target, type, clientY) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true, pointerId: 41, clientY }));
 		send(second, 'pointerdown', y(second));
 		send(rail, 'pointermove', y(first));
-		await new Promise((done) => setTimeout(done, 300));
-		const box = nav.querySelector('.preview').getBoundingClientRect();
+		// The rail scrolls under a finger held past its top, and the preview changes
+		// tick as it goes: read it once the rail has reached the first tick and it has settled.
+		const giveUp = Date.now() + 5000;
+		while (rail.scrollTop > 0 && Date.now() < giveUp) await new Promise(requestAnimationFrame);
+		await new Promise((done) => setTimeout(done, 100));
+		const preview = nav.querySelector('.preview');
+		await Promise.allSettled(preview.getAnimations().map((animation) => animation.finished));
+		const box = preview.getBoundingClientRect();
 		const result = { scrubbing: nav.classList.contains('is-scrubbing'), top: box.top, bottom: box.bottom, tick: y(first) };
 		send(rail, 'pointercancel', y(first));
 		return result;
@@ -258,6 +264,7 @@ await runJourney({
 					await page.waitForTimeout(200);
 					const rest = await railGeometry(page);
 					await composer(page).fill(DRAFT);
+					await page.waitForFunction((height) => document.querySelector('.input-slot').getBoundingClientRect().height > height + 20, rest.composerHeight, { timeout: 5000 }).catch(() => {});
 					await page.waitForTimeout(200);
 					const at = await railGeometry(page);
 					log(`app height ${height ?? 'unset'} ${JSON.stringify({ rest, at })}`);
