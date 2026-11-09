@@ -194,8 +194,8 @@ def invalidate_identity() -> None:
         _identity_cache.clear()
 
 
-def _current_identity(account: dict, *, force: bool = False):
-    account_id = account["id"] if account["kind"] == KIND_SAVED else None
+def _current_identity(account_id: Optional[str], *, force: bool = False):
+    """Generation-guarded auth status for one folder (None means default)."""
     while True:
         with _identity_lock:
             cached = _identity_cache.get(account_id)
@@ -212,15 +212,20 @@ def _current_identity(account: dict, *, force: bool = False):
             return status
 
 
-def _record_identity(account: dict, status) -> None:
+def _record_identity(account: dict, status) -> bool:
+    """Apply a readable result; return whether its durable fields changed."""
     # A timeout or unreadable CLI result says nothing about authentication.
     # Keep the last readable state, including a known need to sign in again.
     if status.signed_in is None:
-        return
+        return False
+    previous = account.copy()
     account["signed_in"] = status.signed_in
-    account["checked_at"] = time.time()
+    # A cached read is not a new check. This also avoids rewriting storage on
+    # every listing while preserving the latest determinate probe across expiry.
+    account["checked_at"] = status.checked_at
     if status.signed_in:
         account["email"], account["plan"], account["org_name"] = status.email, status.plan, status.org_name
+    return account != previous
 
 
 # ─── Public payload ──────────────────────────────────────────────────────────
@@ -294,12 +299,14 @@ def payload() -> dict[str, Any]:
                     "recovery_required": False, "subscription_error": "storage_unavailable"}
         active_saved = _active_saved_id(state)
         rows = []
+        identities_changed = False
         for account in state["accounts"]:
             active = (account["id"] == state["active_id"]) if state["active_id"] else (
                 account["kind"] == KIND_DEFAULT)
             folder_ok = account["kind"] == KIND_DEFAULT or home.intact(account["id"])
             if folder_ok:
-                _record_identity(account, _current_identity(account))
+                home_id = account["id"] if account["kind"] == KIND_SAVED else None
+                identities_changed = _record_identity(account, _current_identity(home_id)) or identities_changed
             rows.append({
                 "id": account["id"],
                 "label": account.get("label") or DEFAULT_LABEL,
@@ -312,6 +319,8 @@ def payload() -> dict[str, Any]:
                 "checked_at": account.get("checked_at"),
                 "needs_sign_in": not folder_ok or account.get("signed_in") is False,
             })
+        if identities_changed:
+            _save(state)
         active_row = next((r for r in rows if r["id"] == active_saved), None)
         return {
             "subscription": rows,
@@ -352,11 +361,11 @@ def save_current(label: str = "") -> str:
     """Register the default folder's current sign-in as a named entry."""
     _require_support()
     label = _label(label, "")
-    status = _probe(None)
-    if not status.signed_in:
-        raise SubscriptionError(
-            "not_signed_in", "Claude Code is not signed in. Sign in first, then save it.", 409)
     with _lock:
+        status = _current_identity(None, force=True)
+        if not status.signed_in:
+            raise SubscriptionError(
+                "not_signed_in", "Claude Code is not signed in. Sign in first, then save it.", 409)
         state = _load()
         account = next((a for a in state["accounts"] if a["kind"] == KIND_DEFAULT), None)
         if account is None:
@@ -429,7 +438,8 @@ def _refresh_quietly(account_id: str) -> None:
         account = _find(_load(), account_id)
         if account is None:
             return
-        status = _current_identity(account, force=True)
+        home_id = account["id"] if account["kind"] == KIND_SAVED else None
+        status = _current_identity(home_id, force=True)
         if status.signed_in is None:
             return
         state = _load()
@@ -521,7 +531,7 @@ def _signed_in_status(account_id: str):
     """``claude auth status`` for an intact pending folder that reports a sign-in, else None."""
     if not home.intact(account_id):
         return None
-    status = _probe(account_id)
+    status = _current_identity(account_id, force=True)
     return status if status.signed_in else None
 
 

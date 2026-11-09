@@ -54,7 +54,7 @@ def world(tmp_path, monkeypatch):
         probed.append(folder)
         email = signed.get(folder)
         return cs.ClaudeCliStatus(installed=True, signed_in=bool(email), email=email,
-                                  plan="max" if email else None)
+                                  plan="max" if email else None, checked_at=subs.time.time())
 
     def run_home(args, home_env):
         ran.append((args, dict(home_env)))
@@ -263,6 +263,27 @@ def test_payload_refreshes_expired_credentials_and_invalidates_on_relogin(world,
     assert subs.payload()["subscription"][0]["needs_sign_in"] is False
 
 
+def test_listing_keeps_latest_signed_out_result_after_expiry_then_timeout(world, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(subs.time, "monotonic", lambda: now[0])
+    account_id = _add(world, "saved@example.com")
+    folder = str(world.root / account_id)
+    world.signed.pop(folder)
+    now[0] += subs._VERIFY_INTERVAL_SECONDS + 1
+    signed_out = subs.payload()
+    assert signed_out["subscription"][0]["signed_in"] is False
+    assert signed_out["recovery_required"] is True
+    # No activation or manually seeded account fields between these listings.
+    now[0] += subs._VERIFY_INTERVAL_SECONDS + 1
+    monkeypatch.setattr(subs, "_probe", lambda _: cs.ClaudeCliStatus(
+        installed=True, signed_in=None, error="timeout"))
+    unknown = subs.payload()
+    assert unknown["subscription"][0]["signed_in"] is False
+    assert unknown["subscription"][0]["needs_sign_in"] is True
+    assert unknown["recovery_required"] is True
+    assert unknown["subscription"][0]["checked_at"] == signed_out["subscription"][0]["checked_at"]
+
+
 @pytest.mark.parametrize("signed_in", [False, True])
 @pytest.mark.parametrize("active", [False, True])
 def test_indeterminate_identity_keeps_last_readable_authentication(world, monkeypatch, signed_in, active):
@@ -288,9 +309,14 @@ def test_indeterminate_identity_keeps_last_readable_authentication(world, monkey
     assert listing["recovery_required"] is (active and not signed_in)
 
 
-@pytest.mark.parametrize("reader", ["payload", "activate"])
+@pytest.mark.parametrize("reader", ["payload", "activate", "save_current", "pending_poll", "pending_cancel"])
 def test_login_completion_rejects_an_inflight_identity_probe(world, monkeypatch, reader):
-    account_id = _add(world, "before@example.com")
+    if reader.startswith("pending_"):
+        account_id = subs.start_login()["id"]
+    elif reader == "save_current":
+        account_id = None
+    else:
+        account_id = _add(world, "before@example.com")
     subs.invalidate_identity()
     probe_started, release_probe = Event(), Event()
     probes = []
@@ -314,7 +340,13 @@ def test_login_completion_rejects_an_inflight_identity_probe(world, monkeypatch,
 
     def read_identity():
         with subs._lock:
-            return subs.payload() if reader == "payload" else subs.change(account_id, "activate")
+            if reader in ("payload", "pending_poll"):
+                return subs.payload()
+            if reader == "save_current":
+                return subs.save_current()
+            if reader == "pending_cancel":
+                return subs.cancel_login()
+            return subs.change(account_id, "activate")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         inflight = pool.submit(read_identity)
@@ -325,13 +357,42 @@ def test_login_completion_rejects_an_inflight_identity_probe(world, monkeypatch,
         finally:
             release_probe.set()
         result = inflight.result(timeout=5)
-        if reader == "payload":
+        if reader in ("payload", "pending_poll"):
             assert result["subscription"][0]["email"] == "after@example.com"
 
     row = subs.payload()["subscription"][0]
     assert row["email"] == "after@example.com"
+    if reader in ("save_current", "pending_poll", "pending_cancel"):
+        # New accounts must derive their labels from the guarded result too.
+        assert row["label"] == "after@example.com"
+        assert subs._load()["accounts"][0]["email"] == "after@example.com"
     assert subs._identity_cache[account_id][1].email == "after@example.com"
-    assert len(probes) == 2
+    # Adoption changes the active folder and deliberately invalidates again.
+    assert len(probes) == (3 if reader.startswith("pending_") else 2)
+
+
+def test_cached_listing_keeps_probe_time_without_rewriting_storage(world, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(subs.time, "monotonic", lambda: now[0])
+    _add(world, "saved@example.com")
+    checked_at = subs.payload()["subscription"][0]["checked_at"]
+    original_save = subs._save
+    writes = []
+
+    def save(state):
+        writes.append(1)
+        original_save(state)
+
+    monkeypatch.setattr(subs, "_save", save)
+    monkeypatch.setattr(subs.time, "time", lambda: checked_at + 5)
+    assert subs.payload()["subscription"][0]["checked_at"] == checked_at
+    assert subs.payload()["subscription"][0]["checked_at"] == checked_at
+    assert writes == []
+    now[0] += subs._VERIFY_INTERVAL_SECONDS + 1
+    assert subs.payload()["subscription"][0]["checked_at"] == checked_at + 5
+    assert writes == [1]
+    assert subs.payload()["subscription"][0]["checked_at"] == checked_at + 5
+    assert writes == [1]
 
 
 def test_inactive_saved_login_commands_never_switch_accounts(world):
