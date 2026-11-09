@@ -339,8 +339,7 @@ jobs:
             -c "CREATE DATABASE shuffle_safety_test OWNER shuffle_safety_test" \
             -c "SET allow_in_place_tablespaces = true" \
             -c "CREATE TABLESPACE history_index_test LOCATION ''" \
-            -c "GRANT CREATE ON TABLESPACE history_index_test TO shuffle_safety_test" \
-            -c "CREATE TABLESPACE history_index_drop_test OWNER shuffle_safety_test LOCATION ''"
+            -c "GRANT CREATE ON TABLESPACE history_index_test TO shuffle_safety_test"
           pg_isready -h 127.0.0.1 -p 5432
 
       - name: Verify PostgreSQL pool and transaction safety

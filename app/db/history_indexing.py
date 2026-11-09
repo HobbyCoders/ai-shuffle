@@ -17,7 +17,7 @@ import shutil
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, NamedTuple
+from typing import Any, Callable, Iterator
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -65,6 +65,8 @@ IMPORT_STATEMENT_TIMEOUT = "10min"
 BUILD_RESERVE_BYTES = 1024 ** 3
 BUILD_RETRY_SECONDS = 600.0
 _retry_build_at = 0.0
+# Indexes already logged as left on their own tablespace, so each pass stays quiet.
+_left_alone: set[str] = set()
 _DEFAULT = f"COALESCE(NULLIF(current_setting('{SETTING}', true), ''), '0')::smallint"
 
 
@@ -222,30 +224,23 @@ def _concurrent_ddl(cur: Any, table: str, statement: str) -> None:
         cur.execute("SET statement_timeout = '1h'")
 
 
-class _BuildPlace(NamedTuple):
-    """Where a replacement goes. Read once: the disk check and the build share it."""
+def _rebuild_size(cur: Any, name: str) -> int | None:
+    """Bytes a rebuild of this index copies; None to leave the index where it is.
 
-    size: int
-    clause: str  # " TABLESPACE name", or empty for the database's own default.
-    directory: str | None  # None when that is the cluster's data directory.
-
-
-def _build_place(cur: Any, name: str) -> _BuildPlace:
-    """Keep a replacement where its original is now.
-
-    Nothing locks that place, so the original can move after this read. Building
-    on the place that was measured is the safe answer to that, so never look it
-    up again between the check and the build.
+    Only the database's own default location, in the cluster's data directory,
+    is rebuilt. Those builds name no tablespace, so nothing done to an index or
+    a tablespace after this read can send one anywhere the disk check did not
+    measure. CREATE INDEX takes a tablespace by name, so a build that named one
+    could not promise that. The app never creates tablespaces: a moved index is
+    an operator's choice, and it is still valid and searched where it is.
     """
-    cur.execute("SELECT pg_relation_size(c.oid) AS bytes, quote_ident(t.spcname) AS space, "
-                "NULLIF(pg_tablespace_location(c.reltablespace), '') AS directory "
-                "FROM pg_class c LEFT JOIN pg_tablespace t ON t.oid = c.reltablespace "
-                "WHERE c.oid = to_regclass(%s)", (name,))
+    cur.execute("SELECT pg_relation_size(c.oid) AS bytes, "
+                "c.reltablespace = 0 AND pg_tablespace_location(0) = '' AS on_default "
+                "FROM pg_class c WHERE c.oid = to_regclass(%s)", (name,))
     row = cur.fetchone()
     if not row:
-        return _BuildPlace(0, "", None)
-    clause = f" TABLESPACE {row['space']}" if row["space"] else ""
-    return _BuildPlace(int(row["bytes"]), clause, row["directory"])
+        return 0
+    return int(row["bytes"]) if row["on_default"] else None
 
 
 def _disk(path: Any) -> tuple[int, int]:
@@ -253,25 +248,24 @@ def _disk(path: Any) -> tuple[int, int]:
     return os.stat(path).st_dev, shutil.disk_usage(path).free
 
 
-def _volumes(cur: Any, place: _BuildPlace) -> list[tuple[str, int, int, int]]:
+def _volumes(cur: Any, size: int) -> list[tuple[str, int, int, int]]:
     """(label, device, free bytes, bytes needed) of each place a rebuild writes."""
     from app.core.config import settings
     from app.core.private_storage import service_files
     from app.maintenance.session_recall_cache import managed_data_directory
 
     data = managed_data_directory(cur, settings.effective_data_dir)
-    places = [("data", place.directory or data, place.size),
-              ("WAL", data / "pg_wal", place.size)]
+    places = [("data", data, size), ("WAL", data / "pg_wal", size)]
     with service_files():
         return [(label, *_disk(path), need) for label, path, need in places]
 
 
-def _space_problem(cur: Any, place: _BuildPlace) -> str | None:
+def _space_problem(cur: Any, size: int) -> str | None:
     """Why rebuilding this index now is unsafe for the PostgreSQL volumes, if so."""
     from app.maintenance.session_recall_cache import ManagedDataDirectoryError
 
     try:
-        volumes = _volumes(cur, place)
+        volumes = _volumes(cur, size)
     except (ManagedDataDirectoryError, OSError, ValueError):
         return ("its free disk space cannot be measured, because PostgreSQL is not "
                 "this worker's own managed database")
@@ -304,8 +298,8 @@ def migrate() -> bool:
             return False
         cur.execute("SET lock_timeout = '250ms'")
         cur.execute("SET statement_timeout = '1h'")
-        # An index with no tablespace of its own stays with the database, as
-        # _build_place assumes, whatever a role or database setting says.
+        # Replacements stay in the database's default location, the place
+        # _volumes measures, whatever a role or database setting says.
         cur.execute("SET default_tablespace = ''")
         cur.execute("CREATE TABLE IF NOT EXISTS history_index_migrations "
                     "(name text PRIMARY KEY, tail text NOT NULL)")
@@ -359,6 +353,16 @@ def migrate() -> bool:
                 if not wanted.issubset(options):
                     cur.execute(f"ALTER INDEX {name}_h2 SET ({_HISTORY_OPTIONS})")
                 continue
+            size = _rebuild_size(cur, name)
+            if size is None:
+                # Decided again each pass, so moving it back is picked up by itself.
+                if name not in _left_alone:
+                    _left_alone.add(name)
+                    logger.info("History index %s stays where it is: it is on its own "
+                                "tablespace, and only indexes on the database's default "
+                                "one are upgraded. Moving long chats stays slower for it.",
+                                name)
+                continue
             if row and not partial:
                 tail = row["ddl"].split(" USING gin ", 1)[1]
                 cur.execute("INSERT INTO history_index_migrations(name, tail) VALUES (%s,%s) "
@@ -377,13 +381,12 @@ def migrate() -> bool:
                 or (t == "session_recall_text" and "session_recall_text" in name)
                 or (t == "session_events" and "events" in name)
                 or (t == "session_messages" and "session_messages" in name)))
-            place = _build_place(cur, name)
             for state in (0, 2):
                 replacement = name + f"_h{state}"
                 if not _valid(cur, replacement):
                     _concurrent_ddl(cur, table, f"DROP INDEX CONCURRENTLY IF EXISTS {replacement}")
                     # Only the live half holds existing rows; history starts empty.
-                    problem = _space_problem(cur, place) if state == 0 else None
+                    problem = _space_problem(cur, size) if state == 0 else None
                     if problem:
                         _retry_build_at = time.monotonic() + BUILD_RETRY_SECONDS
                         logger.warning("History index upgrade for %s is waiting: %s. Moving "
@@ -396,7 +399,7 @@ def migrate() -> bool:
                     else:
                         options = " WITH " + original_options if has_options else ""
                     _concurrent_ddl(cur, table, f"CREATE INDEX CONCURRENTLY {replacement} ON {table} "
-                                    f"USING gin {expression}{options}{place.clause} WHERE "
+                                    f"USING gin {expression}{options} WHERE "
                                     f"{where}{COLUMN} = {state}")
             _concurrent_ddl(cur, table, f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
             cur.execute(f"ALTER INDEX {name}_h0 RENAME TO {name}")
