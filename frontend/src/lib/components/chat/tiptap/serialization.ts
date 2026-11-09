@@ -157,6 +157,20 @@ export function extractFileChips(editor: Editor): FileChipAttributes[] {
 }
 
 /**
+ * Whether a chip is an uploaded attachment rather than an @ mention.
+ *
+ * The @ menu marks what it inserts, because a path alone cannot say: `C:/notes.txt`
+ * can be a project file on a Linux worker. A chip without the mark comes from an
+ * upload or from a draft saved before the mark existed, and the path decides:
+ * every upload endpoint answers with an absolute path, and the server admits
+ * nothing else in `upload_paths`.
+ */
+export function isUploadChip(chip: Pick<FileChipAttributes, 'type' | 'fullPath' | 'mention'>): boolean {
+	if (chip.mention) return false;
+	return chip.type === 'file' && /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(chip.fullPath ?? '');
+}
+
+/**
  * Check if the editor content is effectively empty.
  *
  * Returns true if the editor contains only whitespace and no file chips.

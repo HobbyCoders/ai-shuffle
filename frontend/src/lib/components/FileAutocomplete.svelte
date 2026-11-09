@@ -38,6 +38,8 @@
   interface Props {
     inputValue: string;
     projectId?: string;
+    /** The local project whose agents to offer; a chat on another worker has none here. */
+    subagentProjectId?: string;
     profileId?: string;
     worktreeId?: string;
     sessionId?: string;
@@ -46,7 +48,7 @@
     visible: boolean;
   }
 
-  let { inputValue, projectId, profileId, worktreeId, sessionId, onSelect, onClose, visible }: Props = $props();
+  let { inputValue, projectId, subagentProjectId, profileId, worktreeId, sessionId, onSelect, onClose, visible }: Props = $props();
 
   let files = $state<FileItem[]>([]);
   let filteredFiles = $state<FileItem[]>([]);
@@ -59,7 +61,31 @@
   let inChatHistoryFolder = $state(false);
   let inNotesFolder = $state(false);
   let inSubagentsFolder = $state(false);
+  let loadError = $state<string | null>(null);
   let fetchCounter = 0;
+
+  // The server waits on a worker that may be gone; never spin past its answer.
+  const LIST_TIMEOUT_MS = 25_000;
+  const LIST_FAILED = "Couldn't load this list.";
+  const LIST_TIMED_OUT = 'This list is taking too long to load.';
+
+  function listTimeout(): RequestInit {
+    return typeof AbortSignal.timeout === 'function' ? { signal: AbortSignal.timeout(LIST_TIMEOUT_MS) } : {};
+  }
+
+  function failureMessage(error: unknown): string {
+    return error instanceof DOMException && error.name === 'TimeoutError' ? LIST_TIMED_OUT : LIST_FAILED;
+  }
+
+  /** The server's own reason (such as an offline worker), else a plain fallback. */
+  async function refusalMessage(response: Response): Promise<string> {
+    const body = await response.json().catch(() => null);
+    return typeof body?.detail === 'string' && body.detail ? body.detail : LIST_FAILED;
+  }
+
+  function virtualFolders(): FileItem[] {
+    return VIRTUAL_FOLDER_NAMES.map(name => ({ name, type: 'directory' as const, path: name, size: null }));
+  }
 
   // Get the directory path from query
   function getPathFromQuery(query: string): string {
@@ -119,7 +145,7 @@
   const query = $derived(extractAtMentionQuery(inputValue)?.query ?? null);
   const requestPath = $derived(query?.startsWith(NOTES_FOLDER + '/') ? query : getPathFromQuery(query ?? ''));
   const requestKey = $derived(visible && projectId && query !== null
-    ? JSON.stringify([requestPath, projectId, profileId, worktreeId, sessionId]) : null);
+    ? JSON.stringify([requestPath, projectId, subagentProjectId, profileId, worktreeId, sessionId]) : null);
   const selectionPending = $derived(loading || requestKey !== lastFetchedKey || query !== filteredQuery);
 
   // Invalidate on every request/mode/visibility change, before awaiting I/O.
@@ -132,6 +158,7 @@
       filteredQuery = null;
       lastFetchedKey = key;
       selectedIndex = 0;
+      loadError = null;
       if (key !== null) {
         fetchFiles(requestPath);
       } else {
@@ -236,6 +263,7 @@
 
     const thisFetchId = ++fetchCounter;
     loading = true;
+    loadError = null;
     files = [];
     filteredFiles = [];
     currentPath = isNotesPath(path) ? NOTES_FOLDER : path;
@@ -287,46 +315,28 @@
           params.set('session_id', sessionId);
         }
 
-        const response = await fetch(`${apiBase()}/projects/${projectId}/files?${params}`, withAuth({ }));
+        const response = await fetch(`${apiBase()}/projects/${projectId}/files?${params}`, withAuth(listTimeout()));
 
         if (response.ok) {
           const data = await response.json();
           fetchedFiles = data.files;
         } else {
+          const reason = await refusalMessage(response);
+          if (thisFetchId === fetchCounter) loadError = reason;
           fetchedFiles = [];
         }
       }
 
       if (thisFetchId !== fetchCounter) return;
 
-      if (!path) {
-        files = [
-          {
-            name: CHAT_HISTORY_FOLDER,
-            type: 'directory' as const,
-            path: CHAT_HISTORY_FOLDER,
-            size: null
-          },
-          {
-            name: NOTES_FOLDER,
-            type: 'directory' as const,
-            path: NOTES_FOLDER,
-            size: null
-          },
-          {
-            name: SUBAGENTS_FOLDER,
-            type: 'directory' as const,
-            path: SUBAGENTS_FOLDER,
-            size: null
-          },
-          ...fetchedFiles
-        ];
-      } else {
-        files = fetchedFiles;
-      }
+      files = path ? fetchedFiles : [...virtualFolders(), ...fetchedFiles];
     } catch (error) {
       console.error('Failed to fetch files:', error);
-      if (thisFetchId === fetchCounter) files = [];
+      if (thisFetchId === fetchCounter) {
+        // Chat History, Notes and Subagents do not depend on this list.
+        files = path ? [] : virtualFolders();
+        loadError = failureMessage(error);
+      }
     } finally {
       if (thisFetchId === fetchCounter) loading = false;
     }
@@ -348,7 +358,7 @@
         params.set('session_id', sessionId);
       }
 
-      const response = await fetch(`${apiBase()}/projects/${projectId}/chat-history?${params}`, withAuth({ }));
+      const response = await fetch(`${apiBase()}/projects/${projectId}/chat-history?${params}`, withAuth(listTimeout()));
 
       if (fetchId !== fetchCounter) return;
 
@@ -367,10 +377,15 @@
         }));
       } else {
         files = [];
+        const reason = await refusalMessage(response);
+        if (fetchId === fetchCounter) loadError = reason;
       }
     } catch (error) {
       console.error('Failed to fetch chat history:', error);
-      if (fetchId === fetchCounter) files = [];
+      if (fetchId === fetchCounter) {
+        files = [];
+        loadError = failureMessage(error);
+      }
     } finally {
       if (fetchId === fetchCounter) loading = false;
     }
@@ -392,7 +407,10 @@
       }));
     } catch (error) {
       console.error('Failed to fetch notes:', error);
-      if (fetchId === fetchCounter) files = [];
+      if (fetchId === fetchCounter) {
+        files = [];
+        loadError = failureMessage(error);
+      }
     } finally {
       if (fetchId === fetchCounter) loading = false;
     }
@@ -408,7 +426,7 @@
     }
 
     try {
-      const subagents = await getSubagentsForAutocomplete(profileId, projectId, worktreeId, search || undefined, 30);
+      const subagents = await getSubagentsForAutocomplete(profileId, subagentProjectId, worktreeId, search || undefined, 30);
 
       if (fetchId !== fetchCounter) return;
 
@@ -425,7 +443,10 @@
       }));
     } catch (error) {
       console.error('Failed to fetch subagents:', error);
-      if (fetchId === fetchCounter) files = [];
+      if (fetchId === fetchCounter) {
+        files = [];
+        loadError = failureMessage(error);
+      }
     } finally {
       if (fetchId === fetchCounter) loading = false;
     }
@@ -617,6 +638,16 @@
   }
 </script>
 
+{#snippet loadFailure()}
+  <span class="file-load-error-text">{loadError}</span>
+  <button
+    type="button"
+    class="file-load-retry"
+    onmousedown={(event) => event.preventDefault()}
+    onclick={() => fetchFiles(requestPath)}
+  >Try again</button>
+{/snippet}
+
 {#if visible}
   <div class="autocomplete-panel file-autocomplete-panel">
     <!-- Header -->
@@ -657,6 +688,10 @@
         <div class="autocomplete-loading-spinner"></div>
         <span>Loading...</span>
       </div>
+    {:else if loadError && filteredFiles.length === 0}
+      <div class="autocomplete-empty file-load-error" role="status">
+        {@render loadFailure()}
+      </div>
     {:else if filteredFiles.length === 0}
       <!-- Empty state -->
       <div class="autocomplete-empty">
@@ -666,6 +701,11 @@
         <span>No matching items</span>
       </div>
     {:else}
+      {#if loadError}
+        <div class="file-load-notice" role="status">
+          {@render loadFailure()}
+        </div>
+      {/if}
       <!-- File list -->
       <ul bind:this={listElement} class="autocomplete-list file-autocomplete-list" role="listbox" aria-label="Files">
         {#if showSectionHeaders}
@@ -882,6 +922,65 @@
 
   .file-autocomplete-list {
     max-height: 14rem;
+  }
+
+  /* The composer is narrow on a phone: the name matters, and the icon already says the kind. */
+  @media (max-width: 480px) {
+    .file-autocomplete-panel .autocomplete-badge {
+      display: none;
+    }
+  }
+
+  .file-load-error {
+    color: var(--muted-foreground);
+  }
+
+  .file-load-notice {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2, 8px) var(--space-3, 12px);
+    padding: var(--space-2, 8px) var(--space-3, 12px);
+    border-bottom: 1px solid var(--border);
+    font-size: var(--text-sm, 0.75rem);
+    color: var(--muted-foreground);
+  }
+
+  /* The menu is only as wide as the editor, so on a phone "Try again" drops
+     below the message instead of squeezing it into a one-word column. */
+  .file-load-error-text {
+    flex: 1 1 10rem;
+    min-width: 0;
+    text-align: start;
+  }
+
+  .file-load-retry {
+    flex-shrink: 0;
+    min-height: 28px;
+    padding: 0 var(--space-2, 8px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm, 6px);
+    background: transparent;
+    color: var(--foreground);
+    font-size: var(--text-sm, 0.75rem);
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+  }
+
+  .file-load-retry:hover {
+    background: var(--accent);
+  }
+
+  .file-load-retry:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+
+  @media (pointer: coarse) {
+    .file-load-retry {
+      min-height: 44px;
+    }
   }
 
   .file-note-tags {

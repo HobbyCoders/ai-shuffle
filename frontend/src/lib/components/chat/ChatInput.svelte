@@ -24,7 +24,7 @@
 	 * Delegates voice recording to VoiceRecorder, calls to VoiceCallButton,
 	 * controls to ControlsDock, and drag-and-drop to the inline overlay.
 	 */
-	import { tick, onDestroy, onMount } from 'svelte';
+	import { tick, onDestroy, onMount, untrack } from 'svelte';
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
 	import { subagentChats } from '$lib/stores/subagent-chats';
@@ -87,7 +87,7 @@
 	import NewSessionSentence from '$lib/components/layout/NewSessionSentence.svelte';
 	import { ArrowUp, Plus } from 'lucide-svelte';
 	import { composerCircles, createWrapWatcher } from './composer-wrap';
-	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
+	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips, isUploadChip } from './tiptap/serialization';
 
 	interface Command {
 		name: string;
@@ -132,6 +132,17 @@
 			&& !$activeSession.project && !$activeSession.projectV2Id
 	);
 	const projectLane = $derived(projectRulesLane(composerMode, projectlessSubagent));
+	// A chat on another worker may carry only the shared project id. Its @ list
+	// is asked for by session, so the worker running the chat answers.
+	const mentionProjectId = $derived(
+		$activeSession.project || ($activeSession.sessionId ? $activeSession.projectV2Id : '') || undefined
+	);
+	const mentionsAvailable = $derived(!!mentionProjectId);
+	let mentionAwaitingProject: string | null = null;
+	const mentionWorktreeId = $derived(
+		$activeSession.worktreeIntent === 'worktree' && !$activeSession.isRemote
+			? $activeSession.worktreeId ?? undefined : undefined
+	);
 	// Remote runtime summaries are display/control truth, not transcript streaming
 	// state. A parked turn can also retain background work that Stop must reach.
 	const stoppableWork = $derived(hasStoppableWork(
@@ -1026,9 +1037,25 @@
 			showCommandAutocomplete = false;
 		}
 
-		// File autocomplete (@mentions)
-		// Use plain text for detection to avoid false positives from chip @paths
-		if (!!$activeSession.project && hasAtMention(plainTextValue)) {
+		mentionAwaitingProject = !mentionsAvailable && hasAtMention(plainTextValue) ? $activeSession.sessionId : null;
+		updateFileAutocomplete();
+	}
+
+	// A chat's project can arrive just after an @ was typed (reload metadata):
+	// open the menu then. Only for that keystroke, never for a restored draft.
+	$effect(() => {
+		if (!mentionsAvailable) return;
+		untrack(() => {
+			const typedInThisChat = mentionAwaitingProject !== null && mentionAwaitingProject === $activeSession.sessionId;
+			mentionAwaitingProject = null;
+			if (typedInThisChat) updateFileAutocomplete();
+		});
+	});
+
+	// File autocomplete (@mentions)
+	// Use plain text for detection to avoid false positives from chip @paths
+	function updateFileAutocomplete() {
+		if (mentionsAvailable && hasAtMention(plainTextValue)) {
 			const atInfo = extractAtMentionQuery(plainTextValue);
 			if (atInfo) {
 				const query = atInfo.query;
@@ -1264,7 +1291,8 @@
             // Identity is carried by restored chips. A new chip at the same path
             // is still a fresh upload and must lift its own bytes.
             pendingReferences = chips.flatMap(c => c.uploadReference ? [c.uploadReference] : []);
-            const chipPaths = chips.filter(c => !c.uploadReference).map(c => c.fullPath).filter(Boolean);
+            // An @ mention is text for the agent, never an upload: the server refuses it here.
+            const chipPaths = chips.filter(c => !c.uploadReference && isUploadChip(c)).map(c => c.fullPath);
 			const legacyPaths = uploadedFiles.map(f => f.full_path);
 			const allPaths = [...new Set([...chipPaths, ...legacyPaths])];
 			pendingPaths = allPaths.length ? allPaths : undefined;
@@ -1508,7 +1536,8 @@
 			filename: file.name,
 			fullPath: file.path,
 			size: file.size || 0,
-			type: chipType
+			type: chipType,
+			mention: true
 		});
 
 		// Update inputValue to reflect text after chip insertion (for autocomplete state)
@@ -1843,9 +1872,10 @@
 						<FileAutocomplete
 							bind:this={fileAutocompleteRef}
 							inputValue={plainTextValue}
-							projectId={$activeSession.project}
+							projectId={mentionProjectId}
+							subagentProjectId={$activeSession.project || undefined}
 							profileId={$activeSession.profile}
-							worktreeId={$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
+							worktreeId={mentionWorktreeId}
 							sessionId={$activeSession.sessionId ?? undefined}
 							visible={showFileAutocomplete}
 							onSelect={handleFileSelect}
