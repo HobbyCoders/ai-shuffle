@@ -172,22 +172,16 @@ def session_stopped(session_id):
     session = database.get_session(session_id)
     if not session or session.get("status") == "stopped":
         return True
-    with get_db() as conn:
-        cursor = conn.cursor()
-        # A held progress note (#960) never ran, so it cannot mask a durable Stop.
-        cursor.execute("SELECT * FROM turns WHERE session_id=%s "
-                       "AND NOT (state='aborted' AND COALESCE(stop_reason, '')='held_progress') "
-                       "ORDER BY position DESC,created_at DESC LIMIT 1", (session_id,))
-        turn = row_to_dict(cursor.fetchone())
-        if not turn:
-            return False
-        payload = turn.get("payload") or {}
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-        return (
-            turn.get("interrupt_mode") == "stop"
-            and payload.get("interrupt_source") != SPENDING_INTERRUPT_SOURCE
-        ) or turn.get("stop_reason") in ("user_stopped", "user_stopped_all", "agent_stopped")
+    from app.db import turns
+    # The same visible history/steered resolution as every latest-turn reader.
+    turn = turns.get_latest_turn(session_id)
+    if not turn:
+        return False
+    payload = turn.get("payload") or {}
+    return (
+        turn.get("interrupt_mode") == "stop"
+        and payload.get("interrupt_source") != SPENDING_INTERRUPT_SOURCE
+    ) or turn.get("stop_reason") in ("user_stopped", "user_stopped_all", "agent_stopped")
 
 
 def assert_proactive_allowed(metadata: dict[str, Any], session_id: str | None = None) -> Any:

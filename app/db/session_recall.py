@@ -68,6 +68,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from typing import Callable
 
 import psycopg2.errors
 
@@ -480,8 +481,8 @@ def install_objects(cursor, *, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
         if not schema or "'" in schema:
             raise ValueError("no usable current schema")
         if not present:
-            # Preserve existing opt-in so automatic maintenance rebuilds the
-            # indexes and resumes pending imports. Never opt in a new worker.
+            # Automatic maintenance must rebuild the indexes and resume pending
+            # imports. A worker with no marker gets one from that maintenance.
             cursor.execute("UPDATE system_settings SET value = 'building' WHERE key = %s",
                            ("migration:history_indexing_v1",))
         for statement in _DDL if present else [*_TABLE_DDL, *_DDL]:
@@ -737,14 +738,18 @@ def backfill_step(cursor, source: str, batch: int | None = None, max_bytes: int 
     return False
 
 
-def promote_overflow(*, max_seconds: float = 10.0, pause_seconds: float = 0.1) -> int:
+def promote_overflow(*, max_seconds: float = 10.0, pause_seconds: float = 0.1,
+                     can_work: Callable[[], bool] = lambda: True) -> int:
     """Cut rows that a user's write only marked (too long to index inline)
     into pieces, newest first, one short transaction per row. Returns how many
-    rows it promoted."""
+    rows it promoted. Stops after one row while a foreground turn runs: that
+    row is what keeps unbroken activity from hiding a long message for ever."""
+    from app.db import history_indexing
+
     deadline = time.monotonic() + max_seconds
     promoted = 0
     skipped: set = set()
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline and (not promoted or can_work()):
         try:
             with get_db() as conn:
                 cur = conn.cursor()
@@ -761,8 +766,12 @@ def promote_overflow(*, max_seconds: float = 10.0, pause_seconds: float = 0.1) -
                 from app.db.base import column_exists
                 history = column_exists(cur, _SOURCE_TABLE[source], "history_index_state")
                 sql = _rows(source, where, history=history)
-                cur.execute(f"SELECT COUNT({_put(source)}) AS n FROM ({sql}) b", params(sid, key))
-                if not cur.fetchone()["n"]:
+                cur.execute(f"SELECT COUNT({_put(source)}) AS n, MAX(b.history_state) AS state "
+                            f"FROM ({sql}) b", params(sid, key))
+                written = cur.fetchone()
+                if written["state"] == 2:
+                    history_indexing.note_history_write()
+                if not written["n"]:
                     # Its row is gone or no longer scored: the marker is stale.
                     cur.execute(f"DELETE FROM {TABLE} WHERE source = %s AND session_id = %s AND row_key = %s",
                                 (source, sid, key))
@@ -773,7 +782,8 @@ def promote_overflow(*, max_seconds: float = 10.0, pause_seconds: float = 0.1) -
     return promoted
 
 
-def run_backfill(*, max_seconds: float = 20.0, pause_seconds: float = 0.1) -> bool:
+def run_backfill(*, max_seconds: float = 20.0, pause_seconds: float = 0.1,
+                 can_work: Callable[[], bool] = lambda: True) -> bool:
     """One bounded pass of installation, backfill and promotion of marked rows;
     True when recall is ready.
 
@@ -803,9 +813,13 @@ def run_backfill(*, max_seconds: float = 20.0, pause_seconds: float = 0.1) -> bo
             except psycopg2.errors.LockNotAvailable:
                 pass  # a writer holds a row of this batch; retry after the pause
             time.sleep(pause_seconds)
-    promote_overflow(max_seconds=max(0.0, deadline - time.monotonic()), pause_seconds=pause_seconds)
+    promote_overflow(max_seconds=max(0.0, deadline - time.monotonic()),
+                     pause_seconds=pause_seconds, can_work=can_work)
     if was_ready:
         return True
+    # A projection rebuild writes imported rows back into the history lists.
+    from app.db import history_indexing
+    history_indexing.note_history_write()
     with get_db() as conn:
         cur = conn.cursor()
         if not ready(cur):

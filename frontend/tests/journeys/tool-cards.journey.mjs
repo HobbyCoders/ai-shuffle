@@ -286,6 +286,14 @@ const nativeModel = {
 	}
 };
 
+// The owner answers a model switch on the regular prompt, never by typing.
+async function denyPermissionPrompt(page) {
+	const deny = page.getByRole('button', { name: 'Deny', exact: true });
+	await deny.waitFor({ timeout: 20_000 });
+	await deny.click();
+	await deny.waitFor({ state: 'hidden', timeout: 10_000 });
+}
+
 const nativePinRetry = {
 	name: 'native-pin-retry',
 	viewports: ['desktop'],
@@ -297,9 +305,8 @@ const nativePinRetry = {
 		const token = `native-pin-retry-${uniq()}`;
 		await mark('request a specific native version, then retry its family');
 		await typeAndSend(page, `${token}\nCan you use Opus version 4?\n${fakeAiTag(variant, 'tool-native-model-override')}`);
-		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
-		await mark('decline the current-family substitution');
-		await typeAndSend(page, 'no');
+		await denyPermissionPrompt(page);
+		await mark('declined the current-family substitution');
 		await waitTurnSettled(page, { text: 'Native model checks complete.', messagesAtLeast: 2 });
 		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
 		const results = parent.messages.filter((m) => m.tool_name === 'StartSession' && m.toolResult);
@@ -334,8 +341,7 @@ const nativePrecedence = {
 		const id = await chatIdByToken(page, token);
 		await mark('a newer version request supersedes the saved plain-family naming');
 		await typeAndSend(page, `Can you use Opus version 4?\n${fakeAiTag(variant, 'tool-native-model-precedence')}`);
-		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
-		await typeAndSend(page, 'no');
+		await denyPermissionPrompt(page);
 		await waitNativeCheck(page, id, 6, 1);
 		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 4 });
 		const parent = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);
@@ -347,8 +353,7 @@ const nativePrecedence = {
 		await mark('a command word in a different clause cannot restore consent');
 		await typeAndSend(page, `the opus agent stopped, try again
 ${fakeAiTag(variant, 'tool-native-model-precedence')}`);
-		await page.getByText('Reply yes or no in the message box.', { exact: false }).waitFor({ timeout: 20_000 });
-		await typeAndSend(page, 'no');
+		await denyPermissionPrompt(page);
 		await waitNativeCheck(page, id, 8, 2);
 		await waitTurnSettled(page, { text: 'Newer native request checks complete.', messagesAtLeast: 6 });
 		const narrative = await api(page, 'GET', `/sessions/${await chatIdByToken(page, token)}`);

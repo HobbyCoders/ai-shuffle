@@ -33,7 +33,7 @@ async def _noop_coro():
 
 
 @pytest.fixture()
-def engine_mocks():
+def engine_mocks(session_factory):
     profile = {"id": "principal-engineer", "name": "PE"}
     options = MagicMock()
     options.cwd = None
@@ -70,7 +70,9 @@ def engine_mocks():
         "app.core.sync_engine.sync_engine.broadcast_user_session_created",
         new=AsyncMock(),
     ):
-        mock_db.create_session.return_value = {"id": "new-session"}
+        # Keep the producer spy, but create its real parent row: the query's
+        # recovery receipt and recorder now require that row before provider work.
+        mock_db.create_session.side_effect = lambda **kwargs: session_factory(kwargs["session_id"])
         yield mock_db
 
 

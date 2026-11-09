@@ -89,12 +89,11 @@ def prepare(archive):
 
 
 def wait_for_service():
-    """Do not submit a 10s request before the supervisor's first ready probe.
+    """Prove a startup command is consumed within its unchanged 10s validity.
 
-    /health/ready precedes the supervisor's 30s readiness poll. Its initial
-    status is constructor output, not proof that it can consume requests.
-    Wait for the normal first feed check to finish (including a feed error on
-    this network-isolated container), without extending or replaying requests.
+    HTTP readiness can precede the periodic supervisor probe. Queue exactly one
+    check, require prompt consumption, then wait for its completed publication
+    from the expected resident (including a network-isolated feed error).
     """
     fixture = json.loads((ROOT / "ci-fixture.json").read_text())
     path = ROOT / "status.json"
@@ -102,7 +101,7 @@ def wait_for_service():
     generation = (before.st_ino, before.st_mtime_ns)
     # A single read-only check also covers a container whose automatic first
     # check finished before this barrier. It is never renewed or replayed.
-    submit_request("check")
+    submit_request("check", require_ack=True)
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         stamp = path.stat()
@@ -265,7 +264,7 @@ def wait_for(mode):
     raise TimeoutError("Candidate updater lifecycle did not complete")
 
 
-def submit_request(action):
+def submit_request(action, *, require_ack=False):
     if action not in ("check", "install"):
         raise SystemExit("Unknown fixture action")
     from app.core.application_updates import atomic_json, CONTAINER_REQUEST_SECONDS
@@ -273,6 +272,15 @@ def submit_request(action):
     request = {"action": action, "expires_at": queued + CONTAINER_REQUEST_SECONDS}
     atomic_json(ROOT / "ci-request.json", dict(request, queued_at=queued))
     atomic_json(ROOT / "request.json", request)
+    if require_ack:
+        # Disappearance after expiry proves nothing: the consumer also removes
+        # expired commands. Keep this proof bounded, and never renew/requeue it.
+        while (ROOT / "request.json").exists() and time.time() < request["expires_at"]:
+            time.sleep(0.2)
+        observed = time.time()
+        if (ROOT / "request.json").exists() or observed >= request["expires_at"]:
+            raise TimeoutError("Resident updater did not consume the startup command within its validity window")
+        atomic_json(ROOT / "ci-request.json", dict(request, queued_at=queued, observed_absent_at=observed))
 
 
 def main():

@@ -15,6 +15,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
+from functools import partial
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
 if TYPE_CHECKING:
@@ -800,6 +801,18 @@ def _is_interactive_run(
     return (row.get("mode") or "") != "voice"
 
 
+def _continues_approved_generation(
+    overrides: Optional[Dict[str, Any]], session_row: Optional[Dict[str, Any]]
+) -> bool:
+    """Whether this wake carries the owner's Approve of a generation spend
+    (``continues_approved_generation``), in a chat a typed turn would be
+    interactive in. It may finish that one call and stays unattended otherwise.
+    """
+    overrides = overrides or {}
+    return bool(overrides.get("continues_approved_generation")) and _is_interactive_run(
+        {**overrides, "turn_source": "user"}, session_row)
+
+
 def _generation_choices(ai_tools_config, session_row, api_user_id) -> dict:
     """Remembered generation choices of the account behind this run.
 
@@ -824,8 +837,9 @@ def _generation_context(
     ai_tools_config: dict[str, Any], session_row: dict[str, Any] | None,
     api_user_id: str | None, *, session_id: str | None,
     unattended: bool, chat_mode: bool = False, native_generation: bool = False,
-    turn_source: str | None = None,
+    turn_source: str | None = None, continues_approval: bool = False,
 ) -> "RunContext":
+    from app.core.generation_confirmations import ask_on_prompt
     from app.core.generation_resolver import RunContext
 
     # Native-only grants still need the same saved choices, without enabling
@@ -837,6 +851,7 @@ def _generation_context(
     # Each generation call re-reads the store through the same identity, so a
     # pick saved or forgotten in an earlier turn applies (with_current_choices).
     session_row = dict(session_row) if session_row else None
+    owner_prompt = partial(ask_on_prompt, session_id, (session_row or {}).get("profile_id")) if session_id else None
     return RunContext(session_id=session_id, unattended=unattended,
                       owner=bool(session_row) and not api_user_id, api_user_id=api_user_id,
                       chat_mode=chat_mode, remembered_choices=choices["remembered"],
@@ -845,7 +860,9 @@ def _generation_context(
                       choices_loader=lambda: _generation_choices(choice_config, session_row, api_user_id),
                       turn_source=turn_source if isinstance(turn_source, str) else None,
                       requires_active_turn=bool(session_id),
-                      voice_mode=bool(session_row and session_row.get("mode") == "voice"))
+                      voice_mode=bool(session_row and session_row.get("mode") == "voice"),
+                      spend_prompt=None if unattended else owner_prompt,
+                      approved_wake_prompt=owner_prompt if unattended and continues_approval else None)
 
 
 #: A turn whose bound provider row was deleted. Plain words, no raw id.
@@ -1276,7 +1293,7 @@ def build_options_from_profile(
     # Ask/Auto/Bypass stay selected; Accept Edits has nothing to approve here.
     permission_mode = permission_mode_for_session_mode(permission_mode, session_mode)
 
-    # An owner coordination chat (no project): the app asks the owner for the
+    # An owner coordination chat (no project): the app asks the owner on the permission prompt for the
     # high-risk calls itself (``app.core.background_permissions``).
     assistant_scope = ({"session_id": session_id, "home_session_id": session_id,
                         "roots": [], "cwd": working_dir} if owner_coordinator else None)
@@ -1767,6 +1784,7 @@ def build_options_from_profile(
     generation_context = _generation_context(
         ai_tools_server_config, session_row, api_user_id, session_id=session_id,
         unattended=not _is_interactive_run(overrides, session_row),
+        continues_approval=_continues_approved_generation(overrides, session_row),
         turn_source=(overrides or {}).get("turn_source"),
         chat_mode=session_mode == "chat",
         native_generation=any(

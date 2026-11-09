@@ -6,7 +6,10 @@ from app.db.base import after_commit, get_db
 
 _LATEST_TURN = (
     "SELECT CASE WHEN stop_reason='steered' THEN COALESCE(parent_turn_id, id) ELSE id END "
-    "FROM turns WHERE session_id=%s ORDER BY created_at DESC, id DESC LIMIT 1"
+    # Same visible history and ties as turns.get_latest_turn, not replay time.
+    "FROM turns WHERE session_id=%s "
+    "AND NOT (state='aborted' AND COALESCE(stop_reason, '')='held_progress') "
+    "ORDER BY insert_order DESC, created_at DESC, position DESC, id DESC LIMIT 1"
 )
 # A continued turn can reuse its id. Completion must follow *all* activity,
 # not merely exist somewhere in that turn's history.

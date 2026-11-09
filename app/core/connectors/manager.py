@@ -639,14 +639,29 @@ class ConnectorManager:
 
         Polling and permission callbacks do not acquire this lock. Different
         chats also remain concurrent. asyncio locks admit waiting messages FIFO.
+        The owner's plain-text answer to a permission request does not wait for
+        the lock, which is held by the very turn waiting for that answer. The
+        message's place in the queue is still taken before anything is awaited,
+        so a slow check of one message cannot let a later one overtake it.
         """
+        from app.core.connector_permissions import answer_from_chat
+
         key = (message.connector_id, message.platform_chat_id)
         lock = self._message_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
             self._message_locks[key] = lock
-        async with lock:
+        place = asyncio.ensure_future(lock.acquire())
+        try:
+            if await answer_from_chat(message):
+                return
+            await place
             await self._handle_incoming_message(message)
+        finally:
+            if not place.done():
+                place.cancel()
+            elif not place.cancelled() and place.exception() is None:
+                lock.release()
 
     async def _handle_incoming_message(self, message: IncomingMessage) -> None:
         """
@@ -992,19 +1007,19 @@ class ConnectorManager:
     async def handle_permission_response(
         self, request_id: str, session_id: str, approved: bool
     ) -> None:
-        """Ignore a tool approval answered from a messaging platform.
+        """Ignore a tool approval sent by a platform button or callback.
 
         Tool approvals for connector sessions are the owner's to answer, in the
-        app (web UI or phone), through the same pending-interaction path as any
-        other session. Chats no longer receive Approve/Deny buttons, but old
-        ones can still sit in chat history, and some connectors parse plain
-        text replies; every such answer ends here and is dropped, so nobody in
-        a chat can approve the agent's tool calls.
+        app or in a plain-text reply from their own account
+        (``connector_permissions.answer_from_chat``). Chats no longer receive
+        Approve/Deny buttons, but old ones can still sit in chat history, and
+        this callback carries no sender to verify, so every such answer ends
+        here and is dropped.
         """
         logger.warning(
             "Ignoring a tool approval sent from a connector chat "
-            "(request=%s session=%s approved=%s): approvals are answered in the "
-            "owner's app",
+            "(request=%s session=%s approved=%s): only the owner's app or the "
+            "owner's own plain-text reply can answer it",
             request_id, session_id, approved,
         )
 

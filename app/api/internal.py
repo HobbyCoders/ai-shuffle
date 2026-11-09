@@ -177,6 +177,17 @@ async def desktop_stop_sessions(request: Request):
     if _shutdown_task is None or _shutdown_task.cancelled() or (
         _shutdown_task.done() and _shutdown_task.exception() is not None
     ):
-        _shutdown_task = asyncio.create_task(stop_running_sessions())
+        from app.core import query_shutdown
+
+        async def stop_all():
+            # Windows terminates the process without SIGTERM after this route.
+            # Headless queries are not in the session pool/runtime registry.
+            _, queries_settled = await asyncio.gather(
+                stop_running_sessions(), query_shutdown.settle(grace=0),
+            )
+            if not queries_settled:
+                raise RuntimeError("Request-owned queries have not finished saving")
+
+        _shutdown_task = asyncio.create_task(stop_all())
     await asyncio.shield(_shutdown_task)
     return {"stopped": True}

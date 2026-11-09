@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
+from app.core.owner_confirm import PAYLOAD_KEY as OWNER_APPROVAL_KEY, approval_of
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -177,7 +178,7 @@ class PermissionHandler:
             payload.get("tool_name") == PROMPT_TOOL
             or (payload.get("provider_agent") or {}).get("remote_approval_id") is not None
             or payload.get("safety_check")
-            or (payload.get("skip_saved_rules") and payload.get("assistant_confirm") is None)
+            or payload.get("skip_saved_rules")
         )
 
     def remember_scopes(self, session_id: str | None, payload: dict[str, Any]) -> list[str]:
@@ -335,7 +336,7 @@ class PermissionHandler:
             ("decision_reason", decision_reason),
             ("blocked_path", blocked_path),
             ("provider_agent", provider_agent),
-            ("assistant_confirm", assistant_confirm),
+            (OWNER_APPROVAL_KEY, assistant_confirm),
         ):
             if value is not None:
                 payload[key] = value
@@ -388,7 +389,9 @@ class PermissionHandler:
             "blocked_path",
             # Worker tag — present only on a redirected worker prompt.
             "provider_agent",
-            # Present only on a prompt answered in the assistant's conversation.
+            # Present only on a prompt raised on an owner chat (voice reads it).
+            OWNER_APPROVAL_KEY,
+            # The same marker on a row an earlier build wrote.
             "assistant_confirm",
             # False only on a prompt that cannot be deferred (Switch model).
             "deferrable",
@@ -423,8 +426,8 @@ class PermissionHandler:
         from app.db import interactions
 
         # This chat's own call in an owner chat (not a worker's redirected
-        # prompt): the owner answers it in words, and another message from the
-        # owner answers it "not run yet" instead of holding that message (#523).
+        # prompt): another message from the owner answers it "not run yet"
+        # instead of holding that message, and its prompt stays open (#523).
         own_confirm = assistant_confirm is not None and provider_agent is None
         if own_confirm:
             from app.core import owner_confirm as confirm_flow
@@ -474,9 +477,8 @@ class PermissionHandler:
             payload["mode_managed"] = True
         if safety_check:
             payload["safety_check"] = True
-        if skip_saved_rules and assistant_confirm is None:
-            # Owner-confirm calls bypass prior rules but keep the remembered-
-            # answer contract, including cards released while another turn runs.
+        if skip_saved_rules:
+            # A person decides this one call, so the prompt offers no "always".
             payload["skip_saved_rules"] = True
         ttl_seconds = PERMISSION_TTL_SECONDS
         if assistant_confirm is not None:
@@ -487,73 +489,79 @@ class PermissionHandler:
         )
         interaction_id = row["id"]
 
-        # Queue position counts this session's pending permission rows (the row
-        # just created is included).
-        queue_position = self._v2_pending_count(session_id)
+        # Live before anything can show the prompt: the owner can answer a chat
+        # prompt while its delivery is still returning.
+        with interaction_wait.awaiting(interaction_id):
+            # Queue position counts this session's pending permission rows (the row
+            # just created is included).
+            queue_position = self._v2_pending_count(session_id)
 
-        # Broadcast the permission_request event (transient request object).
-        request = PermissionRequest(
-            request_id=request_id,
-            session_id=session_id,
-            profile_id=profile_id,
-            tool_name=tool_name,
-            tool_input=tool_input,
-            tool_use_id=tool_use_id,
-            agent_id=agent_id,
-            title=title,
-            display_name=display_name,
-            description=description,
-            decision_reason=decision_reason,
-            blocked_path=blocked_path,
-            provider_agent=provider_agent,
-            assistant_confirm=assistant_confirm,
-        )
-        await self._broadcast_permission_request(request, queue_position, broadcast_func)
-
-        # Connector funnel: sessions owned by a connector conversation have
-        # their prompts delivered to the platform (Discord buttons, ...) —
-        # best-effort, AFTER the durable row exists so the normal web/mobile
-        # answer paths stay authoritative even when delivery fails.
-        try:
-            from app.core.connector_permissions import deliver_permission_prompt
-
-            await deliver_permission_prompt(
-                session_id=session_id,
+            # Broadcast the permission_request event (transient request object).
+            request = PermissionRequest(
                 request_id=request_id,
+                session_id=session_id,
+                profile_id=profile_id,
                 tool_name=tool_name,
                 tool_input=tool_input,
-                description=description or title or f"Allow {display_name or tool_name}?",
+                tool_use_id=tool_use_id,
+                agent_id=agent_id,
+                title=title,
+                display_name=display_name,
+                description=description,
+                decision_reason=decision_reason,
+                blocked_path=blocked_path,
+                provider_agent=provider_agent,
+                assistant_confirm=assistant_confirm,
             )
-        except Exception:  # noqa: BLE001 — the funnel must never break the flow
-            logger.debug(
-                "connector permission funnel failed", exc_info=True
+            await self._broadcast_permission_request(request, queue_position, broadcast_func)
+
+            # Durable lifecycle event: emit AFTER the WS broadcast, swallowed
+            # on failure so a log append can never break the permission flow.
+            from app.core import interaction_events
+
+            await interaction_events.emit_interaction_requested(
+                session_id, interaction_id, request_id, PERMISSION_KIND, payload,
             )
 
-        # Durable lifecycle event: emit AFTER the WS broadcast, swallowed
-        # on failure so a log append can never break the permission flow.
-        from app.core import interaction_events
+            # Connector funnel: sessions owned by a connector conversation have
+            # their prompts delivered to the platform (Discord buttons, ...) —
+            # best-effort, AFTER the durable row exists so the normal web/mobile
+            # answer paths stay authoritative even when delivery fails. Also after
+            # the event above: a chat reply can answer the request as soon as it
+            # is sent, and the log must not record it as asked after that.
+            try:
+                from app.core.connector_permissions import deliver_permission_prompt
 
-        await interaction_events.emit_interaction_requested(
-            session_id, interaction_id, request_id, PERMISSION_KIND, payload,
-        )
+                await deliver_permission_prompt(
+                    session_id=session_id,
+                    request_id=request_id,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    description=description or title or f"Allow {display_name or tool_name}?",
+                    interaction_id=interaction_id,
+                )
+            except Exception:  # noqa: BLE001 — the funnel must never break the flow
+                logger.debug(
+                    "connector permission funnel failed", exc_info=True
+                )
 
-        logger.debug(f"Permission request persisted (v2): {request_id} for {tool_name}")
+            logger.debug(f"Permission request persisted (v2): {request_id} for {tool_name}")
 
-        # Block on the durable row: a peer install's answer wakes us via the
-        # gateway NOTIFY; a local answer wakes us in-process. The adapter also
-        # honours its own local expires_at deadline so a dead sweeper never
-        # wedges the turn.
-        # A mode update can race the insert/broadcast above. Recheck after the
-        # row is visible, as well as sweeping existing rows from the setter.
-        if payload.get("mode_managed"):
-            from app.core.session_pool import get_session_pool
-            state = get_session_pool().peek(session_id)
-            if state and state.is_connected:
-                await self.resolve_mode_permissions(session_id, state)
-        result_row = await interaction_wait.await_interaction(
-            interaction_id, session_id, float(ttl_seconds),
-            release=confirm_flow.is_parked if own_confirm else None,
-        )
+            # Block on the durable row: a peer install's answer wakes us via the
+            # gateway NOTIFY; a local answer wakes us in-process. The adapter also
+            # honours its own local expires_at deadline so a dead sweeper never
+            # wedges the turn.
+            # A mode update can race the insert/broadcast above. Recheck after the
+            # row is visible, as well as sweeping existing rows from the setter.
+            if payload.get("mode_managed"):
+                from app.core.session_pool import get_session_pool
+                state = get_session_pool().peek(session_id)
+                if state and state.is_connected:
+                    await self.resolve_mode_permissions(session_id, state)
+            result_row = await interaction_wait.await_interaction(
+                interaction_id, session_id, float(ttl_seconds),
+                release=confirm_flow.is_parked if own_confirm else None,
+            )
 
         state = (result_row or {}).get("state")
         if own_confirm and state == "pending" and confirm_flow.is_parked(result_row):
@@ -774,7 +782,7 @@ class PermissionHandler:
         # read back as answered and judged on ``released`` alone (a park and
         # release from another device may land after the read above), so only
         # a call its waiter really let go counts.
-        settled = [(row["id"], decision)] if payload.get("assistant_confirm") else []
+        settled = [(row["id"], decision)] if approval_of(payload) else []
         settled += [
             (emit_id, (emit_answer or {}).get("decision"))
             for emit_id, _rid, emit_answer in resolved_emits
@@ -938,7 +946,7 @@ class PermissionHandler:
                     decision_reason=payload.get("decision_reason"),
                     blocked_path=payload.get("blocked_path"),
                     provider_agent=payload.get("provider_agent"),
-                    assistant_confirm=payload.get("assistant_confirm"),
+                    assistant_confirm=approval_of(payload),
                 )
                 await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
@@ -990,9 +998,9 @@ class PermissionHandler:
         # redirected onto its parent. Absent on every ordinary request.
         if request.provider_agent is not None:
             permission_event["provider_agent"] = request.provider_agent
-        # The client shows this as the assistant's question, not a card.
+        # Raised on an owner chat; the client shows its ordinary prompt.
         if request.assistant_confirm is not None:
-            permission_event["assistant_confirm"] = request.assistant_confirm
+            permission_event[OWNER_APPROVAL_KEY] = request.assistant_confirm
         if not is_deferrable(request.tool_name):
             permission_event["deferrable"] = False
 

@@ -22,10 +22,14 @@ def pg_schema():
     here means a module's own ``init_database()`` always runs the column pass
     (as on an upgrade), whatever ran before it in the same pytest process.
     """
-    from app.db import base
+    from app.db import base, history_indexing
     from app.db.database import MIGRATIONS_FINGERPRINT_KEY
     from app.db.schema_postgres import create_postgres_schema
     assert os.environ.get("TEST_POSTGRES_DSN")
+    # A disposable cluster is not laid out like a worker's managed database, so
+    # its disk cannot be measured. tests that cover the guard replace this.
+    measure_volumes = history_indexing._volumes
+    history_indexing._volumes = lambda cur, size: []
     base.init_pool(min_conn=1, max_conn=6)
     try:
         with base.get_db() as conn:
@@ -35,4 +39,5 @@ def pg_schema():
                            (MIGRATIONS_FINGERPRINT_KEY,))
         yield
     finally:
+        history_indexing._volumes = measure_volumes
         base.close_pool()

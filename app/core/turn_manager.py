@@ -583,26 +583,15 @@ async def submit_async(
     unchanged: the turn is durably ``queued`` before the kick.
     """
     message_admission.check_cancelled(session_id, command_id)
-    answered: Optional[Dict[str, Any]] = None
     held: Optional[Dict[str, Any]] = None
     if source in _OWNER_ANSWER_SOURCES and prompt and not (payload or {}).get(VOICE_DELEGATION):
-        # The owner's own message is the only thing that can answer a question
-        # the assistant is waiting on (app/core/owner_confirm). The request
-        # is settled now, so the job that asked never waits on this chat's
-        # queue. The queued row carries the outcome: session_runtime writes it
-        # right after the owner's message (#484). A live turn may still hear
-        # the reply as a steer, but a reply already used by a permission waiter
-        # must not start another model call if it outlives that turn (#1092).
-        # An answer to a released call still runs to resume that work (#523).
+        # A message never answers a permission request in the app, even "yes"
+        # (app/core/owner_confirm). The requests stay pending on their prompts,
+        # and the calls this chat waits on are let go once this message is
+        # queued, so it is never stranded behind them (#523).
         from app.core import owner_confirm
 
-        answered = await owner_confirm.on_owner_message(session_id, prompt)
-        if answered is not None and answered.get("decision") == owner_confirm.HELD:
-            # Not an answer: the requests stay pending, and the calls this chat
-            # waits on are let go once this message is queued (#523).
-            held, answered = answered, None
-        if answered is not None:
-            payload = {**(payload or {}), owner_confirm.ANSWER_KEY: answered}
+        held = await owner_confirm.on_owner_message(session_id, prompt)
     window_pin: Dict[str, int] = {}
     reactivated: dict[str, Any] = {}
     try:
@@ -624,14 +613,6 @@ async def submit_async(
             reactivated=reactivated,
             caller=caller,
         )
-    except Exception:
-        if answered is not None:
-            # No turn will record the owner's message now, but the request was
-            # settled: keep its outcome in the transcript all the same.
-            from app.core import owner_confirm
-
-            await owner_confirm.record_answer(session_id, answered)
-        raise
     finally:
         if reactivated:
             await _announce_reactivated(session_id, reactivated["user_id"])

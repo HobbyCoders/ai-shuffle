@@ -2119,6 +2119,32 @@ async def test_unpark_turn_threads_completion_frames_to_provider_overrides(mock_
     assert captured["overrides"]["background_task_completions"] == frames
 
 
+@pytest.mark.parametrize("payload,expected", [
+    ({"owner_approved_call": {"tool_name": "ApproveGenerationSpend", "interaction_id": "i"}}, True),
+    ({"owner_approved_call": {"tool_name": "Bash", "interaction_id": "i"}}, False),
+    (None, False),
+])
+async def test_only_a_wake_holding_a_generation_approval_continues_it(mock_db, payload, expected):
+    _seed_session("s12g", "active")
+    if payload:
+        from app.core.owner_confirm import PASS_KEY
+
+        payload = {PASS_KEY: payload["owner_approved_call"]}
+    turn = turns_db.enqueue_turn("s12g", "wakeup", prompt="go", payload=payload,
+                                 overrides={"continues_approved_generation": True})
+    captured = {}
+
+    async def pump(**kwargs):
+        captured.update(kwargs)
+        yield {"type": "done", "metadata": {}}
+
+    with _runtime_env(pump=pump):
+        await session_runtime.SessionRuntime(turn).execute()
+
+    # Set from the turn's own payload, whatever its stored overrides say.
+    assert captured["overrides"]["continues_approved_generation"] is expected
+
+
 @pytest.mark.parametrize("source", ["user", "unpark", "agent_message", "wakeup", "promotion"])
 async def test_turn_source_threads_to_provider_overrides(mock_db, source):
     """Fluid records the source on TurnStarted; it reaches the adapter here."""
