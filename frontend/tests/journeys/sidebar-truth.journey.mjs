@@ -804,7 +804,7 @@ const NEW_CHAT_GLIDE_HAS_NO_STEP = {
 			Math.abs(top - frames[i].top) - pxPerMs * (at - frames[i].at));
 		const worst = Math.max(...over);
 		expect(worst <= GLIDE_STEP_LIMIT_PX, `the row moves without a step: ${worst.toFixed(1)} px beyond the glide in frame ${over.indexOf(worst) + 1} of ${frames.length}`);
-		expect(frames.at(-1).top - frames[0].top > 10, `the row is gliding down: ${frames[0].top.toFixed(1)} to ${frames.at(-1).top.toFixed(1)}`);
+		expect(restTop - frames.at(-1).top > 10, `the glide was still under way when the trace stopped: row at ${frames.at(-1).top.toFixed(1)}, its real place ${restTop.toFixed(1)}`);
 	}
 };
 
