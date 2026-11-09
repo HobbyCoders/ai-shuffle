@@ -400,6 +400,11 @@ async def test_a_turn_event_stays_behind_a_between_turns_batch_being_resent(monk
 # Stop reaches the provider whatever the event log is doing
 # ---------------------------------------------------------------------------
 
+# The wedged write holds this long. The signal must not wait for it, yet a
+# loaded hosted runner took 1.15s to deliver it, so the bound is relative.
+STUCK_SECONDS = 5
+
+
 async def _interrupt_with_a_stuck_log(monkeypatch, mode="stop", *, stuck_prompts=False):
     """Run the real interrupt with event writes wedged until the signal has gone out."""
     from app.core import session_runtime as sr
@@ -410,7 +415,7 @@ async def _interrupt_with_a_stuck_log(monkeypatch, mode="stop", *, stuck_prompts
     real = se.append_events
 
     def stuck(*args, **kwargs):
-        release.wait(5)
+        release.wait(STUCK_SECONDS)
         return real(*args, **kwargs)
 
     monkeypatch.setattr(se, "append_events", stuck)
@@ -425,7 +430,7 @@ async def _interrupt_with_a_stuck_log(monkeypatch, mode="stop", *, stuck_prompts
 
     async def cancel_prompts(_sid):
         if stuck_prompts:
-            await asyncio.to_thread(release.wait, 5)
+            await asyncio.to_thread(release.wait, STUCK_SECONDS)
 
     with patch("app.core.session_runtime._should_evict_after_escalation", return_value=False), \
             patch("app.core.query_session_lifecycle.interrupt_session", new=signal), \
@@ -440,14 +445,14 @@ async def _interrupt_with_a_stuck_log(monkeypatch, mode="stop", *, stuck_prompts
 async def test_a_stuck_event_write_does_not_hold_the_provider_signal(monkeypatch, mode):
     signalled_at = await _interrupt_with_a_stuck_log(monkeypatch, mode)
 
-    assert len(signalled_at) == 1 and signalled_at[0] < 1
+    assert len(signalled_at) == 1 and signalled_at[0] < STUCK_SECONDS - 1
     assert "turn.interrupting" in [row["event_type"] for row in se.get_events(SID)]
 
 
 async def test_stuck_prompt_cancellation_does_not_hold_the_provider_signal(monkeypatch):
     signalled_at = await _interrupt_with_a_stuck_log(monkeypatch, stuck_prompts=True)
 
-    assert len(signalled_at) == 1 and signalled_at[0] < 1
+    assert len(signalled_at) == 1 and signalled_at[0] < STUCK_SECONDS - 1
 
 
 async def test_a_failure_after_an_unfenced_caller_was_cancelled_is_logged(monkeypatch, caplog):
