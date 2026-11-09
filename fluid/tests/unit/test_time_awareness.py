@@ -377,4 +377,98 @@ def test_epoch_pins_have_absolute_send_times_without_rewriting_the_owner():
     legacy = render_epoch_stub([[owner]], CompactionConfig(render_version=3)).text()
     assert "ExampleWorker tomorrow" in legacy and "[sent " not in legacy
 
+@pytest.mark.parametrize("reachable", [True, False])
+@pytest.mark.parametrize("multiple", [False, True])
+def test_clipped_legacy_pin_dates_its_carrier_without_restoring_the_full_text(reachable, multiple):
+    from copy import deepcopy
+    from fluid.context.compaction import Compactor, Promotion, _clip_verbatim
+    from fluid.messages.content import SteerDelivery, ToolResultBlock, ToolUseBlock
 
+    first = node("Opening request")
+    sent = dt("2026-11-09T04:55:00Z").timestamp()
+    tool = SessionNode("tool", first.node_id, Message(role="assistant", content=[
+        ToolUseBlock(id="call", name="Bash", input={})]), ts=sent)
+    long = "Tomorrow " + "x" * 13_000
+    steers = [SteerDelivery(text=long, accepted_at=sent)]
+    if multiple:
+        steers.insert(0, SteerDelivery(text="Another message", accepted_at=sent - 60))
+    carrier = SessionNode("carrier", tool.node_id, Message(role="user", content=[
+        ToolResultBlock(tool_use_id="call", content=[Text("ok")], delivered_steers=steers)]), ts=sent + 900)
+    covered = SessionNode("covered", carrier.node_id, Message(role="assistant", content=[Text("done")]), ts=sent + 960)
+    later = SessionNode("later", covered.node_id, Message(role="assistant", content=[Text("next")]), ts=sent + 1800)
+    last = SessionNode("last", later.node_id, Message(role="assistant", content=[Text("last")]), ts=sent + 3600)
+    original = [first, tool, carrier, covered]
+    old = Compactor(config=CompactionConfig(render_version=3, peer_pin_chars=4096))
+    pin = old._checkpoint_pin(first.node_id, covered.node_id, original)
+    clipped = _clip_verbatim(steers[-1].render(), 4096)
+    assert pin["messages"] == [[carrier.node_id, clipped]]
+    if multiple:
+        # Saved legacy pins identify messages only by their shared carrier.
+        pin["messages"].insert(0, [carrier.node_id, steers[0].render()])
+    saved = deepcopy(pin)
+    legacy = Promotion(tier=4, render_version=3,
+        spans=((first.node_id, covered.node_id, "summary"),), summary_text="old", summary_pin=pin)
+    current = Compactor(config=CompactionConfig(render_version=4, peer_pin_chars=5000))
+    current.rehydrate([legacy])
+    frozen_old = current._summary_message(first.node_id, covered.node_id, "old").text()
+    path = original + [later, last] if reachable else [first, covered, later, last]
+    promoted = current._checkpoint_pin(first.node_id, later.node_id, path)
+    text = promoted["messages"][-1][1]
+    assert text.endswith(clipped)
+    assert len(text) == len(clipped) + len(text.split("\n", 1)[0]) + 1
+    if reachable:
+        assert text.startswith("[sent/delivered 2026-11-09 04:55:00 UTC +0000 (UTC)]\n")
+        if multiple:
+            assert promoted["messages"][0][1].startswith("[sent/delivered 2026-11-09 04:54:00 UTC +0000 (UTC)]\n")
+    else:
+        assert text.startswith("[sent/delivered before 2026-11-09 05:11:00 UTC +0000 (UTC); exact time unavailable]\n")
+    assert sum(len(t) for _, t in promoted["messages"]) <= 5000
+    assert pin == saved
+    newer = Promotion(tier=4, render_version=4,
+        spans=((first.node_id, later.node_id, "summary"),), summary_text="new", summary_pin=promoted)
+    current.rehydrate([newer])
+    replay = Compactor(config=current.config)
+    replay.rehydrate([legacy, newer])
+    assert replay._summary_message(first.node_id, later.node_id, "new").text() == current._summary_message(first.node_id, later.node_id, "new").text()
+    assert replay._checkpoint_pin(first.node_id, last.node_id, path)["messages"] == promoted["messages"]
+    assert replay._summary_message(first.node_id, covered.node_id, "old").text() == frozen_old
+
+@pytest.mark.parametrize("case", ["empty", "literal_marker", "duplicates", "ambiguous", "missing_time"])
+def test_legacy_pin_carrier_edge_cases(case):
+    from fluid.context.compaction import Compactor, Promotion
+    from fluid.messages.content import SteerDelivery, ToolResultBlock, ToolUseBlock
+
+    sent = dt("2026-11-09T04:55:00Z").timestamp()
+    text = {"empty": "", "literal_marker": "Real words … (+123 chars)"}.get(case, "same words")
+    deliveries = [SteerDelivery(text=text, accepted_at=None if case == "missing_time" else sent)]
+    if case in {"duplicates", "ambiguous"}:
+        deliveries.append(SteerDelivery(text=text, accepted_at=sent + 60 if case == "ambiguous" else sent))
+    first = node("Opening request")
+    tool = SessionNode("tool", first.node_id, Message(role="assistant", content=[ToolUseBlock("call", "Bash", {})]), ts=sent)
+    carrier = SessionNode("carrier", tool.node_id, Message(role="user", content=[
+        ToolResultBlock("call", [Text("ok")], delivered_steers=deliveries)]), ts=sent + 900)
+    covered = SessionNode("covered", carrier.node_id, Message(role="assistant", content=[Text("done")]), ts=sent + 960)
+    later = SessionNode("later", covered.node_id, Message(role="assistant", content=[Text("next")]), ts=sent + 1800)
+    path = [first, tool, carrier, covered, later]
+    old = Compactor(config=CompactionConfig(render_version=3))
+    pin = old._checkpoint_pin(first.node_id, covered.node_id, path[:-1])
+    current = Compactor(config=CompactionConfig(render_version=4))
+    current.rehydrate([Promotion(tier=4, render_version=3,
+        spans=((first.node_id, covered.node_id, "summary"),), summary_text="old", summary_pin=pin)])
+    result = current._checkpoint_pin(first.node_id, later.node_id, path)
+    assert len(result["messages"]) == len(deliveries)
+    if case == "ambiguous":
+        prefix = "[sent/delivered before 2026-11-09 05:11:00 UTC +0000 (UTC); exact time unavailable]\n"
+    elif case == "missing_time":
+        prefix = "[sent/delivered 2026-11-09 05:10:00 UTC +0000 (UTC)]\n"
+    else:
+        prefix = "[sent/delivered 2026-11-09 04:55:00 UTC +0000 (UTC)]\n"
+    assert result["messages"] == [[carrier.node_id, prefix + d.render()] for d in deliveries]
+
+
+def test_legacy_clip_validation_does_not_strip_literal_or_forged_markers():
+    from fluid.context.compaction import _clip_verbatim, _matches_pinned_text
+    assert _matches_pinned_text("", "")
+    assert _matches_pinned_text("real … (+123 chars)", "real … (+123 chars)")
+    assert not _matches_pinned_text("real … (+123 chars)", "real more words")
+    assert _matches_pinned_text(_clip_verbatim("x" * 13000, 4096), "x" * 13000)

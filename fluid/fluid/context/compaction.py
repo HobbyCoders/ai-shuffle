@@ -759,12 +759,19 @@ def _opens_session(node: SessionNode) -> bool:
 def _delivered_on_path(
     spans: list[list[SessionNode]], *, steers: bool, dated: bool = False,
 ) -> list[tuple[str, str]]:
-    """``(node id, text)`` of what was delivered in ``spans``, in delivery order:
+    return [(ref, _date_told(text, sent) if dated else text)
+            for ref, text, sent in _delivery_candidates(spans, steers=steers)]
+
+
+def _delivery_candidates(
+    spans: list[list[SessionNode]], *, steers: bool,
+) -> list[tuple[str, str, float]]:
+    """``(carrier node id, raw text, send time)`` in delivery order:
     the agents' messages that opened turns and, with ``steers``, what rode tool
     results. A harness notice is no instruction: it stays out. So does the
     session's opening message, because the intent pin already carries it."""
     opening = spans[0][0] if spans and spans[0] else None
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, float]] = []
     for span in spans:
         for node in span:
             if is_turn_start(node):
@@ -772,11 +779,10 @@ def _delivered_on_path(
                 if text.startswith(PEER_OPEN_PREFIX) and not (
                     node is opening and _opens_session(node)
                 ):
-                    found.append((node.node_id, _date_told(text, node.ts) if dated else text))
+                    found.append((node.node_id, text, node.ts))
             elif steers:
                 found.extend(
-                    (node.node_id, _date_told(steer.render(), steer.accepted_at if steer.accepted_at is not None else node.ts)
-                     if dated else steer.render())
+                    (node.node_id, steer.render(), steer.accepted_at if steer.accepted_at is not None else node.ts)
                     for block in node.message.content if isinstance(block, ToolResultBlock)
                     for steer in block.delivered_steers if steer.origin != "system"
                 )
@@ -1025,6 +1031,13 @@ def _clip_verbatim(text: str, cap: int) -> str:
     if len(text) <= cap:
         return text
     return f"{text[:cap]}… (+{len(text) - cap} chars)"
+
+
+def _matches_pinned_text(stored: str, raw: str) -> bool:
+    if stored == raw:
+        return True
+    marker = re.search(r"… \(\+\d+ chars\)$", stored)
+    return marker is not None and stored == _clip_verbatim(raw, marker.start())
 
 
 def _intent_pin(
@@ -3278,15 +3291,19 @@ class Compactor:
                 bound = (f"[sent/delivered before {absolute_time(nodes[earlier].ts, 'UTC')}; "
                          "exact time unavailable]\n")
                 spans = split_spans(nodes[:earlier + 1])
-                available = {}
-                for raw, (_, dated) in zip(_delivered_on_path(spans, steers=True),
-                                           _delivered_on_path(spans, steers=True, dated=True)):
-                    available.setdefault(raw, []).append(dated)
+                available: dict[str, list[tuple[str, float]]] = {}
+                for ref, text, sent in _delivery_candidates(spans, steers=True):
+                    available.setdefault(ref, []).append((text, sent))
                 upgraded = []
-                for ref, text in reversed(found):
-                    matches = available.get((ref, text))
-                    upgraded.append((ref, matches.pop() if matches else bound + text))
-                found = list(reversed(upgraded))
+                for ref, text in found:
+                    candidates = available.get(ref, [])
+                    times = {sent for raw, sent in candidates
+                             if len(candidates) == 1 or _matches_pinned_text(text, raw)}
+                    # The ref identifies the carrier; text only disambiguates
+                    # its receipts. Date the stored (possibly clipped) words,
+                    # never replace them with the full carrier's message.
+                    upgraded.append((ref, _date_told(text, times.pop()) if len(times) == 1 else bound + text))
+                found = upgraded
                 if brief and brief_at is None and brief[0] not in index:
                     brief = [brief[0], bound + brief[1]]
             left_out = int(prior.get("left_out") or 0)

@@ -117,7 +117,9 @@ async def test_resume_continues_from_a_tool_result_head(tmp_path) -> None:
     assert provider.calls == 1
     request = provider.requests[-1]
     assert [m.role for m in request.messages] == [n.message.role for n in before]
-    assert request.messages[-1].text().endswith("Current time: 2026-11-09T18:00:00+00:00 (UTC)")
+    assert request.messages[0].text() == "weather in Paris?\n\nCurrent time: 2026-11-09T18:00:00+00:00 (UTC)"
+    assert [m.to_dict() for m in request.messages[1:]] == [n.message.to_dict() for n in before[1:]]
+    assert request.messages[-1].to_dict() == original
     assert head.message.to_dict() == original
 
     after = await store.load_path(sid)
@@ -249,6 +251,13 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
     clock = "Current time: 2026-11-09T18:00:00+00:00 (UTC)"
     overhead = loop._context_overhead_tokens()
     loop._environment_reminder = AsyncMock(return_value=clock)
+    sent_overheads = []
+    stream = provider.stream
+    async def observe(request):
+        sent_overheads.append(loop._context_overhead_tokens())
+        async for chunk in stream(request):
+            yield chunk
+    provider.stream = observe
     await _turn(loop, Resume())
 
     events = _events_since(loop, sid, mark)
@@ -268,7 +277,9 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
     assert provider.requests[-1].messages[0].text() == "what is 2 + 2?\n\n" + clock
     assert after[0].message.text() == "what is 2 + 2?"
     from fluid.context.trim import estimate_tokens_of_text
-    assert loop._context_overhead_tokens() == overhead + estimate_tokens_of_text("\n\n" + clock)
+    assert sent_overheads == [overhead + estimate_tokens_of_text("\n\n" + clock)]
+    assert loop._context_overhead_tokens() == overhead
+    assert loop._resume_environment is loop._resume_anchor is None
 
     next_clock = "Current time: 2026-11-09T19:00:00+00:00 (UTC)"
     loop._environment_reminder = AsyncMock(return_value=next_clock)
@@ -276,3 +287,179 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
     assert provider.requests[-1].messages[-1].text() == "a new question" + next_clock
     assert not any(clock in m.text() for m in provider.requests[-1].messages)
     assert loop._context_overhead_tokens() == overhead
+
+@pytest.mark.parametrize("duplicate", [False, True])
+@pytest.mark.parametrize("retry", [False, True])
+async def test_resume_clock_is_an_append_only_prefix_across_two_tool_calls(duplicate, retry):
+    from unittest.mock import AsyncMock
+
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([_text("prior answer"), _bad_request()] if duplicate else [_bad_request()])
+    loop = NativeLoop(provider=provider, store=store, model="stealth/ox-alpha", session_id=sid,
+                      registry=registry, permissions=PermissionEngine("never_ask"))
+    if duplicate:
+        await _turn(loop, UserTurn(content="question"))
+    await _turn(loop, UserTurn(content="question"))
+    before = await store.load_path(sid)
+    anchor_index = len(before) - 1
+    clock = "Current time: 2026-11-09T18:00:00+00:00 (UTC)"
+    loop._environment_reminder = AsyncMock(return_value=clock)
+    scripts = [_tool_call("t1", "mcp__wx__get_weather", '{"city":"Paris"}'),
+               _tool_call("t2", "mcp__wx__get_weather", '{"city":"London"}'), _text("done")]
+    if retry:
+        scripts.insert(0, _empty())
+    _rescript(provider, scripts)
+    mark = len(provider.requests)
+    await _turn(loop, Resume())
+    requests = provider.requests[mark:]
+    assert len(requests) == len(scripts)
+    for request in requests:
+        assert [i for i, message in enumerate(request.messages) if clock in message.text()] == [anchor_index]
+        assert request.messages[anchor_index].text().count(clock) == 1
+    for previous, following in zip(requests, requests[1:]):
+        assert [m.to_dict() for m in following.messages[:len(previous.messages)]] == [m.to_dict() for m in previous.messages]
+    after = await store.load_path(sid)
+    assert [n.message.to_dict() for n in after[:len(before)]] == [n.message.to_dict() for n in before]
+    assert all(clock not in n.message.text() for n in after)
+    assert loop._resume_environment is loop._resume_anchor is None
+
+async def test_resume_compaction_drops_even_a_single_node_anchor_and_its_overhead(monkeypatch):
+    from unittest.mock import AsyncMock
+    from fluid.context.compaction import Promotion
+    from fluid.context.trim import estimate_tokens_of_text
+
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([_bad_request()])
+    loop = NativeLoop(provider=provider, store=store, model="stealth/ox-alpha", session_id=sid,
+                      registry=registry, permissions=PermissionEngine("never_ask"))
+    await _turn(loop, UserTurn(content="question"))
+    first = (await store.load_path(sid))[0]
+    clock = "Current time: 2026-11-09T18:00:00+00:00 (UTC)"
+    loop._environment_reminder = AsyncMock(return_value=clock)
+    _rescript(provider, [_tool_call("t1", "mcp__wx__get_weather", '{"city":"Paris"}'),
+                         _tool_call("t2", "mcp__wx__get_weather", '{"city":"London"}'), _text("done")])
+    context_path = loop._context_path
+    folded = False
+    async def compact_after_first_call(*args, **kwargs):
+        nonlocal folded
+        nodes = await context_path(*args, **kwargs)
+        if provider.calls == 1 and not folded:
+            folded = True
+            loop._compactor.rehydrate([Promotion(tier=4,
+                spans=((first.node_id, first.node_id, "summary"),), summary_text="A compacted input")])
+        return nodes
+    monkeypatch.setattr(loop, "_context_path", compact_after_first_call)
+    overheads = []
+    stream = provider.stream
+    async def observe(request):
+        note = loop._resume_environment
+        active = loop._context_overhead_tokens()
+        loop._resume_environment = None
+        base = loop._context_overhead_tokens()
+        loop._resume_environment = note
+        overheads.append(active - base)
+        async for chunk in stream(request):
+            yield chunk
+    provider.stream = observe
+    mark = len(provider.requests)
+    await _turn(loop, Resume())
+    requests = provider.requests[mark:]
+    assert folded and len(requests) == 3
+    assert [sum(clock in m.text() for m in r.messages) for r in requests] == [1, 0, 0]
+    assert "[checkpoint summary" in requests[1].messages[0].text()
+    assert overheads == [estimate_tokens_of_text("\n\n" + clock), 0, 0]
+    assert loop._resume_environment is loop._resume_anchor is None
+    assert all(clock not in n.message.text() for n in await store.load_path(sid))
+    # Ordinary input after retirement gets its normal fresh note, not the old clock.
+    next_clock = "Current time: 2026-11-09T19:00:00+00:00 (UTC)"
+    loop._environment_reminder = AsyncMock(return_value=next_clock)
+    await _turn(loop, UserTurn(content="next question"))
+    assert provider.requests[-1].messages[-1].text() == "next question" + next_clock
+    assert not any(clock in m.text() for m in provider.requests[-1].messages)
+@pytest.mark.parametrize("exit_kind", ["error", "cancel", "blocked_hook", "hook_error"])
+async def test_resume_anchor_is_cleared_on_all_early_exits(monkeypatch, exit_kind):
+    from unittest.mock import AsyncMock
+
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    provider = ScriptedProvider([_bad_request()])
+    loop = NativeLoop(provider=provider, store=store, model="stealth/ox-alpha", session_id=sid)
+    await _turn(loop, UserTurn(content="question"))
+    clock = "Current time: old resume clock"
+    loop._environment_reminder = AsyncMock(return_value=clock)
+    baseline = loop._context_overhead_tokens()
+    entered = asyncio.Event()
+    async def fail_or_wait(*args):
+        assert loop._resume_anchor is not None and loop._resume_environment == clock
+        entered.set()
+        if exit_kind == "error":
+            raise RuntimeError("fixture failure")
+        await asyncio.Event().wait()
+    with monkeypatch.context() as patch:
+        if exit_kind in {"blocked_hook", "hook_error"}:
+            patch.setattr(loop, "_turn_start_hook", AsyncMock(
+                return_value=(True, None), side_effect=RuntimeError("fixture failure") if exit_kind == "hook_error" else None))
+        else:
+            patch.setattr(loop, "_start_and_loop", fail_or_wait)
+        await loop.submit(Resume())
+        if exit_kind == "cancel":
+            await asyncio.wait_for(entered.wait(), 5)
+            loop._turn_task.cancel()
+        if exit_kind in {"error", "hook_error"}:
+            with pytest.raises(RuntimeError, match="fixture failure"):
+                await loop.wait_turn()
+        elif exit_kind == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await loop.wait_turn()
+        else:
+            await loop.wait_turn()
+    assert loop._resume_environment is loop._resume_anchor is None
+    assert loop._context_overhead_tokens() == baseline
+    assert all(clock not in n.message.text() for n in await store.load_path(sid))
+    next_clock = "Current time: next ordinary turn"
+    loop._environment_reminder = AsyncMock(return_value=next_clock)
+    await _turn(loop, UserTurn(content="next question"))
+    assert provider.requests[-1].messages[-1].text() == "next question" + next_clock
+    assert not any(clock in m.text() for m in provider.requests[-1].messages)
+
+@pytest.mark.parametrize("rewrite", ["fold", "window", "escalation"])
+def test_resume_admission_releases_a_removed_anchor_before_refusing(monkeypatch, rewrite):
+    from fluid.context.compaction import Promotion
+    from fluid.context.trim import estimate_tokens_of_text
+    from fluid.messages import Message, Text
+    from fluid.store.base import SessionNode
+
+    store = MemoryStore()
+    loop = NativeLoop(provider=ScriptedProvider([]), store=store, model="stealth/ox-alpha", max_tokens=1)
+    anchor = SessionNode("anchor", None, Message(role="user", content=[Text("question")]))
+    following = SessionNode("following", anchor.node_id, Message(role="user", content=[Text("new input")]))
+    nodes = [anchor, following]
+    fold = Promotion(tier=4, spans=((anchor.node_id, anchor.node_id, "summary"),), summary_text="Folded input")
+    if rewrite == "fold":
+        loop._compactor.rehydrate([fold])
+    elif rewrite == "window":
+        nodes = [following]
+    else:
+        def escalate(*args, **kwargs):
+            loop._compactor.rehydrate([fold])
+            return [fold]
+        monkeypatch.setattr(loop._compactor, "escalate", escalate)
+    loop._resume_anchor = anchor.node_id
+    loop._resume_environment = "Current time: " + "x" * 4000
+    reserved = estimate_tokens_of_text("\n\n" + loop._resume_environment)
+    overhead = loop._context_overhead_tokens()
+    # Both the live view and its single-node replacement fit without the
+    # retired clock, but neither fits with that stale reservation.
+    loop.context_window = max(400, loop._compactor.estimate_view_tokens(nodes, overhead - reserved) + 10)
+    promotions, refusal = loop._admission_promotions(nodes, overhead_tokens=overhead,
+                                                    measured=None, measured_current=False)
+    assert refusal is None
+    assert len(promotions) == (rewrite == "escalation")
+    assert loop._resume_environment is loop._resume_anchor is None
+    assert loop._context_overhead_tokens() == overhead - reserved
