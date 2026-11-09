@@ -47,8 +47,7 @@
 		item
 			? [
 					item.always ? 'Applies to every chat' : '',
-					item.this_worker_only ? 'Only on this worker' : '',
-					item.status === 'active' && item.expires_at ? `Archived automatically if unused by ${dateText(item.expires_at)}` : ''
+					item.this_worker_only ? 'Only on this worker' : ''
 				]
 					.filter(Boolean)
 					.join(' · ')
@@ -69,6 +68,7 @@
 		if (item.status === 'archived') lines.push('This memory is archived, so agents aren’t using it. Saving makes it active again.');
 		if (item.tier === 'agent') lines.push('An agent saved this. Saving makes it yours, and it’s kept until you change it.');
 		if (item.tier === 'learned') lines.push('This was learned automatically. Saving makes it yours, and it’s kept until you change it.');
+		if (item.status === 'active' && item.expires_at) lines.push(`Archived automatically if unused by ${dateText(item.expires_at)}.`);
 		return lines;
 	});
 
@@ -145,9 +145,6 @@
 						{/snippet}
 					</InlineBanner>
 				{/if}
-				{#if notes.length}
-					<InlineBanner tone="info" compact>{notes.join(' ')}</InlineBanner>
-				{/if}
 			{/snippet}
 			{#snippet children()}
 				<RowGroup title="Memory">
@@ -189,6 +186,10 @@
 						<button type="button" class="st-btn ghost" disabled={saving} onclick={() => model.discard(id)}>Discard</button>
 					</div>
 				{/if}
+				{#if notes.length}
+					<!-- Below the form: saving clears these, and that must not move the box being typed in. -->
+					<div class="mem-notes"><InlineBanner tone="info" compact>{notes.join(' ')}</InlineBanner></div>
+				{/if}
 			{/snippet}
 		</DetailPane>
 	</div>
@@ -200,6 +201,9 @@
 		max-height: 420px;
 		field-sizing: content;
 		overflow-wrap: anywhere;
+	}
+	.mem-notes {
+		margin-top: 8px;
 	}
 	.mem-discard {
 		display: flex;
@@ -232,6 +236,13 @@
 		white-space: normal;
 		text-overflow: clip;
 		overflow-wrap: anywhere;
+	}
+	/* A long project name truncates; the Project fact shows it in full. */
+	.mem-detail :global(.st-dhn .badge) {
+		display: block;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	/* The delete question is a full sentence; let it wrap. */
 	.mem-detail :global(.st-ask) {

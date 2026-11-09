@@ -43,10 +43,21 @@ def save(store, text="The owner prefers concise status reports.", **kwargs):
     return store.save_memory(text, provenance="user", protected=True, **kwargs)
 
 
+def opened_version(client, memory_id):
+    listing = client.get(BASE).json().get("items", [])
+    return next((item["metadata_version"] for item in listing if item["id"] == memory_id), "unseen")
+
+
 def edit(client, entry, **overrides):
-    body = {"text": entry.text, "when": None, "expected_revision": entry.revision}
+    body = {"text": entry.text, "when": None, "expected_revision": entry.revision,
+            "expected_metadata_version": opened_version(client, entry.id)}
     body.update(overrides)
     return client.put(f"{BASE}/{entry.id}", json=body)
+
+
+def remove(client, memory_id, revision, version=None):
+    version = version or opened_version(client, memory_id)
+    return client.delete(f"{BASE}/{memory_id}?expected_revision={revision}&expected_metadata_version={version}")
 
 
 def contents(root):
@@ -93,6 +104,7 @@ def test_list_shape_tiers_archive_worker_visibility_and_read_only(world):
     assert items[0]["id"] == user.id
     assert by_id[user.id] == {
         "id": user.id, "revision": user.revision, "text": user.text,
+        "metadata_version": by_id[user.id]["metadata_version"],
         "when": "When writing updates", "status": "active", "tier": "user",
         "source": "user", "scope": "global", "scope_label": "All projects",
         "always": True, "needs_review": True, "this_worker_only": False,
@@ -147,9 +159,10 @@ def test_hidden_and_unknown_ids_are_refused(world, hidden, method):
     if method == "put":
         response = client.put(f"{BASE}/{memory_id}", json={
             "text": "An owner correction.", "when": None, "expected_revision": 1,
+            "expected_metadata_version": "unseen",
         })
     else:
-        response = client.delete(f"{BASE}/{memory_id}?expected_revision=1")
+        response = remove(client, memory_id, 1, version="unseen")
     assert response.status_code == 404
     assert isinstance(response.json()["detail"], str)
     assert store.memories_path.read_bytes() == before
@@ -169,7 +182,26 @@ def test_edit_promotes_shares_and_bumps_revision(world):
     assert item["when"] == entry.when  # null preserves the old written line
     assert client.get(BASE).json()["items"] == [item]
     assert edit(client, entry, text="A stale correction.").status_code == 409
-    assert client.delete(f"{BASE}/{entry.id}?expected_revision={entry.revision}").status_code == 409
+    assert remove(client, entry.id, entry.revision).status_code == 409
+
+
+def test_when_only_edit_makes_copies_opened_before_it_stale(world):
+    client, root = world
+    store = store_at(root)
+    entry = save(store, when="When planning")
+    opened = opened_version(client, entry.id)
+    newer = edit(client, entry, when="When writing a progress report")
+    assert newer.status_code == 200
+    assert newer.json()["revision"] == entry.revision
+    assert newer.json()["metadata_version"] != opened
+    assert client.get(BASE).json()["items"] == [newer.json()]
+    before = store.memories_path.read_bytes()
+    stale_save = edit(client, entry, text="A stale correction.", when="When planning",
+                      expected_metadata_version=opened)
+    assert stale_save.status_code == 409 and "changed" in stale_save.json()["detail"]
+    assert remove(client, entry.id, entry.revision, version=opened).status_code == 409
+    assert store.memories_path.read_bytes() == before
+    assert remove(client, entry.id, entry.revision).status_code == 204
 
 
 @pytest.mark.parametrize("archived", [False, True])
@@ -218,6 +250,7 @@ def test_identical_owner_edit_claims_provenance_and_clears_worker_tag(world):
     {"when": "w" * (facts.MAX_WHEN_CHARS + 1)}, {"when": "   "},
     {"when": "api_key=" + "example" * 6},
     {"text": 123}, {"expected_revision": 0}, {"expected_revision": True},
+    {"expected_metadata_version": ""}, {"expected_metadata_version": 7},
     {"scope": "global"},
 ])
 def test_validation_is_plain_and_never_echoes_input(world, override):
@@ -231,7 +264,7 @@ def test_validation_is_plain_and_never_echoes_input(world, override):
     assert store.memories()[0].text == entry.text
 
 
-@pytest.mark.parametrize("query", ["", "?expected_revision=0", "?expected_revision=abc"])
+@pytest.mark.parametrize("query", ["", "?expected_revision=0", "?expected_revision=abc", "?expected_revision=1"])
 def test_delete_requires_positive_revision(world, query):
     client, root = world
     entry = save(store_at(root))
@@ -246,7 +279,7 @@ def test_delete_explicitly_purges_history_and_journal_and_blocks_re_save(world):
     revised = store.save_memory("The owner now prefers detailed reports.", memory_id=entry.id,
                                 expected_revision=entry.revision, protected=True, provenance="user")
     store._journal_path.write_text(json.dumps({"text": entry.text}) + "\n")
-    response = client.delete(f"{BASE}/{entry.id}?expected_revision={revised.revision}")
+    response = remove(client, entry.id, revised.revision)
     assert response.status_code == 204 and response.content == b""
     doc = store._facts.snapshot(read_only=True)
     assert doc["entries"] == doc["archived"] == []
@@ -270,7 +303,8 @@ def test_non_admin_refused(world, monkeypatch, method):
     monkeypatch.setattr(preview_access, "grant", lambda request: None)
     response = getattr(client, method)(BASE if method == "get" else f"{BASE}/m1",
                                        **({"json": {"text": "change", "when": None,
-                                                    "expected_revision": 1}} if method == "put" else {}))
+                                                    "expected_revision": 1,
+                                                    "expected_metadata_version": "unseen"}} if method == "put" else {}))
     assert response.status_code == 403
 
 
@@ -282,7 +316,7 @@ def test_preview_cookie_is_read_only_even_with_independent_owner_access(world, m
     client.cookies.set(preview_access.cookie_name(), "test-preview-cookie")
     assert client.get(BASE).status_code == 200
     assert edit(client, entry).status_code == 403
-    assert client.delete(f"{BASE}/{entry.id}?expected_revision=1").status_code == 403
+    assert remove(client, entry.id, 1).status_code == 403
     # The cookie alone may read owner routes too, but never write them.
     monkeypatch.setattr(owner_auth, "local_access", lambda request: False)
     monkeypatch.setattr(preview_access, "grant", lambda request: grant)
@@ -301,7 +335,7 @@ def test_storage_failures_are_503_logged_without_fact_text(world, monkeypatch, c
     elif method == "put":
         response = edit(client, entry)
     else:
-        response = client.delete(f"{BASE}/{entry.id}?expected_revision=1")
+        response = remove(client, entry.id, 1)
     assert response.status_code == 503
     assert marker not in response.text and marker not in caplog.text
     assert "Memory storage operation failed (TimeoutError)" in caplog.text
@@ -340,5 +374,5 @@ def test_file_work_runs_off_the_event_loop(world, monkeypatch):
     assert client.get(BASE).status_code == 200
     response = edit(client, entry, text="The owner prefers clear reports.")
     assert response.status_code == 200
-    assert client.delete(f"{BASE}/{entry.id}?expected_revision={response.json()['revision']}").status_code == 204
+    assert remove(client, entry.id, response.json()["revision"]).status_code == 204
     assert event_threads and file_threads and set(event_threads).isdisjoint(file_threads)

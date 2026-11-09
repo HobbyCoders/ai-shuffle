@@ -44,7 +44,9 @@ to another worker are excluded.
 
 Each item contains:
 
-- `id`, `revision`, `text`, and `when` (null if no written applicability line).
+- `id`, `revision`, `metadata_version`, `text`, and `when` (null if no written
+  applicability line). `metadata_version` is an opaque token for the fact's
+  when-line and apply-to-every-chat flag.
 - `status`: `active` or `archived`; `tier`: `user` (owner-saved, no expiry),
   `agent` (durable), or `learned`.
 - `source`: `user`, `tool`, `session`, or `manual`.
@@ -58,18 +60,19 @@ History, internal keys, replication clocks and deletion records are not exposed.
 
 ### PUT /api/v1/memories/{memory_id}
 
-Send `{"text": "The corrected fact.", "when": "When this fact applies", "expected_revision": 1}`.
-All three fields are required; `when: null` keeps the existing line. The response
+Send `{"text": "The corrected fact.", "when": "When this fact applies", "expected_revision": 1, "expected_metadata_version": "<from the list>"}`.
+All four fields are required; `when: null` keeps the existing line. The response
 is the updated item in the list shape. An owner edit makes the fact owner-saved,
 shared across workers and active (including an archived fact). Scope and the
 apply-to-every-chat flag are preserved, not editable through this route.
 
 A text/tier correction increments `revision`. A when-only edit of an already
 owner-saved fact uses the store's separate metadata stamp, so its `revision` and
-`updated_at` remain unchanged. Existing owner-saved facts can still be corrected
+`updated_at` remain unchanged and its `metadata_version` moves. A copy opened
+before either change is refused with `409`. Existing owner-saved facts can still be corrected
 when the owner-saved tier is full; promoting another fact requires a free slot.
 
-### DELETE /api/v1/memories/{memory_id}?expected_revision=1
+### DELETE /api/v1/memories/{memory_id}?expected_revision=1&expected_metadata_version=TOKEN
 
 Returns `204` with no body. This is explicit Forget: it removes the live/archived
 fact and retained history, purges older memory journal evidence, and records a

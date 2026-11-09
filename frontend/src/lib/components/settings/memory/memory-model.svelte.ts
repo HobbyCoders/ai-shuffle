@@ -23,6 +23,8 @@ export type MemoryFilter = 'active' | 'archived' | 'review' | 'all';
 export interface MemoryItem {
 	id: string;
 	revision: number;
+	/** Moves when the when-line changes; `revision` only counts the text. */
+	metadata_version: string;
 	text: string;
 	when: string | null;
 	status: MemoryStatus;
@@ -54,7 +56,7 @@ export interface MemoryForm {
 	text: string;
 	when: string;
 	/** What the form was opened from; a later list refresh does not move it. */
-	base: { text: string; when: string; revision: number };
+	base: { text: string; when: string; revision: number; metadataVersion: string };
 }
 
 export interface MemoryProblems {
@@ -146,7 +148,7 @@ export function filterMemories(
 
 export function formFromMemory(m: MemoryItem): MemoryForm {
 	const when = m.when ?? '';
-	return { text: m.text, when, base: { text: m.text, when, revision: m.revision } };
+	return { text: m.text, when, base: { text: m.text, when, revision: m.revision, metadataVersion: m.metadata_version } };
 }
 
 export function validateMemoryForm(f: MemoryForm, limits: MemoryLimits): MemoryProblems {
@@ -173,6 +175,12 @@ const statusOf = (e: unknown): number | undefined =>
 	e && typeof e === 'object' ? ((e as { status?: number }).status ?? undefined) : undefined;
 
 const path = (id: string) => `/memories/${encodeURIComponent(id)}`;
+
+/** A dropped connection can't say whether the write landed, so don't claim either way. */
+const UNREACHABLE = {
+	change: 'Could not reach this worker, so this may not have saved. Your edits are still here. Try again.',
+	delete: 'Could not reach this worker, so this may not have been deleted. Try again.'
+} as const;
 
 export class MemoryModel {
 	/** Replaced, never mutated: rows are read many times and edited rarely. */
@@ -328,7 +336,8 @@ export class MemoryModel {
 			const saved = await api.put<MemoryItem>(path(id), {
 				text: compact(sent.text),
 				when: compact(sent.when) || null,
-				expected_revision: f.base.revision
+				expected_revision: f.base.revision,
+				expected_metadata_version: f.base.metadataVersion
 			});
 			this.#requests += 1;
 			this.items = this.items.map((m) => (m.id === id ? saved : m));
@@ -356,7 +365,9 @@ export class MemoryModel {
 		if (!f) return false;
 		delete this.errors[id];
 		try {
-			await api.delete(`${path(id)}?expected_revision=${f.base.revision}`);
+			await api.delete(
+				`${path(id)}?expected_revision=${f.base.revision}&expected_metadata_version=${encodeURIComponent(f.base.metadataVersion)}`
+			);
 		} catch (e) {
 			// Already gone is what the owner asked for.
 			if (statusOf(e) !== 404) {
@@ -376,7 +387,12 @@ export class MemoryModel {
 		const status = statusOf(e);
 		if (status === 404) this.remote[id] = 'deleted';
 		this.errors[id] = {
-			message: isForbidden(e) ? `You need owner access to ${verb} memories.` : message(e, fallback),
+			message:
+				status === undefined
+					? UNREACHABLE[verb]
+					: isForbidden(e)
+						? `You need owner access to ${verb} memories.`
+						: message(e, fallback),
 			conflict: status === 409
 		};
 	}
@@ -392,7 +408,7 @@ export class MemoryModel {
 				this.remote[id] = 'deleted';
 			} else {
 				const base = this.forms[id].base;
-				if (m.revision !== base.revision || m.text !== base.text || (m.when ?? '') !== base.when) this.remote[id] = 'changed';
+				if (m.revision !== base.revision || m.metadata_version !== base.metadataVersion || m.text !== base.text || (m.when ?? '') !== base.when) this.remote[id] = 'changed';
 				else delete this.remote[id];
 			}
 		}

@@ -20,6 +20,7 @@ from fluid.codemode.transactions import file_transaction
 logger = logging.getLogger(__name__)
 _UNAVAILABLE = "Memories are unavailable on this worker. Please try again later."
 _NOT_FOUND = "This memory could not be found on this worker."
+_CHANGED = "This memory changed since you opened it. Refresh it and try again."
 
 
 class MemoryRoute(APIRoute):
@@ -31,7 +32,7 @@ class MemoryRoute(APIRoute):
                 return await handler(request)
             except RequestValidationError:
                 # Do not echo rejected input (which might itself be a secret).
-                raise HTTPException(422, "Provide memory text, a when line or null, and a positive whole-number revision.") from None
+                raise HTTPException(422, "Provide memory text, a when line or null, and the version of the memory you opened.") from None
 
         return plain_validation
 
@@ -40,18 +41,35 @@ router = APIRouter(prefix="/api/v1/memories", tags=["memories"], route_class=Mem
                    dependencies=[Depends(require_admin)])
 
 
+_VERSION_CHARS = 16
+
+
 class MemoryUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: StrictStr
     when: StrictStr | None
     expected_revision: int = Field(ge=1, strict=True)
+    expected_metadata_version: StrictStr = Field(min_length=1, max_length=_VERSION_CHARS)
 
 
 def _visible(entry, store_id):
     # memory.coexist.* rows are internal pair answers, not saved memories.
     return (not str(entry.get("key") or "").startswith("memory.coexist.")
             and facts.visible_on(entry, store_id))
+
+
+def _metadata_version(entry):
+    # The store's revision counts the fact's value only: when-line and always
+    # edits replicate by their own stamps and leave it alone. An owner's open
+    # form needs both, or a stale save restores an older when-line unnoticed.
+    stamps = [facts.metadata_stamp(entry, field) for field in facts.METADATA_FIELDS]
+    return facts.fingerprint(repr(stamps))[:_VERSION_CHARS]
+
+
+def _require_metadata_version(entry, expected):
+    if _metadata_version(entry) != expected:
+        raise HTTPException(409, _CHANGED)
 
 
 def _project_names(entries):
@@ -66,6 +84,7 @@ def _item(entry, status, project_names):
     return {
         "id": entry["id"],
         "revision": entry.get("revision", 1),
+        "metadata_version": _metadata_version(entry),
         "text": entry["text"],
         "when": facts.written_when(entry),
         "status": status,
@@ -111,18 +130,19 @@ def _update(memory_id, body):
     # Check visibility/control keys and write in one reentrant transaction, so
     # a concurrent replica cannot turn an ordinary fact into a hidden target.
     with file_transaction(store._facts.lock):
-        _find(store, memory_id)
+        _require_metadata_version(_find(store, memory_id), body.expected_metadata_version)
         saved = store.save_memory(body.text, memory_id=memory_id,
                                   expected_revision=body.expected_revision,
                                   protected=True, provenance="user", when=body.when)
-        entry = vars(saved)
+        # The stored row, not the returned MemoryEntry, carries the metadata stamps.
+        entry = _find(store, saved.id)
         return _item(entry, "active", _project_names([entry]))
 
 
-def _delete(memory_id, expected_revision):
+def _delete(memory_id, expected_revision, expected_metadata_version):
     store = store_for_owner("local")
     with file_transaction(store._facts.lock):
-        _find(store, memory_id)
+        _require_metadata_version(_find(store, memory_id), expected_metadata_version)
         if not store.delete_memory(memory_id, explicit=True, expected_revision=expected_revision):
             raise HTTPException(404, _NOT_FOUND)
 
@@ -132,7 +152,7 @@ def _store_error(exc):
     if message.startswith("Unknown memory ID;"):
         return HTTPException(404, _NOT_FOUND)
     if message.startswith("Memory changed since it was read;"):
-        return HTTPException(409, "This memory changed since you opened it. Refresh it and try again.")
+        return HTTPException(409, _CHANGED)
     if message in (
         "This fact matches a deletion barrier; an explicit restore request is required",
         "This fact was forgotten; an explicit restore request is required",
@@ -180,6 +200,7 @@ async def update_memory(memory_id: str, body: MemoryUpdate):
 
 
 @router.delete("/{memory_id}", status_code=204)
-async def delete_memory(memory_id: str, expected_revision: Annotated[int, Query(ge=1)]):
-    await _run(_delete, memory_id, expected_revision)
+async def delete_memory(memory_id: str, expected_revision: Annotated[int, Query(ge=1)],
+                        expected_metadata_version: Annotated[str, Query(min_length=1, max_length=_VERSION_CHARS)]):
+    await _run(_delete, memory_id, expected_revision, expected_metadata_version)
     return Response(status_code=204)

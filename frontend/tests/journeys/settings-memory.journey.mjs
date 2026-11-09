@@ -6,9 +6,9 @@ import { expect, gotoApp, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 const STALE = 'This memory changed since you opened it. Refresh it and try again.';
-const memory = (id, text, extra = {}) => ({ id, revision: 1, text, when: null, status: 'active', tier: 'agent', source: 'tool', scope: 'global', scope_label: 'All projects', always: false, needs_review: false, this_worker_only: false, created_at: 1.77e9, updated_at: 1.77e9, last_recalled_at: null, expires_at: null, uses: 0, ...extra });
+const memory = (id, text, extra = {}) => ({ id, revision: 1, metadata_version: 'meta-1', text, when: null, status: 'active', tier: 'agent', source: 'tool', scope: 'global', scope_label: 'All projects', always: false, needs_review: false, this_worker_only: false, created_at: 1.77e9, updated_at: 1.77e9, last_recalled_at: null, expires_at: null, uses: 0, ...extra });
 const seed = () => [
- memory('a', 'The nightly build publishes at two in the morning.', { when: 'When checking the nightly build' }),
+ memory('a', 'The nightly build publishes at two in the morning.', { when: 'When checking the nightly build', expires_at: 1.9e9 }),
  memory('b', 'The greenhouse controller reports humidity every five minutes.', { tier: 'learned' }),
  memory('c', 'The old toolchain was retired in the spring.', { status: 'archived' }),
  memory('d', 'Two facts disagree about the staging address.', { needs_review: true }),
@@ -18,8 +18,10 @@ const rows = page => page.locator('.mem-list .st-it').filter({ visible: true });
 const text = page => page.getByRole('textbox', { name: 'What to remember', exact: true }).filter({ visible: true });
 const button = (page, name) => page.getByRole('button', { name, exact: true }).filter({ visible: true }).first();
 const showing = (page, count) => page.waitForFunction(n => [...document.querySelectorAll('.mem-list .st-it')].filter(el => el.checkVisibility()).length === n, count);
+const formOffset = page => text(page).evaluate(el => el.getBoundingClientRect().top - el.closest('.st-dwrap').getBoundingClientRect().top);
 const saved = page => page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Save' && b.disabled && b.checkVisibility()));
-await runJourney({ name: 'settings-memory', allow: DEV_INSTANCE_NOISE, cases: [{
+// The service worker would answer the memories request before page.route sees it.
+await runJourney({ name: 'settings-memory', browser: async () => ({ context: { serviceWorkers: 'block' } }), allow: DEV_INSTANCE_NOISE, cases: [{
  name: mobileShell ? 'native-see-edit-delete' : 'see-edit-delete', viewports: mobileShell ? ['phone'] : ['desktop', 'phone'], throttles: ['fast'],
  allow: [
   { kind: 'failed_requests', status: 409, url: /\/memories\/a(\?|$)/, reason: 'this case answers a stale save on purpose' },
@@ -70,9 +72,11 @@ await runJourney({ name: 'settings-memory', allow: DEV_INSTANCE_NOISE, cases: [{
   await text(page).waitFor();
   expect(await button(page, 'Save').isDisabled(), 'nothing to save before an edit');
   await text(page).fill('The nightly build publishes at three in the morning.');
+  const offset = await formOffset(page);
   await button(page, 'Save').click();
   await saved(page);
-  expect(api.puts.length === 1 && api.puts[0].expected_revision === 1 && api.puts[0].when === 'When checking the nightly build', 'save sends the opened version and keeps the when-line ' + JSON.stringify(api.puts));
+  expect(Math.abs(await formOffset(page) - offset) < 1, 'saving an agent memory does not move the form');
+  expect(api.puts.length === 1 && api.puts[0].expected_revision === 1 && api.puts[0].expected_metadata_version === 'meta-1' && api.puts[0].when === 'When checking the nightly build', 'save sends the opened version and keeps the when-line ' + JSON.stringify(api.puts));
   await mark('a stale save keeps the draft and offers the latest version');
   api.mode = 'stale';
   const draft = 'A draft the owner is still typing.';
@@ -100,7 +104,7 @@ await runJourney({ name: 'settings-memory', allow: DEV_INSTANCE_NOISE, cases: [{
   expect(api.deletes.length === 0, 'nothing is deleted before the confirm');
   await page.locator('.mem-detail button', { hasText: /^Delete$/ }).filter({ visible: true }).last().click();
   await page.waitForFunction(() => ![...document.querySelectorAll('textarea.mem-text')].some(t => t.checkVisibility()));
-  expect(api.deletes.length === 1 && api.deletes[0].includes('expected_revision=') , 'delete carries the opened version ' + JSON.stringify(api.deletes));
+  expect(api.deletes.length === 1 && api.deletes[0].includes('expected_revision=') && api.deletes[0].includes('expected_metadata_version=meta-1'), 'delete carries the opened version ' + JSON.stringify(api.deletes));
   await showing(page, 2);
   if (phone) {
    await page.goBack();

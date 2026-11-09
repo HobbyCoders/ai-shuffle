@@ -31,6 +31,7 @@ import {
 const memory = (over: Partial<MemoryItem> = {}): MemoryItem => ({
 	id: 'm1',
 	revision: 3,
+	metadata_version: 'meta+1',
 	text: 'Shayne prefers short status updates',
 	when: 'when reporting progress',
 	status: 'active',
@@ -189,7 +190,8 @@ describe('Settings > Memory page', () => {
 		expect(http.put).toHaveBeenCalledWith('/memories/m1', {
 			text: 'Keep updates very short',
 			when: 'when reporting progress',
-			expected_revision: 3
+			expected_revision: 3,
+			expected_metadata_version: 'meta+1'
 		});
 		await waitFor(() => expect(saveButton().disabled).toBe(true));
 	});
@@ -217,6 +219,29 @@ describe('Settings > Memory page', () => {
 		expect(textBox().value).toBe('Blocked edit');
 	});
 
+	it('explains a dropped connection and keeps the draft', async () => {
+		http.put.mockRejectedValue(new TypeError('Failed to fetch'));
+		await show('m1');
+		await screen.findByRole('textbox', { name: 'What to remember' });
+		await fireEvent.input(textBox(), { target: { value: 'Offline edit' } });
+		await fireEvent.click(saveButton());
+		await screen.findByText(/Could not reach this worker/);
+		expect(screen.queryByText(/Failed to fetch/)).toBeNull();
+		expect(textBox().value).toBe('Offline edit');
+	});
+
+	it('flags a draft when only the when-line changed elsewhere', async () => {
+		const model = new MemoryModel();
+		http.get.mockResolvedValue({ items: [memory()], limits });
+		await model.load();
+		model.ensure('m1');
+		model.forms.m1.text = 'My draft';
+		http.get.mockResolvedValue({ items: [memory({ metadata_version: 'meta+2' })], limits });
+		await model.load();
+		expect(model.remote.m1).toBe('changed');
+		expect(model.forms.m1.base.metadataVersion).toBe('meta+1');
+	});
+
 	it('deletes only after confirming, with the version it was opened from', async () => {
 		await show('m1');
 		await screen.findByRole('textbox', { name: 'What to remember' });
@@ -225,7 +250,7 @@ describe('Settings > Memory page', () => {
 		await screen.findByText(/permanently on all your workers/);
 		// The trigger has swapped for the confirm, which keeps the same word.
 		await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
-		await waitFor(() => expect(http.delete).toHaveBeenCalledWith('/memories/m1?expected_revision=3'));
+		await waitFor(() => expect(http.delete).toHaveBeenCalledWith('/memories/m1?expected_revision=3&expected_metadata_version=meta%2B1'));
 		await waitFor(() => expect(settingsNav.selectedItem('memory')).toBeFalsy());
 		await waitFor(() => expect(screen.queryByText(rows[0].text)).toBeNull());
 	});
