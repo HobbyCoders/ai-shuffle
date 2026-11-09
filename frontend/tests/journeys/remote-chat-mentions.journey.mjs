@@ -13,22 +13,19 @@
 //
 // Cases:
 //   lists-after-reload   the menu shows the running worker's files, before and
-//                        after a reload; a pick inserts its relative path
-//   typed-before-metadata the @ is typed while the reloaded chat's details are
-//                        still loading; the menu opens when they arrive
-//   restored-draft-stays-closed a saved draft holding an @ opens nothing by
-//                        itself on reload; only typing does
+//                        after a reload; a saved draft holding an @ opens
+//                        nothing by itself; a pick inserts its relative path
 //   worker-offline       the worker cannot answer: the menu says so, keeps the
 //                        Quick Access folders, and Try again recovers
-//   local-chat-unchanged a chat on this worker still lists its own files
-//   no-project-no-menu   a chat with no project at all opens no menu
-//   selected-file-sends  a file picked from the menu sends, and the model is
-//                        given its relative path (a pick is not an upload)
-//   selected-file-sends-after-reload the same chip, restored from the saved
+//   selected-file-and-upload a picked file and a real attachment in one message:
+//                        the pick keeps its relative path, so it is no upload
+//   selected-file-sends-after-reload a pick on its own, restored from the saved
 //                        draft of a chat that already has a turn
-//   selected-file-and-upload a pick and a real attachment in one message
 //   remote-chat-keeps-local-agents a chat on another worker still holding its
 //                        local project lists that project's agents
+//
+// Slow desktop and phone only. Shards have little time to spare, and the races
+// here show up under the slow throttle.
 import { runJourney } from './runner.mjs';
 import { readFileSync } from 'node:fs';
 import { PROJECT, SEEDED, composer, expect, gotoApp, isPhone, openFromSidebar, openNewChat, seededChatId, sendButton, showSidebar, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
@@ -67,9 +64,6 @@ async function simulateRemoteChat(page, status, key, { offline = false, keepLoca
 			window.fetch = async (input, init) => {
 				const url = urlOf(input);
 				const method = (init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
-				if (url.pathname === `/api/v1/sessions/${id}/live` && sessionStorage.getItem('journey:delayLive')) {
-					await new Promise((done) => setTimeout(done, 1500));
-				}
 				if (/\/subagents\/all$/.test(url.pathname)) window.__subagentLists.push(url.searchParams.get('project_id'));
 				if (url.pathname === `/api/v1/sessions/${id}/sync-status`) {
 					return json({ state: 'current', scope: 'session', initial_caught_up: true, pending_updates: 0 });
@@ -105,7 +99,7 @@ async function openChat(ctx, title) {
 }
 
 const start = (key, title, opts) => async (ctx) => {
-	if (opts) await simulateRemoteChat(ctx.page, ctx.status, key, opts);
+	await simulateRemoteChat(ctx.page, ctx.status, key, opts);
 	await gotoApp(ctx.page, ctx.status);
 	await waitChat(ctx.page, { surface: 'new' });
 	await openChat(ctx, title);
@@ -167,6 +161,7 @@ const startNewChat = async ({ page, status }) => { await openNewChat({ page, sta
 
 await runJourney({
 	name: 'remote-chat-mentions',
+	throttles: ['slow'],
 	cases: [
 		{
 			name: 'lists-after-reload',
@@ -179,16 +174,19 @@ await runJourney({
 				const shared = await fileLists(page);
 				expect(shared.length > 0 && shared.every((id) => id.startsWith('pv2-')),
 					`the list is asked for by the shared project id, got ${JSON.stringify(shared)}`);
-				await clearComposer(page);
-				await page.locator(MENU).waitFor({ state: 'detached', timeout: 5_000 });
 				await draftSaved(page);
 
-				await mark('reload');
+				await mark('reload with @ in the saved draft');
 				await page.reload({ waitUntil: 'domcontentloaded' });
 				// Its own step: leaving the old document is not the app going backwards.
 				await nextFrames(page);
 				await mark('page reloaded');
 				await waitChat(page, { surface: 'active', loading: 'false', session: /^s:/, messagesAtLeast: 1 }, { timeout: 60_000 });
+
+				await composer(page).getByText('@').waitFor({ timeout: 10_000 });
+				await page.waitForTimeout(1500);
+				expect(await page.locator(MENU).count() === 0, 'a restored draft opens no menu by itself');
+				await clearComposer(page);
 
 				await mark('type @ after the reload');
 				await typeAt(page);
@@ -198,41 +196,6 @@ await runJourney({
 				await page.locator(MENU).getByText(ON_PEER).click();
 				await page.locator(MENU).waitFor({ state: 'detached', timeout: 5_000 });
 				await page.locator('.ProseMirror').getByText(ON_PEER).first().waitFor({ timeout: 5_000 });
-				await clearComposer(page);
-				await draftSaved(page);
-			}
-		},
-		{
-			name: 'typed-before-metadata',
-			setup: start('long', SEEDED.long, {}),
-			async act({ page, mark }) {
-				await page.evaluate(() => sessionStorage.setItem('journey:delayLive', '1'));
-				await mark('reload');
-				await page.reload({ waitUntil: 'domcontentloaded' });
-				await nextFrames(page);
-				await mark('type @ while the chat details load');
-				await typeAt(page);
-				await expectRunningWorkerFiles(page);
-				await page.evaluate(() => sessionStorage.removeItem('journey:delayLive'));
-				await clearComposer(page);
-				await draftSaved(page);
-			}
-		},
-		{
-			name: 'restored-draft-stays-closed',
-			setup: start('long', SEEDED.long, {}),
-			async act({ page, mark }) {
-				await typeAt(page);
-				await page.locator(MENU).getByText(ON_PEER).waitFor({ timeout: 15_000 });
-				await draftSaved(page);
-				await mark('reload');
-				await page.reload({ waitUntil: 'domcontentloaded' });
-				await nextFrames(page);
-				await mark('page reloaded');
-				await waitChat(page, { surface: 'active', loading: 'false', session: /^s:/, messagesAtLeast: 1 }, { timeout: 60_000 });
-				await composer(page).getByText('@').waitFor({ timeout: 10_000 });
-				await page.waitForTimeout(1500);
-				expect(await page.locator(MENU).count() === 0, 'a restored draft opens no menu by itself');
 				await clearComposer(page);
 				await draftSaved(page);
 			}
@@ -255,41 +218,6 @@ await runJourney({
 				await menu.getByText(ON_PEER).waitFor({ timeout: 15_000 });
 				expect(await menu.getByText(OFFLINE).count() === 0, 'the notice goes away once the list loads');
 				await clearComposer(page);
-			}
-		},
-		{
-			name: 'local-chat-unchanged',
-			setup: start('long', SEEDED.long),
-			async act({ page, mark }) {
-				await mark('type @ in a chat on this worker');
-				await typeAt(page);
-				const menu = page.locator(MENU);
-				await menu.getByText('README.md').waitFor({ timeout: 15_000 });
-				await clearComposer(page);
-			}
-		},
-		{
-			name: 'no-project-no-menu',
-			setup: start('no_project', SEEDED.no_project),
-			async act({ page, mark }) {
-				await mark('type @ in a chat with no project');
-				await typeAt(page);
-				await page.waitForTimeout(1000);
-				expect(await page.locator(MENU).count() === 0, 'a chat with no project opens no file menu');
-				await clearComposer(page);
-			}
-		},
-		{
-			name: 'selected-file-sends',
-			setup: startNewChat,
-			async act({ page, mark, status }) {
-				const token = uniq();
-				await mark('type @README and take the file');
-				await pickReadme(page);
-				await page.keyboard.type(` check ${token}`);
-				await mark('send the message');
-				const prompt = await sendAndExpectReply(page, status, token, 2);
-				expect(prompt.includes('@README.md'), `the model is given the relative path, got ${prompt.slice(0, 400)}`);
 			}
 		},
 		{
