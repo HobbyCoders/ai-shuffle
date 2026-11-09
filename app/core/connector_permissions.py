@@ -17,6 +17,13 @@ from the platform's clock (``BaseConnector.send_timed``), so the workers' own
 clocks play no part. A request stays on the worker that opened it, and so does
 its time. A platform that does not report that time gets no invitation to reply.
 
+A connector can also come back to a worker whose older request is still open,
+and that request's time cannot tell a repeated reply from a new one. So the
+request also keeps the version of the connector's synced definition that posted
+it (``ownership.revision``), and a reply answers it only while that is unchanged:
+any move, there and back included, sends the owner to the app. The running
+adapter is no guide, because a reassignment does not restart it.
+
 The platform Approve/Deny buttons are not sent, and
 ``ConnectorManager.handle_permission_response`` ignores any left in old chat
 history: a button press there carries no sender to verify.
@@ -35,6 +42,7 @@ logger = logging.getLogger(__name__)
 #: What :func:`_request_to_answer` returns for a reply already delivered once.
 _REPEAT_DELIVERY: Tuple[str, str, Dict[str, Any]] = ("", "", {})
 _NOT_AFTER_REQUEST: Tuple[str, str, Dict[str, Any]] = ("", "", {})
+_CONNECTOR_CHANGED: Tuple[str, str, Dict[str, Any]] = ("", "", {})
 
 
 async def deliver_permission_prompt(
@@ -133,12 +141,16 @@ async def _ask_in_chat(
     cannot honour."""
     from app.core.connectors.base import OutgoingMessage, sent_at_seconds
     from app.db import interactions
+    from app.network import ownership
 
+    # Read before posting: a move during the send must leave this stamp stale.
+    owner_revision = await asyncio.to_thread(ownership.revision, "connectors", connector_id)
     posted_at = sent_at_seconds(await instance.send_timed(
         OutgoingMessage(platform_chat_id=platform_chat_id, text=f"The agent wants to {action}.")
     ))
     if posted_at is None or not interaction_id or not await asyncio.to_thread(
-            interactions.record_chat_prompt, interaction_id, _chat_key(connector_id, platform_chat_id), posted_at):
+            interactions.record_chat_prompt, interaction_id, _chat_key(connector_id, platform_chat_id),
+            posted_at, owner_revision):
         return "Answer it in the app."
     return "Reply yes or no to answer."
 
@@ -151,7 +163,8 @@ def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]
     """``(session id, request id, payload)`` of the oldest request this sender
     was asked in this chat, else None. Any doubt is None. A repeat of a reply is
     :data:`_REPEAT_DELIVERY`; one the platform did not time after the request's
-    message, :data:`_NOT_AFTER_REQUEST`. Blocking (DB)."""
+    message, :data:`_NOT_AFTER_REQUEST`; one to a request posted under an earlier
+    version of the connector, :data:`_CONNECTOR_CHANGED`. Blocking (DB)."""
     from app.core import owner_confirm
     from app.core.connector_service import sender_is_owner
     from app.core.permission_handler import PERMISSION_KIND
@@ -175,17 +188,20 @@ def _request_to_answer(message: Any) -> Optional[Tuple[str, str, Dict[str, Any]]
     if not session_id or not (linked or {}).get("is_active"):
         return None
     chat = _chat_key(message.connector_id, message.platform_chat_id)
+    owner_revision = ownership.revision("connectors", message.connector_id)
     for row in interactions.get_pending_interactions(session_id):
         payload = row.get("payload") or {}
         if row.get("kind") != PERMISSION_KIND or not payload.get("request_id"):
             continue
-        asked_at = (payload.get(interactions.CHAT_PROMPTS_KEY) or {}).get(chat)
-        if asked_at is None:
+        prompt = (payload.get(interactions.CHAT_PROMPTS_KEY) or {}).get(chat)
+        if prompt is None:
             continue  # never asked in this chat
         if owner_confirm.is_owner_approval(payload.get("tool_name"), payload.get("tool_input")):
+            if prompt["owner_revision"] != owner_revision:
+                return _CONNECTOR_CHANGED
             # Strictly later: platforms that report whole seconds cannot order
             # two messages in one second, so such a reply is asked for again.
-            if message.sent_at <= asked_at:
+            if message.sent_at <= prompt["posted_at"]:
                 return _NOT_AFTER_REQUEST
             return session_id, payload["request_id"], payload
     return None
@@ -215,6 +231,9 @@ async def answer_from_chat(message: Any) -> bool:
         if found is _NOT_AFTER_REQUEST:
             await _tell_chat(message, "Couldn't tell that reply came after this request, so it did not "
                                       "answer it. Reply yes or no again to answer.")
+            return True
+        if found is _CONNECTOR_CHANGED:
+            await _tell_chat(message, "This connector changed after that request was asked. Answer it in the app.")
             return True
         session_id, request_id, payload = found
         from app.core.permission_handler import permission_handler

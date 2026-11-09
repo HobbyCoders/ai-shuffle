@@ -193,7 +193,7 @@ def _open_request(tool="Bash", tool_input=None, kind="permission", request_id="r
     asked_at = time.time() - 60 if asked_at is None else asked_at
     return {"kind": kind, "created_at": time.time() - 60 if created_at is None else created_at, "payload": {
         "request_id": request_id, "tool_name": tool, "tool_input": tool_input or {"command": "ls"},
-        "chat_prompts": {f"c1:{chat}": asked_at for chat in chats},
+        "chat_prompts": {f"c1:{chat}": {"posted_at": asked_at, "owner_revision": None} for chat in chats},
     }}
 
 
@@ -587,10 +587,13 @@ class TestRequestTimedByThePlatform:
     def test_every_chat_keeps_its_own_time(self, chat):
         from app.db import interactions
 
-        assert interactions.record_chat_prompt(chat["interaction"], "c1:a", 1.0)
-        assert interactions.record_chat_prompt(chat["interaction"], "c2:b", 2.0)
+        assert interactions.record_chat_prompt(chat["interaction"], "c1:a", 1.0, "7:Office PC")
+        assert interactions.record_chat_prompt(chat["interaction"], "c2:b", 2.0, None)
         payload = interactions.get_interaction(chat["interaction"])["payload"]
-        assert payload["chat_prompts"] == {"c1:a": 1.0, "c2:b": 2.0}
+        assert payload["chat_prompts"] == {
+            "c1:a": {"posted_at": 1.0, "owner_revision": "7:Office PC"},
+            "c2:b": {"posted_at": 2.0, "owner_revision": None},
+        }
         assert payload["request_id"] == "req-1"
 
     @pytest.mark.parametrize("module,name", [
@@ -606,3 +609,151 @@ class TestRequestTimedByThePlatform:
 
         cls = getattr(importlib.import_module(f"app.core.connectors.{module}"), name)
         assert cls.send_timed is BaseConnector.send_timed
+
+
+class TestAnswersFollowContinuousOwnership:
+    """A prompt is answerable only while the ownership that posted it lasted.
+
+    One test database stands in for the two workers: each worker's session is
+    its own row and link, and its per-worker reply claims are dropped on a move.
+    The reassignments are written straight into the synced record table, so this
+    is a controlled check of the rule, not two real workers.
+    """
+
+    REPLY_AT = 1_800_000_010.0
+
+    @pytest.fixture
+    def network(self, mock_db):
+        from app.db import connectors as connectors_db
+        from app.db import interactions
+
+        here = {"worker": "A"}
+        requests = {}
+        for worker in ("A", "B"):
+            session_id = f"session-{worker}"
+            requests[worker] = interactions.create_interaction(
+                session_id, "permission",
+                {"request_id": f"req-{worker}", "tool_name": "Bash", "tool_input": {"command": "ls"}}, 300)["id"]
+
+        def link(session_id):
+            return [{"connector_id": "c1", "platform_chat_id": "42", "platform_user_id": "owner-account",
+                     "session_id": session_id}]
+
+        def owned_row(_connector_id):
+            return {"id": "c1", "owner_device_id": here["worker"]}
+
+        def active_link(_connector_id, _chat):
+            return {"session_id": f"session-{here['worker']}", "is_active": True}
+
+        with patch("app.core.connector_service.sender_is_owner", side_effect=lambda _c, user: user == "owner-account"), \
+                patch("app.db.database.get_connector_sessions_for_ai_session", side_effect=link), \
+                patch("app.db.database.get_connector_session", side_effect=active_link), \
+                patch("app.db.database.get_connector", side_effect=owned_row), \
+                patch("app.network.ownership.enrolled", return_value=True), \
+                patch("app.network.ownership.owns", return_value=True), \
+                patch("app.core.connectors.manager.connector_manager") as manager, \
+                patch("app.core.permission_handler.permission_handler.respond",
+                      new=AsyncMock(return_value={"resolved": True})) as respond:
+            instance = _fake_instance()
+            manager.get_running_instance.return_value = instance
+
+            def assign(worker, clock):
+                """A synced ownership change landing on this worker's database."""
+                from app.db import network as store
+                from app.db.base import get_db
+
+                here["worker"] = worker
+                with get_db() as conn:
+                    cursor = conn.cursor()
+                    store.put_record(cursor, "connectors", "c1", clock=clock, origin_device_id="Office PC",
+                                     content_hash=f"owner-{worker}", deleted=False)
+                    # Reply claims never travel: the other worker has none of them.
+                    cursor.execute("DELETE FROM system_settings WHERE key LIKE %s",
+                                   (f"{connectors_db.ANSWER_CLAIM_PREFIX}%",))
+
+            async def ask(worker, posted_at):
+                instance.send_timed.return_value = posted_at
+                await deliver_permission_prompt(f"session-{worker}", f"req-{worker}", "Bash", {"command": "ls"}, "d",
+                                                interaction_id=requests[worker])
+
+            yield {"assign": assign, "ask": ask, "respond": respond, "instance": instance, "requests": requests}
+
+    def test_the_revision_moves_with_every_synced_change_and_only_those(self, network):
+        from app.network import ownership, policy
+
+        with patch("app.network.ownership.enrolled", return_value=False):
+            assert ownership.revision("connectors", "c1") is None
+        assert ownership.revision("connectors", "c1") is None  # never synced
+
+        network["assign"]("A", clock=4)
+        first = ownership.revision("connectors", "c1")
+        assert first == "4:Office PC" and ownership.revision("connectors", "c1") == first
+        network["assign"]("A", clock=5)  # same owner again is still a new version
+        assert ownership.revision("connectors", "c1") != first
+
+        # The connector's frequent writes (status, last event) publish nothing.
+        connectors = policy.collection("connectors")
+        assert "updated_at" not in connectors.hash_fields
+        assert {"status", "last_event_at", "failure_count"} <= set(connectors.local_fields)
+
+    def _reply(self, message_id="owner-yes", sent_at=REPLY_AT):
+        return _chat_message(chat="42", message_id=message_id, sent_at=sent_at)
+
+    @pytest.mark.asyncio
+    async def test_one_message_never_approves_on_both_sides_of_a_there_and_back(self, network):
+        from app.core.connector_permissions import answer_from_chat
+
+        network["assign"]("A", clock=1)
+        await network["ask"]("A", 1_800_000_000.0)
+
+        network["assign"]("B", clock=2)
+        await network["ask"]("B", 1_800_000_001.0)
+        # The new owner can answer its own request.
+        assert await answer_from_chat(self._reply()) is True
+        network["respond"].assert_awaited_once_with("req-B", "session-B", "allow")
+
+        network["assign"]("A", clock=3)
+        network["instance"].send_message.reset_mock()
+        assert await answer_from_chat(self._reply()) is True  # the same platform message, again
+
+        network["respond"].assert_awaited_once_with("req-B", "session-B", "allow")
+        told = network["instance"].send_message.await_args.args[0].text
+        assert "Answer it in the app." in told
+
+    @pytest.mark.asyncio
+    async def test_a_reply_within_one_ownership_still_approves(self, network):
+        from app.core.connector_permissions import answer_from_chat
+
+        network["assign"]("A", clock=1)
+        await network["ask"]("A", 1_800_000_000.0)
+
+        assert await answer_from_chat(self._reply()) is True
+        network["respond"].assert_awaited_once_with("req-A", "session-A", "allow")
+
+    @pytest.mark.asyncio
+    async def test_a_worker_restart_is_not_a_move(self, network):
+        """Nothing about a restart changes the synced record, so the prompt lives."""
+        from app.core.connector_permissions import answer_from_chat
+
+        network["assign"]("A", clock=1)
+        await network["ask"]("A", 1_800_000_000.0)
+        network["instance"].send_timed.reset_mock()  # a fresh adapter after the restart
+
+        assert await answer_from_chat(self._reply()) is True
+        network["respond"].assert_awaited_once_with("req-A", "session-A", "allow")
+
+    @pytest.mark.asyncio
+    async def test_a_prompt_posted_after_coming_back_needs_a_later_reply(self, network):
+        """Back on A with a fresh prompt: the old message is before it on the
+        platform's clock, and only a real later reply answers it."""
+        from app.core.connector_permissions import answer_from_chat
+
+        network["assign"]("A", clock=1)
+        network["assign"]("B", clock=2)
+        network["assign"]("A", clock=3)
+        await network["ask"]("A", self.REPLY_AT + 5)
+
+        assert await answer_from_chat(self._reply()) is True  # the old message
+        network["respond"].assert_not_awaited()
+        assert await answer_from_chat(self._reply("new", self.REPLY_AT + 6)) is True
+        network["respond"].assert_awaited_once_with("req-A", "session-A", "allow")

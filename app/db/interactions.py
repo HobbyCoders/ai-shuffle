@@ -328,11 +328,13 @@ def _mark_pending_flag(interaction_id: str, key: str) -> bool:
     return _edit_pending_payload(interaction_id, mark)
 
 
-def record_chat_prompt(interaction_id: str, chat: str, posted_at: float) -> bool:
-    """When the platform says it posted this request's message in ``chat``.
-    A reply there must be later, on that same clock, to answer the request."""
+def record_chat_prompt(interaction_id: str, chat: str, posted_at: float, owner_revision: Optional[str]) -> bool:
+    """When the platform says it posted this request's message in ``chat``, and
+    which version of the connector's ownership posted it. A reply there must be
+    later, on that same clock, and find the ownership unchanged."""
     def stamp(payload: Dict[str, Any]) -> bool:
-        payload[CHAT_PROMPTS_KEY] = {**(payload.get(CHAT_PROMPTS_KEY) or {}), chat: posted_at}
+        payload[CHAT_PROMPTS_KEY] = {**(payload.get(CHAT_PROMPTS_KEY) or {}),
+                                     chat: {"posted_at": posted_at, "owner_revision": owner_revision}}
         return True
 
     return _edit_pending_payload(interaction_id, stamp)
