@@ -3600,7 +3600,9 @@ class SessionRuntime:
         """Tell every device this turn waits for the database, or stopped waiting.
 
         Runs while the database is short of room, so nothing here may touch it:
-        the owner is named outright instead of being read from the session row.
+        the owner is named outright instead of being read from the session row,
+        and other installs are not told, since telling them goes through the
+        database and their own lists could not show this worker's wait anyway.
         """
         from app.core.sync_engine import sync_engine
         from app.db.notifications import NotificationOwner
@@ -3610,7 +3612,7 @@ class SessionRuntime:
         )
         await sync_engine.broadcast_user_session_updated(
             user_id=owner, session_id=self.session_id,
-            updates={"start_queued": True if queued else None},
+            updates={"start_queued": True if queued else None}, relay=False,
         )
 
     def _stop_applies(self) -> bool:

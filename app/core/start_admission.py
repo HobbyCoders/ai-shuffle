@@ -160,7 +160,11 @@ class StartAdmission:
             with self._lock:
                 if self._queue.get(turn_id) is waiter:
                     self._queue.pop(turn_id)
-            await _tell(on_change, False)
+                # cancel() leaves this waiter asleep for up to one poll. A newer
+                # turn of this chat may have joined and said so; do not undo it.
+                replaced = any(w.session_id == session_id for w in self._queue.values())
+            if not replaced:
+                await _tell(on_change, False)
 
 
 async def _tell(on_change: Callable[[bool], Awaitable[None]] | None, queued: bool) -> None:
