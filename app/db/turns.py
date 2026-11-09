@@ -46,6 +46,13 @@ import psycopg2
 from app.core.config import settings
 from app.db.base import get_db, get_lease_db, parse_jsonb as _parse_json
 from app.db.compat import phs
+from app.db.query_recovery import RECOVERY_ERROR
+
+# Replays are derived history, never boundaries for another replay. This marker
+# predates unknown ended_at, so it also identifies older timestamped replays.
+_NON_RECOVERED_HISTORY = ("AND NOT (state='aborted' "
+                          "AND COALESCE(stop_reason,'')='server_shutdown' "
+                          "AND COALESCE(error,'')=%s) ")
 
 logger = logging.getLogger(__name__)
 
@@ -1014,10 +1021,12 @@ def record_adhoc_turn(
                 cursor.execute("DELETE FROM query_recovery WHERE id=%s", (turn_id,))
                 return existing
         _initialize_insert_order(cursor, session_id)
+        history_filter = _NON_RECOVERED_HISTORY if recovered else ""
+        history_params = (session_id, RECOVERY_ERROR) if recovered else (session_id,)
         cursor.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 AS pos, "
-            "COALESCE(MAX(insert_order), 0) + 1 AS insert_order FROM turns WHERE session_id = %s",
-            (session_id,),
+            "COALESCE(MAX(insert_order), 0) + 1 AS insert_order FROM turns WHERE session_id = %s "
+            + history_filter, history_params,
         )
         pos_row = cursor.fetchone()
         position = pos_row["pos"] if pos_row and pos_row.get("pos") is not None else 1
@@ -1030,13 +1039,18 @@ def record_adhoc_turn(
                 cursor.execute("SELECT created_at FROM sessions WHERE id=%s", (session_id,))
                 session_created = _to_utc(cursor.fetchone()["created_at"])
                 cursor.execute("SELECT MIN(COALESCE(started_at, created_at)) AS first_at "
-                               "FROM turns WHERE session_id=%s", (session_id,))
+                               "FROM turns WHERE session_id=%s " + history_filter, history_params)
                 first = _to_utc(cursor.fetchone()["first_at"])
                 started_at = min(stamp for stamp in (session_created, first) if stamp is not None)
+            # All receipts in a gap share a slot against immutable history;
+            # created_at orders them without feeding earlier replays back into
+            # this calculation. The tail/empty fallback and legacy start anchor
+            # above must exclude replays too. Existing ordinals never change.
             cursor.execute(
                 "SELECT insert_order, position FROM turns WHERE session_id=%s "
-                "AND created_at >= %s ORDER BY insert_order ASC, created_at ASC, id ASC LIMIT 1",
-                (session_id, started_at),
+                "AND created_at >= %s " + history_filter
+                + "ORDER BY insert_order ASC, created_at ASC, position ASC, id ASC LIMIT 1",
+                (session_id, started_at, RECOVERY_ERROR),
             )
             later = cursor.fetchone()
             if later:

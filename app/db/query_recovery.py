@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from app.db.base import get_db
 
 _PROCESS_ID = uuid.uuid4().hex
+# Durable recovery identity, including receipts replayed before unknown-end timing.
+RECOVERY_ERROR = "Worker stopped before query finalization finished"
 
 
 def create_schema(cursor):
@@ -33,7 +35,7 @@ def begin(session_id, source, *, turn_id=None, instance_id=None, process_id=None
     turn_id = turn_id or "turn-" + uuid.uuid4().hex
     record.setdefault("started_at", datetime.now(timezone.utc))
     record.update(outcome="aborted", stop_reason="server_shutdown",
-                  error="Worker stopped before query finalization finished")
+                  error=RECOVERY_ERROR)
     with get_db() as conn:
         conn.cursor().execute(
             "INSERT INTO query_recovery (id, session_id, instance_id, process_id, record) "

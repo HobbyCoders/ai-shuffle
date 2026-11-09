@@ -60,7 +60,14 @@ Recovery is historical evidence, not a new execution. Recovered terminals keep
 `ended_at=NULL`: the crash leaves no trustworthy completion time, and startup
 must not charge the offline interval as work. Their original start dates
 `created_at` and slots them below later immutable history without renumbering
-existing turns. Execution-context and usage-hold readers use the original start
+existing turns. Only non-recovery rows define a bucket, its tail slot and a
+missing-start anchor. The durable aborted/server-shutdown/error marker already
+written by the receipt design identifies older replays too, even those with a
+recorded end. Any number of receipts in one gap share a bucket; timestamp,
+position and ID break ties independently of replay order. Latest-turn readers
+(including reply hints, Stop and reply-credit selection) use immutable admission
+order, then creation time, position and ID, rather than replay time or queue
+position alone. Execution-context and usage-hold readers use the original start
 when an end is unknown; an observed completion wins an exact-time tie. Thus an
 older recovered receipt cannot replace newer model/provider/permission settings,
 while a newest recovered query still hands its context to the next wake. Missing
