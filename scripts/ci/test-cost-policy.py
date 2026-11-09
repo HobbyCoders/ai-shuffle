@@ -2,7 +2,9 @@
 
 Publishing still requires explicit dispatch or an attested local full pass.
 Unfiltered PR suites have no secrets or publishing permissions. Android additionally
-runs path-filtered unsigned native checks; its release-only steps stay owner-gated.
+runs path-filtered unsigned native checks (debug emulator suite and minified
+release smoke); its release-only steps stay owner-gated. UI journeys run whole
+on main; a pull request runs the ones its changed files need.
 """
 from pathlib import Path
 import json
@@ -17,14 +19,16 @@ PR_CHECKS = {
     "ci-backend.yml", "ci-fluid.yml", "ci-frontend.yml", "desktop.yml",
     "desktop-source-checks.yml", "windows-suite.yml", "ci-instance-identity.yml",
     "ci-artifact-policy.yml", "ci-browser-workspace.yml", "container-postgres.yml",
-    "ci-android-minified.yml",
 }
+# What an APK is built from: the two Android workflows run on PRs changing these.
+APK_INPUTS = ["android/**", "mobile/**", "frontend/**"]
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
     "main-suite.yml": {"push", "workflow_dispatch"},
     "android-webview-cache.yml": {"push", "schedule", "workflow_dispatch"},
     "android.yml": {"pull_request", "workflow_dispatch", "workflow_call"},
+    "ci-android-minified.yml": {"pull_request", "workflow_dispatch", "workflow_call"},
     "runtime-overlay-acceptance.yml": {"pull_request", "workflow_dispatch"},
     **{name: {"pull_request", "workflow_dispatch", "workflow_call"} for name in PR_CHECKS},
 }
@@ -84,7 +88,7 @@ class CostPolicyTests(unittest.TestCase):
     def test_android_native_pr_checks_cover_the_apk_inputs_on_free_runners(self):
         config = workflow("android.yml")
         self.assertEqual(config["on"]["pull_request"], {"paths": [
-            "android/**", "mobile/**", "frontend/**", ".github/workflows/android.yml",
+            *APK_INPUTS, ".github/workflows/android.yml",
             "scripts/ci/test-cost-policy.py", "tests/scripts/test_owner_publication_policy.py",
         ]})
         self.assertEqual(config["permissions"], {"contents": "read"})
@@ -100,6 +104,52 @@ class CostPolicyTests(unittest.TestCase):
         for job in config["jobs"].values():
             self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertEqual([leg["api"] for leg in config["jobs"]["android-ui"]["strategy"]["matrix"]["include"]], ["34", "36"])
+
+    def test_minified_android_smoke_runs_on_the_same_apk_inputs_and_stays_read_only(self):
+        name = "ci-android-minified.yml"
+        config = workflow(name)
+        self.assertEqual(config["on"]["pull_request"], {"paths": [
+            *APK_INPUTS, ".github/workflows/ci-android-minified.yml", "scripts/ci/test-cost-policy.py",
+        ]})
+        self.assertEqual(config["permissions"], {"contents": "read"})
+        self.assertEqual(config["concurrency"], {
+            "group": name[:-4] + "-${{ github.event.pull_request.number || github.ref }}",
+            "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+        })
+        text = (WORKFLOWS / name).read_text(encoding="utf-8")
+        for forbidden in ("secrets.", "pull_request_target", ".draft", "secrets: inherit"):
+            self.assertNotIn(forbidden, text)
+        for job in config["jobs"].values():
+            self.assertNotIn("if", job)  # Includes drafts and forks.
+            self.assertEqual(job.get("permissions", {"contents": "read"}), {"contents": "read"})
+            self.assertEqual(job["runs-on"], "ubuntu-latest")
+
+    def test_ui_journeys_run_whole_off_pull_requests_and_skip_only_on_an_empty_selection(self):
+        jobs = workflow("ci-frontend.yml")["jobs"]
+        plan, journeys, gate = jobs["journey-plan"], jobs["journeys"], jobs["javascript"]
+        for forbidden in ("if", "continue-on-error"):
+            self.assertNotIn(forbidden, plan)
+        self.assertEqual(plan["outputs"], {"only": "${{ steps.select.outputs.only }}",
+                                           "shards": "${{ steps.select.outputs.shards }}"})
+        checkout, select = plan["steps"]
+        self.assertEqual(checkout["with"], {"fetch-depth": "2"})  # the merge commit's parents
+        self.assertEqual(select["run"], 'python3 -m scripts.devloop.ci matrix --shards 16 >> "$GITHUB_OUTPUT"')
+        for step in plan["steps"]:
+            for forbidden in ("if", "continue-on-error", "shell"):
+                self.assertNotIn(forbidden, step)
+        self.assertEqual(journeys["needs"], "journey-plan")
+        self.assertEqual(journeys["if"], "needs.journey-plan.outputs.shards != '[]'")
+        self.assertNotIn("continue-on-error", journeys)
+        self.assertEqual(journeys["strategy"]["matrix"]["shard"],
+                         "${{ fromJSON(needs.journey-plan.outputs.shards) }}")
+        self.assertEqual(journeys["env"], {"JOURNEY_SELECTION": "${{ needs.journey-plan.outputs.only }}"})
+        self.assertLessEqual({"journey-plan", "journeys"}, set(gate["needs"]))
+        check = gate["steps"][0]["run"]
+        expected = json.loads(check.split("const expected = ", 1)[1].split(";", 1)[0])
+        self.assertLessEqual({"journey-plan", "journeys"}, set(expected))
+        self.assertIn("const noJourneys = plan.result === 'success' && plan.outputs?.shards === '[]';", check)
+        self.assertIn("name === 'journeys' && noJourneys ? 'skipped' : 'success'", check)
+        self.assertEqual(check.count("'skipped'"), 1)
 
     def test_stable_release_requires_explicit_dispatch(self):
         self.assertEqual(triggers(workflow("release.yml")), {"workflow_dispatch"})

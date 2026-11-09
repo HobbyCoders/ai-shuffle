@@ -1,5 +1,9 @@
 {
-	"$comment": "Changed file → UI journeys it needs (select.mjs). Paths are repo-relative globs (** any depth, * within a name). A file matching an 'all' rule runs every journey; otherwise the union of every matching rule. Tests (*.test.ts) never select anything. Keep this in step when adding a journey: every journey must be reachable from some rule (select.mjs --check).",
+	"$comment": "Changed file → UI journeys it needs (select.mjs). Paths are repo-relative globs (** any depth, * within a name). A file matching an 'all' rule runs every journey; otherwise the union of every matching rule. Tests (*.test.ts) never select anything. On a pull request (select.mjs --ci) a changed non-test file under 'unmapped_runs_all' that no rule covers also runs every journey; a local selection does not. There, an edit to this file is judged against the base's copy: the other changed files run what either copy names, so an edit can add journeys to the run but never drop one. Keep this in step when adding a journey: every journey must be reachable from some rule (select.mjs --check).",
+	"unmapped_runs_all": {
+		"why": "a UI source file no rule covers: the map cannot say which journeys it needs",
+		"globs": ["frontend/src/**", "frontend/static/**"]
+	},
 	"all": [
 		{
 			"why": "the journeys' own harness and the recorder they judge by",
@@ -7,6 +11,8 @@
 				"frontend/tests/journeys/runner.mjs",
 				"frontend/tests/journeys/lib/**",
 				"frontend/tests/journeys/map.json",
+				"frontend/tests/journeys/select.mjs",
+				".github/workflows/ci-frontend.yml",
 				"frontend/tests/flight-recorder/**",
 				"browser-mcp/src/recorder/**",
 				"frontend/src/lib/utils/ui-signature.ts"
@@ -634,6 +640,11 @@
 				"app/api/git.py",
 				"app/core/git_commit_ops.py"
 			]
+		},
+		{
+			"why": "in-app documentation text: no journey reads it, so it needs none (and is not an uncovered UI source file)",
+			"journeys": [],
+			"globs": ["frontend/src/lib/docs/content/**"]
 		},
 		{
 			"why": "a journey file itself",
