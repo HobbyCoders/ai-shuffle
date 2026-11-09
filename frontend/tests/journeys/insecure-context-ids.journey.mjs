@@ -88,6 +88,8 @@ await runJourney({
 	// On a loopback address the built app's service worker would answer
 	// auth/status itself, past the page routes that keep /setup open.
 	browser: async () => ({ context: { serviceWorkers: 'block' } }),
+	// A slower network does not change how an id is made.
+	throttles: ['fast'],
 	cases: [
 		{
 			name: 'pairing-exchange',
