@@ -380,6 +380,11 @@
 			]
 		},
 		{
+			"why": "the live thinking estimate reaches the working line, keeps climbing and never lands in the transcript, across the real stream and a reload",
+			"journeys": ["thinking-progress"],
+			"globs": ["frontend/tests/journeys/thinking-progress.journey.mjs", "frontend/src/lib/components/chat/TurnActivity.svelte", "app/core/system_message_filter.py", "scripts/devloop/fake_claude/scenarios/long-think.json"]
+		},
+		{
 			"why": "stopping a turn",
 			"journeys": ["stop-midstream", "chat-send-stream", "stop-holds-the-reader", "stop-with-queued-messages"],
 			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
