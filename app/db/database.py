@@ -3947,9 +3947,10 @@ def run_database_maintenance(
     - Cleanup of the usage ledger (older than USAGE_LOG_RETENTION_DAYS)
 
     Args:
-        skip_vacuum: If True, skip the VACUUM step. Used when sessions are
-            actively streaming to avoid holding an exclusive lock that would
-            block all reads and writes for seconds.
+        skip_vacuum: Legacy streaming hint. If True, run a light plain VACUUM
+            without ANALYZE instead of skipping reclamation indefinitely. Both
+            modes disable tail truncation (the part that needs an exclusive lock)
+            and skip relations whose maintenance lock is busy. Never VACUUM FULL.
 
     Returns:
         dict with maintenance results.
@@ -4024,47 +4025,47 @@ def run_database_maintenance(
     if stop is not None and stop.is_set():
         return results
 
-    # 3. VACUUM — reclaims disk space. Must run outside a transaction.
-    # Skipped when sessions are actively streaming to avoid an exclusive lock
-    # that would block all reads and writes for potentially several seconds.
-    if skip_vacuum:
-        results["vacuum"] = "skipped (active streaming)"
-        logger.info("VACUUM skipped — active streaming sessions detected")
-    else:
+    # Plain VACUUM frees pages for reuse, not disk space. Disable tail truncation
+    # so streaming can never starve it out of fear of an exclusive table lock.
+    try:
+        vacuum_conn = get_connection()
+        vacuum_cursor = None
         try:
-            conn = get_connection()
+            exempt_from_start_pressure(vacuum_conn)
+            # Postgres VACUUM cannot run inside a transaction block
+            vacuum_conn.autocommit = True
+            vacuum_cursor = vacuum_conn.cursor()
+            # Parallel index vacuum allocates dynamic shared memory; on a
+            # container with a small /dev/shm it fails with "could not
+            # resize shared memory segment". A serial vacuum needs none.
+            with vacuum_timeouts(vacuum_cursor):
+                if isinstance(vacuum_cursor, psycopg2.extensions.cursor):
+                    vacuum_cursor.execute("SET max_parallel_maintenance_workers = 0")
+                options = "SKIP_LOCKED, TRUNCATE FALSE, PARALLEL 0"
+                if not skip_vacuum:
+                    options += ", ANALYZE"
+                vacuum_cursor.execute(f"VACUUM ({options})")
+            results["vacuum"] = "ok"
+        finally:
+            # Cleanup belongs only to this checkout, even if initialization
+            # failed before creating a cursor. Never reuse ANALYZE's cursor.
             try:
-                exempt_from_start_pressure(conn)
-                # Postgres VACUUM cannot run inside a transaction block
-                conn.autocommit = True
-                cursor = conn.cursor()
-                # Parallel index vacuum allocates dynamic shared memory; on a
-                # container with a small /dev/shm it fails with "could not
-                # resize shared memory segment". A serial vacuum needs none.
-                with vacuum_timeouts(cursor):
-                    cursor.execute("SET max_parallel_maintenance_workers = 0")
-                    cursor.execute("VACUUM ANALYZE")
-                results["vacuum"] = "ok"
+                if vacuum_cursor is None:
+                    vacuum_conn.close()
+                else:
+                    if isinstance(vacuum_cursor, psycopg2.extensions.cursor):
+                        vacuum_cursor.execute("RESET max_parallel_maintenance_workers")
+                    vacuum_conn.autocommit = False
+            except Exception:
+                # Failed initialization/restoration must not return an altered
+                # connection to service, including an autocommit reset failure.
+                vacuum_conn.close()
             finally:
-                # VACUUM uses a session setting; do not leak it to the next borrower.
-                try:
-                    conn.cursor().execute("RESET max_parallel_maintenance_workers")
-                except Exception:
-                    # A connection we cannot reset must not return to service.
-                    conn.close()
-                # Always reset autocommit before returning to pool,
-                # even if VACUUM raises — otherwise the pooled connection
-                # is left in autocommit mode, breaking transaction semantics
-                # for all subsequent callers.
-                try:
-                    conn.autocommit = False
-                except Exception:
-                    pass
                 from app.db.base import _close_connection
-                _close_connection(conn)
-        except Exception as e:
-            results["vacuum"] = f"error: {e}"
-            logger.warning(f"VACUUM failed: {e}")
+                _close_connection(vacuum_conn)
+    except Exception as e:
+        results["vacuum"] = f"error: {e}"
+        logger.warning(f"VACUUM failed: {e}")
 
     logger.info(f"Database maintenance completed: {results}")
     return results

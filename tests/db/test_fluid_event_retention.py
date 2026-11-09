@@ -114,10 +114,10 @@ def test_retention_pages_across_sessions_and_sequence_numbers(mock_db, monkeypat
     finally:
         mock_db.set_trace_callback(None)
     deletes = [q for q in queries if q.startswith("DELETE FROM fluid_session_events")]
-    assert len(deletes) == 5
-    assert "(session_id, seq) > ('sdk-a', 3)" in deletes[1]
-    assert "(session_id, seq) > ('sdk-b', 1)" in deletes[2]
-    assert "(session_id, seq) > ('sdk-c', 3)" in deletes[-1]
+    assert len(deletes) == 9  # three bounded ranges per session, even if none match
+    assert "seq >= 0 AND seq <= 1" in deletes[0]
+    assert "seq >= 2 AND seq <= 3" in deletes[1]
+    assert "seq >= 4 AND seq <= 4" in deletes[-1]
     for name in ("sdk-a", "sdk-b", "sdk-c"):
         assert _remaining(name) == ["Usage", "ToolUse"]
 
@@ -241,3 +241,20 @@ def test_retention_default_is_seven_days():
     from app.core.config import Settings
 
     assert Settings.model_fields["fluid_event_retention_days"].default == 7
+
+
+def test_sparse_retained_ranges_do_not_end_the_pass(mock_db, monkeypatch):
+    from app.db import fluid_events
+
+    monkeypatch.setattr(fluid_events, "BATCH_SIZE", 2)
+    _mk_session("s-sparse", "sdk-sparse", idle_days=30)
+    _seed_events("sdk-sparse", ["Usage"] * 6 + ["TextDelta", "ToolUse"])
+    assert prune_fluid_delta_events() == 1
+    assert _remaining("sdk-sparse") == ["Usage"] * 6 + ["ToolUse"]
+
+
+def test_empty_sdk_id_retains_the_existing_idle_policy(mock_db):
+    _mk_session("s-empty", "", idle_days=30)
+    _seed_events("", ["TextDelta", "Usage"])
+    assert prune_fluid_delta_events() == 1
+    assert _remaining("") == ["Usage"]
