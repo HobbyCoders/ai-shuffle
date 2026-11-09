@@ -9,6 +9,8 @@ import { page } from '$app/state';
 
 type Entry = Record<string, unknown>;
 const h = vi.hoisted(() => ({ stack: [] as Record<string, unknown>[], index: 0 }));
+/** SvelteKit numbers every entry and keeps that number across a reload. */
+const numberEntry = vi.hoisted(() => () => history.replaceState({ 'sveltekit:history': 1000 + h.index }, ''));
 const active = vi.hoisted(() => ({ store: null as unknown as ReturnType<typeof writable<{ sessionId: string | null }>> }));
 
 vi.mock('$app/navigation', async () => {
@@ -19,6 +21,7 @@ vi.mock('$app/navigation', async () => {
 			h.stack = [...h.stack.slice(0, h.index + 1), state];
 			h.index = h.stack.length - 1;
 			page.state = state;
+			numberEntry();
 		},
 		replaceState: (_url: string, state: Entry) => {
 			h.stack[h.index] = state;
@@ -49,13 +52,18 @@ vi.mock('$lib/stores/layout.svelte', async () => {
 vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { current: { sessions: [] } } }));
 
 import { followChatHistory, openSession, openSessionFromList } from '$lib/services/session-navigation';
-import { settingsNav } from './navigation.svelte';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { settingsNav, SettingsNavigation } from './navigation.svelte';
+
+let nav: SettingsNavigation = settingsNav;
 
 /** Land on an entry the way the app does; a stale entry can move again. */
 function land(delta: number, settingsOnScreen = true) {
 	h.index += delta;
 	page.state = h.stack[h.index];
-	settingsNav.followHistory(page.state as never, settingsOnScreen);
+	numberEntry();
+	nav.followHistory(page.state as never, settingsOnScreen);
 	followChatHistory(page.state);
 }
 const openChat = () => get(active.store).sessionId;
@@ -65,6 +73,8 @@ beforeEach(() => {
 	h.stack = [{}];
 	h.index = 0;
 	page.state = {};
+	numberEntry();
+	nav = settingsNav;
 	active.store.set({ sessionId: null });
 	settingsNav.reset();
 	sessionStorage.clear();
@@ -188,5 +198,88 @@ describe('Settings and chat in one history', () => {
 		land(-1);
 		expect(h.index).toBe(0);
 		expect(settingsNav.view).toBe('index');
+	});
+});
+
+describe('a reload, which SvelteKit answers by emptying the current entry', () => {
+	/** A new document: the entry loses its state, Settings restores from storage. */
+	function reload() {
+		h.stack[h.index] = {};
+		page.state = {};
+		nav = new SettingsNavigation();
+		nav.stacked = true;
+		nav.startStack(page.state as never);
+	}
+
+	function atClaudeDetail() {
+		settingsNav.stacked = true;
+		settingsNav.resetStack('index');
+		settingsNav.go({ category: 'providers', item: 'claude:subscription' });
+		expect(h.stack).toHaveLength(3);
+	}
+
+	it('stays on its entry and Back walks out through the list', () => {
+		atClaudeDetail();
+		const detail = { ...here() };
+
+		reload();
+
+		expect(h.stack).toHaveLength(3);
+		expect(here()).toEqual(detail);
+		expect(nav.view).toBe('detail');
+		expect(nav.depth).toBe(2);
+		land(-1);
+		expect(nav.view).toBe('page');
+		land(-1);
+		expect(nav.view).toBe('index');
+		expect(h.index).toBe(0); // the next Back leaves Settings
+	});
+
+	it('leaves the reloaded entry whole for Forward', () => {
+		atClaudeDetail();
+		reload();
+		land(-1);
+		land(+1);
+		expect(nav.view).toBe('detail');
+		expect(nav.depth).toBe(2);
+	});
+
+	it('survives a second reload further down the stack', () => {
+		atClaudeDetail();
+		reload();
+		land(-1);
+		reload();
+		expect(h.index).toBe(1); // no new step: the page's own entry was adopted
+		expect(nav.view).toBe('page');
+		expect(nav.depth).toBe(1);
+		land(-1);
+		expect(nav.view).toBe('index');
+	});
+
+	it('never claims a chat entry, even one carrying copied markers', () => {
+		openSession('chat-a');
+		settingsNav.stacked = true;
+		settingsNav.selectCategory('security');
+		openSessionFromList('chat-b');
+		settingsNav.followHistory(here() as never, false);
+		expect(here().chatSession).toBe('chat-b');
+		const chatEntryAt = h.index;
+
+		reload();
+
+		expect(h.stack[chatEntryAt]).toEqual({});
+		expect(h.stack).toHaveLength(chatEntryAt + 2);
+	});
+
+	it('does not claim an entry whose number it does not know', () => {
+		atClaudeDetail();
+		history.replaceState({ 'sveltekit:history': 5 }, '');
+		reload();
+		expect(h.stack).toHaveLength(5);
+	});
+
+	it('reads the number from where SvelteKit still puts it', () => {
+		const constants = readFileSync(resolve('node_modules/@sveltejs/kit/src/runtime/client/constants.js'), 'utf8');
+		expect(constants).toContain("HISTORY_INDEX = 'sveltekit:history'");
 	});
 });

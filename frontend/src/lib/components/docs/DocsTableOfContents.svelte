@@ -6,7 +6,7 @@
 	 * the active section based on scroll position.
 	 */
 	import type { DocSection } from '$lib/docs/types';
-	import { onMount, tick } from 'svelte';
+	import { tick } from 'svelte';
 
 	interface Props {
 		headings: DocSection[];
@@ -20,20 +20,30 @@
 	let activeId = $state('');
 	let chosenUntil = 0;
 
-	// Scroll-spy via IntersectionObserver
-	let observer: IntersectionObserver | null = null;
+	/** Where a heading counts as reached: the top 30% of the reading pane. */
+	const REACHED_FRACTION = 0.3;
 
-	onMount(() => {
-		return () => {
-			observer?.disconnect();
-		};
-	});
+	/**
+	 * The heading the reader is in, from where the headings are now. It holds
+	 * after a jump (End, dragging the scrollbar), which skips past a heading
+	 * without it ever passing a marker.
+	 */
+	function headingAtScroll(root: HTMLElement): string {
+		// The last heading can never reach the line on a page that ends right under it.
+		if (root.scrollHeight - root.scrollTop - root.clientHeight < 8) return headings[headings.length - 1].id;
+		const line = root.getBoundingClientRect().top + root.clientHeight * REACHED_FRACTION;
+		let current = '';
+		for (const heading of headings) {
+			const el = document.getElementById(heading.id);
+			if (!el) continue;
+			if (el.getBoundingClientRect().top > line) break;
+			current = heading.id;
+		}
+		return current;
+	}
 
 	$effect(() => {
-		observer?.disconnect();
-
 		if (headings.length === 0) return;
-		let onScroll: (() => void) | undefined;
 		let removeScroll: (() => void) | undefined;
 		let resize: ResizeObserver | undefined;
 
@@ -42,49 +52,35 @@
 			const root = scrollContainer;
 			if (!root) return;
 
-			observer = new IntersectionObserver(
-				(entries) => {
-					for (const entry of entries) {
-						if (entry.isIntersecting) {
-							activeId = entry.target.id;
-						}
-					}
-				},
-				{
-					root: root,
-					rootMargin: '-80px 0px -70% 0px',
-					threshold: 0
-				}
-			);
-
-			for (const heading of headings) {
-				const el = document.getElementById(heading.id);
-				if (el) observer.observe(el);
-			}
-
-			// The last heading can never reach the observer's band on a page
-			// that ends right under it, so the end of the page selects it.
-			onScroll = () => {
-				if (performance.now() < chosenUntil) return;
-				if (root.scrollHeight - root.scrollTop - root.clientHeight < 8) activeId = headings[headings.length - 1].id;
+			// How far the pane's top is past the current heading. Measured before
+			// a reflow, because the resize callback only runs after one.
+			let pastHeading = 0;
+			const headingTop = () => {
+				const el = activeId ? document.getElementById(activeId) : null;
+				return el ? el.getBoundingClientRect().top - root.getBoundingClientRect().top : null;
+			};
+			const onScroll = () => {
+				if (performance.now() >= chosenUntil) activeId = headingAtScroll(root);
+				pastHeading = -(headingTop() ?? 0);
 			};
 			root.addEventListener('scroll', onScroll, { passive: true });
-			removeScroll = () => root.removeEventListener('scroll', onScroll!);
-			onScroll(); // The reader may already be at the end when this list starts.
+			removeScroll = () => root.removeEventListener('scroll', onScroll);
+			onScroll(); // The reader may already be part way down when this list starts.
 
-			// A new width reflows the text: keep the current heading in view.
+			// A new width reflows the text: keep the reader the same distance past
+			// the current heading, rather than back at its start.
 			let width = root.clientWidth;
 			resize = new ResizeObserver(() => {
 				if (root.clientWidth === width) return;
 				width = root.clientWidth;
-				if (activeId && root.scrollTop > 0) document.getElementById(activeId)?.scrollIntoView({ block: 'start' });
+				const top = headingTop();
+				if (top !== null && root.scrollTop > 0) root.scrollTop += top + pastHeading;
 			});
 			resize.observe(root);
 		}, 100);
 
 		return () => {
 			clearTimeout(timer);
-			observer?.disconnect();
 			resize?.disconnect();
 			removeScroll?.();
 		};

@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { tick } from 'svelte';
 
 const mocks = vi.hoisted(() => ({ pushState: vi.fn(), supportCaps: vi.fn() }));
@@ -35,6 +35,7 @@ import { registerSearchShortcut } from '$lib/services/search-shortcut';
 import { FEATURE_PANEL_CONTEXT } from '$lib/components/layout/feature-panel-context';
 import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
 import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
+import { loadCollection } from '../pages';
 import SettingsShell from './SettingsShell.svelte';
 import PanelHost from '../../layout/view/test-fixtures/PanelHost.svelte';
 
@@ -271,6 +272,10 @@ describe('SettingsShell Ctrl+K', () => {
 });
 
 describe('SettingsShell read-only', () => {
+	// The banner's link opens a lazily imported page. Import it first, so this
+	// test measures the link and not how busy the runner is.
+	beforeAll(async () => { await loadCollection('devices'); }, 60_000);
+
 	it('shows the approval banner and disables controls', async () => {
 		admin.set(false);
 		render(SettingsShell);
@@ -282,8 +287,7 @@ describe('SettingsShell read-only', () => {
 		}
 		expect((screen.getByRole('combobox', { name: 'Time zone' }) as HTMLSelectElement).disabled).toBe(true);
 		await fireEvent.click(screen.getByRole('button', { name: 'Open Devices' }));
-		// The Devices page is a lazy chunk; its first import can outlast the default wait on a busy runner.
-		await screen.findByRole('heading', { level: 1, name: 'Devices' }, { timeout: 5000 });
+		await screen.findByRole('heading', { level: 1, name: 'Devices' });
 	});
 });
 
