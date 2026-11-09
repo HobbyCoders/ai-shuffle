@@ -443,11 +443,22 @@ def test_readable_holder_is_named_without_its_private_path(processes, caplog, fi
     assert str(path) not in caplog.text
 
 
-def test_holder_details_are_capped_and_names_sanitized(processes, caplog):
-    _, add, root = processes
+@pytest.mark.parametrize("reverse", [False, True])
+def test_holder_details_are_capped_and_names_sanitized(processes, caplog, monkeypatch, reverse):
+    from contextlib import nullcontext
+    proc, add, root = processes
+    scan = os.scandir
+    def ordered(path):
+        if Path(path) == proc:
+            with scan(path) as entries:
+                return nullcontext(iter(sorted(entries, key=lambda entry: entry.name, reverse=reverse)))
+        return scan(path)
+    monkeypatch.setattr(sr.os, "scandir", ordered)
     paths = []
     for index in range(12):
-        path = session(root, f"held-{index}")
+        # Equal-width keys cannot prefix-match another holder's cwd. Reference
+        # matching is conservative; held-1 would also match held-10/held-11.
+        path = session(root, f"held-{index:02d}")
         paths.append(path)
         base = add(881000 + index, ["python"], cwd=path)
         (base / "comm").write_text("long/name\n" + "x" * 1000)

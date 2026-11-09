@@ -303,12 +303,12 @@ def _references(proc, deadline, *, protected_prefixes=None, strict=False, on_dis
                 continue  # exited during observation
             except PermissionError:
                 try:
-                    references.add_owned(os.fsdecode((base / "cmdline").read_bytes()).replace("\0", " "), owner)
-                    if strict and _managed_postgres(base, proc, deadline):
-                        continue
                     unrelated = (_uninspectable_is_unrelated(base, proc, protected_prefixes, strict=True)
                                  if strict else _uninspectable_is_unrelated(base, proc, protected_prefixes))
                     if unrelated and not strict:
+                        continue  # Preserve non-strict UID/init proofs without cmdline access.
+                    references.add_owned(os.fsdecode((base / "cmdline").read_bytes()).replace("\0", " "), owner)
+                    if strict and _managed_postgres(base, proc, deadline):
                         continue
                     if strict:
                         try:

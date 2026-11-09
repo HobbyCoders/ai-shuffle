@@ -41,9 +41,30 @@ def folder(root, name="s", count=1):
 
 def age(path, stamp=1):
     for parent, dirs, files in os.walk(path):
+        # Windows cannot utime(..., follow_symlinks=False). Prune links/reparse
+        # points first so the portable call never touches an outside target.
+        dirs[:] = [name for name in dirs if not ss._linked((Path(parent) / name).lstat())]
         for name in [*dirs, *files]:
-            os.utime(Path(parent) / name, (stamp, stamp), follow_symlinks=False)
+            entry = Path(parent) / name
+            if not ss._linked(entry.lstat()):
+                os.utime(entry, (stamp, stamp))
     os.utime(path, (stamp, stamp))
+
+
+def test_age_helper_does_not_require_no_follow_utime(tmp_path, monkeypatch):
+    path = tmp_path / "aging"
+    nested = path / "nested"
+    nested.mkdir(parents=True)
+    payload = nested / "payload"
+    payload.write_bytes(b"data")
+    utime = os.utime
+    def windows_utime(path, times, **kwargs):
+        if "follow_symlinks" in kwargs:
+            raise NotImplementedError("utime: follow_symlinks unavailable on this platform")
+        return utime(path, times, **kwargs)
+    monkeypatch.setattr(os, "utime", windows_utime)
+    age(path)
+    assert all(entry.stat().st_mtime == 1 for entry in (path, nested, payload))
 
 
 def test_settled_scratch_removed_durable_siblings_survive_and_can_recreate(world):
@@ -186,7 +207,7 @@ def test_one_failed_folder_does_not_starve_siblings(world, monkeypatch):
     assert bad.exists() and not good.exists()
 
 
-def test_symlinks_are_not_followed(world, tmp_path, requires_symlinks):
+def test_symlinks_are_not_followed(world, tmp_path, requires_symlinks, monkeypatch):
     root, _, sweep = world
     path = folder(root)
     outside = tmp_path / "outside"
@@ -194,9 +215,16 @@ def test_symlinks_are_not_followed(world, tmp_path, requires_symlinks):
     (outside / "keep").write_text("durable")
     (path / "link").symlink_to(outside, target_is_directory=True)
     (path.parent / "linked-session").symlink_to(outside, target_is_directory=True)
+    outside_mtime = (outside / "keep").stat().st_mtime_ns
     age(path)
-    assert sweep.step() == 1
+    # Let the link itself become quiet without requiring unsupported Windows
+    # no-follow utime. Windows retains reparse trees; POSIX unlinks the link.
+    future = time.time() + ss.QUIET_SECONDS + 1
+    monkeypatch.setattr(ss.time, "time", lambda: future)
+    assert sweep.step() == (0 if os.name == "nt" else 1)
+    assert path.exists() == (os.name == "nt")
     assert (outside / "keep").read_text() == "durable"
+    assert (outside / "keep").stat().st_mtime_ns == outside_mtime
     assert (path.parent / "linked-session").is_symlink()
 
 
@@ -222,10 +250,12 @@ def test_windows_junction_never_recurses(world, tmp_path):
     (outside / "keep").write_text("durable")
     junction = path / "junction"
     subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)], check=True, capture_output=True)
-    os.utime(path, (1, 1))
+    outside_mtime = (outside / "keep").stat().st_mtime_ns
+    age(path)  # Prunes the real junction without touching its target.
     try:
         assert sweep.step() == 0
         assert (outside / "keep").read_text() == "durable"
+        assert (outside / "keep").stat().st_mtime_ns == outside_mtime
     finally:
         junction.rmdir()  # remove the link only, never its target
 
