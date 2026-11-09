@@ -346,6 +346,99 @@ describe('TurnNavigator', () => {
 				expect(onSelect).toHaveBeenCalledWith(3);
 			});
 
+			describe('the press the rail acts on keeps its own reading', () => {
+				const mouse = { pointerType: 'mouse', isPrimary: true, pointerId: 1 };
+				const secondFinger = { pointerType: 'touch', isPrimary: false, pointerId: 9 };
+				/** A finger lands on the rail and that press closes the popup. */
+				async function pressThatCloses(ticks: HTMLElement[]) {
+					document.addEventListener('pointerdown', closeTrigger, true);
+					await fireEvent.pointerDown(ticks[0], { ...touch, clientY: centre(0) });
+					document.removeEventListener('pointerdown', closeTrigger, true);
+					expect(trigger.getAttribute('aria-expanded')).toBe('false');
+				}
+				function railWithTicks() {
+					const view = renderRail();
+					return { ...view, rail: layOut(view.container), ticks: screen.getAllByRole('button', { name: /^Turn/ }) };
+				}
+
+				it('a second finger does not undo the first finger having closed it', async () => {
+					const { onSelect, rail, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerDown(ticks[2], { ...secondFinger, clientY: centre(2) });
+					await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
+					await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+
+				it('a second finger landing as the first lifts does not free its click', async () => {
+					const { onSelect, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerUp(ticks[0], { ...touch, clientY: centre(0) });
+					await fireEvent.pointerDown(ticks[2], { ...secondFinger, clientY: centre(2) });
+					await fireEvent.click(ticks[0], { detail: 1 });
+					await new Promise((resolve) => setTimeout(resolve, 0));
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+
+				it('a mouse press during the finger does not free its slide', async () => {
+					const { onSelect, rail, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerDown(document.body, mouse);
+					await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
+					await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+
+				it('a mouse press during the finger does not free its tap', async () => {
+					const { onSelect, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerDown(document.body, mouse);
+					await fireEvent.pointerUp(ticks[0], { ...touch, clientY: centre(0) });
+					await fireEvent.click(ticks[0], { detail: 1 });
+					await new Promise((resolve) => setTimeout(resolve, 0));
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+
+				it('a finger whose lift was lost leaves nothing for a later mouse click or tap', async () => {
+					const { onSelect, ticks } = railWithTicks();
+					await pressThatCloses(ticks);
+					await fireEvent.pointerDown(ticks[1], mouse);
+					await fireEvent.click(ticks[1], { detail: 1 });
+					expect(onSelect).toHaveBeenCalledTimes(1);
+					expect(onSelect).toHaveBeenLastCalledWith(1);
+					await tap(ticks[3], 3);
+					expect(onSelect).toHaveBeenCalledTimes(2);
+					expect(onSelect).toHaveBeenLastCalledWith(3);
+				});
+
+				it('a second finger on the rail while the first is elsewhere does nothing and leaves nothing', async () => {
+					const { onSelect, rail, ticks } = railWithTicks();
+					await fireEvent.pointerDown(document.body, { ...touch, clientY: 400 });
+					await fireEvent.pointerDown(ticks[2], { ...secondFinger, clientY: centre(2) });
+					await fireEvent.pointerMove(rail, { ...secondFinger, clientY: centre(4) });
+					await fireEvent.pointerUp(ticks[2], { ...secondFinger, clientY: centre(4) });
+					await fireEvent.pointerUp(document.body, { ...touch, clientY: 400 });
+					expect(onSelect).not.toHaveBeenCalled();
+					expect(rail.closest('nav')?.classList.contains('is-scrubbing')).toBe(false);
+					await tap(ticks[3], 3);
+					expect(onSelect).toHaveBeenCalledTimes(1);
+					expect(onSelect).toHaveBeenLastCalledWith(3);
+				});
+
+				it('a newer press during the wait does not change what the tap closed', async () => {
+					document.addEventListener('click', closeTrigger);
+					const { onSelect, ticks } = railWithTicks();
+					vi.useFakeTimers();
+					await fireEvent.pointerDown(ticks[3], { ...touch, clientY: centre(3) });
+					await fireEvent.pointerUp(ticks[3], { ...touch, clientY: centre(3) });
+					await fireEvent.click(ticks[3], { detail: 1 });
+					document.removeEventListener('click', closeTrigger);
+					await fireEvent.pointerDown(document.body, { ...touch, pointerId: 4, clientY: 400 });
+					vi.advanceTimersByTime(1);
+					expect(onSelect).not.toHaveBeenCalled();
+				});
+			});
+
 			it('does not select after the rail has gone away', async () => {
 				const { onSelect, tick, unmount } = renderRail();
 				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });

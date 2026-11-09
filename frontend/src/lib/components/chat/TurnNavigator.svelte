@@ -134,6 +134,9 @@
 		lastFrame: number;
 		/** This press closes an open sheet or picker, so the rail does nothing with it. */
 		dismissing: boolean;
+		/** What this press read at the window. The gesture holds its own copy because a
+		 *  mouse press has to replace the shared one, and the rail starts no gesture for it. */
+		expanded: Element[];
 	}
 	let scrub: Scrub | null = null;
 	let scrubbing = $state(false);
@@ -147,30 +150,34 @@
 	let expandedAtPress: Element[] = [];
 
 	function readExpandedAtPress(event: PointerEvent) {
+		// The rail ignores a second finger, so it must not replace the first finger's reading.
+		if (event.isPrimary === false) return;
 		expandedAtPress =
 			event.pointerType === 'mouse'
 				? []
 				: [...document.querySelectorAll('[aria-haspopup][aria-expanded="true"]')].filter((t) => !t.closest('[inert]'));
 	}
 
-	/** Did this press close a popup? A press that dismisses one must not also act on
-	 *  what is beneath it. Asking what really closed, not what looks open, lets a popup
-	 *  the rail cannot close (one left behind a collapsed sidebar) never block a tap. */
-	function pressClosedPopup(): boolean {
-		return expandedAtPress.some((t) => !t.isConnected || t.getAttribute('aria-expanded') !== 'true');
+	/** Did the press that read these triggers close a popup? A press that dismisses one
+	 *  must not also act on what is beneath it. Asking what really closed, not what looks
+	 *  open, lets a popup the rail cannot close (one left behind a collapsed sidebar)
+	 *  never block a tap. */
+	function pressClosedPopup(expanded: Element[]): boolean {
+		return expanded.some((t) => !t.isConnected || t.getAttribute('aria-expanded') !== 'true');
 	}
 
 	function selectFromTap(index: number, event: MouseEvent) {
 		// A keyboard click has no press of its own to read.
-		if (event.detail === 0 || expandedAtPress.length === 0) {
+		const expanded = expandedAtPress;
+		if (event.detail === 0 || expanded.length === 0) {
 			onSelect(index);
 			return;
 		}
-		if (pressClosedPopup()) return;
+		if (pressClosedPopup(expanded)) return;
 		// Many popups close on this same click at the document or window, after this
 		// handler has run, so the answer is only known once the event has finished.
 		pendingSelect = setTimeout(() => {
-			if (!pressClosedPopup()) onSelect(index);
+			if (!pressClosedPopup(expanded)) onSelect(index);
 		}, 0);
 	}
 
@@ -265,7 +272,8 @@
 			selected: null,
 			startTick: landed && rail ? Array.prototype.indexOf.call(rail.children, landed) : -1,
 			lastFrame: 0,
-			dismissing: false
+			dismissing: false,
+			expanded: expandedAtPress
 		};
 	}
 
@@ -274,7 +282,7 @@
 		scrub.y = event.clientY;
 		if (!scrub.active) {
 			if (Math.abs(scrub.y - scrub.startY) < SCRUB_SLOP_PX) return;
-			if (pressClosedPopup()) {
+			if (pressClosedPopup(scrub.expanded)) {
 				scrub.dismissing = true;
 				return;
 			}
@@ -294,6 +302,8 @@
 
 	function onRailPointerEnd(event: PointerEvent) {
 		if (!scrub || event.pointerId !== scrub.pointerId) return;
+		// The click that follows this lift belongs to this press.
+		expandedAtPress = scrub.expanded;
 		endScrub(event.type === 'pointerup');
 	}
 
