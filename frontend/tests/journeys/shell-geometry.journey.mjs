@@ -91,10 +91,14 @@ await runJourney({name:'shell-geometry', allow:[...DEV_INSTANCE_NOISE, {
   // The answer sets the page's shape, and a slow one must not move what is on screen (#1270).
   name:'cloud-slow-license', viewports:['desktop','phone'], throttles:['slow'],
   async setup({page,status}) {
-   await page.route(/\/api\/v1\/license(?:\?|$)/, async route => {
-    const response=await route.fetch();
-    await new Promise(done=>setTimeout(done,1000));
-    await route.fulfill({response});
+   // In the page's own fetch: page.route cannot see a call the built app's service worker owns.
+   await page.addInitScript(()=>{
+    const real=window.fetch;
+    window.fetch=async(...args)=>{
+     const answer=await real.apply(window,args);
+     if(/\/api\/v1\/license(?:\?|$)/.test(String(args[0]?.url??args[0]))) await new Promise(done=>setTimeout(done,1000));
+     return answer;
+    };
    });
    await gotoApp(page,status);
    const nav=page.getByRole('navigation',{name:'Workspace',exact:true});
