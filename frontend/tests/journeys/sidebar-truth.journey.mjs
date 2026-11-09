@@ -777,10 +777,6 @@ async function traceRowTop(page, id) {
 
 const NEW_CHAT_GLIDE_HAS_NO_STEP = {
 	name: 'new-chat-glide-has-no-step',
-	// CPU throttling makes the slowed animation clock jump by tens of pixels at
-	// the start of a glide, with or without a step, so only an unthrottled page
-	// can tell the two apart.
-	throttles: ['fast'],
 	setup: crowdedProjects,
 	async act({ page, mark }) {
 		const pushedDown = await page.locator('[data-group="active"] .proj-group').first()
