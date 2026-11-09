@@ -204,7 +204,7 @@
 
 	async function moveHighlight(delta: number) {
 		if (rowValues.length === 0) return;
-		const idx = effectiveHighlighted ? rowValues.indexOf(effectiveHighlighted) : -1;
+		const idx = effectiveHighlighted !== null ? rowValues.indexOf(effectiveHighlighted) : -1;
 		const next = (idx + delta + rowValues.length) % rowValues.length;
 		highlighted = rowValues[next];
 		keyboardCursor = true;
@@ -885,6 +885,7 @@
 {#snippet plainRow(r: ExtraRow)}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div
+		id={rowId(r.value)}
 		class="mpp-row mpp-row-plain"
 		class:selected={value === r.value}
 		class:highlighted={keyboardCursor && effectiveHighlighted === r.value}

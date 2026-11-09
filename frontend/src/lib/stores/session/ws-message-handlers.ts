@@ -389,12 +389,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 	// ── Handler: done ────────────────────────────────────────────────
 
-	function clearLiveThinking(): void {
-		if (getState().liveThinking) update(s => ({ ...s, liveThinking: null }));
+	/** Drop the estimate of this chat's turn. Another chat's estimate stays. */
+	function clearLiveThinking(sessionId: string | null | undefined): void {
+		if (sessionId && getState().liveThinking?.sessionId === sessionId) update(s => ({ ...s, liveThinking: null }));
 	}
 
 	function handleDone(data: Record<string, unknown>): void {
-		clearLiveThinking();
 		const metadata = data.metadata as Record<string, unknown>;
 		const sessionId = data.session_id as string;
 		// done event — the SSE feed folds the streaming→ended transition into
@@ -404,6 +404,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const currentState = getState();
 		const isActiveSession = !sessionId || sessionId === currentState.sessionId;
 		const doneSessionId = sessionId || currentState.sessionId;
+		clearLiveThinking(doneSessionId);
 
 		if (isActiveSession) {
 			clearStopTimeout();
@@ -460,7 +461,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	// ── Handler: stopped / interrupted ───────────────────────────────
 
 	function handleStoppedOrInterrupted(data: Record<string, unknown>): void {
-		clearLiveThinking();
 		// Route by the EVENT's session_id, not the active session — mirror
 		// handleDone. A stopped/interrupted event for a BACKGROUND session must
 		// not clobber the ACTIVE session's pendingTools. Pre-fix this handler
@@ -470,6 +470,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const currentState = getState();
 		const isActiveSession = !sessionId || sessionId === currentState.sessionId;
 		const stoppedSessionId = sessionId || currentState.sessionId;
+		clearLiveThinking(stoppedSessionId);
 
 		if (isActiveSession) {
 			clearStopTimeout();
@@ -953,6 +954,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// (e.g. a pending message becoming the next turn) must not wipe its
 				// live task strip.
 				const startAdoptsNewSession = currentState.sessionId !== sessionId;
+				// A new turn of this chat owes nothing to the last one's estimate.
+				clearLiveThinking(sessionId);
 				if (acceptStart) {
 					if (startAwaitingMatch) pendingQueue.adoptSession(sessionId, currentState.messages.map(m => m.commandId));
 					internal.awaitingNewSession = false;
@@ -1001,7 +1004,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				if (!tuSessionId || tuSessionId !== getState().sessionId) break;
 				const toolId = data.id as string;
 				if (toolId) internal.pendingTools.add(toolId);
-				clearLiveThinking();
+				clearLiveThinking(tuSessionId);
 				break;
 			}
 
@@ -1174,6 +1177,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// moved past raises nothing.
 					const frameTurnId = typeof data.turn_id === 'string' && data.turn_id ? data.turn_id : null;
 					if (erroredSessionId && feedController.raiseTurnError(erroredSessionId, errMessage, frameTurnId) === 'outlived') break;
+					clearLiveThinking(erroredSessionId);
 					update(s => ({
 						...s,
 						error: errMessage,

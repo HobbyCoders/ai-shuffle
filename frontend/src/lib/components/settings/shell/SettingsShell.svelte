@@ -96,7 +96,7 @@
 				// A pending target builds every Back step from the index; otherwise
 				// the page the reader was on stays open (#1043).
 				stackStarted = true;
-				if (initialItemId) settingsNav.resetStack('index');
+				if (initialItemId) settingsNav.resetStack('index', page.state as SettingsHistoryState);
 				else if (!targetLanded) settingsNav.startStack(page.state as SettingsHistoryState);
 			} else if (!s) {
 				stackStarted = false;

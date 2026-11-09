@@ -40,5 +40,5 @@ def test_subagent_and_unusable_estimates_are_dropped():
         assert not _mapper().feed(_frame(bad)).events
 
 
-def test_progress_is_never_stored():
+def test_progress_may_wait_in_the_stream_batch_like_other_droppable_events():
     assert ThinkingProgress in RECONSTRUCTIBLE_EVENTS

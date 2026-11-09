@@ -196,6 +196,26 @@ describe('ModelPickerPanel', () => {
 		expect(row?.dataset.value).toBe(options[1].value);
 	});
 
+	it('names the plain rows too, and arrows on from an empty choice (#1220)', async () => {
+		render(ModelPickerPanel, { props: {
+			groups, options, value: '', onSelect: vi.fn(),
+			leadingRows: [{ value: '', label: 'Use default' }],
+			trailingRows: [{ value: '__custom__', label: 'Custom…' }]
+		} });
+		const search = screen.getByRole('textbox', { name: 'Search models' });
+		const active = () => document.getElementById(search.getAttribute('aria-activedescendant') ?? '');
+
+		await fireEvent.keyDown(search, { key: 'ArrowUp' });
+		await tick();
+		expect(active()?.dataset.value).toBe('__custom__');
+		await fireEvent.keyDown(search, { key: 'ArrowDown' });
+		await tick();
+		expect(active()?.dataset.value).toBe('');
+		await fireEvent.keyDown(search, { key: 'ArrowDown' });
+		await tick();
+		expect(active()?.dataset.value).toBe(options[0].value);
+	});
+
 	it('keeps focus on the star when a row moves into Favorites (#1220)', async () => {
 		render(ModelPickerPanel, { props: { groups, options, value: 'sonnet', onSelect: vi.fn() } });
 		const star = screen.getByRole('button', { name: /add opus to favorites/i });

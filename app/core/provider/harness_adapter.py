@@ -4811,7 +4811,10 @@ class HarnessAdapter(ProviderAdapter):
 
         if cls == "ThinkingProgress":
             # The live thinking estimate. query_engine turns it into a working
-            # line frame; it never becomes a transcript row.
+            # line frame; it never becomes a transcript row. One from before
+            # this turn is replay, and the working line would call it current.
+            if not self._is_live(event):
+                return []
             return [SystemMessage(subtype="thinking_tokens", data={
                 "estimated_tokens": getattr(event, "estimated_tokens", 0),
             })]

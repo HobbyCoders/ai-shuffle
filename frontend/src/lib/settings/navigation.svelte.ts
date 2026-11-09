@@ -12,7 +12,7 @@
  * `page.state` back in through `followHistory`.
  */
 import { get } from 'svelte/store';
-import { pushState } from '$app/navigation';
+import { pushState, replaceState } from '$app/navigation';
 import { activeView, layout } from '$lib/stores/layout.svelte';
 import { isCategoryId, PAGE_TYPES, type CategoryId, type SettingsTarget, type SettingsView } from './types';
 
@@ -22,6 +22,8 @@ export interface SettingsHistoryState {
 	settingsDepth?: number;
 	settingsCategory?: CategoryId;
 	settingsItem?: string;
+	/** Entries below this depth belong to an earlier stack (see `staleBelow`). */
+	settingsStaleBelow?: number;
 }
 
 /** Old `openSettingsTab(tab)` names and where they live now. */
@@ -128,6 +130,11 @@ interface Persisted {
 	view?: SettingsView;
 }
 
+/** How deep a leftover Settings history entry sits; 0 for any other entry. */
+function retainedDepth(state: SettingsHistoryState | null | undefined): number {
+	return state?.settingsView && state.settingsView !== 'index' ? state.settingsDepth ?? 0 : 0;
+}
+
 function tabKey(category: CategoryId, item: string): string {
 	return `${category}:${item}`;
 }
@@ -150,8 +157,13 @@ export class SettingsNavigation {
 	focusRequest = $state<{ pane: 'page' | 'detail'; n: number } | null>(null);
 	/** Bumps when the search box should take focus. */
 	searchFocusRequest = $state(0);
-	/** History entries pushed for the current stack (stacked mode only). */
+	/** Settings history entries from the first one to this one (stacked mode only). */
 	depth = 0;
+	/**
+	 * Entries below this depth were left by an earlier stack, so the pages they
+	 * name are not what the reader is on now. Back skips them to the index.
+	 */
+	private staleBelow = 0;
 	/** The reader chose a page here: a reload or a shrink to one pane keeps it (#1043). */
 	private hasPlace = false;
 	/** Mounted SettingsShell count; `openSettings` updates in place when > 0. */
@@ -271,6 +283,13 @@ export class SettingsNavigation {
 		if (!this.stacked) return;
 		const view = state?.settingsView ?? 'index';
 		this.depth = state?.settingsDepth ?? 0;
+		if (this.depth === 0) this.staleBelow = 0;
+		if (this.depth > 0 && this.depth < this.staleBelow) {
+			this.view = 'index';
+			this.notePlace();
+			if (typeof history !== 'undefined') history.go(-this.depth);
+			return;
+		}
 		if (state?.settingsCategory && isCategoryId(state.settingsCategory)) {
 			this.category = state.settingsCategory;
 			if (state.settingsItem) this.selected[state.settingsCategory] = state.settingsItem;
@@ -279,27 +298,44 @@ export class SettingsNavigation {
 		this.notePlace();
 	}
 
-	/** Put the stack at its start (shell mount in stacked mode, no target). */
-	resetStack(view: SettingsView = 'index'): void {
+	/**
+	 * Put the stack at its start. `state` is the history entry the shell is
+	 * sitting on: when it is left over from an earlier stack, new steps continue
+	 * above it and Back skips it.
+	 */
+	resetStack(view: SettingsView = 'index', state?: SettingsHistoryState | null): void {
 		this.view = view;
-		this.depth = 0;
+		this.depth = retainedDepth(state);
+		this.staleBelow = this.depth ? this.depth + 1 : 0;
 	}
 
 	/**
-	 * The shell just became one pane. Open the page the reader was on, else the
-	 * index. `state` is the history entry a reload came back to: its Back steps
-	 * already exist, so only a place with no entry yet pushes one.
+	 * The shell just became one pane. Open the page the reader is on, else the
+	 * index. `state` is the history entry the shell is sitting on: a reload, or a
+	 * resize that changed nothing, comes back to the entry for this very page and
+	 * keeps its Back steps. Any other entry is left over from an earlier stack, so
+	 * the current page takes it over and never the other way round.
 	 */
 	startStack(state?: SettingsHistoryState | null): void {
 		const place: SettingsView = this.hasPlace && this.view !== 'index' ? this.view : 'index';
-		if (place !== 'index' && state?.settingsView && state.settingsView !== 'index') {
+		if (place !== 'index' && this.entryShows(state, place)) {
+			this.staleBelow = state?.settingsStaleBelow ?? 0;
 			this.followHistory(state);
 			return;
 		}
 		this.resetStack('index');
 		if (place === 'index') return;
-		this.moveTo('page');
+		const retained = retainedDepth(state);
+		this.staleBelow = retained;
+		if (retained) this.depth = retained - 1;
+		this.moveTo('page', retained > 0);
 		if (place === 'detail' && this.selected[this.category]) this.moveTo('detail');
+	}
+
+	private entryShows(state: SettingsHistoryState | null | undefined, place: SettingsView): boolean {
+		return state?.settingsView === place
+			&& state.settingsCategory === this.category
+			&& (place !== 'detail' || state.settingsItem === this.selected[this.category]);
 	}
 
 	/** Settings closed: the next visit starts at the index again. */
@@ -340,6 +376,7 @@ export class SettingsNavigation {
 		this.focusRequest = null;
 		this.searchFocusRequest = 0;
 		this.depth = 0;
+		this.staleBelow = 0;
 		this.hasPlace = false;
 	}
 
@@ -352,7 +389,7 @@ export class SettingsNavigation {
 		this.focusRequest = { pane, n: (this.focusRequest?.n ?? 0) + 1 };
 	}
 
-	private moveTo(view: SettingsView): void {
+	private moveTo(view: SettingsView, replaceEntry = false): void {
 		if (this.stacked && view !== 'index') {
 			// Every step into a page or detail is its own Back step, even
 			// sideways (detail to another detail via a link).
@@ -361,10 +398,11 @@ export class SettingsNavigation {
 				settingsView: view,
 				settingsDepth: depth,
 				settingsCategory: this.category,
-				...(view === 'detail' && this.selected[this.category] ? { settingsItem: this.selected[this.category] } : {})
+				...(view === 'detail' && this.selected[this.category] ? { settingsItem: this.selected[this.category] } : {}),
+				...(this.staleBelow ? { settingsStaleBelow: this.staleBelow } : {})
 			};
 			try {
-				pushState('', state as App.PageState);
+				(replaceEntry ? replaceState : pushState)('', state as App.PageState);
 				this.depth = depth;
 			} catch {
 				// Router not ready (tests, early boot): the in-UI back still works.

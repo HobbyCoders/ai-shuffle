@@ -22,6 +22,8 @@ vi.mock('./session/ws-connection', () => ({ createWsConnection: () => ({
 	resetLastMessageTime: vi.fn(), resetReconnectAttempts: vi.fn(), destroy: vi.fn(),
 }) }));
 
+import { workerGitTargetKey } from '$lib/components/layout/worker-git-target';
+
 let active: (typeof import('./active-session'))['activeSession'];
 let ephemeral: (typeof import('./session-cache'))['sessionEphemeralCache'];
 
@@ -105,6 +107,53 @@ it('keeps a picked branch and a one-time new branch until a session spends it', 
 		mode: 'code', deviceIntent: PEER, project: 'a', worktreeIntent: 'worktree',
 		worktreeBranch: 'topic/a', worktreeCreateNewBranch: true,
 	});
+});
+
+it('stages a local worktree moved to another worker as a checkout still to be made', () => {
+	gitRepo('a'); active.setProject('a'); active.setWorktreeIntent('worktree');
+	active.selectWorktreeBranch('feat/local', 'wt-1');
+
+	active.setDeviceIntent(PEER);
+
+	expect(active.current).toMatchObject({ worktreeId: null, worktreeBranch: 'feat/local', worktreeCheckoutPending: true, worktreeCreateNewBranch: false });
+	expect(workerGitTargetKey(active.current)).toBe(JSON.stringify([PEER.id, null]));
+
+	awayAndBack();
+
+	expect(active.current).toMatchObject({ worktreeBranch: 'feat/local', worktreeCheckoutPending: true });
+	expect(workerGitTargetKey(active.current)).toBe(JSON.stringify([PEER.id, null]));
+});
+
+it('stages this worker\'s checkout moved to another worker as one still to be made', () => {
+	gitRepo('a'); active.setProject('a'); active.setWorktreeIntent('worktree');
+	active.setWorktreeBranch('feat/here');
+	expect(active.current.worktreeCheckoutPending).toBe(false);
+
+	active.setDeviceIntent(PEER);
+
+	expect(active.current).toMatchObject({ worktreeBranch: 'feat/here', worktreeCheckoutPending: true });
+	expect(workerGitTargetKey(active.current)).toBe(JSON.stringify([PEER.id, null]));
+});
+
+it('leaves a branch the first send creates alone when the worker changes', () => {
+	gitRepo('a'); active.setProject('a'); active.setWorktreeIntent('worktree');
+	active.setWorktreeBranch('feat/new');
+	active.setWorktreeCreateNewBranch(true);
+
+	active.setDeviceIntent(PEER);
+
+	expect(active.current).toMatchObject({ worktreeBranch: 'feat/new', worktreeCreateNewBranch: true, worktreeCheckoutPending: false });
+});
+
+it('does not let the pending mark outlive its branch', () => {
+	gitRepo('a'); active.setProject('a'); active.setWorktreeIntent('worktree');
+	active.setWorktreeBranch('feat/x', { checkoutPending: true });
+	active.selectWorktreeBranch('feat/y', 'wt-2');
+	expect(active.current.worktreeCheckoutPending).toBe(false);
+
+	active.setWorktreeBranch('feat/x', { checkoutPending: true });
+	active.clearWorktreeSelection();
+	expect(active.current.worktreeCheckoutPending).toBe(false);
 });
 
 it('keeps the worker and "no project" when the owner cleared the project', () => {

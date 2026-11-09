@@ -113,6 +113,19 @@ class TestDbLoaderTimestampSerializable:
         assert msg["metadata"]["timestamp"] == "2026-06-18T09:22:40Z"
 
 
+def test_an_estimate_from_before_this_turn_never_reaches_the_working_line():
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from fluid.events.model import ThinkingProgress
+
+    adapter = HarnessAdapter()
+    adapter._turn_floor = 10
+    event = {"session_id": "s", "estimated_tokens": 900}
+
+    assert adapter._translate(ThinkingProgress(seq=5, **event)) == []
+    [message] = adapter._translate(ThinkingProgress(seq=11, **event))
+    assert (message.subtype, message.data) == ("thinking_tokens", {"estimated_tokens": 900})
+
+
 class TestThinkingProgressFrame:
     """Live thinking estimates move the working line without entering the log (#1271)."""
 

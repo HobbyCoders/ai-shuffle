@@ -28,8 +28,10 @@ HIDDEN_SYSTEM_SUBTYPES = frozenset({
 def thinking_progress_frame(data):
     """The live working-line frame for one ``thinking_tokens`` message, or None.
 
-    The frame is its own type so it never becomes a transcript row: nothing
-    records it, and reload keeps hiding any ``thinking_tokens`` row (#1271).
+    The frame is its own type so it never becomes a transcript row: the turn
+    recorder does not keep it, and reload keeps hiding any ``thinking_tokens``
+    row (#1271). The event behind it does reach the engine's event log, batched
+    and prunable, at most about once a second.
     """
     estimate = data.get("estimated_tokens") if isinstance(data, dict) else None
     if isinstance(estimate, bool) or not isinstance(estimate, (int, float)) or estimate <= 0:

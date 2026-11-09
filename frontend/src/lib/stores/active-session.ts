@@ -1225,7 +1225,7 @@ export const activeSession = {
 			_update(s => ({
 				...s, mode,
 				project: row?.project_id ?? '', projectV2Id: row?.project_v2_id ?? null,
-				worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null,
+				worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', worktreeCheckoutPending: false, selectedWorktreeBranch: null,
 				permissionModeOverride: permissionMode,
 				...markBindingHydrated(s, 'permission'),
 			}));
@@ -1480,11 +1480,14 @@ export const activeSession = {
 	 */
 	setDeviceIntent(intent: DeviceIntent | null) {
 		setPersistedDeviceIntent(intent);
-		const branch = !_state.sessionId && intent && _state.worktreeId
-			? _state.selectedWorktreeBranch || _state.worktreeBranch : null;
+		// A checkout on the worker being left says nothing about the new one, so
+		// whichever branch was staged is now a checkout the first send has to make.
+		const branch = _state.sessionId || !intent ? null
+			: _state.worktreeId ? _state.selectedWorktreeBranch || _state.worktreeBranch
+			: _state.worktreeCreateNewBranch ? null : _state.worktreeBranch || null;
 		_update(s => ({ ...s, deviceIntent: intent, ...(branch ? {
 			worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: branch,
-			worktreeMode: 'new' as const, worktreeCreateNewBranch: false, worktreeCheckoutPending: false,
+			worktreeMode: 'new' as const, worktreeCreateNewBranch: false, worktreeCheckoutPending: true,
 		} : {}) }));
 		if (branch) rememberBranchIntent();
 	},
@@ -1499,12 +1502,12 @@ export const activeSession = {
 
 	selectWorktreeBranch(branch: string, worktreeId: string) {
 		composerPreferences.rememberCheckout({projectId:_state.project, projectV2Id:_state.projectV2Id}, {kind:'existing',projectId:_state.project, projectV2Id:_state.projectV2Id, worktreeId, branch});
-		_update(s => ({ ...s, worktreeId, worktreeBranch:'', selectedWorktreeBranch: branch, worktreeMode: 'existing' as const }));
+		_update(s => ({ ...s, worktreeId, worktreeBranch:'', worktreeCheckoutPending: false, selectedWorktreeBranch: branch, worktreeMode: 'existing' as const }));
 	},
 
 	clearWorktreeSelection() {
 		composerPreferences.rememberCheckout({projectId:_state.project, projectV2Id:_state.projectV2Id}, null);
-		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeMode: 'new' as const }));
+		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeCheckoutPending: false, worktreeMode: 'new' as const }));
 	},
 
 	markWorktreeDeleted() {

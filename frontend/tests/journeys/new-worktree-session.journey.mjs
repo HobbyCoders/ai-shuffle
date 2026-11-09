@@ -417,12 +417,15 @@ function narrowChips(chat) {
 		name: `narrow-chips-${chat}`,
 		viewports: ['desktop'],
 		throttles: ['fast'],
-		// This window is narrow, so the open sidebar is a large share of it.
-		allow: [{
-			kind: 'layout_shift',
-			message: /moved: div\.scard-frame/,
-			reason: 'the first send adds this chat to the open sidebar, pushing the rows below it down; the chip row is what this case judges, and a larger move of it is named instead'
-		}],
+		// At 480 the window is narrow enough that the open sidebar is a large share
+		// of it: the first send's new row measured 0.046-0.054 there. Only that one
+		// sidebar move is excused; every other shift is still judged.
+		...(chat === 480 ? { expectShift: [{
+			step: 'send',
+			moved: /^div\.scard-frame$/,
+			maxValue: 0.06,
+			reason: 'the first send adds this chat to the open sidebar, pushing the rows below it down'
+		}] } : {}),
 		setup: settled(async (ctx) => {
 			await chipProbe(ctx.page, `fix/long-staged-branch-generated-from-message-${uniq()}`);
 			await stageNames(ctx, chat + 320);
