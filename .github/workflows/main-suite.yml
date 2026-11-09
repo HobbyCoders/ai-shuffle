@@ -159,6 +159,28 @@ jobs:
         if: always() && (failure() || steps.report.outcome == 'failure')
         run: echo "::warning title=UI journey issue reporting::Reporting could not finish; suite and publication results are unchanged."
 
+  stop-on-failure:
+    name: Stop on first failure (non-blocking)
+    # A run with a failed job cannot publish. Cancel it at once so the fix is
+    # not left waiting behind 20 more minutes of jobs that no longer matter.
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Advisory, like the reporter above: outside the aggregate and non-fatal.
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Cancel the run when a required job fails
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/stop_on_failure.py
+
   main-suite:
     name: Main suite
     if: always()

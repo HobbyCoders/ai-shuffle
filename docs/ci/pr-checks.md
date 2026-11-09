@@ -158,7 +158,11 @@ and its README; the app still checks `docs/content` against the frontend copy.
 
 `main-suite.yml` runs once per push to `main`, or an explicit dispatch on `main`.
 A dispatch on another ref skips the suites and fails the aggregate. A started
-run always finishes. GitHub keeps one more run waiting behind it; a newer merge
+run finishes unless a required job fails: the advisory `stop-on-failure` job
+(`scripts/ci/stop_on_failure.py`) then names the failed jobs in the run summary
+and cancels the run at once, because it can no longer publish and would only
+hold the lane while the fix waits. Such a run also ends "cancelled" but has
+jobs; `nightly_wait.py` reports it as a failure. GitHub keeps one more run waiting behind it; a newer merge
 replaces that waiting run, which GitHub then lists as "cancelled". It never
 started and nothing is lost: the newer run tests a main revision that contains
 the replaced commit, and the publisher ships the newest proven revision with
