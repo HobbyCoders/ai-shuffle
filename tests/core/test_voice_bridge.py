@@ -2965,3 +2965,38 @@ async def test_held_note_waits_until_nobody_is_talking(mock_db, fake_sockets, mo
     await bridge._handle_event({"type": "input_audio_buffer.speech_started"})
     assert not bridge._is_quiet()
     await bridge.stop()
+
+
+async def test_typed_attachment_note_becomes_recorded_paths(mock_db, fake_sockets, monkeypatch):
+    from app.core import upload_transfer
+    from app.core.voice_prompts import attachment_note
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+    checked = []
+    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", lambda payload, session: checked.append(payload["upload_paths"]))
+    text = "Read @/up/a.pdf" + attachment_note(["/up/a.pdf"])
+    await bridge._handle_event({"type": "conversation.item.created", "item": {
+        "id": "typed-1", "role": "user", "content": [{"type": "input_text", "text": text}]}})
+    await bridge._handle_event({"type": "response.done", "response": {}})
+    assert checked == [["/up/a.pdf"]]
+    user = next(e for e in se.get_events(SID) if e["event_type"] == "message.user")
+    assert user["payload"]["content"] == "Read @/up/a.pdf"
+    assert user["payload"]["upload_paths"] == ["/up/a.pdf"]
+
+
+async def test_typed_attachment_note_that_fails_the_check_stays_text(mock_db, fake_sockets, monkeypatch):
+    from app.core import upload_transfer
+    from app.core.voice_prompts import attachment_note
+    _mk_session()
+    bridge = await _bridge(fake_sockets)
+
+    def refuse(payload, session):
+        raise upload_transfer.UploadLiftError("outside")
+    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", refuse)
+    text = "Read" + attachment_note(["/etc/passwd"])
+    await bridge._handle_event({"type": "conversation.item.created", "item": {
+        "id": "typed-1", "role": "user", "content": [{"type": "input_text", "text": text}]}})
+    await bridge._handle_event({"type": "response.done", "response": {}})
+    user = next(e for e in se.get_events(SID) if e["event_type"] == "message.user")
+    assert "upload_paths" not in user["payload"]
+    assert "/etc/passwd" in user["payload"]["content"]

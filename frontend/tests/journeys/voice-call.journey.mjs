@@ -18,8 +18,10 @@
 //   relay       the caller asks, the chat agent answers ([script:voice-reply]); the reply is said once, in full
 //   wait-update the agent starts a background build and waits ([script:voice-wait]): its update is said before the wait, the result after
 //   busy        a call placed while the chat is still answering says that reply once it lands, then relays a new request
+//   attachment-during-call (#1265) a file sent while a call is live goes as fields beside the words
+//               and shows as a chip on the message
 import { runJourney } from './runner.mjs';
-import { PROJECT, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
+import { PROJECT, composer, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import {
 	VOICE_REPLY_SPOKEN,
@@ -218,9 +220,51 @@ const busy = {
 	}
 };
 
+const attachmentDuringCall = {
+	name: 'attachment-during-call',
+	// Slow copies only: the fast ones add no signal and cost hosted shard time.
+	throttles: ['slow'],
+	async setup(ctx) {
+		ctx.typedFrames = [];
+		ctx.page.on('websocket', socket => socket.on('framesent', ({ payload }) => {
+			if (typeof payload !== 'string') return;
+			try {
+				const frame = JSON.parse(payload);
+				if (frame.type === 'input_text') ctx.typedFrames.push(frame);
+			} catch { /* microphone PCM, not typed text */ }
+		}));
+		ctx.token = await chatWithScenario(ctx, 'default');
+		await startCall(ctx.page);
+		ctx.state = { file: `note-${uniq()}.txt`, words: `attached-${uniq()}` };
+	},
+	async act(ctx) {
+		const { page, mark, state, log } = ctx;
+		const box = composer(page);
+		// The preview cookie cannot save execution settings; answer that one save.
+		await page.route('**/api/v1/voice/sessions/*/context', route => {
+			if (route.request().method() !== 'PATCH') return route.continue();
+			return route.fulfill({ status: 200, contentType: 'application/json', body: route.request().postData() });
+		});
+		await mark('attach a file and send it into the call');
+		await page.locator('input[type="file"]').setInputFiles({ name: state.file, mimeType: 'text/plain', buffer: Buffer.from('during the call\n') });
+		await box.locator('[data-file-chip]').first().waitFor({ timeout: 20_000 });
+		await box.focus();
+		await page.keyboard.press('ControlOrMeta+End');
+		await box.pressSequentially(` ${state.words}`);
+		await page.getByRole('button', { name: 'Send', exact: true }).click();
+		await page.locator('.attachment-chip').filter({ hasText: state.file }).first().waitFor({ timeout: 30_000 });
+		expect(ctx.typedFrames.length === 1, `one typed frame went up (saw ${ctx.typedFrames.length})`);
+		const paths = ctx.typedFrames[0].upload_paths || [];
+		expect(paths.length === 1 && paths[0].endsWith(state.file), `the frame names the file as a field: ${JSON.stringify(paths)}`);
+		await waitTurnSettled(page, { messagesAtLeast: 4, text: 'Live conversation context' });
+		await mark('end the call');
+		await endCall(page);
+	}
+};
+
 await runJourney({
 	name: 'voice-call',
 	browser: voiceBrowser,
-	cases: [startEnd, relay, waitUpdate, busy, contextAdmissionTimeout],
+	cases: [startEnd, relay, waitUpdate, busy, contextAdmissionTimeout, attachmentDuringCall],
 	allow: [...DEV_INSTANCE_NOISE]
 });
