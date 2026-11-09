@@ -175,8 +175,9 @@ async def dismiss_owner_waits(session_id: str, *, expected_revision=None) -> boo
     interaction_wait.notify_changed(session_id)
     for waiter, tid in snapshot["signals"]:
         turn_manager._fire_interrupt_executor(waiter, "stop", tid)
+    from app.core.turn_recorder import _append_unfenced
     for turn in snapshot["aborted"]:
-        await run_sync(session_events.append_events, turn["session_id"], [{
+        await _append_unfenced(turn["session_id"], [{
             "type": "turn.aborted", "turn_id": turn["id"],
             "payload": {"reason": "interrupt", "message": "Session settled"},
         }])

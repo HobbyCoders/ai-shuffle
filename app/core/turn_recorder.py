@@ -61,7 +61,7 @@ USAGE_COALESCE_SECONDS = 2.0   # at most one turn.usage append per window
 # applies per lock, so an attempt queued behind another writer of the same row
 # can wait twice, for about 78 s in all. The fenced writer holds its run row only
 # during attempts: the longer waits here leave lease renewal room to land.
-_LOCK_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
+_LOCK_RETRY_DELAYS_SECONDS = session_events_db.LOCK_RETRY_DELAYS_SECONDS
 
 # turn.provider_alive: the first of a turn is always recorded; a later one only
 # after this long with nothing appended at all. A turn that streams content

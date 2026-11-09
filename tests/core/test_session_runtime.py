@@ -173,6 +173,10 @@ async def test_checkout_reserved_by_a_handoff_keeps_the_turn_queued(mock_db, hel
 @pytest.mark.parametrize("phase", ["start", "done", "close", "timer"])
 @pytest.mark.parametrize("background", [False, True])
 async def test_recording_failure_aborts_and_cleans_up(mock_db, phase, background):
+    from app.db import session_events
+    from tests.shared_fixtures import seed_session
+
+    seed_session("recording-failure")
     turn = turns_db.enqueue_turn("recording-failure", "user", prompt="hello")
     holder = {}
 
@@ -197,6 +201,11 @@ async def test_recording_failure_aborts_and_cleans_up(mock_db, phase, background
             interrupt.assert_awaited_once_with(turn["session_id"])
         assert rt._abort_reason == "recording_failed"
         assert turns_db.get_turn(turn["id"])["state"] == "aborted"
+        terminals = [event for event in session_events.get_events(turn["session_id"])
+                     if event["event_type"] == "turn.aborted"]
+        assert len(terminals) == 1
+        assert terminals[0]["turn_id"] == turn["id"]
+        assert terminals[0]["payload"]["stop_reason"] == "recording_failed"
         env["recorder"].close.assert_awaited_once()
         assert all(call.args[1].get("type") != "done" for call in env["broadcaster"].await_args_list)
         env["start_idle"].assert_not_called()

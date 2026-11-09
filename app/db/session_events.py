@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -217,6 +218,34 @@ def _parse_payload(raw: Any) -> Dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return raw if isinstance(raw, dict) else {}
+
+
+# Same bounded recovery window as the async recorder. No caller-owned
+# transaction may be retried here: its preceding work belongs to the caller.
+LOCK_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
+
+
+def append_events_with_lock_retry(
+    session_id: str,
+    events: List[Dict[str, Any]],
+    run_id: Optional[str] = None,
+    fence_token: Optional[int] = None,
+) -> Tuple[int, int]:
+    """Recover standalone synchronous writes only from server-confirmed rollback.
+
+    Each attempt owns a fresh transaction and rechecks the run fence. Connection
+    loss, statement timeout and every other uncertain outcome propagate without
+    replay, even for events with stable IDs.
+    """
+    for delay in (*LOCK_RETRY_DELAYS_SECONDS, None):
+        try:
+            return append_events(session_id, events, run_id=run_id, fence_token=fence_token)
+        except psycopg2.errors.LockNotAvailable:
+            if delay is None:
+                raise
+            logger.warning("lock timeout writing %d event(s) for %s; rolled back, retrying in %.2fs",
+                           len(events), session_id, delay)
+            time.sleep(delay)
 
 
 def append_events(

@@ -928,7 +928,6 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     source = body.get("source")
     source = source[:64] if isinstance(source, str) and source else None
     from app.core.query_session_lifecycle import capture_stop_scope, stop_all_background_tasks
-    from app.db import turns
 
     # Before the flip's wait: once it commits, the next turn can start.
     scope = capture_stop_scope(session_id)
@@ -937,16 +936,22 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                                              turn_id=body.get("turn_id") or None,
                                              **({"source": source} if source else {}))
     is_stop = str(body.get("mode") or "stop") == "stop"
-    reaches_work = bool(body.get("stop_background")) and is_stop and await run_sync(
-        turn_manager.stop_reaches_background_work, session_id, body.get("turn_id") or None, row,
-    )
+    try:
+        receipt = await run_sync(
+            turn_manager.capture_stop_receipt, session_id, body.get("turn_id") or None, row,
+        ) if body.get("stop_background") and is_stop else None
+    except Exception:  # noqa: BLE001 — never turn an unadmitted Stop into authority.
+        logger.warning("Stop: receipt capture failed for %s", session_id, exc_info=True)
+        return {"interrupted": row is not None, "finished": False, "incomplete": True,
+                "turn_id": (row or {}).get("id"),
+                "message": "Stop cleanup could not be admitted. Press Stop again; "
+                           "background cleanup has not been confirmed."}
     results = []
-    if body.get("stop_background") and (row is not None or reaches_work):
+    if body.get("stop_background") and (receipt is not None or (row is not None and not is_stop)):
         results = await stop_all_background_tasks(
-            session_id, user_stop=True, scope=scope,
-            receipt=((row or {}).get("payload") or {}).get(turns.STOP_RECEIPT_KEY),
+            session_id, user_stop=True, scope=scope, receipt=receipt,
         )
-    interrupted = row is not None or reaches_work
+    interrupted = row is not None or receipt is not None
     # "finished" (not merely "not interrupted"): only an ENDED target lets the
     # relaying page say nothing was stopped; an interrupting one is still busy.
     finished = bool(is_stop and not interrupted and await run_sync(

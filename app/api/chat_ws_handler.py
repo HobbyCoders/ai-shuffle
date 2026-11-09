@@ -2049,7 +2049,16 @@ class ChatWebSocketHandler:
                 # unnamed source too); computer use reports it as theirs.
                 source="user_stop",
             )
-            if await run_sync(turn_manager.stop_reaches_background_work, session_id, target_turn_id, flipped):
+            try:
+                receipt = await run_sync(turn_manager.capture_stop_receipt, session_id, target_turn_id, flipped)
+            except Exception:  # noqa: BLE001 — no admission means no cleanup authority.
+                logger.warning("Stop: receipt capture failed for %s", session_id, exc_info=True)
+                await self.send_json({"type": "error", "session_id": session_id,
+                                      "message": "Stop cleanup could not be admitted. Press Stop again; "
+                                                 "background cleanup has not been confirmed."})
+                await self._v2_broadcast_queue(session_id)
+                return  # A committed flip's durable receipt still retries independently.
+            if receipt is not None:
                 # A session-scoped Stop also quiesces queued/blocked work with
                 # no live turn. A stale TURN-scoped Stop still spares successors.
                 # Mark canceled-task wakes suppressed and stop all owned tasks.
@@ -2057,7 +2066,7 @@ class ChatWebSocketHandler:
                 # not cancel a successor's work.
                 results = await stop_all_background_tasks(
                     session_id, user_stop=True, scope=scope,
-                    receipt=((flipped or {}).get("payload") or {}).get(turns_db.STOP_RECEIPT_KEY),
+                    receipt=receipt,
                 )
                 if any(result.get("incomplete") for result in results):
                     from app.core.scoped_remote_stop import incomplete_text
