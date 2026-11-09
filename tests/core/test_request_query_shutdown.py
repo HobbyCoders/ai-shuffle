@@ -191,7 +191,7 @@ async def test_windows_does_not_acknowledge_clean_stop_with_unfinished_writes(mo
 
 
 async def test_finalization_waiters_share_one_absolute_deadline(monkeypatch):
-    monkeypatch.setattr(shutdown, "configured_stop_budget", lambda: .3)
+    monkeypatch.setattr(shutdown, "configured_stop_budget", lambda environ=None: .3)
     writing, release = asyncio.Event(), asyncio.Event()
 
     async def pending_write():
