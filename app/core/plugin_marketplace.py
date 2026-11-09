@@ -87,8 +87,9 @@ def fetch_pending_sources(svc) -> None:
     with marketplace_lock(svc, DEFAULT_SOURCE_ID), _FETCH_LOCK:
         data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
         for mp_id, entry in data.items():
-            # A failed first fetch waits for explicit Sync, not another offline stall.
-            if entry.get("fetchOnDiscovery") and not entry.get("lastUpdated") and not entry.get("syncError"):
+            # Failed fetches wait for explicit Sync; incomplete removals for Remove.
+            if (entry.get("fetchOnDiscovery") and not entry.get("removing")
+                    and not entry.get("lastUpdated") and not entry.get("syncError")):
                 try:
                     svc.sync_marketplace(mp_id)
                 except (RuntimeError, OSError):

@@ -281,6 +281,34 @@ def test_settings_import_participates_in_shared_state_and_respects_removal(sourc
     assert svc.get_enabled_plugins() == {"tool@mp": True}
 
 
+def test_unfetched_default_partial_removal_does_not_block_other_sources(sources, monkeypatch):
+    from app.core import plugin_marketplace
+
+    svc, _, _, healthy = setup(sources, "directory")
+    default_id = plugin_marketplace.DEFAULT_SOURCE_ID
+    plugin_marketplace.ensure_default_source(svc)
+    assert not (svc.MARKETPLACES_DIR / default_id).exists()
+    save = svc._write_json_file
+    with monkeypatch.context() as failure:
+        failure.setattr(svc, "_write_json_file", lambda path, data:
+                        False if path == svc.SETTINGS_FILE else save(path, data))
+        assert svc.remove_marketplace(default_id) is False
+
+    pending = svc._read_json_file(svc.MARKETPLACES_FILE, {})[default_id]
+    assert pending["fetchOnDiscovery"] is True
+    assert pending["removing"] is True
+    assert not pending.get("lastUpdated") and not pending.get("syncError")
+    assert [plugin.id for plugin in svc.get_available_plugins(marketplace="sample")] == [healthy.id]
+    assert default_id in {source.id for source in svc.get_marketplaces()}
+    assert svc._read_json_file(svc.MARKETPLACES_FILE, {})[default_id] == pending
+    assert not (svc.MARKETPLACES_DIR / default_id).exists()
+
+    assert svc.remove_marketplace(default_id) is True
+    plugin_marketplace.ensure_default_source(svc)
+    assert default_id not in svc._read_json_file(svc.MARKETPLACES_FILE, {})
+    assert [plugin.id for plugin in svc.get_available_plugins(marketplace="sample")] == [healthy.id]
+
+
 def test_partial_default_registration_is_not_readded_after_explicit_removal(sources):
     from app.core import plugin_marketplace
 
