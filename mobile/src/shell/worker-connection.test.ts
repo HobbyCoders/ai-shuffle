@@ -28,6 +28,19 @@ describe('"Connected to" workers', () => {
 		]);
 	});
 
+	it('counts a running chat once, for its owner, even when the local instance id is out of date', () => {
+		const rows = connectionWorkers(
+			[install('pc', { is_self: true }), install('b', { device_name: 'Office PC' }), install('c', { device_name: 'Laptop' })],
+			[
+				session('passed-on', { is_remote: true, owner_device_id: 'c', instance_id: 'b', remote_runtime_state: 'working' }),
+				session('no-owner', { is_remote: true, instance_id: 'b', remote_runtime_state: 'parked' }),
+				session('unknown-owner', { is_remote: true, owner_device_id: 'gone', instance_id: 'b', remote_runtime_state: 'working' })
+			],
+			new Set()
+		);
+		expect(Object.fromEntries(rows.map((r) => [r.name, r.running]))).toEqual({ DesktopWorker: 0, 'Office PC': 1, Laptop: 1 });
+	});
+
 	it('never names a worker by its container ID', () => {
 		const rows = connectionWorkers(
 			[install('pc', { is_self: true, device_name: '75c733a3514a' }), install('unraid', { device_name: '0123456789ab' })],

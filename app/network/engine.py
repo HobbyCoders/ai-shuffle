@@ -119,7 +119,8 @@ def _savepoint(cursor, statement: str) -> None:
     apply of one op runs under a savepoint. SQLite (the test shim) fails only
     the statement and cannot nest savepoints under the shim; skip it there."""
     if type(cursor).__module__.startswith("psycopg2"):
-        cursor.execute(statement)
+        from app.db.base import execute_savepoint
+        execute_savepoint(cursor, statement)
 
 
 # Out-of-order ops are buffered per stream. Beyond these bounds a peer is
@@ -2555,14 +2556,14 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                                                         and data.get("collection") == "session_events"))
             for data in (() if appended else chunk):
                 if savepoints:
-                    cursor.execute("SAVEPOINT apply_envelope")
+                    _savepoint(cursor, "SAVEPOINT apply_envelope")
                 try:
                     outcome = apply_envelope(cursor, data, ctx=ctx, result=part)
                 except Exception as exc:  # noqa: BLE001 - classified below
                     if not savepoints:
                         raise _ChunkAbandoned() from exc
-                    cursor.execute("ROLLBACK TO SAVEPOINT apply_envelope")
-                    cursor.execute("RELEASE SAVEPOINT apply_envelope")
+                    _savepoint(cursor, "ROLLBACK TO SAVEPOINT apply_envelope")
+                    _savepoint(cursor, "RELEASE SAVEPOINT apply_envelope")
                     if isinstance(exc, TransientApplyError):
                         part.retry_operation(data, str(exc))
                     elif isinstance(exc, ApplyError):
@@ -2574,7 +2575,7 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                     continue
                 if savepoints:
                     # A "rejected" outcome may have moved the watermark: keep it.
-                    cursor.execute("RELEASE SAVEPOINT apply_envelope")
+                    _savepoint(cursor, "RELEASE SAVEPOINT apply_envelope")
                 _count_outcome(part, outcome)
             _deferred_clock.box = None
             if box[0] > seen:

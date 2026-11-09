@@ -6,31 +6,109 @@ client that shows a terminal (the web UI, desktop, Android). Code:
 authorization). Tests: `tests/core/test_terminals.py`,
 `tests/api/test_terminals_api.py`.
 
-Terminals support local Unix PTYs and Windows ConPTY and explicitly selected
-private-access SSH machine grants. **Peer terminals ship with backend and
-terminal-panel UI (#349, #353); a real two-worker HTTPS acceptance run is still
-outstanding (#196).** Persisted `network_peer_terminals`
-owner policy still defaults to `false` and must be enabled on both workers through
-`GET`/`PUT /api/v1/settings/owner-policy`. Legacy env values are adopted once only
-when no saved key exists; later env edits do not override saved policy. It does not authorize
-a terminal: every new shell requires an explicit owner-authenticated approval
-directly on the receiving worker. No approval can be issued by peer control.
+Terminals support local Unix PTYs and Windows ConPTY, explicitly selected
+private-access SSH machine grants, and shells on another worker in the owner's
+network (#349, #353, #642, #674). Peer terminals are off by default. The switch
+is **Settings > Security > Terminals on other workers** (`network_peer_terminals`
+owner policy), and both workers need it on. The setting allows the feature; it
+authorizes nothing.
 
-An enrolled worker can forge a lease and its own callback response. Therefore
-neither membership nor a reverse `terminal-owner` callback is owner proof.
-The recipient holds its own memory-only approval bound to the source worker
-and request lease; it independently rechecks the approving credential using
-`require_terminal_owner` on every operation and at most every 15 seconds while
-idle. Source owner authorization is also rechecked via the callback. Both
-legs require authenticated HTTPS, with no plaintext fallback. Pending requests
-expire after two minutes; approved grants are single-use with a ten-minute
-maximum, and 30 seconds without relay activity closes the shell. Revocation,
-expiry, lost membership, either owner's sign-out, or process restart ends
-access. Audit records cover request, approval, refusal, open and close on the
-recipient (`app.network.terminal_relay`) and request, open, refused open and
-close on the source (`app.api.terminals`, `app.core.terminal_targets`), never
-input/output, credentials or lease tokens. This strict per-use approval on the
-recipient is intentional; any less restrictive policy needs an owner decision.
+### Which proof the receiving worker accepts
+
+The receiver opens a shell only for a request signed by a device the owner
+linked on that receiver. Nothing else counts:
+
+- **Not proof:** network membership, the requesting worker's network key, its
+  relay token, its `terminal-owner` callback, or anything else the requesting
+  worker says. An enrolled worker can forge all of those.
+- **Proof:** a P-256 ECDSA signature from a key recorded in the receiver's own
+  `terminal_device_links` table, over a payload that names the action and the
+  target. The table is local to each worker and never synced.
+
+The device key is created by WebCrypto as non-extractable and kept in that
+browser profile's IndexedDB (`frontend/src/lib/terminal/device-key.ts`). The
+requesting worker relays the public key and the signature, and never has the
+private key. Each device links once per receiving worker, and the link is bound
+to the worker it was requested through: a device linked through worker A cannot
+use that link through worker C.
+
+Signed payload, sent as the exact JSON text that was signed:
+
+```json
+{"purpose": "ai-shuffle-peer-terminal-v1", "receiver": "<B device id>",
+ "via": "<A device id>", "challenge": "<token>",
+ "action": "terminal.open | terminal.open_and_paste",
+ "target": {"session_id": null, "cwd": null, "shell": null}}
+```
+
+The receiver (`app.network.terminal_device_links.verify_open`) takes the
+single-use challenge it issued within the last 60 seconds, checks that it was
+issued for this key through this requesting worker, checks that the link still
+exists, verifies the signature, then compares `purpose`, `receiver`, `via`,
+`action` and the target's shape. A replay finds no challenge. The chat, folder
+and shell come only from the signed `target`, so the requesting worker cannot
+retarget a signature. `key_id` is `base64url(sha256(raw public point))`, the
+signature is raw `r||s` base64url.
+
+Which surfaces can hold a key (WebCrypto needs a secure context):
+
+| Surface | Holds a key | Why |
+| --- | --- | --- |
+| HTTPS origin | Yes | Secure context |
+| `localhost` / `127.0.0.1` | Yes | Secure context |
+| Desktop app | Yes | Loads the local worker on the loopback address |
+| Android app | Yes | Loads `/mobile/` over HTTPS only (`usesCleartextTraffic="false"`) |
+| Plain-HTTP LAN address | **No** | No `crypto.subtle`. The controls stay disabled with a reason |
+
+There is no fallback to an exportable key, a key in local storage, a software
+crypto library or a weaker proof. `deviceKeyProblem()` supplies the disabled
+reason.
+
+**One-time link.** A device with no link sends its public key through the
+requesting worker (`POST /peer-links`). The device works out a twelve-character
+link code (60 bits of SHA-256 over its public key) and shows it. The device never
+sends the code and no route lists it. The owner types it on the receiving worker,
+which works out the same value from the key it received, under Settings or the
+Terminal panel's waiting list
+(`POST /device-links/approve`), which needs the owner there: on that worker's
+own UI or from a device already signed in to it as the owner. A requesting
+worker that swapped in its own public key would produce a different code, so the
+owner's typed code would not match. Requests live in memory for ten minutes,
+with at most 32 waiting in total and 4 per requesting worker.
+
+**Revocation.** Linked devices are listed and revoked on the receiving worker
+(Settings > Security). Revoking deletes the link, so the next request is refused,
+and **immediately closes every shell that device opened** on that worker
+(`terminal_relay.revoke_device`, reason `device-link-revoked`). A running shell
+does not outlive its device's authority. An open relay also rechecks the link
+every 15 seconds.
+
+A shell being opened cannot slip past a revocation. The last check of the link
+and the registration of the shell are one step, and the deletion of the link
+takes turns with that step (`terminal_relay._final_authorization`). When a
+revocation has returned, no shell from that device can appear afterwards: an
+open that was already finishing is registered first and then closed by the
+revocation, and a later one is refused and its shell killed. That last step
+also rechecks the setting, the requesting worker's membership and a revoke from
+the requesting worker. If any part of it fails or is cancelled, the shell is
+killed and nothing is left registered.
+
+**Stated limit.** A fully compromised requesting worker serves the page the
+owner is using, so it could trick an open browser into signing a request. The
+key itself cannot be stolen, cannot be used without that browser being open, and
+is still bound to one receiver, one action and one target for each signature.
+Revoking the device, or turning the setting off, ends it.
+
+A shell lasts at most ten minutes and closes after 30 seconds without relay
+traffic. Revocation, expiry, lost membership, the setting turned off, the
+requesting owner's sign-out, or a process restart on either worker ends it. A
+lost relay needs a new signed open, never an automatic reconnection or restart.
+Both legs require authenticated HTTPS, with no plaintext fallback. The receiver
+logs link requests, links, revocations, refused and successful opens, and closes
+(`app.network.terminal_relay`, `app.network.terminal_device_links`). The
+requester logs link requests, opens, refused opens and closes (`app.api.terminals`,
+`app.core.terminal_targets`). Neither logs input, output, credentials or lease
+tokens.
 
 ### Peer-terminal API (UI contract)
 
@@ -40,82 +118,85 @@ non-owner paired devices and peer device tokens are refused.
 
 The terminal panel implements this contract (user guide:
 `docs/content/features/terminals.md`). With `network_peer_terminals` off
-locally, `/targets` lists no peer rows, a new request returns 409
-`peer_terminals_disabled`, opens return 400 `target_unavailable`,
-`GET /peer-requests` returns an empty list, approval returns 403, and a status
-poll returns 403 and drops the source lease. Revocation routes keep working.
-The recipient refuses requests and opens under its own policy regardless of
-what the source sends. Refusal-matrix and lifetime coverage:
-`tests/api/test_peer_terminal_refusals.py`.
+locally, `/targets` lists no peer rows, peer challenges and link requests are
+refused, opens return 400 `target_unavailable`, and approving a link returns 403.
+Listing and revoking linked devices keep working, so a device can always be
+removed. The receiver refuses challenges, link requests and opens under its own
+policy regardless of what the requester sends. Refusal-matrix and lifetime
+coverage: `tests/api/test_peer_terminal_refusals.py`.
 
-1. On source A, `GET /api/v1/terminals/targets` includes known peer workers only
-   when peer terminals are enabled locally. Default-off discovery returns no
-   peer rows, preserving the existing terminal picker.
-   Each has `kind: "worker"`, `worker_id`, `name`, `available`, `reason_code`
-   and `reason`. Codes: `peer_offline`, `peer_terminals_disabled`,
-   `peer_unsupported_or_disabled`, `not_supported`, `https_required`,
-   `peer_unavailable`, `recipient_approval_required`. Pending approval is **not**
-   available. Live HTTPS probes detect unavailable recipients even when cached
-   capability advertisements are stale. Discovery probes and authorization
-   status checks each have a three-second total deadline and a one-second
-   connect cap; checks run concurrently. Opening probes only the selected peer,
-   and SSH opens never probe peers.
-2. On A, `POST /api/v1/terminals/peer-authorizations` with
-   `{"worker_id":"<B>"}` returns 201 with `authorization_id`, `worker_id`,
-   `request_id`, `status: "pending"`, `used: false`, `expires_in` (seconds),
-   `confirmation_code` (six random base32 characters), `source_name` (the
-   requesting member's name) and `age_seconds` (since the request was created).
-   B checks A's existing owner callback before creating the request; that
-   callback has a one-second connect cap and three-second total deadline,
-   shorter than A's request timeout, and is still not a substitute for B's
-   independent owner approval. A timed-out callback creates no pending request.
-   A disabled/unsupported recipient can instead return `status: "unavailable"`
-   plus `available: false`, `reason_code`, `reason`; never open in that state.
-3. Directly on B, `GET /api/v1/terminals/peer-requests` returns
-   `{"requests":[{"request_id", "worker_id":"<A>", "status", "used", "expires_in"}]}`.
-   Each request also includes `confirmation_code`, `source_name`, `age_seconds`.
-   **Show the same code on A and B** and require the owner to compare it before
-   approval. Show the requesting worker name and request age and explain that
-   this grants one interactive shell. The code is a comparison aid, not authority.
-   `POST /api/v1/terminals/peer-requests/{request_id}/approve` returns the
-   approved request object. It requires B's own owner credential; A cannot
-   forward an approval. `DELETE /api/v1/terminals/peer-requests/{request_id}`
-   revokes it and closes its shell (`{"revoked":true}`).
-4. On A, `GET /api/v1/terminals/peer-authorizations/{authorization_id}` returns
-   the request state plus `authorization_id`, `worker_id`. Poll until
-   `status: "approved"` and `used: false`; `expired` means request again.
-   A fresh `/targets` then reports `available: true`, null reasons and that
-   `authorization_id` only to its authorizing owner principal.
-5. Open on A with `POST /api/v1/terminals` and
-   `{"target":{"kind":"worker","worker_id":"<B>","authorization_id":"<id>"},"cols":80,"rows":24}`.
-   Optional `session_id` is only A's UI association; optional `cwd`/`shell`
-   are resolved on B, never from a mirrored session. B applies the same workspace
-   cwd validation and pinned-root spawn rules as local opens. Returns existing
-   `201 {"terminal":...}`. A rejected folder returns HTTP 400 with
-   `{detail, code: "bad_folder"}` on A without consuming either worker's
-   authorization. Let the owner correct the folder and retry the same target;
-   do not report this as peer unavailability. Each approval opens at most one shell.
-6. Attach/reconnect, input/output and resize use the existing A socket
+On the requesting worker A, for a target on receiving worker B:
+
+1. `GET /api/v1/terminals/targets` includes known peer workers only when peer
+   terminals are enabled locally. Each has `kind: "worker"`, `worker_id`, `name`,
+   `available`, `reason_code` and `reason`. Codes: `peer_offline`,
+   `peer_terminals_disabled`, `peer_unsupported_or_disabled`, `not_supported`,
+   `https_required`, `peer_unavailable`. Discovery probes have a three-second
+   total deadline and a one-second connect cap and run concurrently; SSH opens
+   never probe peers. With `session_id` for a chat on another worker, the response
+   also has `chat_worker_id`, and the UI starts on that worker. If peer terminals
+   are off, that call returns 409 `chat_on_other_worker` instead.
+2. `POST /api/v1/terminals/peer-challenge` with `{"worker_id","key_id"}` returns
+   `{status, receiver, via}`. `status: "linked"` adds a `challenge` and
+   `expires_in` (60). `"pending"` and `"unlinked"` carry no challenge.
+   `"unavailable"` means B refused under its own policy.
+3. If unlinked, `POST /api/v1/terminals/peer-links` with
+   `{"worker_id","public_key","label"}` returns 201 with `status`, `key_id` and
+   `expires_in`. The device shows its own code and polls step 2 until linked.
+4. Open with `POST /api/v1/terminals` and
+   `{"target":{"kind":"worker","worker_id":"<B>","proof":{"key_id","payload","signature"}},"session_id":"<chat>","cwd":null,"shell":null,"cols":80,"rows":24}`.
+   Returns `201 {"terminal":...}`. Chat, folder and shell are taken from the
+   signed payload on B, and B applies the same workspace folder validation and
+   pinned-root spawn rules as a local open. A rejected folder returns 400
+   `bad_folder`. Each challenge opens at most one shell.
+5. Attach/reconnect, input/output and resize use the existing A socket
    `/api/v1/ws/terminals/{terminal_id}` (protocol below); its bounded replay
    buffer survives viewer reconnects while the relay remains alive. Close via
-   `DELETE /api/v1/terminals/{terminal_id}`. No new transport is required in UI.
-   `DELETE /api/v1/terminals/peer-authorizations/{authorization_id}` revokes
-   source authority immediately and attempts recipient teardown; an unreachable
-   recipient independently expires. A lost relay requires a new approval, not
-   automatic reconnection or restart.
+   `DELETE /api/v1/terminals/{terminal_id}`. Peer `paste` is ordinary input on a
+   shell A already holds, with the same authority as a keystroke. Nothing runs
+   until Enter, as for any paste.
 
-`authorization_id` is an opaque, in-memory source lease: keep it out of URLs
-other than these owner API routes and out of logs/storage. It is not proof on B.
-Unreachable/insecure peers return 503 detail `{code,message}`; invalid/expired
-source authorizations return 403; missing peers 404; locally unavailable
-request targets 409 with the reason object. Existing terminal create failures
-retain `{detail,code}`. Real two-worker verification is still outstanding
-(live-smoke `two-worker-smoke.peer-terminal-acceptance`). In-process tests
-exercise real recipient HTTP owner checks and relay PTYs, including reconnect
-(`tests/api/test_peer_terminal_authorization.py`), and two harness workers with
-separate identities over the real signed `/peer/control/terminal` route
-(`tests/core/network/test_peer_terminal_control.py`): compatible, old and
-turned-off peers, forged leases, plaintext routes and unauthenticated callers.
+Directly on B, as the owner there:
+
+- `GET /api/v1/terminals/device-links` returns `{"links":[...], "requests":[...]}`.
+  Requests carry no public key and no code.
+- `POST /api/v1/terminals/device-links/approve` with `{"code"}` links the waiting
+  device whose code matches. Spaces, dashes and letter case are ignored. Returns
+  201, 404 when no waiting device has that code, 409 when it can't be linked.
+- `DELETE /api/v1/terminals/device-links/requests/{request_id}` declines a waiting
+  device.
+- `DELETE /api/v1/terminals/device-links/{key_id}` revokes a linked device and
+  closes its shells.
+
+Unreachable or insecure peers return 503 detail `{code,message}`; missing peers
+404; locally unavailable targets 409 with the reason object. Refusals from B keep
+`{detail,code}`: `device_link_required`, `device_proof_invalid` and
+`device_proof_expired`, all 403.
+
+In-process tests exercise the real receiver checks with real P-256 signatures
+and relay PTYs (`tests/api/test_peer_terminal_authorization.py`,
+`tests/api/test_peer_terminal_refusals.py`) and two harness workers with separate
+identities over the real signed `/peer/control/terminal` route
+(`tests/core/network/test_peer_terminal_control.py`).
+
+**Two-worker check, 2026-11-08 (#674).** Two private development workers paired
+on one host, both on real PostgreSQL, driven in a real browser. The HTTPS route
+between them was a self-signed test front, and the owner session used the
+desktop-listener credential. So this is a controlled run, not two separate
+machines. Passed: Open and paste from A on a chat owned by B (link card and code
+on A, wrong code refused, right code linked on B, shell on B in the chat's folder,
+command waiting unrun at the prompt, Enter ran it), input and output, page-reload
+reconnect with previous output, resize reaching B's shell, close leaving no shell
+on B, reopening without a new link, revoking on B ending the open shell within
+about two seconds, and relinking afterwards. Refused against the running receiver:
+replayed and expired challenge, wrong receiver, wrong requesting worker, wrong
+action, tampered payload, unlinked key, no proof, a nonexistent chat and a folder
+outside the workspace, plus preview cookies and anonymous callers on every device
+link route. Not run live, tests only: API key and non-owner paired device refusal,
+a direct peer call forged with the requesting worker's token, the Android app and
+the real desktop app. Not exercised: sign-out ending a shell, the ten-minute and
+30-second limits, removing a worker from the network, a process restart.
+Live-smoke row: `two-worker-smoke.peer-terminal-acceptance`.
 
 SSH targets require an active, writable machine grant for this chat (including
 grants approved from saved connections). They reuse the private-access SSH
@@ -132,7 +213,7 @@ The Files-open and read-only Monitor APIs are documented below.
 
 | Where | Field | Values |
 | --- | --- | --- |
-| Runner capabilities (`app/core/runner_capabilities.py`) | `terminal` | `2` = per-use recipient-approved relay enabled, `1` = local only, `0` = none |
+| Runner capabilities (`app/core/runner_capabilities.py`) | `terminal` | `3` = signed device-link peer relay enabled, `1` = local only, `0` = none. A receiver below `3` is offered as needing an update |
 | `GET /api/v1/terminals/targets` | `supported` | `true` / `false` |
 
 `terminal` is `0` on a worker with no usable PTY/shell. `/targets` lists the
@@ -225,7 +306,7 @@ agent's Bash tool alike; the owner session itself is only stored as a hash.
 | Field | Meaning |
 | --- | --- |
 | `id` | `term_` + 16 hex. Unique on this worker for its lifetime. |
-| `target` | `{"kind": "worker", "worker_id": <local or peer worker>}` or `{"kind": "ssh", "grant_id": <active machine handle>}`. |
+| `target` | `{"kind": "worker", "worker_id": <local or peer worker>, "proof": <device proof, required for a peer>}` or `{"kind": "ssh", "grant_id": <active machine handle>}`. |
 | `shell` | `bash` or `sh`. |
 | `cwd` | The folder the shell started in (not its current directory). |
 | `folder_source` | `requested`, `worktree`, `project`, `workspace` or `home`. |
@@ -274,7 +355,8 @@ exit without launching the shell. Restart retains this Files-root policy.
 (empty path means the Files root), resolves it with the same Files validator,
 and returns `201 {"terminal": <Terminal object>}`. It is owner-only, just like
 opening a terminal with an absolute `cwd`.
-A chat that runs on another worker is refused with `409 chat_on_other_worker`.
+A folder opened from a chat that runs on another worker is refused with
+`409 chat_on_other_worker`; the chat's own Open terminal path uses a peer target.
 
 A terminal created without `session_id` belongs to no chat and opens in the
 workspace folder, else home. The Terminal page (sidebar More, the search
@@ -610,10 +692,13 @@ text and output are never logged.
 | `bad_shell` | 400 | <shell> isn't available on this worker. Choose one of: bash, sh. |
 | `bad_folder` | 400 | The folder must be a full path, for example /workspace/my-project. / The folder <path> doesn't exist on this worker. / <path> is a file, not a folder. / The folder <path> doesn't exist on this worker anymore. (restart) |
 | `chat_not_found` | 404 | That chat doesn't exist. |
-| `chat_on_other_worker` | 409 | That chat runs on another worker. Terminals open on this worker only for now. |
+| `chat_on_other_worker` | 409 | That chat runs on another worker. Open its terminal on that worker from here. / Turn on Terminals on other workers in Settings to open a shell there. (`/targets`, setting off) |
 | `target_unavailable` | 400 | Choose an online terminal worker or an approved SSH grant. |
 | `limit_reached` | 409 | 8 terminals are open on <worker>. Close one to open another. |
 | `start_failed` | 500 | The shell couldn't start on this worker. |
+| `device_link_required` | 403 | Link this device to the worker before opening a terminal there. |
+| `device_proof_invalid` | 403 | That terminal request is malformed. / does not match its challenge. / This device's signature did not verify. / That terminal request was not made for this worker and action. |
+| `device_proof_expired` | 403 | That terminal request expired. Try again. |
 | `not_found` | 404 | That terminal is closed or never existed. |
 | `not_exited` | 409 | This terminal is still running. Close it or wait for it to exit. |
 | `terminal_exited` | 409 | This terminal has exited. Restart it to type again. |
@@ -627,12 +712,13 @@ text and output are never logged.
 ## Remote implementation
 
 `app/network/terminal_relay.py` registers the `terminal` and `terminal-owner`
-control actions. The recipient issues pending requests and accepts approval
-only through its own owner-authenticated HTTP routes. Its source callback is
-an additional revocation check, never an issuer of recipient authority. Each
-approval is single-use and bound to the authenticated source and source lease;
-revocation or replacement during spawn closes the newly created PTY.
-Tests drive the HTTP request/approval producer, a real relay PTY, the existing
+control actions. `app/network/terminal_device_links.py` holds the link requests,
+challenges and signature check; `app/db/terminal_device_links.py` is the
+receiver's own record. The receiver links a device only through its own
+owner-authenticated HTTP routes. The source callback is an additional revocation
+check, never an issuer of authority. Each signed open is single-use, and
+revocation during spawn closes the newly created PTY.
+Tests drive the link routes, real P-256 signatures, a real relay PTY, the existing
 WebSocket, immediate close before the reader starts, and malicious-member
 requests with policy both on and off. The in-process transport is a test seam,
 not evidence of a working two-worker HTTPS deployment.
