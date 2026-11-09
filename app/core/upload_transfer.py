@@ -78,6 +78,32 @@ def session_upload_dir(session_id: str) -> Path:
     return settings.effective_workspace_dir / "session-uploads" / key
 
 
+def stage_session_upload(session_id: str, filename: str, content: bytes) -> Dict[str, Any]:
+    """Write bytes into the session's staging area; the send lifts them from there."""
+    from app.core.config import settings
+    from app.core.confined_files import upload
+
+    workspace = settings.effective_workspace_dir
+    stage = session_upload_dir(session_id).relative_to(workspace).as_posix()
+    destination = upload(workspace, stage, filename, content)
+    return {
+        "filename": destination.name,
+        "path": destination.relative_to(workspace).as_posix(),
+        "full_path": destination.as_posix(),
+        "size": len(content),
+    }
+
+
+def split_session_staged_paths(paths: List[str], session_id: str) -> tuple[List[str], List[str]]:
+    """Separate this session's staged files from files in a project checkout."""
+    root = session_upload_dir(session_id).resolve()
+    staged: List[str] = []
+    others: List[str] = []
+    for raw in paths:
+        (staged if _is_under(Path(raw).resolve(), root) else others).append(raw)
+    return staged, others
+
+
 def validate_upload_paths(paths: List[str], session: Dict[str, Any]) -> None:
     """Admit provenance only from this session's attachment staging areas.
 

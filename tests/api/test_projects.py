@@ -14,6 +14,7 @@ Tests cover:
 
 import pytest
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from fastapi import FastAPI
@@ -1592,6 +1593,58 @@ class TestProjectFileRoutesStayInProject:
         )
 
         assert response.status_code == 404
+
+    @pytest.fixture
+    def shared_session(self, mock_database, temp_dir, monkeypatch):
+        """A chat owned by another worker: no local project id, only the shared one."""
+        import app.core.config as config
+        monkeypatch.setitem(config._runtime_overrides, "workspace_dir", temp_dir)
+        row = {"id": "s1", "project_id": None, "project_v2_id": "pv2-shared", "mode": "code"}
+        mock_database.get_session.return_value = row
+        with patch("app.db.projects_v2.get_project_v2", return_value={"id": "pv2-shared", "origin": "github.com/acme/app"}), \
+             patch("app.core.project_resolver.origin_for_legacy_project", return_value="github.com/acme/app") as origin:
+            yield row, origin
+
+    def test_upload_for_shared_project_chat_is_staged_for_the_send(self, client, layout, shared_session):
+        from app.core import upload_transfer
+        project_dir, _ = layout
+        row, _ = shared_session
+
+        response = client.post(
+            "/api/v1/projects/test-project/upload",
+            files={"file": ("a.txt", BytesIO(b"x"), "text/plain")},
+            data={"session_id": "s1"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["sizeFormatted"]
+        assert Path(body["full_path"]).parent == upload_transfer.session_upload_dir("s1")
+        assert not (project_dir / "uploads").exists()
+        upload_transfer.validate_upload_paths([body["full_path"]], row)
+
+    def test_upload_rejects_shared_chat_of_a_different_project(self, client, layout, shared_session, temp_dir):
+        _, origin = shared_session
+        origin.return_value = "github.com/acme/other"
+
+        response = client.post(
+            "/api/v1/projects/test-project/upload",
+            files={"file": ("a.txt", BytesIO(b"x"), "text/plain")},
+            data={"session_id": "s1"},
+        )
+
+        assert response.status_code == 404
+        assert not (temp_dir / "session-uploads").exists()
+
+    def test_file_list_for_shared_project_chat_uses_this_workers_copy(self, client, layout, shared_session):
+        project_dir, _ = layout
+        (project_dir / "readme.md").write_text("hello")
+
+        with patch("app.core.project_resolver.resolve_existing_cwd", return_value=None):
+            response = client.get("/api/v1/projects/test-project/files", params={"session_id": "s1"})
+
+        assert response.status_code == 200
+        assert "readme.md" in response.text
 
     def test_upload_with_own_session_still_works(self, client, mock_database, layout):
         project_dir, _ = layout

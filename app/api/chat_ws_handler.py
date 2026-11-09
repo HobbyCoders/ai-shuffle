@@ -1147,11 +1147,21 @@ class ChatWebSocketHandler:
         """
         from app.core import upload_transfer
 
+        # Where each file was staged decides how it lifts. The composer can
+        # still name its local project for a chat whose files are session-staged.
+        staged, upload_paths = await run_sync(
+            upload_transfer.split_session_staged_paths, upload_paths, session_id
+        )
         if not project_id:
+            staged, upload_paths = staged + upload_paths, []
+        blob_ids: List[str] = []
+        if staged:
             session = await run_sync(database.get_session, session_id)
             if not session or not session.get("project_v2_id"):
                 raise upload_transfer.UploadLiftError("Attachments need a project session.")
-            return await run_sync(upload_transfer.lift_session_paths_to_blobs, upload_paths, session)
+            blob_ids = await run_sync(upload_transfer.lift_session_paths_to_blobs, staged, session)
+        if not upload_paths:
+            return blob_ids
         project = await run_sync(database.get_project, project_id)
         if not project:
             raise upload_transfer.UploadLiftError(
@@ -1171,7 +1181,7 @@ class ChatWebSocketHandler:
                 "Upload lift: project_v2 resolve failed for %s", project_id,
                 exc_info=True,
             )
-        return await run_sync(
+        return blob_ids + await run_sync(
             upload_transfer.lift_paths_to_blobs,
             upload_paths,
             project,
