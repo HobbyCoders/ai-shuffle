@@ -367,6 +367,185 @@ def chat():
             cur.execute(f"DELETE FROM {table} WHERE session_id IN (%s,%s)", (sdk, "ses_lab-source"))
 
 
+def _merge_between_turns(chat: str) -> dict[str, int]:
+    """Startup's own pass and gate, with durable run rows opening and closing it."""
+    import threading
+
+    from app.core.startup import _no_foreground_turn
+    from app.db import history_indexing
+
+    stop = threading.Event()
+    turns = 0
+
+    def run_turns() -> None:
+        nonlocal turns
+        while not stop.wait(7.0):
+            turns += 1
+            run = f"history-lab-run-{turns}"
+            with base.get_db() as conn:
+                conn.cursor().execute(
+                    "INSERT INTO runs(id,session_id,runner_id,fence_token,state,lease_expires_at) "
+                    "VALUES (%s,%s,'lab',1,'active',NOW() + interval '1 minute')", (run, chat))
+            stop.wait(3.0)
+            with base.get_db() as conn:
+                conn.cursor().execute("DELETE FROM runs WHERE id=%s", (run,))
+
+    driver = threading.Thread(target=run_turns)
+    driver.start()
+    passes = 1
+    try:
+        deadline = time.monotonic() + 1800
+        while not history_indexing.run_pass(can_work=_no_foreground_turn):
+            assert time.monotonic() < deadline, "merge exceeded the lab time budget"
+            passes += 1
+            time.sleep(5)
+    finally:
+        stop.set()
+        driver.join()
+    return {"gated_passes": passes, "turns_started": turns}
+
+
+@pytest.mark.skipif(os.environ.get("HANDOFF_LAB_SEARCH") != "1",
+                    reason="opt-in search over a near-full history pending list")
+def test_near_full_history_list_search_lab(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    import statistics
+
+    from app.core.provider import fluid_pg_store
+    from app.db import history_indexing as hi, recall_index_retirement, session_recall, sessions
+    from tests.db.test_history_indexing_postgres import finish_migration
+
+    assert session_recall.run_backfill(max_seconds=60.0)
+    for _ in range(30):
+        if recall_index_retirement.run_pass(seconds=60.0):
+            break
+    finish_migration()
+    index = "idx_session_recall_text_trgm_e_h2"
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pageinspect")
+        # Worst case: nothing else gets to merge the list first.
+        cur.execute("ALTER TABLE session_recall_text SET (autovacuum_enabled=false)")
+
+    def pending_kb() -> int:
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT n_pending_pages * 8 AS kb FROM gin_metapage_info(get_raw_page(%s, 0))",
+                        (index,))
+            return int(cur.fetchone()["kb"])
+
+    full = dict(events=7823, nodes=1741, transcript=10768, messages=4000, width=3100)
+    target = int(hi.HISTORY_PENDING_KB * 0.91)
+    imports: list[dict[str, Any]] = []
+    gain = 0
+    terms_from: dict[str, Any] | None = None
+    while (before := pending_kb()) < target:
+        # Rounded down, so the last partial import lands just past the target.
+        divisor = max(1, gain // (target - before))
+        n = len(imports)
+        sid = f"handoff-search-lab-{n}"
+        data = snapshot(**{k: (v // divisor if k != "width" else v) for k, v in full.items()})
+        data["token"] = f"lab-token-{n}"
+        data["sdk_session_id"] = f"ses_search-lab-{n}"
+        history = data["history"]
+        terms_from = terms_from or history
+        for row in history["session_events"]:
+            row["id"] = f"{sid}-{row['id']}"
+        for row in history["session_messages"]:
+            row["jsonl_uuid"] = f"{sid}-{row['jsonl_uuid']}"
+        with base.get_db() as conn:
+            conn.cursor().execute("INSERT INTO sessions(id,title,owner_device_id) VALUES (%s,'Search lab','lab-remote')",
+                                  (sid,))
+        started = time.monotonic()
+        handoff.install_history(sid, data, "/tmp/handoff-search-lab")
+        imports.append({"seconds": round(time.monotonic() - started, 2), "divisor": divisor,
+                        "pending_kb": pending_kb()})
+        added = imports[-1]["pending_kb"] - before
+        assert added > 0, f"the list stopped growing at {before} KB after {imports}"
+        gain = max(gain, added * divisor)
+        with base.get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET sdk_session_id=NULL WHERE id=%s", (sid,))
+    monkeypatch.setattr(fluid_pg_store, "_my_device_id", lambda: "lab-local")
+    monkeypatch.setattr(fluid_pg_store, "_worker_name", lambda _: "Lab mirror")
+
+    assert terms_from is not None
+    texts = [row["payload"]["content"] for row in terms_from["session_events"]]
+    cut = lambda row, size: texts[row][100:100 + size]  # noqa: E731
+    shapes = {
+        "one_rare_control": [cut(11, 12)],
+        "two_rare": [cut(23, 12), cut(301, 12)],
+        "three_mixed": [cut(47, 12), cut(811, 5), cut(1203, 4)],
+        "five_short": [cut(n, 4) for n in (3, 99, 512, 2048, 4096)],
+        "two_broad": [cut(5, 3), cut(6, 3)],
+        "two_absent": ["zzqqxx00zzqq", "qqzz00xxqqzz"],
+        "long_phrase": [cut(77, 60), cut(78, 60)],
+    }
+
+    def measure() -> dict[str, dict[str, Any]]:
+        results: dict[str, dict[str, Any]] = {}
+        for name, terms in shapes.items():
+            times: list[float] = []
+            hits = 0
+            for _ in range(3):
+                started = time.perf_counter()
+                hits = len(fluid_pg_store._search_sync(terms, 10, None))
+                times.append(time.perf_counter() - started)
+            started = time.perf_counter()
+            listed = len(sessions.search_sessions(" ".join(terms)))
+            results[name] = {"seconds": [round(t, 3) for t in times],
+                             "median": round(statistics.median(times), 3), "hits": hits,
+                             "search_sessions_seconds": round(time.perf_counter() - started, 3),
+                             "search_sessions_hits": listed}
+        return results
+
+    pending = pending_kb()
+    unmerged = measure()
+    # A starved merge: the next long chat crosses the limit under production's
+    # statement limit and pays PostgreSQL's inline merge itself.
+    with base.get_db() as conn:
+        conn.cursor().execute("ALTER DATABASE lab SET statement_timeout = '30s'")
+    base.close_pool()
+    base.init_pool(min_conn=1, max_conn=6)
+    sid = "handoff-search-lab-crossing"
+    data = snapshot(**full)
+    data["token"] = "lab-token-crossing"
+    data["sdk_session_id"] = "ses_search-lab-crossing"
+    for row in data["history"]["session_events"]:
+        row["id"] = f"{sid}-{row['id']}"
+    for row in data["history"]["session_messages"]:
+        row["jsonl_uuid"] = f"{sid}-{row['jsonl_uuid']}"
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions(id,title,owner_device_id) VALUES (%s,'Search lab','lab-remote')",
+                              (sid,))
+    from tests.db.history_index_lab import LiveInserts
+    crossing_sampler = LiveInserts(offset=3_000_000)
+    crossing_sampler.start()
+    started = time.monotonic()
+    try:
+        handoff.install_history(sid, data, "/tmp/handoff-search-lab")
+        crossing: dict[str, Any] = {"ok": True}
+    except Exception as exc:  # noqa: BLE001 — the outcome is the measurement
+        crossing = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
+    elapsed = round(time.monotonic() - started, 2)
+    crossing.update(seconds=elapsed, pending_kb_after=pending_kb(),
+                    live_latency_seconds=crossing_sampler.finish())
+    started = time.monotonic()
+    assert hi.flush_pending(quiet=0)
+    merge_seconds = time.monotonic() - started
+    merged = measure()
+    with base.get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET owner_device_id='lab-local' "
+                              "WHERE id LIKE 'handoff-search-lab-%%'")
+    adopted = measure()
+    with capsys.disabled():
+        print("HANDOFF_SEARCH_LAB " + json.dumps({
+            "limit_kb": hi.HISTORY_PENDING_KB, "pending_kb": pending,
+            "full_fraction": round(pending / hi.HISTORY_PENDING_KB, 3),
+            "imports": imports, "crossing_import": crossing, "merge_seconds": round(merge_seconds, 1),
+            "unmerged": unmerged, "merged": merged, "adopted_merged": adopted}))
+
+
 @pytest.mark.skipif(os.environ.get("HANDOFF_LAB") != "1", reason="opt-in 20k-row measurement")
 def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
     from app.db import network, session_recall
@@ -379,16 +558,26 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
     payload_bytes = len(json.dumps(data))
     timing = handoff._Timing("lab", chat)
     data["_timing"] = timing
-    with base.get_db() as conn:
-        create_session_recall_text(conn.cursor())
-        session_recall.install_objects(conn.cursor())
-    session_recall.install_triggers()
+    if os.environ.get("HANDOFF_LAB_RETIRED") == "1":
+        # A worker that finished the projection backfill and #1170's retirement.
+        from app.db import recall_index_retirement
+        assert session_recall.run_backfill(max_seconds=60.0)
+        for _ in range(30):
+            if recall_index_retirement.run_pass(seconds=60.0):
+                break
+        else:
+            pytest.fail("transcript GIN retirement did not finish")
+    else:
+        with base.get_db() as conn:
+            create_session_recall_text(conn.cursor())
+            session_recall.install_objects(conn.cursor())
+        session_recall.install_triggers()
     if os.environ.get("HANDOFF_LAB_DEFERRED") == "1":
         from tests.db.test_history_indexing_postgres import finish_migration
         finish_migration()
-        pending_kb = int(os.environ.get("HANDOFF_LAB_HISTORY_PENDING_KB", "4096"))
-        assert pending_kb in (1024, 2048, 4096)
-        from app.db.history_indexing import INDEXES
+        from app.db.history_indexing import HISTORY_PENDING_KB, INDEXES
+        pending_kb = int(os.environ.get("HANDOFF_LAB_HISTORY_PENDING_KB", HISTORY_PENDING_KB))
+        assert 64 <= pending_kb <= HISTORY_PENDING_KB
         with base.get_db() as conn:
             cur = conn.cursor()
             for name in INDEXES:
@@ -472,6 +661,18 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
         promoted = 0
         complete = False
         args = {}
+        flushed = None
+        if os.environ.get("HANDOFF_LAB_FLUSH") == "1":
+            from app.db import sessions
+            search = time.perf_counter()
+            sessions.search_sessions("handofflabneedle")
+            searched_pending = time.perf_counter() - search
+            flushed = (_merge_between_turns(chat) if os.environ.get("HANDOFF_LAB_GATED") == "1"
+                       else history_indexing.flush_pending(quiet=0))
+            search = time.perf_counter()
+            sessions.search_sessions("handofflabneedle")
+            flushed = {"merged": flushed, "search_pending_s": searched_pending,
+                       "search_merged_s": time.perf_counter() - search}
         if os.environ.get("HANDOFF_LAB_BATCH_ROWS"):
             args["rows"] = int(os.environ["HANDOFF_LAB_BATCH_ROWS"])
         try:
@@ -497,7 +698,7 @@ def test_import_lab(chat: str, capsys: pytest.CaptureFixture[str]) -> None:
             with capsys.disabled():
                 print("HANDOFF_CATCHUP_LAB " + json.dumps({"seconds": elapsed,
                       "complete": complete, "pending": pending, "batch_args": args,
-                      "promoted_rows": promoted, "total_import_and_catchup_wal": total_wal,
+                      "promoted_rows": promoted, "flushed_pages": flushed, "total_import_and_catchup_wal": total_wal,
                       "wal_diagnostics": wal_summary(catchup_wal_start, "catchup"),
                       "live_latency_seconds": catchup_latency}))
         assert complete, "catch-up exceeded the lab time budget"
