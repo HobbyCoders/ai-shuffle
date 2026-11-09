@@ -172,6 +172,9 @@ class PackageConnector(BaseConnector):
     async def send_message(self, message):
         return await self._call("send_message", message)
 
+    async def send_timed(self, message):
+        return await self._call("send_timed", message)
+
     async def send_permission_prompt(self, platform_chat_id, prompt):
         return await self._call("send_permission_prompt", platform_chat_id, prompt)
 

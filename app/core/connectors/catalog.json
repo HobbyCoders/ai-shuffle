@@ -6,7 +6,7 @@
       "module": "telegram",
       "class": "TelegramConnector",
       "files": {
-        "telegram.py": "39693e54727e5f91a81fcc702df2df6617d15ce54bce43c105e91b1e6f090f38",
+        "telegram.py": "9831d9b4b0dfe493239f67c98e3552aae0f305708427f473e0c7a2d08e63466d",
         "telegram_actions.py": "b1f33a8a249e16fa582c7e00bb3da22770c52a55ab513ded25b9af9b54a89281"
       }
     },
@@ -14,7 +14,7 @@
       "module": "discord_connector",
       "class": "DiscordConnector",
       "files": {
-        "discord_connector.py": "76dc3be22797feae97410c17a08ec16c779a982ea1b85269bca39f5d71024cff",
+        "discord_connector.py": "b5defb6695c2a9ebc21667e0a794d2e0b0f506ff4dd27069fae675df2abd4129",
         "discord_actions.py": "7d76da94b24d40c09b4ac6277eddf912d9dd0ce19b8b87808df4aaa98984b083",
         "watch_history.py": "043086d62c915463920475b285e0286ee32dd5c21c19de6055c20241e6b81f71"
       }
@@ -38,7 +38,7 @@
       "module": "slack",
       "class": "SlackConnector",
       "files": {
-        "slack.py": "facbf3211a95124d00f51641dce1a3c15a8004bc76e2bc57e6683bbc9e4f8845",
+        "slack.py": "b9c061d7d350a51763769f1addbc182689c356d077a339610b9c5e17a60b6d5d",
         "slack_actions.py": "a7e2fe70523d2c21125605649ffaf69a1ad8d88f575c0bed5a480cf4911e58fb",
         "watch_history.py": "043086d62c915463920475b285e0286ee32dd5c21c19de6055c20241e6b81f71"
       }
@@ -145,5 +145,5 @@
     ]
   },
   "sdk": 1,
-  "release": "3911d1498bae82ee"
+  "release": "2e699c86e7e75f0e"
 }

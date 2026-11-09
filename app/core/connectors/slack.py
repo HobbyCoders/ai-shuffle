@@ -332,25 +332,35 @@ class SlackConnector(BaseConnector):
 
     async def send_message(self, message: OutgoingMessage) -> bool:
         """Send a text message to a Slack channel."""
+        return await self._send_chunks(message) is not None
+
+    async def send_timed(self, message: OutgoingMessage) -> Optional[float]:
+        """Slack's own ``ts`` on the last message it posted."""
+        sent = await self._send_chunks(message)
+        return sent_at_seconds(sent[-1].get("ts")) if sent else None
+
+    async def _send_chunks(self, message: OutgoingMessage) -> Optional[List[Any]]:
+        """Slack's response for each posted message, or None when the send failed."""
         if self._web_client is None:
             logger.error("Cannot send message: web client is not initialised")
-            return False
+            return None
 
         try:
-            for text in chunk_text(message.text, self.MAX_MESSAGE_LENGTH):
+            return [
                 await self._web_client.chat_postMessage(
                     channel=message.platform_chat_id,
                     text=text,
                     thread_ts=message.reply_to_message_id,
                 )
-            return True
+                for text in chunk_text(message.text, self.MAX_MESSAGE_LENGTH)
+            ]
 
         except Exception as exc:
             logger.exception(
                 "Failed to send Slack message to %s: %s",
                 message.platform_chat_id, exc,
             )
-            return False
+            return None
 
     async def send_ack_reaction(
         self, platform_chat_id: str, platform_message_id: str

@@ -365,9 +365,18 @@ class DiscordConnector(BaseConnector):
 
     async def send_message(self, message: OutgoingMessage) -> bool:
         """Send a text message to a Discord channel."""
+        return await self._send_chunks(message) is not None
+
+    async def send_timed(self, message: OutgoingMessage) -> Optional[float]:
+        """Discord's own ``created_at`` on the last message it posted."""
+        sent = await self._send_chunks(message)
+        return sent_at_seconds(getattr(sent[-1], "created_at", None)) if sent else None
+
+    async def _send_chunks(self, message: OutgoingMessage) -> Optional[List[Any]]:
+        """Each posted message, or None when the send failed."""
         if self._client is None:
             logger.error("Cannot send message: client is not initialised")
-            return False
+            return None
 
         try:
             channel = self._client.get_channel(int(message.platform_chat_id))
@@ -378,7 +387,7 @@ class DiscordConnector(BaseConnector):
                     "the channel ID is invalid.",
                     message.platform_chat_id,
                 )
-                return False
+                return None
 
             chunks = list(chunk_text(message.text, self.MAX_MESSAGE_LENGTH))
             logger.info(
@@ -387,16 +396,14 @@ class DiscordConnector(BaseConnector):
                 message.platform_chat_id,
                 getattr(channel, "name", "DM"),
             )
-            for text in chunks:
-                await channel.send(text)
-            return True
+            return [await channel.send(text) for text in chunks]
 
         except Exception as exc:
             logger.exception(
                 "Failed to send Discord message to %s: %s",
                 message.platform_chat_id, exc,
             )
-            return False
+            return None
 
     async def send_typing_indicator(self, platform_chat_id: str) -> None:
         """Trigger the typing indicator in a Discord channel."""

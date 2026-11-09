@@ -336,6 +336,19 @@ class BaseConnector(ABC):
         """Send a message to a platform chat. Returns True on success."""
         ...
 
+    async def send_timed(self, message: OutgoingMessage) -> Optional[float]:
+        """Send ``message`` and return when the PLATFORM says it was posted, in
+        epoch seconds. None when the send failed or the platform does not say.
+
+        Override only when that time comes from the same clock as the
+        ``sent_at`` of incoming messages. A permission request in a chat is
+        answered only by a reply the platform timed after the request's message,
+        so this clock is what stops a repeated old reply from approving a new
+        request, whatever the workers' own clocks say.
+        """
+        await self.send_message(message)
+        return None
+
     @abstractmethod
     async def send_permission_prompt(
         self, platform_chat_id: str, prompt: PermissionPrompt

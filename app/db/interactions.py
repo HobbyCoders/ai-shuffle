@@ -14,12 +14,15 @@ from contextlib import nullcontext
 import json
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.db.base import get_db, parse_jsonb as _parse_json, rows_to_list
 from app.db.session_events import notify_session_write
 
 logger = logging.getLogger(__name__)
+
+#: Payload key of a request's chat messages: chat -> when the platform posted it.
+CHAT_PROMPTS_KEY = "chat_prompts"
 
 
 def _parse_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -279,30 +282,31 @@ def mark_interaction_requeued(interaction_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-def _mark_pending_flag(interaction_id: str, key: str) -> bool:
-    """Stamp ``key: true`` into a still-pending interaction's payload.
+def _edit_pending_payload(interaction_id: str, edit: Callable[[Dict[str, Any]], bool]) -> bool:
+    """Apply ``edit`` to a still-pending interaction's payload; it returns False
+    when the payload already says so.
 
     Read-modify-write in Python (not a JSONB ``||``) so the SQLite test shim
-    stays compatible; the UPDATE is guarded on ``pending``, so it serializes
-    against an answer, a cancel or an expiry (each also guarded on ``pending``):
-    either the stamp lands while the row is pending, or it is refused. True
-    when the row is pending and now carries the stamp.
+    stays compatible; the row is locked for it and the UPDATE is guarded on
+    ``pending``, so it serializes against other edits, an answer, a cancel or an
+    expiry (each also guarded on ``pending``): either the edit lands while the
+    row is pending, or it is refused. True when the row is pending and now
+    carries the edit.
     """
     session_id = None
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT session_id, payload FROM pending_interactions "
-            "WHERE id=%s AND state='pending'",
+            "WHERE id=%s AND state='pending' FOR UPDATE",
             (interaction_id,),
         )
         row = cursor.fetchone()
         if row is None:
             return False
         payload = dict(_parse_json(row["payload"]) or {})
-        if payload.get(key):
+        if edit(payload) is False:
             return True
-        payload[key] = True
         cursor.execute(
             "UPDATE pending_interactions SET payload=%s WHERE id=%s AND state='pending'",
             (json.dumps(payload), interaction_id),
@@ -311,6 +315,27 @@ def _mark_pending_flag(interaction_id: str, key: str) -> bool:
             session_id = row["session_id"]
     notify_session_write(session_id, "pending_interactions")
     return session_id is not None
+
+
+def _mark_pending_flag(interaction_id: str, key: str) -> bool:
+    """Stamp ``key: true`` into a still-pending interaction's payload."""
+    def mark(payload: Dict[str, Any]) -> bool:
+        if payload.get(key):
+            return False
+        payload[key] = True
+        return True
+
+    return _edit_pending_payload(interaction_id, mark)
+
+
+def record_chat_prompt(interaction_id: str, chat: str, posted_at: float) -> bool:
+    """When the platform says it posted this request's message in ``chat``.
+    A reply there must be later, on that same clock, to answer the request."""
+    def stamp(payload: Dict[str, Any]) -> bool:
+        payload[CHAT_PROMPTS_KEY] = {**(payload.get(CHAT_PROMPTS_KEY) or {}), chat: posted_at}
+        return True
+
+    return _edit_pending_payload(interaction_id, stamp)
 
 
 def mark_interaction_parked(interaction_id: str) -> bool:

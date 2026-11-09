@@ -525,6 +525,7 @@ class PermissionHandler:
                 tool_name=tool_name,
                 tool_input=tool_input,
                 description=description or title or f"Allow {display_name or tool_name}?",
+                interaction_id=interaction_id,
             )
         except Exception:  # noqa: BLE001 — the funnel must never break the flow
             logger.debug(
