@@ -7,6 +7,7 @@ runs path-filtered unsigned native checks; its release-only steps stay owner-gat
 from pathlib import Path
 import json
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -24,6 +25,7 @@ AUTOMATIC = {
     "main-suite.yml": {"push", "workflow_dispatch"},
     "android-webview-cache.yml": {"push", "schedule", "workflow_dispatch"},
     "android.yml": {"pull_request", "workflow_dispatch", "workflow_call"},
+    "runtime-overlay-acceptance.yml": {"pull_request", "workflow_dispatch"},
     **{name: {"pull_request", "workflow_dispatch", "workflow_call"} for name in PR_CHECKS},
 }
 FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "workflow_run",
@@ -212,7 +214,7 @@ class CostPolicyTests(unittest.TestCase):
             "deploy-hub.yml", "deploy-license.yml", "deploy-site.yml", "deploy-uptime.yml",
             "ci-license.yml", "ci-uptime.yml", "withdraw-release.yml",
         }
-        allowed = {"ubuntu-latest", "ubuntu-24.04", "windows-latest", "macos-latest", "macos-14"}
+        allowed = {"ubuntu-latest", "ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "macos-latest", "macos-14"}
         for path in sorted(WORKFLOWS.glob("*.yml")):
             if path.name in private_cloud:
                 continue
@@ -229,8 +231,50 @@ class CostPolicyTests(unittest.TestCase):
                             self.assertLessEqual(set(matrix), allowed)
                         else:
                             self.assertIn("fromJSON((github.event_name == 'pull_request' || inputs.main_suite == true)", matrix)
+                    elif runner == "${{ matrix.runner }}":
+                        matrix = job["strategy"]["matrix"]
+                        self.assertEqual(set(matrix), {"include"},
+                                         "matrix.runner support is include-only; axes create extra jobs")
+                        entries = matrix["include"]
+                        self.assertTrue(entries)
+                        for entry in entries:
+                            self.assertIn(entry["runner"], allowed)
                     else:
                         self.assertIn(runner, allowed)
+
+    def test_runner_axis_cannot_hide_a_paid_job_behind_free_include_entries(self):
+        config = workflow("runtime-overlay-acceptance.yml")
+        config["jobs"]["acceptance"]["strategy"]["matrix"]["runner"] = ["macos-latest-xlarge"]
+        original_workflow = workflow
+
+        def mixed_matrix(name):
+            return config if name == "runtime-overlay-acceptance.yml" else original_workflow(name)
+
+        result = unittest.TestResult()
+        guard = CostPolicyTests("test_public_app_workflows_use_standard_hosted_runners")
+        with patch(f"{__name__}.workflow", side_effect=mixed_matrix):
+            guard.run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertFalse(result.errors)
+        self.assertEqual(len(result.failures), 1, "Paid runner axis escaped the free-runner guard")
+
+    def test_runtime_overlay_acceptance_is_path_scoped_and_non_publishing(self):
+        config = workflow("runtime-overlay-acceptance.yml")
+        self.assertEqual(config["on"]["pull_request"]["paths"], [
+            ".github/workflows/runtime-overlay-acceptance.yml",
+            "scripts/release/overlay_acceptance.py",
+            "docker/update_contract.py",
+        ])
+        self.assertEqual(config["permissions"], {"contents": "read"})
+        text = (WORKFLOWS / "runtime-overlay-acceptance.yml").read_text()
+        self.assertNotIn("secrets.", text)
+        self.assertNotIn("continue-on-error", text)
+        job = config["jobs"]["acceptance"]
+        self.assertEqual({entry["runner"] for entry in job["strategy"]["matrix"]["include"]},
+                         {"ubuntu-24.04", "ubuntu-24.04-arm"})
+        build = next(step for step in job["steps"]
+                     if step.get("uses") == "docker/build-push-action@v6")
+        self.assertEqual(build["with"]["push"], "false")
 
     def test_docker_jobs_use_branch_scoped_github_cache_and_verify_before_push(self):
         for name in ("build-branch.yml", "container-postgres.yml", "docker-publish.yml"):

@@ -456,10 +456,11 @@ def install_objects(cursor, *, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
     any function was missing, the triggers may have skipped writes, so every
     source's backfill starts over. Returns True on success.
     """
-    cursor.execute("SAVEPOINT session_recall_objects")
+    from app.db.base import execute_savepoint
+    execute_savepoint(cursor, "SAVEPOINT session_recall_objects")
     try:
         if not _try_schema_lock(cursor):
-            cursor.execute("RELEASE SAVEPOINT session_recall_objects")
+            execute_savepoint(cursor, "RELEASE SAVEPOINT session_recall_objects")
             return False
         cursor.execute("SELECT current_setting('lock_timeout') AS v")
         previous = cursor.fetchone()["v"]
@@ -489,10 +490,10 @@ def install_objects(cursor, *, lock_timeout_ms: int = LOCK_TIMEOUT_MS) -> bool:
         if not intact:
             cursor.execute("DELETE FROM session_recall_backfill")
         cursor.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
-        cursor.execute("RELEASE SAVEPOINT session_recall_objects")
+        execute_savepoint(cursor, "RELEASE SAVEPOINT session_recall_objects")
     except Exception:  # recall degrades to the legacy queries
-        cursor.execute("ROLLBACK TO SAVEPOINT session_recall_objects")
-        cursor.execute("RELEASE SAVEPOINT session_recall_objects")
+        execute_savepoint(cursor, "ROLLBACK TO SAVEPOINT session_recall_objects")
+        execute_savepoint(cursor, "RELEASE SAVEPOINT session_recall_objects")
         logger.info("SessionSearch projection not installed yet; recall keeps the legacy queries",
                     exc_info=True)
         return False

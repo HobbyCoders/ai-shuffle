@@ -242,11 +242,15 @@ def supported() -> bool:
     return pty_supported() and bool(available_shells())
 
 
+# 3 = the receiver accepts a device-signed open; 2 was per-shell approval.
+PEER_TERMINAL_VERSION = 3
+
+
 def capability_version() -> int:
-    """Relay support requires an explicit recipient policy and per-use owner approval."""
+    """Relay support requires the owner policy and device-signed opens."""
     try:
         from app.network.terminal_relay import peer_targets_enabled
-        return (2 if peer_targets_enabled() else 1) if supported() else 0
+        return (PEER_TERMINAL_VERSION if peer_targets_enabled() else 1) if supported() else 0
     except Exception:  # noqa: BLE001 — capability detection never raises
         return 0
 
@@ -1041,7 +1045,7 @@ def chat_folder(session_id: str) -> Optional[Tuple[str, str]]:
 
         if control.owner_of(row):
             raise TerminalError("chat_on_other_worker",
-                                "That chat runs on another worker. Terminals open on this worker only for now.", 409)
+                                "That chat runs on another worker. Open its terminal on that worker from here.", 409)
     except TerminalError:
         raise
     except Exception:  # noqa: BLE001 — not networked
@@ -1080,6 +1084,15 @@ def chat_folder(session_id: str) -> Optional[Tuple[str, str]]:
         except Exception:  # noqa: BLE001
             logger.debug("terminals: legacy project lookup failed", exc_info=True)
     return None
+
+
+def chat_worker_id(session_id: str) -> Optional[str]:
+    """The worker that runs this chat, when that is not this one."""
+    from app.db import database
+    from app.network import control
+
+    row = database.get_session(session_id)
+    return control.owner_of(row) if row else None
 
 
 def default_folder() -> Tuple[str, str]:
@@ -1213,6 +1226,8 @@ class TerminalRegistry:
                                 f"That's too much text to paste at once (limit {PASTE_MAX_CHARS // 1024} KB).", 413)
         if terminal.state == STATE_EXITED:
             raise TerminalError("terminal_exited", "This terminal has exited. Restart it to type again.", 409)
+        if hasattr(terminal, "paste"):  # A peer terminal: the PTY that decides is on the receiver.
+            return await terminal.paste(text)
         await terminal.wait_ready()
         terminal.refresh_busy()
         # Foreground programs may be waiting for input (including hidden

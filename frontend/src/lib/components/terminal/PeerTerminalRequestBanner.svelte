@@ -1,14 +1,13 @@
 <script lang="ts">
 	/**
-	 * App-wide nudge on the worker that would run a peer shell (#196): another
-	 * worker asked for a terminal here and it waits for this owner. A request
-	 * lasts two minutes, so it must be seen without opening Terminal first.
-	 * Review opens the Terminal page, where the code is compared and the
-	 * request approved or denied; this banner never approves anything itself.
+	 * App-wide nudge on a worker where a device is waiting to link (#674), so
+	 * the owner sees it without opening Terminal first. Review opens the
+	 * Terminal page, where the code from the device is entered; this banner
+	 * never links anything itself.
 	 *
-	 * Only for the owner, and only polls when this worker has peer terminals
-	 * turned on (its targets list another worker). Off by default: nothing
-	 * is requested or drawn.
+	 * Only for the owner, and only polls when this worker has terminals on
+	 * other workers turned on (its targets list another worker). Off by
+	 * default: nothing is requested or drawn.
 	 */
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -26,7 +25,7 @@
 	$effect(() => { if ($isAdmin) void terminals.ensureCapability(); });
 	$effect(() => { if (enabled) return peerTerminals.watch(); });
 
-	const pending = $derived(enabled ? peerTerminals.requests.filter((r) => r.status === 'pending') : []);
+	const pending = $derived(enabled ? peerTerminals.requests : []);
 	const onTerminalPage = $derived($layout.activeView?.type === 'terminal');
 	/** Dismissed request ids: a new request shows again. */
 	let dismissed = $state<string[]>([]);
@@ -39,8 +38,8 @@
 		<Banner
 			variant="page"
 			severity="warning"
-			title={shown.length > 1 ? `${shown.length} workers want a terminal here` : `${first.source_name} wants a terminal here`}
-			message="Compare the six-character code on both workers before you approve. The request expires in two minutes."
+			title={shown.length > 1 ? `${shown.length} devices want to link for terminals here` : `${first.label || 'A device'} wants to link for terminals here`}
+			message="Read the code on that device and enter it here to link it. The request runs out in ten minutes."
 			action={{ label: 'Review', onClick: () => layout.openFeaturePage('terminal') }}
 			dismissible
 			onDismiss={() => (dismissed = [...dismissed, ...shown.map((r) => r.request_id)])}

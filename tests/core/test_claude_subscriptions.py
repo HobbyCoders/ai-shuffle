@@ -7,7 +7,9 @@ folder, the worker-local setting lives in a dict, and every folder is under
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -39,6 +41,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(subs.database, "set_system_setting", values.__setitem__)
     monkeypatch.setattr(subs, "setting_key", lambda: "claude_cli_logins:test-worker")
     monkeypatch.setattr(subs, "_verified", {})
+    monkeypatch.setattr(subs, "_identity_cache", {})
     monkeypatch.setattr(subs, "_last_pending_probe", 0.0)
     monkeypatch.setattr(subs, "_reap_due", False)
 
@@ -51,7 +54,7 @@ def world(tmp_path, monkeypatch):
         probed.append(folder)
         email = signed.get(folder)
         return cs.ClaudeCliStatus(installed=True, signed_in=bool(email), email=email,
-                                  plan="max" if email else None)
+                                  plan="max" if email else None, checked_at=subs.time.time())
 
     def run_home(args, home_env):
         ran.append((args, dict(home_env)))
@@ -241,6 +244,205 @@ def test_transcripts_are_shared_across_sign_ins(world):
     if settings.claude_projects_dir is None:
         assert (cli_sessions._projects() / "-repo" / "after-switch.jsonl").exists()
     assert (world.base / "projects" / "-repo" / "after-switch.jsonl").exists()
+
+
+def test_payload_refreshes_expired_credentials_and_invalidates_on_relogin(world, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(subs.time, "monotonic", lambda: now[0])
+    account_id = _add(world, "saved@example.com")
+    folder = str(world.root / account_id)
+    assert subs.payload()["subscription"][0]["needs_sign_in"] is False
+    world.signed.pop(folder)
+    now[0] += subs._VERIFY_INTERVAL_SECONDS + 1
+    row = subs.payload()["subscription"][0]
+    assert row["needs_sign_in"] is True
+    assert row["signed_in"] is False
+    assert subs.payload()["recovery_required"] is True
+    world.signed[folder] = "saved@example.com"
+    subs.invalidate_identity()
+    assert subs.payload()["subscription"][0]["needs_sign_in"] is False
+
+
+def test_listing_keeps_latest_signed_out_result_after_expiry_then_timeout(world, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(subs.time, "monotonic", lambda: now[0])
+    account_id = _add(world, "saved@example.com")
+    folder = str(world.root / account_id)
+    world.signed.pop(folder)
+    now[0] += subs._VERIFY_INTERVAL_SECONDS + 1
+    signed_out = subs.payload()
+    assert signed_out["subscription"][0]["signed_in"] is False
+    assert signed_out["recovery_required"] is True
+    # No activation or manually seeded account fields between these listings.
+    now[0] += subs._VERIFY_INTERVAL_SECONDS + 1
+    monkeypatch.setattr(subs, "_probe", lambda _: cs.ClaudeCliStatus(
+        installed=True, signed_in=None, error="timeout"))
+    unknown = subs.payload()
+    assert unknown["subscription"][0]["signed_in"] is False
+    assert unknown["subscription"][0]["needs_sign_in"] is True
+    assert unknown["recovery_required"] is True
+    assert unknown["subscription"][0]["checked_at"] == signed_out["subscription"][0]["checked_at"]
+
+
+@pytest.mark.parametrize("signed_in", [False, True])
+@pytest.mark.parametrize("active", [False, True])
+def test_indeterminate_identity_keeps_last_readable_authentication(world, monkeypatch, signed_in, active):
+    account_id = _add(world, "saved@example.com")
+    if not signed_in:
+        world.signed.pop(str(world.root / account_id))
+    monkeypatch.setattr(subs.time, "time", lambda: 123.0)
+    # Produce the stored auth state through the real activation/refresh path,
+    # rather than seeding the state that the listing will consume.
+    subs.change(account_id, "activate")
+    if not active:
+        _add(world, "other@example.com")
+    subs.invalidate_identity()
+    monkeypatch.setattr(subs, "_probe", lambda _: cs.ClaudeCliStatus(
+        installed=True, signed_in=None, error="timeout"))
+
+    listing = subs.payload()
+    row = next(row for row in listing["subscription"] if row["id"] == account_id)
+    assert row["signed_in"] is signed_in
+    assert row["needs_sign_in"] is (not signed_in)
+    assert row["checked_at"] == 123.0
+    assert row["email"] == "saved@example.com"
+    assert listing["recovery_required"] is (active and not signed_in)
+
+
+@pytest.mark.parametrize("reader", ["payload", "activate", "save_current", "pending_poll", "pending_cancel"])
+def test_login_completion_rejects_an_inflight_identity_probe(world, monkeypatch, reader):
+    if reader.startswith("pending_"):
+        account_id = subs.start_login()["id"]
+    elif reader == "save_current":
+        account_id = None
+    else:
+        account_id = _add(world, "before@example.com")
+    subs.invalidate_identity()
+    probe_started, release_probe = Event(), Event()
+    probes = []
+
+    def probe(_):
+        probes.append(1)
+        if len(probes) == 1:
+            probe_started.set()
+            assert release_probe.wait(5), "the old identity probe was not released"
+            email = "before@example.com"
+        else:
+            email = "after@example.com"
+        return cs.ClaudeCliStatus(installed=True, signed_in=True, email=email)
+
+    monkeypatch.setattr(subs, "_probe", probe)
+    # Complete the real terminal reader path while the listing/activation holds
+    # the subscription lock. The terminal must not acquire that lock to invalidate.
+    terminal = claude_cli_login.LoginTerminal()
+    terminal._proc = SimpleNamespace(take_output=lambda: b"", running=False,
+                                     wait=lambda _: None, exit_code=0)
+
+    def read_identity():
+        with subs._lock:
+            if reader in ("payload", "pending_poll"):
+                return subs.payload()
+            if reader == "save_current":
+                return subs.save_current()
+            if reader == "pending_cancel":
+                return subs.cancel_login()
+            return subs.change(account_id, "activate")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        inflight = pool.submit(read_identity)
+        try:
+            assert probe_started.wait(5), "the old identity probe did not start"
+            completed = pool.submit(terminal.read)
+            assert completed.result(timeout=5)["succeeded"] is True
+        finally:
+            release_probe.set()
+        result = inflight.result(timeout=5)
+        if reader in ("payload", "pending_poll"):
+            assert result["subscription"][0]["email"] == "after@example.com"
+
+    row = subs.payload()["subscription"][0]
+    assert row["email"] == "after@example.com"
+    if reader in ("save_current", "pending_poll", "pending_cancel"):
+        # New accounts must derive their labels from the guarded result too.
+        assert row["label"] == "after@example.com"
+        assert subs._load()["accounts"][0]["email"] == "after@example.com"
+    assert subs._identity_cache[account_id][1].email == "after@example.com"
+    # Adoption changes the active folder and deliberately invalidates again.
+    assert len(probes) == (3 if reader.startswith("pending_") else 2)
+
+
+def test_cached_listing_keeps_probe_time_without_rewriting_storage(world, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(subs.time, "monotonic", lambda: now[0])
+    _add(world, "saved@example.com")
+    checked_at = subs.payload()["subscription"][0]["checked_at"]
+    original_save = subs._save
+    writes = []
+
+    def save(state):
+        writes.append(1)
+        original_save(state)
+
+    monkeypatch.setattr(subs, "_save", save)
+    monkeypatch.setattr(subs.time, "time", lambda: checked_at + 5)
+    assert subs.payload()["subscription"][0]["checked_at"] == checked_at
+    assert subs.payload()["subscription"][0]["checked_at"] == checked_at
+    assert writes == []
+    now[0] += subs._VERIFY_INTERVAL_SECONDS + 1
+    assert subs.payload()["subscription"][0]["checked_at"] == checked_at + 5
+    assert writes == [1]
+    assert subs.payload()["subscription"][0]["checked_at"] == checked_at + 5
+    assert writes == [1]
+
+
+def test_inactive_saved_login_commands_never_switch_accounts(world):
+    first = _add(world, "first@example.com")
+    second = _add(world, "second@example.com")
+    before = subs._load()
+    login = subs.sign_in_commands(first)
+    assert login["terminal"] is False
+    assert login["env"] == {"CLAUDE_CONFIG_DIR": str(world.root / first)}
+    assert "claude auth login" in login["commands"]["posix"]
+    assert subs._load() == before and before["active_id"] == second
+    with pytest.raises(subs.SubscriptionError) as missing:
+        subs.sign_in_commands("../outside")
+    assert missing.value.status == 404
+
+
+def test_failed_folder_deletion_is_retried_at_startup(world, monkeypatch):
+    account_id = _add(world, "saved@example.com")
+    real_remove = home.remove
+    monkeypatch.setattr(home, "remove", lambda _: (_ for _ in ()).throw(PermissionError("locked")))
+    with pytest.raises(subs.SubscriptionError, match="could not be deleted"):
+        subs.change(account_id, "delete")
+    assert not subs._load()["accounts"]
+    assert subs._load()["cleanup"] == [account_id]
+    monkeypatch.setattr(home, "remove", real_remove)
+    subs.repair_on_startup()
+    assert not (world.root / account_id).exists()
+    assert subs._load()["cleanup"] == []
+    assert (world.base / "projects" / "-repo" / "chat.jsonl").exists()
+
+
+def test_delete_readonly_directory_does_not_chmod_shared_target(world, monkeypatch):
+    account_id = _add(world, "saved@example.com")
+    folder = world.root / account_id
+    backup = folder / ".claude.json.backup"
+    backup.write_text("opaque CLI-owned backup")
+    real_rmdir = os.rmdir
+    attempted = []
+
+    def readonly_once(path):
+        if path == folder and not attempted:
+            attempted.append(path)
+            raise PermissionError("read-only directory")
+        return real_rmdir(path)
+
+    monkeypatch.setattr(home.os, "rmdir", readonly_once)
+    subs.change(account_id, "delete")
+    assert attempted == [folder]
+    assert not folder.exists()
+    assert (world.base / "projects" / "-repo" / "chat.jsonl").exists()
 
 
 def test_one_active_at_a_time_and_delete_rules(world):

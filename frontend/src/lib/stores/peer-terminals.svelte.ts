@@ -1,257 +1,221 @@
 /**
- * Owner-approved peer terminals (#196), both ends.
+ * Terminals on another worker (#196, #674), both ends.
  *
- * Source (the worker the owner is using): one request flow per peer worker.
- * Request, show the confirmation code while the other worker's owner
- * decides, then hold the approval until the panel opens its single shell.
+ * This device: sign one open for a peer worker, linking the device first if
+ * that worker doesn't know it yet. The code shown while linking is worked out
+ * here from the device's own key and is never sent; the owner types it on the
+ * receiving worker.
  *
- * Recipient (the worker that would run the shell): the requests waiting here
- * and the approvals still alive, polled only while something shows them.
+ * The receiving worker: the devices waiting to link here and the ones linked,
+ * polled only while something shows them.
  *
- * Runtime only. Authorization ids are opaque in-memory leases: they never
- * reach localStorage, a URL other than the owner API routes, or a log.
+ * Runtime only. The private key stays in the browser's key store and never
+ * passes through here.
  */
-import { terminalsApi, TerminalApiError, type PeerAuthorization, type PeerRequest } from '$lib/api/terminals';
-import { requestErrorMessage } from '$lib/terminal/peer';
+import { terminalsApi, TerminalApiError, type DeviceProof, type LinkedDevice, type PeerLinkRequest, type ProofTarget } from '$lib/api/terminals';
+import { deviceKey, deviceLabel, type DeviceKey } from '$lib/terminal/device-key';
+import { LINK_SECONDS, PROOF_PURPOSE, requestErrorMessage, type PeerAction } from '$lib/terminal/peer';
 
-export const SOURCE_POLL_MS = 2_000;
-/** An approved, unopened lease changes only on expiry or revocation: check it less often. */
-export const APPROVED_POLL_MS = 10_000;
-export const RECIPIENT_POLL_MS = 3_000;
+export const LINK_POLL_MS = 2_500;
+export const DEVICES_POLL_MS = 3_000;
 
-export type SourceFlow =
-	| { phase: 'requesting'; workerId: string; name: string }
-	| { phase: 'pending'; workerId: string; name: string; authorizationId: string; code: string; expiresAt: number; unreachable: boolean }
-	| { phase: 'approved'; workerId: string; name: string; authorizationId: string; code: string; expiresAt: number }
-	/** The request did not lead to a shell. `retry` is true when asking again can help. */
+export type LinkFlow =
+	| { phase: 'linking'; workerId: string; name: string; code: string; expiresAt: number; unreachable: boolean }
+	/** The link did not finish. `retry` is true when asking again can help. */
 	| { phase: 'ended'; workerId: string; name: string; title: string; message: string; retry: boolean };
 
-let flows = $state<Record<string, SourceFlow>>({});
+let flows = $state<Record<string, LinkFlow>>({});
 let now = $state(Date.now());
-let requests = $state<PeerRequest[]>([]);
+let requests = $state<PeerLinkRequest[]>([]);
+let links = $state<LinkedDevice[]>([]);
 let fetchedAt = $state(0);
-let recipientLoaded = $state(false);
-let recipientError = $state<string | null>(null);
-let decisions = $state<Record<string, 'approve' | 'deny' | 'revoke'>>({});
+let loaded = $state(false);
+let loadError = $state<string | null>(null);
+let working = $state<Record<string, 'decline' | 'revoke'>>({});
 let notices = $state<Record<string, string>>({});
-/** Leases this owner revoked here, so a target row still reporting one is not shown as approved. */
-let revoked = $state<string[]>([]);
+let approving = $state(false);
 
-/** One status call per worker at a time, and when each was last asked. */
-const polling = new Set<string>();
-const polledAt = new Map<string, number>();
-/** Recipient list answers are applied only if no newer refresh or decision came after them. */
-let recipientSeq = 0;
-/** Refreshes still waiting for an answer: a background tick waits for them instead of overtaking them. */
-let recipientInflight = 0;
-
+/** Each worker's current attempt: a newer attempt or a cancel ends the older one. */
+const attempts = new Map<string, number>();
+let attemptSeq = 0;
+let listSeq = 0;
+let listInflight = 0;
 let ticker: ReturnType<typeof setInterval> | null = null;
-let sourceTimer: ReturnType<typeof setInterval> | null = null;
-let recipientTimer: ReturnType<typeof setInterval> | null = null;
+let listTimer: ReturnType<typeof setInterval> | null = null;
 let watchers = 0;
+/**
+ * Workers with a link card counting down. Plain, not read from `flows`, because
+ * syncTimers also runs from an effect teardown, where Svelte hands back a key
+ * added in the same flush as undefined.
+ */
+const linking = new Set<string>();
 
-const live = (flow: SourceFlow | undefined): flow is Extract<SourceFlow, { phase: 'pending' | 'approved' }> =>
-	!!flow && (flow.phase === 'pending' || flow.phase === 'approved');
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 function syncTimers() {
-	const sourceActive = Object.values(flows).some(live);
-	const anyActive = sourceActive || watchers > 0;
-	if (anyActive && !ticker) ticker = setInterval(() => { now = Date.now(); }, 1_000);
-	if (!anyActive && ticker) { clearInterval(ticker); ticker = null; }
-	if (sourceActive && !sourceTimer) sourceTimer = setInterval(() => void pollSources(), SOURCE_POLL_MS);
-	if (!sourceActive && sourceTimer) { clearInterval(sourceTimer); sourceTimer = null; }
-	if (watchers > 0 && !recipientTimer) recipientTimer = setInterval(() => {
-		// A slow list (over one interval) must not be overtaken by the next tick
-		// every time, or each answer would be dropped as stale and never shown.
-		if (recipientInflight > 0) return;
-		if (typeof document === 'undefined' || document.visibilityState !== 'hidden') void peerTerminals.refreshRequests();
-	}, RECIPIENT_POLL_MS);
-	if (watchers === 0 && recipientTimer) { clearInterval(recipientTimer); recipientTimer = null; }
+	const counting = linking.size > 0 || watchers > 0;
+	if (counting && !ticker) ticker = setInterval(() => { now = Date.now(); }, 1_000);
+	if (!counting && ticker) { clearInterval(ticker); ticker = null; }
+	if (watchers > 0 && !listTimer) listTimer = setInterval(() => {
+		// A slow list must not be overtaken by the next tick, or each answer is dropped as stale.
+		if (listInflight > 0) return;
+		if (typeof document === 'undefined' || document.visibilityState !== 'hidden') void peerTerminals.refreshDevices();
+	}, DEVICES_POLL_MS);
+	if (watchers === 0 && listTimer) { clearInterval(listTimer); listTimer = null; }
 }
 
-function setFlow(workerId: string, flow: SourceFlow | null) {
+function setFlow(workerId: string, flow: LinkFlow | null) {
 	now = Date.now();
 	if (flow) flows[workerId] = flow;
 	else delete flows[workerId];
+	if (flow?.phase === 'linking') linking.add(workerId);
+	else linking.delete(workerId);
 	syncTimers();
 }
 
-const EXPIRED = (name: string) => `No approval from ${name}`;
-
-function ended(flow: { workerId: string; name: string }, message: string, retry = true, title = EXPIRED(flow.name)): SourceFlow {
-	return { phase: 'ended', workerId: flow.workerId, name: flow.name, title, message, retry };
+function end(workerId: string, name: string, title: string, message: string, retry = true) {
+	setFlow(workerId, { phase: 'ended', workerId, name, title, message, retry });
 }
 
-/** Fold one status answer into the flow it belongs to. */
-function apply(workerId: string, result: PeerAuthorization) {
-	const flow = flows[workerId];
-	if (!live(flow) || flow.authorizationId !== result.authorization_id) return;
-	const expiresAt = typeof result.expires_in === 'number' ? Date.now() + result.expires_in * 1000 : flow.expiresAt;
-	const code = result.confirmation_code || flow.code;
-	if (result.status === 'pending') {
-		// Approval only moves forward: a late "pending" never undoes "approved".
-		if (flow.phase === 'approved') return;
-		setFlow(workerId, { phase: 'pending', workerId, name: flow.name, authorizationId: flow.authorizationId, code, expiresAt, unreachable: false });
-	} else if (result.status === 'approved' && !result.used) {
-		setFlow(workerId, { phase: 'approved', workerId, name: flow.name, authorizationId: flow.authorizationId, code, expiresAt });
-	} else if (result.status === 'approved') {
-		setFlow(workerId, ended(flow, 'That approval was already used. Each approval opens one shell.'));
-	} else {
-		// The recipient answers `expired` for both a timed-out request and one
-		// its owner denied or revoked: it does not say which.
-		setFlow(workerId, ended(flow, `The request expired, or it was denied or revoked on ${flow.name}. Request again to get a new code.`));
-	}
-}
-
-async function poll(workerId: string) {
-	const flow = flows[workerId];
-	if (!live(flow) || polling.has(workerId)) return;
-	polling.add(workerId);
-	polledAt.set(workerId, Date.now());
-	try {
-		apply(workerId, await terminalsApi.peerAuthorization(flow.authorizationId));
-	} catch (error) {
-		const current = flows[workerId];
-		if (!live(current) || current.authorizationId !== flow.authorizationId) return;
-		if (error instanceof TerminalApiError && (error.status === 403 || error.status === 404)) {
-			setFlow(workerId, ended(current, `The request is no longer valid here. Request again to get a new code.`));
-		} else if (current.phase === 'pending') {
-			// Keep waiting: the recipient may answer on the next poll.
-			setFlow(workerId, { ...current, unreachable: true });
-		}
-	} finally {
-		polling.delete(workerId);
-	}
-}
-
-async function pollSources() {
-	const at = Date.now();
-	for (const flow of Object.values(flows)) {
-		if (!live(flow)) continue;
-		// The recipient is the authority on expiry; this is the backstop when it stops answering.
-		if (at >= flow.expiresAt + SOURCE_POLL_MS * 2) {
-			setFlow(flow.workerId, flow.phase === 'pending'
-				? ended(flow, `${flow.name} didn't approve in time. Request again to get a new code.`)
-				: ended(flow, `The approval on ${flow.name} ran out before a shell opened.`));
-			continue;
-		}
-		if (flow.phase === 'approved' && at - (polledAt.get(flow.workerId) ?? 0) < APPROVED_POLL_MS) continue;
-		void poll(flow.workerId);
-	}
-}
+const isOutage = (error: unknown) => !(error instanceof TerminalApiError) || error.status === 0 || error.status >= 500;
 
 export const peerTerminals = {
 	/** Wall clock for countdowns, ticking once a second while anything counts down. */
 	get now(): number { return now; },
 
-	// ── Source ────────────────────────────────────────────────────────────
-	flow(workerId: string | undefined): SourceFlow | null { return workerId ? flows[workerId] ?? null : null; },
-
-	/** Ask `workerId` for one shell. Its owner approves it on that worker. */
-	async request(workerId: string, name: string): Promise<void> {
-		const current = flows[workerId];
-		if (current?.phase === 'requesting' || live(current)) return;
-		setFlow(workerId, { phase: 'requesting', workerId, name });
-		try {
-			const result = await terminalsApi.requestPeer(workerId);
-			if (flows[workerId]?.phase !== 'requesting') {
-				// Cancelled while the request was in flight: withdraw it.
-				void terminalsApi.revokePeerAuthorization(result.authorization_id).catch(() => {});
-				return;
-			}
-			if (result.status === 'unavailable' || result.available === false) {
-				setFlow(workerId, ended({ workerId, name }, result.reason || `${name} can't host a terminal right now.`, false, `${name} is unavailable`));
-				return;
-			}
-			const expiresAt = Date.now() + (result.expires_in ?? 120) * 1000;
-			const code = result.confirmation_code ?? '';
-			const base = { workerId, name, authorizationId: result.authorization_id, code, expiresAt };
-			setFlow(workerId, result.status === 'approved' && !result.used
-				? { phase: 'approved', ...base }
-				: { phase: 'pending', ...base, unreachable: false });
-		} catch (error) {
-			if (flows[workerId]?.phase !== 'requesting') return;
-			setFlow(workerId, ended({ workerId, name }, requestErrorMessage(error, name), true, `Couldn't request a shell on ${name}`));
-		}
-	},
+	// ── This device ───────────────────────────────────────────────────────
+	flow(workerId: string | undefined): LinkFlow | null { return workerId ? flows[workerId] ?? null : null; },
 
 	/**
-	 * Withdraw a pending request or an unused approval. `authorizationId` covers
-	 * an approval reported by the worker (after a reload) with no flow here.
-	 * Local authority ends even if the peer is unreachable.
+	 * A signed proof for one open on `workerId`, or null when it did not happen
+	 * (cancelled, or the reason is in the flow). If the device isn't linked yet
+	 * this keeps waiting while the link card shows the code, then signs.
 	 */
-	async cancel(workerId: string, authorizationId?: string): Promise<void> {
-		const flow = flows[workerId];
+	async authorize(workerId: string, name: string, action: PeerAction, target: ProofTarget): Promise<DeviceProof | null> {
+		attemptSeq += 1;
+		const attempt = attemptSeq;
+		attempts.set(workerId, attempt);
+		const current = () => attempts.get(workerId) === attempt;
 		setFlow(workerId, null);
-		const id = live(flow) ? flow.authorizationId : authorizationId;
-		if (!id) return;
-		if (!revoked.includes(id)) revoked = [...revoked, id];
+		let key: DeviceKey;
 		try {
-			await terminalsApi.revokePeerAuthorization(id);
-		} catch {
-			// The source forgot it before calling out; the recipient expires its side by itself.
+			key = await deviceKey();
+		} catch (error) {
+			if (current()) end(workerId, name, "This device can't sign", error instanceof Error ? error.message : "This device can't hold a terminal key.", false);
+			return null;
 		}
+		let asked = false;
+		while (current()) {
+			let answer;
+			try {
+				answer = await terminalsApi.peerChallenge(workerId, key.keyId);
+			} catch (error) {
+				if (!current()) return null;
+				const flow = flows[workerId];
+				if (flow?.phase === 'linking' && isOutage(error) && Date.now() < flow.expiresAt) {
+					setFlow(workerId, { ...flow, unreachable: true });
+					await sleep(LINK_POLL_MS);
+					continue;
+				}
+				end(workerId, name, `Couldn't reach ${name}`, requestErrorMessage(error, name));
+				return null;
+			}
+			if (!current()) return null;
+			if (answer.status === 'linked' && answer.challenge) {
+				setFlow(workerId, null);
+				const payload = JSON.stringify({ purpose: PROOF_PURPOSE, receiver: answer.receiver, via: answer.via, challenge: answer.challenge, action, target });
+				const signature = await key.sign(payload);
+				return current() ? { key_id: key.keyId, payload, signature } : null;
+			}
+			if (answer.status === 'pending') {
+				const flow = flows[workerId];
+				if (flow?.phase === 'linking' && flow.unreachable) setFlow(workerId, { ...flow, unreachable: false });
+			}
+			if (answer.status === 'unlinked') {
+				if (asked) {
+					end(workerId, name, `The link to ${name} ended`, `The request ran out or was declined on ${name}. Ask again to get it there.`);
+					return null;
+				}
+				asked = true;
+				try {
+					const link = await terminalsApi.requestPeerLink(workerId, key.publicKey, deviceLabel());
+					if (!current()) return null;
+					// Already linked (another tab finished first): the next round signs.
+					if (link.status !== 'linked') {
+						setFlow(workerId, { phase: 'linking', workerId, name, code: key.code, expiresAt: Date.now() + (link.expires_in ?? LINK_SECONDS) * 1000, unreachable: false });
+					}
+				} catch (error) {
+					if (current()) end(workerId, name, `Couldn't start linking ${name}`, requestErrorMessage(error, name));
+					return null;
+				}
+				continue;
+			}
+			if (answer.status === 'pending' && !flows[workerId]) {
+				// A request from an earlier page is still waiting: show its code.
+				asked = true;
+				setFlow(workerId, { phase: 'linking', workerId, name, code: key.code, expiresAt: Date.now() + (answer.expires_in ?? LINK_SECONDS) * 1000, unreachable: false });
+			}
+			await sleep(LINK_POLL_MS);
+		}
+		return null;
 	},
 
-	/** True once this owner revoked the lease here (a stale target row may still list it). */
-	isRevoked(authorizationId: string | undefined): boolean { return !!authorizationId && revoked.includes(authorizationId); },
+	/** Stop an attempt and forget its card. The request on the other worker expires by itself. */
+	cancel(workerId: string) {
+		attempts.delete(workerId);
+		setFlow(workerId, null);
+	},
 
-	/** Forget a flow without contacting anyone: the approval was used (or its error shown). */
+	/** Forget a finished flow without contacting anyone. */
 	clear(workerId: string) { setFlow(workerId, null); },
 
-	/** Record why the single shell did not open; the approval may be spent. */
-	fail(workerId: string, name: string, title: string, message: string) {
-		setFlow(workerId, ended({ workerId, name }, message, true, title));
-	},
+	/** Record why the shell did not open. */
+	fail(workerId: string, name: string, title: string, message: string) { end(workerId, name, title, message); },
 
-	/** Test hook and sign-out. */
-	poll: (workerId: string) => poll(workerId),
-
-	// ── Recipient ─────────────────────────────────────────────────────────
-	get requests(): PeerRequest[] {
+	// ── The receiving worker ──────────────────────────────────────────────
+	get requests(): PeerLinkRequest[] {
 		const elapsed = (now - fetchedAt) / 1000;
 		return requests.filter((r) => r.expires_in - elapsed > 0);
 	},
-	get pendingCount(): number { return this.requests.filter((r) => r.status === 'pending').length; },
-	get loaded(): boolean { return recipientLoaded; },
-	get error(): string | null { return recipientError; },
+	get links(): LinkedDevice[] { return links; },
+	get loaded(): boolean { return loaded; },
+	get error(): string | null { return loadError; },
+	get approving(): boolean { return approving; },
 	/** Seconds left and age for one request, from the last answer plus local time. */
-	timing(request: PeerRequest): { left: number; age: number } {
+	timing(request: PeerLinkRequest): { left: number; age: number } {
 		const elapsed = Math.max(0, (now - fetchedAt) / 1000);
 		return { left: Math.max(0, request.expires_in - elapsed), age: request.age_seconds + elapsed };
 	},
-	decision(requestId: string): 'approve' | 'deny' | 'revoke' | null { return decisions[requestId] ?? null; },
-	/** A per-request failure, shown on its card. */
-	notice(requestId: string): string | null { return notices[requestId] ?? null; },
+	working(id: string): 'decline' | 'revoke' | null { return working[id] ?? null; },
+	notice(id: string): string | null { return notices[id] ?? null; },
 
-	async refreshRequests(): Promise<void> {
-		const seq = ++recipientSeq;
-		recipientInflight += 1;
+	async refreshDevices(): Promise<void> {
+		const seq = ++listSeq;
+		listInflight += 1;
 		try {
-			const result = await terminalsApi.peerRequests();
-			// A newer refresh or a decision landed meanwhile: this answer is stale.
-			if (seq !== recipientSeq) return;
+			const result = await terminalsApi.deviceLinks();
+			if (seq !== listSeq) return; // A newer refresh or decision landed meanwhile.
 			requests = result.requests ?? [];
+			links = result.links ?? [];
 			fetchedAt = Date.now();
 			now = fetchedAt;
-			recipientError = null;
-			for (const id of Object.keys(notices)) if (!requests.some((r) => r.request_id === id)) delete notices[id];
+			loadError = null;
 		} catch (error) {
+			if (seq !== listSeq) return;
 			// 401/403: not this worker's owner. Show nothing rather than an error.
-			if (seq !== recipientSeq) return;
-			if (error instanceof TerminalApiError && (error.status === 401 || error.status === 403)) requests = [];
-			else recipientError = error instanceof Error ? error.message : 'Terminal requests are unavailable right now.';
+			if (error instanceof TerminalApiError && (error.status === 401 || error.status === 403)) { requests = []; links = []; }
+			else loadError = error instanceof Error ? error.message : 'Linked devices are unavailable right now.';
 		} finally {
-			recipientInflight = Math.max(0, recipientInflight - 1);
-			recipientLoaded = true;
+			listInflight = Math.max(0, listInflight - 1);
+			loaded = true;
 		}
 	},
 
-	/** Poll the recipient list while a surface shows it. Returns the stop function. */
+	/** Poll the device list while a surface shows it. Returns the stop function. */
 	watch(): () => void {
 		watchers += 1;
 		syncTimers();
-		if (watchers === 1) void this.refreshRequests();
+		if (watchers === 1) void this.refreshDevices();
 		let stopped = false;
 		return () => {
 			if (stopped) return;
@@ -261,43 +225,49 @@ export const peerTerminals = {
 		};
 	},
 
-	async approve(requestId: string): Promise<void> { await decide(requestId, 'approve'); },
-	/** Deny a pending request, or revoke an approval and close its shell. */
-	async revoke(requestId: string, kind: 'deny' | 'revoke' = 'revoke'): Promise<void> { await decide(requestId, kind); },
+	/** Link the device whose code the owner typed here. Returns why not, or null when linked. */
+	async approve(code: string): Promise<string | null> {
+		if (approving) return null;
+		approving = true;
+		try {
+			await terminalsApi.approveDeviceLink(code);
+			listSeq += 1;
+			await this.refreshDevices();
+			return null;
+		} catch (error) {
+			if (error instanceof TerminalApiError && error.status === 404) return "No device is waiting with that code. Check it on the device and try again.";
+			return error instanceof Error ? error.message : "Couldn't link the device. Try again.";
+		} finally {
+			approving = false;
+		}
+	},
+
+	async decline(requestId: string): Promise<void> { await act(requestId, 'decline', () => terminalsApi.declineDeviceLink(requestId)); },
+	/** Unlink a device. Any shell it has open here closes straight away. */
+	async revoke(keyId: string): Promise<void> { await act(keyId, 'revoke', () => terminalsApi.revokeDeviceLink(keyId)); },
 
 	/** Test hook. */
 	reset() {
-		flows = {}; requests = []; fetchedAt = 0; recipientLoaded = false; recipientError = null; decisions = {}; notices = {}; revoked = [];
-		polling.clear(); polledAt.clear(); recipientSeq = 0; recipientInflight = 0;
-		watchers = 0; now = Date.now();
+		flows = {}; requests = []; links = []; fetchedAt = 0; loaded = false; loadError = null; working = {}; notices = {}; approving = false;
+		attempts.clear(); linking.clear(); listSeq = 0; listInflight = 0; watchers = 0; now = Date.now();
 		syncTimers();
 	},
 };
 
-async function decide(requestId: string, kind: 'approve' | 'deny' | 'revoke') {
-	if (decisions[requestId]) return;
-	decisions[requestId] = kind;
-	delete notices[requestId];
+async function act(id: string, kind: 'decline' | 'revoke', run: () => Promise<unknown>) {
+	if (working[id]) return;
+	working[id] = kind;
+	delete notices[id];
 	try {
-		if (kind === 'approve') {
-			const approved = await terminalsApi.approvePeerRequest(requestId);
-			recipientSeq += 1; // Drop any list answer fetched before this decision.
-			requests = requests.map((r) => (r.request_id === requestId ? { ...r, ...approved, expires_in: approved.expires_in + (Date.now() - fetchedAt) / 1000 } : r));
-		} else {
-			await terminalsApi.revokePeerRequest(requestId);
-			recipientSeq += 1;
-			requests = requests.filter((r) => r.request_id !== requestId);
-		}
+		await run();
+		listSeq += 1;
+		if (kind === 'decline') requests = requests.filter((r) => r.request_id !== id);
+		else links = links.filter((d) => d.key_id !== id);
 	} catch (error) {
-		notices[requestId] = kind === 'approve'
-			? (error instanceof TerminalApiError && error.status === 403
-				? 'This request expired, was already approved, or peer terminals were turned off. Ask for a new one.'
-				: error instanceof Error ? error.message : "Couldn't approve. Try again.")
-			: error instanceof TerminalApiError && error.status === 403
-				? 'This request already ended.'
-				: error instanceof Error ? error.message : "Couldn't revoke. Try again.";
+		if (error instanceof TerminalApiError && error.status === 404) { /* Already gone: the refresh shows it. */ }
+		else notices[id] = error instanceof Error ? error.message : "That didn't work. Try again.";
 	} finally {
-		delete decisions[requestId];
-		void peerTerminals.refreshRequests();
+		delete working[id];
+		void peerTerminals.refreshDevices();
 	}
 }

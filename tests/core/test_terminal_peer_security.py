@@ -15,7 +15,7 @@ from app.network import control, engine, terminal_relay
 @pytest.mark.parametrize("operation", ["open", "read", "write", "resize", "close"])
 async def test_malicious_member_cannot_self_authorize(monkeypatch, enabled, https, operation):
     monkeypatch.setattr(type(settings), 'network_peer_terminals', property(lambda self, value=enabled: value))
-    monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(member=lambda device:
+    monkeypatch.setattr(engine, "context", lambda: SimpleNamespace(device_id="receiver", member=lambda device:
         SimpleNamespace(kind="worker", status="active")))
     # This is the exploit: the worker manufactures a lease AND answers its
     # own callback "yes". Neither an enrolled identity nor HTTPS is owner proof.
@@ -27,11 +27,16 @@ async def test_malicious_member_cannot_self_authorize(monkeypatch, enabled, http
     monkeypatch.setattr(terminals, "registry", registry)
     context = control.inbound_https.set(https)
     try:
-        with pytest.raises(PermissionError):
-            await control.handle("terminal", {
+        try:
+            answer = await control.handle("terminal", {
                 "lease": "forged-by-enrolled-worker-123456", "op": operation,
                 "options": {"shell": "sh"}, "authorized": True,
             }, from_device="malicious-member")
+        except (PermissionError, LookupError):
+            pass
+        else:
+            # An open with no device proof answers with a refusal the UI can show.
+            assert operation == "open" and https and answer["error"]["status"] in (403, 409)
     finally:
         control.inbound_https.reset(context)
     malicious_callback.assert_not_awaited()
@@ -46,16 +51,15 @@ async def test_peer_policy_controls_capability_but_never_implies_authorization(m
     monkeypatch.setattr(type(settings), 'network_peer_terminals', property(lambda self, value=enabled: value))
     monkeypatch.setattr(terminals, "supported", lambda: True)
     monkeypatch.setattr(terminal_targets.runners, "directory", lambda: {"runners": [{
-        "id": "peer", "device_name": "Peer", "is_self": False, "online": True, "capabilities": {"terminal": 2},
+        "id": "peer", "device_name": "Peer", "is_self": False, "online": True, "capabilities": {"terminal": terminals.PEER_TERMINAL_VERSION},
         "endpoints": ["https://peer.example"],
     }]})
-    assert terminals.capability_version() == (2 if enabled else 1)
-    monkeypatch.setattr(control, "call", AsyncMock(return_value={
-        "available": False, "reason_code": "recipient_approval_required"}))
+    assert terminals.capability_version() == (terminals.PEER_TERMINAL_VERSION if enabled else 1)
+    monkeypatch.setattr(control, "call", AsyncMock(return_value={"available": True, "reason_code": None}))
     rows = await terminal_targets.targets(None)
     if enabled:
-        assert rows[0]["available"] is False
-        assert rows[0]["reason_code"] == "recipient_approval_required"
+        # Offered, which authorizes nothing: only a linked device's signature does.
+        assert rows[0]["available"] is True
     else:
         assert rows == []
 

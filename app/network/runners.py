@@ -14,7 +14,7 @@ from typing import Dict, Optional
 from app.core.config import settings
 from app.db import network as store
 from app.db.base import utc_now_iso as _now_iso
-from app.network import engine, membership, transport
+from app.network import engine, identity as identity_mod, membership, transport
 from app.network.endpoints import peer_endpoints
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,22 @@ def installs_map() -> Dict[str, dict]:
 def self_device_id() -> Optional[str]:
     ctx = engine.context()
     return ctx.device_id if ctx else None
+
+
+def own_device_id() -> Optional[str]:
+    """This worker's device id, including while it belongs to no network.
+
+    Joining another network leaves the old one before approval arrives and
+    keeps the sessions and the device keys, so ``self_device_id`` is None for a
+    while even though the stored identity still says which chats are ours.
+    """
+    device_id = self_device_id()
+    if device_id:
+        return device_id
+    try:
+        return identity_mod.load(create=False).device_id
+    except identity_mod.IdentityError:
+        return None
 
 
 def device_for_instance(instance_id: Optional[str]) -> Optional[str]:
