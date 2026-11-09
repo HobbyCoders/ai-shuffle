@@ -7,7 +7,7 @@
 import { runJourney } from './runner.mjs';
 import { composer, expect, gotoApp, seededChatId, sendButton, stopButton, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { mobileShell, openStopChat, queueDuringASlowTurn } from './lib/stop-queue.mjs';
-import { movements, transcriptMovements } from './lib/frame-movement.mjs';
+import { movements, transcriptMovements, unmeasuredFrames } from './lib/frame-movement.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const LOG = '[role="log"][aria-label="Conversation messages"]';
@@ -83,9 +83,13 @@ const sendCase = ({ name, setup, prepare }) => ({
 		const rail = present(frames, 'rail');
 		const travel = rail.length ? Math.max(...rail) - Math.min(...rail) : Infinity;
 		const composerMoves = movements(present(frames, 'composer'));
-		const transcriptMoves = transcriptMovements(frames);
-		expect(present(frames, 'row').length >= 2, 'the transcript row was measured through the send');
-		log(`send frames ${JSON.stringify({ frames: frames.length, rail: travel, composerMoves, transcriptMoves })}`);
+		// Desktop only: the composer gives back 8.5px and the row follows it for
+		// one frame before the bottom-follow code takes it back. Phones do not.
+		const knownCorrection = ctx.variant.viewport === 'desktop' ? 8.5 : null;
+		const transcriptMoves = transcriptMovements(frames, { knownCorrection });
+		const unmeasured = unmeasuredFrames(frames);
+		log(`send frames ${JSON.stringify({ frames: frames.length, unmeasured, rail: travel, composerMoves, transcriptMoves })}`);
+		expect(frames.length >= 20 && unmeasured === 0, `the row and composer were measured on every frame of the send (${unmeasured} of ${frames.length} missing)`);
 		expect(travel <= 2, `sending keeps the turn rail still (${travel.toFixed(1)}px)`);
 		expect(composerMoves <= 1, `clearing the draft moves the composer at most once (${composerMoves} movements)`);
 		expect(transcriptMoves <= 1, `the composer shrinking moves the transcript at most once (${transcriptMoves} movements)`);
@@ -107,6 +111,18 @@ const railGeometry = (page) => page.evaluate((selector) => {
 	const [rail, log, composer] = [box('.turn-rail'), box(selector), box('.input-slot')];
 	return { railTop: rail.top, railBottom: rail.bottom, logTop: log.top, composerTop: composer.top };
 }, LOG);
+
+// Enough for a few ticks; a shorter rail scrolls, and a shorter transcript fills it.
+const MIN_RAIL = 40;
+
+/** Only a transcript with no height left may lose the rail. */
+function expectRailUsable(name, at) {
+	const detail = JSON.stringify(at);
+	const room = at.composerTop - at.logTop;
+	if (room < 1) return;
+	expect(at.railTop >= at.logTop - 1 && at.railBottom <= at.composerTop + 1, `${name}: the rail stays inside the transcript (${detail})`);
+	expect(at.railBottom - at.railTop >= Math.min(room, MIN_RAIL) - 1, `${name}: the rail stays usable while the transcript has room (${detail})`);
+}
 
 const short = [
 	{ name: 'portrait keyboard', width: 390, height: 844, visible: 544 },
@@ -131,9 +147,7 @@ await runJourney({
 					await showVisibleHeight(page, visible);
 					const at = await railGeometry(page);
 					log(`${name} ${JSON.stringify(at)}`);
-					// A transcript with no height left has no rail to show: it collapses.
-					const inside = at.railTop >= at.logTop - 1 && at.railBottom <= at.composerTop + 1;
-					expect(inside || at.railBottom - at.railTop < 1, `${name}: the rail stays inside the transcript (${JSON.stringify(at)})`);
+					expectRailUsable(name, at);
 				}
 				await page.setViewportSize({ width: 390, height: 844 });
 				await showVisibleHeight(page, 544);
@@ -142,6 +156,20 @@ await runJourney({
 				await page.waitForFunction((top) => document.querySelector('.input-slot').getBoundingClientRect().top < top - 10, before.composerTop);
 				const after = await railGeometry(page);
 				expect(Math.abs(after.railTop - before.railTop) <= 1, `the draft's height does not move the rail (${before.railTop} to ${after.railTop})`);
+				// Grow the draft until the transcript has less room than the rail's usual
+				// offset. /mobile/ caps its composer at 300px, so it needs less height to get there.
+				if (mobileShell) await showVisibleHeight(page, 440);
+				let tightest = Infinity;
+				for (const repeats of [4, 5, 7, 10, 14]) {
+					await composer(page).fill('please read the deployment notes again and then list every question that is still open for me '.repeat(repeats));
+					await page.waitForTimeout(200);
+					const tall = await railGeometry(page);
+					log(`tall draft ${repeats} under a keyboard ${JSON.stringify(tall)}`);
+					expectRailUsable(`tall draft (${repeats}) under a keyboard`, tall);
+					tightest = Math.min(tightest, tall.composerTop - tall.logTop);
+				}
+				expect(tightest > 0 && tightest < 130, `a draft left the transcript too little room for the usual offset (${tightest}px left)`);
+				await composer(page).fill('');
 			},
 			async act() {}
 		},

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { movements, transcriptMovements } from './frame-movement.mjs';
+import { movements, transcriptMovements, unmeasuredFrames } from './frame-movement.mjs';
 
 const frames = (rows, { content = rows.map(() => 2000), composer = rows.map(() => 700) } = {}) =>
 	rows.map((row, i) => ({ row, content: content[i], composer: composer[i] }));
@@ -32,7 +32,34 @@ test('the row landing a frame after the content or composer is still explained',
 	const rows = [68, 68, 68, 76, 68, -322, -322];
 	const content = [3650, 3650, 3658, 3658, 3658, 4048, 4048];
 	const composer = [744, 744, 752, 752, 752, 752, 752];
-	assert.equal(transcriptMovements(frames(rows, { content, composer })), 0);
+	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 0);
+});
+
+test('that same return is a bounce when the correction is not named, as on a phone', () => {
+	const rows = [68, 68, 68, 76, 68, -322, -322];
+	const content = [3650, 3650, 3658, 3658, 3658, 4048, 4048];
+	const composer = [744, 744, 752, 752, 752, 752, 752];
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 2);
+});
+
+test('the named correction is forgiven only at its own size', () => {
+	const rows = [68, 68, 68, 88, 68, 68];
+	const content = [3650, 3650, 3670, 3670, 3670, 3670];
+	const composer = [744, 744, 764, 764, 764, 764];
+	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 2);
+});
+
+test('the named correction is forgiven only once', () => {
+	const rows = [68, 68, 68, 76, 68, 68, 68, 68, 68, 76, 68, 68];
+	const content = [3650, 3650, 3658, 3658, 3658, 3658, 3658, 3658, 3666, 3666, 3666, 3666];
+	const composer = [744, 744, 752, 752, 752, 752, 752, 752, 760, 760, 760, 760];
+	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 2);
+});
+
+test('the named correction must be the composer step, then the bottom-follow', () => {
+	const rows = [68, 68, 76, 68, 68];
+	const composer = [744, 744, 752, 752, 752];
+	assert.equal(transcriptMovements(frames(rows, { composer }), { knownCorrection: 8.5 }), 2);
 });
 
 test('the row catching up with the composer after an idle frame is explained', () => {
@@ -68,6 +95,43 @@ test('a bounce bigger than the composer step still counts', () => {
 	assert.ok(transcriptMovements(frames([68, 108, 68, 68], { composer })) >= 2);
 });
 
+test('a bounce on a phone right after the composer gave height back counts twice', () => {
+	const composer = [592, 678, 678, 678, 678];
+	assert.equal(transcriptMovements(frames([68, 68, 8, 68, 68], { composer })), 2);
+	assert.equal(transcriptMovements(frames([68, 68, 8, 68, 68], { composer }), { knownCorrection: 8.5 }), 2);
+});
+
+test('a row that follows the composer and snaps straight back counts twice', () => {
+	const composer = [592, 678, 678, 678];
+	assert.equal(transcriptMovements(frames([68, 154, 68, 68], { composer })), 2);
+});
+
+test('two separate jumps count separately while content keeps growing', () => {
+	const rows = [500, 500, 460, 460, 420, 420];
+	const content = [2000, 2024, 2048, 2072, 2096, 2120];
+	assert.equal(transcriptMovements(frames(rows, { content })), 2);
+});
+
+test('a reader kept at the bottom of a growing reply is not moving', () => {
+	const rows = [500, 476, 452, 428, 404];
+	const content = [2000, 2024, 2048, 2072, 2096];
+	assert.equal(transcriptMovements(frames(rows, { content })), 0);
+});
+
+test('a spent explanation cannot explain a second jump', () => {
+	const rows = [68, 68, 154, 154, 240, 240];
+	const composer = [592, 592, 678, 678, 678, 678];
+	assert.equal(transcriptMovements(frames(rows, { composer })), 1);
+});
+
 test('frames without the row are skipped, not read as a jump', () => {
 	assert.equal(transcriptMovements([{ row: 10, content: 2000, composer: 700 }, { row: null, content: 2000, composer: 700 }, { row: 10, content: 2000, composer: 700 }]), 0);
+});
+
+test('a frame with no reading, or one that never reported, is unmeasured', () => {
+	const at = (seq, row = 10, composer = 700) => ({ seq, row, composer });
+	assert.equal(unmeasuredFrames([at(0), at(1), at(2)]), 0);
+	assert.equal(unmeasuredFrames([at(0), at(1, null), at(2)]), 1);
+	assert.equal(unmeasuredFrames([at(0), at(1, 10, null), at(2)]), 1);
+	assert.equal(unmeasuredFrames([at(0), at(3)]), 2);
 });

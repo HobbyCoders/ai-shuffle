@@ -381,11 +381,14 @@
 		   Sized from the visible height, not this box: the box's height follows
 		   the composer, so a percentage of it moved the rail whenever a wrapped
 		   draft was sent (#1094). 120px on an ordinary screen, easing to 8px as
-		   a keyboard or a landscape phone leaves too little height for it. No
-		   percentage here even as a cap: under a keyboard it would become the
-		   smaller value and follow the composer again. */
+		   a keyboard or a landscape phone leaves too little height for it.
+		   The box only gets a say once that offset would leave the rail less
+		   than --rail-room: a draft that tall has taken the space the rail
+		   stood in, so it moves up rather than vanishing. */
 		--visible-height: var(--app-viewport-height, 100dvh);
-		--rail-top: clamp(8px, calc((var(--visible-height) - 300px) * 0.4), 120px);
+		--rail-room: 56px;
+		--rail-offset: clamp(8px, calc((var(--visible-height) - 300px) * 0.4), 120px);
+		--rail-top: max(0px, min(var(--rail-offset), calc(100% - var(--rail-room))));
 		top: var(--rail-top);
 		max-height: calc(100% - var(--rail-top));
 		z-index: 12;
