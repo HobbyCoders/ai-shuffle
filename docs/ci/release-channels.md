@@ -358,8 +358,28 @@ is published. Its three paths run on one install:
   `runtime-overlays-v1` are all refused before activation, with the user's
   message, and the running release keeps answering.
 
-Run it as appuser in a disposable container of the image under test (for
-arm64 on an x86-64 host, an `--platform linux/arm64` container through QEMU).
+The non-publishing `runtime-overlay-acceptance.yml` workflow builds disposable
+images from its checkout on standard `ubuntu-24.04` and `ubuntu-24.04-arm`
+runners. An acceptance-only copy of the Dockerfile pins its Python base to
+`python:3.12.15-slim-trixie@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704`.
+The production Dockerfile and dependency locks are untouched. The job checks
+that the baked interpreter is 3.12.15, then checks pinned standalone Python
+3.12.16 archives and runs all three harness paths
+as appuser against each image's baked updater, and separately installs the
+real hash-locked application dependencies and Fluid on the candidate runtime.
+The JSON acceptance report and dependency log are kept for three days. It uses
+no publisher credentials and does not enable `OVERLAYS` or publish an image.
+It runs for changes to the workflow, harness or runtime contract and can also
+be dispatched manually. A passing run uses a throwaway signing key, not the
+production publisher identity; release signing remains publisher-only.
+A same-minor Python overlay is allowed by the contract. Python 3.13 is not an
+accepted candidate with the current lock: `psycopg2-binary==2.9.9` has no cp313
+wheel and its source build needs a compiler absent from the runtime image.
+Changing that shared database driver is a separate prerequisite, not part of
+overlay acceptance.
+
+For a manual run, use appuser in a disposable container of the image under
+test (for arm64 on an x86-64 host, an `--platform linux/arm64` container through QEMU).
 Mount the harness and the candidate archive, for example a relocatable
 python-build-standalone `install_only` build for that architecture:
 

@@ -8,8 +8,10 @@ Merge requires green CI and review. Edge/nightly publication remains separate:
 a hosted full-suite pass on the exact main revision or the owner's local
 attested full pass authorizes the read-only publication gate.
 
-PR workflows use only free standard GitHub-hosted `ubuntu-latest` and
-`windows-latest` runners. No larger/paid runners and no macOS PR jobs are used.
+PR workflows use only free standard GitHub-hosted Linux and Windows runners.
+The Docker runtime-overlay acceptance uses native `ubuntu-24.04` and
+`ubuntu-24.04-arm` runners; the other PR workflows use `ubuntu-latest` and
+`windows-latest`. No larger/paid runners and no macOS PR jobs are used.
 macOS and iOS native checks remain manual. Docker uses the official Buildx and
 build-push actions with branch-isolated GitHub Actions layer caching.
 
@@ -58,6 +60,12 @@ These workflows retain manual dispatch and also run on unfiltered
   and disposable signing are test-only; release keep rules are unchanged. The
   `android.yml` also runs the broader **debug** instrumentation suite on relevant
   PRs, as described below. Neither workflow publishes on a PR or needs publisher credentials.
+
+`runtime-overlay-acceptance.yml` runs on PRs changing its workflow, the overlay
+harness or the runtime contract, and supports manual dispatch. It builds
+non-published amd64 and arm64 Docker images, checks signed activation, cold
+restart and rollback with a throwaway key, and checks the real application
+dependencies on the pinned candidate interpreter. It needs no signing secrets.
 
 `ci-folder-confinement.yml` stays manual because it is macOS-only; Linux folder
 confinement is already covered by CI Backend. Stable release authorization is unchanged.
