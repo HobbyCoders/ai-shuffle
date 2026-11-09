@@ -31,12 +31,13 @@ def _disabled(reason):
     if not _disabled_logged:
         log.warning("Owned scratch sweep disabled: %s", reason)
         _disabled_logged = True
-    return None
 
 
 def _uninspectable_is_unrelated(base, proc, protected_prefixes=None, *, strict=False):
     status = dict(line.split(":", 1) for line in (base / "status").read_text().splitlines() if ":" in line)
     uids = {int(uid) for uid in status["Uid"].split()}
+    if strict and _is_supervisor(base, status):
+        return _is_ancestor(base, proc)
     if 0 not in uids:
         if strict:
             return False  # Opaque apps may reference arbitrary session scratch.
@@ -54,20 +55,35 @@ def _uninspectable_is_unrelated(base, proc, protected_prefixes=None, *, strict=F
     return _is_ancestor(base, proc)
 
 
+def _python_args(base, status):
+    if not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", status["Name"].strip()):
+        return None
+    argv = (base / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
+    if not argv or not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", Path(os.fsdecode(argv[0])).name):
+        return None
+    args = argv[1:]
+    while args and args[0] in {b"-s", b"-I", b"-E", b"-u", b"-B"}:
+        args = args[1:]
+    return args
+
+
+def _is_supervisor(base, status):
+    args = _python_args(base, status)
+    if args is None or len(args) != 2 or args[1] != b"run":
+        return False
+    script = Path(os.fsdecode(args[0]))
+    return script.is_absolute() and script.parts[-2:] == ("docker", "container_runtime.py")
+
+
 def _is_application_process(base, status, proc, protected_prefixes=None):
     # Normal startup makes app/runner processes non-dumpable. Live-owner receipts
     # protect their own scratch, but an orphaned preview app can retain a dead
     # launcher's tree. Exempting an opaque app therefore protects ALL preview
     # trees for this sweep. The supervisor only starts/reaps children and never
     # opens their scratch.
-    if not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", status["Name"].strip()):
+    args = _python_args(base, status)
+    if args is None:
         return False
-    argv = (base / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
-    if not argv or not re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", Path(os.fsdecode(argv[0])).name):
-        return False
-    args = argv[1:]
-    while args and args[0] in {b"-s", b"-I", b"-E", b"-u", b"-B"}:
-        args = args[1:]
     devloop = (len(args) == 3 and args[:2] == [b"-m", b"scripts.devloop.child"]
                and Path(os.fsdecode(args[2])).is_absolute())
     if devloop or args in ([b"-m", b"app.main"], [b"-m", b"app.preview_process"]):
@@ -100,8 +116,120 @@ def _is_ancestor(base, proc):
     return False
 
 
-def _references(proc, deadline, *, protected_prefixes=None, strict=False):
-    references = set()
+class References(set):
+    def __init__(self):
+        super().__init__()
+        self.protected_roots = []
+        self.preview_exemptions = 0
+
+
+def _private_record(path):
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_mode & 0o022 or info.st_size > 131072):
+        raise ValueError("unsafe receipt")
+    return json.loads(path.read_text())
+
+
+def _isolated_preview(base, proc, deadline):
+    """Prove an exact preview launcher owns live, private throwaway roots.
+
+    Private HOME is NOT a filesystem sandbox: no receipt proves the opaque app
+    has no external descriptor. Exempting it accepts loss of path access to
+    quiet, settled external scratch; Linux keeps a held descriptor readable.
+    """
+    status = dict(line.split(":", 1) for line in (base / "status").read_text().splitlines() if ":" in line)
+    args = _python_args(base, status)
+    child = len(args or []) == 3 and args[:2] == [b"-m", b"scripts.devloop.child"]
+    if not child and args not in ([b"-m", b"app.main"], [b"-m", b"app.preview_process"]):
+        return None
+    owner = proc / status["PPid"].strip()
+    owner_status = dict(line.split(":", 1) for line in (owner / "status").read_text().splitlines() if ":" in line)
+    if any(int(uid) != os.getuid() for row in (status, owner_status) for uid in row["Uid"].split()):
+        return None
+    launcher = _python_args(owner, owner_status) or []
+    if not (launcher[:3] in ([b"-m", b"scripts.devloop", b"up"], [b"-m", b"app.preview", b"run"])
+            or launcher[:2] == [b"-m", b"app.preview_run"]):
+        return None
+    identity = process_identity(int(base.name), proc)
+    owner_identity = process_identity(int(owner.name), proc)
+    if identity is None or owner_identity is None:
+        return None
+    checkout = Path(os.readlink(owner / "cwd"))
+    temp = Path(tempfile.gettempdir()).resolve()
+    directories = [Path(os.fsdecode(args[2])).parent] if child else temp.iterdir()
+    for index, directory in enumerate(directories):
+        if index >= MAX_ENTRIES or time.monotonic() >= deadline:
+            return None
+        if directory.parent != temp or not directory.name.startswith("ai-shuffle-preview-"):
+            continue
+        try:
+            info = directory.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077):
+                continue
+            receipt = _private_record(directory / MARKER)
+            if (receipt.get("version") != 1 or receipt.get("uid") != os.getuid()
+                    or receipt.get("pid") != int(owner.name)
+                    or receipt.get("start") != owner_identity):
+                continue
+            scopes = [directory]
+            if (b"--workers=2" in launcher or (b"--workers" in launcher
+                    and launcher[launcher.index(b"--workers") + 1:][:1] == [b"2"])):
+                scopes = [directory / "worker-a", directory / "worker-b"]
+            roots = [directory, checkout]
+            for scope in scopes:
+                data = scope / "data"
+                marker = scope / ".branch-preview"
+                if not stat.S_ISREG(marker.lstat().st_mode) or marker.read_text() != str(data):
+                    raise ValueError("missing private data marker")
+                for path in (scope, scope / "home", data, scope / "workspace"):
+                    current = path.lstat()
+                    if not stat.S_ISDIR(current.st_mode) or current.st_uid != os.getuid():
+                        raise ValueError("unsafe private root")
+                    roots.append(path)
+            if child:
+                activity = _private_record(Path(os.fsdecode(args[2])))
+                if (activity.get("pid") != int(base.name) or activity.get("identity") != identity
+                        or not 0 <= time.monotonic() - activity["updated"] <= 5):
+                    continue
+            # A different worktree is fine. Its live status, when available,
+            # supplies the actual source checkout as another protected root.
+            from scripts.devloop.__main__ import default_status_path
+            status_path = default_status_path(checkout)
+            for pos, arg in enumerate(launcher):
+                if arg == b"--status" and pos + 1 < len(launcher):
+                    status_path = checkout / os.fsdecode(launcher[pos + 1])
+                elif arg.startswith(b"--status="):
+                    status_path = checkout / os.fsdecode(arg.split(b"=", 1)[1])
+            try:
+                record = _private_record(status_path)
+                if (record.get("pid") == int(owner.name) and record.get("pid_identity") == receipt["start"]
+                        and record.get("app", {}).get("pid") == int(base.name)
+                        and record.get("app", {}).get("pid_identity") == identity):
+                    roots.append(Path(record["checkout"]))
+            except (OSError, ValueError, KeyError):
+                pass
+            if (identity == process_identity(int(base.name), proc)
+                    and owner_identity == process_identity(int(owner.name), proc)):
+                return roots
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return None
+
+
+def _references(proc, deadline, *, protected_prefixes=None, strict=False, on_disabled=None, on_exempt=None):
+    def disabled(reason, base=None):
+        if base is not None:
+            try:
+                name = " ".join((base / "comm").read_text().split())
+            except OSError:
+                name = "unknown"
+            reason += f" pid={base.name} name={name}"
+        if on_disabled is not None:
+            on_disabled(reason)
+        return _disabled(reason)
+
+    references = References()
     count = 0
     descriptor_count = 0
     # No /proc or an unreadable potentially relevant process: fail closed.
@@ -111,7 +239,7 @@ def _references(proc, deadline, *, protected_prefixes=None, strict=False):
                 continue
             count += 1
             if count > MAX_ENTRIES or time.monotonic() >= deadline:
-                return _disabled("process scan limit reached")
+                return disabled("process scan limit reached")
             base = Path(process.path)
             try:
                 links = [base / "cwd", base / "root"]
@@ -120,7 +248,7 @@ def _references(proc, deadline, *, protected_prefixes=None, strict=False):
                         links.append(Path(descriptor.path))
                         descriptor_count += 1
                         if descriptor_count > MAX_DESCRIPTORS or time.monotonic() >= deadline:
-                            return _disabled("descriptor scan limit reached")
+                            return disabled("descriptor scan limit reached", base)
                 for link in links:
                     try:
                         value = os.readlink(link)
@@ -133,15 +261,28 @@ def _references(proc, deadline, *, protected_prefixes=None, strict=False):
                 continue  # exited during observation
             except PermissionError:
                 try:
+                    references.add(os.fsdecode((base / "cmdline").read_bytes()).replace("\0", " "))
                     unrelated = (_uninspectable_is_unrelated(base, proc, protected_prefixes, strict=True)
                                  if strict else _uninspectable_is_unrelated(base, proc, protected_prefixes))
                     if unrelated:
                         continue
+                    if strict:
+                        roots = _isolated_preview(base, proc, deadline)
+                        if roots:
+                            references.protected_roots.extend(roots)
+                            references.update(str(path) for path in roots)
+                            references.preview_exemptions += 1
+                            if on_exempt is not None:
+                                on_exempt(f"preview_exempt pid={base.name} name=python")
+                            continue
                 except (FileNotFoundError, ProcessLookupError):
-                    continue
+                    if not base.exists():
+                        continue
                 except (OSError, ValueError, KeyError, ImportError):
                     pass
-                return _disabled("potentially relevant process is not inspectable")
+                return disabled("potentially relevant process is not inspectable", base)
+    if time.monotonic() >= deadline:
+        return disabled("process scan deadline reached")
     return references
 
 

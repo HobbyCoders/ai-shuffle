@@ -1,8 +1,9 @@
 """Settled-session scratch, not durable harness state or a general disk cleaner.
 
 Work is resumable (including the tree walk and individual unlinks), off-loop and
-budgeted by time, files and bytes per paced slice, not a folder removal count. Unknown DB/process/filesystem facts keep
-files. An hour of filesystem quiet protects commands outliving the settled flag.
+budgeted by time, files and bytes per paced slice, not a folder removal count.
+Unknown safety retains files; Windows opaque processes rely on exclusive leaf
+handles instead. An hour of quiet protects commands outliving the settled flag.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import re
 import stat
 import tempfile
 import time
+from collections import Counter
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -75,28 +77,51 @@ def _idle(key):
     return QUIET_SECONDS if rows else ORPHAN_SECONDS
 
 
-def _process_references(deadline):
+def _process_references(deadline, diagnostics=None):
     if os.name == "posix" and Path("/proc/self/stat").exists():
         from app.core.scratch_reaper import _references
-        return _references(Path("/proc"), deadline, strict=True)
-    # Missing/access-denied process data is not an empty process table.
+        report = diagnostics.append if diagnostics is not None else None
+        return _references(Path("/proc"), deadline, strict=True, on_disabled=report, on_exempt=report)
+    return _psutil_references(deadline, diagnostics, windows=os.name == "nt")
+
+
+def _psutil_references(deadline, diagnostics, *, windows):
     import psutil
 
     refs = set()
     for process in psutil.process_iter():
         if time.monotonic() >= deadline:
+            if diagnostics is not None:
+                diagnostics.append("process scan deadline reached")
             return None
-        try:
-            # PID 0 is the kernel idle pseudo-process, not a userspace owner.
-            if process.pid == 0:
+        if process.pid == 0:
+            continue  # kernel idle pseudo-process
+        for field in ("cwd", "open_files", "cmdline"):
+            try:
+                value = getattr(process, field)()
+                if field == "cwd":
+                    refs.add(value)
+                else:
+                    refs.update(item.path if field == "open_files" else item for item in value)
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                break
+            except psutil.AccessDenied:
+                try:
+                    name = process.name()
+                except psutil.Error:
+                    name = "unknown"
+                if diagnostics is not None:
+                    diagnostics.append(f"access_denied pid={process.pid} name={name} field={field}")
+                if not windows:
+                    return None
+                # Windows leaf deletion requires an exclusive delete handle,
+                # not ordinary unlink (which permits FILE_SHARE_DELETE holders).
+                # Readable fields are still checked; continue with the next one.
                 continue
-            refs.add(process.cwd())
-            refs.update(item.path for item in process.open_files())
-            refs.update(process.cmdline())
-        except (psutil.NoSuchProcess, psutil.ZombieProcess):
-            continue
-        except psutil.AccessDenied:
-            return None
+    if time.monotonic() >= deadline:
+        if diagnostics is not None:
+            diagnostics.append("process scan deadline reached")
+        return None
     return refs
 
 
@@ -104,6 +129,10 @@ def _in_use(path, refs):
     if refs is None:
         return True
     target = os.path.normcase(str(path))
+    for root in getattr(refs, "protected_roots", ()):
+        other = os.path.normcase(str(root)).rstrip(os.sep)
+        if target == other or target.startswith(other + os.sep) or other.startswith(target + os.sep):
+            return True
     # Also match --option=/path and paths embedded in shell command strings.
     return any(target in os.path.normcase(ref) for ref in refs)
 
@@ -126,6 +155,28 @@ def _walk(path, cutoff, device):
 
 def _identity(info):
     return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)]
+
+
+def _windows_remove(path):
+    """Exclusive delete-on-close also rejects holders using FILE_SHARE_DELETE."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    # DELETE, no sharing, OPEN_EXISTING. Open reparse points themselves, never
+    # their targets; BACKUP_SEMANTICS allows directories, DELETE_ON_CLOSE removes.
+    handle = kernel.CreateFileW(str(path), 0x10000, 0, None, 3, 0x02000000 | 0x04000000 | 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not kernel.CloseHandle(handle):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if path.exists():
+        raise OSError("exclusive deletion did not remove entry")
 
 
 def _remove_entry(root, path, info, root_identity):
@@ -161,7 +212,11 @@ def _remove_entry(root, path, info, root_identity):
     owner = parent.lstat()
     if not owner.st_mode & stat.S_IWUSR:
         os.chmod(parent, owner.st_mode | stat.S_IWUSR)
-    if stat.S_ISDIR(info.st_mode):
+    if os.name == "nt":
+        if not info.st_mode & stat.S_IWUSR:
+            os.chmod(path, info.st_mode | stat.S_IWUSR)
+        _windows_remove(path)
+    elif stat.S_ISDIR(info.st_mode):
         path.rmdir()
     else:
         path.unlink()
@@ -214,11 +269,18 @@ class ScratchSweep:
                 except OSError:
                     continue
 
+    def _retain(self, reason):
+        self.retained += 1
+        self.reasons[reason] += 1
+        return False
+
     def _start(self, path):
         if not _contained(self.root, path):
+            self._retain("unsafe_path")
             return
         quiet = _idle(path.name)
         if quiet is None:
+            self._retain("active_or_open_turn")
             return
         info = path.lstat()
         stack = ExitStack()
@@ -232,12 +294,48 @@ class ScratchSweep:
     def _guard(self, job, deadline):
         path = job["path"]
         if not _contained(self.root, path) or _identity(path.lstat()) != job["identity"]:
-            return False
-        if _idle(path.name) is None or _in_use(path, _process_references(deadline)):
-            return False
-        return path.lstat().st_mtime_ns == job["root_modified"]
+            return self._retain("path_changed")
+        if _idle(path.name) is None:
+            return self._retain("active_or_open_turn")
+        notes = []
+        refs = _process_references(deadline, diagnostics=notes)
+        self.process_notes.update(notes)
+        self.preview_exemptions += max(getattr(refs, "preview_exemptions", 0),
+                                       sum(note.startswith("preview_exempt ") for note in notes))
+        if refs is None:
+            self.disabled_reason = notes[-1] if notes else "incomplete_process_table"
+            return self._retain(self.disabled_reason)
+        if _in_use(path, refs):
+            return self._retain("process_reference")
+        if path.lstat().st_mtime_ns != job["root_modified"]:
+            return self._retain("root_changed")
+        return True
 
     def step(self):
+        self.retained = 0
+        self.reasons = Counter()
+        self.process_notes = set()
+        self.disabled_reason = "none"
+        self.preview_exemptions = 0
+        removed = 0
+        self.scan_entries = 0
+        try:
+            removed = self._step()
+            return removed
+        except Exception as exc:
+            self.disabled_reason = "pass_error_" + type(exc).__name__
+            self._retain(self.disabled_reason)
+            raise
+        finally:
+            log.info("Session scratch pass: removed=%d removed_bytes=%d retained=%d "
+                     "disabled=%s preview_exemptions=%d reasons=%s process_notes=%s "
+                     "scanned_entries=%d removed_entries=%d pending=%s",
+                     removed, self.slice_bytes, self.retained, self.disabled_reason,
+                     self.preview_exemptions, json.dumps(self.reasons, sort_keys=True),
+                     json.dumps(sorted(self.process_notes)[:20]), self.scan_entries,
+                     self.slice_files, bool(self.candidates))
+
+    def _step(self):
         deadline = time.monotonic() + PASS_SECONDS
         removed = 0
         scanned = 0
@@ -259,6 +357,7 @@ class ScratchSweep:
                         job["deleting"] = True
                         continue
                     scanned += 1
+                    self.scan_entries = scanned
                     job["bytes"] += info.st_size if stat.S_ISREG(info.st_mode) else 0
                     job["manifest"].write(json.dumps([str(path.relative_to(job["path"])),
                                                        _identity(info), info.st_mtime_ns, info.st_size]) + "\n")
@@ -279,6 +378,7 @@ class ScratchSweep:
                             or (not stat.S_ISDIR(current.st_mode) and current.st_size != size)):
                         raise ValueError("tree changed during scan")
                     scanned += 1
+                    self.scan_entries = scanned
                     if scanned >= MAX_SCAN_ENTRIES:
                         break
                     continue
@@ -340,13 +440,12 @@ class ScratchSweep:
                 self.candidates.close()
                 self.candidates = None
                 break
-            except (OSError, ValueError, RecursionError):
+            except (OSError, ValueError, RecursionError) as exc:
                 # A bad folder never blocks its siblings, nor retries forever
                 # within this pass. The next rotation starts with fresh evidence.
+                self._retain(str(exc) if isinstance(exc, ValueError) else type(exc).__name__)
                 log.debug("Session scratch retained: safety unavailable or changed", exc_info=True)
                 self.close_job()
-        if removed:
-            log.info("Session scratch: removed=%d reclaimed_bytes=%d", removed, self.removed_bytes)
         return removed
 
 

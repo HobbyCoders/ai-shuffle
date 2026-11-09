@@ -21,7 +21,7 @@ def world(tmp_path, monkeypatch):
     root.mkdir()
     rows = [{"id": "s", "is_active": False, "open_turn": False}]
     monkeypatch.setattr(ss, "_session_rows", lambda key: rows)
-    monkeypatch.setattr(ss, "_process_references", lambda deadline: set())
+    monkeypatch.setattr(ss, "_process_references", lambda deadline, **kwargs: set())
     sweeper = ss.ScratchSweep(root)
     yield root, rows, sweeper
     sweeper.close()
@@ -71,7 +71,7 @@ def test_live_or_unknown_session_is_retained(world, field, value):
 def test_session_reactivated_after_scan_is_retained(world, monkeypatch):
     root, rows, sweep = world
     path = folder(root)
-    def refs(deadline):
+    def refs(deadline, **kwargs):
         rows[0]["is_active"] = True
         return set()
     monkeypatch.setattr(ss, "_process_references", refs)
@@ -87,7 +87,7 @@ def test_process_use_and_unknown_inspection_keep_files(world, monkeypatch, kind)
         refs = {f"shell --input={path}/0"}
     if kind == "unknown":
         refs = None
-    monkeypatch.setattr(ss, "_process_references", lambda deadline: refs)
+    monkeypatch.setattr(ss, "_process_references", lambda deadline, **kwargs: refs)
     assert sweep.step() == 0 and path.exists()
 
 
@@ -267,7 +267,7 @@ def test_database_settle_producer_and_open_turn_guard(mock_db, tmp_path, monkeyp
     root = tmp_path / "projects"
     root.mkdir()
     path = folder(root, sid)
-    monkeypatch.setattr(ss, "_process_references", lambda deadline: set())
+    monkeypatch.setattr(ss, "_process_references", lambda deadline, **kwargs: set())
     sweep = ss.ScratchSweep(root)
     try:
         assert sweep.step() == 0 and path.exists()

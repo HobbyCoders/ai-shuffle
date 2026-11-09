@@ -38,7 +38,12 @@ permissions, not a blanket allow. Legacy cwd ledger/notes are copied exclusively
 on first access; existing canonical files (including empty cleared state) win.
 Legacy files and owner scratch are left intact. Designated session scratch is
 cleared after settlement and one hour of filesystem quiet, unless an open turn,
-a process reference or unavailable safety evidence prevents it. An unsettle or
+a process reference or unavailable safety evidence prevents it, except for
+identity-bound isolated preview roles and Windows access-denied processes guarded
+by exclusive delete handles. Preview private roots are protected, but isolation
+is not a filesystem sandbox and an opaque preview can lose path access to quiet
+settled scratch outside those roots. Each pass logs its results and exemptions.
+An unsettle or
 handoff recreates temporary files on demand; ledger, notes and reports survive.
 Cleanup is paced: two-second slices stop at 512 entries or 256 MiB and wait
 30 seconds before resuming. A single indivisible file can exceed the byte budget.

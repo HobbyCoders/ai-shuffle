@@ -138,7 +138,11 @@ absent. Legacy checkout scratch/reports are not migrated or cleaned automaticall
 Designated per-session scratch is temporary: settled sessions are swept every
 five minutes after an hour of filesystem quiet, with fresh session/open-turn and
 process-use checks. Missing-session folders need seven days of quiet. Ledger,
-notes and Task reports are not scratch and are never swept. Unknown safety facts
+notes and Task reports are not scratch and are never swept. Narrow live-receipted
+preview exceptions protect their private roots, not arbitrary external handles;
+quiet settled scratch has no promised path lifetime. Windows uses exclusive
+delete handles to retain open files even when process inspection is denied.
+Each pass logs removed bytes, retained reasons and preview exemptions. Unknown safety facts
 retain files; symlinks are never followed and Windows reparse trees are retained.
 Backlogs resume in slices of at most two seconds, 512 entries or 256 MiB, with
 30 seconds between slices (one indivisible oversized file may exceed the byte
