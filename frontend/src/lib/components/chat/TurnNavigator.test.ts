@@ -224,134 +224,164 @@ describe('TurnNavigator', () => {
 				trigger = document.createElement('button');
 				trigger.setAttribute('aria-haspopup', 'dialog');
 				trigger.setAttribute('aria-expanded', 'true');
-				trigger.getBoundingClientRect = () => ({ width: 80, height: 40 }) as DOMRect;
 				document.body.append(trigger);
 			});
 			afterEach(() => trigger.remove());
 			const touch = { pointerType: 'touch', isPrimary: true, pointerId: 2 };
+			const closeTrigger = () => trigger.setAttribute('aria-expanded', 'false');
 
-			it('a tap that closes it does not select the tick, and leaves it unlit', async () => {
+			/** A touch tap in the order a browser sends it, then the wait for the
+			 *  rail's decision. `detail` is what tells a real press from a keyboard. */
+			async function tap(tick: HTMLElement, index: number) {
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(index) });
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(index) });
+				await fireEvent.mouseDown(tick);
+				await fireEvent.mouseUp(tick);
+				await fireEvent.click(tick, { detail: 1 });
+				await new Promise((resolve) => setTimeout(resolve, 0));
+			}
+			function renderRail() {
 				const onSelect = vi.fn();
-				render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+				const view = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
 				const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
-				tick.focus();
-				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
-				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
-				await fireEvent.click(tick);
+				return { ...view, onSelect, tick };
+			}
+
+			// Every way a popup in the app closes on an outside press. The click cases
+			// run after the tick's own handler, which is why the rail has to wait.
+			const closesOn: [string, string, EventTarget][] = [
+				['pointerdown at the document, in capture', 'pointerdown', document],
+				['pointerdown at the window', 'pointerdown', window],
+				['the mousedown a touch sends before its click', 'mousedown', document],
+				['click at the document', 'click', document],
+				['click at the window', 'click', window]
+			];
+			for (const [path, type, target] of closesOn) {
+				it(`a tap that closes it on ${path} only closes it`, async () => {
+					const capture = path.includes('capture');
+					target.addEventListener(type, closeTrigger, capture);
+					const { onSelect, tick } = renderRail();
+					tick.focus();
+					await tap(tick, 3);
+					target.removeEventListener(type, closeTrigger, capture);
+					expect(trigger.getAttribute('aria-expanded')).toBe('false');
+					expect(onSelect).not.toHaveBeenCalled();
+					expect(document.activeElement).not.toBe(tick);
+				});
+			}
+
+			it('a tap that removes the trigger with its popup only closes it', async () => {
+				const remove = () => trigger.remove();
+				document.addEventListener('click', remove);
+				const { onSelect, tick } = renderRail();
+				await tap(tick, 3);
+				document.removeEventListener('click', remove);
 				expect(onSelect).not.toHaveBeenCalled();
-				expect(document.activeElement).not.toBe(tick);
 			});
 
-			it('a slide that closes it neither scrubs nor selects', async () => {
-				vi.useFakeTimers();
-				const onSelect = vi.fn();
-				const { container } = render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
-				const rail = layOut(container);
-				const tick = screen.getAllByRole('button', { name: /^Turn/ })[0];
-				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(0) });
-				await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
-				expect(container.querySelector('.is-scrubbing')).toBeNull();
-				vi.advanceTimersByTime(1000);
-				await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
-				await fireEvent.click(tick);
+			it('the usage sheet with its ring hidden: the first tap closes, the second selects', async () => {
+				trigger.style.display = 'none';
+				document.addEventListener('click', closeTrigger);
+				const { onSelect, tick } = renderRail();
+				await tap(tick, 3);
+				document.removeEventListener('click', closeTrigger);
 				expect(onSelect).not.toHaveBeenCalled();
-			});
-
-			it('still counts as open when the popup closes itself earlier in the same press', async () => {
-				const close = () => trigger.setAttribute('aria-expanded', 'false');
-				document.addEventListener('pointerdown', close, true);
-				const onSelect = vi.fn();
-				render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
-				const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
-				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
-				document.removeEventListener('pointerdown', close, true);
-				expect(trigger.getAttribute('aria-expanded')).toBe('false');
-				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
-				await fireEvent.click(tick);
-				expect(onSelect).not.toHaveBeenCalled();
-			});
-
-			it('the very next tap, once it has closed, selects as usual', async () => {
-				const onSelect = vi.fn();
-				render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
-				const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
-				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
-				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
-				await fireEvent.click(tick);
-				trigger.setAttribute('aria-expanded', 'false');
-				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
-				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
-				await fireEvent.click(tick);
+				await tap(tick, 3);
 				expect(onSelect).toHaveBeenCalledTimes(1);
 				expect(onSelect).toHaveBeenLastCalledWith(3);
 			});
 
-			describe('counts any trigger that can still own a popup on screen', () => {
-				const tapSelects = async () => {
-					const onSelect = vi.fn();
-					render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
-					const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
-					await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
-					await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
-					await fireEvent.click(tick);
-					return onSelect.mock.calls.length === 1;
-				};
-
-				it('ignores a trigger inside an inert panel', async () => {
-					const panel = document.createElement('div');
-					panel.setAttribute('inert', '');
-					panel.append(trigger);
-					document.body.append(panel);
-					expect(await tapSelects()).toBe(true);
-					panel.remove();
-				});
-
-				it('ignores a trigger left expanded in a hidden, inert panel, as Settings leaves one', async () => {
-					const panel = document.createElement('div');
-					panel.setAttribute('inert', '');
-					panel.style.display = 'none';
-					panel.append(trigger);
-					document.body.append(panel);
-					trigger.getBoundingClientRect = () => ({ width: 0, height: 0 }) as DOMRect;
-					expect(await tapSelects()).toBe(true);
-					panel.remove();
-				});
-
-				it('counts a trigger hidden on its own, as the usage ring is while its sheet stays open', async () => {
-					trigger.style.display = 'none';
-					trigger.getBoundingClientRect = () => ({ width: 0, height: 0 }) as DOMRect;
-					expect(await tapSelects()).toBe(false);
-				});
-
-				it('ignores a trigger that is visibility:hidden', async () => {
-					trigger.style.visibility = 'hidden';
-					expect(await tapSelects()).toBe(true);
-				});
-
-				it('still counts a visible trigger when a hidden one is expanded too', async () => {
-					const panel = document.createElement('div');
-					panel.setAttribute('inert', '');
-					const stale = document.createElement('button');
-					stale.setAttribute('aria-haspopup', 'listbox');
-					stale.setAttribute('aria-expanded', 'true');
-					panel.append(stale);
-					document.body.prepend(panel);
-					expect(await tapSelects()).toBe(false);
-					panel.remove();
-				});
-
-				it('still counts a trigger scrolled out of view', async () => {
-					trigger.getBoundingClientRect = () => ({ width: 80, height: 40, top: -900, bottom: -860 }) as DOMRect;
-					expect(await tapSelects()).toBe(false);
-				});
+			it('a filter the rail cannot close, left behind a collapsed sidebar, never blocks a tap', async () => {
+				const column = document.createElement('div');
+				column.style.display = 'none';
+				column.append(trigger);
+				document.body.append(column);
+				const { onSelect, tick } = renderRail();
+				await tap(tick, 3);
+				expect(onSelect).toHaveBeenCalledTimes(1);
+				await tap(tick, 3);
+				expect(onSelect).toHaveBeenCalledTimes(2);
+				expect(trigger.getAttribute('aria-expanded')).toBe('true');
+				column.remove();
 			});
 
-			it('leaves a mouse click alone', async () => {
-				const onSelect = vi.fn();
-				render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
-				const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
+			it('Settings kept alive behind the chat closes its picker on the press, unseen, and the tap still selects', async () => {
+				const panel = document.createElement('div');
+				panel.setAttribute('inert', '');
+				panel.append(trigger);
+				document.body.append(panel);
+				document.addEventListener('mousedown', closeTrigger);
+				const { onSelect, tick } = renderRail();
+				await tap(tick, 3);
+				document.removeEventListener('mousedown', closeTrigger);
+				expect(trigger.getAttribute('aria-expanded')).toBe('false');
+				expect(onSelect).toHaveBeenCalledTimes(1);
+				panel.remove();
+			});
+
+			it('a slide that closes it on pointerdown neither scrubs nor selects', async () => {
+				vi.useFakeTimers();
+				document.addEventListener('pointerdown', closeTrigger);
+				const { container, onSelect } = renderRail();
+				const rail = layOut(container);
+				const first = screen.getAllByRole('button', { name: /^Turn/ })[0];
+				await fireEvent.pointerDown(first, { ...touch, clientY: centre(0) });
+				document.removeEventListener('pointerdown', closeTrigger);
+				await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
+				expect(container.querySelector('.is-scrubbing')).toBeNull();
+				vi.advanceTimersByTime(1000);
+				await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
+				expect(onSelect).not.toHaveBeenCalled();
+			});
+
+			it('a slide over a popup it does not close scrubs at once', async () => {
+				vi.useFakeTimers();
+				const { container, onSelect } = renderRail();
+				const rail = layOut(container);
+				const first = screen.getAllByRole('button', { name: /^Turn/ })[0];
+				await fireEvent.pointerDown(first, { ...touch, clientY: centre(0) });
+				await fireEvent.pointerMove(rail, { ...touch, clientY: centre(3) });
+				expect(container.querySelector('.is-scrubbing')).not.toBeNull();
+				await fireEvent.pointerUp(rail, { ...touch, clientY: centre(3) });
+				expect(onSelect).toHaveBeenCalledWith(3);
+			});
+
+			it('does not select after the rail has gone away', async () => {
+				const { onSelect, tick, unmount } = renderRail();
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick, { detail: 1 });
+				unmount();
+				await new Promise((resolve) => setTimeout(resolve, 0));
+				expect(onSelect).not.toHaveBeenCalled();
+			});
+
+			it('leaves a mouse click alone, and selects without waiting', async () => {
+				document.addEventListener('click', closeTrigger);
+				const { onSelect, tick } = renderRail();
 				await fireEvent.pointerDown(tick, { pointerType: 'mouse', isPrimary: true, pointerId: 1 });
+				await fireEvent.click(tick, { detail: 1 });
+				document.removeEventListener('click', closeTrigger);
+				expect(onSelect).toHaveBeenLastCalledWith(3);
+			});
+
+			it('a keyboard press after a touch selects without reading that touch', async () => {
+				document.addEventListener('pointerdown', closeTrigger);
+				const { container, onSelect, tick } = renderRail();
+				const rail = layOut(container);
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				document.removeEventListener('pointerdown', closeTrigger);
+				await fireEvent.pointerCancel(rail, { ...touch, clientY: centre(3) });
 				await fireEvent.click(tick);
+				expect(onSelect).toHaveBeenLastCalledWith(3);
+			});
+
+			it('with nothing expanded, a tap selects without waiting', async () => {
+				closeTrigger();
+				const { onSelect, tick } = renderRail();
+				await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
+				await fireEvent.click(tick, { detail: 1 });
 				expect(onSelect).toHaveBeenLastCalledWith(3);
 			});
 		});

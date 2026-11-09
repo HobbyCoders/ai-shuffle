@@ -140,16 +140,38 @@
 	let dwellTimer: ReturnType<typeof setTimeout> | undefined;
 	let edgeFrame = 0;
 	let suppressClick = { index: -1, until: 0 };
-	/** Was a sheet or picker open as this press began? Read at the window, ahead of
-	 *  the popup's own outside-press handling, which closes it during this press. */
-	let popupOpenAtPress = false;
+	let pendingSelect: ReturnType<typeof setTimeout> | undefined;
+	/** Popup triggers expanded as this touch began, read at the window, ahead of any
+	 *  popup's own outside-press handling. A trigger inside `inert` is left out: Settings
+	 *  kept alive behind the chat closes its picker on this press, and nobody saw it. */
+	let expandedAtPress: Element[] = [];
 
-	/** Could this expanded trigger own a popup on screen? A kept-alive panel leaves
-	 *  one behind inside `inert` or `visibility: hidden`, and nothing shows from there.
-	 *  Its own size is not read: the phone usage ring is `display: none` below 70%
-	 *  while its sheet stays open, and an opener's box says nothing about its popup. */
-	function canOwnOpenPopup(trigger: Element): boolean {
-		return !trigger.closest('[inert]') && getComputedStyle(trigger).visibility === 'visible';
+	function readExpandedAtPress(event: PointerEvent) {
+		expandedAtPress =
+			event.pointerType === 'mouse'
+				? []
+				: [...document.querySelectorAll('[aria-haspopup][aria-expanded="true"]')].filter((t) => !t.closest('[inert]'));
+	}
+
+	/** Did this press close a popup? A press that dismisses one must not also act on
+	 *  what is beneath it. Asking what really closed, not what looks open, lets a popup
+	 *  the rail cannot close (one left behind a collapsed sidebar) never block a tap. */
+	function pressClosedPopup(): boolean {
+		return expandedAtPress.some((t) => !t.isConnected || t.getAttribute('aria-expanded') !== 'true');
+	}
+
+	function selectFromTap(index: number, event: MouseEvent) {
+		// A keyboard click has no press of its own to read.
+		if (event.detail === 0 || expandedAtPress.length === 0) {
+			onSelect(index);
+			return;
+		}
+		if (pressClosedPopup()) return;
+		// Many popups close on this same click at the document or window, after this
+		// handler has run, so the answer is only known once the event has finished.
+		pendingSelect = setTimeout(() => {
+			if (!pressClosedPopup()) onSelect(index);
+		}, 0);
 	}
 
 	/** The tick nearest a viewport y, clamped to the rail's visible box. */
@@ -214,13 +236,11 @@
 	function endScrub(commit: boolean) {
 		const active = scrub?.active ?? false;
 		const startTick = scrub?.startTick ?? -1;
-		const dismissing = scrub?.dismissing ?? false;
 		clearTimeout(dwellTimer);
 		if (edgeFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(edgeFrame);
 		edgeFrame = 0;
 		if (active && commit && hoveredIndex !== null) selectFromScrub(hoveredIndex);
 		scrub = null;
-		if (dismissing) suppressClick = { index: startTick, until: Date.now() + 400 };
 		if (!active) return;
 		scrubbing = false;
 		hoveredIndex = null;
@@ -245,7 +265,7 @@
 			selected: null,
 			startTick: landed && rail ? Array.prototype.indexOf.call(rail.children, landed) : -1,
 			lastFrame: 0,
-			dismissing: popupOpenAtPress
+			dismissing: false
 		};
 	}
 
@@ -254,6 +274,10 @@
 		scrub.y = event.clientY;
 		if (!scrub.active) {
 			if (Math.abs(scrub.y - scrub.startY) < SCRUB_SLOP_PX) return;
+			if (pressClosedPopup()) {
+				scrub.dismissing = true;
+				return;
+			}
 			scrub.active = true;
 			scrubbing = true;
 			// Capture on the rail so the finger can leave it (to scroll at an
@@ -273,7 +297,10 @@
 		endScrub(event.type === 'pointerup');
 	}
 
-	$effect(() => () => endScrub(false));
+	$effect(() => () => {
+		endScrub(false);
+		clearTimeout(pendingSelect);
+	});
 
 	// The rail rests invisible and shows while the transcript beside it scrolls.
 	let scrolling = $state(false);
@@ -314,7 +341,7 @@
 </script>
 
 <svelte:window
-	onpointerdowncapture={() => (popupOpenAtPress = [...document.querySelectorAll('[aria-haspopup][aria-expanded="true"]')].some(canOwnOpenPopup))}
+	onpointerdowncapture={readExpandedAtPress}
 />
 
 <nav
@@ -355,7 +382,7 @@
 				aria-current={index === resolvedIndex ? 'true' : undefined}
 				tabindex={index === (focusedTick ?? resolvedIndex) ? 0 : -1}
 				onclick={(event) => {
-					if (index !== suppressClick.index || Date.now() >= suppressClick.until) onSelect(index);
+					if (index !== suppressClick.index || Date.now() >= suppressClick.until) selectFromTap(index, event);
 					// A tap focuses the tick, which would keep it lit as if it were
 					// the current turn after the reader scrolls on.
 					if (lastPointerType === 'touch') event.currentTarget.blur();
