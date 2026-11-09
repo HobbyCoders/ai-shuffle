@@ -222,6 +222,20 @@ def _concurrent_ddl(cur: Any, table: str, statement: str) -> None:
         cur.execute("SET statement_timeout = '1h'")
 
 
+def _tablespace_clause(cur: Any, name: str) -> str:
+    """Keep a replacement where its original lives, the place _volumes measures."""
+    cur.execute("SELECT quote_ident(t.spcname) AS name FROM pg_class c "
+                "JOIN pg_tablespace t ON t.oid = c.reltablespace "
+                "WHERE c.oid = to_regclass(%s)", (name,))
+    row = cur.fetchone()
+    return f" TABLESPACE {row['name']}" if row else ""
+
+
+def _disk(path: Any) -> tuple[int, int]:
+    """(device, free bytes) of the filesystem holding this path."""
+    return os.stat(path).st_dev, shutil.disk_usage(path).free
+
+
 def _volumes(cur: Any, name: str) -> list[tuple[str, int, int, int]]:
     """(label, device, free bytes, bytes needed) of each place a rebuild writes."""
     from app.core.config import settings
@@ -237,8 +251,7 @@ def _volumes(cur: Any, name: str) -> list[tuple[str, int, int, int]]:
     places = [("data", row["place"] if row and row["place"] else data, needed),
               ("WAL", data / "pg_wal", needed)]
     with service_files():
-        return [(label, os.stat(path).st_dev, shutil.disk_usage(path).free, need)
-                for label, path, need in places]
+        return [(label, *_disk(path), need) for label, path, need in places]
 
 
 def _space_problem(cur: Any, name: str) -> str | None:
@@ -279,6 +292,9 @@ def migrate() -> bool:
             return False
         cur.execute("SET lock_timeout = '250ms'")
         cur.execute("SET statement_timeout = '1h'")
+        # An index with no tablespace of its own stays with the database, as
+        # _volumes assumes, whatever a role or database setting says.
+        cur.execute("SET default_tablespace = ''")
         cur.execute("CREATE TABLE IF NOT EXISTS history_index_migrations "
                     "(name text PRIMARY KEY, tail text NOT NULL)")
         for table in TABLES:
@@ -349,6 +365,7 @@ def migrate() -> bool:
                 or (t == "session_recall_text" and "session_recall_text" in name)
                 or (t == "session_events" and "events" in name)
                 or (t == "session_messages" and "session_messages" in name)))
+            tablespace = _tablespace_clause(cur, name)
             for state in (0, 2):
                 replacement = name + f"_h{state}"
                 if not _valid(cur, replacement):
@@ -367,7 +384,7 @@ def migrate() -> bool:
                     else:
                         options = " WITH " + original_options if has_options else ""
                     _concurrent_ddl(cur, table, f"CREATE INDEX CONCURRENTLY {replacement} ON {table} "
-                                    f"USING gin {expression}{options} WHERE "
+                                    f"USING gin {expression}{options}{tablespace} WHERE "
                                     f"{where}{COLUMN} = {state}")
             _concurrent_ddl(cur, table, f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
             cur.execute(f"ALTER INDEX {name}_h0 RENAME TO {name}")

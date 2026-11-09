@@ -4,6 +4,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import psycopg2
@@ -15,6 +19,9 @@ from app.db import base, history_indexing as hi, session_recall
 from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401
 
 pytestmark = requires_real_pg
+
+# Captured at import, before the shared fixture swaps in its stand-in.
+REAL_VOLUMES = hi._volumes
 
 
 def finish_migration() -> None:
@@ -649,6 +656,137 @@ def test_automatic_build_defers_when_the_disk_is_short(
     assert hi.migrate() is False
     monkeypatch.undo()
     finish_migration()
+
+
+TEST_TABLESPACE = "history_index_test"
+REBUILT = "idx_session_recall_text_trgm_n"
+PLENTY = 100 * 1024 ** 3
+
+
+def _index_tablespace(cur: Any, name: str) -> str | None:
+    cur.execute("SELECT t.spcname FROM pg_class c LEFT JOIN pg_tablespace t "
+                "ON t.oid = c.reltablespace WHERE c.oid = to_regclass(%s)", (name,))
+    return cur.fetchone()["spcname"]
+
+
+def _make_rebuild_pending(cur: Any, tablespace: str | None) -> None:
+    """Put back the single index a worker has before the upgrade."""
+    cur.execute("SELECT tail FROM history_index_migrations WHERE name = %s", (REBUILT,))
+    expression, _, predicate = cur.fetchone()["tail"].partition(" WHERE ")
+    cur.execute(f"DROP INDEX {REBUILT}, {REBUILT}_h2")
+    place = f" TABLESPACE {tablespace}" if tablespace else ""
+    where = f" WHERE {predicate}" if predicate else ""
+    cur.execute(f"CREATE INDEX {REBUILT} ON session_recall_text USING gin "
+                f"{expression}{place}{where}")
+
+
+@pytest.fixture
+def tablespace() -> Iterator[str]:
+    """A real non-default tablespace. CI's unprivileged role is given one."""
+    finish_migration()
+    with hi._online_cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_tablespace WHERE spcname = %s", (TEST_TABLESPACE,))
+        if not cur.fetchone():
+            cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+            if not cur.fetchone()["rolsuper"]:
+                pytest.skip("needs the history_index_test tablespace or a superuser")
+            cur.execute("SET allow_in_place_tablespaces = true")
+            cur.execute(f"CREATE TABLESPACE {TEST_TABLESPACE} LOCATION ''")
+    yield TEST_TABLESPACE
+    finish_migration()
+    with hi._online_cursor() as cur:
+        for name in (REBUILT, f"{REBUILT}_h2"):
+            cur.execute(f"ALTER INDEX {name} SET TABLESPACE pg_default")
+
+
+@dataclass
+class Disks:
+    """Made-up free bytes per place, and each place the accounting looked at."""
+    free: dict[str, int]
+    seen: list[str]
+
+
+@pytest.fixture
+def disks(tablespace: str, tmp_path: Path) -> Iterator[Disks]:
+    """Runs the real catalog-to-path accounting over made-up free space."""
+    from app.maintenance import session_recall_cache
+
+    with hi._online_cursor() as cur:
+        cur.execute("SELECT pg_tablespace_location(oid) AS place FROM pg_tablespace "
+                    "WHERE spcname = %s", (tablespace,))
+        place = cur.fetchone()["place"]
+    result = Disks({"data": PLENTY, "wal": PLENTY, "tablespace": PLENTY}, [])
+    labels = {str(tmp_path): "data", str(tmp_path / "pg_wal"): "wal", place: "tablespace"}
+
+    def disk(path: Any) -> tuple[int, int]:
+        label = labels[str(path)]
+        result.seen.append(label)
+        return list(result.free).index(label), result.free[label]
+
+    # Undone here, so that the tablespace fixture's cleanup sees real settings.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(session_recall_cache, "managed_data_directory", lambda cur, _: tmp_path)
+        patch.setattr(hi, "_volumes", REAL_VOLUMES)
+        patch.setattr(hi, "_disk", disk)
+        patch.setattr(hi, "_retry_build_at", 0.0)
+        yield result
+
+
+def test_rebuild_stays_on_the_measured_tablespace(
+    tablespace: str, disks: Disks,
+) -> None:
+    # The database default is nearly full; only the index's own volume has room.
+    disks.free["data"] = 1
+    with hi._online_cursor() as cur:
+        _make_rebuild_pending(cur, tablespace)
+    assert hi.migrate() is False
+    assert disks.seen == ["tablespace", "wal"]
+    with hi._online_cursor() as cur:
+        assert hi._valid(cur, REBUILT) and hi._valid(cur, f"{REBUILT}_h2")
+        assert _index_tablespace(cur, REBUILT) == tablespace
+        assert _index_tablespace(cur, f"{REBUILT}_h2") == tablespace
+
+
+def test_rebuild_defers_when_its_own_tablespace_is_short(
+    tablespace: str, disks: Disks, caplog: pytest.LogCaptureFixture,
+) -> None:
+    disks.free["tablespace"] = 1
+    with hi._online_cursor() as cur:
+        _make_rebuild_pending(cur, tablespace)
+    with caplog.at_level(logging.WARNING, logger=hi.__name__):
+        assert hi.migrate() is False
+    assert "free some disk space" in caplog.text
+    assert disks.seen == ["tablespace", "wal"]
+    with hi._online_cursor() as cur:
+        assert hi._valid(cur, REBUILT), "the original must stay usable"
+        assert _index_tablespace(cur, REBUILT) == tablespace
+        assert not hi._valid(cur, f"{REBUILT}_h0")
+    assert _invalid_indexes() == []
+
+
+def test_default_tablespace_setting_cannot_redirect_a_rebuild(
+    tablespace: str, disks: Disks, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index with no tablespace of its own stays with the database, as measured."""
+    borrow = hi._online_cursor
+
+    @contextmanager
+    def redirected() -> Iterator[Any]:
+        with borrow() as cur:
+            if cur is not None:  # As a role or database setting would.
+                cur.execute(f"SET default_tablespace = {tablespace}")
+            yield cur
+
+    with borrow() as cur:
+        _make_rebuild_pending(cur, None)
+    monkeypatch.setattr(hi, "_online_cursor", redirected)
+    assert hi.migrate() is False
+    monkeypatch.setattr(hi, "_online_cursor", borrow)
+    assert disks.seen == ["data", "wal"]
+    with hi._online_cursor() as cur:
+        assert hi._valid(cur, REBUILT) and hi._valid(cur, f"{REBUILT}_h2")
+        assert _index_tablespace(cur, REBUILT) is None
+        assert _index_tablespace(cur, f"{REBUILT}_h2") is None
 
 
 def test_merge_waits_for_an_import_scope_held_past_the_quiet_time(

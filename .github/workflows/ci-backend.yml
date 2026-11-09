@@ -336,7 +336,10 @@ jobs:
             -c "CREATE USER shuffle_network_test WITH PASSWORD 'network-test-only'" \
             -c "CREATE DATABASE shuffle_network_test OWNER shuffle_network_test" \
             -c "CREATE USER shuffle_safety_test WITH PASSWORD 'safety-test-only'" \
-            -c "CREATE DATABASE shuffle_safety_test OWNER shuffle_safety_test"
+            -c "CREATE DATABASE shuffle_safety_test OWNER shuffle_safety_test" \
+            -c "SET allow_in_place_tablespaces = true" \
+            -c "CREATE TABLESPACE history_index_test LOCATION ''" \
+            -c "GRANT CREATE ON TABLESPACE history_index_test TO shuffle_safety_test"
           pg_isready -h 127.0.0.1 -p 5432
 
       - name: Verify PostgreSQL pool and transaction safety
