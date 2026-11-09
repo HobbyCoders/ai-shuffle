@@ -37,6 +37,7 @@ def test_mirrored_chat_keeps_explicit_remote_targets(ctx, monkeypatch):
     def remote_folder(*args):
         raise service.TerminalError("chat_on_other_worker", "Chat is remote", 409)
 
+    monkeypatch.setattr(service, "chat_worker_id", lambda session_id: "peer")
     monkeypatch.setattr(service, "resolve_folder", remote_folder)
     monkeypatch.setattr(terminal_targets, "targets", AsyncMock(return_value=[
         {"kind": "worker", "worker_id": "peer", "name": "Peer", "available": True}]))
@@ -44,6 +45,17 @@ def test_mirrored_chat_keeps_explicit_remote_targets(ctx, monkeypatch):
     assert response.status_code == 200 and response.json()["supported"]
     assert not response.json()["targets"][0]["available"]
     assert response.json()["default_folder"] is None
+    assert response.json()["chat_worker_id"] == "peer"
+
+
+def test_mirrored_chat_without_remote_targets_explains_the_setting(ctx, monkeypatch):
+    from app.core import terminals as service
+
+    monkeypatch.setattr(service, "chat_worker_id", lambda session_id: "peer")
+    monkeypatch.setattr(terminal_targets, "targets", AsyncMock(return_value=[]))
+    response = owner(ctx).get("/api/v1/terminals/targets?session_id=remote-chat")
+    assert response.status_code == 409 and response.json()["code"] == "chat_on_other_worker"
+    assert "Settings" in response.json()["detail"]
 
 
 def test_owner_open_dispatches_to_selected_remote_target(ctx, monkeypatch):

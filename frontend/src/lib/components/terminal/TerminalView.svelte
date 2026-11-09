@@ -239,7 +239,7 @@
 	{#if exited}
 		<div class="ended" role="group" aria-label="Shell exited">
 			<p><strong>The shell exited</strong>{exitDetail(info?.exit_code)}</p>
-			<p class="sub">{remote ? 'Its output stays here until you close it. To continue, open a new terminal with + (another worker asks for approval again).' : 'Its output stays here until you close or restart it.'}</p>
+			<p class="sub">{remote ? 'Its output stays here until you close it. To continue, open a new terminal with +.' : 'Its output stays here until you close or restart it.'}</p>
 			<div class="ended-actions">
 				{#if !remote}<button class="st-btn primary" onclick={() => terminals.restart(sessionId, id)}><RotateCcw size={14} />Restart</button>{/if}
 				<button class="st-btn" onclick={() => terminals.close(sessionId, id)}><X size={14} />Close</button>

@@ -1029,7 +1029,9 @@ describe('SessionCard git state', () => {
 			{ ...bare, is_active: true, is_remote: true, device_name: 'Worker B' },
 			{ status: 'working' },
 		);
-		expect(remote.container.querySelector('.l2 .where')?.textContent).toMatch(/^Worker B · (.* ago|Just now)$/);
+		expect(remote.container.querySelector('.l2 .where')?.textContent).toMatch(/.* ago$|^Just now$/);
+		expect(remote.container.querySelector('.l2')?.textContent).not.toContain('Worker B');
+		expect(remote.container.querySelector('.l2 .worker')).not.toBeNull();
 	});
 
 	it('names the project only when the row is not under a project header', () => {
@@ -1045,9 +1047,19 @@ describe('SessionCard git state', () => {
 			{ is_active: true, is_remote: true, device_name: 'Worker B', worktree_branch: 'feat/a' },
 			{ status: 'idle' },
 		);
-		expect(container.querySelector('.l2 .worker')?.getAttribute('title')).toBe('On Worker B');
-		expect(container.querySelector('.details')?.textContent).toContain('Worker B');
+		const worker = container.querySelector('.l2 .worker');
+		expect(worker?.getAttribute('title')).toBe('On Worker B');
+		expect(worker?.getAttribute('aria-label')).toBe('On Worker B');
+		expect(worker?.getAttribute('aria-hidden')).toBeNull();
 		expect(container.querySelector('.l2 .where')?.textContent).toBe('feat/a');
+		// The icon names the worker to a screen reader, so the details do not repeat it.
+		expect(container.querySelector('.details')?.textContent).not.toContain('Worker B');
+	});
+
+	it('gives a row on this worker no worker icon and no worker name', () => {
+		const { container } = renderCard({ is_active: true, device_name: 'Worker A' }, { status: 'idle' });
+		expect(container.querySelector('.l2 .worker')).toBeNull();
+		expect(container.querySelector('.l2')?.textContent).not.toContain('Worker A');
 	});
 
 	it('marks a working row with the live pip and a parked row with the warning', () => {

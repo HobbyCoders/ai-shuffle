@@ -376,6 +376,69 @@ class TestControllableAnnotation:
         assert "remote_runtime_state" not in sessions[0]
         assert sessions[1]["is_remote"] is True
 
+    def test_owner_names_the_worker_when_instance_is_out_of_date(self):
+        """instance_id is per worker and not synced, so after a chat is passed
+        on it can name a worker that no longer has it. The owner decides both
+        which side the row is on and whose name it carries."""
+        installs = {
+            "dev-b": {"online": True, "device_name": "Office PC", "base_url": None},
+            "dev-c": {"online": False, "device_name": "Laptop", "base_url": None},
+        }
+        sessions = [
+            {"id": "s-passed-on", "instance_id": "dev-b", "owner_device_id": "dev-c"},
+            {"id": "s-names-me", "instance_id": "dev-me", "owner_device_id": "dev-b"},
+        ]
+        with patch("app.network.runners.self_device_id", return_value="dev-me"), \
+                patch("app.network.session_runtime.for_sessions", return_value={}):
+            self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is True
+        assert sessions[0]["device_name"] == "Laptop"
+        assert sessions[0]["device_online"] is False
+        assert sessions[1]["is_remote"] is True
+        assert sessions[1]["device_name"] == "Office PC"
+
+    def test_owner_missing_from_registry_is_never_credited_to_the_instance(self):
+        """An owner this worker does not know stays unknown. The instance_id
+        names a former worker, and that worker being online says nothing."""
+        installs = {"dev-b": {"online": True, "device_name": "Office PC", "base_url": None}}
+        sessions = [{"id": "s-gone", "instance_id": "dev-b", "owner_device_id": "dev-gone"}]
+        with patch("app.network.runners.self_device_id", return_value="dev-me"), \
+                patch("app.network.session_runtime.for_sessions", return_value={}):
+            self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is True
+        assert sessions[0]["device_name"] is None
+        assert sessions[0]["device_online"] is False
+        assert sessions[0]["controllable"] is False
+        assert sessions[0]["remote_runtime_state"] == "offline"
+
+    def test_own_chat_stays_local_while_enrollment_is_pending(self):
+        """Joining another network leaves the old one first and keeps the
+        sessions and device keys, so there is no network context for a while.
+        The stored identity still says which chats are this worker's, and it
+        does not claim a chat that a different device owns."""
+        from types import SimpleNamespace
+
+        installs = {"me-install": {"online": True, "device_name": "Primary", "base_url": None}}
+        sessions = [
+            {"id": "s-mine", "instance_id": "me-install", "owner_device_id": "dev-me"},
+            {"id": "s-theirs", "instance_id": "me-install", "owner_device_id": "dev-b"},
+            {"id": "s-legacy", "instance_id": "me-install"},
+        ]
+        with patch("app.network.runners.self_device_id", return_value=None), \
+                patch("app.network.identity.load", return_value=SimpleNamespace(device_id="dev-me")), \
+                patch("app.network.session_runtime.for_sessions", return_value={}) as runtime:
+            self._annotate(sessions, installs)
+        assert sessions[0]["is_remote"] is False
+        assert sessions[0]["device_name"] == "Primary"
+        assert sessions[0]["device_online"] is True
+        assert sessions[0]["controllable"] is True
+        assert "remote_runtime_state" not in sessions[0]
+        assert sessions[1]["is_remote"] is True
+        assert sessions[2]["is_remote"] is False
+        # Only the other device's chat needs a runtime summary. A row with no
+        # owner must not cost a read: session detail has a query budget.
+        assert runtime.call_args.args[0] == ["s-theirs"]
+
     def test_is_pinned_from_runner_placement(self):
         """``is_pinned`` is true only for an explicit runner:<id> placement."""
         installs = {"me-install": {"online": True, "device_name": "Primary"}}

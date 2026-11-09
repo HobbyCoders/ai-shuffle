@@ -32,6 +32,9 @@ const sessions = [
 	{ id: 'session-a', project_id: 'project-a', instance_id: 'dead-install' },
 	{ id: 'session-b', project_id: 'project-a', instance_id: 'dead-install' },
 	{ id: 'session-c', project_id: 'project-b', instance_id: 'still-here' },
+	// The owner decides; a per-worker instance_id can name a former worker.
+	{ id: 'session-d', project_id: 'project-b', owner_device_id: 'dead-install', instance_id: 'still-here' },
+	{ id: 'session-e', project_id: 'project-b', owner_device_id: 'still-here', instance_id: 'dead-install' },
 ];
 
 beforeEach(() => {
@@ -58,8 +61,8 @@ describe('appData.dropDeviceSessions', () => {
 
 		appData.dropDeviceSessions('dead-install');
 
-		expect(appData.current.sessions.map((session) => session.id)).toEqual(['session-c']);
-		expect(appData.current.sessionsTotal).toBe(1);
+		expect(appData.current.sessions.map((session) => session.id).sort()).toEqual(['session-c', 'session-e']);
+		expect(appData.current.sessionsTotal).toBe(2);
 		expect(mocks.newChat).toHaveBeenCalledOnce();
 	});
 });

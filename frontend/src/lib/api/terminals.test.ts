@@ -51,20 +51,20 @@ describe('peer terminal routes', () => {
 	it('uses the contract paths and bodies', async () => {
 		const fetch = answer(200, { requests: [] });
 		vi.stubGlobal('fetch', fetch);
-		await terminalsApi.requestPeer('dev_b');
-		await terminalsApi.peerAuthorization('auth id');
-		await terminalsApi.revokePeerAuthorization('auth id');
-		await terminalsApi.peerRequests();
-		await terminalsApi.approvePeerRequest('req/1');
-		await terminalsApi.revokePeerRequest('req/1');
+		await terminalsApi.peerChallenge('dev_b', 'key');
+		await terminalsApi.requestPeerLink('dev_b', 'public', 'Chrome on Linux');
+		await terminalsApi.deviceLinks();
+		await terminalsApi.approveDeviceLink('ABCD 2345');
+		await terminalsApi.declineDeviceLink('req/1');
+		await terminalsApi.revokeDeviceLink('key/1');
 		const calls = fetch.mock.calls.map(([url, init]) => [String(url).replace(/^.*\/terminals/, ''), (init as RequestInit | undefined)?.method ?? 'GET', (init as RequestInit | undefined)?.body ?? null]);
 		expect(calls).toEqual([
-			['/peer-authorizations', 'POST', JSON.stringify({ worker_id: 'dev_b' })],
-			['/peer-authorizations/auth%20id', 'GET', null],
-			['/peer-authorizations/auth%20id', 'DELETE', null],
-			['/peer-requests', 'GET', null],
-			['/peer-requests/req%2F1/approve', 'POST', null],
-			['/peer-requests/req%2F1', 'DELETE', null],
+			['/peer-challenge', 'POST', JSON.stringify({ worker_id: 'dev_b', key_id: 'key' })],
+			['/peer-links', 'POST', JSON.stringify({ worker_id: 'dev_b', public_key: 'public', label: 'Chrome on Linux' })],
+			['/device-links', 'GET', null],
+			['/device-links/approve', 'POST', JSON.stringify({ code: 'ABCD 2345' })],
+			['/device-links/requests/req%2F1', 'DELETE', null],
+			['/device-links/key%2F1', 'DELETE', null],
 		]);
 	});
 });

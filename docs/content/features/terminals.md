@@ -60,49 +60,61 @@ single-line paste only, without pressing Enter.
 
 ### A terminal on another worker
 
-You can open a shell on another worker in your network. You approve each shell
-on the worker that will run it.
+For a chat running on another worker in your network, **Open terminal** and
+**Open and paste** open the shell on that worker, in the chat's folder, and show
+it in the app you are using. You can also pick that worker under **+ → Target**.
 
-**Turn it on.** Peer terminals are off by default. There is no switch in
-Settings yet. Signed in as the owner, send `PUT /api/v1/settings/owner-policy`
-with `{"network_peer_terminals": true}`; `GET` on the same path shows the
-current value. The setting is shared across your worker network, and both
-workers need it on: the one you open from and the one that runs the shell. For
-one release, an old `NETWORK_PEER_TERMINALS` environment value is imported once
-if no saved setting exists. After that, only the saved setting counts.
+**Turn it on.** Go to **Settings → Security → Terminals on other workers**. It is
+off by default, and both workers need it on: the one you are using and the one
+that runs the shell.
 
-**Open one.**
+**Link this device, once per worker.** The first time you open a shell on a
+worker, this device shows a twelve-character code. On the other worker, go to
+**Settings → Security → Terminals on other workers** and enter the code, either
+on that worker itself or from a device already signed in to it as the owner.
+That links the device. From then on, opening a shell on that worker takes one
+press. A code that isn't entered within ten minutes expires.
 
-1. On the worker you are using, choose **+ → Target**, pick the other worker
-   and choose **Request approval**. A six-character code appears.
-2. On the other worker, open the Terminal panel or the Terminal page. Under
-   **Terminal requests from other workers**, check that the code matches, tick
-   the box that says so and choose **Approve one shell**. A banner on that
-   worker points you to waiting requests.
-3. Back on the first worker, choose **Open terminal**. You can name a folder;
-   it is checked on the other worker.
+The device holds a private key that can't be copied out of it, and signs every
+shell it opens. The worker you are using only passes the request along.
 
-One approval opens one shell. A request that isn't approved within two
-minutes expires. An approved shell lasts at most ten minutes and closes after
-30 seconds without traffic. Closing the tab, **Revoke** on either worker,
-signing out on either worker, removing a worker from the network or restarting
-either worker ends the shell. To open another, request a new approval.
-Restart is not offered for a shell on another worker.
+**Where a device can link.** The desktop app, the Android app, HTTPS addresses
+and `localhost` can hold the key. A plain `http://` LAN address can't, because
+browsers only offer this on secure connections. There the terminal button is
+disabled and says why.
 
-Both workers write each request, open and close to their app log. The log
-never includes what you type or what the shell prints.
+**Linked devices.** The other worker lists its linked devices in the same place
+in Settings. **Revoke** takes effect at once: the device's next request is
+refused and any shell it has open on that worker closes immediately.
+
+A shell on another worker lasts at most ten minutes and closes after 30 seconds
+without traffic. Closing the tab, revoking the device, signing out on the worker
+you are using, turning the setting off, removing a worker from the network or
+restarting either worker ends the shell. Restart is not offered for it; open a
+new one instead, without linking again.
+
+As with any paste, a command you open and paste waits at the prompt until you
+press Enter. Both workers write each link, open and close to their app log. The
+log never includes what you type or what the shell prints.
 
 **What is refused.**
 
 - Anyone who cannot open a local terminal (see [Who can use terminals](#who-can-use-terminals)),
-  including API keys and agent preview links.
-  The approval itself needs the owner signed in on the receiving worker; the
-  first worker cannot approve on its behalf, and being a member of the network
-  is not enough.
+  including API keys and agent preview links. An agent on the worker you are
+  using cannot sign for you, and being a member of the network is not enough.
+- Linking from anywhere except the owner on the receiving worker. The worker you
+  are using cannot approve on its behalf.
 - A worker that is offline, runs an older version, has no shell, or has no
   HTTPS route. The picker shows the reason. Plain HTTP is never used.
-- Every request while the setting is off on either worker. Revoking still works.
-- An approval used for a different worker, or used a second time.
+- Every request while the setting is off on either worker. Listing and revoking
+  linked devices still work.
+- A signature that is old, already used, or made for a different worker, chat,
+  folder or action.
+
+One limit: if the worker you are using were fully compromised, it serves the page
+you are looking at and could trick an open browser into signing a request. It
+still could not take the key. Revoke the device on the other worker if you ever
+suspect this.
 
 ## Pasting
 
