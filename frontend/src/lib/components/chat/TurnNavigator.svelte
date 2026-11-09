@@ -144,6 +144,15 @@
 	 *  the popup's own outside-press handling, which closes it during this press. */
 	let popupOpenAtPress = false;
 
+	/** A kept-alive panel hides an expanded picker with `display: none` and `inert`
+	 *  but leaves it marked open, so only a trigger the user can see counts. Its
+	 *  position is not read: a trigger scrolled out of view can still own an open menu. */
+	function canBeSeen(trigger: Element): boolean {
+		if (trigger.closest('[inert]')) return false;
+		const box = trigger.getBoundingClientRect();
+		return box.width > 0 && box.height > 0 && getComputedStyle(trigger).visibility === 'visible';
+	}
+
 	/** The tick nearest a viewport y, clamped to the rail's visible box. */
 	function indexAtY(clientY: number): number | null {
 		if (!rail || items.length === 0) return null;
@@ -306,7 +315,7 @@
 </script>
 
 <svelte:window
-	onpointerdowncapture={() => (popupOpenAtPress = document.querySelector('[aria-haspopup][aria-expanded="true"]') !== null)}
+	onpointerdowncapture={() => (popupOpenAtPress = [...document.querySelectorAll('[aria-haspopup][aria-expanded="true"]')].some(canBeSeen))}
 />
 
 <nav

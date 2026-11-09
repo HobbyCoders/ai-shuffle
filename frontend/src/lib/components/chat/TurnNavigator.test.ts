@@ -224,6 +224,7 @@ describe('TurnNavigator', () => {
 				trigger = document.createElement('button');
 				trigger.setAttribute('aria-haspopup', 'dialog');
 				trigger.setAttribute('aria-expanded', 'true');
+				trigger.getBoundingClientRect = () => ({ width: 80, height: 40 }) as DOMRect;
 				document.body.append(trigger);
 			});
 			afterEach(() => trigger.remove());
@@ -283,6 +284,51 @@ describe('TurnNavigator', () => {
 				await fireEvent.click(tick);
 				expect(onSelect).toHaveBeenCalledTimes(1);
 				expect(onSelect).toHaveBeenLastCalledWith(3);
+			});
+
+			describe('counts only a trigger the user can see', () => {
+				const tapSelects = async () => {
+					const onSelect = vi.fn();
+					render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
+					const tick = screen.getAllByRole('button', { name: /^Turn/ })[3];
+					await fireEvent.pointerDown(tick, { ...touch, clientY: centre(3) });
+					await fireEvent.pointerUp(tick, { ...touch, clientY: centre(3) });
+					await fireEvent.click(tick);
+					return onSelect.mock.calls.length === 1;
+				};
+
+				it('ignores a trigger inside an inert panel', async () => {
+					const panel = document.createElement('div');
+					panel.setAttribute('inert', '');
+					panel.append(trigger);
+					document.body.append(panel);
+					expect(await tapSelects()).toBe(true);
+					panel.remove();
+				});
+
+				it('ignores a trigger with no box, as in a display:none panel', async () => {
+					trigger.getBoundingClientRect = () => ({ width: 0, height: 0 }) as DOMRect;
+					expect(await tapSelects()).toBe(true);
+				});
+
+				it('ignores a trigger that is visibility:hidden', async () => {
+					trigger.style.visibility = 'hidden';
+					expect(await tapSelects()).toBe(true);
+				});
+
+				it('still counts a visible trigger when a hidden one is expanded too', async () => {
+					const stale = document.createElement('button');
+					stale.setAttribute('aria-haspopup', 'listbox');
+					stale.setAttribute('aria-expanded', 'true');
+					document.body.prepend(stale);
+					expect(await tapSelects()).toBe(false);
+					stale.remove();
+				});
+
+				it('still counts a trigger scrolled out of view', async () => {
+					trigger.getBoundingClientRect = () => ({ width: 80, height: 40, top: -900, bottom: -860 }) as DOMRect;
+					expect(await tapSelects()).toBe(false);
+				});
 			});
 
 			it('leaves a mouse click alone', async () => {
