@@ -306,7 +306,7 @@ def selection_for_event(event: str | None, root: Path = ROOT) -> tuple[list[str]
 
 def matrix(shards: int) -> int:
     only, why = selection_for_event(os.environ.get("GITHUB_EVENT_NAME"))
-    buckets = plan(shards, only=only)
+    buckets = plan(shards) if only is None else plan(shards, only=only)
     numbers = [index for index, bucket in enumerate(buckets, 1) if bucket]
     print(f"[ci] UI journeys: {why}", file=sys.stderr, flush=True)
     _write_summary(f"\n**UI journeys for this run:** {why}.\n")
@@ -630,7 +630,8 @@ def journeys(args: argparse.Namespace) -> int:
     (attempt_out / "logs").mkdir(parents=True, exist_ok=True)
     (attempt_out / "journeys").mkdir(parents=True, exist_ok=True)
     label = f"shard {index}/{shards}"
-    mine = plan(shards, only=parse_only(args.only))[index - 1]
+    only = parse_only(args.only)
+    mine = (plan(shards) if only is None else plan(shards, only=only))[index - 1]
     commands = ([["node", str(JOURNEYS / name)] for name in mine]
                 if args.retry_failures else commands_for(mine, shards))
     print(f"[ci] {label}: {', '.join(' '.join(Path(part).name for part in c[1:]) for c in commands) or 'nothing'}",
@@ -753,7 +754,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="CI only: retry up to three failed cases/crashed files once, in the same instance")
     args = parser.parse_args(argv)
     if args.command == "plan":
-        print(json.dumps(plan(args.shards, only=parse_only(args.only))))
+        only = parse_only(args.only)
+        print(json.dumps(plan(args.shards) if only is None else plan(args.shards, only=only)))
         return 0
     if args.command == "matrix":
         return matrix(args.shards)
