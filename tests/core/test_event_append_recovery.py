@@ -172,7 +172,8 @@ async def test_websocket_stop_leaves_failure_owned_close_pending_without_false_e
     await asyncio.wait_for(handler.handle_stop({
         "session_id": "recovery-chat", "turn_id": turn["id"],
     }), 1)
-    handler.send_json.assert_not_awaited()  # no false error / "nothing stopped"
+    assert not [call.args[0] for call in handler.send_json.call_args_list
+                if call.args[0].get("type") in ("error", "stop_result")]
     assert blocked.call_count == 3  # Stop did not start another counter write
     row = turns.get_turn(turn["id"])
     assert (row["state"], row["stop_reason"]) == ("draining", "recording_failed")

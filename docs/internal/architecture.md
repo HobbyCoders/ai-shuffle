@@ -121,9 +121,14 @@ with a stable terminal intent in the existing Stop notice outbox. This does not
 need the transcript counter. The marker excludes the already-executed prompt
 from reaping/requeue and holds its live slot until the receipt commits, preventing
 a delayed close from closing a successor's stream. Orphan Stop and parking also
-leave failure-owned rows to this intent: neither may erase its marker. A Stop
-for that draining turn returns promptly without a new contended append or a
-false "nothing stopped" response; its page waits for the durable close. Delivery
+leave failure-owned rows to this intent: neither may erase its marker. Stop's
+shared cleanup predicate separately admits a still-current failure-owned turn:
+background tasks stop, the user-stop latch lands and queued words become
+restorable "Not sent" messages, just as for an ordinary Stop. They do not run
+when terminal delivery releases the slot. Local WebSocket and owning-peer Stop
+use the same predicate; a newer run (even released) or started successor makes
+that turn-scoped cleanup stale. The marker and closing intent stay untouched;
+the page gets no false "nothing stopped" response and waits for the close. Delivery
 atomically aborts the marked turn, appends its terminal receipt and acknowledges
 the outbox using the shared run/counter/session/turn lock order and the captured
 run-id guard.

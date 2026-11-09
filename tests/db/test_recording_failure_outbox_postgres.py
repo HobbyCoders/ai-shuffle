@@ -217,3 +217,29 @@ async def test_delayed_delivery_cannot_close_replacement_holding_row(connect, se
     finally:
         holder.rollback()
         await asyncio.gather(delivery, return_exceptions=True)
+
+
+async def test_failure_owned_stop_cleanup_uses_latest_run_even_when_released(session_id, monkeypatch):
+    from app.core import turn_manager
+    from psycopg2.errors import LockNotAvailable
+
+    old = runs.claim_run(session_id, 'old-owner', 60)
+    turn = turns.enqueue_turn(session_id, 'user', prompt='already executed')
+    assert turns.start_turn(turn['id'], old['id'], 'old-owner')
+    with monkeypatch.context() as blocked:
+        blocked.setattr(session_events, 'LOCK_RETRY_DELAYS_SECONDS', ())
+        blocked.setattr(stop_notices, 'deliver', lambda _: (_ for _ in ()).throw(LockNotAvailable()))
+        assert turns.settle_turn(turn['id'], 'aborted', 'recording_failed', run_id=old['id'])
+    marker = turns.get_turn(turn['id'])
+    assert turn_manager.stop_reaches_background_work(session_id, turn['id'], None)
+    assert runs.release_run(old['id'], old['fence_token'])
+    assert turn_manager.stop_reaches_background_work(session_id, turn['id'], None)
+    replacement = runs.claim_run(session_id, 'replacement-owner', 60)
+    assert replacement
+    assert not turn_manager.stop_reaches_background_work(session_id, turn['id'], None)
+    assert runs.release_run(replacement['id'], replacement['fence_token'])
+    assert not turn_manager.stop_reaches_background_work(session_id, turn['id'], None)
+    assert turns.get_turn(turn['id']) == marker
+    assert stop_notices.pending() == ['recording-failed:' + turn['id']]
+    assert stop_notices.deliver('recording-failed:' + turn['id'])
+    assert len(session_events.get_events(session_id)) == 1
