@@ -7,6 +7,10 @@ control route and comes back through the mirror. An owner on an older build
 that does not publish the field leaves the viewer at "unknown", which reads
 as off.
 """
+import asyncio
+import pytest
+from unittest.mock import AsyncMock, patch
+
 from app.api import sessions as sessions_api
 from app.api.sessions_permissions import AwayModeUpdate, apply_away_mode, update_away_mode
 from app.core.models import Session
@@ -107,3 +111,137 @@ async def test_owner_on_an_older_build_reads_as_off(workers):
             engine.materialize(conn.cursor(), coll, SESSION, record)
         assert database.get_session(SESSION)["title"] == "Renamed by an older owner"
     assert not await _served_away(viewer)
+
+
+async def test_global_away_reaches_an_offline_worker_and_releases_its_local_cards(workers, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.core import away_mode, global_away_mode
+    from app.core.global_events import global_events
+    from app.db import interactions
+    from app.network import startup
+    from tests.core.network.harness import _ACTIVE
+
+    assert policy.is_shared_setting_key("global_away_mode")
+    viewer, owner = _network(workers)
+    from app.db import mobile_tool_identity
+    for worker in (viewer, owner):
+        with worker.active():
+            mobile_tool_identity.init_schema()
+    with owner.active():
+        question = interactions.create_interaction(SESSION, "question", {
+            "request_id": "q", "questions": [{"question": "Track?", "options": ["Stable", "Nightly (Recommended)"]}],
+        }, 300)
+        approval = interactions.create_interaction(SESSION, "permission", {
+            "request_id": "p", "tool_name": "Bash",
+        }, 300)
+    with viewer.active():
+        assert (await global_away_mode.apply(True))["deferred_approvals"] == 0
+        engine.scan_all()
+    # No exchange yet: the worker that owns the cards was offline.
+    with owner.active():
+        database.invalidate_system_setting_memo("global_away_mode")
+        assert not away_mode.global_away_enabled()
+        assert interactions.get_interaction(approval["id"])["state"] == "pending"
+
+    scheduled = []
+    def schedule(coro, loop):
+        scheduled.append((_ACTIVE.get(), coro))
+
+    monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop())
+    monkeypatch.setattr(startup.asyncio, "run_coroutine_threadsafe", schedule)
+    unsubscribe = engine.on_applied(startup._on_applied)
+    try:
+        with patch.object(away_mode, "record_decision", AsyncMock()):
+            converge([viewer, owner])
+            for worker, coro in scheduled:
+                with worker.active():
+                    await coro
+            assert scheduled, "the real sync apply must schedule the release"
+            with owner.active():
+                assert database.get_system_setting("global_away_mode") == "1"
+                assert away_mode.is_away(SESSION)
+                assert interactions.get_interaction(question["id"])["state"] == "answered"
+                assert interactions.get_interaction(approval["id"])["answer"] == {
+                    "decision": "deny", "behavior": "deny", "message": away_mode.DEFERRED_MESSAGE}
+                assert (await global_away_mode.release_local_pending())["deferred_approvals"] == 0
+                assert database.get_session(SESSION)["away_mode"] is None
+    finally:
+        unsubscribe()
+
+
+@pytest.mark.parametrize("accept_path", ["normal", "history-recovery", "finalize-wakes"])
+async def test_global_away_recovers_question_when_both_early_sweeps_miss_the_move(workers, monkeypatch, accept_path):
+    from app.core import away_mode, global_away_mode
+    from app.core.detached_tasks import _DETACHED_TASKS
+    from app.core.user_question_handler import user_question_handler
+    from app.db import interactions, mobile_tool_identity
+    from app.network import handoff
+
+    destination, source = _network(workers)
+    for worker in (source, destination):
+        with worker.active():
+            mobile_tool_identity.init_schema()
+    monkeypatch.setattr(handoff, "question_carry", lambda _: True)
+    with source.active():
+        # Real producing path: the nonblocking durable question is carried in
+        # the handoff export, not invented on the receiving worker.
+        await user_question_handler.post_question(
+            request_id="moving-question", tool_use_id="ask", session_id=SESSION,
+            questions=[{"question": "Track?", "options": ["Stable", "Nightly (Recommended)"]}],
+            broadcast_func=AsyncMock())
+        row = interactions.get_pending_interactions(SESSION)[0]
+        reply = handoff.begin(SESSION, destination.device_id)
+    with destination.active():
+        # B sees global-on and sweeps while A still owns the chat.
+        assert (await global_away_mode.apply(True))["released_questions"] == 0
+        data, _ = handoff._open_export(engine.require_context(), reply, SESSION)
+        data["_prepare_history"] = True
+        handoff.install_history(SESSION, data, ".")
+        handoff._mark_commit_sent(SESSION, data["token"], source.device_id)
+        handoff._stage_wakes(SESSION, source.device_id, data, None)
+    with source.active():
+        database.set_system_setting("global_away_mode", "1")
+        handoff.finish(SESSION, destination.device_id, {
+            "phase": "commit", "token": data["token"], "branch": None, "wake_ids": [],
+        })
+        # A's delayed sweep now sees B as owner and skips the still-pending row.
+        assert (await global_away_mode.release_local_pending())["released_questions"] == 0
+        assert interactions.get_interaction(row["id"])["state"] == "pending"
+        engine.scan_all()
+    converge([source, destination])
+
+    completed = asyncio.Event()
+    original = global_away_mode.release_session_pending
+
+    async def release(sid):
+        assert global_away_mode._covered_local(sid)
+        assert not handoff.admission_held(sid), "recovery ran before the import committed"
+        result = await original(sid)
+        completed.set()
+        return result
+
+    monkeypatch.setattr(global_away_mode, "release_session_pending", release)
+    from app.core.global_events import global_events
+    monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop())
+    with destination.active(), patch.object(away_mode, "record_decision", AsyncMock()):
+        assert interactions.get_pending_interactions(SESSION) == []  # History is still private.
+        if accept_path == "normal":
+            await handoff._accept_and_arm(SESSION, destination.device_id, None, data["token"])
+        elif accept_path == "history-recovery":
+            # Real boot/maintenance path runs in a thread and has no running
+            # loop of its own; use the app loop established by startup.
+            assert await asyncio.to_thread(handoff.recover_history_staging) == 1
+        else:
+            await handoff._handle_phase({
+                "phase": "finalize-wakes", "session_id": SESSION,
+                "token": data["token"], "release": True,
+            }, source.device_id)
+        await asyncio.wait_for(completed.wait(), 3)
+        await asyncio.gather(*(t for t in _DETACHED_TASKS if t.get_name() == f"global-away-{SESSION}"))
+        final = interactions.get_interaction(row["id"])
+        assert final["state"] == "answered"
+        assert final["answer"] == {"Track?": "Nightly (Recommended)"}
+        assert database.get_session(SESSION)["away_mode"] is None
+        assert (await global_away_mode.release_session_pending(SESSION))["released_questions"] == 0

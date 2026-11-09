@@ -463,6 +463,13 @@ def _on_applied(touched) -> None:
             continue
         if collection == "system_settings":
             database.invalidate_system_setting_memo(record_id)
+            if record_id == "global_away_mode":
+                resources.add("away_mode")
+                loop = getattr(global_events, "_loop", None)
+                if loop and not loop.is_closed():
+                    from app.core.global_away_mode import release_if_enabled
+                    # Post-commit: never wait for questions/approvals under sync locks.
+                    asyncio.run_coroutine_threadsafe(release_if_enabled(), loop)
             if record_id == "allow_updates":
                 from app.core.application_updates import mirror_policy
                 mirror_policy()

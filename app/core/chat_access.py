@@ -296,6 +296,7 @@ class Action:
     expires_at: float
     decision: asyncio.Future
     attention_id: str | None = None
+    away_deferred: bool = False
 
     def public(self):
         return {key: getattr(self, key) for key in (
@@ -324,6 +325,7 @@ class AccessRequest:
     plugin_service: str = ""
     timer: asyncio.TimerHandle | None = None
     attention_id: str | None = None
+    away_deferred: bool = False
 
     def model_pending(self):
         return {"status": "awaiting_user", "request_id": self.id,
@@ -805,7 +807,7 @@ class Broker:
                     and pending.plugin_id == plugin and pending.plugin_service == service
                     and pending.saved_id == saved_id):
                 try:
-                    await _defer_if_away(session_id, "private service access request")
+                    await self._defer_registered_away(pending)
                 except AccessDenied:
                     self._finish_request(pending)
                     raise
@@ -826,13 +828,16 @@ class Broker:
         try:
             await self._show_in_main(session_id, owner)
             # Registered first so watchers see it; Away mode then refuses at once.
-            await _defer_if_away(session_id, f"private {kind} access request")
+            await self._defer_registered_away(request)
             if kind == "service":
                 request.timer = asyncio.get_running_loop().call_later(duration, self._finish_request, request)
                 keep_pending = True
                 return request.model_pending()
             grant_id = await asyncio.wait_for(request.result, 240)
             if not grant_id:
+                if request.away_deferred:
+                    from app.core.away_mode import DEFERRED_MESSAGE
+                    raise AccessDenied(DEFERRED_MESSAGE)
                 raise AccessDenied("The user declined the private access request.")
             grant = await self.get(session_id, grant_id)
             return grant.model_public()
@@ -984,6 +989,44 @@ class Broker:
                 if grant is not None:
                     self._notify(action.session_id, grant.owner)
         return waiting
+
+    async def _defer_registered_away(self, item: AccessRequest | Action) -> None:
+        from app.core.away_mode import answers_questions_async, DEFERRED_MESSAGE
+
+        # Both the registration recheck and a toggle sweep consume the same
+        # futures. One wins, so a race cannot record the same deferral twice.
+        if not item.away_deferred and await answers_questions_async(item.session_id):
+            await self.defer_pending_away(item.session_id)
+        if item.away_deferred:
+            raise AccessDenied(DEFERRED_MESSAGE)
+
+    async def defer_pending_away(self, session_id: str) -> int:
+        """Refuse this consumer's live private-input/action cards, never grants.
+
+        These waits are memory-only, not pending_interactions. Service setup
+        cards are nonblocking, but must also disappear without granting access.
+        Snapshot by actual consumer, not the panel's delegation alias.
+        """
+        from app.core.away_mode import record_decision
+
+        deferred = []
+        for request in list(self.requests.values()):
+            if request.session_id == session_id and not request.result.done():
+                request.away_deferred = True
+                self._finish_request(request)
+                deferred.append(f"private {request.kind} access request")
+        for action in list(self.actions.values()):
+            if action.session_id == session_id and not action.decision.done():
+                action.away_deferred = True
+                action.decision.set_result(False)
+                grant = self.grants.get(action.grant_id)
+                if grant:
+                    self._notify(session_id, grant.owner)
+                deferred.append(f"private access action: {action.operation}")
+        for action in deferred:
+            await record_decision(session_id, {"kind": "deferred", "action": action},
+                                  f"Deferred until you are back: {action}")
+        return len(deferred)
 
     async def decline(self, session_id: str, request_id: str):
         request = self.requests.get(request_id)
@@ -1402,13 +1445,16 @@ class Broker:
         self._notify(session_id, grant.owner)
         try:
             await self._show_in_main(session_id, grant.owner)
-            await _defer_if_away(session_id, f"private access action: {operation}")
+            await self._defer_registered_away(action)
             # A persisted-mode lookup can complete with an old snapshot after
             # a mode-change sweep already ran. Recheck with the action visible
             # so switching to Bypass cannot strand a newly queued confirmation.
             await self.resolve_mode_actions(session_id)
             allowed = await asyncio.wait_for(action.decision, max(0, action.expires_at - time.time()))
             if not allowed:
+                if action.away_deferred:
+                    from app.core.away_mode import DEFERRED_MESSAGE
+                    raise AccessDenied(DEFERRED_MESSAGE)
                 raise AccessDenied("The action was denied or access was revoked.")
         except asyncio.TimeoutError:
             raise AccessDenied("Approval expired. Ask the user before requesting it again.") from None

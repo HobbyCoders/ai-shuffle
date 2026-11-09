@@ -526,7 +526,7 @@ def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=F
             # even when the earlier commit response never reached this worker.
             metadata = _publish_history(cur, sid, token)
             _lock_published_owner(cur, sid, device, token, session, metadata)
-            _accept_owner_row(cur, sid, device, row["branch"], token, locked)
+            _accept_owner_row(conn, cur, sid, device, row["branch"], token, locked)
             # This authenticated committed transfer also supersedes older
             # abandoned imports whose cancellation reply never arrived.
             cur.execute("UPDATE handoff_wakes SET finalized=TRUE,wakes='[]' "
@@ -1782,7 +1782,12 @@ def install_history(sid, data, cwd):
     return sdk
 
 
-def _accept_owner_row(cur, sid, device_id, branch, token=None, locked=()):
+def _accept_owner_row(conn, cur, sid, device_id, branch, token=None, locked=()):
+    from app.core.global_away_mode import release_session_after_commit
+
+    # Includes finalize-wakes, abandoned/revoked transfers and staged-history
+    # recovery, not just the normal receive reply. Never sweep under DB locks.
+    release_session_after_commit(conn, sid)
     # instance_id moves too (as adopt/unpin do): left on the previous
     # worker's id, the session listed as remote with an unknown state here.
     placement = {"where": "runner:" + device_id}
@@ -1863,7 +1868,7 @@ def _accept_owner(sid, device_id, branch=None, token=None, held_messages=None, *
         receipt = (parse_jsonb(session["placement"]) or {}).get("handoff") or {}
         if held_messages is None:
             held_messages = receipt.get("held_messages", 0) if receipt.get("token") == token else 0
-        _accept_owner_row(cur, sid, device_id, branch, token, locked)
+        _accept_owner_row(conn, cur, sid, device_id, branch, token, locked)
         if metadata is not None:
             _adopt_outcome(cur, sid, metadata.get("last_turn_failed"))
         for staged in staged_rows:

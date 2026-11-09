@@ -531,10 +531,16 @@ async def answered_elsewhere(session_id: str, row: Optional[Dict[str, Any]], dec
         confirm = approval_of(payload)
         if confirm is None or not payload.get(RELEASED_KEY) or payload.get("provider_agent"):
             return
-        note = _outcome_text({
-            "released": True, "decision": "approved" if decision == "allow" else "declined",
-            "action": confirm.get("action"), "question": confirm.get("question"),
-        })
+        from app.core.away_mode import DEFERRED_MESSAGE
+
+        if decision == "deny" and (row.get("answer") or {}).get("message") == DEFERRED_MESSAGE:
+            action = confirm.get("action") or confirm.get("question") or "the call"
+            note = f"{DEFERRED_MESSAGE}\nDeferred request: {action}. This call was never run."
+        else:
+            note = _outcome_text({
+                "released": True, "decision": "approved" if decision == "allow" else "declined",
+                "action": confirm.get("action"), "question": confirm.get("question"),
+            })
         granted = None
         if decision == "allow":
             granted = {PASS_KEY: {"tool_name": payload.get("tool_name") or "",

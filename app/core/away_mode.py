@@ -1,7 +1,10 @@
 """Away mode: the owner stepped away, so the agent decides and reports back.
 
-A per-session flag (``sessions.away_mode``), changed mid-session the same way
-as the permission mode. While it is on:
+The per-session flag (``sessions.away_mode``), inherited by Task workers, OR
+shared ``system_settings.global_away_mode`` governs a chat. Global Away covers
+only the owner's visible top-level chats and their Task workers, not API-key
+users, automations or voice calls. It never changes any per-chat flag. Both
+switches are read mid-session; while effective Away is on:
 
 * A question tool (fluid ``AskUser``, Claude's ``AskUserQuestion``) does not
   park on the owner. It returns at once with each question's recommended
@@ -117,12 +120,38 @@ def is_away(session_id: Optional[str]) -> bool:
                 (session_id,),
             )
             row = cursor.fetchone()
+        if not row:
+            return False
+        if bool(row["away"]) or (bool(row["is_worker"]) and bool(row["parent_away"])):
+            return True
+        # Only the global-on path pays for the extra ownership/identity reads.
+        return global_away_enabled() and globally_covered(session_id)
     except Exception:  # noqa: BLE001 — absent flag means present owner
         logger.debug("away_mode read failed for %s", session_id, exc_info=True)
         return False
+
+
+GLOBAL_SETTING = "global_away_mode"
+
+
+def global_away_enabled() -> bool:
+    from app.db.settings import get_system_setting_cached
+
+    return get_system_setting_cached(GLOBAL_SETTING) == "1"
+
+
+def globally_covered(session_id: str) -> bool:
+    """Global Away's scope, deliberately narrower than an explicit chat flag."""
+    from app.core.session_orchestration import is_owner_session
+    from app.db import sessions
+
+    row = sessions.get_session(session_id)
     if not row:
         return False
-    return bool(row["away"]) or (bool(row["is_worker"]) and bool(row["parent_away"]))
+    if row.get("is_worker"):
+        parent = row.get("parent_session_id")
+        return bool(parent and is_owner_session(parent))
+    return is_owner_session(row)
 
 
 async def is_away_async(session_id: Optional[str]) -> bool:
@@ -404,4 +433,48 @@ async def release_pending_questions(session_id: str) -> int:
         if await user_question_handler.respond(item["request_id"], session_id, answers, human_input=False):
             released += 1
             await record_answers(session_id, questions, answers)
+    return released
+
+
+async def release_pending_approvals(session_id: str) -> int:
+    """Resolve permission cards as Away denials, never the UI's requeue-defer.
+
+    Includes provider-agent/starter proxies, remote-task proxies, safety checks
+    and owner_confirm cards: all use the same permission interaction/waiter.
+    A guarded answer wins once; no saved permission rules or approval passes.
+    """
+    from app.core import interaction_events, interaction_wait, remote_task_approvals
+    from app.core.permission_handler import PERMISSION_KIND
+    from app.db import interactions
+
+    rows = await asyncio.to_thread(interactions.get_pending_interactions, session_id)
+    released = 0
+    for row in rows:
+        if row.get("kind") != PERMISSION_KIND:
+            continue
+        payload = row.get("payload") or {}
+        tag = payload.get("provider_agent") or {}
+        remote_id = tag.get("remote_approval_id") if isinstance(tag, dict) else None
+        if remote_id and not remote_task_approvals.has_live_relay(remote_id):
+            # Keep it pending until restoration can forward the denial to the child.
+            continue
+        answer = {"decision": "deny", "behavior": "deny", "message": DEFERRED_MESSAGE}
+        if not await asyncio.to_thread(interactions.answer_interaction, row["id"], answer):
+            continue
+        released += 1
+        interaction_wait.notify_changed(session_id)
+        action = f"permission for {payload.get('tool_name') or 'tool'}"
+        await record_decision(session_id, {"kind": "deferred", "action": action},
+                              f"Deferred until you are back: {action}")
+        await interaction_events.emit_interaction_answered(
+            session_id, row["id"], payload.get("request_id"), answer,
+        )
+        # A parked owner_confirm call may already have returned "not run yet".
+        # It has no waiter now: use its existing wake path, without an approval
+        # pass, so the agent hears that it may continue without this action.
+        from app.core import owner_confirm
+
+        if owner_confirm.approval_of(payload):
+            answered = await asyncio.to_thread(interactions.get_interaction, row["id"])
+            await owner_confirm.answered_elsewhere(session_id, answered, "deny")
     return released

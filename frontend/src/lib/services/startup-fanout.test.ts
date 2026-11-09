@@ -178,8 +178,10 @@ describe('startup fan-out (journey 1)', () => {
 		expect(duplicates).toEqual([]);
 		// Settled history now has its own scoped count, even while collapsed.
 		expect(sent.filter((r) => r.startsWith('GET /sessions/count?') && r.includes('membership=settled'))).toHaveLength(1);
-		// Ratchet: the replay's reads, each once, including that new reader.
-		expect(sent.length).toBeLessThanOrEqual(16);
+		// The global Away switch and its band need the shared state at startup.
+		expect(sent.filter((r) => r === 'GET /away-mode')).toHaveLength(1);
+		// Ratchet: the replay's reads, each once, including those new readers.
+		expect(sent.length).toBeLessThanOrEqual(17);
 	});
 
 	it('sends the sidebar list as soon as auth answers, ahead of the page fan-out', async () => {

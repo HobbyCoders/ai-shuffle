@@ -65,6 +65,22 @@
 	],
 	"rules": [
 		{
+			"why": "the Away for all chats switch, its always-on band and the per-chat control it locks: real taps, a real layout and a second browser are what these depend on",
+			"journeys": [
+				"away-all-chats"
+			],
+			"globs": [
+				"frontend/tests/journeys/away-all-chats.journey.mjs",
+				"frontend/src/lib/stores/away-mode.svelte.ts",
+				"frontend/src/lib/components/layout/AwayAllChatsSwitch.svelte",
+				"frontend/src/lib/components/layout/AwayAllChatsEdge.svelte",
+				"frontend/src/lib/components/layout/StudioTopBar.svelte",
+				"frontend/src/lib/components/chat/ControlsDock.svelte",
+				"frontend/src/lib/components/chat/phone/MobileComposerControlsSheet.svelte",
+				"mobile/src/shell/AppTopBar.svelte"
+			]
+		},
+		{
 			"why": "the real-editor input driver must preserve literal multiline text without command or mention completion submitting early",
 			"journeys": ["composer-helper"],
 			"globs": ["frontend/tests/journeys/composer-helper.journey.mjs", "frontend/src/lib/components/CommandAutocomplete.svelte", "frontend/src/lib/components/FileAutocomplete.svelte"]

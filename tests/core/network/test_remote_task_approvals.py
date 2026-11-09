@@ -415,7 +415,8 @@ def test_a_parent_restart_restores_the_open_prompt(workers, monkeypatch, proxies
             await asyncio.wait_for(follower, 10)
         return await finish_ask(a, ask, held)
     # The target keeps its own waiter; only the parent "restarted".
-    monkeypatch.setattr(relay, "reset", lambda: (relay._SEEN.clear(), relay._WITHDRAWN.clear()))
+    monkeypatch.setattr(relay, "reset", lambda: (
+        relay._SEEN.clear(), relay._ACTIVE_RELAYS.clear(), relay._WITHDRAWN.clear()))
     result = asyncio.run(scenario())
     assert isinstance(result, PermissionResultAllow)
 
