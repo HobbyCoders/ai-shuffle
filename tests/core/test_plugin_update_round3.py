@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import subprocess
 import threading
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def test_swap_during_directory_enumeration_cannot_copy_outside(tmp_path, monkeyp
     assert all("Outside secret" not in p.read_text() for p in destination.rglob("SKILL.md"))
 
 
-def test_real_git_sync_can_overlap_install_without_copying_outside(sources, tmp_path, monkeypatch, requires_symlinks):
+def test_uncoordinated_git_sync_can_overlap_install_without_copying_outside(sources, tmp_path, monkeypatch, requires_symlinks):
     svc, upstream, skill, info = setup(sources, "implicit")
     outside = tmp_path / "outside"
     write(outside / "SKILL.md", "Outside secret fixture")
@@ -69,7 +70,11 @@ def test_real_git_sync_can_overlap_install_without_copying_outside(sources, tmp_
 
     def sync():
         try:
-            svc.sync_marketplace("sample")
+            # Cooperating service sync now shares the source gate. Keep this
+            # adversarial confinement test independent of that gate: a git CLI
+            # outside the service can still change the checkout during copying.
+            subprocess.run(["git", "-C", str(marketplace), "pull", "--ff-only"],
+                           check=True, capture_output=True)
             completed.append(True)
         except Exception as exc:
             errors.append(exc)
@@ -81,7 +86,7 @@ def test_real_git_sync_can_overlap_install_without_copying_outside(sources, tmp_
             worker = threading.Thread(target=sync, daemon=True)
             worker.start()
             worker.join(timeout=5)
-            assert not worker.is_alive(), "Source sync unexpectedly serialized with installation"
+            assert not worker.is_alive(), "External Git checkout edit did not finish"
             assert completed and not errors
             if os.name != "nt":
                 assert victim.is_symlink()

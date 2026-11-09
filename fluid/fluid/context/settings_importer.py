@@ -1341,6 +1341,33 @@ def _provenance(destination_home: Path, item: SettingsImportItem) -> None:
 
 
 def apply_settings_import(preview: SettingsImportPreview, *, selected_ids: Iterable[str] | None = None) -> SettingsImportResult:
+    """Apply entries without racing the plugin manager's settings transaction."""
+    from fluid.context.plugin_state import plugin_state_lock
+
+    selected = set(selected_ids) if selected_ids is not None else None
+    fluid = Path(preview.destination_home) / ".fluid"
+    active = [item for item in preview.items if item.status == "ready"
+              and (selected is None or item.id in selected)]
+    enablement = any(item.destination == str(fluid / "settings.json") for item in active)
+    if enablement or any(item.kind == "plugin" for item in active):
+        if _path_has_symlink(fluid):
+            # Keep the importer's existing per-item skipped result, without
+            # creating a lock through an unsafe destination ancestor first.
+            return _apply_settings_import(preview, selected_ids=selected)
+        if _path_has_symlink(fluid / "plugins" / ".locks"):
+            raise ValueError("Plugin destination state path has a symlink ancestor; rejected")
+        with plugin_state_lock(fluid / "plugins"):
+            registry = fluid / "plugins" / "known_marketplaces.json"
+            known = json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else {}
+            refs = (item.provenance.get("plugin_ref", "") for item in
+                    (preview.items if enablement else active) if item.kind == "plugin")
+            if any(known.get(ref.rsplit("@", 1)[-1], {}).get("removing") for ref in refs):
+                raise ValueError("Plugin source removal is incomplete; retry removing it first")
+            return _apply_settings_import(preview, selected_ids=selected)
+    return _apply_settings_import(preview, selected_ids=selected)
+
+
+def _apply_settings_import(preview: SettingsImportPreview, *, selected_ids: Iterable[str] | None = None) -> SettingsImportResult:
     """Apply selected ready entries with digest/state rechecks and no-overwrite writes."""
     selected = set(selected_ids) if selected_ids is not None else {item.id for item in preview.items if item.status == "ready"}
     results: list[SettingsImportItem] = []

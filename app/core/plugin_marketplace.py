@@ -9,11 +9,13 @@ import re
 import shutil
 import subprocess
 import threading
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from app.core.plugin_models import MarketplaceInfo
+from app.core.plugin_locks import marketplace_lock, plugin_lock, state_lock, serialized_marketplace
 from app.core.process_tree import child_env
 from app.core.scrub import redact_url_credentials
 
@@ -33,7 +35,8 @@ def ensure_default_source(svc) -> None:
     leaves a removable source that discovery or the Sync action can retry.
     """
     marker = svc.PLUGINS_DIR / "source_defaults.json"
-    with _DEFAULTS_LOCK:
+    svc._check_files_replaceable(marker, svc.MARKETPLACES_FILE)
+    with marketplace_lock(svc, DEFAULT_SOURCE_ID), _DEFAULTS_LOCK, state_lock(svc):
         defaults = svc._read_json_file(marker, {}, for_update=True)
         if defaults.get("anthropic_source_applied"):
             return
@@ -55,9 +58,11 @@ def ensure_default_source(svc) -> None:
                 "installLocation": str(svc.MARKETPLACES_DIR / DEFAULT_SOURCE_ID),
                 "fetchOnDiscovery": True,
             }
-            svc._write_json_file(svc.MARKETPLACES_FILE, data)
+            if svc._write_json_file(svc.MARKETPLACES_FILE, data) is False:
+                raise OSError("Could not register the default plugin source")
         defaults["anthropic_source_applied"] = True
-        svc._write_json_file(marker, defaults)
+        if svc._write_json_file(marker, defaults) is False:
+            raise OSError("Could not save default plugin source state")
 
 
 def source_error(svc, mp_id: str, data: dict) -> Optional[str]:
@@ -77,7 +82,9 @@ def source_error(svc, mp_id: str, data: dict) -> Optional[str]:
 
 def fetch_pending_sources(svc) -> None:
     # Only the shipped, never-fetched source needs automatic I/O on discovery.
-    with _FETCH_LOCK:
+    # Never hold the thread fetch mutex while waiting for the source gate:
+    # an update of that source can itself invoke discovery.
+    with marketplace_lock(svc, DEFAULT_SOURCE_ID), _FETCH_LOCK:
         data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
         for mp_id, entry in data.items():
             # A failed first fetch waits for explicit Sync, not another offline stall.
@@ -163,10 +170,22 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
     if name.casefold() == "authored":
         raise ValueError("The marketplace name 'authored' is reserved; pass a different name")
 
+    # Source gate covers clone plus registration; other sources only share the
+    # short metadata lock. Never hold shared state while waiting for a source.
+    svc._check_files_replaceable(svc.MARKETPLACES_FILE)
+    with marketplace_lock(svc, name):
+        return _add_marketplace(svc, url, name)
+
+
+def _add_marketplace(svc, url, name):
     install_location = str(svc.MARKETPLACES_DIR / name)
 
     # Refuse (409) before cloning if the registry cannot be read back.
     svc._check_files_replaceable(svc.MARKETPLACES_FILE)
+
+    with state_lock(svc):
+        if svc._read_json_file(svc.MARKETPLACES_FILE, {}).get(name, {}).get("removing"):
+            raise ValueError("Plugin source removal is incomplete; retry removing it first")
 
     # Clone the repository
     if not Path(install_location).exists():
@@ -183,17 +202,19 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
         except subprocess.TimeoutExpired:
             raise RuntimeError("Marketplace clone timed out")
 
-    # Update known_marketplaces.json
-    data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
-    data[name] = {
-        "source": {
-            "source": "git",
-            "url": url
-        },
-        "installLocation": install_location,
-        "lastUpdated": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    }
-    svc._write_json_file(svc.MARKETPLACES_FILE, data)
+    with state_lock(svc):
+        # Update known_marketplaces.json
+        data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
+        data[name] = {
+            "source": {
+                "source": "git",
+                "url": url
+            },
+            "installLocation": install_location,
+            "lastUpdated": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        }
+        if svc._write_json_file(svc.MARKETPLACES_FILE, data) is False:
+            raise OSError("Could not register the plugin source")
 
     return MarketplaceInfo(
         id=name,
@@ -215,54 +236,71 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
     Returns:
         True if successful
     """
-    # Refuse (409) before removing anything if any file this writes cannot be
-    # read back; the entry, clone and cache stay for a retry.
+    # Refuse before creating sidecars or changing any metadata.
     svc._check_files_replaceable(svc.MARKETPLACES_FILE, svc.INSTALLED_FILE, svc.SETTINGS_FILE)
-    data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
+    if marketplace_id == DEFAULT_SOURCE_ID:
+        svc._check_files_replaceable(svc.PLUGINS_DIR / "source_defaults.json")
+    with marketplace_lock(svc, marketplace_id):
+        with state_lock(svc):
+            data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
+            if marketplace_id not in data:
+                raise ValueError(f"Marketplace not found: {marketplace_id}")
+            installed = svc._read_json_file(svc.INSTALLED_FILE, {"plugins": {}}, for_update=True)
+            plugin_ids = sorted(pid for pid in installed.get("plugins", {})
+                                if pid.endswith(f"@{marketplace_id}"))
+        with ExitStack() as locks:
+            for plugin_id in plugin_ids:
+                locks.enter_context(plugin_lock(svc, plugin_id))
+            with state_lock(svc):
+                # Read every map inside the same lock, never write a snapshot
+                # collected before acquiring it. The source gate fixes membership.
+                data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
+                entry = data[marketplace_id]
+                if marketplace_id == DEFAULT_SOURCE_ID:
+                    # Even after a startup process died before writing its
+                    # marker, an explicit removal must survive next discovery.
+                    marker = svc.PLUGINS_DIR / "source_defaults.json"
+                    defaults = svc._read_json_file(marker, {}, for_update=True)
+                    defaults["anthropic_source_applied"] = True
+                    if svc._write_json_file(marker, defaults) is False:
+                        return False
+                entry["removing"] = True
+                if not svc._write_json_file(svc.MARKETPLACES_FILE, data):
+                    return False
+                installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
+                settings = svc._read_json_file(svc.SETTINGS_FILE, {}, for_update=True)
+                enabled = settings.setdefault("enabledPlugins", {})
+                for pid in list(enabled):
+                    if pid.endswith(f"@{marketplace_id}"):
+                        del enabled[pid]
+                # Disable before detaching records, and detach before deleting
+                # trees. Process death leaves complete, disabled or retryable data.
+                if not svc._write_json_file(svc.SETTINGS_FILE, settings):
+                    return False
+                for pid in list(installed.get("plugins", {})):
+                    if pid.endswith(f"@{marketplace_id}"):
+                        del installed["plugins"][pid]
+                if not svc._write_json_file(svc.INSTALLED_FILE, installed):
+                    return False
+                install_location = entry.get("installLocation")
 
-    if marketplace_id not in data:
-        raise ValueError(f"Marketplace not found: {marketplace_id}")
-
-    install_location = data[marketplace_id].get("installLocation")
-
-    # Remove from known_marketplaces.json
-    del data[marketplace_id]
-    svc._write_json_file(svc.MARKETPLACES_FILE, data)
-
-    # Remove marketplace directory
-    if install_location and Path(install_location).exists():
-        shutil.rmtree(install_location, ignore_errors=True)
-
-    # Remove installed plugins from this marketplace
-    installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
-    plugins_to_remove = [
-        pid for pid in installed.get("plugins", {})
-        if pid.endswith(f"@{marketplace_id}")
-    ]
-    for pid in plugins_to_remove:
-        del installed["plugins"][pid]
-    svc._write_json_file(svc.INSTALLED_FILE, installed)
-
-    # Remove those plugins' cached files too (only a direct child of the cache).
-    cache_dir = svc.CACHE_DIR / marketplace_id
-    if (
-        marketplace_id not in ("", ".", "..")
-        and "/" not in marketplace_id and "\\" not in marketplace_id
-        and cache_dir.is_dir() and not cache_dir.is_symlink()
-    ):
-        shutil.rmtree(cache_dir, ignore_errors=True)
-
-    # Remove from enabled plugins in settings
-    settings = svc._read_json_file(svc.SETTINGS_FILE, {}, for_update=True)
-    enabled = settings.get("enabledPlugins", {})
-    for pid in plugins_to_remove:
-        enabled.pop(pid, None)
-    settings["enabledPlugins"] = enabled
-    svc._write_json_file(svc.SETTINGS_FILE, settings)
-
-    return True
+            cache_dir = svc.CACHE_DIR / marketplace_id
+            if (marketplace_id not in ("", ".", "..") and "/" not in marketplace_id
+                    and "\\" not in marketplace_id and not cache_dir.is_symlink()):
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            if install_location:
+                shutil.rmtree(install_location, ignore_errors=True)
+            if cache_dir.exists() or (install_location and Path(install_location).exists()):
+                # Keep the persistent gate closed after sharing violations or a
+                # crash. Retry Remove finishes it; Sync/Update cannot resurrect it.
+                return False
+            with state_lock(svc):
+                data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
+                data.pop(marketplace_id, None)
+                return svc._write_json_file(svc.MARKETPLACES_FILE, data)
 
 
+@serialized_marketplace
 def sync_marketplace(svc, marketplace_id: str) -> bool:
     """
     Sync a marketplace with its remote repository.
@@ -281,6 +319,8 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
     if marketplace_id not in data:
         raise ValueError(f"Marketplace not found: {marketplace_id}")
 
+    if data[marketplace_id].get("removing"):
+        raise ValueError("Plugin source removal is incomplete; retry removing it first")
     install_location = data[marketplace_id].get("installLocation")
 
     if not install_location:
@@ -354,9 +394,12 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
         except subprocess.TimeoutExpired:
             raise RuntimeError("Marketplace sync timed out")
 
-    # Update lastUpdated
-    data[marketplace_id]["lastUpdated"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    svc._write_json_file(svc.MARKETPLACES_FILE, data)
+    # Other sources may have changed during network I/O. Merge into a fresh map.
+    with state_lock(svc):
+        data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
+        data[marketplace_id]["lastUpdated"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if not svc._write_json_file(svc.MARKETPLACES_FILE, data):
+            raise OSError("Could not save plugin source refresh")
 
     return True
 

@@ -1,7 +1,8 @@
 """Serialize plugin operations across threads and worker processes.
 
 Never unlink sidecars: waiters must continue locking the same inode. Lock order
-is plugin, then shared registry/settings; recursive installer calls reuse both.
+is marketplace, then plugin(s in sorted order), then shared state. Never acquire
+marketplace/plugin locks while holding only shared state. Recursive calls reuse locks.
 """
 import hashlib
 import threading
@@ -9,6 +10,7 @@ from contextlib import contextmanager
 from functools import wraps
 
 from app.core.config import _lock_instance_id_file
+from fluid.context.plugin_state import plugin_state_lock
 
 _guard = threading.Lock()
 _locks = {}
@@ -38,12 +40,25 @@ def _lock(svc, key):
                     held.remove(identity)
 
 
+def marketplace_lock(svc, marketplace_id):
+    return _lock(svc, "marketplace:" + marketplace_id)
+
+
 def plugin_lock(svc, plugin_id):
     return _lock(svc, "plugin:" + plugin_id)
 
 
+def serialized_marketplace(operation):
+    @wraps(operation)
+    def wrapped(svc, marketplace_id, *args, **kwargs):
+        svc._check_files_replaceable(svc.MARKETPLACES_FILE)
+        with marketplace_lock(svc, marketplace_id):
+            return operation(svc, marketplace_id, *args, **kwargs)
+    return wrapped
+
+
 def state_lock(svc):
-    return _lock(svc, "registry-and-settings")
+    return plugin_state_lock(svc.PLUGINS_DIR)
 
 
 def serialized_plugin(operation):
@@ -51,8 +66,13 @@ def serialized_plugin(operation):
     def wrapped(svc, plugin_id, *args, **kwargs):
         # Refuse unreadable state before even creating a lock sidecar. The
         # operation rechecks under the lock before staging or publishing.
-        svc._check_files_replaceable(svc.INSTALLED_FILE, svc.SETTINGS_FILE)
-        with plugin_lock(svc, plugin_id):
+        svc._check_files_replaceable(svc.INSTALLED_FILE, svc.SETTINGS_FILE, svc.MARKETPLACES_FILE)
+        marketplace_id = plugin_id.rsplit("@", 1)[-1]
+        with marketplace_lock(svc, marketplace_id), plugin_lock(svc, plugin_id):
+            with state_lock(svc):
+                entry = svc._read_json_file(svc.MARKETPLACES_FILE, {}).get(marketplace_id, {})
+                if entry.get("removing") and operation.__name__ not in ("uninstall_plugin", "disable_plugin"):
+                    raise ValueError("Plugin source removal is incomplete; retry removing it first")
             return operation(svc, plugin_id, *args, **kwargs)
     return wrapped
 

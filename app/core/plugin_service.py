@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import List, NoReturn, Optional, Dict, Any
 
 from app.core.mcp_service import McpConfigUnreadable
-from app.core.plugin_locks import serialized_plugin, serialized_state
+from app.core.plugin_locks import serialized_plugin, serialized_state, serialized_marketplace, state_lock
 
 # Re-export all models and helpers for backward compatibility
 from app.core.plugin_models import (  # noqa: F401
@@ -491,6 +491,7 @@ class PluginService:
         """
         return _mp_mod.remove_marketplace(self, marketplace_id)
 
+    @serialized_marketplace
     def sync_marketplace(self, marketplace_id: str) -> bool:
         """
         Sync a marketplace with its remote repository.
@@ -504,15 +505,18 @@ class PluginService:
         try:
             result = _mp_mod.sync_marketplace(self, marketplace_id)
         except (RuntimeError, OSError):
-            data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
-            if marketplace_id in data:
-                # Do not persist git stderr: it may contain private remote details.
-                data[marketplace_id]["syncError"] = "the download failed; check your connection and source URL"
-                self._write_json_file(self.MARKETPLACES_FILE, data)
+            with state_lock(self):
+                data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
+                if marketplace_id in data:
+                    # Do not persist git stderr: it may contain private remote details.
+                    data[marketplace_id]["syncError"] = "the download failed; check your connection and source URL"
+                    self._write_json_file(self.MARKETPLACES_FILE, data)
             raise
-        data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
-        if marketplace_id in data and data[marketplace_id].pop("syncError", None):
-            self._write_json_file(self.MARKETPLACES_FILE, data)
+        with state_lock(self):
+            data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
+            if marketplace_id in data and data[marketplace_id].pop("syncError", None):
+                if self._write_json_file(self.MARKETPLACES_FILE, data) is False:
+                    raise OSError("Could not save plugin source refresh state")
         return result
 
     def sync_all_marketplaces(self) -> Dict[str, bool]:
@@ -1069,6 +1073,8 @@ class PluginService:
             self._clear_pending(plugin_id)
         return written
 
+    @serialized_plugin
+    @serialized_state
     def _clear_pending(self, plugin_id: str) -> None:
         """The owner enabled an agent-installed plugin: it no longer waits
         for review. Who asked stays in the record."""
@@ -1244,6 +1250,8 @@ class PluginService:
         """
         return _inst_mod.uninstall_project_plugin(self, plugin_id)
 
+    @serialized_plugin
+    @serialized_state
     def enable_project_plugin(self, plugin_id: str) -> bool:
         """Enable a plugin in its Fluid project/local settings file."""
         scope = self._scope_from_project_plugin_id(plugin_id)
@@ -1253,6 +1261,8 @@ class PluginService:
         settings["enabledPlugins"][plugin_id] = True
         return self._write_project_settings(settings, scope)
 
+    @serialized_plugin
+    @serialized_state
     def disable_project_plugin(self, plugin_id: str) -> bool:
         """Disable a plugin in its Fluid project/local settings file."""
         scope = self._scope_from_project_plugin_id(plugin_id)

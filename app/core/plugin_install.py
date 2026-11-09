@@ -502,6 +502,14 @@ def _agent_request(
     return {}
 
 
+def _prepare_plugin_scripts(candidate):
+    """Canonical install transform, shared by publication and comparison."""
+    for script in candidate.rglob("*.sh"):
+        if not _is_within(script, candidate):
+            raise ValueError("Plugin script points outside the checkout")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 def _stage_plugin_revision(svc, plugin_id: str, version: str, populate) -> Path:
     """Publish an immutable, complete tree at an unreferenced cache path.
 
@@ -521,11 +529,24 @@ def _stage_plugin_revision(svc, plugin_id: str, version: str, populate) -> Path:
     with tempfile.TemporaryDirectory(prefix=".plugin-install-", dir=base) as tmp:
         candidate = Path(tmp) / "candidate"
         populate(candidate)
-        for script in candidate.rglob("*.sh"):
-            if not _is_within(script, candidate):
-                raise ValueError("Plugin script points outside the checkout")
-            script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        _prepare_plugin_scripts(candidate)
         digest = _tree_digest(candidate)
+        # Existing records are authoritative, including byte-only revision keys
+        # written before executable-v2. Compare actual trees, not an old basename
+        # against a new hash. Unchanged legacy installations need no migration.
+        with state_lock(svc):
+            previous = svc.get_installation_records(plugin_id)
+        for record in previous:
+            raw_path = record.get("installPath")
+            if record.get("version") != version or not raw_path:
+                continue
+            prior = Path(raw_path)
+            try:
+                if (prior.parent.resolve() == base.resolve() and prior.is_dir()
+                        and not prior.is_symlink() and _tree_digest(prior) == digest):
+                    return prior
+            except (OSError, ValueError):
+                pass  # Repair at a new immutable path; never touch a live tree.
         # Human-readable prefix, but raw source metadata never becomes a path.
         # Include the full version in the key even when its label is truncated.
         label = re.sub(r"[^A-Za-z0-9.+_-]", "_", version[:80])
@@ -575,6 +596,48 @@ def _reclaim_plugin_cache(svc, plugin_id: str, current: Path):
             logger.warning("Could not reclaim retired plugin cache for %s; will retry", plugin_id)
 
 
+@contextmanager
+def _preserve_install_settings(svc):
+    """Restore exact prior settings if activation or the record commit fails.
+
+    The caller holds shared state throughout. A restoration refusal retains the
+    explicit backup (not TemporaryDirectory cleanup) and surfaces a recovery
+    error instead of silently losing the only prior copy.
+    """
+    import tempfile
+
+    path = svc.SETTINGS_FILE
+    existed = path.exists()
+    before = path.read_bytes() if existed else None
+    backup = None
+    retain = False
+    if existed:
+        with tempfile.NamedTemporaryFile(prefix=".plugin-settings-restore-", dir=path.parent, delete=False) as stream:
+            stream.write(before)
+            backup = Path(stream.name)
+    try:
+        yield
+    except BaseException:
+        try:
+            if existed:
+                if not path.exists() or path.read_bytes() != before:
+                    backup.replace(path)
+                    backup = None
+            else:
+                path.unlink(missing_ok=True)
+        except OSError as restore_error:
+            retain = True
+            location = str(backup) if backup else "the previously absent settings file"
+            raise OSError(f"Could not restore plugin settings after failed install; prior state kept at {location}") from restore_error
+        raise
+    finally:
+        if backup is not None and not retain:
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove an unused plugin-settings backup")
+
+
 def _register_plugin_revision(svc, plugin_id, cache_path, record, enable, requested_by):
     """Finish fallible preparation, then atomically switch the installed record.
 
@@ -589,12 +652,13 @@ def _register_plugin_revision(svc, plugin_id, cache_path, record, enable, reques
         record.update(review)
         enabled = bool(enable and not review)
         result = svc._installed_plugin_info(plugin_id, record, enabled)
-        activated = svc.enable_plugin(plugin_id) if enabled else svc.disable_plugin(plugin_id)
-        if activated is False:
-            raise OSError("Could not activate the plugin installation")
-        records[plugin_id] = [record]
-        if svc._write_json_file(svc.INSTALLED_FILE, installed) is False:
-            raise OSError("Could not register the plugin installation")
+        with _preserve_install_settings(svc):
+            activated = svc.enable_plugin(plugin_id) if enabled else svc.disable_plugin(plugin_id)
+            if activated is False:
+                raise OSError("Could not activate the plugin installation")
+            records[plugin_id] = [record]
+            if svc._write_json_file(svc.INSTALLED_FILE, installed) is False:
+                raise OSError("Could not register the plugin installation")
         # Once committed, cleanup must not turn a successful update into failure.
         try:
             _reclaim_plugin_cache(svc, plugin_id, cache_path)
@@ -955,6 +1019,8 @@ def install_plugin_to_project(svc, plugin_id: str, scope: PluginScope = PluginSc
     )
 
 
+@serialized_plugin
+@serialized_state
 def uninstall_project_plugin(svc, plugin_id: str) -> bool:
     """
     Uninstall a plugin from the project directory.
