@@ -10,7 +10,7 @@ failure.
 
 import asyncio
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from fluid.engine.delegated import ClaudeCliMissingError
@@ -337,6 +337,23 @@ def _headless_patches(stack, adapter, session_row=None, project_row=None):
     sync = b.sync_engine
     stack.enter_context(patch("app.core.sync_engine.sync_engine", new=sync))
     return b
+
+
+@pytest.mark.parametrize("automation_id,recorded_source,turn_sources", [
+    ("auto-1", "automation", [call("automation_step")]),
+    (None, None, []),
+])
+async def test_headless_turn_labels_only_an_automation_as_non_owner(automation_id, recorded_source, turn_sources):
+    adapter = fresh_adapter([_result()])
+    recorder = MagicMock(start=AsyncMock(), close=AsyncMock())
+    with ExitStack() as stack:
+        _headless_patches(stack, adapter)
+        stack.enter_context(patch("app.core.credential_gate.claude_cli_uses_subscription", return_value=False))
+        stack.enter_context(patch("app.core.turn_recorder.TurnRecorder.maybe_create", AsyncMock(return_value=recorder)))
+        stack.enter_context(patch("app.core.query_engine._record_query_message", AsyncMock()))
+        await qe.execute_query("do the thing", "claude-code", automation_id=automation_id, api_user_id="api-1")
+    assert recorder.start.await_args.kwargs["source"] == recorded_source
+    assert adapter.set_turn_source.call_args_list == turn_sources
 
 
 async def test_headless_turn_returns_the_answer_and_records_an_automation_step():

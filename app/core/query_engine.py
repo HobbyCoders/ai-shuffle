@@ -770,7 +770,11 @@ async def _execute_query_turn(
         # Headless metadata is created before connect, unlike the pooled paths.
         # Book the credential account actually bound by lazy client construction.
         metadata[USAGE_PROVIDER_KEY] = getattr(options, "aih_provider_id", None)
-        recorder = await plan_scope.enter_async_context(recorded_turn(session_id, prompt, profile_id))
+        # An automation step's prompt is not the owner speaking: label it, or
+        # the owner's "last message" time would come from the automation.
+        recorder = await plan_scope.enter_async_context(recorded_turn(
+            session_id, prompt, profile_id, source="automation" if automation_id else None,
+        ))
         from app.db import query_recovery
         # Allocate before issuing the write: even a cancelled begin awaiter must
         # finalize with the same identity as its still-running database write.
@@ -781,6 +785,9 @@ async def _execute_query_turn(
             started_at=turn_started_at, overrides=overrides or None,
             payload={"api_user_id": api_user_id} if api_user_id else None,
         )
+        set_turn_source = getattr(adapter, "set_turn_source", None)
+        if automation_id and callable(set_turn_source):
+            set_turn_source("automation_step")
         await adapter.send_query(prompt)
 
         async for message in adapter.receive_events():
