@@ -703,10 +703,10 @@ class TestAConnectorMovesBetweenWorkers:
         network["respond"].assert_awaited_once_with("req-B", "session-B", "allow")
 
     @pytest.mark.asyncio
-    async def test_the_one_accepted_limit_is_the_same_code_open_on_both_workers(self, network):
+    async def test_the_remaining_limit_is_the_same_code_open_on_a_second_worker(self, network):
         """Workers do not share codes. If a platform delivers one reply to two
         workers that each hold the same code open in that chat, each answers its
-        own: about 1 in 10,000, and only around a move. The owner accepted this."""
+        own: about 1 in 10,000, and only around a move."""
         from app.core.connector_permissions import answer_from_chat
 
         on_a = _open_request("4821", "req-A", "session-A")
