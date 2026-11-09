@@ -22,11 +22,13 @@ await runJourney({ name: 'settings-detail-link', allow: DEV_INSTANCE_NOISE, case
   await onSecurity('after the resize');
   await mark('reload at phone width');
   await page.reload();
+  await mark('page reloaded at phone width');
   await onSecurity('after the reload');
   await mark('Back reaches the list, and a reload then stays on the list');
   await page.locator('.topbar').getByRole('button',{name:'Back to Settings',exact:true}).click();
   await page.getByRole('navigation',{name:'Settings',exact:true}).waitFor();
   await page.reload();
+  await mark('list reloaded');
   await page.getByRole('navigation',{name:'Settings',exact:true}).waitFor({timeout:15000});
   expect(await page.locator('.settings-shell[data-view="page"]').count()===0,'the list stays the list after Back');
  }
