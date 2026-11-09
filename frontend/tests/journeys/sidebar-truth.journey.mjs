@@ -329,6 +329,7 @@ const ROLLBACK_DELETE = {
 // delete, which is a designed move, not jank (#1009).
 const DELETE_OPEN_CHAT = {
 	name: 'delete-the-open-chat',
+	throttles: ['slow'],
 	setup: twoChats,
 	expectShift: [{
 		step: 'delete the open chat',

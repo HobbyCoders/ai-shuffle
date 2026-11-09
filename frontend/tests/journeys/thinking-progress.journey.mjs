@@ -13,6 +13,7 @@ await runJourney({
 	cases: [{
 		name: 'silent-think-keeps-moving',
 		viewports: ['desktop', 'phone'],
+		throttles: ['slow'],
 		async setup(ctx) {
 			const hero = await openNewChat(ctx);
 			const menu = ctx.page.getByRole('menu', { name: 'Agent selection' });
