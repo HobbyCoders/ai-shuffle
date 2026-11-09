@@ -1025,9 +1025,15 @@ async def stop_all_background_tasks(
                 f"Monitor shell(s) alive: {sorted(keep)}"
             )
 
-    # Close completion-vs-Stop races BEFORE the first await: every later terminal
-    # frame is dropped at the scheduler entry point, and a wake queued a moment
-    # before these latches is removed (or rebuilt without the canceled tasks).
+    # Admission/validation may have waited, and a retained scope may be replayed.
+    # A resumed id is not ours for ANY side effect, including wake withdrawal.
+    # No await separates this check from suppression and queued-wake cleanup.
+    resumed = {task_id for task_id in task_ids if not same_run(task_id)}
+    spared.extend({"ok": True, "task_id": task_id, "skipped": "resumed"}
+                  for task_id in sorted(resumed))
+    task_ids = [task_id for task_id in task_ids if task_id not in resumed]
+    # Suppress before the next await so killing a captured run cannot produce a
+    # stray completion wake. A later resume re-arms its own wake.
     for task_id in task_ids:
         task_registry.suppress_wake(session_id, task_id)
     if task_ids:
@@ -1108,13 +1114,17 @@ async def stop_all_background_tasks(
         try:
             from app.mcp.builtin_tools import stop_session_background_shells
 
-            # A worker can start a shell until it is killed just above, so sweep
-            # all of its shells. Once it is running for something newer, only the
-            # shells it had when this stop began.
+            # Recheck after overtaken's await: a resumed worker owns its shells,
+            # and even a captured-id sweep must not touch that new incarnation.
             newer = await overtaken()
+            if not same_run(worker_session_id):
+                continue
+            # The captured worker can start shells until its kill above. Sweep
+            # all only while this Stop still owns the parent; otherwise just the
+            # shell ids captured at admission.
             reaped = await stop_session_background_shells(
                 worker_session_id,
-                **({} if not newer and same_run(worker_session_id)
+                **({} if not newer
                    else {"only": worker_shells.get(worker_session_id, set())}),
             )
             if reaped:
@@ -1147,6 +1157,7 @@ async def stop_all_background_tasks(
             continue
         frames.append({
             "task_id": task_id,
+            "task_incarnation": scope.runs.get(task_id),
             "status": record.get("status") or "killed",
             "summary": record.get("summary") or "",
             "reason": record.get("reason") or "",
