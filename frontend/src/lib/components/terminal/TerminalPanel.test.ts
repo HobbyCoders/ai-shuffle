@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 
 const api = vi.hoisted(() => ({
 	list: vi.fn(), targets: vi.fn(), create: vi.fn(), get: vi.fn(), close: vi.fn(), restart: vi.fn(), paste: vi.fn(),
-	peerRequests: vi.fn(),
+	deviceLinks: vi.fn(),
 }));
 vi.mock('$lib/api/terminals', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('$lib/api/terminals')>();
@@ -118,7 +118,7 @@ beforeEach(() => {
 		created += 1;
 		return info(`t${created}`, { shell: body.shell ?? 'bash', cwd: body.cwd ?? '/workspace/app' });
 	});
-	api.peerRequests.mockResolvedValue({ requests: [] });
+	api.deviceLinks.mockResolvedValue({ links: [], requests: [] });
 	api.paste.mockImplementation(async (id: string) => ({ mode: 'bracketed', terminal: terminals.terminal(id) ?? info(id) }));
 });
 afterEach(() => {

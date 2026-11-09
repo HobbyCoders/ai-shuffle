@@ -53,6 +53,16 @@ export const entries: SettingEntry[] = [
 		default: false
 	},
 	{
+		id: 'security.peerTerminals',
+		category: 'security',
+		section: 'Terminals on other workers',
+		label: 'Terminals on other workers',
+		hint: 'Off by default',
+		help: 'Lets a chat on another worker of yours open its shell from the app you are using. Turn it on for both workers. Each device links once per worker with a code, then signs every shell it opens. Agents, API keys and preview links cannot use it.',
+		keywords: ['terminal', 'shell', 'peer', 'remote', 'device link', 'other worker'],
+		default: false
+	},
+	{
 		id: 'security.secInstr',
 		category: 'security',
 		section: 'Agent safety',

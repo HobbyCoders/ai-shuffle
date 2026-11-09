@@ -10,6 +10,7 @@
 import { terminalsApi, TerminalApiError, type TerminalInfo, type TerminalTargets, type CreateTerminal } from '$lib/api/terminals';
 import { sidePanel, sessionPanelKey } from './side-panel.svelte';
 import type { ProbeState } from '$lib/terminal/gating';
+import { deviceKeyProblem } from '$lib/terminal/device-key';
 import type { CommandBlock } from '$lib/terminal/commands';
 
 export type ConnStatus = 'connecting' | 'live' | 'reconnecting' | 'gone' | 'auth' | 'error';
@@ -73,6 +74,8 @@ export function probeFromTargets(result: TerminalTargets): ProbeState {
 		defaultShell: result.default_shell,
 		folder: result.default_folder?.path ?? null,
 		folderSource: result.default_folder?.source ?? null,
+		chatWorkerId: result.chat_worker_id ?? null,
+		deviceKeyProblem: deviceKeyProblem(),
 		open: result.open,
 		limit: result.limit,
 	};
@@ -192,7 +195,7 @@ export const terminals = {
 
 	/**
 	 * Open a terminal and report a refusal to the caller instead of the panel
-	 * notice: the peer picker shows its own failure (the approval is spent).
+	 * notice: the peer picker shows its own failure.
 	 */
 	async open(sessionId: string, options: CreateTerminal = {}): Promise<{ info: TerminalInfo } | { code: string; message: string }> {
 		try {

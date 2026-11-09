@@ -210,9 +210,13 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   stream past it and keeps the record in the conflicts list. Buffered
   out-of-order ops are bounded per stream and dropped for revoked origins;
   the op log is pruned after 30 days (peers behind the pruned prefix take a
-  state copy instead). Superseded `memory` envelopes (each one a whole fact
-  store) are dropped at the daily maintenance pass once every recent peer
-  holds them; see [sync-log retention](../internal/sync-log-retention.md#memory-op-compaction).
+  state copy instead). Transcript event envelopes go after an hour once every
+  recent peer holds them, and superseded `memory`, `sessions` and
+  `session_runtime` envelopes (each one a whole record) are dropped at the
+  daily maintenance pass once every recent peer holds them (for transcripts and
+  sessions, also every active member however long since contact; anything a
+  member has not acknowledged keeps the 30 days); see
+  [sync-log retention](../internal/sync-log-retention.md).
 
 ## Deviations from the plan
 

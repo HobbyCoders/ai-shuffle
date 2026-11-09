@@ -14,8 +14,8 @@ PREFIX = "owner_policy_"
 
 class OwnerPolicy(BaseModel):
     network_require_token_binding: bool = False
-    # Capability only, never authorization: an independent owner-authenticated
-    # grant on the recipient is still required for every remote terminal.
+    # Capability only, never authorization: every remote terminal still needs a
+    # signature from a device the owner linked on the receiving worker.
     network_peer_terminals: bool = False
     session_expire_days: int = Field(default=30, ge=0)
     # The memory learner's model calls per UTC day, per store. 0 is automatic:
