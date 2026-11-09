@@ -55,7 +55,7 @@
       "module": "signal_connector",
       "class": "SignalConnector",
       "files": {
-        "signal_connector.py": "15ceb5558bdcbf2b95ff5f44c95cb3565e20eab1ab47cb890e3dd527ec57e5ff",
+        "signal_connector.py": "4c1ebbf90ec5dad860e3ad63620bfdc254234c323d4825019d4a63e81f44d5e9",
         "signal_actions.py": "8f4139205355f19b18f0f8fbc29e5bb954ec4c420e14d566fe56085593ad7431"
       }
     },
@@ -145,5 +145,5 @@
     ]
   },
   "sdk": 1,
-  "release": "64614cb83b9fa442"
+  "release": "560c8831bc27947d"
 }

@@ -1,11 +1,11 @@
 """#523: the owner's other message is never held behind a pending approval.
 
-Owner decision: only a firm yes or no answers an approval asked in an owner
-chat. Any other message is an ordinary message that reaches the agent at once,
-and the approval stays pending and answerable. When the chat is itself blocked
-on one of its own calls waiting for that approval, the call gets a "not run
-yet" result so the engine can take the message; a later yes admits exactly
-that call once, a later no or an expiry is reported back.
+A message, even "yes", is an ordinary message that reaches the agent at once,
+and the approval stays pending and answerable on its permission prompt. When
+the chat is itself blocked on one of its own calls waiting for that approval,
+the call gets a "not run yet" result so the engine can take the message; a
+later approval admits exactly that call once, a later decline or an expiry is
+reported back.
 
 These drive the real intake (``turn_manager.submit_async``), the real
 permission plumbing (``provider_agent_approvals.route_permission`` into
@@ -38,6 +38,7 @@ from tests.core.interaction_harness import (  # noqa: F401  (autouse fixtures)
 from tests.core.test_assistant_confirm import (  # noqa: F401  (autouse fixture)
     _answers,
     _ask,
+    decide,
     _outcomes,
     _pending,
     _started_chat,
@@ -83,6 +84,11 @@ def _wakes(home_id: str) -> List[Dict[str, Any]]:
         cursor.execute("SELECT * FROM turns WHERE session_id=%s AND source='wakeup' "
                        "ORDER BY position", (home_id,))
         return [turns._row(row) for row in cursor.fetchall()]
+
+
+async def _decline_next(home_id: str) -> None:
+    [asked] = await _pending(home_id)
+    await decide(home_id, asked, "deny")
 
 
 async def _parked(home_id: str, monkeypatch: pytest.MonkeyPatch,
@@ -155,53 +161,44 @@ async def test_parallel_own_calls_are_all_let_go(
     assert [item["parked"] for item in confirm.pending_requests(home_id)] == [True, True]
 
 
-async def test_a_later_yes_admits_exactly_that_call_once(
+async def test_a_later_approval_admits_exactly_that_call_once(
     home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
     home_id, _ = home
     request = await _parked(home_id, monkeypatch)
-    turn_id = await owner_says(home_id, "yes")
+    await decide(home_id, request, "allow")
     assert confirm.pending_requests(home_id) == []
-    payload = turns.get_turn(turn_id)["payload"]
-    answer = payload[confirm.ANSWER_KEY]
-    assert answer["request_id"] == request["request_id"]
-    assert answer["decision"] == "approved" and answer["released"] is True
-    assert answer["pass"] == {"tool_name": "Bash", "tool_input": {"command": "gh pr merge 12"},
-                              "interaction_id": request["interaction_id"]}
-    # The agent hears it with the owner's own yes, at turn start or steered.
-    note = confirm.engine_note(payload)
-    assert "run that exact call again now" in note and "gh pr merge 12" in note
-    assert "It should not ask again" in note
-    assert "run that exact call again now" in session_runtime._with_voice_note("yes", payload)
-    # The typed yes carries it, so no separate wake, and no outcome note twice.
-    assert _wakes(home_id) == [] and confirm.context_note(home_id) is None
+    [wake] = _wakes(home_id)
+    payload = wake["payload"]
+    assert payload[confirm.PASS_KEY] == {"tool_name": "Bash", "tool_input": {"command": "gh pr merge 12"},
+                                         "interaction_id": request["interaction_id"]}
 
-    # Nothing is admitted until the turn carrying the yes reaches the engine.
+    # Nothing is admitted until the wake reaches the engine.
     early = _own_call(home_id)
     await _pending(home_id)
     assert not early.done()
-    await owner_says(home_id, "no")
+    await _decline_next(home_id)
     assert isinstance(await asyncio.wait_for(early, 12.0), PermissionResultDeny)
-    # session_runtime arms the pass when it hands the yes to the engine.
-    assert confirm.arm_pass(home_id, payload, "turn-yes")
+    # session_runtime arms the pass when it hands the wake to the engine.
+    assert confirm.arm_pass(home_id, payload, "turn-wake")
 
     # A different call is not admitted: it asks as usual.
     other = _own_call(home_id, "gh pr merge 13")
     [asked] = await _pending(home_id)
     assert "gh pr merge 13" in asked["question"]
-    await owner_says(home_id, "no")
+    await decide(home_id, asked, "deny")
     assert isinstance(await asyncio.wait_for(other, 12.0), PermissionResultDeny)
 
     # The exact call is admitted once, without asking.
     again = _own_call(home_id)
     assert isinstance(await asyncio.wait_for(again, 5.0), PermissionResultAllow)
     assert confirm.pending_requests(home_id) == []
-    # ...and only once, even when the same message is delivered again.
+    # ...and only once, even when the same wake is delivered again.
     assert not confirm.arm_pass(home_id, payload, "turn-later")
     third = _own_call(home_id)
     await _pending(home_id)
     assert not third.done()
-    await owner_says(home_id, "no")
+    await _decline_next(home_id)
     assert isinstance(await asyncio.wait_for(third, 12.0), PermissionResultDeny)
 
 
@@ -209,28 +206,29 @@ async def test_the_pass_lives_only_for_its_turn_and_only_replaces_the_ask(
     home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
     home_id, _ = home
-    await _parked(home_id, monkeypatch)
-    payload = turns.get_turn(await owner_says(home_id, "yes"))["payload"]
-    assert confirm.arm_pass(home_id, payload, "turn-yes")
+    request = await _parked(home_id, monkeypatch)
+    await decide(home_id, request, "allow")
+    payload = _wakes(home_id)[0]["payload"]
+    assert confirm.arm_pass(home_id, payload, "turn-wake")
 
     # A subagent's call never spends the main chat's pass.
     sub_call = _own_call(home_id, agent_id="agent-1")
     await _pending(home_id)
     assert not sub_call.done()
-    await owner_says(home_id, "no")
+    await _decline_next(home_id)
     assert isinstance(await asyncio.wait_for(sub_call, 12.0), PermissionResultDeny)
     # Nor does a call outside the allowed paths.
     blocked = _own_call(home_id, blocked_path="/etc")
     await _pending(home_id)
     assert not blocked.done()
-    await owner_says(home_id, "no")
+    await _decline_next(home_id)
     assert isinstance(await asyncio.wait_for(blocked, 12.0), PermissionResultDeny)
     # A saved Deny outranks it: the call is asked, the pass stays unspent.
     ph.permission_handler._add_session_rule_idempotent(home_id, "Bash", "gh pr merge 12", "deny")
     denied = _own_call(home_id)
     await _pending(home_id)
     assert not denied.done()
-    await owner_says(home_id, "no")
+    await _decline_next(home_id)
     assert isinstance(await asyncio.wait_for(denied, 12.0), PermissionResultDeny)
     ph.permission_handler._session_rules.pop(home_id, None)
     # Away mode defers the call before the pass is looked at.
@@ -288,59 +286,28 @@ async def test_a_steered_yes_arms_its_pass_only_once_the_engine_took_it(
         session_runtime._live_runtimes.pop(sid, None)
 
 
-async def test_a_release_from_elsewhere_before_the_typed_yes_is_reported(
+async def test_an_approval_that_reaches_the_waiter_first_runs_the_call_once(
     home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
-    """The typed yes read the request before another device's message let
-    its call go: the answer is judged on the row as answered, so the yes
-    still tells the agent to run it again and carries the pass."""
-    home_id, _ = home
-    _steers(monkeypatch)
-    task = _own_call(home_id)
-    [request] = await _pending(home_id)
-    real = confirm.pending_requests
-
-    def read_then_release(session_id: str) -> List[Dict[str, Any]]:
-        items = real(session_id)
-        # Another device parks and the waiter releases, right after this read.
-        assert interactions.mark_interaction_parked(request["interaction_id"])
-        assert interactions.mark_interaction_released(request["interaction_id"])
-        return items
-
-    monkeypatch.setattr(confirm, "pending_requests", read_then_release)
-    turn_id = await owner_says(home_id, "yes")
-    monkeypatch.setattr(confirm, "pending_requests", real)
-    answer = turns.get_turn(turn_id)["payload"][confirm.ANSWER_KEY]
-    assert answer["released"] is True and answer["pass"]["tool_name"] == "Bash"
-    task.cancel()
-
-
-async def test_a_yes_that_reaches_the_waiter_first_runs_the_call_once(
-    home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
-) -> None:
-    """The yes lands after the request was parked but before its waiter read
-    the row: the waiter gets the yes and runs the call, so the yes neither
-    admits the call again nor tells the agent to re-run it."""
+    """The approval lands after the request was parked but before its waiter
+    read the row: the waiter runs the call, so nothing re-runs it."""
     home_id, _ = home
     steers = _steers(monkeypatch)
     task = _own_call(home_id)
     [request] = await _pending(home_id)
     # park() stamped the row, but its waiter has not read it yet.
     assert interactions.mark_interaction_parked(request["interaction_id"])
-    turn_id = await owner_says(home_id, "yes")
+    await decide(home_id, request, "allow")
     assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultAllow)
-    answer = turns.get_turn(turn_id)["payload"][confirm.ANSWER_KEY]
-    assert answer["decision"] == "approved" and answer["released"] is False
-    assert "pass" not in answer and confirm.engine_note({confirm.ANSWER_KEY: answer}) is None
     assert not interactions.mark_interaction_released(request["interaction_id"])
     assert steers == [] and _wakes(home_id) == []
 
 
-async def test_a_remembered_answer_reports_every_released_sibling(
+async def test_a_remembered_answer_leaves_a_sibling_on_its_own_prompt(
     home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
-    """An "always allow" answer settles the sibling requests its rule matches
-    too: each released one wakes the agent with its own pass."""
+    """These calls ask past saved rules, so an "always allow" cannot cover
+    them: each one is settled, and reported, on its own prompt."""
     home_id, _ = home
     _steers(monkeypatch)
     first = _own_call(home_id, "git push origin a")
@@ -353,29 +320,29 @@ async def test_a_remembered_answer_reports_every_released_sibling(
     await ph.permission_handler.respond(pending[0]["request_id"], home_id, "allow",
                                         remember="session", pattern="git push*",
                                         broadcast_func=AsyncMock())
-    assert confirm.pending_requests(home_id) == []
+    [left] = confirm.pending_requests(home_id)
+    assert left["request_id"] == pending[1]["request_id"]
+    await decide(home_id, left, "allow")
     wakes = _wakes(home_id)
     assert [w["payload"][confirm.PASS_KEY]["tool_input"]["command"] for w in wakes] == [
         "git push origin a", "git push origin b"]
     assert all(w["prompt"].startswith("The owner approved this request:") for w in wakes)
 
 
-async def test_a_later_no_declines_and_says_so(
+async def test_a_later_decline_says_so_and_admits_nothing(
     home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
     home_id, _ = home
     request = await _parked(home_id, monkeypatch)
-    turn_id = await owner_says(home_id, "no")
-    payload = turns.get_turn(turn_id)["payload"]
-    assert payload[confirm.ANSWER_KEY]["decision"] == "declined"
-    assert payload[confirm.ANSWER_KEY]["request_id"] == request["request_id"]
-    assert "Do not run it" in confirm.engine_note(payload)
+    await decide(home_id, request, "deny")
     assert confirm.pending_requests(home_id) == []
+    [wake] = _wakes(home_id)
+    assert confirm.PASS_KEY not in wake["payload"]
     # Nothing was admitted: the same call asks again.
     again = _own_call(home_id)
     await _pending(home_id)
     assert not again.done()
-    await owner_says(home_id, "no")
+    await _decline_next(home_id)
     assert isinstance(await asyncio.wait_for(again, 12.0), PermissionResultDeny)
 
 
@@ -462,28 +429,22 @@ def test_only_the_placeholder_and_a_persons_no_carry_the_message() -> None:
         assert not confirm.deny_carries_steers(message)
 
 
-async def test_a_plain_yes_or_no_with_nothing_else_is_unchanged(
+async def test_a_typed_yes_is_an_ordinary_message_for_an_own_call(
     home: Home, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
     home_id, _ = home
     steers = _steers(monkeypatch)
     task = _own_call(home_id)
-    await _pending(home_id)
+    [request] = await _pending(home_id)
     turn_id = await owner_says(home_id, "yes")
-    assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultAllow)
-    payload = turns.get_turn(turn_id)["payload"]
-    assert payload[confirm.ANSWER_KEY]["decision"] == "approved"
-    assert not payload[confirm.ANSWER_KEY]["released"]
-    assert not confirm.arm_pass(home_id, payload, turn_id)
-    assert confirm.engine_note(payload) is None and steers == [] and _wakes(home_id) == []
-    # A live call's yes is spent on that call: nothing is left to admit.
+    result = await asyncio.wait_for(task, 12.0)
+    # Never run on the word "yes": the message goes to the agent as usual.
+    assert isinstance(result, PermissionResultDeny) and result.message == confirm.NOT_RUN_YET
+    assert steers == [["yes"]] and confirm.ANSWER_KEY not in (turns.get_turn(turn_id)["payload"] or {})
     assert not confirm.take_approved_once(home_id, "Bash", {"command": "gh pr merge 12"})
-
-    task = _own_call(home_id, "rm -rf build")
-    await _pending(home_id)
-    await owner_says(home_id, "no")
-    assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultDeny)
-    assert steers == [] and _wakes(home_id) == []
+    [still] = confirm.pending_requests(home_id)
+    assert still["request_id"] == request["request_id"]
+    await decide(home_id, request, "deny")
 
 
 async def test_a_started_chats_request_is_not_let_go(
@@ -491,7 +452,7 @@ async def test_a_started_chats_request_is_not_let_go(
 ) -> None:
     """A started chat's (or worker's) call blocks its own loop, not this one:
     the owner's other message reaches the home as usual and the call keeps
-    waiting for the yes or no."""
+    waiting for its prompt."""
     home_id, _ = home
     steers = _steers(monkeypatch, only=home_id)
     task = _ask(await _started_chat(home_id))
@@ -501,7 +462,7 @@ async def test_a_started_chats_request_is_not_let_go(
     await asyncio.sleep(0.05)
     assert not task.done() and steers == []
     assert not confirm.pending_requests(home_id)[0]["parked"]
-    await owner_says(home_id, "yes")
+    await decide(home_id, request, "allow")
     assert isinstance(await asyncio.wait_for(task, 12.0), PermissionResultAllow)
 
 
@@ -601,20 +562,19 @@ async def test_a_typed_message_leaves_a_safety_check_waiting(
 async def test_the_buttons_settle_exactly_that_request(
     home: Home, monkeypatch: pytest.MonkeyPatch, decision: str,  # noqa: F811
 ) -> None:
-    """Continue / Stop answer the safety check by its own request id, and an
-    ordinary approval waiting in the same chat is still answered by typing."""
+    """Continue / Stop answer the safety check by its own request id. A typed
+    yes settles neither it nor an ordinary approval waiting in the same chat."""
     home_id, _ = home
     _steers(monkeypatch)
     check = _safety_check(home_id)
     card = await _card(home_id)
     call = _own_call(home_id)
     [asked] = await _pending(home_id)
-    assert asked["tool_name"] == "Bash"  # the only request asked in words
-    # A typed yes answers the ordinary approval, never the safety check.
+    assert asked["tool_name"] == "Bash"  # the only request the note names
     await owner_says(home_id, "yes")
-    assert isinstance(await asyncio.wait_for(call, 12.0), PermissionResultAllow)
-    assert [a["request_id"] for a in _answers(home_id)] == [asked["request_id"]]
-    assert not check.done()
+    assert (await asyncio.wait_for(call, 12.0)).message == confirm.NOT_RUN_YET
+    assert _answers(home_id) == [] and not check.done()
+    await decide(home_id, asked, "deny")
     result = await ph.permission_handler.respond(card["request_id"], home_id, decision)
     assert result.get("resolved")
     answered = await asyncio.wait_for(check, 12.0)
@@ -628,16 +588,16 @@ async def test_the_buttons_settle_exactly_that_request(
     assert not (await ph.permission_handler.respond(card["request_id"], home_id, "allow")).get("resolved")
 
 
-def test_a_safety_check_is_never_asked_in_words(home: Home) -> None:  # noqa: F811
-    """No route marks a safety check ``assistant_confirm``; every other request
-    in an owner chat still is."""
+def test_a_safety_check_never_carries_the_owner_marker(home: Home) -> None:  # noqa: F811
+    """No route marks a safety check as an owner approval, which is what a
+    connector's plain-text answer needs; every other owner-chat request is."""
     from app.core import remote_task_approvals
     from types import SimpleNamespace
 
     home_id, _ = home
-    assert not confirm.asks_in_words("ModelGuardrail", {})
-    assert not confirm.asks_in_words("Anything", {"guardrail": True})
-    assert confirm.asks_in_words("Bash", {"command": "ls"})
+    assert not confirm.is_owner_approval("ModelGuardrail", {})
+    assert not confirm.is_owner_approval("Anything", {"guardrail": True})
+    assert confirm.is_owner_approval("Bash", {"command": "ls"})
     guardrail = {"tool_name": "ModelGuardrail", "tool_input": dict(_GUARDRAIL_INPUT)}
     assert approvals._assistant_confirm(home_id, guardrail, None) is None
     assert approvals._assistant_confirm(

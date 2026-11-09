@@ -26,7 +26,75 @@ The first Send after a pause wakes the copy and reloads the page; the draft
 survives, so press Send again.
 A failed clean stop reports `pause-failed` and retains its data until `down` or
 TTL; it never silently starts a second cluster. See the dev-loop guide for the
-dev-only five-second stream shutdown grace and the whole-pause deadline.
+dev-only five-second shutdown fallback after admission closes and the
+whole-pause deadline. The normal app closes passive event subscriptions and
+allows finite requests to finish before retiring remaining raw query engine
+reads. The default ten-second stop budget allows 6.5 seconds for that drain,
+then a shared 1.5-second query-settlement reserve and two seconds for lifespan.
+The Python container supervisor passes its unchanged 30-second stop budget as
+`SHUFFLE_SUPERVISOR_STOP_SECONDS`, giving it a 23.5-second finite drain and a
+4.5-second settlement reserve instead. Settlement retains its 15% share of the
+supplied budget; the two-second lifespan reservation stays fixed.
+This is deployment metadata, not a user setting; absent, invalid or out-of-range
+values retain the 6.5-second default. The Windows desktop pre-stop route also
+settles headless API queries, which do not belong to the session pool.
+
+The first signal or Windows pre-stop establishes one absolute query-drain
+deadline; subsequent waiters cannot renew it. Retirement ends provider reads,
+not query-owned finalization. An HTTP disconnect can no longer cancel the
+retired query between its issued persistence, terminal record and memory push.
+Lifespan waits on the same deadline before database teardown, rather than
+cancelling the finalizer when the initial HTTP-drain reserve expires.
+
+Each non-scheduler API query commits a `query_recovery` receipt before sending
+the provider prompt. The caller allocates the terminal ID before issuing that
+write, so cancellation of its awaiter cannot create a second identity. Inserting
+the terminal and consuming the receipt share one database transaction. A killed
+process leaves either its terminal or a receipt; approved worker startup recovers
+prior-process receipts for this install as aborted terminals, never runnable
+work. A normal terminal wins unchanged on replay. The additive schema migration
+does not infer outcomes for pre-upgrade history. This path is also portable to
+Windows, where the launcher may terminate the process tree without SIGTERM.
+
+Recovery is historical evidence, not a new execution. Recovered terminals keep
+`ended_at=NULL`: the crash leaves no trustworthy completion time, and startup
+must not charge the offline interval as work. Their original start dates
+`created_at` and slots them below later immutable history without renumbering
+existing turns. Only non-recovery rows define a bucket, its tail slot and a
+missing-start anchor. The durable aborted/server-shutdown/error marker already
+written by the receipt design identifies older replays too, even those with a
+recorded end. Any number of receipts in one gap share a bucket; timestamp,
+position and ID break ties independently of replay order. Latest-turn readers
+(including reply hints, Stop and reply-credit selection) use immutable admission
+order, then creation time, position and ID, rather than replay time or queue
+position alone. Execution-context and usage-hold readers use the original start
+when an end is unknown; an observed completion wins an exact-time tie. Thus an
+older recovered receipt cannot replace newer model/provider/permission settings,
+while a newest recovered query still hands its context to the next wake. Missing
+legacy receipt timing uses the earliest retained history/session timestamp as a
+conservative ordering anchor, not as a measured execution interval.
+No event timestamp or sequence is rewritten, and recovery invents no completion
+event, fresh unread/settle marker, usage booking, or session-activity timestamp.
+Work-time backfill also skips the unknown interval. Both terminal/receipt
+atomicity and normal-completion accounting remain unchanged.
+
+**Remaining limit:** the shortest normal stop budget is 10 seconds, lifespan
+`stop_running_sessions` can take 25 seconds and adapter disconnect can take
+5 seconds. Thus full lifecycle cleanup can still exceed an outer kill budget;
+terminal durability is not a guarantee that every shutdown write completes.
+An idle full-app shutdown measured 0.282 seconds. The retained controlled
+two-second memory-publication case now finishes on both 10- and 30-second
+budgets despite HTTP-owner cancellation. A legacy memory-mirror push stalled
+past the absolute deadline can still be unpublished, but the already-written
+local file is durable. `push_memory` is native per-project file replication,
+not the durable `Remember` fact store: the next qualifying native/project turn
+reconciles without overwriting local-only/newer files, then uploads them.
+Startup terminal recovery does not retry that mirror push; sync must remain
+enabled and the original files present (normal last-write-wins rules apply).
+Real stalled PostgreSQL/adapter teardown and real-provider or cross-worker
+shutdown have not been verified. Remaining lifecycle-budget and legacy mirror
+work is tracked in [#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305);
+launcher budgets are unchanged here.
 
 ## The loop
 

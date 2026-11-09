@@ -98,7 +98,12 @@ def test_spawn_logs_bracket_popen_without_command_environment_or_paths(monkeypat
             runtime.start_app(command, cwd, env)
     else:
         assert runtime.start_app(command, cwd, env) is child
-    spawn.assert_called_once_with(command, cwd=cwd, env=env, start_new_session=True)
+    spawn.assert_called_once_with(
+        command, cwd=cwd,
+        env=dict(env, SHUFFLE_SUPERVISOR_STOP_SECONDS=str(runtime.APP_STOP_SECONDS)),
+        start_new_session=True,
+    )
+    assert env == {"PRIVATE": "private value"}
     output = capsys.readouterr().err
     assert "application child spawn starting" in output
     assert "duration_seconds=0.125" in output
@@ -178,7 +183,12 @@ def test_update_stderr_failure_still_returns_the_live_candidate(monkeypatch, tmp
     assert any(fragment in text for text in writes)
     stop.assert_called_once_with(current, 30)
     updates.activating.assert_called_once_with()
-    spawn.assert_called_once_with(command, cwd=tmp_path, env=env, start_new_session=True)
+    spawn.assert_called_once_with(
+        command, cwd=tmp_path,
+        env=dict(env, SHUFFLE_SUPERVISOR_STOP_SECONDS=str(runtime.APP_STOP_SECONDS)),
+        start_new_session=True,
+    )
+    assert env == {"A": "1"}
 
 
 @pytest.mark.parametrize("fragment", ["application child spawn starting", "application child spawn failed", ""])
@@ -192,4 +202,8 @@ def test_spawn_stderr_failure_does_not_mask_the_original_error(monkeypatch, stde
         runtime.start_app(["candidate"], None, {})
     assert caught.value is original
     assert any(fragment in text for text in writes)
-    spawn.assert_called_once_with(["candidate"], cwd=None, env={}, start_new_session=True)
+    spawn.assert_called_once_with(
+        ["candidate"], cwd=None,
+        env={"SHUFFLE_SUPERVISOR_STOP_SECONDS": str(runtime.APP_STOP_SECONDS)},
+        start_new_session=True,
+    )

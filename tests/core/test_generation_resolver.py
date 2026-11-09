@@ -430,3 +430,41 @@ async def test_budget_check_failure_never_submits():
     output = await Resolver(backend).generate("image", {"prompt": "make it", "source": "fal"}, INTERACTIVE)
     assert output["status"] == "refused" and output["reason"] == "budget_unavailable"
     assert not any(c[0] == "execute" for c in backend.calls)
+
+
+async def test_expensive_generation_in_the_app_is_decided_on_the_prompt():
+    entry = replace(candidate(), price={**PRICE, "amount": "0.25", "total": "0.25"})
+    backend = FakeBackend([entry])
+    asked = []
+
+    async def approve(kind, chosen, prompt):
+        asked.append((kind, chosen.account, prompt))
+
+    context = replace(INTERACTIVE, spend_prompt=approve)
+    output = await Resolver(backend).generate("image", {"prompt": "make it", "source": entry.account}, context)
+    assert output["status"] == "completed" and "confirmation_token" not in output
+    assert asked == [("image", entry.account, "make it")]
+    assert [c[0] for c in backend.calls].count("execute") == 1
+
+
+async def test_a_declined_prompt_charges_nothing_and_a_claimed_approval_counts_for_nothing():
+    entry = replace(candidate(), price={**PRICE, "amount": "0.25", "total": "0.25"})
+    backend = FakeBackend([entry])
+    prompts = []
+
+    async def decline(kind, chosen, prompt):
+        prompts.append(prompt)
+        return "The owner did not approve this spend."
+
+    args = {"prompt": "make it", "source": entry.account, "confirmed": True, "confirmation_token": "made-up"}
+    output = await Resolver(backend).generate("image", args, replace(INTERACTIVE, spend_prompt=decline))
+    assert (output["status"], output["reason"]) == ("refused", "declined")
+    assert prompts == ["make it"]  # the model saying "confirmed" skips nothing
+    assert not any(c[0] in ("reserve", "execute") for c in backend.calls)
+
+
+async def test_a_cheap_generation_never_opens_the_prompt():
+    backend = FakeBackend([candidate()])
+    context = replace(INTERACTIVE, spend_prompt=AsyncMock(side_effect=AssertionError("asked")))
+    output = await Resolver(backend).generate("image", {"prompt": "make it", "source": "account-a"}, context)
+    assert output["status"] == "completed"

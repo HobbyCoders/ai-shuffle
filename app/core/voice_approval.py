@@ -24,9 +24,9 @@ that worker (``control.answer_permission``), as a tap there would be (#700).
 
 :func:`classify_spoken_answer` is the one decision function; it uses the shared
 ``app.core.owner_confirm.classify``, the same check typed answers get. When
-a request carries the assistant's own question (``assistant_confirm``), the
-outcome is also recorded the way a typed answer's is, so the conversation and
-the text model see it.
+a request carries an owner chat's own question (``owner_confirm.approval_of``),
+the outcome is also recorded in the conversation, so it and the text model see
+it.
 """
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Literal, Optional
 
+from app.core import owner_confirm
 from app.core.owner_confirm import MAX_UNCLEAR, UNCLEAR, YES
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,6 @@ def classify_spoken_answer(text: str) -> str:
     The shared check for answers given in the assistant's conversation, so a
     spoken and a typed answer are judged by the same rule.
     """
-    from app.core import owner_confirm
     return owner_confirm.classify(text)
 
 
@@ -118,8 +118,8 @@ def _job_label(request: Dict[str, Any]) -> Optional[str]:
 
 def request_summary(request: Dict[str, Any]) -> str:
     """One short, speakable line naming what the request would do."""
-    confirm = request.get("assistant_confirm")
-    if isinstance(confirm, dict) and isinstance(confirm.get("question"), str) and confirm["question"].strip():
+    confirm = owner_confirm.approval_of(request)
+    if confirm is not None and isinstance(confirm.get("question"), str) and confirm["question"].strip():
         # The assistant's own plain question for this request, when it has one.
         return " ".join(confirm["question"].split())[:SUMMARY_MAX_CHARS]
     # A background job's request says whose it is (#1797).
@@ -150,9 +150,9 @@ def retry_key(request: Dict[str, Any]) -> Optional[tuple]:
             value = tuple(str(v) for v in value) or None
         if value not in (None, ""):
             tag = request.get("provider_agent")
-            confirm = request.get("assistant_confirm")
+            confirm = owner_confirm.approval_of(request)
             asker = ((tag.get("worker_session_id") if isinstance(tag, dict) else None)
-                     or (confirm.get("chat_session_id") if isinstance(confirm, dict) else None) or "")
+                     or (confirm.get("chat_session_id") if confirm is not None else None) or "")
             return (asker, tool, name, value if isinstance(value, tuple) else str(value))
     return None
 
@@ -164,7 +164,7 @@ class Ask:
     delivered: bool = False
     marker: Any = None
     unclear: int = 0
-    # The assistant's own question for this request (assistant_confirm), if any.
+    # The owner chat's own question for this request, if any.
     confirm: Optional[Dict[str, Any]] = None
     # Same action on the same target (see retry_key); None when it has no target.
     retry: Optional[tuple] = None
@@ -224,8 +224,7 @@ class SpokenApprovals:
             self.handled.add(request_id)
             return (f"A decision is waiting on screen and cannot be answered by voice. {reason} "
                     f"Tell the user in one sentence to answer it on screen: {summary}")
-        confirm = request.get("assistant_confirm")
-        ask = Ask(request_id, summary, confirm=confirm if isinstance(confirm, dict) else None,
+        ask = Ask(request_id, summary, confirm=owner_confirm.approval_of(request),
                   retry=retry_key(request))
         approved_at = self.approved.get(ask.retry) if ask.retry else None
         if approved_at is not None and time.monotonic() - approved_at <= RETRY_WINDOW_SECONDS:
@@ -371,7 +370,6 @@ class SpokenApprovals:
         if ask.confirm is None:
             return
         try:
-            from app.core import owner_confirm
             request = {"request_id": ask.request_id, "question": ask.confirm.get("question") or ask.summary,
                        "action": ask.confirm.get("action"), "asker": ask.confirm.get("asker"),
                        "chat_session_id": ask.confirm.get("chat_session_id")}

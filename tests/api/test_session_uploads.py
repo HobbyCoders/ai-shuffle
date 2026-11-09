@@ -78,3 +78,31 @@ def test_uncreated_project_and_chat_lanes_are_not_staged_here(upload_client):
                                files={"file": ("notes.txt", b"data", "text/plain")})
         assert response.status_code == 400
     assert not (root / "session-uploads").exists()
+
+
+def test_staged_paths_are_split_by_this_sessions_area(upload_client):
+    _, row, _, root = upload_client
+    mine = str(upload_transfer.session_upload_dir(row["id"]) / "notes.txt")
+    theirs = str(upload_transfer.session_upload_dir("another") / "notes.txt")
+    checkout = str(root / "project" / "uploads" / "notes.txt")
+    assert upload_transfer.split_session_staged_paths([mine, theirs, checkout], row["id"]) == (
+        [mine], [theirs, checkout],
+    )
+
+
+async def test_staged_file_lifts_when_the_composer_still_names_its_project(upload_client, mock_db, monkeypatch):
+    """A composer that kept its local project id must not lift against that checkout."""
+    from app.api import chat_ws_handler
+    client, row, _, root = upload_client
+    source = client.post("/api/v1/sessions/worker-session/upload",
+                         files={"file": ("notes.txt", b"remote attachment", "text/plain")}).json()["full_path"]
+    monkeypatch.setattr(chat_ws_handler.database, "get_session", lambda _id: row)
+    monkeypatch.setattr(chat_ws_handler.database, "get_project",
+                        lambda _id: pytest.fail("a staged file has no project checkout to look up"))
+    ids = await chat_ws_handler.ChatWebSocketHandler._lift_uploads(
+        object(), [source], "local-project", row["id"],
+    )
+    owner = root / "owner-checkout"
+    owner.mkdir()
+    upload_transfer.materialize_blobs_for_turn(ids, str(owner))
+    assert (owner / "uploads" / "notes.txt").read_bytes() == b"remote attachment"

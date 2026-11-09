@@ -57,7 +57,7 @@ You can call any of your chats at any time, even while its agent is busy. A call
 
 - **Ask for status**, such as "what are you working on?" or "is it done yet?". It answers from the app's task list.
 - **Finished jobs** are mentioned at the next pause.
-- **Approvals:** when work needs your permission, the agent asks one plain question, and you can answer it out loud or by typing. Only a clear yes approves and a clear no declines. An unclear spoken answer is asked once more, then declined. A typed message that is not a clear yes or no never answers: it goes to the agent as an ordinary message and the request stays open.
+- **Approvals:** when work needs your permission, the agent asks one plain question, and you answer it out loud. Only a clear yes approves and a clear no declines. An unclear spoken answer is asked once more, then declined. A typed message never answers, even "yes": it goes to the agent as an ordinary message and the request stays open. A request still open when the call ends is waiting on the regular permission prompt in the chat.
 - **Secrets stay on screen.** Private access requests are answered on screen, and the agent tells you when that is needed.
 - **Same tools as typing.** What you ask for by voice runs with the tools a message you typed from the same login would get. On your own chat without a project, a call you started signed in gets the full code tools. A call from an API key keeps that key's restricted tools.
 

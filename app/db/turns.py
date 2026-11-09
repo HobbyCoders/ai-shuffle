@@ -46,6 +46,13 @@ import psycopg2
 from app.core.config import settings
 from app.db.base import get_db, get_lease_db, parse_jsonb as _parse_json
 from app.db.compat import phs
+from app.db.query_recovery import RECOVERY_ERROR
+
+# Replays are derived history, never boundaries for another replay. This marker
+# predates unknown ended_at, so it also identifies older timestamped replays.
+_NON_RECOVERED_HISTORY = ("AND NOT (state='aborted' "
+                          "AND COALESCE(stop_reason,'')='server_shutdown' "
+                          "AND COALESCE(error,'')=%s) ")
 
 logger = logging.getLogger(__name__)
 
@@ -969,6 +976,8 @@ def record_adhoc_turn(
     started_at=None,
     payload: Optional[Dict[str, Any]] = None,
     overrides: Optional[Dict[str, Any]] = None,
+    turn_id: Optional[str] = None,
+    recovered: bool = False,
 ) -> Dict[str, Any]:
     """Write a TERMINAL history row for a turn that already ran outside the
     scheduler (ad-hoc REST calls, automation steps, headless background runs).
@@ -986,34 +995,77 @@ def record_adhoc_turn(
     lifecycle computation ignores it. ``run_id``/``instance_id`` stay NULL
     because there was never a lease to point at.
 
-    ``started_at`` is the caller's recorded turn start (defaults to now);
-    ``ended_at`` is stamped at insert. Returns the created turn row.
+    ``started_at`` is the caller's recorded turn start (defaults to now).
+    Normal completion stamps ``ended_at`` at insert. Recovery knows no end:
+    it keeps that NULL (zero banked work), dates creation at the original start,
+    and inserts below later history without renumbering existing ordinals.
+    Returns the created turn row.
     """
     if outcome not in ("completed", "aborted"):
         raise ValueError(
             f"record_adhoc_turn outcome must be completed|aborted, got {outcome!r}"
         )
-    turn_id = f"turn-{uuid.uuid4().hex}"
+    recovering = turn_id is not None
+    turn_id = turn_id or f"turn-{uuid.uuid4().hex}"
     with get_db() as conn:
         cursor = conn.cursor()
         # Share enqueue's lock: ad-hoc records participate in the same history
         # even though they never claim a live slot or a run lease.
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        if recovering:
+            cursor.execute("SELECT * FROM turns WHERE id=%s", (turn_id,))
+            existing = _row(cursor.fetchone())
+            if existing is not None:
+                if existing["session_id"] != session_id:
+                    raise ValueError("Query terminal identity belongs to another session")
+                cursor.execute("DELETE FROM query_recovery WHERE id=%s", (turn_id,))
+                return existing
         _initialize_insert_order(cursor, session_id)
+        history_filter = _NON_RECOVERED_HISTORY if recovered else ""
+        history_params = (session_id, RECOVERY_ERROR) if recovered else (session_id,)
         cursor.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 AS pos, "
-            "COALESCE(MAX(insert_order), 0) + 1 AS insert_order FROM turns WHERE session_id = %s",
-            (session_id,),
+            "COALESCE(MAX(insert_order), 0) + 1 AS insert_order FROM turns WHERE session_id = %s "
+            + history_filter, history_params,
         )
         pos_row = cursor.fetchone()
         position = pos_row["pos"] if pos_row and pos_row.get("pos") is not None else 1
+        insert_order = pos_row["insert_order"]
+        if recovered:
+            # Receipt creation preceded execution, not this replay. Preserve
+            # later permission/caller history as well as execution context.
+            # Missing legacy timing stays behind every known history row.
+            if (started_at := _to_utc(started_at)) is None:
+                cursor.execute("SELECT created_at FROM sessions WHERE id=%s", (session_id,))
+                session_created = _to_utc(cursor.fetchone()["created_at"])
+                cursor.execute("SELECT MIN(COALESCE(started_at, created_at)) AS first_at "
+                               "FROM turns WHERE session_id=%s " + history_filter, history_params)
+                first = _to_utc(cursor.fetchone()["first_at"])
+                started_at = min(stamp for stamp in (session_created, first) if stamp is not None)
+            # All receipts in a gap share a slot against immutable history;
+            # created_at orders them without feeding earlier replays back into
+            # this calculation. The tail/empty fallback and legacy start anchor
+            # above must exclude replays too. Existing ordinals never change.
+            cursor.execute(
+                "SELECT insert_order, position FROM turns WHERE session_id=%s "
+                "AND created_at >= %s " + history_filter
+                + "ORDER BY insert_order ASC, created_at ASC, position ASC, id ASC LIMIT 1",
+                (session_id, started_at, RECOVERY_ERROR),
+            )
+            later = cursor.fetchone()
+            if later:
+                # History ordinals need not be unique. Share the preceding
+                # bucket; original created_at orders it after that older row.
+                # This inert row grants no new admission/Stop cutoff.
+                insert_order = max(0, later["insert_order"] - 1)
+                position = later["position"]
         cursor.execute(
             "INSERT INTO turns "
             "(id, session_id, state, source, prompt, profile_id, project_id, "
             "overrides, payload, position, insert_order, stop_reason, error, "
-            "started_at, ended_at) "
+            "started_at, ended_at, created_at) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-            "COALESCE(%s, NOW()), NOW()) "
+            "COALESCE(%s, NOW()), CASE WHEN %s THEN NULL ELSE NOW() END, COALESCE(%s, NOW())) "
             "RETURNING *",
             (
                 turn_id,
@@ -1026,22 +1078,28 @@ def record_adhoc_turn(
                 json.dumps(overrides or {}),
                 json.dumps(payload or {}),
                 position,
-                pos_row["insert_order"],
+                insert_order,
                 stop_reason,
                 error,
                 started_at,
+                recovered,
+                started_at if recovered else None,
             ),
         )
         row = _row(cursor.fetchone())
         if row is None:  # INSERT ... RETURNING always yields the new row
             raise RuntimeError(f"record_adhoc_turn: INSERT returned no row for {turn_id}")
+        if recovering:
+            # Same transaction as the terminal: a kill cannot erase both copies.
+            cursor.execute("DELETE FROM query_recovery WHERE id=%s", (turn_id,))
     # The ad-hoc paths refuse to run while a turn is live (busy-write guard),
     # so their interval never overlaps one the scheduler already banked. One
     # recorded while the session is parked leaves the park's open segment be.
-    _record_session_work(
-        row.get("session_id"), interval_ms(row.get("started_at"), row.get("ended_at")),
-        keep_park=True,
-    )
+    if not recovered:
+        _record_session_work(
+            row.get("session_id"), interval_ms(row.get("started_at"), row.get("ended_at")),
+            keep_park=True,
+        )
     return row
 
 

@@ -40,12 +40,11 @@ from typing import (
 )
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
 
 from app.api.auth import require_auth
 from app.api.sessions_helpers import require_transcript_session
-from app.api.sse_utils import is_client_disconnect
+from app.api.sse_utils import PassiveEventResponse, is_client_disconnect
 from app.core.event_gateway import LOG_RECHECK, get_gateway
 from app.core.history_backfill import ensure_backfilled
 from app.core.transcript_replay import (
@@ -926,7 +925,7 @@ async def stream_session_events(
         named = await asyncio.to_thread(get_reader_epoch, session_id)
         if named.isascii():
             headers["X-Log-Epoch"] = named
-    return StreamingResponse(
+    return PassiveEventResponse(
         _batch_backfill(event_stream(session_id, from_seq, epoch)),
         media_type="text/event-stream",
         headers=headers,

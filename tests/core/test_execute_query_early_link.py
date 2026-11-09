@@ -55,7 +55,9 @@ def _early_link_calls(mock_db):
 
 
 @pytest.fixture()
-def engine_mocks():
+def engine_mocks(session_factory):
+    # Mock option/link calls, not the parent row required by receipt/turn writes.
+    session_factory(APP_SESSION_ID)
     profile = {"id": "principal-engineer", "name": "PE"}
     session_row = {"id": APP_SESSION_ID, "sdk_session_id": None}
     options = MagicMock()

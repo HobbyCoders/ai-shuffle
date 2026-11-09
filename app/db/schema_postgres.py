@@ -22,7 +22,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 95
+SCHEMA_VERSION = 96
 
 
 def session_recall_cache_ready(cursor, *, legacy_only: bool = False) -> bool:
@@ -2058,6 +2058,9 @@ def create_postgres_schema(cursor: Any) -> None:
 
     from app.db.background_tasks import create_order_guard
     create_order_guard(cursor)
+
+    from app.db.query_recovery import create_schema as create_query_recovery_schema
+    create_query_recovery_schema(cursor)
 
     # The existing session-prefixed indexes also cover insertion-order reads.
     # No history rewrite or new writer-blocking index build belongs in bootstrap.

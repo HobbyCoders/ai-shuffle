@@ -1,12 +1,13 @@
 """Issue #295: real-PostgreSQL bulk, equivalence and atomicity ratchets.
 
-Counts, not a wall-clock assertion: the 65 MB measurement is reproducible without
-making busy CI runners fail a timing threshold. The large fixture explicitly
-prepares the experimental deferred-index schema; it does not activate it on a
-worker or claim that the ordinary GIN path is fast. Never uses an installed DB.
+Mostly counts, which busy CI runners cannot fail by being slow. One deliberately
+generous time budget catches the import falling back to synchronous GIN merging:
+that took about 223 s on this 20k-row bundle, the current path about 25 s. Never
+uses an installed DB.
 """
 import json
 import logging
+import time
 from collections import Counter
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -104,8 +105,10 @@ def test_issue_295_bundle_has_bounded_round_trips(destination, mirrored):
     assert len(json.dumps(data).encode()) >= 64_000_000
     if mirrored:
         handoff.install_history(sid, data, cwd)
+    started = time.monotonic()
     with statements() as calls:
         sdk = handoff.install_history(sid, data, cwd)
+    assert time.monotonic() - started < 150
     # Preserve the legacy WHOLE producing-path ceiling, not just its 200-row
     # loop; separately bound the single new empty-Plan reconciliation lookup.
     assert_bulk_statement_budget(calls)
