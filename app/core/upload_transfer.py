@@ -363,6 +363,51 @@ def validate_turn_uploads(payload: Dict[str, Any], session: Dict[str, Any]) -> N
                 raise UploadLiftError("Attachment is no longer on this owner; reattach it.")
 
 
+def lift_send_uploads(paths: List[str], project_id: Optional[str], session_id: str) -> List[str]:
+    """Lift one send's staged uploads so another worker can receive them.
+
+    Raises rather than returning part of them: the caller refuses the send.
+    Synchronous (filesystem + DB) — call via ``run_sync`` from async contexts.
+    """
+    from app.core import project_resolver
+    from app.db import database
+
+    # Where each file was staged decides how it lifts. The composer can still
+    # name its local project for a chat whose files are session-staged.
+    staged, paths = split_session_staged_paths(paths, session_id)
+    if not project_id:
+        staged, paths = staged + paths, []
+    blob_ids: List[str] = []
+    if staged:
+        session = database.get_session(session_id)
+        if not session or not session.get("project_v2_id"):
+            raise UploadLiftError("Attachments need a project session.")
+        blob_ids = lift_session_paths_to_blobs(staged, session)
+    if not paths:
+        return blob_ids
+    project = database.get_project(project_id)
+    if not project:
+        raise UploadLiftError(f"Project not found: {project_id}")
+    project_v2_id = None
+    try:
+        resolved = project_resolver.resolve_project_v2({"project_id": project_id, "id": session_id})
+        project_v2_id = (resolved or {}).get("id")
+    except Exception:  # noqa: BLE001 — the v2 id is bookkeeping, not a gate
+        logger.debug("Upload lift: project_v2 resolve failed for %s", project_id, exc_info=True)
+    # A send can mix session staging, a first-message source in main, and an
+    # established checkout outside the base project. Select each file's root,
+    # rather than losing another attachment by replacing the batch's root.
+    session = database.get_session(session_id)
+    cwd = project_resolver.resolve_existing_cwd(session) if session else None
+    checkout = Path(cwd).resolve() if cwd else None
+    for source in paths:
+        source_project = project
+        if checkout and _is_under(Path(source).resolve(), checkout):
+            source_project = {**project, "path": str(checkout)}
+        blob_ids += lift_paths_to_blobs([source], source_project, session_id, project_v2_id)
+    return blob_ids
+
+
 def lift_session_paths_to_blobs(paths: List[str], session: Dict[str, Any]) -> List[str]:
     """Lift only this session's staged files, never arbitrary workspace paths."""
     session_id = session["id"]

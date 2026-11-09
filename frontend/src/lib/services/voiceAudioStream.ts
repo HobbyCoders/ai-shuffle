@@ -1,12 +1,19 @@
 import { wsUrl } from '$lib/api/runtime';
 import { randomUUID } from '$lib/utils/id';
+import type { UploadReference } from '$lib/api/rewind';
 import { createVoiceOutput } from './voiceVolume';
+
+/** The attachments of text typed into a call; the server validates them. */
+export interface VoiceTextUploads {
+ paths?: string[];
+ references?: UploadReference[];
+}
 
 export interface VoiceAudioStream {
  close(): Promise<void>;
  muteOutput(muted: boolean): void;
  muteInput(muted: boolean): void;
- sendText(text: string): Promise<boolean>;
+ sendText(text: string, uploads?: VoiceTextUploads): Promise<boolean>;
 }
 interface Handlers {
  caption(id: string, role: 'user' | 'assistant', delta: string): void;
@@ -493,7 +500,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
      try { handlers.micHealth?.(true); } catch (handlerError) { console.warn('[voice] ignoring a failed voice event handler:', handlerError); }
     }
    },
-   sendText: text => {
+   sendText: (text, uploads) => {
     if (stopped || socket?.readyState !== WebSocket.OPEN) return Promise.resolve(false);
     if (!text.trim() || new TextEncoder().encode(text).length > 16000) return Promise.reject(new Error('Voice messages must contain text and be at most 16,000 bytes. Your draft has been kept.'));
     const id = randomUUID();
@@ -503,7 +510,11 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
       reject(new Error('Could not confirm message delivery. Check the conversation before retrying.'));
      }, 10000);
      pendingText.set(id, { resolve, reject, timer });
-     try { socket!.send(JSON.stringify({ type: 'input_text', id, text })); }
+     try { socket!.send(JSON.stringify({
+      type: 'input_text', id, text,
+      ...(uploads?.paths?.length ? { upload_paths: uploads.paths } : {}),
+      ...(uploads?.references?.length ? { upload_references: uploads.references } : {}),
+     })); }
      catch { clearTimeout(timer); pendingText.delete(id); resolve(false); }
     });
    },

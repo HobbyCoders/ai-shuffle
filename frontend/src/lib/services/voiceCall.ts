@@ -40,7 +40,7 @@ import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, prepareConversationC
 import { isLiveApiModel, usesAudioStream, usesDelegation } from '$lib/constants/voice-engines';
 import { createVoiceOutput } from './voiceVolume';
 import { CALL_LOAD_FAILED_MESSAGE, registerReloadBlocker, reportChunkLoadFailure } from './app-update';
-import type { VoiceAudioStream, VoiceStreamEndReason } from './voiceAudioStream';
+import type { VoiceAudioStream, VoiceStreamEndReason, VoiceTextUploads } from './voiceAudioStream';
 let audioStream: VoiceAudioStream | null = null;
 let audioAbort: AbortController | null = null;
 
@@ -1187,6 +1187,16 @@ export async function confirmCallReplacement(nextSessionId: string | null): Prom
 	return true;
 }
 
+/**
+ * This goes browser to provider, so a Realtime call's attachments can only ride
+ * in the text. The server's sideband reads this exact note and checks each path
+ * before recording it (voice_prompts.split_attachment_note).
+ */
+function attachmentNote(uploads?: VoiceTextUploads): string {
+	const paths = [...(uploads?.paths ?? []), ...(uploads?.references ?? []).map(reference => reference.path)];
+	return paths.length ? '\n\nAttached file references (ask a worker to inspect these files):\n' + paths.map(path => JSON.stringify(path)).join('\n') : '';
+}
+
 /** Send into the owner's Realtime conversation, never the normal query lane.
  * Transcript persistence belongs to the sideband input_text item handler. */
 function scheduleTypedResponse(): void {
@@ -1206,18 +1216,18 @@ function scheduleTypedResponse(): void {
 	}
 }
 
-export function sendVoiceText(owner: string, text: string): boolean | Promise<boolean> {
+export function sendVoiceText(owner: string, text: string, uploads?: VoiceTextUploads): boolean | Promise<boolean> {
 	const state = get(voiceCallState);
 	if (state.sessionId !== owner || state.status !== 'live' || !text.trim()) return false;
 	if (audioStream) {
 		if (!usesDelegation(state.model, state.options)) throw new Error('This voice engine does not support text or attachments. End the call to send your draft in chat.');
-		return audioStream.sendText(text);
+		return uploads ? audioStream.sendText(text, uploads) : audioStream.sendText(text);
 	}
 	if (connection?.dc.readyState !== 'open') return false;
 	try {
 		connection.dc.send(JSON.stringify({
 			type: 'conversation.item.create',
-			item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] }
+			item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: text + attachmentNote(uploads) }] }
 		}));
 	} catch {
 		return false;

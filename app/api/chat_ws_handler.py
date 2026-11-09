@@ -1147,69 +1147,7 @@ class ChatWebSocketHandler:
         """
         from app.core import upload_transfer
 
-        # Where each file was staged decides how it lifts. The composer can
-        # still name its local project for a chat whose files are session-staged.
-        staged, upload_paths = await run_sync(
-            upload_transfer.split_session_staged_paths, upload_paths, session_id
-        )
-        if not project_id:
-            staged, upload_paths = staged + upload_paths, []
-        blob_ids: List[str] = []
-        if staged:
-            session = await run_sync(database.get_session, session_id)
-            if not session or not session.get("project_v2_id"):
-                raise upload_transfer.UploadLiftError("Attachments need a project session.")
-            blob_ids = await run_sync(upload_transfer.lift_session_paths_to_blobs, staged, session)
-        if not upload_paths:
-            return blob_ids
-        project = await run_sync(database.get_project, project_id)
-        if not project:
-            raise upload_transfer.UploadLiftError(
-                f"Project not found: {project_id}"
-            )
-        project_v2_id = None
-        try:
-            from app.core import project_resolver
-
-            resolved = await run_sync(
-                project_resolver.resolve_project_v2,
-                {"project_id": project_id, "id": session_id},
-            )
-            project_v2_id = (resolved or {}).get("id")
-        except Exception:  # noqa: BLE001 — the v2 id is bookkeeping, not a gate
-            logger.debug(
-                "Upload lift: project_v2 resolve failed for %s", project_id,
-                exc_info=True,
-            )
-        # Established branch chats upload into their checkout, which may be
-        # outside the base project. First-message attachments can still be in
-        # main/uploads, so choose the confined root for each source rather than
-        # replacing the base root for the whole batch.
-        from pathlib import Path
-        from app.core.project_resolver import resolve_existing_cwd
-
-        def _lift_project_paths():
-            session = database.get_session(session_id)
-            cwd = resolve_existing_cwd(session) if session else None
-            checkout = Path(cwd).resolve() if cwd else None
-            lifted = []
-            for source in upload_paths:
-                source_project = project
-                if checkout and upload_transfer._is_under(Path(source).resolve(), checkout):
-                    source_project = {**project, "path": str(checkout)}
-                lifted += upload_transfer.lift_paths_to_blobs(
-                    [source], source_project, session_id, project_v2_id,
-                )
-            return lifted
-
-        lifted = await run_sync(_lift_project_paths)
-        if session_id:
-            session = await run_sync(database.get_session, session_id)
-            if session and (session.get("branch") or session.get("worktree_branch")):
-                errors = await run_sync(upload_transfer.stage_lifted_compose_uploads, lifted, project, session_id)
-                if errors:
-                    raise upload_transfer.UploadLiftError("; ".join(errors))
-        return blob_ids + lifted
+        return await run_sync(upload_transfer.lift_send_uploads, upload_paths, project_id, session_id)
 
     async def _authorize_mobile_session(self, session_id, *, claim=False):
         from app.core.mobile_tool_identity import bind_session

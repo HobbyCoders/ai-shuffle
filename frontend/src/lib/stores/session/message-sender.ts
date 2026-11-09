@@ -86,6 +86,12 @@ export function newSessionWorker(
 	return { isRemote: target !== null, ownerDeviceName: target?.name ?? null, createdFromComposer: true };
 }
 
+/** An optimistic echo's attachments, in the shape its durable row will carry. */
+function uploadsMetadata(paths: string[] = [], references: import('$lib/api/rewind').UploadReference[] = []): { metadata?: { upload_paths: string[] } } {
+	const all = [...paths, ...references.map(reference => reference.path)];
+	return all.length ? { metadata: { upload_paths: all } } : {};
+}
+
 function formatWorktreeError(rawError: string, branchName: string): string {
 	const lower = rawError.toLowerCase();
 
@@ -454,13 +460,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					clearTimeout(contextTimeout);
 				}
 				const paths = options?.pendingUploadPaths;
-				if (paths?.length) {
-					prompt += '\n\nAttached file references (ask a worker to inspect these files):\n' + paths.map(path => JSON.stringify(path)).join('\n');
-				}
+				const references = options?.pendingUploadReferences;
+				const uploads = paths?.length || references?.length ? { paths, references } : undefined;
 				try {
 					// Streaming calls acknowledge admission before the composer clears
 					// its draft; WebRTC retains its existing local-transport result.
-					const sent = await sendVoiceText(_state.sessionId, prompt);
+					const sent = await (uploads ? sendVoiceText(_state.sessionId, prompt, uploads) : sendVoiceText(_state.sessionId, prompt));
 					if (!sent) update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Voice call is not ready. Keep your message and try again when connected.' } : s);
 					return sent;
 				} catch (error) {
@@ -633,7 +638,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// An unrelated snapshot cannot admit this newly minted command.
 				const optimisticQueuedId = queuedEcho ? clientMessageId : null;
 				// A confirmed withdrawal or refusal hands these back with the words.
-				pendingQueue.noteSendUploads(clientMessageId, options?.pendingUploadPaths, options?.pendingUploadReferences);
+				pendingQueue.noteSendUploads(_state.sessionId, clientMessageId, options?.pendingUploadPaths, options?.pendingUploadReferences);
 
 				// A fresh local send can clear an error without adding a transcript row
 				// (queued/authoritative/pre-appended paths). Publish that intent in the
@@ -706,6 +711,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 								// The same command identity comes back on the durable receipt.
 								commandId: clientMessageId,
 								timestamp: new Date().toISOString(),
+								// The bubble shows its chips before the durable row arrives.
+								...uploadsMetadata(options?.pendingUploadPaths, options?.pendingUploadReferences),
 							}],
 							// S6: declared optimistic flip (see the skipMessageAppend
 							// branch above) — not a competing write of isStreaming.
@@ -1176,6 +1183,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						content: prompt,
 						profileId: queryProfileId,
 						timestamp: new Date().toISOString(),
+						...uploadsMetadata(pendingUploadPaths),
 					}],
 				};
 			});
