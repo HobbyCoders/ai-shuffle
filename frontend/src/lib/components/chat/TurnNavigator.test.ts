@@ -286,7 +286,7 @@ describe('TurnNavigator', () => {
 				expect(onSelect).toHaveBeenLastCalledWith(3);
 			});
 
-			describe('counts only a trigger the user can see', () => {
+			describe('counts any trigger that can still own a popup on screen', () => {
 				const tapSelects = async () => {
 					const onSelect = vi.fn();
 					render(TurnNavigator, { props: { items: many, currentIndex: 0, onSelect } });
@@ -306,9 +306,21 @@ describe('TurnNavigator', () => {
 					panel.remove();
 				});
 
-				it('ignores a trigger with no box, as in a display:none panel', async () => {
+				it('ignores a trigger left expanded in a hidden, inert panel, as Settings leaves one', async () => {
+					const panel = document.createElement('div');
+					panel.setAttribute('inert', '');
+					panel.style.display = 'none';
+					panel.append(trigger);
+					document.body.append(panel);
 					trigger.getBoundingClientRect = () => ({ width: 0, height: 0 }) as DOMRect;
 					expect(await tapSelects()).toBe(true);
+					panel.remove();
+				});
+
+				it('counts a trigger hidden on its own, as the usage ring is while its sheet stays open', async () => {
+					trigger.style.display = 'none';
+					trigger.getBoundingClientRect = () => ({ width: 0, height: 0 }) as DOMRect;
+					expect(await tapSelects()).toBe(false);
 				});
 
 				it('ignores a trigger that is visibility:hidden', async () => {
@@ -317,12 +329,15 @@ describe('TurnNavigator', () => {
 				});
 
 				it('still counts a visible trigger when a hidden one is expanded too', async () => {
+					const panel = document.createElement('div');
+					panel.setAttribute('inert', '');
 					const stale = document.createElement('button');
 					stale.setAttribute('aria-haspopup', 'listbox');
 					stale.setAttribute('aria-expanded', 'true');
-					document.body.prepend(stale);
+					panel.append(stale);
+					document.body.prepend(panel);
 					expect(await tapSelects()).toBe(false);
-					stale.remove();
+					panel.remove();
 				});
 
 				it('still counts a trigger scrolled out of view', async () => {

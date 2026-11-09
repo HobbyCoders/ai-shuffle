@@ -144,13 +144,12 @@
 	 *  the popup's own outside-press handling, which closes it during this press. */
 	let popupOpenAtPress = false;
 
-	/** A kept-alive panel hides an expanded picker with `display: none` and `inert`
-	 *  but leaves it marked open, so only a trigger the user can see counts. Its
-	 *  position is not read: a trigger scrolled out of view can still own an open menu. */
-	function canBeSeen(trigger: Element): boolean {
-		if (trigger.closest('[inert]')) return false;
-		const box = trigger.getBoundingClientRect();
-		return box.width > 0 && box.height > 0 && getComputedStyle(trigger).visibility === 'visible';
+	/** Could this expanded trigger own a popup on screen? A kept-alive panel leaves
+	 *  one behind inside `inert` or `visibility: hidden`, and nothing shows from there.
+	 *  Its own size is not read: the phone usage ring is `display: none` below 70%
+	 *  while its sheet stays open, and an opener's box says nothing about its popup. */
+	function canOwnOpenPopup(trigger: Element): boolean {
+		return !trigger.closest('[inert]') && getComputedStyle(trigger).visibility === 'visible';
 	}
 
 	/** The tick nearest a viewport y, clamped to the rail's visible box. */
@@ -315,7 +314,7 @@
 </script>
 
 <svelte:window
-	onpointerdowncapture={() => (popupOpenAtPress = [...document.querySelectorAll('[aria-haspopup][aria-expanded="true"]')].some(canBeSeen))}
+	onpointerdowncapture={() => (popupOpenAtPress = [...document.querySelectorAll('[aria-haspopup][aria-expanded="true"]')].some(canOwnOpenPopup))}
 />
 
 <nav
