@@ -68,7 +68,7 @@ function counted(count: number, noun: string): string {
 /** The confirmation after turning Away for all chats on. */
 export function globalAwayOnMessage(result: Pick<GlobalAwayResult, 'released_questions' | 'deferred_approvals'>): string {
 	const done = [
-		result.released_questions > 0 ? `answered ${counted(result.released_questions, 'waiting question')}` : '',
+		result.released_questions > 0 ? `answered ${counted(result.released_questions, 'question card')}` : '',
 		result.deferred_approvals > 0 ? `put off ${counted(result.deferred_approvals, 'approval')}` : ''
 	].filter(Boolean).join(' and ');
 	if (!done) return 'Away for all chats is on.';

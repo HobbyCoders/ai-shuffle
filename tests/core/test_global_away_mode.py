@@ -134,7 +134,11 @@ async def test_turn_on_releases_real_question_and_permission_waiters(monkeypatch
 @pytest.mark.parametrize("tag", [{}, {"provider_agent": {"worker_session_id": "task"}},
     {"provider_agent": {"worker_session_id": "remote", "remote_approval_id": "a"}},
     {"assistant_confirm": {"question": "Run this?"}}, {"tool_name": "ModelGuardrail"}])
-async def test_every_permission_card_kind_is_away_denied_once(tag):
+async def test_every_permission_card_kind_is_away_denied_once(tag, monkeypatch):
+    from collections import OrderedDict
+    from app.core import remote_task_approvals
+
+    monkeypatch.setattr(remote_task_approvals, "_SEEN", OrderedDict({"a": None}))
     chat("owner")
     payload = {"request_id": "p", "tool_name": "Bash", **tag}
     row = interactions.create_interaction("owner", "permission", payload, 300)
@@ -291,6 +295,9 @@ async def test_provider_worker_routed_to_owner_gets_away_denial(monkeypatch):
 async def test_remote_task_proxy_sends_away_denial_to_the_executing_worker(monkeypatch, restored):
     from app.core import remote_task_approvals as approvals
 
+    from collections import OrderedDict
+
+    monkeypatch.setattr(approvals, "_SEEN", OrderedDict({"away-proxy": None}))
     chat("owner")
     posted, ids = watch_permission_waiter(monkeypatch)
     send = AsyncMock()
@@ -352,15 +359,19 @@ async def test_startup_recovers_parked_cards_after_restoring_remote_waiters(monk
     order = []
     original_restore, original_release = approvals.restore_proxies, global_away_mode.release_if_enabled
 
-    async def restore():
+    async def restore(*, report_status):
+        assert report_status
         assert order == ["reattach"]
-        assert await original_restore() == 1
+        result = await original_restore(report_status=True)
+        assert result == approvals.ProxyRestoration(1, True)
         order.append("restored")
+        return result
 
-    async def release():
+    async def release(*, strict):
+        assert strict
         assert order == ["reattach", "restored"]
         order.append("release")
-        await original_release()
+        await original_release(strict=True)
 
     async def reattach():
         order.append("reattach")
@@ -371,10 +382,10 @@ async def test_startup_recovers_parked_cards_after_restoring_remote_waiters(monk
     stops, targets = AsyncMock(), AsyncMock()
     monkeypatch.setattr(remote_task, "deliver_stops", stops)
     monkeypatch.setattr(remote_task, "check_targets", targets)
-    # Stop after the first background tracking pass, without altering asyncio
-    # for the real restored waiters or other prompt machinery.
+    # A second pass must track normally without repeating successful recovery.
+    # Do not alter asyncio for the real restored waiters or prompt machinery.
     monkeypatch.setattr(remote_task, "asyncio", SimpleNamespace(
-        sleep=AsyncMock(side_effect=[None, asyncio.CancelledError()]), CancelledError=asyncio.CancelledError))
+        sleep=AsyncMock(side_effect=[None, None, asyncio.CancelledError()]), CancelledError=asyncio.CancelledError))
     try:
         with patch.object(away_mode, "record_decision", AsyncMock()):
             with pytest.raises(asyncio.CancelledError):
@@ -382,8 +393,7 @@ async def test_startup_recovers_parked_cards_after_restoring_remote_waiters(monk
             if enabled:
                 await asyncio.wait_for(asyncio.gather(*restored_tasks), 3)
         assert order == ["reattach", "restored", "release"]
-        stops.assert_awaited_once()
-        targets.assert_awaited_once()
+        assert stops.await_count == targets.await_count == 2
         for row in (question, confirm, proxy):
             current = interactions.get_interaction(row["id"])
             assert current["state"] == ("answered" if enabled else "pending")
@@ -409,18 +419,196 @@ async def test_startup_away_failure_does_not_stop_background_tracking(monkeypatc
     from app.core import remote_task, remote_task_approvals
 
     monkeypatch.setattr(remote_task, "asyncio", SimpleNamespace(
-        sleep=AsyncMock(side_effect=[None, asyncio.CancelledError()]), CancelledError=asyncio.CancelledError))
-    monkeypatch.setattr(remote_task, "reattach_all", AsyncMock())
-    monkeypatch.setattr(remote_task_approvals, "restore_proxies", AsyncMock())
-    monkeypatch.setattr(global_away_mode, "release_if_enabled", AsyncMock(side_effect=RuntimeError("DB unavailable")))
+        sleep=AsyncMock(side_effect=[None, None, None, asyncio.CancelledError()]), CancelledError=asyncio.CancelledError))
+    reattach = AsyncMock()
+    restore = AsyncMock(return_value=remote_task_approvals.ProxyRestoration(0, True))
+    release = AsyncMock(side_effect=[RuntimeError("DB unavailable"), None])
+    monkeypatch.setattr(remote_task, "reattach_all", reattach)
+    monkeypatch.setattr(remote_task_approvals, "restore_proxies", restore)
+    monkeypatch.setattr(global_away_mode, "release_if_enabled", release)
     stops, targets = AsyncMock(), AsyncMock()
     monkeypatch.setattr(remote_task, "deliver_stops", stops)
     monkeypatch.setattr(remote_task, "check_targets", targets)
     with pytest.raises(asyncio.CancelledError):
         await remote_task.tracking_loop()
-    stops.assert_awaited_once()
-    targets.assert_awaited_once()
+    reattach.assert_awaited_once()
+    assert restore.await_count == release.await_count == 2
+    assert stops.await_count == targets.await_count == 3
     assert "Could not release global Away prompts at startup" in caplog.text
+
+
+async def run_startup_passes(monkeypatch, passes, after_pass):
+    """Drive real tracking passes, inspecting durable state between each one."""
+    from app.core import remote_task
+
+    completed = 0
+    stops, targets, reattach = AsyncMock(), AsyncMock(), AsyncMock()
+
+    async def sleep(_seconds):
+        nonlocal completed
+        if stops.await_count:
+            completed += 1
+            assert stops.await_count == targets.await_count == completed
+            after_pass(completed)
+            if completed == passes:
+                raise asyncio.CancelledError()
+
+    monkeypatch.setattr(remote_task, "asyncio", SimpleNamespace(
+        sleep=sleep, CancelledError=asyncio.CancelledError))
+    monkeypatch.setattr(remote_task, "reattach_all", reattach)
+    monkeypatch.setattr(remote_task, "deliver_stops", stops)
+    monkeypatch.setattr(remote_task, "check_targets", targets)
+    with pytest.raises(asyncio.CancelledError):
+        await remote_task.tracking_loop()
+    assert completed == passes
+    reattach.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure", ["setting", "pending", "chat"])
+async def test_startup_retries_failed_sweep_until_clean_then_stops(monkeypatch, failure):
+    from app.core import remote_task_approvals as approvals
+
+    chat("owner")
+    row = interactions.create_interaction("owner", "question", {
+        "request_id": "retry-question", "questions": QUESTIONS,
+    }, 300)
+    # A broken chat must not hold up the rest of this pass's local sweep.
+    chat("z-other")
+    other = interactions.create_interaction("z-other", "question", {
+        "request_id": "other-question", "questions": QUESTIONS,
+    }, 300)
+    database.set_system_setting("global_away_mode", "1")
+    module, name = {
+        "setting": (away_mode, "global_away_enabled"),
+        "pending": (global_away_mode, "_pending_sessions"),
+        "chat": (away_mode, "release_pending_questions"),
+    }[failure]
+    original = getattr(module, name)
+    failed = False
+
+    def fail_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("temporary read failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, fail_once)
+    restore = AsyncMock(wraps=approvals.restore_proxies)
+    sweep = AsyncMock(wraps=global_away_mode.release_if_enabled)
+    monkeypatch.setattr(approvals, "restore_proxies", restore)
+    monkeypatch.setattr(global_away_mode, "release_if_enabled", sweep)
+
+    def check_pass(number):
+        assert interactions.get_interaction(row["id"])["state"] == (
+            "pending" if number == 1 else "answered")
+        if number == 1 and failure == "chat":
+            assert interactions.get_interaction(other["id"])["state"] == "answered"
+
+    await run_startup_passes(monkeypatch, 3, check_pass)
+    assert failed
+    assert restore.await_count == sweep.await_count == 2
+    assert interactions.get_interaction(row["id"])["answer"] == {
+        "Track?": "Nightly (Recommended)"}
+
+
+@pytest.mark.parametrize("failure", ["dispatches", "proxy_rows", "spawn"])
+async def test_incomplete_relay_restore_keeps_proxy_pending_but_releases_local_questions(monkeypatch, failure):
+    from collections import OrderedDict
+    from app.core import remote_task_approvals as approvals
+    from app.db import remote_tasks
+
+    chat("owner")
+    question = interactions.create_interaction("owner", "question", {
+        "request_id": "local-question", "questions": QUESTIONS,
+    }, 300)
+    proxy = interactions.create_interaction("owner", "permission", {
+        "request_id": "retry-proxy", "tool_name": "Bash",
+        "provider_agent": {"worker_session_id": "remote-child", "remote_approval_id": "retry-approval"},
+    }, 300)
+    database.set_system_setting("global_away_mode", "1")
+    monkeypatch.setattr(approvals, "_SEEN", OrderedDict())
+    dispatches = [{"root_session_id": "owner", "worker_session_id": "remote-child", "target_device_id": "peer"}]
+    monkeypatch.setattr(remote_tasks, "tracked_dispatches", lambda: dispatches)
+    tasks = []
+    monkeypatch.setattr(approvals, "_spawn", lambda coro, name: tasks.append(asyncio.create_task(coro)))
+    module, name = {"dispatches": (remote_tasks, "tracked_dispatches"),
+                    "proxy_rows": (approvals, "_proxy_rows"), "spawn": (approvals, "_spawn")}[failure]
+    original = getattr(module, name)
+    failed = False
+
+    def fail_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("temporary relay failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, fail_once)
+    send = AsyncMock()
+    monkeypatch.setattr(approvals, "_send_answer", send)
+    restore = AsyncMock(wraps=approvals.restore_proxies)
+    sweep = AsyncMock(wraps=global_away_mode.release_if_enabled)
+    monkeypatch.setattr(approvals, "restore_proxies", restore)
+    monkeypatch.setattr(global_away_mode, "release_if_enabled", sweep)
+
+    def check_pass(number):
+        assert interactions.get_interaction(question["id"])["state"] == "answered"
+        current = interactions.get_interaction(proxy["id"])
+        assert current["state"] == ("pending" if number == 1 else "answered")
+        if number == 1:
+            assert current["answer"] is None
+            assert not approvals.has_live_relay("retry-approval")
+            send.assert_not_awaited()
+        else:
+            assert current["answer"]["message"] == away_mode.DEFERRED_MESSAGE
+
+    try:
+        with patch.object(away_mode, "record_decision", AsyncMock()):
+            await run_startup_passes(monkeypatch, 3, check_pass)
+            await asyncio.wait_for(asyncio.gather(*tasks), 3)
+        assert failed
+        assert restore.await_count == sweep.await_count == 2
+        send.assert_awaited_once()
+        assert send.await_args.args[0].worker_session_id == "remote-child"
+        assert send.await_args.args[1:] == ("deny", approvals.AWAY_MESSAGE)
+        # Existing count-only callers keep the original contract.
+        assert await approvals.restore_proxies() == 0
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_untracked_remote_proxy_is_skipped_without_retrying_recovery_forever(monkeypatch):
+    from collections import OrderedDict
+    from app.core import remote_task_approvals as approvals
+    from app.db import remote_tasks
+
+    chat("owner")
+    row = interactions.create_interaction("owner", "permission", {
+        "request_id": "orphan-proxy", "tool_name": "Bash",
+        "provider_agent": {"worker_session_id": "untracked", "remote_approval_id": "orphan"},
+    }, 300)
+    monkeypatch.setattr(approvals, "_SEEN", OrderedDict())
+    monkeypatch.setattr(remote_tasks, "tracked_dispatches", lambda: [])
+    # A toggle can arrive before startup has even attempted relay restoration.
+    assert await global_away_mode.apply(True) == {
+        "away": True, "released_questions": 0, "deferred_approvals": 0}
+    restore = AsyncMock(wraps=approvals.restore_proxies)
+    sweep = AsyncMock(wraps=global_away_mode.release_if_enabled)
+    monkeypatch.setattr(approvals, "restore_proxies", restore)
+    monkeypatch.setattr(global_away_mode, "release_if_enabled", sweep)
+
+    def check_pass(_number):
+        current = interactions.get_interaction(row["id"])
+        assert current["state"] == "pending"
+        assert current["answer"] is None
+
+    await run_startup_passes(monkeypatch, 3, check_pass)
+    restore.assert_awaited_once_with(report_status=True)
+    sweep.assert_awaited_once_with(strict=True)
 
 
 @pytest.mark.parametrize("takeover", ["adopt_session", "adopt_session_follow", "unpin_session", "pin_session_placement"])

@@ -687,21 +687,33 @@ async def handle_task_approval(body: Dict[str, Any], from_device: str) -> Dict[s
     return {"accepted": True, "ttl_seconds": ttl}
 
 
-async def restore_proxies() -> int:
+@dataclass(frozen=True)
+class ProxyRestoration:
+    restored: int
+    complete: bool
+
+
+def has_live_relay(approval_id: str) -> bool:
+    """Whether this process has dispatched the relay for a remote approval."""
+    return approval_id in _SEEN
+
+
+async def restore_proxies(*, report_status: bool = False) -> int | ProxyRestoration:
     """Re-attach proxy prompts still open after this worker restarted.
 
     The rows are durable on the root sessions; their waiters died with the old
     process. Each gets a waiter again, so an answer still reaches the child
-    while it waits. Returns how many were restored. Never raises.
+    while it waits. Returns how many were restored, or counts and completeness
+    when startup requests status. Never raises; incomplete passes can be retried.
     """
     from app.db import remote_tasks
 
-    restored = 0
+    restored, complete = 0, True
     try:
         dispatches = await asyncio.to_thread(remote_tasks.tracked_dispatches)
-    except Exception:  # noqa: BLE001 — nothing to restore
+    except Exception:  # noqa: BLE001 — retry on the next tracking pass
         logger.debug("remote approvals: restore read failed", exc_info=True)
-        return 0
+        return ProxyRestoration(0, False) if report_status else 0
     for dispatch in dispatches:
         try:
             rows = await asyncio.to_thread(_proxy_rows, dispatch["root_session_id"],
@@ -719,12 +731,19 @@ async def restore_proxies() -> int:
                     tool_name="", title=None, display_name=None, description=None,
                     decision_reason=None, tool_input={})
                 _note(_SEEN, approval_id)
-                _spawn(_follow_existing(request, row), f"task-approval-restore-{approval_id[:8]}")
+                coro = _follow_existing(request, row)
+                try:
+                    _spawn(coro, f"task-approval-restore-{approval_id[:8]}")
+                except Exception:
+                    _SEEN.pop(approval_id, None)
+                    coro.close()
+                    raise
                 restored += 1
         except Exception:  # noqa: BLE001 — one child never blocks the others
+            complete = False
             logger.warning("remote approvals: could not restore prompts of %s",
                            dispatch.get("worker_session_id"), exc_info=True)
-    return restored
+    return ProxyRestoration(restored, complete) if report_status else restored
 
 
 def drop_proxies(root_session_id: str, worker_session_id: str) -> int:

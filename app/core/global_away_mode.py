@@ -39,8 +39,8 @@ def _covered_local(session_id: str) -> bool:
     return local and away_mode.globally_covered(session_id)
 
 
-async def release_session_pending(session_id: str) -> dict:
-    """Best-effort recovery after a chat becomes locally executable."""
+async def release_session_pending(session_id: str, *, strict: bool = False) -> dict:
+    """Best-effort recovery; startup can request failure reporting for retry."""
     from app.core.chat_access import broker
 
     counts = {"released_questions": 0, "deferred_approvals": 0}
@@ -52,6 +52,8 @@ async def release_session_pending(session_id: str) -> dict:
             counts["deferred_approvals"] += await broker.defer_pending_away(session_id)
     except Exception:  # noqa: BLE001 — a broken prompt must never fail a handoff
         logger.warning("Could not release global Away prompts for %s", session_id, exc_info=True)
+        if strict:
+            raise
     return counts
 
 
@@ -82,7 +84,7 @@ def release_session_after_commit(conn, session_id: str) -> None:
     after_commit(conn, schedule)
 
 
-async def release_local_pending() -> dict:
+async def release_local_pending(*, strict: bool = False) -> dict:
     """Release only covered chats executed here; repeated/overlapping sweeps are safe.
 
     Permission cards share one durable state machine, including starter-chat,
@@ -95,17 +97,24 @@ async def release_local_pending() -> dict:
     ids.update(r.session_id for r in list(broker.requests.values()) if not r.result.done())
     ids.update(a.session_id for a in list(broker.actions.values()) if not a.decision.done())
     counts = {"released_questions": 0, "deferred_approvals": 0}
+    failed = False
     for session_id in sorted(ids):
-        released = await release_session_pending(session_id)
-        for key in counts:
-            counts[key] += released[key]
+        try:
+            released = (await release_session_pending(session_id, strict=True) if strict
+                        else await release_session_pending(session_id))
+            for key in counts:
+                counts[key] += released[key]
+        except Exception:  # noqa: BLE001 — still release the other chats on this pass
+            failed = True
+    if failed:
+        raise RuntimeError("Global Away sweep did not release every chat")
     return counts
 
 
-async def release_if_enabled() -> None:
-    """Sync callback: read after cache invalidation, off-thread and outside locks."""
+async def release_if_enabled(*, strict: bool = False) -> None:
+    """Sync callback; startup requires a clean sweep before it stops retrying."""
     if await run_sync(away_mode.global_away_enabled):
-        await release_local_pending()
+        await release_local_pending(strict=strict)
 
 
 def notify_changed() -> None:

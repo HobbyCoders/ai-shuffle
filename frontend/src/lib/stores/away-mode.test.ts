@@ -256,8 +256,8 @@ describe('Away for all chats', () => {
 
 	it('words the confirmation from the counts', () => {
 		expect(globalAwayOnMessage({ released_questions: 0, deferred_approvals: 0 })).toBe('Away for all chats is on.');
-		expect(globalAwayOnMessage({ released_questions: 1, deferred_approvals: 0 })).toBe('Away for all chats is on. Answered 1 waiting question.');
+		expect(globalAwayOnMessage({ released_questions: 1, deferred_approvals: 0 })).toBe('Away for all chats is on. Answered 1 question card.');
 		expect(globalAwayOnMessage({ released_questions: 0, deferred_approvals: 3 })).toBe('Away for all chats is on. Put off 3 approvals.');
-		expect(globalAwayOnMessage({ released_questions: 2, deferred_approvals: 1 })).toBe('Away for all chats is on. Answered 2 waiting questions and put off 1 approval.');
+		expect(globalAwayOnMessage({ released_questions: 2, deferred_approvals: 1 })).toBe('Away for all chats is on. Answered 2 question cards and put off 1 approval.');
 	});
 });

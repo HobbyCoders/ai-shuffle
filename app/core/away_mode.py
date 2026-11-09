@@ -443,7 +443,7 @@ async def release_pending_approvals(session_id: str) -> int:
     and owner_confirm cards: all use the same permission interaction/waiter.
     A guarded answer wins once; no saved permission rules or approval passes.
     """
-    from app.core import interaction_events, interaction_wait
+    from app.core import interaction_events, interaction_wait, remote_task_approvals
     from app.core.permission_handler import PERMISSION_KIND
     from app.db import interactions
 
@@ -453,6 +453,11 @@ async def release_pending_approvals(session_id: str) -> int:
         if row.get("kind") != PERMISSION_KIND:
             continue
         payload = row.get("payload") or {}
+        tag = payload.get("provider_agent") or {}
+        remote_id = tag.get("remote_approval_id") if isinstance(tag, dict) else None
+        if remote_id and not remote_task_approvals.has_live_relay(remote_id):
+            # Keep it pending until restoration can forward the denial to the child.
+            continue
         answer = {"decision": "deny", "behavior": "deny", "message": DEFERRED_MESSAGE}
         if not await asyncio.to_thread(interactions.answer_interaction, row["id"], answer):
             continue
