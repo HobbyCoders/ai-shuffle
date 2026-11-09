@@ -188,6 +188,24 @@ test('a forgiven correction uses up what explained it', () => {
 	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 2);
 });
 
+test('a follow that stops short by the measured room below it is the same movement', () => {
+	const rows = [-246, -120, -361, -361, -781, -829];
+	const content = [867, 867, 1108, 1536, 1536, 1584];
+	const composer = [188, 322, 322, 322, 322, 322];
+	const gap = [8, 0, 0, 428, 8, 8];
+	const measured = rows.map((row, i) => ({ row, content: content[i], composer: composer[i], gap: gap[i] }));
+	assert.equal(transcriptMovements(measured), 0);
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 2);
+});
+
+test('the content that arrives after the row is back still explains the next step', () => {
+	const rows = [68, 68, 68, 76, 68, 68, 68, 68, -323, -323];
+	const content = [7941, 7941, 7941, 7949, 7949, 7949, 7949, 8340, 8340, 8340];
+	const composer = [744, 744, 744, 752, 752, 752, 752, 752, 752, 752];
+	assert.equal(transcriptMovements(frames(rows, { content, composer }), { knownCorrection: 8.5 }), 0);
+	assert.equal(transcriptMovements(frames(rows, { content, composer })), 2);
+});
+
 test('content that shrinks does not explain a row moving down', () => {
 	assert.equal(transcriptMovements(frames([500, 500, 540, 540], { content: [2040, 2040, 2000, 2000] })), 1);
 });

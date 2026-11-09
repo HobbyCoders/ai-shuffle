@@ -59,27 +59,33 @@ function leftFrom(rows, at, tolerance) {
 	return null;
 }
 
-/** Each time the row left a place and came back: `{ from, to }`, one entry however long it stays back. */
+/** Each time the row left a place and came back: `{ from, to }`, to the first frame back, however long it stays. */
 function findReturns(rows, tolerance) {
 	const returns = [];
+	let stillBack = -1;
 	for (let at = 1; at < rows.length; at++) {
-		const last = returns[returns.length - 1];
-		if (last?.to === at - 1 && Math.abs(rows[at] - rows[at - 1]) <= tolerance) {
-			last.to = at;
+		if (stillBack === at - 1 && Math.abs(rows[at] - rows[at - 1]) <= tolerance) {
+			stillBack = at;
 			continue;
 		}
 		const from = leftFrom(rows, at, tolerance);
-		if (from !== null) returns.push({ from, to: at });
+		if (from === null) continue;
+		returns.push({ from, to: at });
+		stillBack = at;
 	}
 	return returns;
 }
 
-/** Spends the newest unspent changes that add up to `size`; false if none do. */
-function spend(pool, size, tolerance) {
+/**
+ * Spends the newest unspent changes that add up to `size`; false if none do. A row
+ * following the bottom can stop short by the empty room `leftBelow` measured below
+ * the reader on that frame, so that shortfall is the same change.
+ */
+function spend(pool, size, tolerance, leftBelow) {
 	let sum = 0;
 	for (let i = pool.length - 1; i >= 0; i--) {
 		sum += pool[i].px;
-		if (Math.abs(sum - size) <= tolerance) {
+		if (Math.abs(sum - size) <= tolerance || Math.abs(sum - leftBelow - size) <= tolerance) {
 			pool.splice(i);
 			return true;
 		}
@@ -89,7 +95,7 @@ function spend(pool, size, tolerance) {
 
 /**
  * Separate movements of a transcript row that nothing explains, over a whole send.
- * Frames are `{ row: top, content: scrollHeight, composer: top }`.
+ * Frames are `{ row: top, content: scrollHeight, composer: top, gap: room below the reader }`.
  *
  * A bounce is a property of the row's whole path, so it is read from the path:
  * a row that left a position and came back to it moved twice, whatever explains
@@ -138,7 +144,9 @@ export function transcriptMovements(frames, { tolerance = STILL, knownCorrection
 		if (composer > tolerance) gaveBack.push({ at: i, px: composer });
 		if (content > tolerance) added.push({ at: i, px: content });
 		const shift = beyondStill(measured[i].row - measured[i - 1].row, tolerance);
-		steps.push(shift !== 0 && spend(shift > 0 ? gaveBack : added, Math.abs(shift), tolerance) ? 0 : shift);
+		// Moving down used up the room that was below the row; moving up may leave some.
+		const leftBelow = Math.max(0, (shift > 0 ? measured[i - 1].gap : measured[i].gap) ?? 0);
+		steps.push(shift !== 0 && spend(shift > 0 ? gaveBack : added, Math.abs(shift), tolerance, leftBelow) ? 0 : shift);
 	}
 	return bounces + countRuns(steps);
 }

@@ -1,9 +1,9 @@
 // Sending must not move the turn rail, including when the composer gives height
 // back: its box sets the transcript's height, and a rail placed from that box
 // followed it (#1094). chat-position-stability's own send is one short line and
-// never changes the composer's height, so these two sends live here. The rail's
-// position comes from the visible height, so a keyboard or a landscape phone must
-// keep it inside the transcript too.
+// never changes the composer's height, so these sends live here. On a phone the
+// rail stands at the transcript's top whatever shares the composer's slot, and
+// only its bottom gives way to a keyboard or a tall draft.
 import { runJourney } from './runner.mjs';
 import { composer, expect, gotoApp, PROJECT, pickAccess, pickProject, seededChatId, sendButton, stopButton, typeAndSend, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { mobileShell, openStopChat, queueDuringASlowTurn } from './lib/stop-queue.mjs';
@@ -52,7 +52,7 @@ async function watchFrames(page) {
 			const observer = new IntersectionObserver((entries) => {
 				observer.disconnect();
 				const top = (el) => entries.find((entry) => entry.target === el)?.boundingClientRect.top ?? null;
-				watch.frames.push({ seq, rail: top(elements.rail), composer: top(elements.composer), row: top(elements.row), content: log.scrollHeight });
+				watch.frames.push({ seq, rail: top(elements.rail), composer: top(elements.composer), row: top(elements.row), content: log.scrollHeight, gap: log.scrollHeight - log.clientHeight - log.scrollTop });
 			});
 			for (const el of Object.values(elements)) if (el?.isConnected) observer.observe(el);
 			requestAnimationFrame(sample);
@@ -70,8 +70,8 @@ async function watchFrames(page) {
 
 /** Only the frames where something moved, so a failure can be read from its log. */
 const changes = (frames) => frames
-	.filter((frame, i) => i === 0 || ['row', 'content', 'composer'].some((key) => frame[key] !== frames[i - 1][key]))
-	.map(({ seq, row, content, composer }) => [seq, row, content, composer].map((value) => (Number.isFinite(value) ? Math.round(value) : value)));
+	.filter((frame, i) => i === 0 || ['row', 'content', 'composer', 'gap'].some((key) => frame[key] !== frames[i - 1][key]))
+	.map(({ seq, row, content, composer, gap }) => [seq, row, content, composer, gap].map((value) => (Number.isFinite(value) ? Math.round(value) : value)));
 
 const present = (frames, key) => frames.map((frame) => frame[key]).filter(Number.isFinite);
 
@@ -103,6 +103,16 @@ const sendCase = ({ name, setup, prepare, ...options }) => ({
 		expect(transcriptMoves <= 1, `the composer shrinking moves the transcript at most once (${transcriptMoves} movements)`);
 	}
 });
+
+/** Resolves once the composer has held one place and size for 20 frames. */
+function composerAtRest(page) {
+	return page.waitForFunction(() => {
+		const box = document.querySelector('.input-slot').getBoundingClientRect();
+		const at = `${box.top}/${box.height}`;
+		window.__composerRest = at === window.__composerRest?.at ? { at, frames: window.__composerRest.frames + 1 } : { at, frames: 0 };
+		return window.__composerRest.frames >= 20;
+	}, undefined, { polling: 'raf', timeout: 15_000 });
+}
 
 /** A chat with two turns and one child chat still running, so the line naming
  * that child sits in the composer's slot above the draft. */
@@ -137,9 +147,10 @@ const railGeometry = (page) => page.evaluate((selector) => {
 // Enough for a few ticks; a shorter rail scrolls, and a shorter transcript fills it.
 const MIN_RAIL = 40;
 
-/** Only a transcript with no height left may lose the rail. */
+/** The rail's top is the transcript's top; only a transcript with no height left may lose the rail. */
 function expectRailUsable(name, at) {
 	const detail = JSON.stringify(at);
+	expect(Math.abs(at.railTop - at.logTop) <= 1, `${name}: the rail stands at the transcript's top (${detail})`);
 	const room = at.composerTop - at.logTop;
 	if (room < 1) return;
 	expect(at.railTop >= at.logTop - 1 && at.railBottom <= at.composerTop + 1, `${name}: the rail stays inside the transcript (${detail})`);
@@ -147,10 +158,26 @@ function expectRailUsable(name, at) {
 }
 
 const DRAFT = 'please read the deployment notes again and then list every question that is still open for me ';
-// Six wrapped lines in the phone composer: 166px empty, 228px for two lines, then
-// 24px a line. /mobile/ stops at 300px. Up to this size the rail must not move at
-// any visible height; only a taller draft can genuinely be taking its space.
-const ORDINARY_COMPOSER = 324;
+
+/** The touch scrub's preview rides above the finger, and over the first tick
+ * there is no room above it. Real pointer handlers, synthetic touch. */
+async function firstTickPreview(page) {
+	const at = await page.evaluate(async () => {
+		const nav = document.querySelector('nav.turn-nav');
+		const rail = nav.querySelector('.turn-rail');
+		const [first, second] = rail.querySelectorAll('.tick');
+		const y = (el) => { const box = el.getBoundingClientRect(); return box.top + box.height / 2; };
+		const send = (target, type, clientY) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true, pointerId: 41, clientY }));
+		send(second, 'pointerdown', y(second));
+		send(rail, 'pointermove', y(first));
+		await new Promise((done) => setTimeout(done, 300));
+		const box = nav.querySelector('.preview').getBoundingClientRect();
+		const result = { scrubbing: nav.classList.contains('is-scrubbing'), top: box.top, bottom: box.bottom, tick: y(first) };
+		send(rail, 'pointercancel', y(first));
+		return result;
+	});
+	return at;
+}
 
 const short = [
 	{ name: 'portrait keyboard', width: 390, height: 844, visible: 544 },
@@ -184,8 +211,10 @@ await runJourney({
 				await page.waitForFunction((top) => document.querySelector('.input-slot').getBoundingClientRect().top < top - 10, before.composerTop);
 				const after = await railGeometry(page);
 				expect(Math.abs(after.railTop - before.railTop) <= 1, `the draft's height does not move the rail (${before.railTop} to ${after.railTop})`);
-				// Up to ORDINARY_COMPOSER a draft must not move the rail at any visible height.
-				let tallestOrdinary = 0;
+				const preview = await firstTickPreview(page);
+				log(`first tick preview ${JSON.stringify(preview)}`);
+				expect(preview.scrubbing && preview.top >= before.logTop && preview.bottom > preview.top, `the first tick's preview stays below the header (${JSON.stringify(preview)})`);
+				let tallest = 0;
 				for (const visible of [340, 436, 544, 640]) {
 					await showVisibleHeight(page, visible);
 					await composer(page).fill('');
@@ -196,12 +225,11 @@ await runJourney({
 						await page.waitForTimeout(200);
 						const at = await railGeometry(page);
 						log(`ordinary draft ${visible}/${chars} ${JSON.stringify(at)}`);
-						if (at.composerHeight > ORDINARY_COMPOSER) continue;
-						tallestOrdinary = Math.max(tallestOrdinary, at.composerHeight);
+						tallest = Math.max(tallest, at.composerHeight);
 						expect(Math.abs(at.railTop - rest.railTop) <= 1, `a ${Math.round(at.composerHeight)}px composer at visible ${visible} does not move the rail (${rest.railTop} to ${at.railTop})`);
 					}
 				}
-				expect(tallestOrdinary > 260, `the drafts reached a tall ordinary composer (${tallestOrdinary}px)`);
+				expect(tallest > 260, `the drafts reached a tall composer (${tallest}px)`);
 				await showVisibleHeight(page, 544);
 				// Grow the draft until the transcript has less room than the rail's usual
 				// offset. /mobile/ caps its composer at 300px, so it needs less height to get there.
@@ -249,25 +277,40 @@ await runJourney({
 		// With a keyboard up the rail stands at the top of a short transcript, and a
 		// wrapped draft must not change that.
 		sendCase({
-			name: 'wrapped-send-keyboard', viewports: ['phone'], setup: openHistory,
-			async prepare({ page }) {
+			// Prepared in setup, which is not recorded: the journey shrinks the screen
+			// itself, and on a slow phone that lands outside "recent input".
+			name: 'wrapped-send-keyboard', viewports: ['phone'],
+			async setup(ctx) {
+				const { page } = ctx;
+				await openHistory(ctx);
 				await page.setViewportSize({ width: 360, height: 640 });
 				await showVisibleHeight(page, 340);
 				await composer(page).fill('please read the deployment notes again and then list every question that is still open for me [script:default]');
-			}
+				await composerAtRest(page);
+			},
+			prepare: async () => {}
 		}),
 		// Whatever else sits in the composer's slot leaves with its draft height, so
-		// it must not be able to move the rail either.
+		// it must not be able to move the rail either. Prepared in setup, which is
+		// not recorded: the journey grows the draft itself, without typing.
 		sendCase({
-			name: 'six-line-send-with-running-child', viewports: ['phone'], throttles: ['fast'], setup: openChatWithARunningChild,
-			async prepare({ page, log }) {
+			name: 'six-line-send-with-running-child', viewports: ['phone'], throttles: ['fast'],
+			async setup(ctx) {
+				const { page, log } = ctx;
+				await openChatWithARunningChild(ctx);
 				await showVisibleHeight(page, 544);
 				await composer(page).fill(`${DRAFT.repeat(3).slice(0, 230)} [script:default]`);
 				await page.waitForTimeout(300);
 				const at = await railGeometry(page);
 				log(`six lines with a running child ${JSON.stringify(at)}`);
 				expect(at.composerHeight >= 300, `the draft and the running child's line filled the slot (${at.composerHeight}px)`);
-			}
+				// Send from a settled chat, like the other cases: the last turn's room below the reader has been handed back.
+				await page.waitForFunction((selector) => {
+					const log = document.querySelector(selector);
+					return log.scrollHeight - log.clientHeight - log.scrollTop <= 16;
+				}, LOG, { timeout: 15_000 });
+			},
+			prepare: async () => {}
 		}),
 		// The words of a "Not sent" row join a typed draft, and both go at once.
 		sendCase({ name: 'restored-row-send', setup: openStopChat, prepare: restoreNotSentRowIntoADraft })
