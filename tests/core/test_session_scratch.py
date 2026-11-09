@@ -358,3 +358,9 @@ async def test_maintenance_paces_slices_and_warns_without_size_eviction(monkeypa
     assert len(closed) == 2
     notify.assert_awaited_once()
     assert notify.call_args.kwargs["category"] == "agent_storage"
+
+
+def test_windows_reference_case_and_separator_normalization(monkeypatch):
+    import ntpath
+    monkeypatch.setattr(ss.os.path, "normcase", ntpath.normcase)
+    assert ss._in_use(r"C:\State\projects\p\scratch\s", {"python --input=c:/state/projects/p/scratch/s/input"})
