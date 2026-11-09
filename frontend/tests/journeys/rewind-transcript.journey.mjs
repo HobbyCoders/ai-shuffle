@@ -29,6 +29,7 @@ import {
 	withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { expectRetainedHolds } from './lib/retained-geometry.mjs';
 import { frames, markTime, spans } from './lib/timeline.mjs';
 
 // A deterministic refused write on the private database, not a mocked API reply.
@@ -198,23 +199,6 @@ async function readRetainedGeometry(page) {
 		cancelAnimationFrame(window.__rewindGeometryRaf);
 		return window.__rewindGeometry;
 	});
-}
-
-/**
- * The expected shrink: the retained reply comes into view once, at its final
- * place, and stays there, and the composer's bottom edge never moves. Scrolling
- * while it is still off screen (focus reaching the rewound row) is not a jump.
- */
-function expectRetainedHolds(geometry, log) {
-	expect(geometry.every((f) => !f.gone), 'the retained reply stayed on the page through the rewind');
-	const bottoms = geometry.map((f) => f.bottom);
-	expect(Math.max(...bottoms) - Math.min(...bottoms) <= 1, `the composer's bottom edge moved: ${Math.min(...bottoms)}..${Math.max(...bottoms)}`);
-	const visible = geometry.filter((f) => f.top + f.height > 0 && f.top < f.viewport).map((f) => Math.round(f.top));
-	const places = visible.filter((top, i) => i === 0 || Math.abs(top - visible[i - 1]) > 1);
-	expect(places.length === 1, `the retained reply moved while on screen: ${places.join(' -> ')}`);
-	const last = geometry.at(-1);
-	expect(last.top + last.height > 0 && last.top < last.viewport, 'the retained reply is in view after the rewind');
-	log(`Retained reply settled at ${places[0]}px over ${geometry.length} painted frames; composer bottom held.`);
 }
 
 /** What the rewind left on screen, and that the chat still answers. */
