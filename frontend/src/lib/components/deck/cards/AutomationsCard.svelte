@@ -114,6 +114,8 @@
 	// Form state
 	let formSaving = $state(false);
 	let formError = $state('');
+	let formSettling = $state(false);
+	let formSettleTimer: ReturnType<typeof setTimeout> | undefined;
 	let formName = $state('');
 	let formDescription = $state('');
 	let formTriggers: TriggerItem[] = $state([{ type: 'cron', config: { expression: '0 9 * * *' } }]);
@@ -270,6 +272,10 @@
 		error = '';
 		resetForm();
 		currentView = 'create';
+		// The second tap of a double tap would land on whichever field opened under it.
+		formSettling = true;
+		clearTimeout(formSettleTimer);
+		formSettleTimer = setTimeout(() => (formSettling = false), 350);
 	}
 
 	/** `refresh` re-hydrates the same open form after a remote change, so the
@@ -659,6 +665,7 @@
       </button>
      {/snippet}
      {#snippet children()}
+			<div style="display: contents" inert={formSettling}>
 			<AutomationForm
 				currentView={currentView as 'create' | 'edit'}
 				selectedAutomationId={selectedAutomation?.id ?? null}
@@ -718,6 +725,7 @@
 				onToggleTriggerExpand={toggleTriggerExpand}
 				onToggleActionExpand={toggleActionExpand}
 			/>
+			</div>
      {/snippet}
     </DetailPane>
    {:else if currentView === 'detail' && selectedAutomation}

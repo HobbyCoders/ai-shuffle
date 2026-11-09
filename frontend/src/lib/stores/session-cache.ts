@@ -41,6 +41,7 @@ export interface SessionEphemeral {
 	selectedWorktreeBranch: string | null;
 	worktreeMode: 'new' | 'existing';
 	worktreeCreateNewBranch?: boolean;
+	worktreeCheckoutPending?: boolean;
 	worktreeDeleted: boolean;
 }
 

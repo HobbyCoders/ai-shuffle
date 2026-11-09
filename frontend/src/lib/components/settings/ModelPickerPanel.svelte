@@ -200,9 +200,11 @@
 				: (rowValues[0] ?? null)
 	);
 
+	const rowId = (optionValue: string) => `${editorId}-row-${rowValues.indexOf(optionValue)}`;
+
 	async function moveHighlight(delta: number) {
 		if (rowValues.length === 0) return;
-		const idx = effectiveHighlighted ? rowValues.indexOf(effectiveHighlighted) : -1;
+		const idx = effectiveHighlighted !== null ? rowValues.indexOf(effectiveHighlighted) : -1;
 		const next = (idx + delta + rowValues.length) % rowValues.length;
 		highlighted = rowValues[next];
 		keyboardCursor = true;
@@ -237,9 +239,16 @@
 		}
 	}
 
-	function toggleFavorite(e: MouseEvent, optionValue: string) {
+	async function toggleFavorite(e: MouseEvent, optionValue: string) {
 		e.stopPropagation();
 		toggleFavoriteModel(optionValue);
+		// The row moves in or out of Favorites, so the pressed star is a new
+		// element: keep focus on its star instead of dropping it on the page.
+		await tick();
+		[...(listEl?.querySelectorAll<HTMLElement>('[data-value]') ?? [])]
+			.find((row) => row.dataset.value === optionValue)
+			?.querySelector<HTMLButtonElement>('.mpp-fav')
+			?.focus();
 	}
 
 	function onContextKeydown(e: KeyboardEvent) {
@@ -571,6 +580,8 @@
 				class="mpp-search-inp"
 				placeholder="Search models"
 				aria-label="Search models"
+				aria-controls="{editorId}-list"
+				aria-activedescendant={keyboardCursor && effectiveHighlighted !== null ? rowId(effectiveHighlighted) : undefined}
 				spellcheck="false"
 				autocapitalize="off"
 				autocomplete="off"
@@ -582,7 +593,7 @@
 			<div class="mpp-notice">{notice}</div>
 		{/if}
 
-		<div class="mpp-list" class:more-below={moreBelow} role="listbox" aria-label={ariaLabel} bind:this={listEl} onscroll={measureMoreBelow}>
+		<div id="{editorId}-list" class="mpp-list" class:more-below={moreBelow} role="listbox" aria-label={ariaLabel} bind:this={listEl} onscroll={measureMoreBelow}>
 			{#each visibleLeading as r (r.value)}
 				{@render plainRow(r)}
 			{/each}
@@ -602,6 +613,7 @@
 							role="option"
 							aria-selected={value === o.value}
 							tabindex="-1"
+							id={rowId(o.value)}
 							data-value={o.value}
 							title={o.description}
 							onclick={() => onSelect(o.value)}
@@ -873,6 +885,7 @@
 {#snippet plainRow(r: ExtraRow)}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div
+		id={rowId(r.value)}
 		class="mpp-row mpp-row-plain"
 		class:selected={value === r.value}
 		class:highlighted={keyboardCursor && effectiveHighlighted === r.value}

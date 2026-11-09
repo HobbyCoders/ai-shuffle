@@ -51,7 +51,8 @@ describe('no assistant mode anywhere', () => {
 
 	it('keeps the header download and Git on every chat', () => {
 		expect(mainPanel).toContain("{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}");
-		expect(mainPanel).toContain('{#if activeTab && shouldShowHeaderGitActions({');
+		expect(mainPanel).toContain('const gitUiVisible = $derived(!!activeTab && shouldShowHeaderGitActions(headerGitInput));');
+		expect(mainPanel).toContain('{#if activeTab && gitUiVisible}');
 	});
 
 	it('keeps the context chips and the browser toggle in every composer', () => {

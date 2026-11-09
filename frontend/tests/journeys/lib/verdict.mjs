@@ -37,11 +37,15 @@ export const TRANSCRIPT_LAYOUT_SOURCE = /\sin (?:ChatView|MessageArea)$/;
  *   composer: [from, to], the one data-ui-composer change the step designs,
  *   messages: [from, to], or instead the one data-ui-messages change it designs,
  *             for rows leaving the transcript when the server answers an action
+ *   moved:    or instead a pattern every source of one shift must match, for a
+ *             move no data-ui signal marks (a row joining the sidebar). Only the
+ *             largest such shift in the step is excused, the step may have none,
+ *             and every other shift is still judged
  *   maxValue: the largest total layout shift that move may measure,
  *   reason:   why the product moves it without user input,
  * }]
  *
- * Each declaration must find EXACTLY one such change from → to inside its
+ * Each composer or messages declaration must find EXACTLY one such change from → to inside its
  * step (between its mark and the next one); none, or two, is a failure. Only
  * the layout-shift entries within DESIGNED_SHIFT_WINDOW_MS of that change that
  * moved the chat layout (COMPOSER_LAYOUT_SOURCE; for `messages`,
@@ -72,6 +76,24 @@ export function designedShifts(recording, anomalies, expectShift = [], { partial
 		}
 		const from = marks[markIndex].t;
 		const to = markIndex + 1 < marks.length ? marks[markIndex + 1].t : Infinity;
+		if (design.moved) {
+			let own = -1;
+			timeline.forEach((entry, index) => {
+				if (entry.kind !== 'layout_shift' || entry.input || typeof entry.value !== 'number') return;
+				if (entry.t < from || entry.t >= to) return;
+				const sources = Array.isArray(entry.sources) ? entry.sources : [];
+				if (!sources.length || !sources.every((s) => design.moved.test(s))) return;
+				if (own < 0 || entry.value > timeline[own].value) own = index;
+			});
+			if (own < 0) continue;
+			if (timeline[own].value > design.maxValue) {
+				problems.push(`expectShift "${design.step}": ${design.moved} moved ${timeline[own].value.toFixed(3)}, more than its ${design.maxValue}`);
+				continue;
+			}
+			excusedIndices.add(own);
+			excused.push({ step: design.step, what: 'moved', value: Number(timeline[own].value.toFixed(4)), t: timeline[own].t, reason: design.reason });
+			continue;
+		}
 		const what = design.messages ? 'messages' : 'composer';
 		const layoutSource = what === 'messages' ? TRANSCRIPT_LAYOUT_SOURCE : COMPOSER_LAYOUT_SOURCE;
 		const [before, after] = design[what];
@@ -136,7 +158,8 @@ export function checkExpectShift(caseName, expectShift) {
 	const declares = {
 		composer: (pair) => change(pair, isText, isText),
 		// A frame's counts are numbers (see frames()).
-		messages: (pair) => change(pair, Number.isInteger, Number.isInteger)
+		messages: (pair) => change(pair, Number.isInteger, Number.isInteger),
+		moved: (pattern) => pattern instanceof RegExp
 	};
 	const named = (design) => Object.keys(declares).filter((what) => design[what] !== undefined);
 	for (const design of expectShift) {
@@ -152,7 +175,7 @@ export function checkExpectShift(caseName, expectShift) {
 			design.reason.length > 0;
 		if (!ok) {
 			throw new Error(
-				`case ${caseName}: expectShift needs { step: <mark label>, composer or messages: [from, to], maxValue: (0, 0.5], reason } (got ${JSON.stringify(design)})`
+				`case ${caseName}: expectShift needs { step: <mark label>, composer or messages: [from, to] or moved: <pattern>, maxValue: (0, 0.5], reason } (got ${JSON.stringify(design)})`
 			);
 		}
 	}

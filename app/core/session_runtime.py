@@ -927,7 +927,7 @@ class SessionRuntime:
         from app.core import start_admission
 
         admitted = await start_admission.admission.wait(
-            tid, sid, self._stop_applies,
+            tid, sid, self._stop_applies, self._publish_start_queued,
         )
         if admitted != "ready":
             if admitted == "deferred":
@@ -3600,6 +3600,25 @@ class SessionRuntime:
         self._drain_after_cancel = True
         self._cancel_pump()
         return "draining"
+
+    async def _publish_start_queued(self, queued: bool) -> None:
+        """Tell every device this turn waits for the database, or stopped waiting.
+
+        Runs while the database is short of room, so nothing here may touch it:
+        the owner is named outright instead of being read from the session row,
+        and other installs are not told, since telling them goes through the
+        database and their own lists could not show this worker's wait anyway.
+        """
+        from app.core.sync_engine import sync_engine
+        from app.db.notifications import NotificationOwner
+
+        owner = NotificationOwner(
+            self.api_user_id or "admin", "api_user" if self.api_user_id else "admin",
+        )
+        await sync_engine.broadcast_user_session_updated(
+            user_id=owner, session_id=self.session_id,
+            updates={"start_queued": True if queued else None}, relay=False,
+        )
 
     def _stop_applies(self) -> bool:
         """Whether a Stop reaches this turn.

@@ -796,6 +796,12 @@
 		transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
 	}
 
+	/* The row's 22px glyph, with a full finger's reach around it. */
+	@media (max-width: 639px), (pointer: coarse) {
+		.item-dismiss { position: relative; }
+		.item-dismiss::after { content: ''; position: absolute; inset: -11px; }
+	}
+
 	.notif-item:hover .item-dismiss {
 		opacity: 0.9;
 	}

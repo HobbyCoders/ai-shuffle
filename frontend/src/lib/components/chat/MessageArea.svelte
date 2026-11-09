@@ -2569,7 +2569,7 @@
 		     rhythm (prompt, then a taller response), so the switch to real
 		     content is a fill rather than a jump. -->
 			<TranscriptLoadingSkeleton stall={$activeSession.historyStall} onRetry={() => liveActiveSession.reloadSession()} />
-	{:else if transcriptRender === 'empty'}
+	{:else if transcriptRender === 'empty' && !openRow?.start_queued}
 		<!-- Empty State -->
 		<div class="h-full flex flex-col">
 			<!-- Error display for empty state -->
@@ -2689,10 +2689,10 @@
 				bind:this={tailSpacerRef}
 				class="transcript-tail-spacer"
 			>
-				{#if showGapIndicator && !$activeSession.liveCompaction}
+				{#if (showGapIndicator || openRow?.start_queued) && !$activeSession.liveCompaction}
 					<!-- Working occupies existing trailing breathing room, not a
 					     new 30px row + 18px gap that disappears at completion. -->
-					<div class="tail-activity"><TurnActivity startedAt={liveTurnStartedAt} /></div>
+					<div class="tail-activity"><TurnActivity startedAt={liveTurnStartedAt} queued={!!openRow?.start_queued} thinking={$activeSession.liveThinking?.sessionId === $activeSession.sessionId ? $activeSession.liveThinking : null} /></div>
 				{/if}
 				<div class="tail-controls" bind:this={tailControlsRef} style:min-height={`${tailQueueSlotPx}px`}>
 					{#if pendingMessages.length > 0}

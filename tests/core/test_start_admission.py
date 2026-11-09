@@ -2,9 +2,9 @@
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from itertools import pairwise
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -176,6 +176,145 @@ async def test_bound_timeout_and_stop_do_not_claim_work(
     assert gate.queued == 0
     assert await gate.wait("b", "other", lambda: False) == "deferred"  # deadline
     assert gate.queued == 0
+
+
+@pytest.mark.asyncio
+async def test_status_changes_only_for_a_turn_that_really_waits(
+    quick_gate: tuple, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, stats = quick_gate
+    monkeypatch.setattr(start_admission.settings, "db_start_max_waiters", 1)
+    heard: list[tuple[str, bool]] = []
+
+    def teller(name: str):
+        async def tell(queued: bool) -> None:
+            heard.append((name, queued))
+        return tell
+
+    stopped = False
+    task = asyncio.create_task(gate.wait("a", "s", lambda: stopped, teller("waiter")))
+    await asyncio.sleep(0.01)
+    assert heard == [("waiter", True)]
+    assert gate.queued_sessions() == {"s"}
+    assert await gate.wait("a", "s", lambda: False, teller("duplicate")) == "cancelled"
+    assert await gate.wait("b", "other", lambda: False, teller("overflow")) == "deferred"
+    assert heard == [("waiter", True)]
+
+    stopped = True  # Stop still reaches a waiting turn, and the row hears it ended.
+    assert await task == "cancelled"
+    assert heard == [("waiter", True), ("waiter", False)]
+    assert gate.queued_sessions() == set()
+
+    for key in ("utilization", "waiting", "oldest"):
+        stats[key] = 0
+    gate._blocked = False
+    gate._next_start = 0
+    assert await gate.wait("c", "s", lambda: False, teller("fast")) == "ready"
+    assert ("fast", True) not in heard
+
+
+@pytest.mark.asyncio
+async def test_a_failing_status_update_cannot_decide_the_turn(
+    quick_gate: tuple, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, _ = quick_gate
+    monkeypatch.setattr(start_admission.settings, "db_start_wait_seconds", 0.02)
+
+    async def broken(_queued: bool) -> None:
+        raise RuntimeError("socket gone")
+
+    assert await gate.wait("a", "s", lambda: False, broken) == "deferred"
+    assert gate.queued == 0
+
+
+@pytest.mark.asyncio
+async def test_every_way_out_of_the_wait_says_no_longer_queued(
+    quick_gate: tuple, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, stats = quick_gate
+    heard: list[bool] = []
+    stopped = [False]
+
+    async def tell(queued: bool) -> None:
+        heard.append(queued)
+
+    async def leaves(release: Callable[[asyncio.Task], object], wanted: object) -> None:
+        heard.clear()
+        stopped[0] = False
+        stats.update(utilization=1.0, waiting=1, oldest=10.0)
+        task = asyncio.create_task(gate.wait("a", "s", lambda: stopped[0], tell))
+        while not heard:
+            await asyncio.sleep(0.001)
+        assert gate.queued_sessions() == {"s"}
+        release(task)
+        if isinstance(wanted, type):
+            with pytest.raises(wanted):
+                await task
+        else:
+            assert await task == wanted
+        assert heard == [True, False]
+        assert gate.queued_sessions() == set()
+
+    await leaves(lambda _task: stopped.__setitem__(0, True), "cancelled")  # Stop
+    await leaves(lambda _task: gate.cancel("a"), "cancelled")  # removed from the queue
+    await leaves(lambda task: task.cancel(), asyncio.CancelledError)  # task cancelled
+    await leaves(lambda _task: healthy(stats), "ready")  # admitted
+
+    monkeypatch.setattr(start_admission.settings, "db_start_wait_seconds", 0.03)
+    await leaves(lambda _task: None, "deferred")  # wait deadline
+    monkeypatch.setattr(start_admission.settings, "db_start_wait_seconds", 30.0)
+
+    def fault(*_args: object) -> bool:
+        raise RuntimeError("counters unavailable")
+
+    await leaves(lambda _task: monkeypatch.setattr(gate, "_pressured", fault), RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_a_removed_turn_cannot_clear_the_next_turn_of_that_chat(
+    quick_gate: tuple, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate, _ = quick_gate
+    monkeypatch.setattr(start_admission.settings, "db_start_poll_seconds", 0.03)
+    heard: list[tuple[str, bool]] = []
+
+    def teller(name: str):
+        async def tell(queued: bool) -> None:
+            heard.append((name, queued))
+        return tell
+
+    old = asyncio.create_task(gate.wait("old", "s", lambda: False, teller("old")))
+    await asyncio.sleep(0.005)
+    # Removing a queued message lands off the loop; the waiter wakes on its next poll.
+    gate.cancel("old")
+    stopped = False
+    new = asyncio.create_task(gate.wait("new", "s", lambda: stopped, teller("new")))
+    await asyncio.sleep(0)
+    assert heard[-1] == ("new", True)
+    assert await old == "cancelled"
+    assert heard == [("old", True), ("new", True)]
+    assert gate.queued_sessions() == {"s"}
+    stopped = True
+    assert await new == "cancelled"
+    assert heard[-1] == ("new", False)
+
+
+@pytest.mark.asyncio
+async def test_publishing_the_wait_names_the_owner_without_reading_the_database() -> None:
+    from app.core.sync_engine import sync_engine
+
+    for api_user_id, audience in ((None, "admin"), ("user-1", "api_user")):
+        runtime = session_runtime.SessionRuntime.__new__(session_runtime.SessionRuntime)
+        runtime.session_id = "s"
+        runtime.api_user_id = api_user_id
+        with patch.object(sync_engine, "broadcast_user_session_updated", new=AsyncMock()) as sent:
+            await runtime._publish_start_queued(True)
+            await runtime._publish_start_queued(False)
+        first, second = (call.kwargs for call in sent.call_args_list)
+        assert first["user_id"].user_type == audience
+        assert first["updates"] == {"start_queued": True}
+        assert second["updates"] == {"start_queued": None}
+        assert first["relay"] is False and second["relay"] is False
 
 
 def test_sustained_pressure_hysteresis_and_recent_latency(

@@ -7,7 +7,7 @@ sessions first, then walks bounded ranges of the existing (session_id, seq)
 primary key, including nonmatching rows so sparse deltas cannot cause a full scan.
 
 Only PURE STREAMING DELTAS are prunable, plus ``ProviderAlive``, a content-free
-liveness signal that only matters while its model call is running. A delta
+signal that only matters while its model call is running. A delta
 carries an incremental fragment of something the record already holds in
 completed form:
 

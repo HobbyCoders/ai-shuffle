@@ -97,6 +97,65 @@ describe('designedShifts (expectShift)', () => {
 		assert.match(judged.anomalies[0].message, /MessageArea/);
 	});
 
+	describe('a move no signal marks (moved)', () => {
+		const SIDEBAR = { step: 'send', moved: /^div\.scard-frame$/, maxValue: 0.06, reason: 'a row joined' };
+		const rows = ['div.scard-frame', 'div.scard-frame'];
+		const big = (extra) => recording([[0, 'mark', 'send'], [800, 'shift', { value: 0.052, sources: rows }], ...extra]);
+
+		it('excuses that one shift and nothing else', () => {
+			const judged = designedShifts(big([[1200, 'shift', { value: 0.051, sources: ['div.chip-row in ContextPillBar'] }]]), [shiftAnomaly], [SIDEBAR]);
+			assert.deepEqual(judged.problems, []);
+			assert.equal(judged.excused[0].value, 0.052);
+			assert.equal(judged.anomalies.length, 1);
+			assert.match(judged.anomalies[0].message, /0\.051/);
+			assert.match(judged.anomalies[0].message, /chip-row/);
+		});
+
+		it('clears the anomaly when that shift was all of it', () => {
+			const judged = designedShifts(big([]), [shiftAnomaly], [SIDEBAR]);
+			assert.deepEqual(judged.anomalies, []);
+		});
+
+		it('excuses only the largest of several sidebar shifts', () => {
+			const judged = designedShifts(big([[1000, 'shift', { value: 0.051, sources: rows }]]), [shiftAnomaly], [SIDEBAR]);
+			assert.equal(judged.excused.length, 1);
+			assert.equal(judged.excused[0].value, 0.052);
+			assert.equal(judged.anomalies.length, 1);
+		});
+
+		it('never excuses a frame where anything else moved too', () => {
+			const rec = recording([[0, 'mark', 'send'], [800, 'shift', { value: 0.052, sources: [...rows, 'div.chip-row in ContextPillBar'] }]]);
+			const judged = designedShifts(rec, [shiftAnomaly], [SIDEBAR]);
+			assert.deepEqual(judged.excused, []);
+			assert.equal(judged.anomalies.length, 1);
+		});
+
+		it('fails a move larger than its bound', () => {
+			const rec = recording([[0, 'mark', 'send'], [800, 'shift', { value: 0.09, sources: rows }]]);
+			const judged = designedShifts(rec, [shiftAnomaly], [SIDEBAR]);
+			assert.match(judged.problems[0], /more than its 0\.06/);
+			assert.equal(judged.anomalies.length, 1);
+		});
+
+		it('owes nothing when the step had no such shift', () => {
+			const judged = designedShifts(recording([[0, 'mark', 'send']]), [], [SIDEBAR]);
+			assert.deepEqual(judged.problems, []);
+			assert.deepEqual(judged.excused, []);
+		});
+
+		it('does not reach a shift outside its step', () => {
+			const rec = recording([[0, 'mark', 'before'], [10, 'shift', { value: 0.052, sources: rows }], [20, 'mark', 'send']]);
+			const judged = designedShifts(rec, [shiftAnomaly], [SIDEBAR]);
+			assert.deepEqual(judged.excused, []);
+			assert.equal(judged.anomalies.length, 1);
+		});
+
+		it('is accepted by the load-time shape check, and a non-pattern is not', () => {
+			assert.doesNotThrow(() => checkExpectShift('x', [SIDEBAR]));
+			assert.throws(() => checkExpectShift('x', [{ ...SIDEBAR, moved: 'div' }]));
+		});
+	});
+
 	it('does not excuse a shift of something other than the composer layout at the move', () => {
 		const rec = recording([
 			[0, 'state', 'bottom'],

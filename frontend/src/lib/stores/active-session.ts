@@ -206,6 +206,9 @@ export interface ActiveSessionState {
 	 *  indicator and the sidebar's "Compacting" word. Transient — same
 	 *  lifecycle as `liveModel`. */
 	liveCompaction?: LiveCompaction | null;
+	/** The model's latest live thinking estimate, for the working line (#1271).
+	 *  Never in the transcript. Names its chat, so a switch cannot show it elsewhere. */
+	liveThinking?: { sessionId: string; tokens: number; at: number } | null;
 	wsConnected: boolean;
 	wsReconnectRequired: boolean;
 	/** The user's own Reconnect tap: `connecting` while that handshake runs (the
@@ -306,6 +309,8 @@ export interface ActiveSessionState {
 	worktreeBranch: string;
 	worktreeBaseBranch: string;
 	worktreeCreateNewBranch: boolean;
+	/** The staged `worktreeBranch` exists but its checkout is only created by the first send. */
+	worktreeCheckoutPending: boolean;
 	worktreeId: string | null;
 	worktreeMode: 'new' | 'existing';
 	selectedWorktreeBranch: string | null;
@@ -473,6 +478,7 @@ function defaultState(): ActiveSessionState {
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: false,
+		worktreeCheckoutPending: false,
 		worktreeId: null,
 		worktreeMode: 'new',
 		selectedWorktreeBranch: null,
@@ -864,6 +870,7 @@ function rememberBranchIntent() {
 		kind:'branch', projectId:_state.project, projectV2Id:_state.projectV2Id,
 		branch:_state.worktreeBranch, baseBranch:_state.worktreeBaseBranch,
 		createNew:_state.worktreeCreateNewBranch,
+		...(_state.worktreeCheckoutPending ? {checkoutPending:true} : {}),
 	} : null);
 }
 
@@ -1018,7 +1025,7 @@ function composerCheckoutDefaults(code: boolean, selectedProject = composerPrefe
 		worktreeId:localCheckout ? existing!.worktreeId : null,
 		selectedWorktreeBranch:existing?.branch ?? null,
 		worktreeBranch:branch?.branch ?? '', worktreeBaseBranch:branch?.baseBranch ?? 'main',
-		worktreeCreateNewBranch:branch?.createNew ?? false, worktreeMode:existing ? 'existing' as const : 'new' as const,
+		worktreeCreateNewBranch:branch?.createNew ?? false, worktreeCheckoutPending:branch?.checkoutPending ?? false, worktreeMode:existing ? 'existing' as const : 'new' as const,
 		worktreeError:existing && !localCheckout ? 'The selected worktree belongs to another device. Select an available worktree to continue.' : null,
 	};
 }
@@ -1218,7 +1225,7 @@ export const activeSession = {
 			_update(s => ({
 				...s, mode,
 				project: row?.project_id ?? '', projectV2Id: row?.project_v2_id ?? null,
-				worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null,
+				worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', worktreeCheckoutPending: false, selectedWorktreeBranch: null,
 				permissionModeOverride: permissionMode,
 				...markBindingHydrated(s, 'permission'),
 			}));
@@ -1473,28 +1480,34 @@ export const activeSession = {
 	 */
 	setDeviceIntent(intent: DeviceIntent | null) {
 		setPersistedDeviceIntent(intent);
-		const branch = !_state.sessionId && intent && _state.worktreeId
-			? _state.selectedWorktreeBranch || _state.worktreeBranch : null;
+		// A checkout on the worker being left says nothing about the new one, so
+		// whichever branch was staged is now a checkout the first send has to make.
+		const branch = _state.sessionId || !intent ? null
+			: _state.worktreeId ? _state.selectedWorktreeBranch || _state.worktreeBranch
+			: _state.worktreeCreateNewBranch ? null : _state.worktreeBranch || null;
 		_update(s => ({ ...s, deviceIntent: intent, ...(branch ? {
 			worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: branch,
-			worktreeMode: 'new' as const, worktreeCreateNewBranch: false,
+			worktreeMode: 'new' as const, worktreeCreateNewBranch: false, worktreeCheckoutPending: true,
 		} : {}) }));
 		if (branch) rememberBranchIntent();
 	},
 
-	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); rememberBranchIntent(); },
+	setWorktreeBranch(branch: string, options: { checkoutPending?: boolean } = {}) {
+		_update(s => ({ ...s, worktreeBranch: branch, worktreeCheckoutPending: options.checkoutPending ?? false }));
+		rememberBranchIntent();
+	},
 	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); if (_state.worktreeBranch) rememberBranchIntent(); },
 	setWorktreeMode(mode: 'new' | 'existing') { _update(s => ({ ...s, worktreeMode: mode })); if (mode === 'new') rememberBranchIntent(); },
 	setWorktreeCreateNewBranch(val: boolean) { _update(s => ({ ...s, worktreeCreateNewBranch: val })); if (_state.worktreeBranch) rememberBranchIntent(); },
 
 	selectWorktreeBranch(branch: string, worktreeId: string) {
 		composerPreferences.rememberCheckout({projectId:_state.project, projectV2Id:_state.projectV2Id}, {kind:'existing',projectId:_state.project, projectV2Id:_state.projectV2Id, worktreeId, branch});
-		_update(s => ({ ...s, worktreeId, worktreeBranch:'', selectedWorktreeBranch: branch, worktreeMode: 'existing' as const }));
+		_update(s => ({ ...s, worktreeId, worktreeBranch:'', worktreeCheckoutPending: false, selectedWorktreeBranch: branch, worktreeMode: 'existing' as const }));
 	},
 
 	clearWorktreeSelection() {
 		composerPreferences.rememberCheckout({projectId:_state.project, projectV2Id:_state.projectV2Id}, null);
-		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeMode: 'new' as const }));
+		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeCheckoutPending: false, worktreeMode: 'new' as const }));
 	},
 
 	markWorktreeDeleted() {

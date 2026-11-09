@@ -32,11 +32,12 @@ describe('subagent chat controls in MainPanel', () => {
 	});
 
 	it('hides the Git rail and stops loading Git for a subagent chat', () => {
-		const gates = [...mainPanel.matchAll(/shouldShowHeaderGitActions\(\{([\s\S]*?)\}\)/g)].map((m) => m[1]);
-		expect(gates.length).toBeGreaterThanOrEqual(1);
-		for (const gate of gates) expect(gate).toContain('isSubagent: activeIsSubagent');
+		// One gate decides both the rail and the poll, so every use goes through the same input.
+		const gates = [...mainPanel.matchAll(/shouldShowHeaderGitActions\(([^)]*)\)/g)].map((m) => m[1]);
+		expect(gates).toEqual(['headerGitInput']);
 		expect(mainPanel).toMatch(/headerGitInput = \$derived\(\{[\s\S]*?isSubagent: activeIsSubagent/);
-		expect(mainPanel).toMatch(/if \(project && !subagent\) \{\s*git\.setWorkerTarget/);
+		expect(mainPanel).toContain('{#if activeTab && gitUiVisible}');
+		expect(mainPanel).toMatch(/if \(project && !subagent && !setupPending\) \{\s*git\.setWorkerTarget/);
 		expect(mainPanel.match(/<GitHeaderActions\b/g)).toHaveLength(1);
 	});
 

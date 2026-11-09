@@ -101,6 +101,48 @@ await runJourney({
    expect(await page.getByRole('button',{name:'Filter pull requests',exact:true}).isVisible(),'filters can be cleared');
   }
  }, {
+  // A long guide: inline code in headings, the folded list on a phone, and
+  // the "On this page" highlight and scroll position on a wide screen.
+  name: 'docs-contents',
+  async setup({page,status,variant}) {
+   if(variant.viewport!=='phone')await page.setViewportSize({width:2300,height:900});
+   await gotoApp(page,status,native && variant.viewport === 'phone' ? '/mobile/' : '/');
+  },
+  async act({page,mark,variant}) {
+   const phone=variant.viewport==='phone';
+   const workspace=page.getByRole('navigation',{name:'Workspace',exact:true});
+   if(!await workspace.isVisible())await page.getByRole('button',{name:native?/^Open menu/:/^Chats(?: \(|$)|Show sidebar/}).first().click();
+   const entry=workspace.getByRole('button',{name:'Docs',exact:true});
+   if(await entry.count())await entry.click();
+   else {await workspace.getByRole('button',{name:'More',exact:true}).click();await page.getByRole('menuitem',{name:'Docs',exact:true}).click();}
+   await mark('open a long guide');
+   await page.getByRole('navigation',{name:'Documentation',exact:true}).getByText('Install with Docker',{exact:true}).click();
+   const heading=page.locator('h2#scripts-and-curl');
+   await heading.waitFor();
+   expect((await heading.innerText()).trim()==='Scripts and curl'&&await heading.locator('code').count()===1,'a heading renders inline code, not literal backticks');
+   if(phone){
+    await mark('the open list is part of the page');
+    await page.locator('.doc-inline-toggle').click();
+    const list=page.locator('.doc-inline-list .docs-toc');
+    await list.waitFor();
+    expect(await list.evaluate(el=>getComputedStyle(el).overflowY==='visible'&&el.scrollHeight<=el.clientHeight+1),'the open list does not scroll inside the page');
+    return;
+   }
+   const root=page.locator('.view-main-slot').filter({visible:true}).first();
+   await mark('the end of the page selects the last heading');
+   const links=page.locator('.doc-toc .toc-link');
+   await root.evaluate(el=>{el.scrollTop=el.scrollHeight;});
+   await page.waitForFunction(()=>{const all=[...document.querySelectorAll('.doc-toc .toc-link')];return all.at(-1)?.classList.contains('active');},null,{timeout:5000});
+   expect(await links.count()>3,'the guide lists its headings');
+   await mark('a new width keeps the current heading in view');
+   await heading.evaluate(el=>{el.scrollIntoView({block:'start',behavior:'instant'});el.closest('.view-main-slot').scrollTop-=120;});
+   await page.waitForFunction(()=>[...document.querySelectorAll('.doc-toc .toc-link.active')].some(el=>el.textContent.includes('Scripts')),null,{timeout:5000});
+   await page.setViewportSize({width:1500,height:900});
+   await page.waitForTimeout(400);
+   const inView=await heading.evaluate(el=>{const box=el.getBoundingClientRect();const pane=el.closest('.view-main-slot').getBoundingClientRect();return {top:box.top-pane.top,height:pane.height};});
+   expect(inView.top>=-2&&inView.top<inView.height/2,'the current heading stays in view after a resize '+JSON.stringify(inView));
+  }
+ }, {
   // Phone list rows reach into the page gutter and pad back, so the highlight
   // keeps the desktop inset round the avatar and trailing text while every
   // panel's title stays on the shared x.

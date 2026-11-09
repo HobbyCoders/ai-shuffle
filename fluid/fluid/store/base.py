@@ -17,16 +17,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
 
-from fluid.events.model import Event, ProviderAlive, TextDelta, ThinkingDelta, ToolArgsDelta
+from fluid.events.model import (
+    LIVE_ONLY_EVENTS,
+    Event,
+    ProviderAlive,
+    TextDelta,
+    ThinkingDelta,
+    ToolArgsDelta,
+)
 from fluid.messages import Message
 
 log = logging.getLogger(__name__)
 
 # Events whose loss costs a gap in the replay log and nothing else: streaming
 # progress whose full content the turn's stored node carries, and the
-# content-free ProviderAlive liveness signal, which only matters live. Only
-# these may wait in a store's stream batch; every other event is a durable
-# barrier.
+# content-free ProviderAlive signal. Only these may wait in a store's stream
+# batch; every other event is a durable barrier. LIVE_ONLY_EVENTS never get here.
 RECONSTRUCTIBLE_EVENTS = (TextDelta, ThinkingDelta, ToolArgsDelta, ProviderAlive)
 
 
@@ -78,7 +84,10 @@ async def persist_event(store: SessionStore, event: Event) -> None:
     A store with ``append_stream_event`` may hold a delta in memory until its
     batch fills or a durable event arrives; the durable event then commits the
     held deltas and itself in one transaction, in seq order. Failures raise.
+    A live-only signal is not written at all.
     """
+    if isinstance(event, LIVE_ONLY_EVENTS):
+        return
     stream_append = getattr(store, "append_stream_event", None)
     if isinstance(event, RECONSTRUCTIBLE_EVENTS) and callable(stream_append):
         await stream_append(event.session_id, event)

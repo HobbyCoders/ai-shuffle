@@ -362,6 +362,10 @@ function isAskingTool(msg: ChatMessage): boolean {
  * spec §3): it asks something, or it carries a finding (two or more lines, or a
  * heading, list, table or code fence). One short line without a question is
  * narration ("Now checking the workflow.") and folds with the work.
+ *
+ * Shape alone decides, on purpose (#1010): a label like "Finding:" is not
+ * special. Matching on wording would misfire on narration and still miss
+ * "I found a bug: ...", and the folded line is one click away.
  */
 export function isProtectedProse(content: string): boolean {
 	const text = content.trim();
@@ -489,9 +493,14 @@ export function turnDurationMs(turn: ChatMessage[]): number | null {
 		.find((value): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0);
 	if (reportedDuration !== undefined) return reportedDuration;
 
+	// A note that lands after the last real row (the chat being settled minutes
+	// later, say) says when the chat changed, not how long the work ran (#1163).
+	let workEnd = turn.length;
+	while (workEnd > 0 && (turn[workEnd - 1].type === 'system' || turn[workEnd - 1].role === 'system')) workEnd--;
+
 	let first: number | null = null;
 	let last: number | null = null;
-	for (const message of turn) {
+	for (const message of turn.slice(0, workEnd)) {
 		const timestamp = parseStamp(message.timestamp);
 		if (timestamp === null) continue;
 		if (first === null || timestamp < first) first = timestamp;

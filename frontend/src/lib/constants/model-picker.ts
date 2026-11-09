@@ -169,13 +169,23 @@ export function selectionUsesSubscription(
 	return false;
 }
 
-/** Case-insensitive substring match over label, description and group name. */
+function startsAWord(text: string, query: string): boolean {
+	for (let at = text.indexOf(query); at !== -1; at = text.indexOf(query, at + 1)) {
+		if (at === 0 || !/[\p{L}\p{N}]/u.test(text[at - 1])) return true;
+	}
+	return false;
+}
+
+/** Case-insensitive match: anywhere in the label and group name, and at the
+ *  start of a word in the description, so "son" finds Sonnet and not every
+ *  model described as good at "reasoning". */
 export function matchesPickerQuery(option: PickerOption, query: string): boolean {
 	const q = query.trim().toLowerCase();
 	if (!q) return true;
+	const description = option.description.toLowerCase();
 	return (
 		option.label.toLowerCase().includes(q) ||
-		option.description.toLowerCase().includes(q) ||
+		startsAWord(description, q) ||
 		option.group.toLowerCase().includes(q) ||
 		(option.groupSubtext ?? '').toLowerCase().includes(q)
 	);

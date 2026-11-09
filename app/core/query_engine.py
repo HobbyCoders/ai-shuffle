@@ -67,7 +67,7 @@ from app.core.permission_handler import PermissionDecision, permission_handler, 
 from app.core.user_question_handler import user_question_handler
 
 from app.core.task_registry import task_registry
-from app.core.system_message_filter import HIDDEN_SYSTEM_SUBTYPES
+from app.core.system_message_filter import HIDDEN_SYSTEM_SUBTYPES, thinking_progress_frame
 
 # Helpers from the extracted modules. Some are also reached through this module
 # by other code and tests (``qe.<name>`` patch targets, app/api imports).
@@ -3444,6 +3444,12 @@ async def _stream_to_websocket_turn(
                         logger.debug(f"[WS] Suppressed subagent SystemMessage: subtype={message.subtype}")
                     elif is_noop_status:
                         logger.debug(f"[WS] Suppressed no-op status SystemMessage: status={status_val}")
+                    elif message.subtype == "thinking_tokens":
+                        # Silent thinking must not look hung (#1271): the
+                        # estimate moves the working line, never the transcript.
+                        progress = thinking_progress_frame(data_dict)
+                        if progress is not None:
+                            yield progress
                     elif message.subtype not in SUPPRESSED_SUBTYPES:
                         has_visible_content = True
                         logger.debug(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")

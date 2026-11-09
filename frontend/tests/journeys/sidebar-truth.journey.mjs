@@ -334,6 +334,33 @@ const ROLLBACK_DELETE = {
 	}
 };
 
+// The chat view is replaced by the new-chat screen once the server confirms the
+// delete, which is a designed move, not jank (#1009).
+const DELETE_OPEN_CHAT = {
+	name: 'delete-the-open-chat',
+	viewports: ['phone'],
+	throttles: ['slow'],
+	setup: twoChats,
+	allow: [{ kind: 'failed_requests', status: 404, url: /\/live(\?|$)/, reason: 'a live check sent alongside the delete is answered after the chat is gone' }],
+	expectShift: [{
+		step: 'delete the open chat',
+		composer: ['bottom', 'centre'],
+		maxValue: 0.15,
+		reason: 'the open chat is gone, so the view becomes the new-chat screen once the server confirms'
+	}],
+	async act(ctx) {
+		const { page, mark, a } = ctx;
+		await showSidebar(page);
+		await openRow(page, a.id);
+		await mark('delete the open chat');
+		await chatAction(page, 'Delete');
+		await page.getByRole('button', { name: 'Delete', exact: true }).last().click();
+		await waitChat(page, { surface: 'new', composer: 'centre' });
+		await page.locator(CARD(a.id)).waitFor({ state: 'detached', timeout: 15_000 });
+		await page.waitForTimeout(800);
+	}
+};
+
 /** The element is drawn in the theme's danger colour, whatever the theme makes that. */
 async function expectDangerColour(locator, what, log = () => {}) {
 	// A status mark is a drawn shape, so its colour is its fill; a word's is its text.
@@ -880,5 +907,5 @@ const NEW_CHAT_GLIDE_ENDS_IN_PLACE = {
 await runJourney({
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND, NEW_CHAT_GLIDE_HAS_NO_STEP, NEW_CHAT_GLIDE_ENDS_IN_PLACE]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, DELETE_OPEN_CHAT, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND, NEW_CHAT_GLIDE_HAS_NO_STEP, NEW_CHAT_GLIDE_ENDS_IN_PLACE]
 });

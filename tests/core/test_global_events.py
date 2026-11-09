@@ -2,7 +2,7 @@
 import asyncio
 import json
 from contextlib import contextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -201,6 +201,16 @@ async def test_lifecycle_uses_persisted_role_not_id_spelling(owner):
     finally:
         for sid in ids:
             await global_events.unregister(sid)
+
+
+def test_a_local_only_change_never_queues_a_database_notification():
+    hub = GlobalEvents()
+    hub._loop = Mock()
+    message = {"type": "user_session_updated", "session_id": "s", "updates": {"start_queued": True}}
+    hub.lifecycle("admin", message, user_type="admin", relay=False)
+    hub._loop.call_soon_threadsafe.assert_not_called()
+    hub.lifecycle("admin", message, user_type="admin")
+    hub._loop.call_soon_threadsafe.assert_called()
 
 
 @pytest.mark.asyncio

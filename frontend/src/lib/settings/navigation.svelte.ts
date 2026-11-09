@@ -12,7 +12,7 @@
  * `page.state` back in through `followHistory`.
  */
 import { get } from 'svelte/store';
-import { pushState } from '$app/navigation';
+import { pushState, replaceState } from '$app/navigation';
 import { activeView, layout } from '$lib/stores/layout.svelte';
 import { isCategoryId, PAGE_TYPES, type CategoryId, type SettingsTarget, type SettingsView } from './types';
 
@@ -22,6 +22,8 @@ export interface SettingsHistoryState {
 	settingsDepth?: number;
 	settingsCategory?: CategoryId;
 	settingsItem?: string;
+	/** Entries below this depth belong to an earlier stack (see `staleBelow`). */
+	settingsStaleBelow?: number;
 }
 
 /** Old `openSettingsTab(tab)` names and where they live now. */
@@ -125,6 +127,43 @@ interface Persisted {
 	category?: string;
 	selected?: Record<string, string>;
 	tabs?: Record<string, string>;
+	view?: SettingsView;
+	/** The history entry Settings last stood on, by number, and what it held. */
+	entry?: OwnEntry;
+}
+
+interface OwnEntry {
+	id: number;
+	state: SettingsHistoryState;
+}
+
+/**
+ * The Settings position an entry holds, or null. Other features spread
+ * `page.state` into their own entries, so the markers alone prove nothing. The
+ * phone drawer's copy really is this position, but an entry naming a chat
+ * belongs to chat history: landing on it opens that chat.
+ */
+function settingsPosition(state: SettingsHistoryState | null | undefined): SettingsHistoryState | null {
+	return state?.settingsView && !isChatEntry(state) ? state : null;
+}
+
+/** SvelteKit's own number for a history entry. Unlike its state, this survives a reload. */
+const KIT_ENTRY_KEY = 'sveltekit:history';
+
+function currentEntryId(): number | null {
+	if (typeof history === 'undefined') return null;
+	const id = (history.state as Record<string, unknown> | null)?.[KIT_ENTRY_KEY];
+	return typeof id === 'number' ? id : null;
+}
+
+function isChatEntry(state: unknown): boolean {
+	return !!(state as { chatSession?: string } | null | undefined)?.chatSession;
+}
+
+/** How deep a leftover Settings history entry sits; 0 for any other entry. */
+function retainedDepth(state: SettingsHistoryState | null | undefined): number {
+	const position = settingsPosition(state);
+	return position && position.settingsView !== 'index' ? position.settingsDepth ?? 0 : 0;
 }
 
 function tabKey(category: CategoryId, item: string): string {
@@ -149,8 +188,16 @@ export class SettingsNavigation {
 	focusRequest = $state<{ pane: 'page' | 'detail'; n: number } | null>(null);
 	/** Bumps when the search box should take focus. */
 	searchFocusRequest = $state(0);
-	/** History entries pushed for the current stack (stacked mode only). */
+	/** Settings history entries from the first one to this one (stacked mode only). */
 	depth = 0;
+	/**
+	 * Entries below this depth were left by an earlier stack, so the pages they
+	 * name are not what the reader is on now. Back skips them to the index.
+	 */
+	private staleBelow = 0;
+	/** The reader chose a page here: a reload or a shrink to one pane keeps it (#1043). */
+	private hasPlace = false;
+	private ownEntry: OwnEntry | null = null;
 	/** Mounted SettingsShell count; `openSettings` updates in place when > 0. */
 	mounted = 0;
 	/** On-screen SettingsShell count: while > 0, Ctrl+K focuses Settings search. */
@@ -196,6 +243,7 @@ export class SettingsNavigation {
 	/** Index click: show a category. */
 	selectCategory(category: CategoryId): void {
 		this.category = category;
+		this.hasPlace = true;
 		this.pendingAnchor = null;
 		this.pendingItem = null;
 		this.pendingOpen = null;
@@ -207,6 +255,7 @@ export class SettingsNavigation {
 	/** List click: select an item in the current (or given) collection. */
 	selectItem(item: string, category: CategoryId = this.category): void {
 		this.category = category;
+		this.hasPlace = true;
 		this.selected[category] = item;
 		this.moveTo('detail');
 		if (this.stacked) this.requestFocus('detail');
@@ -225,6 +274,7 @@ export class SettingsNavigation {
 		const target = redirectTarget(requested);
 		const { category } = target;
 		this.category = category;
+		this.hasPlace = true;
 		if (target.item) {
 			this.selected[category] = target.item;
 			if (target.tab) this.tabs[tabKey(category, target.item)] = target.tab;
@@ -246,6 +296,7 @@ export class SettingsNavigation {
 			return;
 		}
 		this.view = this.view === 'detail' ? 'page' : 'index';
+		this.notePlace();
 	}
 
 	/** Return to the index (stacked mode), e.g. before focusing search. */
@@ -256,24 +307,114 @@ export class SettingsNavigation {
 			return;
 		}
 		this.view = 'index';
+		this.notePlace();
 	}
 
-	/** Called by SettingsShell whenever `page.state` changes (Back/Forward). */
-	followHistory(state: SettingsHistoryState | null | undefined): void {
+	/**
+	 * Called by SettingsShell whenever `page.state` changes (Back/Forward).
+	 * `onScreen` is false while Settings is kept mounted behind another view: a
+	 * chat opened there says nothing about this stack, so the page stays open.
+	 */
+	followHistory(state: SettingsHistoryState | null | undefined, onScreen = true): void {
 		if (!this.stacked) return;
-		const view = state?.settingsView ?? 'index';
-		this.depth = state?.settingsDepth ?? 0;
-		if (state?.settingsCategory && isCategoryId(state.settingsCategory)) {
-			this.category = state.settingsCategory;
-			if (state.settingsItem) this.selected[state.settingsCategory] = state.settingsItem;
+		if (!onScreen && isChatEntry(state)) {
+			this.depth = 0;
+			this.staleBelow = 0;
+			this.noteEntry(null);
+			return;
+		}
+		const position = settingsPosition(state);
+		this.noteEntry(position);
+		const view = position?.settingsView ?? 'index';
+		this.depth = position?.settingsDepth ?? 0;
+		if (this.depth === 0) this.staleBelow = 0;
+		if (this.depth > 0 && this.depth < this.staleBelow) {
+			this.view = 'index';
+			this.notePlace();
+			if (typeof history !== 'undefined') history.go(-this.depth);
+			return;
+		}
+		if (position?.settingsCategory && isCategoryId(position.settingsCategory)) {
+			this.category = position.settingsCategory;
+			if (position.settingsItem) this.selected[position.settingsCategory] = position.settingsItem;
 		}
 		this.view = view;
+		this.notePlace();
 	}
 
-	/** Put the stack at its start (shell mount in stacked mode, no target). */
-	resetStack(view: SettingsView = 'index'): void {
+	/**
+	 * Put the stack at its start. `state` is the history entry the shell is
+	 * sitting on: when it is left over from an earlier stack, new steps continue
+	 * above it and Back skips it.
+	 */
+	resetStack(view: SettingsView = 'index', state?: SettingsHistoryState | null): void {
 		this.view = view;
-		this.depth = 0;
+		this.depth = retainedDepth(state);
+		this.staleBelow = this.depth ? this.depth + 1 : 0;
+	}
+
+	/**
+	 * The shell just became one pane; every narrowing comes through here. Open
+	 * the page the reader is on, else the index. `state` is the entry the shell is
+	 * sitting on. If it shows this very page (a reload, a resize that changed
+	 * nothing) its Back steps are kept. Otherwise it is history, and history is
+	 * only ever added to: the stack continues above it and Back skips the leftovers.
+	 */
+	startStack(state?: SettingsHistoryState | null): void {
+		const place: SettingsView = this.hasPlace && this.view !== 'index' ? this.view : 'index';
+		const written = settingsPosition(state);
+		const position = written ?? this.positionLostToReload(state);
+		// The one rewrite Settings makes: its own entry, proved by number, so
+		// Back and Forward can land on it again.
+		if (position && !written) this.restoreEntry(position);
+		if (place !== 'index' && this.entryShows(position, place)) {
+			this.staleBelow = position?.settingsStaleBelow ?? 0;
+			this.followHistory(position);
+			return;
+		}
+		this.resetStack('index', position);
+		if (place === 'index') return;
+		this.moveTo('page');
+		if (place === 'detail' && this.selected[this.category]) this.moveTo('detail');
+	}
+
+	/**
+	 * SvelteKit empties the current entry's state when a document loads, so a
+	 * reloaded entry cannot say what it was. Its number can: only an entry
+	 * Settings itself pushed or stood on is ever remembered here, which is why a
+	 * chat entry carrying copied markers can never be mistaken for one.
+	 */
+	private positionLostToReload(state: SettingsHistoryState | null | undefined): SettingsHistoryState | null {
+		if (state && Object.keys(state).length > 0) return null;
+		const id = currentEntryId();
+		return id !== null && this.ownEntry?.id === id ? this.ownEntry.state : null;
+	}
+
+	private restoreEntry(position: SettingsHistoryState): void {
+		try {
+			replaceState('', position as App.PageState);
+		} catch {
+			// Router not ready: this entry stays empty until the next visit.
+		}
+	}
+
+	/** Remember the entry just landed on, or that it is not one of ours. */
+	private noteEntry(position: SettingsHistoryState | null): void {
+		const id = position ? currentEntryId() : null;
+		this.ownEntry = position && id !== null ? { id, state: position } : null;
+		this.persist();
+	}
+
+	private entryShows(position: SettingsHistoryState | null, place: SettingsView): boolean {
+		return position?.settingsView === place
+			&& position.settingsCategory === this.category
+			&& (place !== 'detail' || position.settingsItem === this.selected[this.category]);
+	}
+
+	/** Settings closed: the next visit starts at the index again. */
+	forgetPlace(): void {
+		this.hasPlace = false;
+		this.persist();
 	}
 
 	consumeAnchor(): string | null {
@@ -297,6 +438,7 @@ export class SettingsNavigation {
 
 	/** Back to a fresh state (tests; never needed in the app). */
 	reset(): void {
+		this.ownEntry = null;
 		this.category = 'general';
 		this.selected = {};
 		this.tabs = {};
@@ -308,6 +450,8 @@ export class SettingsNavigation {
 		this.focusRequest = null;
 		this.searchFocusRequest = 0;
 		this.depth = 0;
+		this.staleBelow = 0;
+		this.hasPlace = false;
 	}
 
 	requestSearchFocus(): void {
@@ -320,6 +464,7 @@ export class SettingsNavigation {
 	}
 
 	private moveTo(view: SettingsView): void {
+		let pushed: SettingsHistoryState | null = null;
 		if (this.stacked && view !== 'index') {
 			// Every step into a page or detail is its own Back step, even
 			// sideways (detail to another detail via a link).
@@ -328,21 +473,33 @@ export class SettingsNavigation {
 				settingsView: view,
 				settingsDepth: depth,
 				settingsCategory: this.category,
-				...(view === 'detail' && this.selected[this.category] ? { settingsItem: this.selected[this.category] } : {})
+				...(view === 'detail' && this.selected[this.category] ? { settingsItem: this.selected[this.category] } : {}),
+				...(this.staleBelow ? { settingsStaleBelow: this.staleBelow } : {})
 			};
 			try {
 				pushState('', state as App.PageState);
 				this.depth = depth;
+				pushed = state;
 			} catch {
 				// Router not ready (tests, early boot): the in-UI back still works.
 			}
 		}
 		this.view = view;
+		if (pushed) this.noteEntry(pushed);
+	}
+
+	private notePlace(): void {
+		this.hasPlace = this.view !== 'index';
+		this.persist();
 	}
 
 	private persist(): void {
 		try {
-			const data: Persisted = { category: this.category, selected: { ...this.selected }, tabs: { ...this.tabs } };
+			const data: Persisted = {
+				category: this.category, selected: { ...this.selected }, tabs: { ...this.tabs },
+				...(this.hasPlace ? { view: this.view } : {}),
+				...(this.ownEntry ? { entry: this.ownEntry } : {})
+			};
 			sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 		} catch {
 			// Storage blocked: last place is not remembered.
@@ -355,6 +512,10 @@ export class SettingsNavigation {
 			if (!raw) return;
 			const data = JSON.parse(raw) as Persisted;
 			if (isCategoryId(data.category)) this.category = data.category;
+			if (data.view === 'page' || data.view === 'detail') {
+				this.view = data.view;
+				this.hasPlace = isCategoryId(data.category);
+			}
 			const selected: Partial<Record<CategoryId, string>> = {};
 			for (const [k, v] of Object.entries(data.selected ?? {})) {
 				if (isCategoryId(k) && typeof v === 'string') selected[k] = v;
@@ -363,6 +524,8 @@ export class SettingsNavigation {
 			const tabs: Record<string, string> = {};
 			for (const [k, v] of Object.entries(data.tabs ?? {})) if (typeof v === 'string') tabs[k] = v;
 			this.tabs = tabs;
+			const entry = data.entry;
+			if (typeof entry?.id === 'number' && typeof entry.state?.settingsView === 'string') this.ownEntry = entry;
 		} catch {
 			// Missing or malformed: start at General.
 		}

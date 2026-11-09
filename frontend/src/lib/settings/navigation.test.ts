@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const nav = vi.hoisted(() => ({ pushState: vi.fn() }));
-vi.mock('$app/navigation', () => ({ pushState: nav.pushState, goto: vi.fn() }));
+const nav = vi.hoisted(() => ({ pushState: vi.fn(), replaceState: vi.fn() }));
+vi.mock('$app/navigation', () => ({ pushState: nav.pushState, replaceState: nav.replaceState, goto: vi.fn() }));
 
 import { layout } from '$lib/stores/layout.svelte';
 import {
@@ -17,6 +17,7 @@ import { openSettingsTab } from '$lib/api/account';
 
 beforeEach(() => {
 	nav.pushState.mockReset();
+	nav.replaceState.mockReset();
 	settingsNav.reset();
 	settingsNav.mounted = 0;
 	sessionStorage.clear();
@@ -159,6 +160,156 @@ describe('settings navigation state', () => {
 	it('survives malformed session storage', () => {
 		sessionStorage.setItem('settings.nav', '{oops');
 		expect(new SettingsNavigation().category).toBe('general');
+	});
+});
+
+describe('keeping the reader\'s place in one pane (#1043)', () => {
+	it('keeps a chosen page when the shell becomes one pane, with Back to the index', () => {
+		settingsNav.selectCategory('security');
+		settingsNav.stacked = true;
+		settingsNav.startStack();
+		expect(settingsNav.view).toBe('page');
+		expect(settingsNav.category).toBe('security');
+		expect(settingsNav.depth).toBe(1);
+		settingsNav.followHistory({});
+		expect(settingsNav.view).toBe('index');
+	});
+
+	it('builds both Back steps for a chosen detail', () => {
+		settingsNav.selectItem('thing', 'providers');
+		settingsNav.stacked = true;
+		settingsNav.startStack();
+		expect(settingsNav.view).toBe('detail');
+		expect(settingsNav.depth).toBe(2);
+	});
+
+	it('starts at the index when no page was chosen', () => {
+		settingsNav.stacked = true;
+		settingsNav.startStack();
+		expect(settingsNav.view).toBe('index');
+		expect(settingsNav.depth).toBe(0);
+	});
+
+	it('restores a chosen page after a reload without a second Back step', () => {
+		settingsNav.selectCategory('security');
+		const reloaded = new SettingsNavigation();
+		reloaded.stacked = true;
+		reloaded.startStack({ settingsView: 'page', settingsDepth: 1, settingsCategory: 'security' });
+		expect(reloaded.view).toBe('page');
+		expect(reloaded.category).toBe('security');
+		expect(reloaded.depth).toBe(1);
+	});
+
+	describe('a resize never brings back an old page', () => {
+		const security = { settingsView: 'page', settingsDepth: 1, settingsCategory: 'security' } as const;
+
+		it('keeps the page chosen while wide, above the old entry, with Back to the index', () => {
+			const go = vi.spyOn(history, 'go').mockImplementation(() => {});
+			settingsNav.selectCategory('cloud');
+			settingsNav.stacked = true;
+			settingsNav.startStack(security);
+			expect(settingsNav.view).toBe('page');
+			expect(settingsNav.category).toBe('cloud');
+			expect(settingsNav.depth).toBe(2);
+			expect(nav.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'page', settingsDepth: 2, settingsCategory: 'cloud', settingsStaleBelow: 2 }));
+			expect(nav.replaceState).not.toHaveBeenCalled();
+			settingsNav.followHistory(security);
+			expect(settingsNav.view).toBe('index');
+			expect(go).toHaveBeenCalledWith(-1);
+		});
+
+		it('keeps the entry when the reader is still on its page', () => {
+			settingsNav.selectCategory('security');
+			settingsNav.stacked = true;
+			settingsNav.startStack(security);
+			expect(settingsNav.category).toBe('security');
+			expect(settingsNav.depth).toBe(1);
+			expect(nav.replaceState).not.toHaveBeenCalled();
+			expect(nav.pushState).not.toHaveBeenCalled();
+		});
+
+		it('keeps the current page over a reload entry the wide layout has moved on from', () => {
+			settingsNav.selectCategory('cloud');
+			const reloaded = new SettingsNavigation();
+			reloaded.stacked = true;
+			reloaded.startStack(security);
+			expect(reloaded.category).toBe('cloud');
+			expect(reloaded.view).toBe('page');
+		});
+
+		it('builds a page step under a detail chosen while wide', () => {
+			settingsNav.selectItem('anthropic', 'providers');
+			settingsNav.stacked = true;
+			settingsNav.startStack(security);
+			expect(settingsNav.view).toBe('detail');
+			expect(nav.replaceState).not.toHaveBeenCalled();
+			expect(nav.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'page', settingsCategory: 'providers', settingsDepth: 2 }));
+			expect(nav.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'detail', settingsItem: 'anthropic', settingsDepth: 3 }));
+			settingsNav.followHistory({ settingsView: 'page', settingsDepth: 2, settingsCategory: 'providers', settingsStaleBelow: 2 });
+			expect(settingsNav.view).toBe('page');
+			expect(settingsNav.category).toBe('providers');
+		});
+
+		it('skips the leftover entries under a deep stack on the way back to the index', () => {
+			const go = vi.spyOn(history, 'go').mockImplementation(() => {});
+			settingsNav.selectCategory('cloud');
+			settingsNav.stacked = true;
+			const old = { settingsView: 'detail', settingsDepth: 2, settingsCategory: 'providers', settingsItem: 'old' } as const;
+			settingsNav.startStack(old);
+			expect(settingsNav.depth).toBe(3);
+			settingsNav.followHistory(old);
+			expect(settingsNav.view).toBe('index');
+			expect(settingsNav.category).toBe('cloud');
+			expect(go).toHaveBeenCalledWith(-2);
+			settingsNav.followHistory({});
+			expect(settingsNav.view).toBe('index');
+			expect(settingsNav.depth).toBe(0);
+		});
+
+		it('a deep link lands above a leftover entry, and Back skips that entry', () => {
+			const go = vi.spyOn(history, 'go').mockImplementation(() => {});
+			settingsNav.stacked = true;
+			settingsNav.resetStack('index', security);
+			settingsNav.go({ category: 'cloud' });
+			expect(settingsNav.view).toBe('page');
+			expect(settingsNav.depth).toBe(2);
+			settingsNav.followHistory(security);
+			expect(settingsNav.view).toBe('index');
+			expect(settingsNav.category).toBe('cloud');
+			expect(go).toHaveBeenCalledWith(-1);
+		});
+
+		it('a reload keeps skipping the entries left under its stack', () => {
+			const go = vi.spyOn(history, 'go').mockImplementation(() => {});
+			settingsNav.selectCategory('cloud');
+			const top = { settingsView: 'page', settingsDepth: 2, settingsCategory: 'cloud', settingsStaleBelow: 2 } as const;
+			const reloaded = new SettingsNavigation();
+			reloaded.stacked = true;
+			reloaded.startStack(top);
+			expect(reloaded.depth).toBe(2);
+			reloaded.followHistory({ settingsView: 'page', settingsDepth: 1, settingsCategory: 'providers' });
+			expect(reloaded.view).toBe('index');
+			expect(go).toHaveBeenCalledWith(-1);
+		});
+	});
+
+	it('does not reopen a page after the reader went back to the index, or left Settings', () => {
+		settingsNav.selectCategory('security');
+		settingsNav.stacked = true;
+		settingsNav.startStack();
+		settingsNav.followHistory({});
+		expect(new SettingsNavigation().view).toBe('page');
+		const backed = new SettingsNavigation();
+		backed.stacked = true;
+		backed.startStack();
+		expect(backed.view).toBe('index');
+
+		settingsNav.selectCategory('security');
+		settingsNav.forgetPlace();
+		const reopened = new SettingsNavigation();
+		reopened.stacked = true;
+		reopened.startStack();
+		expect(reopened.view).toBe('index');
 	});
 });
 
