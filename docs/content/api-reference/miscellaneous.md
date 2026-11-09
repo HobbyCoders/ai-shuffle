@@ -27,6 +27,66 @@ release after clients upgrade. They do not restore a hidden home, research API o
 special live agent. Historical spending tables, peer accounting names and stored
 conversational-approval event subtypes remain unchanged.
 
+## Saved memories
+
+The installation owner can manage long-term saved facts from Remember/Recall
+(not project `AGENTS.md` files). Ordinary API users and mobile keys cannot access
+these routes. A valid agent preview cookie may read them, but cannot edit or
+forget memories, even when it also has owner credentials.
+
+### GET /api/v1/memories
+
+Returns `{"items": [...], "limits": {"text_chars": 2000, "when_chars": 140}}`.
+The read does not count as a recall or change storage. An absent store returns
+an empty list. Active and archived facts visible on this worker are included,
+newest `updated_at` first; internal coexistence-answer rows and facts restricted
+to another worker are excluded.
+
+Each item contains:
+
+- `id`, `revision`, `metadata_version`, `text`, and `when` (null if no written
+  applicability line). `metadata_version` is an opaque token for what
+  `revision` does not count: the when-line, apply-to-every-chat flag, and
+  replica conflict and replacement state.
+- `status`: `active` or `archived`; `tier`: `user` (owner-saved, no expiry),
+  `agent` (durable), or `learned`.
+- `source`: `user`, `tool`, `session`, or `manual`.
+- `scope`: `global` or the stored project key; `scope_label` is `All projects`,
+  the resolved project name, or `Other project` (never a path or opaque key).
+- `always`, `needs_review`, `this_worker_only`, and integer `uses`.
+- `created_at`, `updated_at`, `last_recalled_at`, `expires_at`: epoch seconds,
+  with missing/zero times normalized to null. Owner-saved facts have no expiry.
+
+History, internal keys, replication clocks and deletion records are not exposed.
+
+### PUT /api/v1/memories/{memory_id}
+
+Send `{"text": "The corrected fact.", "when": "When this fact applies", "expected_revision": 1, "expected_metadata_version": "<from the list>"}`.
+All four fields are required; `when: null` keeps the existing line. The response
+is the updated item in the list shape. An owner edit makes the fact owner-saved,
+shared across workers and active (including an archived fact). Scope and the
+apply-to-every-chat flag are preserved, not editable through this route.
+
+A text/tier correction increments `revision`. A when-only edit of an already
+owner-saved fact uses the store's separate metadata stamp, so its `revision` and
+`updated_at` remain unchanged and its `metadata_version` moves. A copy opened
+before either change is refused with `409`. Existing owner-saved facts can still be corrected
+when the owner-saved tier is full; promoting another fact requires a free slot.
+
+### DELETE /api/v1/memories/{memory_id}?expected_revision=1&expected_metadata_version=TOKEN
+
+Returns `204` with no body. This is explicit Forget: it removes the live/archived
+fact and retained history, purges older memory journal evidence, and records a
+replicated deletion barrier to stop stale workers or later saves resurrecting
+it. It does not erase source conversations or provider logs. Deleted facts
+cannot be restored through these routes.
+
+All error responses have a plain-English `detail` string: `404` for unknown or
+hidden facts; `409` for a stale revision, deletion barrier or owner-saved capacity
+conflict; `422` for invalid text/applicability lines (including secrets), missing
+fields or invalid revisions; and `503` when storage is unavailable. Writes need
+owner authentication and same-origin validation, just like other owner settings.
+
 ## Tags
 
 Organize sessions with custom tags. **Auth:** Required for every tag endpoint.

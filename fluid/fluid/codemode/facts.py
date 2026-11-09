@@ -332,9 +332,18 @@ class FactStore:
         self.path = self.root / "memories.json"
         self.lock = self.root / ".memory.lock"
 
-    def _load(self):
+    def _load(self, *, read_only=False):
         from fluid.codemode.skills import load_json_document
-        doc = load_json_document(self.path, {"next_id": 1, "entries": []})
+        if read_only:
+            # Observation must not quarantine corrupt files or hide I/O failures.
+            try:
+                doc = json.loads(self.path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                doc = {"next_id": 1, "entries": []}
+            if not isinstance(doc, dict):
+                raise ValueError("Invalid memory document")
+        else:
+            doc = load_json_document(self.path, {"next_id": 1, "entries": []})
         if doc.get("schema", 1) > SCHEMA:
             raise ValueError("Memory was written by a newer application; refusing to overwrite it")
         if doc.get("owner", self.owner) != self.owner:
@@ -357,8 +366,8 @@ class FactStore:
             from fluid.codemode.transactions import committed_change
             committed_change(self.path)
 
-    def _prepare(self):
-        doc = self._load()
+    def _prepare(self, *, read_only=False):
+        doc = self._load(read_only=read_only)
         changed = False
         legacy = self.root / ".archive" / "memories-archive.jsonl"
         if doc.get("schema", 1) < SCHEMA:
@@ -381,6 +390,12 @@ class FactStore:
                     e.setdefault("origin", e["id"].rsplit(":", 1)[0] if ":" in e["id"] else doc["store_id"])
                     e.setdefault("clock", {e["origin"]: e["revision"]})
             changed = bool(doc["entries"] or doc["archived"])
+        if read_only:
+            # Normalize legacy tiers in this copy, without curation, revision
+            # bumps, archive pruning, migrations or filesystem changes.
+            for entry in doc["entries"] + doc["archived"]:
+                self._classify(entry, time.time())
+            return doc
         changed = self._maintain(doc) or changed
         if changed:
             self._write(doc)
@@ -682,7 +697,11 @@ class FactStore:
         days = self._load().get("inference_budget_spent_days")
         return [d for d in days if isinstance(d, int)] if isinstance(days, list) else []
 
-    def snapshot(self):
+    def snapshot(self, *, read_only=False):
+        if read_only:
+            # Writers replace the document atomically. No lock file is needed
+            # for a read, including observation of a missing store.
+            return self._prepare(read_only=True)
         with file_transaction(self.lock):
             return self._prepare()
 
@@ -859,11 +878,16 @@ class FactStore:
                                  "model for a subagent'), not a summary; nothing was saved")
             # The learner and harvests never downgrade an agent's durable fact.
             is_durable = not protected and bool(durable or (old and old.get("durable")))
-            if (old and not resolves and not old.get("conflicted") and old["text"] == text
+            # An explicit correction also claims user provenance and shares a
+            # worker-tagged fact, even when its text/metadata did not change.
+            same_authority = not old or not protected or (
+                not old.get("worker") and (not provenance or old.get("provenance") == provenance))
+            if (old and not archived_old and not resolves and not old.get("conflicted") and old["text"] == text
                     and not targets and self._metadata_differs(old, when, always)
-                    and old.get("protected", False) == protected
+                    and same_authority and old.get("protected", False) == protected
                     and (protected or bool(old.get("durable")) == is_durable)):
-                # Same value, new when-line or always flag: a metadata edit.
+                # Same live value, new when-line or always flag: a metadata edit.
+                # Archived saves must take the reactivation path below.
                 # Stamped per field (METADATA_FIELDS), not a new revision, so
                 # the revision, clock, updated_at and history stay as they are.
                 self._edit_metadata(doc, old, when, always, protected=protected,
@@ -873,7 +897,7 @@ class FactStore:
                     self._write(doc)
                 return self._entry(old)
             if (old and not resolves and not old.get("conflicted") and old["text"] == text
-                    and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
+                    and same_authority and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
                 if not (protected or durable):
                     if archived_old and not old.get("retired_at") and old.get("expires_at", now + 1) <= now:
                         # Observed again after it expired into the archive:

@@ -94,6 +94,7 @@ describe('SettingsShell index', () => {
 			'Default models',
 			'Model tuning',
 			'Usage',
+			'Memory',
 			'Integrations',
 			'Plugins',
 			'MCP servers',
