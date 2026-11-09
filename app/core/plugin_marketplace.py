@@ -371,8 +371,7 @@ def sync_all_marketplaces(svc) -> Dict[str, bool]:
     results: Dict[str, bool] = {}
     for mp in svc.get_marketplaces():
         try:
-            svc.sync_marketplace(mp.id)
-            results[mp.id] = True
+            results[mp.id] = svc.sync_marketplace(mp.id) is not False
         except Exception as e:
             logger.error(f"Failed to sync marketplace {mp.id}: {e}")
             results[mp.id] = False

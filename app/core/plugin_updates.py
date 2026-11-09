@@ -222,7 +222,8 @@ def refresh_update_sources(svc) -> Dict[str, str]:
     errors = {}
     for marketplace_id in sorted(ids & marketplaces.keys()):
         try:
-            svc.sync_marketplace(marketplace_id)
+            if svc.sync_marketplace(marketplace_id) is False:
+                errors[marketplace_id] = "Plugin source refresh failed"
         except Exception as exc:
             logger.warning("Cannot refresh plugin source %s: %s", marketplace_id, exc)
             errors[marketplace_id] = "Plugin source refresh failed"
@@ -344,8 +345,17 @@ def run_auto_update(svc) -> Dict[str, Any]:
 
     # 2. Check for updates
     try:
-        updates = check_for_updates(svc, allow_remote=au_settings.auto_sync_marketplaces)
+        source_errors = {key: "Plugin source refresh failed"
+                         for key, synced in summary["synced_marketplaces"].items() if not synced}
+        report = get_update_report(
+            svc, allow_remote=au_settings.auto_sync_marketplaces, source_errors=source_errors,
+        )
+        updates = report["updates"]
+        failed = {check["plugin_id"] for check in report["checks"] if check["status"] == "failed"}
+        summary["errors"].extend(f"Could not check plugin {plugin_id}" for plugin_id in sorted(failed))
         summary["updates_available"] = [u.to_dict() for u in updates]
+        # Keep last-known offers visible, but never auto-install a stale candidate.
+        updates = [update for update in updates if update.plugin_id not in failed]
     except Exception as e:
         logger.error(f"Failed to check for updates: {e}")
         summary["errors"].append(f"Update check failed: {e}")
