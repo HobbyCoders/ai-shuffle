@@ -6,7 +6,7 @@ stamps the scope dict on their options). Every other session is untouched.
 Every tool has a risk level, declared once in :data:`TOOL_LEVELS`:
 
 * ``low`` goes ahead.
-* ``high`` asks the owner in the chat and waits for a firm yes
+* ``high`` asks the owner on the permission prompt and waits for an approval
   (``app.core.owner_confirm``), whatever the session's mode.
 
 A tool with no declared level is high, so a new built-in, MCP or plugin tool
@@ -807,7 +807,7 @@ def own_consent_covers(name: Any, tool_input: Any, permission_mode: Optional[str
 
 def needs_owner(name: Any, tool_input: Any, scope: Optional[Scope], *, spec_risk: Optional[str] = None,
                 permission_mode: Optional[str] = None) -> bool:
-    """True when this call must wait for the owner's firm yes.
+    """True when this call must wait for the owner's approval.
 
     ``permission_mode`` is the session's live mode; a tool whose own consent
     covers the call in that mode (:data:`OWN_CONSENT_TOOLS`) does not ask first.

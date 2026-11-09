@@ -1,11 +1,11 @@
 /**
- * Approvals an owner chat asks in words, not with a dialog.
+ * Approvals an older version asked in words instead of with a dialog.
  *
- * A permission request marked `assistant_confirm` is projected as one card in
- * the transcript, keyed by its request id, at the point it was raised, and
- * settled in place (authorized, declined, expired, cancelled). The owner
- * answers in the message box ("yes" / "no"); deciding what the reply means is
- * the backend's job. The card projection here must match the backend's REST
+ * New requests use the regular permission prompt. A past request marked
+ * `assistant_confirm` is projected as one card in the transcript, keyed by its
+ * request id, at the point it was raised, and settled in place (authorized,
+ * declined, expired, cancelled), so old transcripts still read the same. The
+ * card projection here must match the backend's REST
  * fold (`_approval_card` in app/api/sessions_helpers.py) so live, replay and
  * reload read the same transcript.
  */

@@ -403,8 +403,8 @@
 	// Background tasks do NOT gate the dots — the main turn streams concurrently
 	// with running tasks, which have their own "Running N task" panel. See
 	// gap-indicator.ts for the full contract + tests.
-	// The approval asked in words that the owner's next yes or no answers
-	// (assistant_confirm: the oldest still waiting). Its card sits in the
+	// The oldest approval an older version asked in words and is still waiting
+	// (assistant_confirm). Its card sits in the
 	// transcript where it was raised, keyed by request id (#483); this only
 	// marks which card is the one being asked.
 	// Rows Stop just wrote stay bubbles until the stopped turn settles.

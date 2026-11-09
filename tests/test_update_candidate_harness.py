@@ -185,12 +185,12 @@ def test_barrier_waits_for_real_watch_service_before_short_lived_install(tmp_pat
     updater.fetch = Mock(side_effect=updates.UpdateError("Offline fixture network"))
     service_times = []
 
-    def tick():
+    def tick(**kwargs):
         service_times.append(clock.now)
-        updater.service()  # real consumer, including expiry/policy/check publication
+        updater.service(**kwargs)  # real consumer, including expiry/policy/check publication
 
     updater.tick = tick
-    stop = SimpleNamespace(is_set=lambda: clock.now >= 31, wait=clock.sleep)
+    stop = SimpleNamespace(is_set=lambda: clock.now >= 2, wait=clock.sleep)
     monkeypatch.setattr(runtime, "STOP", stop)
     monitor = runtime.ReadinessMonitor("http://unused/health/ready", probe=lambda _: True)
 
@@ -202,11 +202,11 @@ def test_barrier_waits_for_real_watch_service_before_short_lived_install(tmp_pat
 
     monkeypatch.setattr(clock, "sleep", first_sleep)
     fixture.wait_for_service()
-    assert monitor.ever_ready
-    assert service_times[0] >= runtime.READY_PROBE_INTERVAL == 30
+    assert not monitor.ever_ready  # HTTP-ready command does not wait for this probe.
+    assert service_times[0] < runtime.READY_PROBE_INTERVAL == 30
     initial_request = json.loads((tmp_path / "ci-request.json").read_text())
     assert initial_request["action"] == "check"
-    assert initial_request["expires_at"] < clock.time()  # boot-gated check expired
+    assert service_times[0] < initial_request["expires_at"] - 1000  # consumed within its TTL
     assert not updater.install_requested.is_set()
     assert not (tmp_path / "request.json").exists()
     assert json.loads((tmp_path / "status.json").read_text())["error"] == "Offline fixture network"
@@ -249,7 +249,7 @@ def test_barrier_rejects_stale_unready_or_wrong_resident_publications(tmp_path, 
     monkeypatch.setattr(clock, "sleep", sleep)
     with pytest.raises(TimeoutError, match="first service pass"):
         fixture.wait_for_service()
-    submit.assert_called_once_with("check")
+    submit.assert_called_once_with("check", require_ack=True)
 
 
 @pytest.mark.parametrize("row,allowed", [(None, True), (("true",), True), (("false",), False)])
@@ -287,6 +287,35 @@ def test_diagnostics_capture_actual_files_and_read_only_policy(tmp_path, monkeyp
     assert "default_transaction_read_only=on" in connect.call_args.kwargs["options"]
     cursor.execute.assert_called_once_with("SELECT value FROM system_settings WHERE key = %s", ("allow_updates",))
     connection.close.assert_called_once()
+
+
+@pytest.mark.parametrize("consumed", [True, False])
+def test_startup_command_ack_is_bounded_without_renewal(tmp_path, monkeypatch, consumed):
+    from scripts.ci import updater_candidate_fixture as fixture
+    clock = Clock()
+    monkeypatch.setattr(fixture, "ROOT", tmp_path)
+    monkeypatch.setattr(fixture, "time", clock)
+    sleep = clock.sleep
+
+    def advance(seconds):
+        sleep(seconds)
+        if consumed and clock.now >= 1:
+            (tmp_path / "request.json").unlink()
+
+    monkeypatch.setattr(clock, "sleep", advance)
+    if consumed:
+        fixture.submit_request("check", require_ack=True)
+    else:
+        with pytest.raises(TimeoutError, match="within its validity window"):
+            fixture.submit_request("check", require_ack=True)
+    receipt = json.loads((tmp_path / "ci-request.json").read_text())
+    from app.core.application_updates import CONTAINER_REQUEST_SECONDS
+    assert receipt["expires_at"] - receipt["queued_at"] == CONTAINER_REQUEST_SECONDS == 10
+    assert (tmp_path / "request.json").exists() is not consumed
+    if consumed:
+        assert receipt["queued_at"] < receipt["observed_absent_at"] < receipt["expires_at"]
+    else:
+        assert "observed_absent_at" not in receipt
 
 
 def test_policy_diagnostic_failure_reports_only_exception_type(tmp_path, monkeypatch, capsys):

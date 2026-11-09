@@ -1377,8 +1377,9 @@ def attach_event_positions(messages: list[dict], session_id: str) -> None:
                 message["seq"], message["epoch"] = event["seq"], event["epoch"]
 
 
-# An approval asked in words (``assistant_confirm``) is one transcript card per
-# request id, settled in place. Mirrors the frontend reducer's projection
+# An approval an older version asked in words (``assistant_confirm``) is one
+# transcript card per request id, settled in place. New requests use the
+# regular prompt and never reach this. Mirrors the frontend reducer's projection
 # (frontend/src/lib/utils/assistant-confirm.ts) so a reload reads the same (#483).
 APPROVAL_CARD_SUBTYPE = "assistant_confirm_request"
 # Earlier outcomes that make a same-question card a retry ("Asked again").

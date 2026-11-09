@@ -16,7 +16,6 @@
 	import BackgroundWorkStrip from '$lib/components/chat/BackgroundWorkStrip.svelte';
 	import { tabRestoreTarget } from '$lib/stores/session/session-init';
 	import { rememberEmptyChat, wasLastSeenEmpty } from '$lib/stores/session/empty-chat-memory';
-	import { isAssistantConfirm } from '$lib/utils/assistant-confirm';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
@@ -324,11 +323,10 @@
 	// the agent's respond_approval finds nothing to answer. So the modal's
 	// permission leg is suppressed for exactly the sessions/timespan the spoken
 	// leg covers; it returns the moment the call ends. Questions are unaffected.
-	// A request the agent asks in words (`assistant_confirm`, raised on any
-	// owner chat) never opens the dialog: it reads as the agent's question in
-	// the transcript and is answered by typing or saying yes or no
-	// (MessageArea renders it). Every other request keeps the dialog.
-	const dialogPermissions = $derived(($activeSession.pendingPermissions ?? []).filter((request) => !isAssistantConfirm(request)));
+	// Every request in every chat is answered on these controls. A typed "yes"
+	// is an ordinary message. A request an older version raised as a transcript
+	// question opens here too, so it can still be answered.
+	const dialogPermissions = $derived($activeSession.pendingPermissions ?? []);
 	const showPermissionModal = $derived(!voiceCallActive && dialogPermissions.length > 0);
 	// A shell prompt dock answers permissions, private access and questions
 	// above the composer, so it replaces the modal and the question tray.

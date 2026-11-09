@@ -994,9 +994,10 @@ def _last_settled_turn(session_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             "SELECT id, ended_at FROM turns WHERE session_id=%s "
             "AND state IN ('completed','aborted','parked') "
-            "AND started_at IS NOT NULL AND ended_at IS NOT NULL "
+            "AND started_at IS NOT NULL "
             "AND COALESCE(stop_reason, '') <> 'steered' "
-            "ORDER BY ended_at DESC, id DESC LIMIT 1",
+            # Recovery has unknown end time, but must supersede older holds.
+            "ORDER BY COALESCE(ended_at, started_at) DESC, ended_at DESC NULLS LAST, id DESC LIMIT 1",
             (session_id,),
         )
         row = cursor.fetchone()

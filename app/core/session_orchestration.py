@@ -1222,7 +1222,7 @@ def _reply_credit(cursor, sender_id, target_id):
         "AND NOT EXISTS (SELECT 1 FROM turns reply WHERE reply.session_id IN (%s, %s) "
         "AND (reply.payload ->> 'orchestration_reply_to'=incoming.id OR "
         "reply.payload ->> 'orchestration_reply_receipt'=incoming.id)) "
-        "ORDER BY incoming.created_at DESC LIMIT 1",
+        "ORDER BY incoming.insert_order DESC, incoming.created_at DESC, incoming.position DESC, incoming.id DESC LIMIT 1",
         (sender_id, target_id, target_id, REMOTE_MESSAGE_PREFIX + target_id))
     row = cursor.fetchone()
     return row["id"] if row else None

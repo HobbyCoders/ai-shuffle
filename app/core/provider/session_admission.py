@@ -166,14 +166,15 @@ def _bind(lease: Lease) -> None:
     bind_turn_work(lease.work)
 
 
-async def raw_engine_events(events: Any) -> Any:
+async def raw_engine_events(events: Any, *, on_shutdown=None) -> Any:
     """Mark only the raw engine advance, never adapter-side app work."""
     lease = _current_lease.get()
     while lease is None or not lease.abandoned:
         if lease is not None:
             lease.engine_waiting.set()
         try:
-            event = await anext(events)
+            from app.core.query_shutdown import engine_event
+            event = await engine_event(events, on_shutdown)
         except StopAsyncIteration:
             return
         finally:
