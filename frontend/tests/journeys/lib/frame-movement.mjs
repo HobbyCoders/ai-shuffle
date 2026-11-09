@@ -29,25 +29,47 @@ const CATCH_UP_FRAMES = 3;
 /** How far a return may differ from a named correction's size and still be that correction. */
 const CORRECTION_MARGIN = 1;
 
+/** The row rested here: the start of the path, or a frame with a still neighbour. */
+function restedAt(rows, i, tolerance) {
+	return i === 0 || Math.abs(rows[i] - rows[i - 1]) <= tolerance || Math.abs(rows[i + 1] - rows[i]) <= tolerance;
+}
+
+/** The row stopped travelling here: it rested, ran out of path, or turned around. */
+function stoppedAt(rows, i, tolerance) {
+	return i === rows.length - 1 || restedAt(rows, i, tolerance) || Math.sign(rows[i] - rows[i - 1]) !== Math.sign(rows[i + 1] - rows[i]);
+}
+
 /**
- * Every time the row left a position and later came back to it, however many
- * frames that took: `{ from, to }`, the last frame at the position and the frame
- * back at it. Passing a position on the way somewhere else is not a return.
+ * The frame the row left a resting place from, if frame `at` is the row back at
+ * that place. Reads every earlier resting place straight from the path, so drift
+ * while resting and the steps taken on the way cannot hide a return. Back means
+ * within the tolerance, or stopped within a quarter of how far the row went. A
+ * frame only passing near the place on its way somewhere else is not back.
  */
+function leftFrom(rows, at, tolerance) {
+	let low = Infinity;
+	let high = -Infinity;
+	for (let from = at - 1; from >= 0; from--) {
+		const far = Math.max(high - rows[from], rows[from] - low, 0);
+		const off = Math.abs(rows[at] - rows[from]);
+		if (restedAt(rows, from, tolerance) && far - off > tolerance && (off <= tolerance || (stoppedAt(rows, at, tolerance) && off <= far / 4))) return from;
+		low = Math.min(low, rows[from]);
+		high = Math.max(high, rows[from]);
+	}
+	return null;
+}
+
+/** Each time the row left a place and came back: `{ from, to }`, one entry however long it stays back. */
 function findReturns(rows, tolerance) {
 	const returns = [];
-	let visited = [{ top: rows[0], at: 0 }];
-	for (let i = 1; i < rows.length; i++) {
-		const back = visited.findIndex((place, index) => index < visited.length - 1 && Math.abs(place.top - rows[i]) <= tolerance);
-		if (back !== -1) {
-			returns.push({ from: visited[back].at, to: i });
-			visited = visited.slice(0, back + 1);
-			visited[back].at = i;
-		} else if (Math.abs(rows[i] - visited[visited.length - 1].top) > tolerance) {
-			visited.push({ top: rows[i], at: i });
-		} else {
-			visited[visited.length - 1].at = i;
+	for (let at = 1; at < rows.length; at++) {
+		const last = returns[returns.length - 1];
+		if (last?.to === at - 1 && Math.abs(rows[at] - rows[at - 1]) <= tolerance) {
+			last.to = at;
+			continue;
 		}
+		const from = leftFrom(rows, at, tolerance);
+		if (from !== null) returns.push({ from, to: at });
 	}
 	return returns;
 }
@@ -103,14 +125,20 @@ export function transcriptMovements(frames, { tolerance = STILL, knownCorrection
 	const gaveBack = [];
 	const added = [];
 	for (let i = 1; i < measured.length; i++) {
+		// A return is already counted, and whatever explained it is used up.
+		if (inReturn.has(i)) {
+			gaveBack.length = 0;
+			added.length = 0;
+			steps.push(0);
+			continue;
+		}
 		for (const pool of [gaveBack, added]) while (pool.length && i - pool[0].at > CATCH_UP_FRAMES) pool.shift();
 		const composer = measured[i].composer - measured[i - 1].composer;
 		const content = measured[i].content - measured[i - 1].content;
 		if (composer > tolerance) gaveBack.push({ at: i, px: composer });
 		if (content > tolerance) added.push({ at: i, px: content });
 		const shift = beyondStill(measured[i].row - measured[i - 1].row, tolerance);
-		if (inReturn.has(i)) steps.push(0);
-		else steps.push(shift !== 0 && spend(shift > 0 ? gaveBack : added, Math.abs(shift), tolerance) ? 0 : shift);
+		steps.push(shift !== 0 && spend(shift > 0 ? gaveBack : added, Math.abs(shift), tolerance) ? 0 : shift);
 	}
 	return bounces + countRuns(steps);
 }

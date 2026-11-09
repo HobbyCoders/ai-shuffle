@@ -363,7 +363,7 @@
 			class="preview"
 			class:is-visible={hoveredIndex !== null}
 			class:is-above={scrubbing}
-			style="top: {previewTop}px" aria-hidden="true">
+			style="top: {previewTop}px; --preview-y: {previewTop}px" aria-hidden="true">
 			<span class="preview-title">{previewItem.title}</span>
 			{#if previewItem.preview}
 				<span class="preview-body">{previewItem.preview}</span>
@@ -378,25 +378,24 @@
 		left: 6px;
 		/* Stable origin: centring the changing tick list moved every existing
 		   tick on each send, and re-centred again as the composer cleared.
-		   Sized from the visible height, not this box: the box's height follows
-		   the composer, so a percentage of it moved the rail whenever a wrapped
-		   draft was sent (#1094). 120px on an ordinary screen, easing to 0 as a
-		   keyboard or a landscape phone leaves too little height for it.
-		   436px is the 56px header, a six-line draft's 324px composer and
-		   --rail-room, so the offset always leaves an ordinary draft room and
-		   the box has no say. It only does once a taller draft would leave the
-		   rail less than --rail-room: that draft has taken the rail's space, so
-		   the rail moves up rather than vanishing. */
+		   A constant, never a function of this box or the visible height: the
+		   box follows the composer and whatever else shares its slot, so any
+		   formula that read it moved the rail when a draft was sent (#1094).
+		   Flush with the transcript's top, so the bottom can always give way. */
+		--rail-top: 0px;
 		--visible-height: var(--app-viewport-height, 100dvh);
-		--rail-room: 56px;
-		--rail-offset: clamp(0px, calc(var(--visible-height) - 436px), 120px);
-		--rail-top: max(0px, min(var(--rail-offset), calc(100% - var(--rail-room))));
 		top: var(--rail-top);
 		max-height: calc(100% - var(--rail-top));
 		z-index: 12;
 		display: flex;
 		flex-direction: column;
 		pointer-events: auto;
+	}
+
+	/* With a mouse and a tall window the rail has room to stand lower, beside
+	   what is being read. No keyboard shortens a window like this. */
+	@media (min-width: 640px) and (pointer: fine) and (min-height: 700px) {
+		.turn-nav { --rail-top: 120px; }
 	}
 
 	/* At rest the rail is invisible: it answers to the pointer, to the keyboard
@@ -552,14 +551,15 @@
 	}
 
 	/* During a touch scrub the thumb covers the space beside the tick, so the
-	   preview rides above the finger instead. */
+	   preview rides above the finger instead, as far as the top of the rail
+	   allows: over the first ticks there is no room left above them. */
 	.preview.is-above {
-		transform: translate(-8px, calc(-100% - 20px)) scale(0.98);
+		transform: translate(-8px, max(calc(-100% - 20px), calc(4px - var(--preview-y)))) scale(0.98);
 		transform-origin: left bottom;
 	}
 
 	.preview.is-above.is-visible {
-		transform: translate(0, calc(-100% - 28px)) scale(1);
+		transform: translate(0, max(calc(-100% - 28px), calc(4px - var(--preview-y)))) scale(1);
 	}
 
 	.preview-title {

@@ -5,7 +5,7 @@
 // position comes from the visible height, so a keyboard or a landscape phone must
 // keep it inside the transcript too.
 import { runJourney } from './runner.mjs';
-import { composer, expect, gotoApp, seededChatId, sendButton, stopButton, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { composer, expect, gotoApp, PROJECT, pickAccess, pickProject, seededChatId, sendButton, stopButton, typeAndSend, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { mobileShell, openStopChat, queueDuringASlowTurn } from './lib/stop-queue.mjs';
 import { movements, transcriptMovements, unmeasuredFrames } from './lib/frame-movement.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -68,6 +68,11 @@ async function watchFrames(page) {
 	});
 }
 
+/** Only the frames where something moved, so a failure can be read from its log. */
+const changes = (frames) => frames
+	.filter((frame, i) => i === 0 || ['row', 'content', 'composer'].some((key) => frame[key] !== frames[i - 1][key]))
+	.map(({ seq, row, content, composer }) => [seq, row, content, composer].map((value) => (Number.isFinite(value) ? Math.round(value) : value)));
+
 const present = (frames, key) => frames.map((frame) => frame[key]).filter(Number.isFinite);
 
 const sendCase = ({ name, setup, prepare, ...options }) => ({
@@ -91,12 +96,27 @@ const sendCase = ({ name, setup, prepare, ...options }) => ({
 		const transcriptMoves = transcriptMovements(frames, { knownCorrection });
 		const unmeasured = unmeasuredFrames(frames);
 		log(`send frames ${JSON.stringify({ frames: frames.length, unmeasured, rail: travel, composerMoves, transcriptMoves })}`);
+		log(`row path ${JSON.stringify(changes(frames))}`);
 		expect(frames.length >= 20 && unmeasured === 0, `the row and composer were measured on every frame of the send (${unmeasured} of ${frames.length} missing)`);
 		expect(travel <= 2, `sending keeps the turn rail still (${travel.toFixed(1)}px)`);
 		expect(composerMoves <= 1, `clearing the draft moves the composer at most once (${composerMoves} movements)`);
 		expect(transcriptMoves <= 1, `the composer shrinking moves the transcript at most once (${transcriptMoves} movements)`);
 	}
 });
+
+/** A chat with two turns and one child chat still running, so the line naming
+ * that child sits in the composer's slot above the draft. */
+async function openChatWithARunningChild(ctx) {
+	const { page } = ctx;
+	await openStopChat(ctx);
+	await pickProject(page, page.getByRole('region', { name: 'New chat' }), PROJECT);
+	await pickAccess(page, 'Bypass');
+	await typeAndSend(page, 'start the helper [script:tool-start-running-child]');
+	await waitTurnSettled(page, { text: 'Started the child.', messagesAtLeast: 2 });
+	await page.locator('.input-slot').getByText('Running child job').waitFor({ timeout: 30_000 });
+	await typeAndSend(page, 'one more turn [script:default]');
+	await waitTurnSettled(page, { messagesAtLeast: 4 });
+}
 
 /** What a phone keyboard does: only the visual viewport shrinks, and the app's
  * own listener resizes the shell from it. Headless Chromium has no keyboard. */
@@ -234,6 +254,19 @@ await runJourney({
 				await page.setViewportSize({ width: 360, height: 640 });
 				await showVisibleHeight(page, 340);
 				await composer(page).fill('please read the deployment notes again and then list every question that is still open for me [script:default]');
+			}
+		}),
+		// Whatever else sits in the composer's slot leaves with its draft height, so
+		// it must not be able to move the rail either.
+		sendCase({
+			name: 'six-line-send-with-running-child', viewports: ['phone'], throttles: ['fast'], setup: openChatWithARunningChild,
+			async prepare({ page, log }) {
+				await showVisibleHeight(page, 544);
+				await composer(page).fill(`${DRAFT.repeat(3).slice(0, 230)} [script:default]`);
+				await page.waitForTimeout(300);
+				const at = await railGeometry(page);
+				log(`six lines with a running child ${JSON.stringify(at)}`);
+				expect(at.composerHeight >= 300, `the draft and the running child's line filled the slot (${at.composerHeight}px)`);
 			}
 		}),
 		// The words of a "Not sent" row join a typed draft, and both go at once.
