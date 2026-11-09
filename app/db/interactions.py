@@ -11,9 +11,11 @@ elsewhere — this module deliberately does not touch the event log.
 from __future__ import annotations
 
 from contextlib import nullcontext
+import hashlib
 import json
 import logging
 import secrets
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +27,12 @@ logger = logging.getLogger(__name__)
 #: Payload key of a request's codes in connector chats: chat -> four-digit code.
 CHAT_CODES_KEY = "chat_codes"
 _CHAT_CODE_LOCK_KEY = 718234977
+#: Codes drawn in a chat, kept on this worker (``app.network.policy`` keeps
+#: ``network_`` settings local). A closed request's row can be deleted with its
+#: session, so the row cannot be what remembers them.
+CHAT_CODES_USED_PREFIX = "network_connector_codes:"
+#: Longest a request carrying a code stays open: its TTL is at most 15 minutes.
+_CODED_REQUEST_LONGEST_OPEN_SECONDS = 3600
 
 
 def _parse_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -338,14 +346,29 @@ def open_chat_codes(chat: str) -> Dict[str, Dict[str, Any]]:
         return _open_chat_codes(conn.cursor(), chat)
 
 
+def _used_chat_codes(cursor: Any, key: str, now: int) -> Dict[str, int]:
+    """Code -> the time it may be drawn again, for codes still retired."""
+    cursor.execute("SELECT value FROM system_settings WHERE key=%s", (key,))
+    row = cursor.fetchone()
+    used = _parse_json(row["value"]) if row else None
+    return {code: until for code, until in (used or {}).items() if until > now}
+
+
 def assign_chat_code(interaction_id: str, chat: str) -> Optional[str]:
     """Give a still-pending request a four-digit code in ``chat`` and return it.
 
     The code is on the row, so it survives a restart with the request. It is
     unique among this worker's open requests in that chat; the lock stops two
-    requests opening together from drawing the same one. None when the request
-    is no longer pending.
+    requests opening together from drawing the same one. Once drawn it is not
+    drawn again in that chat for as long as a reply to it can still be on its
+    way, so a late reply cannot land on a newer request.
+
+    None when the request is no longer pending, or every code is in use.
     """
+    from app.db.connectors import ANSWER_CLAIM_TTL_SECONDS
+
+    now = int(time.time())
+    used_key = CHAT_CODES_USED_PREFIX + hashlib.sha256(chat.encode()).hexdigest()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT pg_advisory_xact_lock(%s)", (_CHAT_CODE_LOCK_KEY,))
@@ -357,8 +380,12 @@ def assign_chat_code(interaction_id: str, chat: str) -> Optional[str]:
         row = cursor.fetchone()
         if row is None:
             return None
-        taken = _open_chat_codes(cursor, chat)
-        code = secrets.choice([f"{n:04d}" for n in range(10000) if f"{n:04d}" not in taken])
+        open_codes = _open_chat_codes(cursor, chat)
+        used = _used_chat_codes(cursor, used_key, now)
+        free = [f"{n:04d}" for n in range(10000) if f"{n:04d}" not in open_codes and f"{n:04d}" not in used]
+        if not free:
+            return None
+        code = secrets.choice(free)
         payload = dict(_parse_json(row["payload"]) or {})
         payload[CHAT_CODES_KEY] = {**(payload.get(CHAT_CODES_KEY) or {}), chat: code}
         cursor.execute(
@@ -367,6 +394,12 @@ def assign_chat_code(interaction_id: str, chat: str) -> Optional[str]:
         )
         if cursor.rowcount == 0:
             return None
+        used[code] = now + ANSWER_CLAIM_TTL_SECONDS + _CODED_REQUEST_LONGEST_OPEN_SECONDS
+        cursor.execute(
+            "INSERT INTO system_settings (key,value) VALUES (%s,%s) "
+            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            (used_key, json.dumps(used)),
+        )
     notify_session_write(row["session_id"], "pending_interactions")
     return code
 

@@ -97,6 +97,10 @@ class SignalConnector(BaseConnector):
         )
         self._permission_sessions: Dict[str, str] = {}  # request_id -> session_id
         self._pending_action_approvals: Dict[str, asyncio.Future] = {}  # request_id -> Future[bool]
+        self._chat_tasks: set[asyncio.Task[None]] = set()
+        self._stopping = False
+
+    MAX_CHAT_TASKS = 32
 
     # ------------------------------------------------------------------
     # Helpers
@@ -144,6 +148,7 @@ class SignalConnector(BaseConnector):
             raise RuntimeError(f"API returned {response.status_code}")
 
         # Start SSE listener for incoming messages
+        self._stopping = False
         self._task = asyncio.create_task(self._sse_listener())
 
     async def _sse_listener(self) -> None:
@@ -187,7 +192,13 @@ class SignalConnector(BaseConnector):
                 delay = min(delay * 2, SSE_MAX_RECONNECT_DELAY)
 
     async def disconnect(self) -> None:
-        """Stop the SSE listener task."""
+        """Cancel tracked chat execution and stop the SSE listener task."""
+        self._stopping = True
+        tasks = tuple(self._chat_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         try:
             if self._task is not None and not self._task.done():
                 self._task.cancel()
@@ -265,7 +276,32 @@ class SignalConnector(BaseConnector):
                 "timestamp": timestamp,
             },
         )
-        await self._on_incoming_message(msg)
+        self._start_chat(msg)
+
+    def _start_chat(self, msg: IncomingMessage) -> None:
+        """Run ``msg`` beside the SSE loop: its turn may wait for an approval
+        that arrives as a later event on this same stream. Tasks start in
+        arrival order and the manager queues each chat first-in, first-out."""
+        if self._stopping:
+            return
+        if len(self._chat_tasks) >= self.MAX_CHAT_TASKS:
+            # Never wait for a chat slot here, for the same reason.
+            logger.warning("Signal chat capacity reached for %s", self.connector_id)
+            notice = self.send_message(OutgoingMessage(
+                platform_chat_id=msg.platform_chat_id,
+                text="Too many chats are running. Please try again after one finishes.",
+            ))
+            spawn_detached(asyncio.wait_for(notice, timeout=5), name="signal-chat-capacity")
+            return
+        task = asyncio.create_task(self._dispatch_chat(msg), name="signal-chat")
+        self._chat_tasks.add(task)
+        task.add_done_callback(self._chat_tasks.discard)
+
+    async def _dispatch_chat(self, msg: IncomingMessage) -> None:
+        try:
+            await self._on_incoming_message(msg)
+        except Exception:
+            logger.exception("Error handling Signal message")
 
     def _check_permission_response(self, text: str) -> bool:
         """Check if a text message is a reply to a permission prompt or a

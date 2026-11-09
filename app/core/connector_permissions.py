@@ -13,13 +13,23 @@ to another worker after a connector moves, and nothing about a bare yes says
 which request it meant, so a bare yes answers nothing and the chat shows the
 reply to send. A code that is not open gets "no longer open".
 
-A reply with a platform message ID counts once on a worker, because a code can
-be drawn again once its request closes. One with no ID cannot be told from a
-repeat, so it answers nothing.
+A reply with a platform message ID counts once on a worker. One with no ID
+cannot be told from a repeat, so it answers nothing. A code is not drawn again
+in its chat for 30 days, so a reply that arrives late meets "no longer open"
+rather than a newer request.
+
+Only a request this worker can act on is answered: the call waiting for it in
+this process, or a call already let go (#523) on a chat this worker runs. Any
+other row, such as a read-only copy synced from another worker or one whose
+waiter died in a restart, is left alone and the chat is told to use the app.
 
 Workers do not share codes, so the one way a reply can answer the wrong request
 is a platform delivering it to a second worker that happens to hold the same
 code open in that chat.
+
+Connectors whose senders cannot be verified (LINE, Microsoft Teams,
+BlueBubbles: ``connector_service.OWNER_SENDER_TYPES``) have no owner account, so
+their chats are told to answer in the app.
 
 The platform Approve/Deny buttons are not sent, and
 ``ConnectorManager.handle_permission_response`` ignores any left in old chat
@@ -37,6 +47,8 @@ from typing import Any, Dict, Optional, Union
 
 logger = logging.getLogger(__name__)
 
+_IN_THE_APP = "Answer it in the app."
+_NOT_CONFIRMED = "Couldn't confirm that answer. Send a new reply or answer it in the app."
 #: "yes 4821" in any case, with any spacing, and nothing else.
 _CODED_REPLY = re.compile(r"\s*(yes|no)\s*([0-9]{4})\s*", re.ASCII | re.IGNORECASE)
 
@@ -96,6 +108,8 @@ async def deliver_permission_prompt(
                 codeable = None if instance.config.get("command_prefix") else interaction_id
                 text = await asyncio.to_thread(
                     _question_text, codeable, _chat_key(connector_id, platform_chat_id), action)
+            elif await asyncio.to_thread(_owner_cannot_be_verified, connector_id):
+                text = f"{text} {_IN_THE_APP}"
             sent = await instance.send_message(
                 OutgoingMessage(platform_chat_id=platform_chat_id, text=text)
             )
@@ -131,6 +145,16 @@ def _action_to_offer(connector_session: Dict[str, Any], tool_name: str, tool_inp
     return owner_confirm.describe(tool_name, tool_input)
 
 
+def _owner_cannot_be_verified(connector_id: Any) -> bool:
+    """True for a connector whose chats can never show the owner a code.
+    Blocking (DB read)."""
+    from app.core.connector_service import OWNER_SENDER_TYPES
+    from app.db import database
+
+    row = database.get_connector(connector_id)
+    return bool(row) and row.get("type") not in OWNER_SENDER_TYPES
+
+
 def _question_text(interaction_id: Optional[str], chat: str, action: str) -> str:
     """The question, with the code that answers it once that code is stored on
     the request. Blocking (DB)."""
@@ -138,7 +162,7 @@ def _question_text(interaction_id: Optional[str], chat: str, action: str) -> str
 
     code = interactions.assign_chat_code(interaction_id, chat) if interaction_id else None
     if code is None:
-        return f"The agent wants to {action}. Answer it in the app."
+        return f"The agent wants to {action}. {_IN_THE_APP}"
     return f"The agent wants to {action}. Reply yes {code} or no {code}."
 
 
@@ -158,10 +182,37 @@ def _closed_text(code: str) -> str:
     return f"Request {code} is no longer open."
 
 
+def _can_act_on(row: Dict[str, Any]) -> bool:
+    """Whether answering ``row`` reaches something that will act on it. Blocking (DB)."""
+    from app.core import interaction_wait, owner_confirm
+    from app.db import database
+    from app.network import control
+
+    if interaction_wait.is_awaited(row["id"]):
+        return True
+    # A call already let go has no waiter; answering tells the agent (#523),
+    # but only on the worker that runs the chat. Elsewhere the row is a copy.
+    if not (owner_confirm.approval_of(row.get("payload")) and owner_confirm.is_released(row)):
+        return False
+    session = database.get_session(row["session_id"])
+    return session is not None and control.owner_of(session) is None
+
+
+def _settle_text(code: str, row: Optional[Dict[str, Any]]) -> Union[Dict[str, Any], str]:
+    """The open request to answer, or what to tell the chat instead. Blocking (DB)."""
+    if row is None:
+        return _closed_text(code)
+    return row if _can_act_on(row) else f"Request {code} can't be answered from this chat. {_IN_THE_APP}"
+
+
 def _read_reply(message: Any, code: Optional[str]) -> Union[Dict[str, Any], str, None]:
     """What the owner's reply does: the open request it names, the line to tell
     the chat when it answers nothing ("" for a repeat, which is told nothing),
-    or None when it is an ordinary message. Blocking (DB)."""
+    or None when it is an ordinary message. Blocking (DB).
+
+    Raises only before the claim, when the reply is not yet consumed. After the
+    claim a failure comes back as a line for the chat.
+    """
     from app.core.connector_service import sender_is_owner
     from app.db import connectors as connectors_db
     from app.db import database, interactions
@@ -177,11 +228,15 @@ def _read_reply(message: Any, code: Optional[str]) -> Union[Dict[str, Any], str,
         return _code_hint(codes) if codes else None
     message_id = str(message.platform_message_id or "").strip()
     if not message_id:
-        return "This connection did not identify that reply, so it answered nothing. Answer it in the app."
+        return f"This connection did not identify that reply, so it answered nothing. {_IN_THE_APP}"
     # One insert decides, so of concurrent deliveries exactly one goes on.
     if not connectors_db.claim_answer_message(message.connector_id, message.platform_chat_id, message_id):
         return ""
-    return interactions.open_chat_codes(chat).get(code) or _closed_text(code)
+    try:
+        return _settle_text(code, interactions.open_chat_codes(chat).get(code))
+    except Exception:  # noqa: BLE001 — consumed now, so never an agent prompt
+        logger.warning("connector_permissions: claimed answer could not be read", exc_info=True)
+        return _NOT_CONFIRMED
 
 
 async def answer_from_chat(message: Any) -> bool:
@@ -202,24 +257,29 @@ async def answer_from_chat(message: Any) -> bool:
             return False
         code = coded[2] if coded else None
         found = await asyncio.to_thread(_read_reply, message, code)
-        if found is None:
-            return False
-        if isinstance(found, str):
-            if found:
-                await _tell_chat(message, found)
-            return True
-        from app.core.permission_handler import permission_handler
-
-        payload = found["payload"]
-        allow = coded[1].lower() == "yes"
-        result = await permission_handler.respond(payload["request_id"], found["session_id"], "allow" if allow else "deny")
-        if not result.get("resolved"):
-            # Another path answered it first, or it expired since the lookup.
-            await _tell_chat(message, _closed_text(code))
-            return True
-    except Exception:  # noqa: BLE001 — unanswered is safe; the TTL denies it
+    except Exception:  # noqa: BLE001 — not claimed, so the reply can come again
         logger.warning("connector_permissions: text answer failed", exc_info=True)
         return False
+    if found is None:
+        return False
+    if isinstance(found, str):
+        if found:
+            await _tell_chat(message, found)
+        return True
+    from app.core.permission_handler import permission_handler
+
+    payload = found["payload"]
+    allow = coded[1].lower() == "yes"
+    try:
+        result = await permission_handler.respond(payload["request_id"], found["session_id"], "allow" if allow else "deny")
+    except Exception:  # noqa: BLE001 — claimed, so this reply is spent
+        logger.warning("connector_permissions: claimed answer failed", exc_info=True)
+        await _tell_chat(message, _NOT_CONFIRMED)
+        return True
+    if not result.get("resolved"):
+        # Another path answered it first, or it expired since the lookup.
+        await _tell_chat(message, _closed_text(code))
+        return True
     done = "Approved" if allow else "Declined"
     action = owner_confirm.describe(payload.get("tool_name") or "", payload.get("tool_input"))
     await _tell_chat(message, f"{done}: {action}.")

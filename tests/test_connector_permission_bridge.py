@@ -4,6 +4,8 @@ and the permission_handler hook that drives it.
 """
 
 import asyncio
+import hashlib
+import json
 import time
 import uuid
 
@@ -198,11 +200,12 @@ def channel(mock_db):
 
     with patch("app.core.connector_service.sender_is_owner", side_effect=lambda _c, user: user == "owner-account"), \
             patch("app.network.ownership.enrolled", return_value=False), \
+            patch("app.core.interaction_wait.is_awaited", return_value=True) as awaited, \
             patch("app.core.connectors.manager.connector_manager") as manager, \
             patch("app.core.permission_handler.permission_handler.respond",
                   new=AsyncMock(side_effect=respond)) as responded:
         manager.get_running_instance.return_value = instance
-        yield {"respond": responded, "instance": instance}
+        yield {"respond": responded, "instance": instance, "awaited": awaited}
 
 
 class TestAnswerFromChat:
@@ -471,12 +474,50 @@ class TestAnswerFromChat:
         assert connectors_db.claim_answer_message("c1", "chat", "old") is True
 
     @pytest.mark.asyncio
-    async def test_a_failure_never_raises(self, channel):
+    async def test_a_failure_before_the_claim_does_not_consume_the_reply(self, channel):
         from app.core.connector_permissions import answer_from_chat
 
-        _open_request()
+        request = _open_request()
+        reply = _chat_message(message_id="owner-yes")
+        with patch("app.db.connectors.claim_answer_message", side_effect=RuntimeError("database gone")):
+            assert await answer_from_chat(reply) is False
+        channel["instance"].send_message.assert_not_awaited()
+
+        assert await answer_from_chat(reply) is True
+        assert _state(request) == "answered"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_answer_stays_consumed_and_asks_for_a_new_reply(self, channel):
+        from app.core.connector_permissions import answer_from_chat
+
+        request = _open_request()
+        reply = _chat_message(message_id="owner-yes")
+        real_respond = channel["respond"].side_effect
         channel["respond"].side_effect = RuntimeError("database gone")
-        assert await answer_from_chat(_chat_message()) is False
+
+        assert await answer_from_chat(reply) is True
+        assert "new reply" in _told(channel["instance"])
+        assert _state(request) == "pending"
+
+        channel["respond"].side_effect = real_respond
+        channel["instance"].send_message.reset_mock()
+        assert await answer_from_chat(reply) is True
+        channel["instance"].send_message.assert_not_awaited()
+        assert _state(request) == "pending"
+
+        assert await answer_from_chat(_chat_message(message_id="owner-yes-again")) is True
+        assert _state(request) == "answered"
+
+    @pytest.mark.asyncio
+    async def test_a_lookup_that_fails_after_the_claim_stays_consumed(self, channel):
+        from app.core.connector_permissions import answer_from_chat
+
+        request = _open_request()
+        with patch("app.db.interactions.open_chat_codes", side_effect=RuntimeError("database gone")):
+            assert await answer_from_chat(_chat_message()) is True
+        assert "new reply" in _told(channel["instance"])
+        assert _state(request) == "pending"
+        channel["respond"].assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_the_answer_does_not_wait_behind_the_blocked_turn(self):
@@ -504,23 +545,80 @@ class TestAnswerFromChat:
 # =============================================================================
 
 
-@pytest.mark.asyncio
-async def test_the_code_answers_after_a_restart_with_nothing_in_memory(mock_db):
-    """The code and the request are both on the row, and the real responder
-    settles it from there: no waiter or cache from before the restart is needed."""
-    from app.core.connector_permissions import answer_from_chat
-    from app.core.permission_handler import PermissionHandler
-    from app.db import interactions
+class TestOnlyARequestThisWorkerCanActOnIsAnswered:
+    """A row can look open here with nothing behind it: a read-only copy synced
+    from another worker, or a request whose waiter died in a restart."""
 
-    request = _open_request()
-    with patch("app.core.connector_service.sender_is_owner", return_value=True), \
-            patch("app.network.ownership.enrolled", return_value=False), \
-            patch("app.core.connectors.manager.connector_manager") as manager, \
-            patch("app.core.permission_handler.permission_handler", PermissionHandler()):
-        manager.get_running_instance.return_value = _fake_instance()
-        assert await answer_from_chat(_chat_message("no 4821")) is True
-    assert interactions.get_interaction(request)["state"] == "answered"
-    assert interactions.get_interaction(request)["answer"]["decision"] == "deny"
+    @pytest.mark.asyncio
+    async def test_a_synced_copy_is_left_alone_and_sent_to_the_app(self, channel):
+        from app.core.connector_permissions import answer_from_chat
+
+        channel["awaited"].return_value = False
+        copy = _open_request(session_id="session-on-another-worker")
+
+        assert await answer_from_chat(_chat_message()) is True
+
+        assert "in the app" in _told(channel["instance"])
+        assert "Approved" not in _told(channel["instance"])
+        channel["respond"].assert_not_awaited()
+        assert _state(copy) == "pending"
+
+    @pytest.mark.asyncio
+    async def test_after_a_restart_the_code_resolves_but_nothing_is_approved(self, mock_db):
+        """The code is on the row, so it still names the request; with no waiter
+        an approval would be recorded and never run, so the chat is sent to the app."""
+        from app.core.connector_permissions import answer_from_chat
+        from app.core.permission_handler import PermissionHandler
+
+        request = _open_request()
+        instance = _fake_instance()
+        with patch("app.core.connector_service.sender_is_owner", return_value=True), \
+                patch("app.network.ownership.enrolled", return_value=False), \
+                patch("app.core.connectors.manager.connector_manager") as manager, \
+                patch("app.core.permission_handler.permission_handler", PermissionHandler()):
+            manager.get_running_instance.return_value = instance
+            assert await answer_from_chat(_chat_message("no 4821")) is True
+        assert "in the app" in _told(instance)
+        assert _state(request) == "pending"
+
+    @staticmethod
+    def _released_approval():
+        from app.db import interactions
+        from app.db.base import get_db
+
+        request = _open_request()
+        payload = {**interactions.get_interaction(request)["payload"], "owner_approval": {"subtype": "x"}, "released": True}
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE pending_interactions SET payload=%s WHERE id=%s",
+                                  (json.dumps(payload), request))
+        return request
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("runner,answered", [(None, True), ("another-worker", False)])
+    async def test_a_call_already_let_go_is_answered_only_where_the_chat_runs(self, channel, runner, answered):
+        from app.core.connector_permissions import answer_from_chat
+
+        channel["awaited"].return_value = False
+        request = self._released_approval()
+        with patch("app.db.database.get_session", return_value={"id": "sess-1"}), \
+                patch("app.network.control.owner_of", return_value=runner):
+            assert await answer_from_chat(_chat_message()) is True
+        assert _state(request) == ("answered" if answered else "pending")
+
+    @pytest.mark.asyncio
+    async def test_a_real_waiter_is_what_counts(self, mock_db):
+        from app.core import interaction_wait
+        from app.db import interactions
+
+        request = _open_request()
+        with patch("app.core.interaction_wait._ensure_listener"), \
+                patch("app.core.interaction_wait._set_work_paused", new=AsyncMock()):
+            waiter = asyncio.create_task(interaction_wait.await_interaction(request, "sess-1", 10, poll_seconds=0.01))
+            while not interaction_wait.is_awaited(request):
+                await asyncio.sleep(0.01)
+            assert interactions.answer_interaction(request, {"decision": "allow"})
+            await waiter
+        assert not interaction_wait.is_awaited(request)
 
 
 class TestCodesOnRequests:
@@ -599,15 +697,93 @@ class TestCodesOnRequests:
         pool = choice.call_args.args[0]
         assert taken not in pool and len(pool) == 9999 and second != taken
 
-    def test_a_closed_requests_code_is_free_again(self, mock_db):
+    @staticmethod
+    def _next_pool(chat="c1:42"):
+        from app.db import interactions
+
+        with patch("app.db.interactions.secrets.choice", side_effect=lambda pool: pool[0]) as choice:
+            interactions.assign_chat_code(_open_request(code=None, request_id=uuid.uuid4().hex), chat)
+        return choice.call_args.args[0]
+
+    def test_a_closed_requests_code_is_not_drawn_again(self, mock_db):
         from app.db import interactions
 
         request = _open_request(code=None, request_id="a")
         taken = interactions.assign_chat_code(request, "c1:42")
         assert interactions.answer_interaction(request, {"decision": "deny"})
-        with patch("app.db.interactions.secrets.choice", side_effect=lambda pool: pool[0]) as choice:
-            interactions.assign_chat_code(_open_request(code=None, request_id="b"), "c1:42")
-        assert taken in choice.call_args.args[0]
+        assert taken not in self._next_pool()
+
+    def test_a_used_code_stays_retired_when_its_row_is_deleted(self, mock_db):
+        from app.db import interactions
+        from app.db.base import get_db
+
+        request = _open_request(code=None, request_id="a")
+        taken = interactions.assign_chat_code(request, "c1:42")
+        with get_db() as conn:
+            conn.cursor().execute("DELETE FROM pending_interactions WHERE id=%s", (request,))
+        assert taken not in self._next_pool()
+
+    def test_a_used_code_returns_only_after_the_claim_window_and_the_longest_open_time(self, mock_db):
+        from app.db import interactions
+        from app.db.connectors import ANSWER_CLAIM_TTL_SECONDS
+
+        request = _open_request(code=None, request_id="a")
+        taken = interactions.assign_chat_code(request, "c1:42")
+        assert interactions.answer_interaction(request, {"decision": "deny"})
+        now = time.time()
+        with patch("app.db.interactions.time.time", return_value=now + ANSWER_CLAIM_TTL_SECONDS + 15 * 60):
+            assert taken not in self._next_pool()
+        with patch("app.db.interactions.time.time", return_value=now + ANSWER_CLAIM_TTL_SECONDS + 3700):
+            assert taken in self._next_pool()
+
+    def test_retired_codes_are_kept_per_chat(self, mock_db):
+        from app.db import interactions
+
+        taken = interactions.assign_chat_code(_open_request(code=None, request_id="a"), "c1:42")
+        assert taken in self._next_pool("c1:43")
+
+    def test_the_retired_list_stays_on_this_worker(self, mock_db):
+        from app.db import interactions
+        from app.network import policy
+
+        assert not policy.is_shared_setting_key(interactions.CHAT_CODES_USED_PREFIX + "abc")
+
+    @pytest.mark.asyncio
+    async def test_a_chat_with_no_code_left_is_sent_to_the_app(self, chat):
+        from app.db import interactions
+        from app.db.base import get_db
+
+        chat_key = "c1:42"
+        used = {f"{n:04d}": int(time.time()) + 3600 for n in range(10000)}
+        with get_db() as conn:
+            conn.cursor().execute(
+                "INSERT INTO system_settings (key,value) VALUES (%s,%s)",
+                (interactions.CHAT_CODES_USED_PREFIX + hashlib.sha256(chat_key.encode()).hexdigest(), json.dumps(used)))
+
+        await self._ask(chat)
+
+        assert self._code(chat) is None
+        assert "in the app" in _told(chat["instance"])
+        assert "Reply yes" not in _told(chat["instance"])
+
+    @pytest.mark.asyncio
+    async def test_a_late_first_delivery_cannot_land_on_a_newer_request(self, channel):
+        """The reply to request A is delayed until A has closed and B has opened."""
+        from app.core.connector_permissions import answer_from_chat
+        from app.db import interactions
+
+        first = _open_request(code=None, request_id="a")
+        code = interactions.assign_chat_code(first, "c1:chan-9")
+        assert interactions.answer_interaction(first, {"decision": "deny"})
+        later = _open_request(code=None, request_id="b")
+        with patch("app.db.interactions.secrets.choice", side_effect=lambda pool: code if code in pool else pool[0]):
+            assert interactions.assign_chat_code(later, "c1:chan-9") != code
+
+        assert await answer_from_chat(_chat_message(f"yes {code}", message_id="late")) is True
+
+        assert _state(later) == "pending"
+        assert "no longer open" in _told(channel["instance"])
+        channel["respond"].assert_not_awaited()
 
     def test_every_chat_keeps_its_own_code(self, mock_db):
         from app.db import interactions
@@ -717,6 +893,162 @@ class TestAConnectorMovesBetweenWorkers:
         network["move_to"]("B")
         assert await answer_from_chat(reply) is True
         assert (_state(on_a), _state(on_b)) == ("answered", "answered")
+
+
+# =============================================================================
+# The whole path: a real adapter's receive loop into the real manager
+# =============================================================================
+
+@pytest.mark.parametrize("kind", ["line", "msteams", "bluebubbles"])
+@pytest.mark.asyncio
+async def test_channels_that_cannot_verify_a_sender_are_sent_to_the_app(mock_db, kind):
+    """The real owner gate: their ids are refused, so no chat can reach a code."""
+    from app.core.connector_permissions import answer_from_chat
+    from app.db import interactions
+
+    connector = {"id": "c1", "type": kind, "config": {"owner_sender_ids": ["owner-account"]}}
+    link = {"connector_id": "c1", "platform_chat_id": "42", "platform_user_id": "owner-account"}
+    request = interactions.create_interaction(
+        "sess-1", "permission", {"request_id": "req-1", "tool_name": "Bash", "tool_input": {"command": "ls"}}, 300)["id"]
+    instance = _fake_instance()
+    with patch("app.db.database.get_connector", return_value=connector), \
+            patch("app.db.database.get_connector_sessions_for_ai_session", return_value=[link]), \
+            patch("app.network.ownership.enrolled", return_value=False), \
+            patch("app.core.connectors.manager.connector_manager") as manager:
+        manager.get_running_instance.return_value = instance
+        await deliver_permission_prompt("sess-1", "req-1", "Bash", {"command": "ls"}, "d", interaction_id=request)
+        told = _told(instance)
+        assert await answer_from_chat(_chat_message("yes 4821", chat="42")) is False
+    assert "Answer it in the app." in told and "Reply yes" not in told
+    assert interactions.CHAT_CODES_KEY not in interactions.get_interaction(request)["payload"]
+
+
+class TestSignalReadsTheReplyWhileItsTurnWaits:
+    """Real: SignalConnector's SSE loop, ConnectorManager's entry, the owner gate,
+    the code draw, the waiter and the responder. Fake: signal-cli's HTTP stream
+    and the agent turn, which is held open the way a turn waiting on the request is."""
+
+    OWNER, STRANGER, GROUP = "+15550100", "+15550111", "group-1"
+
+    @pytest.fixture
+    async def signal(self, mock_db):
+        import httpx
+
+        from app.core.connectors.manager import ConnectorManager
+        from app.core.connectors.signal_connector import SignalConnector
+        from app.core.permission_handler import PermissionHandler
+
+        manager = ConnectorManager()
+        events: asyncio.Queue = asyncio.Queue()
+        turns, release = [], asyncio.Event()
+
+        async def hold_turn(message):
+            turns.append(message.text)
+            await release.wait()
+
+        manager._handle_incoming_message = hold_turn
+        adapter = SignalConnector("c1", "signal", {"account": "+15550199"},
+                                  manager.handle_incoming_message, AsyncMock())
+        adapter.send_message = AsyncMock(return_value=True)
+        manager._connectors["c1"] = adapter
+
+        class Stream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def aiter_lines(self):
+                while True:
+                    yield await events.get()
+
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.stream = MagicMock(return_value=Stream())
+        connector = {"id": "c1", "type": "signal", "config": {"owner_sender_ids": [self.OWNER]}}
+        link = {"connector_id": "c1", "platform_chat_id": self.GROUP, "platform_user_id": self.OWNER}
+        with patch.object(httpx, "AsyncClient", return_value=client), \
+                patch("app.db.database.get_connector", return_value=connector), \
+                patch("app.db.database.get_connector_sessions_for_ai_session", return_value=[link]), \
+                patch("app.network.ownership.enrolled", return_value=False), \
+                patch("app.core.connectors.manager.connector_manager", manager), \
+                patch("app.core.permission_handler.permission_handler", PermissionHandler()), \
+                patch("app.core.interaction_wait._ensure_listener"), \
+                patch("app.core.interaction_wait._set_work_paused", new=AsyncMock()):
+            listener = asyncio.create_task(adapter._sse_listener())
+            try:
+                yield {"adapter": adapter, "events": events, "turns": turns, "release": release}
+            finally:
+                release.set()
+                await adapter.disconnect()
+                listener.cancel()
+                await asyncio.gather(listener, return_exceptions=True)
+
+    @classmethod
+    def _event(cls, sender, text, stamp):
+        envelope = {"sourceNumber": sender, "timestamp": stamp, "dataMessage": {"message": text, "timestamp": stamp,
+                                                                                 "groupInfo": {"groupId": cls.GROUP}}}
+        return "data:" + json.dumps({"envelope": envelope})
+
+    @staticmethod
+    async def _until(condition):
+        for _ in range(500):
+            if condition():
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("never happened")
+
+    @pytest.mark.asyncio
+    async def test_the_reply_is_read_and_answered_while_the_turn_waits(self, signal):
+        from app.core import interaction_wait
+        from app.db import interactions
+
+        signal["events"].put_nowait(self._event(self.OWNER, "tidy the folder", 1))
+        await self._until(lambda: signal["turns"] == ["tidy the folder"])
+
+        request = interactions.create_interaction(
+            "sess-1", "permission", {"request_id": "req-1", "tool_name": "Bash", "tool_input": {"command": "ls"}}, 300)["id"]
+        waiter = asyncio.create_task(interaction_wait.await_interaction(request, "sess-1", 30, poll_seconds=0.01))
+        await self._until(lambda: interaction_wait.is_awaited(request))
+        await deliver_permission_prompt("sess-1", "req-1", "Bash", {"command": "ls"}, "d", interaction_id=request)
+        code = interactions.get_interaction(request)["payload"][interactions.CHAT_CODES_KEY][f"c1:{self.GROUP}"]
+        assert f"Reply yes {code} or no {code}" in signal["adapter"].send_message.await_args.args[0].text
+
+        signal["events"].put_nowait(self._event(self.STRANGER, f"yes {code}", 2))
+        await self._until(lambda: len(signal["adapter"]._chat_tasks) == 2)
+        await asyncio.sleep(0.05)
+        assert interactions.get_interaction(request)["state"] == "pending"
+
+        signal["events"].put_nowait(self._event(self.OWNER, f"yes {code}", 3))
+        row = await asyncio.wait_for(waiter, timeout=5)
+
+        assert row["state"] == "answered" and row["answer"]["decision"] == "allow"
+        assert not signal["release"].is_set() and signal["turns"] == ["tidy the folder"]
+        await self._until(lambda: signal["adapter"].send_message.await_args.args[0].text.startswith("Approved"))
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_a_waiting_turn(self, signal):
+        signal["events"].put_nowait(self._event(self.OWNER, "tidy the folder", 1))
+        await self._until(lambda: signal["turns"] == ["tidy the folder"])
+        task = next(iter(signal["adapter"]._chat_tasks))
+
+        await signal["adapter"].disconnect()
+
+        assert task.cancelled() and not signal["adapter"]._chat_tasks
+
+    @pytest.mark.asyncio
+    async def test_a_full_house_says_so_without_stopping_the_stream(self, signal):
+        signal["adapter"].MAX_CHAT_TASKS = 1
+        signal["events"].put_nowait(self._event(self.OWNER, "first", 1))
+        await self._until(lambda: signal["turns"] == ["first"])
+
+        signal["events"].put_nowait(self._event(self.STRANGER, "second", 2))
+        await self._until(lambda: signal["adapter"].send_message.await_count == 1)
+
+        assert "Too many chats" in signal["adapter"].send_message.await_args.args[0].text
+        assert signal["turns"] == ["first"]
 
 
 # =============================================================================

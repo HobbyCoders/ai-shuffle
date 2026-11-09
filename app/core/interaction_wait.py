@@ -44,6 +44,10 @@ _listener_registered = False
 # resumes it (sessions.work_ms, #1619).
 _blocked: Dict[str, int] = {}
 
+# Interaction ids a call in THIS process is blocked on right now. A mirrored or
+# orphaned pending row is never here, so an answer to it would reach nobody.
+_awaited: Set[str] = set()
+
 
 def _on_gateway_tick(session_id: str) -> None:
     """Gateway global listener — runs on the LISTEN thread; must be cheap and
@@ -103,6 +107,12 @@ def has_waiters(session_id: str) -> bool:
     """
     with _lock:
         return bool(_waiters.get(session_id))
+
+
+def is_awaited(interaction_id: str) -> bool:
+    """True while a call in THIS process is blocked on ``interaction_id``."""
+    with _lock:
+        return interaction_id in _awaited
 
 
 def unregister_waiter(session_id: str, event: asyncio.Event) -> None:
@@ -213,6 +223,8 @@ async def await_interaction(
 
     event = register_waiter(session_id)
     first_blocked = _blocked_delta(session_id, +1) == 1
+    with _lock:
+        _awaited.add(interaction_id)
     try:
         # The turn is now blocked on the user: stop its working-time clock
         # until the last pending prompt resolves.
@@ -237,6 +249,8 @@ async def await_interaction(
                 pass
             event.clear()
     finally:
+        with _lock:
+            _awaited.discard(interaction_id)
         unregister_waiter(session_id, event)
         if _blocked_delta(session_id, -1) == 0:
             # Shielded so a cancelled waiter still reopens the clock; the
