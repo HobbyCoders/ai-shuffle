@@ -481,6 +481,58 @@ async def test_restored_wait_retry_uses_original_deadline(monkeypatch, restored_
     assert not approvals.has_live_relay("live-approval")
 
 
+async def test_restored_relay_final_read_keeps_answer_saved_during_last_retry(monkeypatch, restored_proxy):
+    proxy = restored_proxy
+    approvals = proxy.approvals
+    left = 1.0
+
+    async def fail_wait(*_args):
+        raise RuntimeError("read unavailable")
+
+    async def sleep(seconds):
+        nonlocal left
+        assert await asyncio.to_thread(interactions.answer_interaction, proxy.row["id"],
+                                       {"decision": "allow", "behavior": "allow"})
+        left -= seconds
+
+    monkeypatch.setattr(approvals, "_seconds_left", lambda expires: left)
+    monkeypatch.setattr("app.core.interaction_wait.await_interaction", fail_wait)
+    monkeypatch.setattr(approvals, "asyncio", SimpleNamespace(to_thread=asyncio.to_thread, sleep=sleep))
+    assert await approvals.restore_proxies() == 1
+    await asyncio.wait_for(proxy.tasks[0], 1)
+    proxy.send.assert_awaited_once()
+    assert proxy.send.await_args.args[1:] == ("allow", None)
+
+
+async def test_restored_relay_starting_after_expiry_keeps_saved_away_answer(monkeypatch, restored_proxy):
+    proxy = restored_proxy
+    approvals = proxy.approvals
+    monkeypatch.setattr(approvals, "_seconds_left", lambda expires: 0.0)
+    assert await approvals.restore_proxies() == 1
+    # The relay task has been created but has not run yet.
+    assert interactions.answer_interaction(proxy.row["id"], {
+        "decision": "deny", "behavior": "deny", "message": away_mode.DEFERRED_MESSAGE})
+    await asyncio.wait_for(proxy.tasks[0], 1)
+    proxy.send.assert_awaited_once()
+    assert proxy.send.await_args.args[1:] == ("deny", approvals.AWAY_MESSAGE)
+
+
+async def test_restored_relay_final_read_failure_sends_timed_out_denial(monkeypatch, restored_proxy):
+    proxy = restored_proxy
+    approvals = proxy.approvals
+
+    def fail_read(_interaction_id):
+        raise RuntimeError("read unavailable")
+
+    monkeypatch.setattr(approvals, "_seconds_left", lambda expires: 0.0)
+    assert await approvals.restore_proxies() == 1
+    monkeypatch.setattr(interactions, "get_interaction", fail_read)
+    await asyncio.wait_for(proxy.tasks[0], 1)
+    proxy.send.assert_awaited_once()
+    assert proxy.send.await_args.args[1:] == ("deny", approvals.TIMED_OUT_MESSAGE)
+    assert not approvals.has_live_relay("live-approval")
+
+
 async def test_cancelled_restored_wait_sends_nothing_and_cleans_up(monkeypatch, restored_proxy):
     from app.core import interaction_wait
 

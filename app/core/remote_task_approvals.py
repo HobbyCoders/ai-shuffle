@@ -616,6 +616,15 @@ async def _follow_existing(request: _Request, row: Mapping[str, Any]) -> None:
                                request.approval_id, exc_info=True)
                 await asyncio.sleep(min(RELAY_WAIT_RETRY_SECONDS,
                                         max(0.0, _seconds_left(row.get("expires_at")))))
+    if final is None:
+        # The deadline can pass with no successful read: a saved answer still counts.
+        from app.db import interactions
+
+        try:
+            final = await asyncio.to_thread(interactions.get_interaction, row["id"])
+        except Exception:  # noqa: BLE001 — the timed-out denial below is the fallback
+            logger.warning("remote approvals: final read for %s failed", request.approval_id,
+                           exc_info=True)
     state = (final or {}).get("state")
     answer = (final or {}).get("answer") or {}
     if state == "answered" and answer.get("decision") == "allow":
