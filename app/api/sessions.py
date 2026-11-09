@@ -383,8 +383,13 @@ async def move_session_to(session_id: str, session: dict, target_instance_id: st
         )
     _refuse_archived({**session, "id": session_id}, "move")
 
-    # Already pinned there — nothing to write.
-    if target in (session.get("instance_id"), session.get("owner_device_id")):
+    # Already there — nothing to write. The owner decides: instance_id is per
+    # worker and can still name a worker that has passed the chat on, which is
+    # a real destination.
+    from app.network import runners
+
+    current_owner = session.get("owner_device_id") or session.get("instance_id")
+    if current_owner in (target, runners.resolve_runner_id(target)):
         return MoveSessionResponse(
             session_id=session_id,
             instance_id=target,
@@ -453,7 +458,7 @@ async def move_session_to(session_id: str, session: dict, target_instance_id: st
 
     if streaming_status.has_active_run(session_id):
         owner_name = (
-            await run_sync(_adopt_device_name, session.get("instance_id"))
+            await run_sync(_adopt_device_name, current_owner)
             or "another device"
         )
         raise HTTPException(
@@ -467,7 +472,7 @@ async def move_session_to(session_id: str, session: dict, target_instance_id: st
     from app.network import handoff, control, engine
     from app.api.git_helpers import invalidate_working_dir_cache
 
-    owner = session.get("instance_id")
+    owner = current_owner
     try:
         moved = await handoff.move(session, target)
     except (control.RunnerUnreachable, control.ControlRefused, engine.NotEnrolled,

@@ -381,8 +381,14 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        if transcript_producer is not None:
-            await transcript_producer.stop()
+        try:
+            if transcript_producer is not None:
+                await transcript_producer.stop()
+        finally:
+            # This thread and its driver child belong to the app lifespan,
+            # including exceptional exits. Join off-loop while it kills/reaps.
+            from app.core.event_gateway import get_gateway
+            await asyncio.to_thread(get_gateway().stop)
     await provider_usage_monitor.stop()
 
     # Shutdown

@@ -1,10 +1,10 @@
-"""Peer-terminal control between two workers over the real signed control endpoint (#196).
+"""Peer-terminal control between two workers over the real signed control endpoint (#674).
 
 Each worker has its own database, device identity and network membership
 (``tests.core.network.harness``). Calls travel through the real
 ``/api/v1/network/peer/control/{action}`` route with real device tokens, so the
 receiving worker authenticates the caller itself. Nothing in the terminal relay
-is stubbed: these are the refusals a forged, plaintext or unapproved request
+is stubbed: these are the refusals a forged, plaintext or unsigned request
 meets on the worker that would run the shell.
 """
 from __future__ import annotations
@@ -90,7 +90,6 @@ def pair(
     for worker in (source, recipient):
         transport._links.pop(worker.device_id, None)
     yield source, recipient, urls, served
-    relay._approvals.clear()
     relay._owners.clear()
     relay._sessions.clear()
 
@@ -105,19 +104,18 @@ def _row(recipient: Worker, terminal_capability: int) -> dict[str, Any]:
             "capabilities": {"terminal": terminal_capability}, "endpoints": [RECIPIENT_URL]}
 
 
-async def test_compatible_peer_is_offered_only_for_recipient_approval(pair: Pair) -> None:
+async def test_compatible_peer_answers_the_availability_check(pair: Pair) -> None:
     source, recipient, _, served = pair
     with source.active():
-        state = await terminal_targets.peer_availability(_row(recipient, 2))
-    assert state["reason_code"] == "recipient_approval_required" and not state["available"]
-    assert "approve this terminal directly on the receiving worker" in state["reason"]
+        state = await terminal_targets.peer_availability(_row(recipient, service.PEER_TERMINAL_VERSION))
+    assert state["available"] and state["reason_code"] is None
     assert ("POST", "/api/v1/network/peer/control/terminal") in served[RECIPIENT_URL].requests
 
 
 async def test_old_peer_is_refused_without_a_peer_call(pair: Pair) -> None:
     source, recipient, _, served = pair
     with source.active():
-        state = await terminal_targets.peer_availability(_row(recipient, 1))
+        state = await terminal_targets.peer_availability(_row(recipient, service.PEER_TERMINAL_VERSION - 1))
     assert state["reason_code"] == "peer_unsupported_or_disabled" and not state["available"]
     assert served[RECIPIENT_URL].requests == []
 
@@ -133,34 +131,31 @@ async def test_peer_with_terminals_turned_off_answers_for_itself(
     with recipient.active():
         assert service.capability_version() == 1
     with source.active():
-        state = await terminal_targets.peer_availability(_row(recipient, 2))
+        state = await terminal_targets.peer_availability(_row(recipient, service.PEER_TERMINAL_VERSION))
         refused = await control.call(recipient.device_id, "terminal",
-                                     {"op": "request", "lease": FORGED_LEASE}, secure=True)
+                                     {"op": "challenge", "key_id": "anything"}, secure=True)
     assert state["reason_code"] == "peer_terminals_disabled" and not state["available"]
     assert refused["status"] == "unavailable"
     assert refused["reason_code"] == "peer_terminals_disabled"
-    with recipient.active():
-        assert relay.recipient_requests() == []
 
 
-async def test_forged_request_is_refused_after_asking_the_source_owner(pair: Pair) -> None:
+async def test_open_with_no_device_proof_is_refused_without_asking_the_source(pair: Pair) -> None:
     source, recipient, _, served = pair
-    with pytest.raises(control.ControlRefused, match="owner authorization"):
-        await _terminal(source, recipient, {"op": "request", "lease": FORGED_LEASE})
-    # The recipient asked the source over its own signed channel, and the
-    # source had issued no such lease: no request waits for approval.
-    assert ("POST", "/api/v1/network/peer/control/terminal-owner") in served[SOURCE_URL].requests
-    with recipient.active():
-        assert relay.recipient_requests() == []
+    before = service.registry.count
+    answer = await _terminal(source, recipient, {"op": "open", "lease": FORGED_LEASE, "options": {}})
+    assert answer["error"]["code"] == "device_link_required" and answer["error"]["status"] == 403
+    # The source's say-so is not owner proof, so it was never consulted.
+    assert ("POST", "/api/v1/network/peer/control/terminal-owner") not in served[SOURCE_URL].requests
+    assert service.registry.count == before
 
 
-@pytest.mark.parametrize("op", ["open", "read", "write", "resize"])
-async def test_unapproved_lease_cannot_drive_a_shell(pair: Pair, op: str) -> None:
+@pytest.mark.parametrize("op", ["read", "write", "resize", "paste"])
+async def test_a_lease_with_no_open_shell_cannot_drive_one(pair: Pair, op: str) -> None:
     source, recipient, _, _ = pair
     before = service.registry.count
     with pytest.raises(control.ControlRefused):
         await _terminal(source, recipient,
-                        {"op": op, "lease": FORGED_LEASE, "data": "", "cols": 80})
+                        {"op": op, "lease": FORGED_LEASE, "data": "", "cols": 80, "text": "x"})
     assert service.registry.count == before
 
 

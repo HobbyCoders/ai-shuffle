@@ -56,7 +56,8 @@ def drop_legacy_sync_ops_index(cursor) -> bool:
     cursor.execute("SELECT to_regclass('idx_sync_ops_record') AS name")
     if cursor.fetchone()["name"] is None:
         return True
-    cursor.execute("SAVEPOINT sp_sync_ops_record_index")
+    from app.db.base import execute_savepoint
+    execute_savepoint(cursor, "SAVEPOINT sp_sync_ops_record_index")
     try:
         cursor.execute("SHOW lock_timeout")
         previous = cursor.fetchone()["lock_timeout"]
@@ -64,14 +65,14 @@ def drop_legacy_sync_ops_index(cursor) -> bool:
         cursor.execute("DROP INDEX IF EXISTS idx_sync_ops_record")
         cursor.execute("SELECT set_config('lock_timeout', %s, true)", (previous,))
     except (psycopg2.errors.LockNotAvailable, psycopg2.errors.DeadlockDetected):
-        cursor.execute("ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
+        execute_savepoint(cursor, "ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
         logger.warning("Deferring legacy sync-op index removal until next boot: table busy")
         return False
     except Exception:
-        cursor.execute("ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
+        execute_savepoint(cursor, "ROLLBACK TO SAVEPOINT sp_sync_ops_record_index")
         raise
     finally:
-        cursor.execute("RELEASE SAVEPOINT sp_sync_ops_record_index")
+        execute_savepoint(cursor, "RELEASE SAVEPOINT sp_sync_ops_record_index")
     return True
 
 

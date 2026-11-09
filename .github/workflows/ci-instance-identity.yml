@@ -81,6 +81,13 @@ jobs:
         run: >-
           python -m pytest tests/db/test_backend_probe.py
           --confcutdir=tests/db -o addopts="" -p no:cacheprovider --timeout=60 -q
+      - name: Exercise native LISTEN ownership and private child environment
+        if: runner.os == 'Windows'
+        env:
+          BACKEND_PROBE_TEST_DSN: host=127.0.0.1 user=postgres dbname=postgres
+        run: >-
+          python -m pytest tests/core/test_event_listener_ownership.py
+          --confcutdir=tests/core -o addopts="" -p no:cacheprovider --timeout=45 -q
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

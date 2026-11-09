@@ -38,46 +38,48 @@ export interface TerminalTarget {
 	/** Peer workers only: why the worker is not usable right now (see PeerReasonCode). */
 	reason_code?: string | null;
 	reason?: string | null;
-	/** Peer workers only: the caller's approved, unused authorization. Memory only, never stored. */
-	authorization_id?: string;
 }
 
-/**
- * Peer-terminal availability codes on a target row (docs/internal/terminals.md).
- * `recipient_approval_required` is the one the owner can act on: request an
- * approval, then approve it directly on the other worker.
- */
+/** Peer-terminal availability codes on a target row (docs/internal/terminals.md). */
 export type PeerReasonCode = 'peer_offline' | 'peer_terminals_disabled' | 'peer_unsupported_or_disabled' | 'not_supported'
-	| 'https_required' | 'peer_unavailable' | 'recipient_approval_required';
+	| 'https_required' | 'peer_unavailable';
 
-/** The source worker's view of one request (`POST`/`GET /peer-authorizations`). */
-export interface PeerAuthorization {
-	authorization_id: string;
-	worker_id: string;
-	request_id?: string;
-	/** `pending`, `approved`, `expired`, or `unavailable` when the recipient refused up front. */
-	status: string;
-	used?: boolean;
+/** What one device signature opens. Exactly these three fields are signed. */
+export interface ProofTarget { session_id: string | null; cwd: string | null; shell: string | null }
+
+/** A device's signature for one open. `payload` is signed exactly as sent. */
+export interface DeviceProof { key_id: string; payload: string; signature: string }
+
+/** The receiving worker's answer for this device (`POST /peer-challenge`). */
+export interface PeerChallenge {
+	/** `linked` carries the single-use challenge; `pending` and `unlinked` do not. */
+	status: 'linked' | 'pending' | 'unlinked';
+	receiver: string;
+	via: string;
+	challenge?: string;
 	expires_in?: number;
-	confirmation_code?: string;
-	source_name?: string;
-	age_seconds?: number;
-	available?: boolean;
-	reason_code?: string | null;
-	reason?: string | null;
 }
 
-/** The receiving worker's view of one request (`GET /peer-requests`). */
-export interface PeerRequest {
+/** A device waiting to link on this worker. Its code is never listed: the owner types it from the device. */
+export interface PeerLinkRequest {
 	request_id: string;
-	/** The requesting (source) worker. */
+	label: string;
+	/** The worker the device asked through. */
 	worker_id: string;
-	status: 'pending' | 'approved' | string;
-	used: boolean;
-	expires_in: number;
-	confirmation_code: string;
-	source_name: string;
+	worker_name: string;
 	age_seconds: number;
+	expires_in: number;
+}
+
+/** A device linked on this worker. */
+export interface LinkedDevice {
+	key_id: string;
+	label: string;
+	worker_id: string;
+	worker_name: string;
+	linked_by: string;
+	created_at: string;
+	last_used_at: string | null;
 }
 
 export interface TerminalTargets {
@@ -88,11 +90,13 @@ export interface TerminalTargets {
 	shells: { name: string; default: boolean }[];
 	default_shell: string | null;
 	default_folder: { path: string; source: string } | null;
+	/** The chat's own worker, when that isn't this worker. */
+	chat_worker_id?: string | null;
 	limit: number;
 	open: number;
 }
 
-export interface CreateTerminal { target?: Pick<TerminalTarget, 'kind' | 'worker_id' | 'grant_id' | 'authorization_id'>; session_id?: string | null; cwd?: string | null; shell?: string | null; cols?: number; rows?: number }
+export interface CreateTerminal { target?: Pick<TerminalTarget, 'kind' | 'worker_id' | 'grant_id'> & { proof?: DeviceProof }; session_id?: string | null; cwd?: string | null; shell?: string | null; cols?: number; rows?: number }
 
 /** A refused request. `code` is the service code, or `http_<status>` for auth and other errors. */
 export class TerminalApiError extends Error {
@@ -145,19 +149,21 @@ export const terminalsApi = {
 			body: JSON.stringify({ text }),
 		}),
 
-	// ── Peer terminals: owner-approved shells on another worker ──────────
-	/** On the source: ask `workerId` for one shell. Its owner approves it there. */
-	requestPeer: (workerId: string) =>
-		request<PeerAuthorization>('/peer-authorizations', { method: 'POST', body: JSON.stringify({ worker_id: workerId }) }),
-	peerAuthorization: (id: string) => request<PeerAuthorization>(`/peer-authorizations/${encodeURIComponent(id)}`),
-	/** On the source: withdraw a request or an unused approval. */
-	revokePeerAuthorization: (id: string) =>
-		request<{ revoked?: boolean }>(`/peer-authorizations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-	/** On the recipient: requests from other workers waiting here, and live approvals. */
-	peerRequests: () => request<{ requests: PeerRequest[] }>('/peer-requests'),
-	approvePeerRequest: (id: string) =>
-		request<PeerRequest>(`/peer-requests/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
-	/** On the recipient: deny a pending request, or revoke an approval and close its shell. */
-	revokePeerRequest: (id: string) =>
-		request<{ revoked: boolean }>(`/peer-requests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+	// ── Peer terminals: this device's link, and the devices linked here ──
+	/** Through this worker, ask `workerId` whether this device is linked, for a fresh challenge. */
+	peerChallenge: (workerId: string, keyId: string) =>
+		request<PeerChallenge>('/peer-challenge', { method: 'POST', body: JSON.stringify({ worker_id: workerId, key_id: keyId }) }),
+	/** Through this worker, ask `workerId` to expect this device. The owner approves it there. */
+	requestPeerLink: (workerId: string, publicKey: string, label: string) =>
+		request<{ status: string; key_id: string; expires_in?: number }>('/peer-links', { method: 'POST', body: JSON.stringify({ worker_id: workerId, public_key: publicKey, label }) }),
+	/** On the receiver: devices waiting to link here, and devices linked. */
+	deviceLinks: () => request<{ links: LinkedDevice[]; requests: PeerLinkRequest[] }>('/device-links'),
+	/** On the receiver: link the device whose code the owner typed. */
+	approveDeviceLink: (code: string) =>
+		request<LinkedDevice>('/device-links/approve', { method: 'POST', body: JSON.stringify({ code }) }),
+	declineDeviceLink: (id: string) =>
+		request<{ declined?: boolean }>(`/device-links/requests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+	/** On the receiver: unlink a device. Any shell it has open here closes. */
+	revokeDeviceLink: (keyId: string) =>
+		request<{ revoked?: boolean }>(`/device-links/${encodeURIComponent(keyId)}`, { method: 'DELETE' }),
 };

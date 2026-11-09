@@ -749,23 +749,23 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
     my_install = installs_map.get(me)
     try:
         from app.network import runners as _runners
-        my_device = _runners.self_device_id()
+        my_device = _runners.own_device_id()
     except Exception:  # noqa: BLE001
         my_device = None
     from app.network.session_runtime import for_sessions, STATES
-    runtime = for_sessions([s["id"] for s in sessions if s.get("owner_device_id") != my_device])
+    # A summary is matched against the row's owner, so a row with no owner has none to read.
+    runtime = for_sessions([
+        s["id"] for s in sessions
+        if s.get("owner_device_id") and s["owner_device_id"] != my_device
+    ])
     for session in sessions:
-        inst = session.get("instance_id")
         owner_device = session.get("owner_device_id")
-        if owner_device and owner_device != my_device and (not inst or inst == me):
-            # A mirrored session from another network device.
-            inst = owner_device
+        # The owner decides, and only rows with no owner read instance_id.
+        # instance_id is per worker and is not synced: a move writes the target
+        # there on the sender only, so it can keep naming a worker that has
+        # since passed the chat on, or the previous one after a hand-back.
+        inst = owner_device or session.get("instance_id")
         is_remote = bool(inst) and inst != me and inst != my_device
-        if owner_device and my_device and owner_device == my_device:
-            # This device owns the session. A session handed back here can
-            # still carry the other worker's instance_id; treating it as
-            # remote read an empty runtime summary and showed "Unknown".
-            is_remote = False
         session["is_remote"] = is_remote
         session["is_pinned"] = is_pinned(session)
 

@@ -307,23 +307,23 @@
 
 	const remote = $derived(!!session.is_remote);
 	const whereText = $derived([showProject ? projectLabel : null, branch].filter(Boolean).join(' · ') || null);
-	// Nothing to report: the line holds the row's age (and its worker's name, with
-	// room to spell it) so its rhythm stays and it never goes blank.
+	// Nothing to report: the line holds the row's age so its rhythm stays and it
+	// never goes blank.
 	const factless = $derived(!showPr && !diff && !progressWord && !whereText);
 	const ageText = $derived.by(() => {
 		if (!factless) return null;
 		const age = formatAge(Math.max(0, now - lastActivity));
 		return age === 'now' ? 'Just now' : `${age} ago`;
 	});
-	const fallbackText = $derived(factless ? [remote ? device : null, ageText].filter(Boolean).join(' · ') : null);
 
 	// The row's whole story, for the hover tip.
 	const rowFacts = $derived([statusWord, prText, progressWord, diffText, device, projectLabel, branch, ageText]);
 	const rowDetails = $derived(rowFacts.filter(Boolean).join(' · '));
 	const rowTip = $derived(`${title}\n${rowDetails}`);
-	// The same for a screen reader, which already hears the several-PR chip by name.
+	// The same for a screen reader, which already hears the several-PR chip by
+	// name, and another worker's name from the row's server icon.
 	const rowSpeech = $derived(
-		rowFacts.filter((fact, i) => fact && !(multiPr && i === 1)).join(' · ')
+		rowFacts.filter((fact, i) => fact && !(multiPr && i === 1) && !(remote && i === 4)).join(' · ')
 	);
 	// What the state column is showing, for whoever hovers it.
 	const runtimeMark = $derived(running || attention || failed || offline);
@@ -715,12 +715,12 @@
 					{/if}
 					{#if whereText}
 						<span class="where" aria-hidden="true">{whereText}</span>
-					{:else if fallbackText}
-						<span class="where" aria-hidden="true">{fallbackText}</span>
+					{:else if ageText}
+						<span class="where" aria-hidden="true">{ageText}</span>
 					{/if}
 				</span>
-				{#if remote && !factless}
-					<span class="worker" aria-hidden="true" title={`On ${device}`}><Server size={12} strokeWidth={MARK_STROKE} /></span>
+				{#if remote}
+					<span class="worker" role="img" aria-label={`On ${device}`} title={`On ${device}`}><Server size={12} strokeWidth={MARK_STROKE} aria-hidden="true" /></span>
 				{/if}
 			</span>
 
@@ -1038,7 +1038,8 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	/* Sits under the time; only there when the session is on another worker.
+	/* Sits under the time; the one mark that says the session is on another
+	   worker, on every such row whatever else it shows.
 	   Server, not Monitor: Monitor means this device (ExecutionModeBar). */
 	.worker {
 		display: inline-flex;

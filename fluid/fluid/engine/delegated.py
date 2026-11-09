@@ -789,6 +789,8 @@ def _with_forced_env(settings: dict[str, Any]) -> dict[str, Any]:
 _GROUP_TERM_GRACE_S = 2.0
 #: How long the CLI gets to exit once its stdin closes.
 _CLI_EXIT_GRACE_S = 5.0
+# A close may not wait on a CLI that stopped reading its input pipe.
+_CLI_CLOSE_INTERRUPT_S = 0.5
 #: The same, when the close has no time left or the session was given up on.
 _CANCELLED_EXIT_GRACE_S = 1.0
 # How long a cancelled close waits to reap the CLI after killing its tree.
@@ -1585,8 +1587,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         try:
             self._peer_admission_open = False
             self._drop_pending_peers()
-            await self._close_background_lifecycle()
+            # Close wake admission before the interrupt's first await. Lifecycle
+            # cleanup cancels a question wake AND the turn it directly awaits,
+            # so the active-turn check and interrupt must precede that cleanup.
+            self._background_closed = True
+            # The reader may map the CLI's result while the interrupt write
+            # yields: it must already know this is a stopped turn, not a
+            # rejected resume handle to discard and replay.
             self._interrupted.set()
+            if self._turn_task and not self._turn_task.done():
+                # EOF closes input, not an in-flight provider reply. Ask the CLI
+                # to abort without letting a blocked stdin hold up close.
+                try:
+                    await asyncio.wait_for(self._send_interrupt(), timeout=_CLI_CLOSE_INTERRUPT_S)
+                except Exception:
+                    logger.debug("interrupting the closing claude CLI failed", exc_info=True)
+            await self._close_background_lifecycle()
             # Settle anyone parked on a control reply: the CLI is going away, so
             # they get "unavailable" now instead of waiting out the timeout.
             for request_id, fut in list(self._pending_controls.items()):
