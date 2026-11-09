@@ -608,22 +608,31 @@
 	// down lifts that whole group over the ones above it (#1307). That is a
 	// screenful of rows changing place with nothing the user touched, so they
 	// glide there. Position only: a group growing by a row must not stretch.
+	/** How far through its easing a group sinking out of sight reaches the list's bottom edge. */
+	const SINK_REACHES_EDGE_AT = 0.9;
+
 	function slideGroup(node: HTMLElement, { from, to }: { from: DOMRect; to: DOMRect }): AnimationConfig {
 		const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 		if (from.top === to.top || reduced) return { duration: 0 };
 		// In a long list a group can have thousands of pixels to travel, and the
-		// glide would empty the panel on the way. The part below the list's bottom
-		// edge is out of sight, so a group only covers the distance to that edge.
+		// glide would empty the panel on the way. A group rising from below the
+		// list's bottom edge starts at that edge, out of sight either way.
 		const edge = node.closest('.list')?.getBoundingClientRect().bottom ?? Infinity;
 		const start = from.top > edge && to.top < edge ? edge : from.top;
-		const end = to.top > edge && from.top < edge ? edge : to.top;
+		const travel = to.top - start;
+		// A group sinking past that edge has to finish at its real place, because
+		// the list can scroll during the glide and bring that place into view. So
+		// it stays with the panel for most of the glide and covers the distance
+		// out of sight at the end, on one curve that finishes at exactly zero.
+		const sinksAway = to.top > edge && start < edge;
+		const curve = sinksAway ? Math.max(1, Math.log((edge - start) / travel) / Math.log(SINK_REACHES_EDGE_AT)) : 1;
 		// The rising group passes over the rest on the panel's own colour, so two
 		// lists of rows never read through each other on the way.
-		const over = start > end ? ' z-index: 1; background: var(--sidebar);' : '';
+		const over = travel < 0 ? ' z-index: 1; background: var(--sidebar);' : '';
 		return {
 			duration: 240,
 			easing: cubicOut,
-			css: (_t, u) => `transform: translateY(${end + u * (start - end) - to.top}px);${over}`
+			css: (t) => `transform: translateY(${(t ** curve - 1) * travel}px);${over}`
 		};
 	}
 	// A lane with no project headers still needs its rows to say where they

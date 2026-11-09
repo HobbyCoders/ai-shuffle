@@ -301,8 +301,15 @@ describe('A new chat changing the order of the project groups (#1307)', () => {
 		const travel = glides().map(({ frames }) => [frames[0].transform, frames.at(-1)?.transform]);
 		// Rising from 400 to 0: starts at the edge, not at its true place below it.
 		expect(travel).toContainEqual(['translateY(300px)', 'translateY(0px)']);
-		// Sinking from 0 to 400: starts where it was and leaves past the edge.
-		expect(travel).toContainEqual(['translateY(-400px)', 'translateY(-100px)']);
+		// Sinking from 0 to 400: starts where it was and ends at its real place,
+		// so taking the animation off can never move it.
+		expect(travel).toContainEqual(['translateY(-400px)', 'translateY(0px)']);
+
+		// It stays with the panel for most of the glide and leaves late.
+		const sinking = glides().find(({ frames }) => frames[0].transform === 'translateY(-400px)');
+		const tops = sinking!.frames.map(({ transform }) => 400 + parseFloat(String(transform).slice(11)));
+		expect(tops).toEqual([...tops].sort((a, b) => a - b));
+		expect(tops[Math.floor(tops.length / 4)]).toBeLessThan(150);
 	});
 
 	it('puts the groups straight in place for reduced motion', async () => {

@@ -31,6 +31,9 @@
 //   new-chat-first-send  the same when this page's own first send brings the row
 //   new-chat-glide-has-no-step  a row in the group being pushed down follows the
 //                     glide with no jump in position at any frame (#1307)
+//   new-chat-glide-ends-in-place  the list scrolls during that glide and the group
+//                     finishes where it is really laid out, with no jump when
+//                     the animation is removed (#1307)
 //
 // Hosted journeys build only the shared desktop UI and run it at desktop and
 // phone widths. `--mobile-shell` opens the phone variants of the failed-* cases
@@ -805,8 +808,81 @@ const NEW_CHAT_GLIDE_HAS_NO_STEP = {
 	}
 };
 
+/** Slow enough to scroll inside a glide, quick enough to watch one finish. */
+const GLIDE_END_SLOWDOWN = 0.05;
+const GLIDE_END_STEP_LIMIT_PX = 4;
+const GLIDE_FRAMES_BEFORE_SCROLL = 12;
+
+const NEW_CHAT_GLIDE_ENDS_IN_PLACE = {
+	name: 'new-chat-glide-ends-in-place',
+	setup: crowdedProjects,
+	async act({ page, mark }) {
+		const sinking = await page.locator('[data-group="active"] .proj-group').first()
+			.locator('.scard-frame').first().getAttribute('data-session-card');
+		await mark('the list scrolls while a new chat lifts its project over this row');
+		const cdp = await page.context().newCDPSession(page);
+		await cdp.send('Animation.enable');
+		await cdp.send('Animation.setPlaybackRate', { playbackRate: GLIDE_END_SLOWDOWN });
+		await page.evaluate(({ selector, GLIDE_FRAMES_BEFORE_SCROLL }) => {
+			const row = document.querySelector(selector);
+			const group = row.closest('.proj-group');
+			const list = group.closest('.list');
+			const trace = { frames: [], live: true, scrolled: null, glideFrames: 0 };
+			window.__glideEnd = trace;
+			const tick = () => {
+				if (!trace.live) return;
+				const running = group.getAnimations().length > 0;
+				const offset = running ? new DOMMatrix(getComputedStyle(group).transform).m42 : 0;
+				if (offset) trace.glideFrames += 1;
+				// Once it is under way, scroll just far enough to bring the group's
+				// real place into view, so a glide that ends anywhere else shows.
+				if (trace.glideFrames === GLIDE_FRAMES_BEFORE_SCROLL && !trace.scrolled) {
+					const realTop = group.getBoundingClientRect().top - offset;
+					const bottom = list.getBoundingClientRect().bottom;
+					const before = list.scrollTop;
+					list.scrollTop = before + Math.max(realTop - bottom, 0) + 80;
+					trace.scrolled = { realTop, bottom, by: list.scrollTop - before };
+				}
+				trace.frames.push({ running, top: row.getBoundingClientRect().top, scroll: list.scrollTop });
+				requestAnimationFrame(tick);
+			};
+			requestAnimationFrame(tick);
+		}, { selector: CARD(sinking), GLIDE_FRAMES_BEFORE_SCROLL });
+		const { session_id: id } = await api(page, 'POST', '/sessions', {});
+		await page.locator(CARD(id)).waitFor({ state: 'attached', timeout: 30_000 });
+		await page.waitForFunction(() => {
+			const trace = window.__glideEnd;
+			return trace.scrolled && trace.frames.length > 2 && !trace.frames.at(-1).running;
+		}, null, { timeout: 30_000 }).catch(async () => {
+			const seen = await page.evaluate(() => {
+				const { frames, scrolled, glideFrames } = window.__glideEnd;
+				return { frames: frames.length, glideFrames, last: frames.at(-1), scrolled };
+			});
+			throw new Error(`the glide was not seen finishing: ${JSON.stringify(seen)}`);
+		});
+		await page.waitForTimeout(200);
+		const { frames, scrolled } = await page.evaluate(() => {
+			window.__glideEnd.live = false;
+			return window.__glideEnd;
+		});
+		await cdp.send('Animation.setPlaybackRate', { playbackRate: 1 });
+		await cdp.detach();
+		await expectLiftedToTop(page, id);
+		expect(scrolled.realTop > scrolled.bottom, `the group is headed past the list's bottom edge (${scrolled.realTop} against ${scrolled.bottom})`);
+		expect(scrolled.realTop - scrolled.by < scrolled.bottom, `the scroll brings its real place into view (${scrolled.realTop} less ${scrolled.by}, bottom ${scrolled.bottom})`);
+		// Every end counts: a busy page can play a second, smaller glide after it.
+		const place = ({ top, scroll }) => top + scroll;
+		const steps = frames.flatMap((frame, i) => (i > 0 && frames[i - 1].running && !frame.running
+			? [Math.abs(place(frame) - place(frames[i - 1]))]
+			: []));
+		expect(steps.length > 0, 'the glide was seen finishing');
+		const step = Math.max(...steps);
+		expect(step <= GLIDE_END_STEP_LIMIT_PX, `the row stays put when the glide is removed: it moved ${step.toFixed(1)} px`);
+	}
+};
+
 await runJourney({
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND, NEW_CHAT_GLIDE_HAS_NO_STEP]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND, NEW_CHAT_GLIDE_HAS_NO_STEP, NEW_CHAT_GLIDE_ENDS_IN_PLACE]
 });
