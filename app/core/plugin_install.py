@@ -4,12 +4,15 @@ Plugin Install - Installation and uninstallation operations for plugins.
 Provides standalone functions that operate on a PluginService instance.
 """
 
+import hashlib
 import logging
 import os
 import re
 import shutil
 import stat
 import subprocess
+import time
+import uuid
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +23,7 @@ from app.core.plugin_models import (
     PluginScope,
 )
 from app.core.fs_utils import force_rmtree as _force_rmtree
+from app.core.plugin_locks import serialized_plugin, serialized_state, state_lock
 from app.core.process_tree import child_env
 from app.core.scrub import redact_url_credentials
 
@@ -498,49 +502,108 @@ def _agent_request(
     return {}
 
 
-@contextmanager
-def _replace_plugin_cache(svc, plugin_id: str, cache_path: Path, populate):
-    """Prepare privately, publish on the same filesystem, roll back any refusal.
+def _stage_plugin_revision(svc, plugin_id: str, version: str, populate) -> Path:
+    """Publish an immutable, complete tree at an unreferenced cache path.
 
-    Keep the previous tree until registration and activation finish, not just
-    until copying finishes. None of those fallible steps may destroy an install.
+    No installation record changes here. A killed/failed publisher leaves only
+    hidden staging/orphan content, never a missing or partially written live tree.
+    The caller holds the plugin lock through the eventual record switch.
     """
     import tempfile
+    from app.core.plugin_update_content import _tree_digest
 
-    before = svc._read_json_file(svc.INSTALLED_FILE, {"plugins": {}}, for_update=True)
-    previous_records = before.get("plugins", {}).get(plugin_id)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".plugin-install-", dir=cache_path.parent) as tmp:
-        candidate, previous = Path(tmp) / "candidate", Path(tmp) / "previous"
+    name, marketplace = plugin_id.rsplit("@", 1)
+    _safe_path_component(name, "name")
+    _safe_path_component(marketplace, "marketplace")
+    _safe_path_component(version, "version")
+    base = svc.CACHE_DIR / marketplace / name
+    base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".plugin-install-", dir=base) as tmp:
+        candidate = Path(tmp) / "candidate"
         populate(candidate)
         for script in candidate.rglob("*.sh"):
             if not _is_within(script, candidate):
                 raise ValueError("Plugin script points outside the checkout")
             script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        if cache_path.exists():
-            cache_path.replace(previous)
+        digest = _tree_digest(candidate)
+        # Human-readable prefix, but raw source metadata never becomes a path.
+        # Include the full version in the key even when its label is truncated.
+        label = re.sub(r"[^A-Za-z0-9.+_-]", "_", version[:80])
+        revision = hashlib.sha256(version.encode() + b"\0" + digest.encode()).hexdigest()
+        cache_path = base / f".revision-{label}-{revision}"
+        if cache_path.exists() or cache_path.is_symlink():
+            try:
+                if cache_path.is_dir() and not cache_path.is_symlink() and _tree_digest(cache_path) == digest:
+                    return cache_path  # Identical content: never replace a live path.
+            except (OSError, ValueError):
+                pass
+            # A corrupted existing tree is repaired at a NEW path, not in place.
+            cache_path = base / f"{cache_path.name}-{uuid.uuid4().hex}"
+        candidate.replace(cache_path)
+        return cache_path
+
+
+# Keep retired trees for in-flight readers. Reap on later successful installs;
+# sharing violations (including loaded Windows plugins) are retried next time.
+_CACHE_RETENTION_SECONDS = 24 * 60 * 60
+
+
+def _reclaim_plugin_cache(svc, plugin_id: str, current: Path):
+    base = current.parent
+    markers = base / ".retired"
+    markers.mkdir(exist_ok=True)
+    installed = svc._read_json_file(svc.INSTALLED_FILE, {"plugins": {}}, for_update=True)
+    referenced = set()
+    for records in installed.get("plugins", {}).values():
+        for record in records if isinstance(records, list) else [records]:
+            if isinstance(record, dict) and record.get("installPath"):
+                referenced.add(Path(record["installPath"]).resolve())
+    for path in base.iterdir():
+        if not path.is_dir() or path.is_symlink() or path == markers:
+            continue
+        marker = markers / hashlib.sha256(path.name.encode()).hexdigest()
+        if path.resolve() in referenced:
+            marker.unlink(missing_ok=True)
+            continue
         try:
-            candidate.replace(cache_path)
-            yield
-        except BaseException:
-            if cache_path.exists():
-                _force_rmtree(cache_path)
-            if previous.exists():
-                previous.replace(cache_path)
-            # Activation can fail after the new record was written. Restore this
-            # plugin only, so the record never points at a rolled-back cache.
-            current = svc._read_json_file(svc.INSTALLED_FILE, {"plugins": {}}, for_update=True)
-            records = current.setdefault("plugins", {})
-            if records.get(plugin_id) != previous_records:
-                if previous_records is None:
-                    records.pop(plugin_id, None)
-                else:
-                    records[plugin_id] = previous_records
-                if svc._write_json_file(svc.INSTALLED_FILE, current) is False:
-                    raise OSError("Could not restore the previous plugin installation record")
-            raise
+            if not marker.exists():
+                marker.touch()
+            elif time.time() - marker.stat().st_mtime >= _CACHE_RETENTION_SECONDS:
+                _force_rmtree(path)
+                marker.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not reclaim retired plugin cache for %s; will retry", plugin_id)
 
 
+def _register_plugin_revision(svc, plugin_id, cache_path, record, enable, requested_by):
+    """Finish fallible preparation, then atomically switch the installed record.
+
+    Updates pass their existing enabled state. Activation runs against the old
+    complete installation; it cannot expose candidate files before the commit.
+    No fallible activation/rollback is allowed after that commit.
+    """
+    with state_lock(svc):
+        installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
+        records = installed.setdefault("plugins", {})
+        review = _agent_request(records.get(plugin_id), requested_by)
+        record.update(review)
+        enabled = bool(enable and not review)
+        result = svc._installed_plugin_info(plugin_id, record, enabled)
+        activated = svc.enable_plugin(plugin_id) if enabled else svc.disable_plugin(plugin_id)
+        if activated is False:
+            raise OSError("Could not activate the plugin installation")
+        records[plugin_id] = [record]
+        if svc._write_json_file(svc.INSTALLED_FILE, installed) is False:
+            raise OSError("Could not register the plugin installation")
+        # Once committed, cleanup must not turn a successful update into failure.
+        try:
+            _reclaim_plugin_cache(svc, plugin_id, cache_path)
+        except Exception:
+            logger.warning("Could not reclaim plugin cache for %s; will retry", plugin_id)
+        return result
+
+
+@serialized_plugin
 def _install_implicit_plugin(
     svc, plugin_id: str, marketplace_id: str, mp_path: Path, implicit: Dict[str, Any], scope: str,
     enable: bool = True, requested_by: Optional[Dict[str, Any]] = None,
@@ -553,10 +616,7 @@ def _install_implicit_plugin(
     resolved to real files so repos that symlink their skills (e.g. .claude/skills ->
     .agents/skills) install correctly.
     """
-    plugin_name = plugin_id.rsplit("@", 1)[0]
     version = svc._get_marketplace_head_version(marketplace_id) or "0.0.0"
-
-    cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / version
 
     def populate(candidate):
         candidate.mkdir()
@@ -565,38 +625,19 @@ def _install_implicit_plugin(
             if src:
                 _copy_tree_resolving_symlinks(src, candidate / component, root=mp_path)
 
-    with _replace_plugin_cache(svc, plugin_id, cache_path, populate):
-        installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
-        if "plugins" not in installed:
-            installed["plugins"] = {}
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        review = _agent_request(installed["plugins"].get(plugin_id), requested_by)
-        installed["plugins"][plugin_id] = [{
-            "scope": scope,
-            "installPath": str(cache_path),
-            "version": version,
-            "installedAt": now,
-            "lastUpdated": now,
-            "isLocal": True,
-            # Marks a repo installed as an implicit plugin (no marketplace.json entry).
-            # Update checks compare the materialized components with the source.
-            "implicit": True,
-            **review,
-        }]
-        if svc._write_json_file(svc.INSTALLED_FILE, installed) is False:
-            raise OSError("Could not register the plugin installation")
-
-        # Still waiting for the owner (an agent's install, or an update of one):
-        # stay off, so enabling remains the owner's own action.
-        if enable and not review:
-            svc.enable_plugin(plugin_id)
-        else:
-            svc.disable_plugin(plugin_id)
-
-        for p in svc.get_installed_plugins():
-            if p.id == plugin_id:
-                return p
-        return svc.get_installed_plugins()[-1]
+    cache_path = _stage_plugin_revision(svc, plugin_id, version, populate)
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    record = {
+        "scope": scope,
+        "installPath": str(cache_path),
+        "version": version,
+        "installedAt": now,
+        "lastUpdated": now,
+        "isLocal": True,
+        # An update must preserve a catalog-free install's passive components.
+        "implicit": True,
+    }
+    return _register_plugin_revision(svc, plugin_id, cache_path, record, enable, requested_by)
 
 
 def _check_update_version(installed, candidate):
@@ -606,6 +647,7 @@ def _check_update_version(installed, candidate):
         raise ValueError("Plugin update would downgrade the installed release")
 
 
+@serialized_plugin
 def install_plugin(
     svc, plugin_id: str, scope: str = "user", enable: bool = True,
     requested_by: Optional[Dict[str, Any]] = None, *, minimum_version: Optional[str] = None,
@@ -680,103 +722,80 @@ def install_plugin(
     # Resolve plugin source
     local_dir = svc._resolve_plugin_source(source, mp_path, plugin_root)
 
-    with ExitStack() as replacements:
-        if local_dir:
-            # Local source - read version from the plugin's own manifest
-            # (matching Claude Code's behavior: manifest.version is source of truth)
-            manifest_version = svc._get_plugin_manifest_version(local_dir)
-            if manifest_version:
-                version = manifest_version
-            elif not entry.get("version"):
-                # No manifest version and no entry version -- fall back to
-                # marketplace HEAD hash for git-based marketplaces
-                resolved_version = svc._get_marketplace_head_version(marketplace_id)
-                if resolved_version:
-                    version = resolved_version
+    if local_dir:
+        # Local source - read version from the plugin's own manifest
+        # (matching Claude Code's behavior: manifest.version is source of truth)
+        manifest_version = svc._get_plugin_manifest_version(local_dir)
+        if manifest_version:
+            version = manifest_version
+        elif not entry.get("version"):
+            # No manifest version and no entry version -- fall back to
+            # marketplace HEAD hash for git-based marketplaces
+            resolved_version = svc._get_marketplace_head_version(marketplace_id)
+            if resolved_version:
+                version = resolved_version
 
-            # Validate an update before replacing the currently installed tree.
+        # Validate an update before replacing the currently installed tree.
+        _check_update_version(minimum_version, version)
+        # Create cache directory and copy plugin
+        _safe_path_component(version, "version")
+        cache_path = _stage_plugin_revision(
+            svc, plugin_id, version,
+            lambda candidate: _copy_tree_resolving_symlinks(local_dir, candidate, root=mp_path),
+        )
+
+    elif isinstance(source, dict):
+        # Stage fetched content before touching the live cache. The canonical
+        # manifest, not a stale catalog label or changed SHA, decides whether
+        # an update would downgrade the installed release.
+        import tempfile
+
+        _safe_path_component(version, "version")
+        with tempfile.TemporaryDirectory(prefix="plugin-install-") as tmp:
+            candidate = Path(tmp) / "source"
+            source_revision = svc._clone_plugin_source(source, candidate)
+            version = svc._get_plugin_manifest_version(candidate) or version
+            _safe_path_component(version, "version")
             _check_update_version(minimum_version, version)
-            # Create cache directory and copy plugin
-            _safe_path_component(version, "version")
-            cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / version
-            replacements.enter_context(_replace_plugin_cache(
-                svc, plugin_id, cache_path,
-                lambda candidate: _copy_tree_resolving_symlinks(local_dir, candidate, root=mp_path),
-            ))
+            cache_path = _stage_plugin_revision(
+                svc, plugin_id, version,
+                lambda staged: _copy_tree_resolving_symlinks(candidate, staged, root=candidate),
+            )
 
-        elif isinstance(source, dict):
-            # Stage fetched content before touching the live cache. The canonical
-            # manifest, not a stale catalog label or changed SHA, decides whether
-            # an update would downgrade the installed release.
-            import tempfile
+    else:
+        # Better error: include resolved path for relative sources
+        if isinstance(source, str) and (source.startswith("./") or source.startswith(".\\")):
+            if plugin_root:
+                tried_path = mp_path / plugin_root / source.lstrip("./").lstrip(".\\")
+            else:
+                tried_path = mp_path / source.lstrip("./").lstrip(".\\")
+            raise ValueError(
+                f"Plugin source directory not found for '{plugin_name}': "
+                f"{tried_path} does not exist. The marketplace manifest references "
+                f"this plugin but its files are missing from the local marketplace repo."
+            )
+        raise ValueError(f"Plugin source not found or unsupported: {plugin_name}")
 
-            _safe_path_component(version, "version")
-            with tempfile.TemporaryDirectory(prefix="plugin-install-") as tmp:
-                candidate = Path(tmp) / "source"
-                source_revision = svc._clone_plugin_source(source, candidate)
-                version = svc._get_plugin_manifest_version(candidate) or version
-                _safe_path_component(version, "version")
-                _check_update_version(minimum_version, version)
-                cache_path = svc.CACHE_DIR / marketplace_id / plugin_name / version
-                replacements.enter_context(_replace_plugin_cache(
-                    svc, plugin_id, cache_path, lambda staged: shutil.move(str(candidate), str(staged)),
-                ))
-
-        else:
-            # Better error: include resolved path for relative sources
-            if isinstance(source, str) and (source.startswith("./") or source.startswith(".\\")):
-                if plugin_root:
-                    tried_path = mp_path / plugin_root / source.lstrip("./").lstrip(".\\")
-                else:
-                    tried_path = mp_path / source.lstrip("./").lstrip(".\\")
-                raise ValueError(
-                    f"Plugin source directory not found for '{plugin_name}': "
-                    f"{tried_path} does not exist. The marketplace manifest references "
-                    f"this plugin but its files are missing from the local marketplace repo."
-                )
-            raise ValueError(f"Plugin source not found or unsupported: {plugin_name}")
-
-        # Update installed_plugins.json
-        installed = svc._read_json_file(svc.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
-        if "plugins" not in installed:
-            installed["plugins"] = {}
-
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        install_record = {
-            "scope": scope,
-            "installPath": str(cache_path),
-            "version": version,
-            "installedAt": now,
-            "lastUpdated": now,
-            "isLocal": isinstance(source, str)
-        }
-        # Store source SHA for external plugins so update checks can compare
-        # against the marketplace entry's SHA without cloning.
-        if isinstance(source, dict) and source.get("sha"):
-            install_record["sourceSha"] = source["sha"][:7]
-        if source_revision:
-            install_record["sourceRevision"] = source_revision
-        review = _agent_request(installed["plugins"].get(plugin_id), requested_by)
-        install_record.update(review)
-        installed["plugins"][plugin_id] = [install_record]
-        if svc._write_json_file(svc.INSTALLED_FILE, installed) is False:
-            raise OSError("Could not register the plugin installation")
-
-        # Enable by default; an agent-requested install (or an update of one
-        # still waiting) stays off until the owner enables it.
-        if enable and not review:
-            svc.enable_plugin(plugin_id)
-        else:
-            svc.disable_plugin(plugin_id)
-
-        # Return plugin info for the installed/updated plugin
-        for p in svc.get_installed_plugins():
-            if p.id == plugin_id:
-                return p
-        # Fallback: shouldn't happen, but return last if not found
-        return svc.get_installed_plugins()[-1]
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    install_record = {
+        "scope": scope,
+        "installPath": str(cache_path),
+        "version": version,
+        "installedAt": now,
+        "lastUpdated": now,
+        "isLocal": isinstance(source, str)
+    }
+    # Store source SHA for external plugins so update checks can compare
+    # against the marketplace entry's SHA without cloning.
+    if isinstance(source, dict) and source.get("sha"):
+        install_record["sourceSha"] = source["sha"][:7]
+    if source_revision:
+        install_record["sourceRevision"] = source_revision
+    return _register_plugin_revision(svc, plugin_id, cache_path, install_record, enable, requested_by)
 
 
+@serialized_plugin
+@serialized_state
 def uninstall_plugin(svc, plugin_id: str) -> bool:
     """
     Uninstall a plugin.

@@ -14,10 +14,10 @@ module only resolves WHERE a plugin lives and what the runtime takes from it.
 
 On-disk layout, in resolution order:
 
-  1. ``~/.fluid/plugins/cache/<marketplace>/<plugin>/<version>/`` — the
-     installed copy; the highest version wins (numeric-aware, so ``1.10.0``
-     beats ``1.2.0``; non-numeric directory names like ``unknown`` sort below
-     every numeric one and are compared lexicographically among themselves).
+  1. The user/global ``installPath`` in ``installed_plugins.json`` — an
+     immutable revision for app-managed installs. Only legacy caches without
+     a record fall back to the highest non-hidden, non-retired version folder
+     (numeric-aware, so ``1.10.0`` beats ``1.2.0``).
   2. ``~/.fluid/plugins/marketplaces/<marketplace>/<plugin>/`` — a marketplace
      clone with the plugin in a subdirectory.
   3. ``~/.fluid/plugins/marketplaces/<marketplace>/`` — the clone root itself,
@@ -53,6 +53,7 @@ never takes the rest of discovery down with it (CE11).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -174,7 +175,13 @@ def _version_key(name: str) -> tuple[int, tuple[int, ...], str]:
 
 def _latest_version_dir(base: Path) -> Path | None:
     try:
-        versions = [d for d in base.iterdir() if d.is_dir()]
+        # App-managed revisions/staging are hidden and require an explicit
+        # installPath. Retired legacy trees must not win the no-record fallback.
+        versions = [
+            d for d in base.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+            and not (base / ".retired" / hashlib.sha256(d.name.encode()).hexdigest()).exists()
+        ]
     except OSError as exc:
         log.warning("cannot list plugin cache dir %s: %s", base, exc)
         return None

@@ -57,12 +57,10 @@ def test_any_failed_replacement_preserves_previous_cache(sources, monkeypatch, k
             write(Path(dst) / "partial", "Incomplete replacement")
             raise OSError("Forced materialization failure")
         monkeypatch.setattr(plugin_install, "_copy_tree_resolving_symlinks", refuse_copy)
-        if kind == "url":
-            monkeypatch.setattr(plugin_install.shutil, "move", refuse_copy)
     elif failure == "publish":
         original = Path.replace
         def refuse_publish(path, destination):
-            if path.name == "candidate" and Path(destination) == Path(info.install_path):
+            if path.name == "candidate" and Path(destination).parent == Path(info.install_path).parent:
                 raise OSError("Forced publication failure")
             return original(path, destination)
         monkeypatch.setattr(Path, "replace", refuse_publish)
@@ -202,4 +200,7 @@ def test_scheduled_source_failure_does_not_suppress_healthy_install(sources, mon
     assert summary["synced_marketplaces"] == {"sample": False, "healthy": True}
     assert [plugin["id"] for plugin in summary["updated_plugins"]] == [healthy_info.id]
     assert svc.get_update_report()["checks"][0]["status"] == "failed"
-    assert "Second revision" in Path(healthy_info.install_path, "skills/healthy/SKILL.md").read_text()
+    active = next(plugin for plugin in svc.get_installed_plugins() if plugin.id == healthy_info.id)
+    assert active.install_path != healthy_info.install_path
+    assert "First revision" in Path(healthy_info.install_path, "skills/healthy/SKILL.md").read_text()
+    assert "Second revision" in Path(active.install_path, "skills/healthy/SKILL.md").read_text()

@@ -19,11 +19,13 @@ import json
 import logging
 import re
 import threading
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, NoReturn, Optional, Dict, Any
 
 from app.core.mcp_service import McpConfigUnreadable
+from app.core.plugin_locks import serialized_plugin, serialized_state
 
 # Re-export all models and helpers for backward compatibility
 from app.core.plugin_models import (  # noqa: F401
@@ -434,15 +436,27 @@ class PluginService:
         existing file that cannot be read as a JSON object.
         """
         self._check_replaceable(path)
+        temp_path = None
         try:
-            temp_path = path.with_suffix('.tmp')
-            with open(temp_path, 'w', encoding='utf-8') as f:
+            # Independent writers must never share a temporary inode: one may
+            # otherwise rename the other's still-being-written JSON into place.
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix=f".{path.name}-", suffix=".tmp",
+                dir=path.parent, delete=False,
+            ) as f:
+                temp_path = Path(f.name)
                 json.dump(data, f, indent=2)
             temp_path.replace(path)
             return True
         except IOError as e:
             logger.error(f"Error writing {path}: {e}")
             return False
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Could not remove unused plugin JSON temporary file")
 
     # =========================================================================
     # Marketplace Management (delegated to plugin_marketplace module)
@@ -748,6 +762,28 @@ class PluginService:
             records = [records]
         return [record for record in records if isinstance(record, dict)] if isinstance(records, list) else []
 
+    def _installed_plugin_info(self, plugin_id, install, enabled) -> PluginInfo:
+        """Parse one complete revision; also used before committing an install."""
+        parts = plugin_id.rsplit("@", 1)
+        name = parts[0]
+        marketplace = parts[1] if len(parts) > 1 else "local"
+        install_path = Path(install.get("installPath", ""))
+        installed_at = None
+        if install.get("installedAt"):
+            try:
+                installed_at = datetime.fromisoformat(install["installedAt"].replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                pass
+        record = plugin_record(install_path, name, marketplace, install.get("version"))
+        return PluginInfo(
+            id=plugin_id, name=name, marketplace=marketplace,
+            description=record_description(record, install_path),
+            version=install.get("version", "unknown"), scope=install.get("scope", "user"),
+            install_path=str(install_path), installed_at=installed_at, enabled=enabled,
+            trust=_trust_for(marketplace), approval=_pending(install),
+            **record_summary(record, install_path),
+        )
+
     def get_installed_plugins(self) -> List[PluginInfo]:
         """Get all installed plugins"""
         installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
@@ -770,39 +806,7 @@ class PluginService:
                 install = installation_data[0] if installation_data else None
                 if not install:
                     continue
-            parts = plugin_id.rsplit("@", 1)
-            name = parts[0]
-            marketplace = parts[1] if len(parts) > 1 else "local"
-
-            install_path = Path(install.get("installPath", ""))
-
-            # Parse dates
-            installed_at = None
-            if install.get("installedAt"):
-                try:
-                    installed_at = datetime.fromisoformat(
-                        install["installedAt"].replace("Z", "+00:00")
-                    )
-                except (ValueError, TypeError):
-                    pass
-
-            record = plugin_record(install_path, name, marketplace, install.get("version"))
-            summary = record_summary(record, install_path)
-
-            plugins.append(PluginInfo(
-                id=plugin_id,
-                name=name,
-                marketplace=marketplace,
-                description=record_description(record, install_path),
-                version=install.get("version", "unknown"),
-                scope=install.get("scope", "user"),
-                install_path=str(install_path),
-                installed_at=installed_at,
-                enabled=enabled_plugins.get(plugin_id, False),
-                trust=_trust_for(marketplace),
-                approval=_pending(install),
-                **summary,
-            ))
+            plugins.append(self._installed_plugin_info(plugin_id, install, enabled_plugins.get(plugin_id, False)))
 
         from app.core import connector_packages
         plugins.extend(connector_packages.installed())
@@ -1035,6 +1039,8 @@ class PluginService:
     # Plugin Enable/Disable
     # =========================================================================
 
+    @serialized_plugin
+    @serialized_state
     def enable_plugin(self, plugin_id: str, content_hash: Optional[str] = None) -> bool:
         """Enable a plugin globally.
 
@@ -1078,6 +1084,8 @@ class PluginService:
         if changed:
             self._write_json_file(self.INSTALLED_FILE, installed)
 
+    @serialized_plugin
+    @serialized_state
     def disable_plugin(self, plugin_id: str) -> bool:
         """Disable a plugin globally"""
         from app.core import connector_packages

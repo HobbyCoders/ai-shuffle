@@ -17,6 +17,7 @@ from app.core.plugin_models import (
     PluginUpdateInfo,
 )
 from app.core.process_tree import child_env
+from app.core.plugin_locks import serialized_plugin
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,7 @@ def refresh_update_sources(svc) -> Dict[str, str]:
     return errors
 
 
+@serialized_plugin
 def update_plugin(svc, plugin_id: str, refresh_source: bool = True) -> PluginInfo:
     """
     Update a single installed plugin to the latest version.
@@ -284,11 +286,8 @@ def update_plugin(svc, plugin_id: str, refresh_source: bool = True) -> PluginInf
             svc, plugin_id, scope, enable=was_enabled, minimum_version=install.get("version"),
         )
 
-    # Restore enabled state
-    if was_enabled:
-        svc.enable_plugin(plugin_id)
-    else:
-        svc.disable_plugin(plugin_id)
+    # The installer preserves enablement before committing its record. Nothing
+    # fallible may activate or roll back a revision after that atomic switch.
 
     logger.info(f"Updated plugin: {plugin_id} -> {result.version}")
     return result

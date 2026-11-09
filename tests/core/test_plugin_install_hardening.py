@@ -154,14 +154,17 @@ def test_manifest_version_with_traversal_is_rejected(svc, tmp_path):
     assert "evil@mp" not in _installed(svc)
 
 
-def test_manifest_version_traversal_guard_bites(svc, tmp_path, monkeypatch):
+def test_revision_key_confines_publication_even_with_relaxed_version_guard(svc, tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_install, "_safe_path_component", lambda v, _w: v)
     victim, err = _traversal_version_install(svc, tmp_path)
-    # Without the guard the install deletes and overwrites a directory
-    # outside the plugin cache.
+    # Even without validation, the immutable key never incorporates raw path
+    # separators and never deletes a directory before publication.
     assert err is None
-    assert not (victim / "keep.txt").exists()
-    assert (victim / "commands" / "hello.md").exists()
+    assert (victim / "keep.txt").read_text() == "precious"
+    assert not (victim / "commands").exists()
+    record = _installed(svc)["evil@mp"][0]
+    assert Path(record["installPath"]).parent == svc.CACHE_DIR / "mp" / "evil"
+    assert (Path(record["installPath"]) / "commands" / "hello.md").exists()
 
 
 @pytest.mark.parametrize("version", ["..", ".", "", "a/b", "a\\b", 7])
@@ -423,7 +426,9 @@ def test_clone_passes_ref_and_separates_url(svc, fake_git):
     assert clone[clone.index("--branch") + 1] == "v2"
     assert clone[-3:-1] == ["--", "https://github.com/o/x.git"]
     assert info.version == "2.0.0"
-    assert Path(info.install_path) == svc.CACHE_DIR / "mp" / "x" / "2.0.0"
+    assert Path(info.install_path).parent == svc.CACHE_DIR / "mp" / "x"
+    assert Path(info.install_path).name.startswith(".revision-2.0.0-")
+    assert svc.get_installation_records(info.id)[0]["installPath"] == info.install_path
 
 
 # ── sha pinning ─────────────────────────────────────────────────────────────
@@ -503,11 +508,13 @@ def _run_auto_update(svc):
 
 def test_auto_update_never_downgrades(svc):
     _installed_local(svc, "1.5.0", "1.4.0")
+    before = _installed(svc)["p@mp"][0]
     summary = _run_auto_update(svc)
     assert summary["updates_available"] == [] and summary["updated_plugins"] == []
     rec = _installed(svc)["p@mp"][0]
     assert rec["version"] == "1.5.0"
-    assert Path(rec["installPath"]).name == "1.5.0"
+    assert rec == before
+    assert Path(rec["installPath"]).name.startswith(".revision-1.5.0-")
     assert not (svc.CACHE_DIR / "mp" / "p" / "1.4.0").exists()
     assert svc.get_auto_update_settings().last_check
 
