@@ -16,6 +16,35 @@ def fresh_shutdown(monkeypatch):
     monkeypatch.setattr(shutdown, "_retired", set())
 
 
+async def test_ordinary_disconnect_waits_for_owned_teardown():
+    started, saving, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    completed = []
+
+    async def query():
+        try:
+            started.set()
+            await asyncio.Event().wait()
+        finally:
+            saving.set()
+            await release.wait()
+            completed.append("saved")
+
+    owner = asyncio.create_task(shutdown.run(query))
+    await started.wait()
+    owner.cancel()
+    await saving.wait()
+    try:
+        # Ordinary cancellation must keep the pre-wrapper contract: the
+        # caller is not finished before its query releases admission/writes.
+        assert not owner.done()
+    finally:
+        release.set()
+        await asyncio.gather(owner, *list(shutdown._owned), return_exceptions=True)
+    assert owner.cancelled()
+    assert completed == ["saved"]
+    assert not shutdown._turns and not shutdown._owned
+
+
 async def test_stalled_read_retires_before_uncancelled_saving_tail():
     reading, saving, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
     fenced = []

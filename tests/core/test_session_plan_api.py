@@ -124,7 +124,7 @@ async def test_public_api_claim_to_plan_event_and_readback(plan_api, path):
                 if task is None:
                     task = get_session_pool().peek(sid).background_task
                 await asyncio.wait_for(asyncio.shield(task), 10)
-            assert session_plans.read(sid)["plan"]["revision"] == 1
+            assert session_plans.read(sid)["plan"]["revision"] == 1, response.text
             assert runs.get_active_run(sid) is None
             assert CURRENT_PLAN_RUN.get() is None
             events = session_events.get_events(sid)

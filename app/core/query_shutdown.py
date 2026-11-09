@@ -72,7 +72,15 @@ async def run(factory):
         # retirement, another cancel must not cut an issued write off from its
         # terminal/memory continuation. Process death is covered by the receipt.
         if work is None or not work.interrupt.is_set():
+            from app.core.provider.session_admission import finish_saving
+
             task.cancel()
+            try:
+                # Preserve ordinary cancellation's admission/teardown contract.
+                # Only a retired turn may deliberately outlive its HTTP owner.
+                await finish_saving(task)
+            except asyncio.CancelledError:
+                pass
         raise
 
 
