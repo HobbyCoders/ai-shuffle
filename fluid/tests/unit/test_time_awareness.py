@@ -491,7 +491,10 @@ def test_legacy_clip_validation_does_not_strip_literal_or_forged_markers():
     from fluid.context.compaction import _clip_verbatim, _matches_pinned_text
     assert _matches_pinned_text("", "")
     assert _matches_pinned_text("real … (+123 chars)", "real … (+123 chars)")
-    assert not _matches_pinned_text("real … (+123 chars)", "real more words")
+    # A literal marker may admit a receipt sharing its opening words (the caller
+    # then uses the bound) but never one that starts differently.
+    assert _matches_pinned_text("real … (+123 chars)", "real more words")
+    assert not _matches_pinned_text("real … (+123 chars)", "other words")
     assert _matches_pinned_text(_clip_verbatim("x" * 13000, 4096), "x" * 13000)
     twice = _clip_verbatim(_clip_verbatim("x" * 13000, 4096), 4096)
     assert twice != _clip_verbatim("x" * 13000, 4096) and _matches_pinned_text(twice, "x" * 13000)
@@ -535,6 +538,50 @@ def test_partly_retained_old_clip_marker_never_takes_another_receipts_time():
     promoted = current._checkpoint_pin(first.node_id, last.node_id, [first, tool, carrier, covered, later, last])
     assert promoted["messages"][-1][1] == (
         f"[sent/delivered before 2026-11-09 05:25:00 UTC +0000 (UTC); exact time unavailable]\n{stored}")
+
+
+@pytest.mark.parametrize("case", ["three_clips_shared_prefix", "genuine_ellipsis_at_default_budget"])
+def test_repeated_clips_never_borrow_a_time_and_keep_genuine_ellipses(case):
+    from fluid.context.compaction import Compactor, Promotion
+    from fluid.messages.content import SteerDelivery, ToolResultBlock, ToolUseBlock
+
+    sent = dt("2026-11-09T04:55:00Z").timestamp()
+    newest = "Tomorrow " + "x" * 13_000
+    offset = SteerDelivery(text=newest).render().index(newest)
+    if case == "three_clips_shared_prefix":
+        older, budgets = newest[:12_000 - offset] + "…", (12_000, 12_010, 12_001)
+    else:
+        at = 11_995 - offset
+        newest, older, budgets = newest[:at] + "…" + newest[at + 1:], "Another message", (12_000, 12_000)
+    steers = [SteerDelivery(text=older, accepted_at=sent - 60), SteerDelivery(text=newest, accepted_at=sent)]
+    first = node("Opening request")
+    tool = SessionNode("tool", first.node_id, Message(role="assistant", content=[ToolUseBlock("call", "Bash", {})]), ts=sent)
+    carrier = SessionNode("carrier", tool.node_id, Message(role="user", content=[
+        ToolResultBlock("call", [Text("ok")], delivered_steers=steers)]), ts=sent + 900)
+    path = [first, tool, carrier]
+    for index in range(len(budgets) + 1):
+        path.append(SessionNode(f"after{index}", path[-1].node_id,
+            Message(role="assistant", content=[Text("step")]), ts=sent + 960 + 600 * index))
+
+    promotions = []
+    for index, budget in enumerate(budgets):
+        old = Compactor(config=CompactionConfig(render_version=3, peer_pin_chars=budget))
+        old.rehydrate(promotions)
+        end = 3 + index
+        pin = old._checkpoint_pin(first.node_id, path[end].node_id, path[:end + 1])
+        promotions.append(Promotion(tier=4, render_version=3,
+            spans=((first.node_id, path[end].node_id, "summary"),), summary_text="old", summary_pin=pin))
+    stored = promotions[-1].summary_pin["messages"][-1][1]
+
+    current = Compactor(config=CompactionConfig(render_version=4, peer_pin_chars=13_000))
+    current.rehydrate(promotions)
+    promoted = current._checkpoint_pin(first.node_id, path[-1].node_id, path)
+    heading, body = promoted["messages"][-1][1].split("\n", 1)
+    assert body == stored
+    if case == "three_clips_shared_prefix":
+        assert "exact time unavailable" in heading and "04:54" not in heading
+    else:
+        assert heading == "[sent/delivered 2026-11-09 04:55:00 UTC +0000 (UTC)]"
 
 
 def test_legacy_pin_clipped_by_two_checkpoints_keeps_its_exact_send_time():

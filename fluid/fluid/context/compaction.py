@@ -1034,21 +1034,18 @@ def _clip_verbatim(text: str, cap: int) -> str:
 
 
 def _matches_pinned_text(stored: str, raw: str) -> bool:
+    """Whether ``raw`` may be the receipt ``stored`` came from. It may admit extra
+    receipts, which the caller turns into the honest bound, but never the reverse:
+    the true receipt always matches, so no other receipt's time can be taken."""
     if stored == raw:
         return True
-    marker = re.search(r"… \(\+(\d+) chars\)$", stored)
-    if marker is None or not marker.start():
+    marker = re.search(r"… \(\+\d+ chars\)$", stored)
+    if marker is None:
         return False
-    if stored == _clip_verbatim(raw, marker.start()):
-        return True
-    # A later checkpoint can clip an already clipped pin, so the count may
-    # measure that earlier clip (one marker longer at most), not the original.
-    # A "…" this close to the end may be part of that earlier marker: the body
-    # then no longer shows the original's words, so leave it to the honest bound.
-    body = stored[:marker.start()]
-    if "…" in body[-_CLIP_MARK_ALLOWANCE:]:
-        return False
-    return raw.startswith(body) and len(body) + int(marker[1]) <= len(raw) + _CLIP_MARK_ALLOWANCE
+    # Every clip marker opens with "…" and re-clipping can leave pieces of an
+    # old one in the body, so only the text before the first "…" is certain.
+    probe = stored[:marker.start()].split("…", 1)[0]
+    return bool(probe) and raw.startswith(probe)
 
 
 def _intent_pin(
