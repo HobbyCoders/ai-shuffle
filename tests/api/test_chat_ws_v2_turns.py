@@ -708,10 +708,17 @@ async def test_handle_stop_on_a_parked_turn_ends_its_work(mock_db, newer):
         assert [f["stopped"] for f in sent_frames(handler, "stop_result")] == [False]
     else:
         [scope] = captured
-        # A parked turn has no live-row flip/owner receipt. Cleanup must bind
-        # its own cutoff later, but still uses THIS pre-interrupt local scope.
+        # Parked cleanup captures its cutoff at admission, not after an await,
+        # while retaining THIS pre-interrupt local task-incarnation snapshot.
         assert turns_db.STOP_RECEIPT_KEY not in turns_db.get_turn(parked)["payload"]
-        stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=None)
+        stop_bg.assert_awaited_once()
+        receipt = stop_bg.await_args.kwargs["receipt"]
+        assert receipt["input_cutoff"] == turns_db.get_turn(successor)["insert_order"]
+        assert receipt["queued"] == ([successor] if newer == "queued" else [])
+        assert [row["id"] for row in receipt["parks"]] == [parked]
+        assert receipt["cleanup_guard"]["turn"]["id"] == parked
+        assert receipt["cleanup_guard"]["turn"]["run_id"] == "run-1"
+        stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=receipt)
         assert stop_bg.await_args.kwargs["scope"] is scope
         # The parked turn's work was stopped: no "nothing was stopped" notice.
         assert sent_frames(handler, "stop_result") == []
@@ -776,10 +783,17 @@ async def test_stop_relayed_to_the_owning_worker_ends_a_parked_turns_work(mock_d
         assert turns_db.get_turn(successor)["state"] == ("running" if newer == "started" else "completed")
     else:
         [scope] = captured
-        # A parked turn has no live-row flip/owner receipt. Cleanup must bind
-        # its own cutoff later, but still uses THIS pre-interrupt local scope.
+        # Parked cleanup captures its cutoff at admission, not after an await,
+        # while retaining THIS pre-interrupt local task-incarnation snapshot.
         assert turns_db.STOP_RECEIPT_KEY not in turns_db.get_turn(parked)["payload"]
-        stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=None)
+        stop_bg.assert_awaited_once()
+        receipt = stop_bg.await_args.kwargs["receipt"]
+        assert receipt["input_cutoff"] == turns_db.get_turn(successor)["insert_order"]
+        assert receipt["queued"] == ([successor] if newer == "queued" else [])
+        assert [row["id"] for row in receipt["parks"]] == [parked]
+        assert receipt["cleanup_guard"]["turn"]["id"] == parked
+        assert receipt["cleanup_guard"]["turn"]["run_id"] == "run-1"
+        stop_bg.assert_awaited_once_with("sess-1", user_stop=True, scope=scope, receipt=receipt)
         assert stop_bg.await_args.kwargs["scope"] is scope
         assert reply["interrupted"] is True
 
