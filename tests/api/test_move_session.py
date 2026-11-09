@@ -114,6 +114,32 @@ def test_same_owner_is_a_noop(client, mock_database):
     mock_database.adopt_session.assert_not_called()
 
 
+def test_owner_is_a_noop_whatever_the_local_instance_says(client, mock_database, mock_handoff):
+    """The synced owner decides "already there", not a per-worker instance_id."""
+    mock_database.get_session.return_value = _session(instance_id="former-worker", owner_device_id=TARGET)
+
+    response = _move(client)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "already_there"
+    mock_handoff.assert_not_awaited()
+
+
+def test_former_worker_is_a_real_destination(client, mock_database, mock_handoff):
+    """After A to B to C, A still holds instance_id=B. Moving the chat to B is
+    a real move, and must not be answered "already there"."""
+    mock_database.get_session.return_value = _session(instance_id=TARGET, owner_device_id="current-owner")
+    mock_database.get_install.return_value = {"device_name": "Studio Mac"}
+
+    with patch("app.core.placement.capable_runners", return_value=[TARGET]), \
+            patch("app.core.turn_claim.notify_turns_changed"):
+        response = _move(client)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "moved"
+    mock_handoff.assert_awaited_once()
+
+
 def test_unknown_target_404s(client, mock_database):
     """No registry row for the target install → 404, no write."""
     mock_database.get_session.return_value = _session()
