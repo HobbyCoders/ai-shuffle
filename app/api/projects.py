@@ -929,6 +929,12 @@ async def upload_file(
         # The destination may come from session_id / worktree_id; both must
         # belong to this project, or the file lands in another project's checkout.
         session = _get_project_session(session_id, project_id, api_user) if session_id else None
+        # Same refusal as the session upload route: a Chat session cannot read staged files.
+        if session and not session.get("project_id") and session.get("mode") == "chat":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Attachments need a code or voice project session.",
+            )
         if worktree_id:
             _get_project_worktree(worktree_id, project_id)
         return project, session

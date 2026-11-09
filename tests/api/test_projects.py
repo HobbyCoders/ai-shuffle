@@ -1623,6 +1623,19 @@ class TestProjectFileRoutesStayInProject:
         assert not (project_dir / "uploads").exists()
         upload_transfer.validate_upload_paths([body["full_path"]], row)
 
+    def test_upload_refuses_chat_mode_session_that_could_not_read_it(self, client, layout, shared_session, temp_dir):
+        row, _ = shared_session
+        row["mode"] = "chat"
+
+        response = client.post(
+            "/api/v1/projects/test-project/upload",
+            files={"file": ("a.txt", BytesIO(b"x"), "text/plain")},
+            data={"session_id": "s1"},
+        )
+
+        assert response.status_code == 400
+        assert not (temp_dir / "session-uploads").exists()
+
     def test_upload_rejects_shared_chat_of_a_different_project(self, client, layout, shared_session, temp_dir):
         _, origin = shared_session
         origin.return_value = "github.com/acme/other"

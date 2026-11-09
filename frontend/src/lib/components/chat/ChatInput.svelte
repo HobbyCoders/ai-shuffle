@@ -677,6 +677,7 @@
 		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return false;
 		const file = pastedTextFile(text);
 		isUploading = true;
+		errorMessage = '';
 		uploadComposerFile(file)
 			.then(result => {
 				editorRef?.insertFileChip({

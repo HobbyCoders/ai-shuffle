@@ -21,8 +21,8 @@ describe('streaming composer actions', () => {
 		const sender = readFileSync(resolve(process.cwd(), 'src/lib/stores/session/message-sender.ts'), 'utf8');
 		expect(sender).toContain('upload_paths: (!remoteOnly || !!_state.sessionId)');
 	});
-	it('drops an earlier upload error when a new upload starts, for picker and drop', () => {
-		expect(source.match(/isUploading = true;\r?\n\s*errorMessage = '';/g)).toHaveLength(2);
+	it('drops an earlier upload error when a new upload starts, for picker, drop and large paste', () => {
+		expect(source.match(/isUploading = true;\r?\n\s*errorMessage = '';/g)).toHaveLength(3);
 	});
 	it('lets the owner message a subagent that has no project', () => {
 		// A worker started from the owner's no-project chat is stored with no
