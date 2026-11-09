@@ -23,9 +23,14 @@ async function agentOnDisk(page) {
 /**
  * The Dev agent is the default for every other journey on this seed: whatever
  * the save does to its config, put the seeded config back, pass or fail.
+ *
+ * The seed has no streaming setting, which runs as on, but the read API reports
+ * it as off (#1314). Writing that back would stop every later journey's reply
+ * from streaming, so name the value the agent actually runs with.
  */
 async function restoreAgent(page, seeded) {
-	await api(page, 'PUT', `/agents/${AGENT}`, { name: seeded.name, description: seeded.description, config: seeded.config });
+	const config = { ...seeded.config, include_partial_messages: true };
+	await api(page, 'PUT', `/agents/${AGENT}`, { name: seeded.name, description: seeded.description, config });
 }
 
 async function openAgentModels(page, variant) {
