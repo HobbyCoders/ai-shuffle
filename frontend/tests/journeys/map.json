@@ -81,6 +81,11 @@
 			]
 		},
 		{
+			"why": "owner-local per-turn clocks and real background wakes must be visible in outgoing requests",
+			"journeys": ["time-awareness"],
+			"globs": ["frontend/tests/journeys/time-awareness.journey.mjs", "frontend/src/lib/stores/timezonePreference.svelte.ts", "app/core/time_awareness.py", "fluid/fluid/context/time_awareness.py", "scripts/verify_time_context_devloop.py"]
+		},
+		{
 			"why": "the real-editor input driver must preserve literal multiline text without command or mention completion submitting early",
 			"journeys": ["composer-helper"],
 			"globs": ["frontend/tests/journeys/composer-helper.journey.mjs", "frontend/src/lib/components/CommandAutocomplete.svelte", "frontend/src/lib/components/FileAutocomplete.svelte"]

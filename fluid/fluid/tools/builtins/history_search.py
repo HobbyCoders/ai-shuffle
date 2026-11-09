@@ -9,6 +9,9 @@ store access.
 from __future__ import annotations
 
 from typing import Any
+import asyncio
+
+from fluid.tools.time_context import history_zone
 
 from fluid.context.recall import (
     DEFAULT_SEARCH_RESULTS,
@@ -77,4 +80,5 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # The calling node spells out the query; it is never a useful hit.
         exclude=calling_node_ids(nodes, (ctx.extra or {}).get("tool_use_id")),
     )
-    return ToolOutcome(text=render_hits(hits, query))
+    zone = await asyncio.to_thread(history_zone, ctx.extra)
+    return ToolOutcome(text=render_hits(hits, query, zone))

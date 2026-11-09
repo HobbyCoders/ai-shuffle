@@ -42,7 +42,9 @@ from fluid.store.base import SessionNode
 # were made under, so an old session keeps rendering exactly as it did.
 RENDER_VERSION_LEGACY = 1
 RENDER_VERSION_V2 = 2
-CURRENT_RENDER_VERSION = 3
+# Version 4 anchors carried requests to their immutable send times. Old
+# decisions retain their version, so cached history bytes do not change.
+CURRENT_RENDER_VERSION = 4
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -54,6 +56,7 @@ class SteerRenderConfig:
     # Receipts point at HistoryExpand; without the recall tools there is no
     # way back to the body, so every steer stays verbatim.
     recall_tools: bool = True
+    date_deliveries: bool = False
 
 
 def _receipt_offset(
@@ -104,12 +107,17 @@ def render_steer(
     that carries the steer; without it no receipt can name a ref, so the
     steer renders verbatim.
     """
-    if cfg is None or node is None:
-        return delivery.render()
-    offset = _receipt_offset(delivery, node, cfg)
-    if offset is None:
-        return delivery.render()
-    return _receipt(delivery, node, offset, count, cfg)
+    text = delivery.render()
+    if cfg is not None and node is not None:
+        offset = _receipt_offset(delivery, node, cfg)
+        if offset is not None:
+            text = _receipt(delivery, node, offset, count, cfg)
+    if cfg is not None and cfg.date_deliveries and delivery.origin != "system":
+        from fluid.context.time_awareness import absolute_time
+
+        at = delivery.accepted_at if delivery.accepted_at is not None else (node.ts if node else None)
+        text = f"[sent/delivered {absolute_time(at, 'UTC')}]\n{text}"
+    return text
 
 
 def render_steers(
@@ -126,7 +134,7 @@ def render_steers(
     """
     deliveries = list(deliveries)
     if cfg is None or node is None:
-        return [s.render() for s in deliveries]
+        return [render_steer(s, cfg, node=node) for s in deliveries]
     offsets = [_receipt_offset(s, node, cfg) for s in deliveries]
     counts: dict[tuple[str, str | None, str], int] = {}
     for delivery, offset in zip(deliveries, offsets):
@@ -137,7 +145,7 @@ def render_steers(
     seen: set[tuple[str, str | None, str]] = set()
     for delivery, offset in zip(deliveries, offsets):
         if offset is None:
-            out.append(delivery.render())
+            out.append(render_steer(delivery, cfg, node=node))
             continue
         key = (delivery.origin, delivery.sender, delivery.text)
         if key in seen:

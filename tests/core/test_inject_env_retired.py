@@ -311,7 +311,7 @@ async def test_every_stored_value_compiles_one_fluid_environment(flag, repo):
 
     # The per-turn half: date and the checkout's real branch.
     note = await _turn_reminder(compiled, repo)
-    assert "Today's date:" in note
+    assert "Current time:" in note
     assert "Current branch: task/retire-env" in note
 
     # Delegated full-replace leg compiles the same single environment.

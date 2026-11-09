@@ -871,6 +871,7 @@ def enqueue_turn(
     instance_id: Optional[str] = None,
     at_front: bool = False,
     explicit_permission: bool = False,
+    _owner_receipt: Optional[Dict[str, Any]] = None,
     _conn: Any = None,
 ) -> Dict[str, Any]:
     """Append a new ``queued`` turn to a session's queue.
@@ -929,6 +930,12 @@ def enqueue_turn(
         # the same admission; their follow-up is the app's, not a message the
         # owner typed, so it is never written as one.
         payload = dict(payload or {})
+        # Never trust client/payload timestamps. Only a host requeue may carry
+        # the original receipt; normal recovery keeps the same durable row.
+        payload.pop("owner_message_at", None)
+        payload.pop("owner_input_id", None)
+        if _is_human_input(source, payload):
+            payload.update(_owner_receipt or {"owner_message_at": time.time(), "owner_input_id": turn_id})
         # A copied retry payload is a new admission, not recovery of the old
         # logical row. Only start/reap of that SAME row retain this identity.
         payload.pop("accepted_input_order", None)

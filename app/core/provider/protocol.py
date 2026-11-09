@@ -106,7 +106,8 @@ class ProviderAdapter(ABC):
         raise NotImplementedError("resume is only supported on fluid sessions")
 
     async def steer(
-        self, text: str, *, id: Optional[str] = None, origin: str = "user"
+        self, text: str, *, id: Optional[str] = None, origin: str = "user",
+        accepted_at: Optional[float] = None,
     ) -> None:
         """Hand text to the RUNNING turn so the model reads it mid-stream.
 
@@ -117,6 +118,7 @@ class ProviderAdapter(ABC):
         ``id`` is a caller-chosen correlation handle echoed back on the
         delivery receipt, which is how a host with a durable queue knows the
         text is irrevocably in history and can retire its copy.
+        ``accepted_at`` is the host receipt time, preserved through queueing.
 
         Raises ``RuntimeError`` when there is no live turn to steer into — the
         caller then leaves the message queued for the next turn. Adapters that

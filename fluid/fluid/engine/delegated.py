@@ -2746,12 +2746,26 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     if not await spawned():
                         return
             op, question_ids = await self._question_turn_content(op)
+            self.ctx.extra["time_turn_source"] = op.source
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
-            content, context_pin = await self._fresh_turn_content(content, op.context_pin)
+            from fluid.tools.time_context import delegated_wake_time
+
+            message = Message(role="user", content=content, context_pin=op.context_pin)
+            context_pin = op.context_pin if message.pinned_text() else None
+            before = len(message.text())
+            content = await asyncio.to_thread(
+                delegated_wake_time, content, self.ctx.extra, op.source, host_time_note=op.host_time_note,
+                before_context=context_pin[0] if context_pin else None,
+            )
+            if context_pin:
+                added = len(Message(role="user", content=content).text()) - before
+                context_pin = (context_pin[0] + added, context_pin[1] + added)
+            content, context_pin = await self._fresh_turn_content(content, context_pin)
             user_node = SessionNode(
                 node_id=new_id("node"),
                 parent_id=op.parent_node_id or meta.head_node_id,
                 message=Message(role="user", content=content, context_pin=context_pin),
+                **({"ts": op.accepted_at} if op.accepted_at is not None else {}),
             )
             await self.store.append(sid, user_node)
             await self._mark_questions_delivered(question_ids)
@@ -3205,7 +3219,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if op.origin != "user":
             self._unacked_notices.append((record, False))
             return
-        self._delivered_on(None, [SteerDelivery(id=op.id, text=op.text)])
+        self._delivered_on(None, [SteerDelivery(id=op.id, text=op.text, accepted_at=op.accepted_at)])
         await self._emit(SteerDelivered(
             session_id=self.session_id, turn_id=self._active_turn_id,
             steers=[record],
@@ -3502,7 +3516,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         the transcript.
         """
         deliveries = [
-            SteerDelivery(id=op.id, text=op.text)
+            SteerDelivery(id=op.id, text=op.text, accepted_at=op.accepted_at)
             if isinstance(op, Steer)
             else SteerDelivery(id=op.id, text=op.text, sender=op.sender, origin=op.provenance)
             for op in peers
@@ -5624,7 +5638,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         told = merge_told(told, self._delivered)
         text = render_told(
             brief if brief and (answer is None or flat_text(brief) not in shown) else "",
-            [item.text for item in told] if answer is None else still_missing(told, shown, kept),
+            [item.render(dated=True) for item in told] if answer is None else still_missing(told, shown, kept, dated=True),
+            brief_at=nodes[0].ts if nodes else None,
         )
         if text is None:
             return None

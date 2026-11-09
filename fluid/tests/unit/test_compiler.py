@@ -40,7 +40,7 @@ def test_environment_block_non_repo(plain_dir: Path):
     block = environment_block(plain_dir)
     assert block.startswith("# Environment")
     assert f"Working directory: {plain_dir.resolve()}" in block
-    assert "Today's date:" in block
+    assert "Current time:" in block
     assert "Git repository: no" in block
 
 

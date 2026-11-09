@@ -543,17 +543,20 @@ def _seed_steered(session_id="ses_steered"):
     return session_id
 
 
-def test_steer_fixture_matches_real_fluid_serialization():
+@pytest.mark.parametrize("accepted_at", [None, 1234.0])
+def test_steer_fixture_matches_real_fluid_serialization(accepted_at):
     pytest.importorskip("fluid")
     from fluid.messages.content import Message, SteerDelivery, Text, ToolResultBlock
 
     block = ToolResultBlock(
         tool_use_id="t1", content=[Text(text="file body")],
-        delivered_steers=[SteerDelivery(text="also end with STEERED", id="s1")],
+        delivered_steers=[SteerDelivery(text="also end with STEERED", id="s1", accepted_at=accepted_at)],
         delivery_metadata_version=1,
     )
     assert Message(role="user", content=[block]).to_dict() == _steered_result([
-        {"text": "also end with STEERED", "origin": "user", "sender": None, "id": "s1"},
+        {"text": "also end with STEERED", "origin": "user", "sender": None, "id": "s1",
+         # Receipts without a time keep the key out, so old chats replay byte-identically.
+         **({} if accepted_at is None else {"accepted_at": accepted_at})},
     ])
 
 

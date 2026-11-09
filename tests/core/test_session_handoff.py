@@ -40,9 +40,10 @@ async def _drain_runners():
 ])
 def test_handoff_context_attributes_the_actual_requester(by, reason):
     pending = sh.PendingHandoff("dev-gaming", "DesktopWorker", "Keep the note", time.time(), by=by)
-    with patch.object(sh, "_self_label", return_value="Source"):
+    with patch.object(sh, "_self_label", return_value="Source"), \
+            patch("fluid.context.time_awareness.absolute_time", return_value="2026-11-09 12:00:00 UTC +0000 (UTC)"):
         assert sh._handoff_context(pending, "Target") == (
-            f"[hand-off] Moved from Source to Target{reason} Your hand-off note: Keep the note")
+            f"[hand-off] Moved from Source to Target{reason} At 2026-11-09 12:00:00 UTC +0000 (UTC). Your hand-off note: Keep the note")
 
 
 async def test_cleanup_drains_callbacks_of_already_finished_runners():
@@ -1409,10 +1410,11 @@ def _moving(gaming, call, move=None):
                               member=lambda device: SimpleNamespace(kind="worker", status="active"))
     stack.enter_context(patch("app.network.engine.context", return_value=context))
     stack.enter_context(patch("app.network.control.call", call))
+    stack.enter_context(patch("fluid.context.time_awareness.absolute_time", return_value="2026-11-09 12:00:00 UTC +0000 (UTC)"))
     return stack
 
 
-RESUME_PROMPT = ("[hand-off] Moved from ServerWorker to DesktopWorker, as you requested with HandOffSession. Your hand-off note: "
+RESUME_PROMPT = ("[hand-off] Moved from ServerWorker to DesktopWorker, as you requested with HandOffSession. At 2026-11-09 12:00:00 UTC +0000 (UTC). Your hand-off note: "
                  "tests pass; next: wire the UI Continue the work from where you left off. If it was already "
                  "complete, stop after a brief acknowledgement; do not invent new work.")
 

@@ -55,13 +55,14 @@ def test_manifest_matches_current_bundle_and_canonical_input():
     assert manifest["minimum_node_major"] == 22
 
 
-def test_stale_bundle_and_preprocessor_fail_closed(tmp_path):
+@pytest.mark.parametrize("preprocessor", ["app/api/events.py", "app/core/turn_recorder.py"])
+def test_stale_bundle_and_preprocessor_fail_closed(tmp_path, preprocessor):
     directory = copy_bundle(tmp_path)
     (directory / "reducer.cjs").write_text("changed", encoding="utf-8")
     with pytest.raises(ReducerUnavailable, match="bundle_changed"):
         verified_manifest(directory)
     directory = copy_bundle(tmp_path / "second")
-    (directory.parents[2] / "app/api/events.py").write_text("changed", encoding="utf-8")
+    (directory.parents[2] / preprocessor).write_text("changed", encoding="utf-8")
     with pytest.raises(ReducerUnavailable, match="preprocessor_changed"):
         verified_manifest(directory)
 

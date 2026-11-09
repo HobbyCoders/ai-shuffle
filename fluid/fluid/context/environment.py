@@ -13,7 +13,7 @@ import os
 import platform as _platform
 import subprocess
 import sys
-from datetime import UTC, datetime
+from fluid.context.time_awareness import RELATIVE_TIME_RULE, turn_time_lines
 from pathlib import Path
 
 from fluid.tools.child_env import scrub_child_env
@@ -212,10 +212,6 @@ def project_facts(cwd: str) -> str | None:
     return "\n".join(lines) if lines else None
 
 
-def _today() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%d")
-
-
 def environment_block(
     cwd: str | os.PathLike[str] = ".",
     *,
@@ -250,11 +246,12 @@ def environment_block(
         f"Platform: {sys.platform}",
         f"OS: {_os_version()}",
         f"Shell: {shell}",
+        RELATIVE_TIME_RULE,
     ]
     if worker and worker.strip():
         lines.append(worker.strip())
     if include_volatile:
-        lines.append(f"Today's date: {_today()}")
+        lines.extend(turn_time_lines())
         git = git_context(cwd_str)
         in_repo = git is not None
     else:
@@ -274,7 +271,7 @@ def environment_block(
     return "\n".join(lines)
 
 
-def environment_note(cwd: str | os.PathLike[str] = ".") -> str:
+def environment_note(cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None) -> str:
     """The volatile environment facts, as a system-reminder for one turn.
 
     The counterpart of ``environment_block(include_volatile=False)``: today's
@@ -283,7 +280,7 @@ def environment_note(cwd: str | os.PathLike[str] = ".") -> str:
     the line — and never raises.
     """
     cwd_str = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
-    lines = [f"Today's date: {_today()}"]
+    lines = turn_time_lines(**(time_context or {}))
     git = git_context(cwd_str)
     if git is not None:
         lines.append(git)

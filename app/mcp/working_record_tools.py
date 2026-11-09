@@ -12,7 +12,7 @@ def build_tools(tool: Any, *, is_admin: bool, session_id: str) -> list[Any]:
           "newest first, a page at a time (limit; offset=next_offset continues); get returns one "
           "item_id in full. Add a goal, decision, pending item or needs_owner; resolve an item by "
           "id when done, superseded, or a report has been acknowledged. Records survive settled "
-          "chats and sync across workers. Never store secrets. list/get read; add/resolve write.",
+          "chats and sync across workers. Use absolute dates when adding items. Never store secrets. list/get read; add/resolve write.",
           {"type": "object", "properties": {
               "action": {"type": "string", "enum": ["list", "get", "add", "resolve"]},
               "kind": {"type": "string", "enum": ["goal", "decision", "pending", "needs_owner"]},

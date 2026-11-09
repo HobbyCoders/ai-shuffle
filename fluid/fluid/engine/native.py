@@ -1249,6 +1249,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # facts text last sent to the model, and whether this engine has
         # already harvested them into the memory store.
         self._runtime_facts_sent: str | None = None
+        self._resume_environment: str | None = None
+        self._resume_anchor: str | None = None
         self._runtime_facts_harvested = False
         self._runtime_facts_rehydrated = False
         # System text of the request in flight / the last completed one, for
@@ -2530,6 +2532,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             raise
         finally:
             self._stop_turn_watchdog()
+            self._resume_environment = self._resume_anchor = None
             # Covers early hook/Resume exits and cancellation before the
             # agent loop starts, as well as its normal terminal paths. Stop
             # must never leave queued peers or a failed write to a later turn.
@@ -2598,6 +2601,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return
 
     async def _run_turn_inner(self, op: UserTurn | Resume) -> None:
+        self._resume_environment = self._resume_anchor = None
         self._peer_delivery_sealed = False
         meta = await self._ensure_session()
         sid = meta.session_id
@@ -2671,14 +2675,25 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ))
                 self._active_turn_id = None
                 return
-            if op.context_note:
+            self.ctx.extra["time_turn_source"] = "wakeup"
+            context_note = op.context_note
+            if context_note:
                 head = SessionNode(
                     node_id=new_id("node"), parent_id=head.node_id,
                     message=Message(
-                        role="user", content=[Text(op.context_note)],
-                    ).pin_context(op.context_note),
+                        role="user", content=[Text(context_note)],
+                    ).pin_context(context_note),
                 )
                 await self._append_node(sid, head)
+            # Fix the request-only clock to one real message for this turn.
+            # A tool-result head uses its preceding input, never the result;
+            # matching node ids (not text) survives reloads and duplicate inputs.
+            anchor = next((n for n in reversed([*path, head])
+                           if n.message.role == "user" and not any(
+                               isinstance(b, ToolResultBlock) for b in n.message.content)), None)
+            if anchor is not None:
+                self._resume_anchor = anchor.node_id
+                self._resume_environment = await self._environment_reminder()
             await self._emit(TurnStarted(
                 session_id=sid, node_id=head.node_id, turn_id=turn_id,
                 model=self.model, provider=self.provider.name, source=op.source,
@@ -2729,6 +2744,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             notes = self._notes_reminder()
             if notes is not None:
                 content.append(Text(notes))
+        self.ctx.extra["time_turn_source"] = op.source
         env_note = await self._environment_reminder()
         if env_note is not None:
             content.append(Text(env_note))
@@ -2754,6 +2770,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             node_id=node_id,
             parent_id=op.parent_node_id or meta.head_node_id,
             message=Message(role="user", content=content, context_pin=op.context_pin),
+            **({"ts": op.accepted_at} if op.accepted_at is not None else {}),
         )
         if scratch_note and op.context_pin is None:
             user_node.message.pin_context(scratch_note)
@@ -3346,7 +3363,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         from fluid.context.runtime_facts import runtime_facts
 
         facts = runtime_facts(self.ctx.cwd)
-        note = environment_note(self.ctx.cwd) if full else None
+        time_context = self.ctx.extra.get("time_context")
+        try:
+            values = time_context(self.ctx.extra.get("time_turn_source", "wakeup")) if callable(time_context) else {}
+        except Exception:
+            values = {}
+        note = environment_note(self.ctx.cwd, time_context=values or {}) if full else None
         self._harvest_runtime_facts()
         return note, facts
 
@@ -3798,6 +3820,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         history: system prompt + tool schemas. Priced with the same estimator
         the usage breakdown uses, so the trigger and the report agree."""
         total = estimate_tokens_of_text(self.system)
+        if self._resume_environment:
+            total += estimate_tokens_of_text("\n\n" + self._resume_environment)
         for api in self._tools_api():
             try:
                 total += estimate_tokens_of_text(json.dumps(api))
@@ -3873,6 +3897,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         while True:
             nodes = await self._context_path(sid, parent.node_id)
+            self._resume_clock_tokens(nodes)
             if num_calls == 0:
                 await self._note_wake_turn_starts(sid, nodes)
             from fluid.tools.builtins.plan import reminder as plan_reminder
@@ -3947,7 +3972,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             if admitted:
                 promotions.extend(admitted)
                 rendered = self._compactor.view(nodes)
-            history = sanitize_assistant_history(repair_dangling_tool_calls(rendered))
+            history = self._with_resume_clock(nodes, rendered)
+            # Compaction can retire the anchor. Account for only the clock
+            # actually sent, including on later calls of this same Resume.
+            overhead_tokens = self._context_overhead_tokens() + (estimate_tokens_of_text(plan_note) if plan_note else 0)
+            history = sanitize_assistant_history(repair_dangling_tool_calls(history))
             if plan_note and not any(plan_note in message.text() for message in history):
                 # Ephemeral tail, not a system-prefix change or a transcript write.
                 # Keep tool-result pairing by extending the final user message.
@@ -4818,7 +4847,14 @@ class NativeLoop(BackgroundLifecycleMixin):
             measured, float(estimate or 0), current=measured_current,
         )
 
+        resume_cost = estimate_tokens_of_text("\n\n" + self._resume_environment) if self._resume_environment else 0
         def size() -> int:
+            nonlocal overhead_tokens, resume_cost
+            # Escalation may remove the anchor too: retire its reservation
+            # before deciding to trim more history or refuse the request.
+            current_cost = self._resume_clock_tokens(nodes)
+            overhead_tokens += current_cost - resume_cost
+            resume_cost = current_cost
             return int(self._compactor.estimate_view_tokens(nodes, overhead_tokens) * scale)
 
         before = size()
@@ -4998,6 +5034,29 @@ class NativeLoop(BackgroundLifecycleMixin):
         thinking = self._session_thinking.get(sid) if sid else None
         effort = thinking.get("effort") if isinstance(thinking, dict) else None
         return effort if isinstance(effort, str) else None
+
+    def _resume_clock_tokens(self, nodes: list[SessionNode]) -> int:
+        if not self._resume_environment:
+            return 0
+        if (not any(n.node_id == self._resume_anchor for n in nodes)
+                or (self._compactor.active and self._resume_anchor in self._compactor._covered_ids(nodes))):
+            self._resume_environment = self._resume_anchor = None
+            return 0
+        return estimate_tokens_of_text("\n\n" + self._resume_environment)
+
+    def _with_resume_clock(self, nodes: list[SessionNode], rendered: list[Message]) -> list[Message]:
+        if self._resume_clock_tokens(nodes):
+            for i, (start, end, message) in enumerate(self._compactor.view_segments(nodes)):
+                if (start == end and nodes[start].node_id == self._resume_anchor
+                        and message.role == "user" and not any(
+                            isinstance(b, ToolResultBlock) for b in message.content)):
+                    return [*rendered[:i], replace(
+                        rendered[i], content=[*rendered[i].content, Text("\n\n" + self._resume_environment)],
+                    ), *rendered[i + 1:]]
+            # A fold/window removed the original message: never move the
+            # clock to a new tail, or reattach it later during this turn.
+            self._resume_environment = self._resume_anchor = None
+        return rendered
 
     def _build_request(
         self, history: list[Message], *, sticky: bool = True,
@@ -6620,6 +6679,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
         delivered: list[tuple[str | None, str, str | None, str]] = []
         if self._pending_steers:
+            accepted = {pending.id: pending.accepted_at for pending in self._pending_steers
+                        if isinstance(pending, Steer)}
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
             self._pending_steers.clear()
             # Only delivered user intent may exempt a later command. A queued
@@ -6628,7 +6689,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if origin == "user" and sender is None:
                     self.ctx.extra["bash_file_guard_user_text"] = text
             self._tool_deliveries.extend(
-                SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin)
+                SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin, accepted_at=accepted.get(steer_id))
                 for steer_id, text, sender, origin in delivered
             )
             steers = "".join(

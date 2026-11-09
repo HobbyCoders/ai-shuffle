@@ -29,6 +29,11 @@ async def test_owner_turn_preserves_app_authored_markers(monkeypatch, tmp_path, 
 
     memory = {"section": _section(*FACTS)}
     adapter, loop = await _make(monkeypatch, tmp_path, leg, memory)
+    from datetime import datetime, timezone
+    from fluid.context.time_awareness import turn_time_lines, RELATIVE_TIME_RULE
+
+    clock = {"zone": "UTC", "now": datetime(2026, 11, 9, 18, tzinfo=timezone.utc)}
+    loop.ctx.extra["time_context"] = lambda _source: clock
     if wrapper == "voice":
         prompt = _with_voice_note("Owner's spoken request", {
             "voice_delegation": True, "voice_instructions": "Keep the answer short.",
@@ -46,8 +51,13 @@ async def test_owner_turn_preserves_app_authored_markers(monkeypatch, tmp_path, 
         message = next(n.message for n in nodes if n.message.role == "user")
         assert message.text().startswith(prompt + "\n\n")
         assert message.pinned_text() == mr.wrap(memory["section"])
-        # The app block is outside the provenance range and remains byte exact.
-        assert message.text()[:message.context_pin[0]] == prompt + "\n\n"
+        # The app block remains byte exact, followed only by the fresh clock
+        # when the delegated fixture suppresses the adapter's environment note.
+        expected = prompt + "\n\n"
+        if leg == "delegated":
+            tag = "system" + "-" + "reminder"
+            expected += f"<{tag}>\n" + "\n".join([*turn_time_lines(**clock), RELATIVE_TIME_RULE]) + f"\n</{tag}>\n\n"
+        assert message.text()[:message.context_pin[0]] == expected
     finally:
         await adapter.disconnect()
 
@@ -190,7 +200,7 @@ async def test_a_memory_snapshot_cut_from_the_put_back_is_not_credited(monkeypat
         loop._track_main_compaction(compacting)
         result = await loop._cli_session_start({"source": "compact"})
         context = result["hookSpecificOutput"]["additionalContext"]
-        assert "[memory continues" in context and "Today's date" in context
+        assert "[memory continues" in context and "Current time:" in context
         await loop._acknowledge_note()
         assert adapter._memory_put_back is None
         assert not loop._compaction_context_restored

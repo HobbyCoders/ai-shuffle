@@ -283,6 +283,7 @@ class SessionSearchHit:
     # The worker that runs the session, when it is not the one answering
     # (a host with several workers); None = this one.
     worker: str | None = None
+    text_times: list[float] = field(default_factory=list)  # send times, aligned with texts
 
 
 @dataclass

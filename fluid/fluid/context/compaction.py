@@ -70,6 +70,7 @@ from fluid.context.steer_render import (
     RENDER_VERSION_LEGACY,
     RENDER_VERSION_V2,
     SteerRenderConfig,
+    render_steer,
     render_steers,
 )
 from fluid.context.trim import (
@@ -353,6 +354,7 @@ class CompactionConfig:
             receipt_min_chars=self.steer_receipt_chars,
             receipt_preview_chars=self.steer_receipt_preview_chars,
             recall_tools=self.recall_tools,
+            date_deliveries=self.render_version >= 4,
         )
 
 
@@ -755,14 +757,21 @@ def _opens_session(node: SessionNode) -> bool:
 
 
 def _delivered_on_path(
-    spans: list[list[SessionNode]], *, steers: bool,
+    spans: list[list[SessionNode]], *, steers: bool, dated: bool = False,
 ) -> list[tuple[str, str]]:
-    """``(node id, text)`` of what was delivered in ``spans``, in delivery order:
+    return [(ref, _date_told(text, sent) if dated else text)
+            for ref, text, sent in _delivery_candidates(spans, steers=steers)]
+
+
+def _delivery_candidates(
+    spans: list[list[SessionNode]], *, steers: bool,
+) -> list[tuple[str, str, float]]:
+    """``(carrier node id, raw text, send time)`` in delivery order:
     the agents' messages that opened turns and, with ``steers``, what rode tool
     results. A harness notice is no instruction: it stays out. So does the
     session's opening message, because the intent pin already carries it."""
     opening = spans[0][0] if spans and spans[0] else None
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, float]] = []
     for span in spans:
         for node in span:
             if is_turn_start(node):
@@ -770,10 +779,10 @@ def _delivered_on_path(
                 if text.startswith(PEER_OPEN_PREFIX) and not (
                     node is opening and _opens_session(node)
                 ):
-                    found.append((node.node_id, text))
+                    found.append((node.node_id, text, node.ts))
             elif steers:
                 found.extend(
-                    (node.node_id, steer.render())
+                    (node.node_id, steer.render(), steer.accepted_at if steer.accepted_at is not None else node.ts)
                     for block in node.message.content if isinstance(block, ToolResultBlock)
                     for steer in block.delivered_steers if steer.origin != "system"
                 )
@@ -817,7 +826,7 @@ def _peer_pin(
     """What was delivered in folded turns, newest first while it fits
     ``peer_pin_chars``, in delivery order. ``steers`` adds the tool-result lane."""
     kept, left_out = _newest_that_fit(
-        _delivered_on_path(spans, steers=steers), config.peer_pin_chars,
+        _delivered_on_path(spans, steers=steers, dated=config.render_version >= 4), config.peer_pin_chars,
     )
     return _pin_lines(kept, left_out, config, "HistoryExpand the epoch")
 
@@ -844,7 +853,7 @@ def _bounded_deliveries(
             for steer in reversed(block.delivered_steers):
                 if steer.origin == "system":
                     if config.recall_tools and len(steer.text) < steer_cfg.receipt_min_chars:
-                        size = len(steer.render())
+                        size = len(render_steer(steer, steer_cfg, node=node))
                         if size > notice_room:
                             left_out += 1
                             continue
@@ -852,7 +861,7 @@ def _bounded_deliveries(
                 elif notices_only:
                     continue
                 else:
-                    size = len(steer.render())
+                    size = len(render_steer(steer, steer_cfg, node=node))
                     if size > told_room and newest_told:
                         cut = max(0, told_room - (size - len(steer.text)))
                         steer = replace(steer, text=_clip_verbatim(steer.text, cut))
@@ -888,6 +897,17 @@ class ToldMessage:
     carrier: str | None  # the tool result it rode; None for a turn of its own
     text: str
     ts: float
+    accepted_at: float | None = None
+
+    def render(self, dated=False):
+        at = self.accepted_at if self.accepted_at is not None else self.ts
+        return _date_told(self.text, at) if dated else self.text
+
+
+def _date_told(text, at):
+    from fluid.context.time_awareness import absolute_time
+
+    return f"[sent/delivered {absolute_time(at, 'UTC')}]\n{text}"
 
 
 def _delivery_key(
@@ -925,7 +945,7 @@ def told_on_path(nodes: list[SessionNode]) -> tuple[str, list[ToldMessage]]:
                     if steer.origin != "system":
                         text = steer.render().strip()
                         key = _delivery_key(steer, block.tool_use_id, text, times)
-                        told.append(ToldMessage(key, block.tool_use_id, text, node.ts))
+                        told.append(ToldMessage(key, block.tool_use_id, text, node.ts, steer.accepted_at))
     return brief, told
 
 
@@ -943,12 +963,13 @@ def merge_told(
         text = steer.render().strip()
         key = _delivery_key(steer, carrier, text, times)
         held = merged.get(key)
-        merged[key] = ToldMessage(key, carrier, text, min(ts, held.ts) if held else ts)
+        merged[key] = ToldMessage(key, carrier, text, min(ts, held.ts) if held else ts,
+                                  steer.accepted_at if steer.accepted_at is not None else (held.accepted_at if held else None))
     return sorted(merged.values(), key=lambda item: item.ts)
 
 
 def still_missing(
-    told: list[ToldMessage], shown: str, kept: Iterable[str] = (),
+    told: list[ToldMessage], shown: str, kept: Iterable[str] = (), *, dated: bool = False,
 ) -> list[str]:
     """The messages to repeat beside a context that shows ``shown`` (whitespace
     collapsed): the first delivery it does not hold and everything after it. Each
@@ -967,11 +988,11 @@ def still_missing(
         if copies[text] > 0:
             copies[text] -= 1
             continue
-        return [later.text for later in told[index:]]
+        return [later.render(dated=dated) for later in told[index:]]
     return []
 
 
-def render_told(brief: str, messages: list[str]) -> str | None:
+def render_told(brief: str, messages: list[str], *, brief_at=None) -> str | None:
     """A note repeating ``brief`` and ``messages``, or None for neither. Bounded,
     newest messages first, and names what did not fit."""
     if not brief and not messages:
@@ -979,6 +1000,7 @@ def render_told(brief: str, messages: list[str]) -> str | None:
     lines = [INSTRUCTIONS_LEAD]
     room = INSTRUCTIONS_MAX_CHARS
     if brief:
+        brief = _date_told(brief, brief_at) if brief_at is not None else brief
         clipped = brief[:INSTRUCTIONS_BRIEF_CHARS]
         if len(clipped) < len(brief):
             clipped += f"… (+{len(brief) - len(clipped)} chars; HistorySearch finds the rest)"
@@ -1011,6 +1033,21 @@ def _clip_verbatim(text: str, cap: int) -> str:
     return f"{text[:cap]}… (+{len(text) - cap} chars)"
 
 
+def _matches_pinned_text(stored: str, raw: str) -> bool:
+    """Whether ``raw`` may be the receipt ``stored`` came from. It may admit extra
+    receipts, which the caller turns into the honest bound, but never the reverse:
+    the true receipt always matches, so no other receipt's time can be taken."""
+    if stored == raw:
+        return True
+    marker = re.search(r"… \(\+\d+ chars\)$", stored)
+    if marker is None:
+        return False
+    # Re-clipping can leave pieces of an old marker at the body's end, and they
+    # contain only marker characters: without those, the rest is certainly original.
+    probe = stored[:marker.start()].rstrip("… (+)0123456789chars")
+    return bool(probe) and raw.startswith(probe)
+
+
 def _intent_pin(
     spans: list[list[SessionNode]], config: CompactionConfig
 ) -> list[str]:
@@ -1037,6 +1074,12 @@ def _intent_pin(
     ]
     if not found:
         return []
+    from fluid.context.time_awareness import absolute_time
+
+    stamps = {node.node_id: absolute_time(node.ts, "UTC") for node, _ in found}
+    def sent(node_id):
+        return f" [sent {stamps[node_id]}]" if config.render_version >= 4 else ""
+
     requests = [(node.node_id, text) for node, text in found]
     cap = config.user_turn_text_cap
     budget = config.intent_pin_tokens * 4
@@ -1048,7 +1091,7 @@ def _intent_pin(
     lines = [
         "Pinned intent: the user's own requests in these folded turns, "
         "verbatim (a later user message outranks them).",
-        f"original request ({first_id}):",
+        f"original request ({first_id}){sent(first_id)}:",
         first,
     ]
     later = requests[1:][::-1]
@@ -1063,7 +1106,7 @@ def _intent_pin(
             )
             break
         budget -= len(clipped)
-        lines.extend([f"later request ({node_id}):", clipped])
+        lines.extend([f"later request ({node_id}){sent(node_id)}:", clipped])
     return lines
 
 
@@ -1231,7 +1274,10 @@ def render_span_digest(
                     line = _clip_verbatim(user_text, config.peer_turn_text_cap)
                 else:
                     line = _clip(user_text, cap)
-                lines.append(f"user ({node.node_id}): {line}")
+                from fluid.context.time_awareness import absolute_time
+
+                sent = f" [sent {absolute_time(node.ts, 'UTC')}]" if config.render_version >= 4 else ""
+                lines.append(f"user ({node.node_id}){sent}: {line}")
         elif message.role == "assistant":
             texts = [b for b in message.content if isinstance(b, Text)]
             if texts:  # the last text block is the conclusion
@@ -3231,6 +3277,7 @@ class Compactor:
             default=None,
         )
         brief: list[str] | None = None
+        brief_at = None
         found: list[tuple[str, str]] = []
         left_out = 0
         if earlier is None:
@@ -3241,12 +3288,38 @@ class Compactor:
         else:
             prior = self._summary_pins[(start, nodes[earlier].node_id)]
             brief = prior.get("brief")
+            brief_at = prior.get("brief_at")
             found = [(str(ref), str(text)) for ref, text in prior.get("messages") or []]
+            if self.config.render_version >= 4 and self._config_at(start, nodes[earlier].node_id).render_version < 4:
+                from fluid.context.time_awareness import absolute_time
+
+                # Upgrade only a new decision, never the stored legacy pin.
+                # A window can remove the carrier: then the checkpoint's end
+                # supplies an honest bound, not an invented exact send time.
+                bound = (f"[sent/delivered before {absolute_time(nodes[earlier].ts, 'UTC')}; "
+                         "exact time unavailable]\n")
+                spans = split_spans(nodes[:earlier + 1])
+                available: dict[str, list[tuple[str, float]]] = {}
+                for ref, text, sent in _delivery_candidates(spans, steers=True):
+                    available.setdefault(ref, []).append((text, sent))
+                upgraded = []
+                for ref, text in found:
+                    candidates = available.get(ref, [])
+                    times = {sent for raw, sent in candidates
+                             if len(candidates) == 1 or _matches_pinned_text(text, raw)}
+                    # The ref identifies the carrier; text only disambiguates
+                    # its receipts. Date the stored (possibly clipped) words,
+                    # never replace them with the full carrier's message.
+                    upgraded.append((ref, _date_told(text, times.pop()) if len(times) == 1 else bound + text))
+                found = upgraded
+                if brief and brief_at is None and brief[0] not in index:
+                    brief = [brief[0], bound + brief[1]]
             left_out = int(prior.get("left_out") or 0)
             run = nodes[earlier + 1:last + 1]
-        found += _delivered_on_path(split_spans(run), steers=True)
+        found += _delivered_on_path(split_spans(run), steers=True, dated=self.config.render_version >= 4)
         kept, dropped = _newest_that_fit(found, self.config.peer_pin_chars)
-        return {"brief": brief, "messages": [list(item) for item in kept],
+        brief_at = next((node.ts for node in nodes if brief and node.node_id == brief[0]), brief_at)
+        return {"brief": brief, "brief_at": brief_at, "messages": [list(item) for item in kept],
                 "left_out": left_out + dropped}
 
     def _summary_message(
@@ -3270,6 +3343,8 @@ class Compactor:
         if pin and config.render_version > RENDER_VERSION_V2:
             if pin.get("brief"):
                 brief_id, brief = pin["brief"]
+                if config.render_version >= 4 and pin.get("brief_at") is not None:
+                    brief = _date_told(brief, pin["brief_at"])
                 lines += [f"original request, verbatim ({brief_id}):", brief]
             lines += _pin_lines(
                 [(str(r), str(t)) for r, t in pin.get("messages") or []],

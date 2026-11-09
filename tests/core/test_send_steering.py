@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core import session_runtime
+from app.core.time_awareness import owner_message_receipt
 from app.db import turns as turns_db
 
 
@@ -59,7 +60,7 @@ class _Adapter:
         self._refuse = refuse
         self._recallable = recallable
 
-    async def steer(self, text, *, id=None, origin="user"):
+    async def steer(self, text, *, id=None, origin="user", accepted_at=None):
         self.calls.append((text, id))
         self.origins = getattr(self, "origins", []) + [origin]
         if self._refuse is not None:
@@ -108,7 +109,7 @@ async def test_question_producer_answer_steers_or_drains_once(mock_db, ending):
                                 questions=[{"question": "Color?"}], broadcast_func=AsyncMock())
 
     class RacingAdapter(_Adapter):
-        async def steer(self, text, *, id=None, origin="user"):
+        async def steer(self, text, *, id=None, origin="user", accepted_at=None):
             if ending:
                 turns_db.settle_turn(live["id"], "completed")
                 session_runtime._live_runtimes.pop(sid, None)
@@ -489,7 +490,7 @@ async def test_receipt_records_the_message_and_absorbs_the_row(mock_db):
     # so the frontend collapses its pending bubble onto this message.
     env["recorder"].record_steered_user_message.assert_awaited_once_with(
         "also check the logs", profile_id="coder", command_id="req-7",
-        upload_paths=None,
+        upload_paths=None, owner_receipt=owner_message_receipt(queued),
     )
     # ...and in the legacy store, exactly once.
     assert _messages(mock_db, "s5") == [("user", "also check the logs")]
@@ -1053,7 +1054,7 @@ async def test_a_plain_run_does_log_its_message_user(mock_db):
 
     env["recorder"].start.assert_awaited_once_with(
         "sent while idle", profile_id=None, record_user=True, source="user",
-        upload_paths=None,
+        upload_paths=None, owner_receipt=owner_message_receipt(turn),
     )
 
 
@@ -1071,7 +1072,7 @@ async def test_a_requeued_steer_records_nothing_when_it_runs(mock_db):
 
     env["recorder"].start.assert_awaited_once_with(
         "wait, also check the logs", profile_id=None, record_user=False, source="user",
-        upload_paths=None,
+        upload_paths=None, owner_receipt=owner_message_receipt(turn),
     )
     assert _messages(mock_db, "s15") == []
     env["sync"].broadcast_message_added.assert_not_awaited()
@@ -1248,7 +1249,7 @@ async def test_the_flagged_re_run_tells_the_model_about_the_duplicate(mock_db):
     assert seen["prompt"].endswith("also check the logs")
     env["recorder"].start.assert_awaited_once_with(
         "also check the logs", profile_id=None, record_user=True, source="user",
-        upload_paths=None,
+        upload_paths=None, owner_receipt=owner_message_receipt(turn),
     )
 
 

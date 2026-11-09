@@ -14,6 +14,15 @@ import { createSubscribers } from './store-utils';
 
 const STORAGE_KEY = 'ai-shuffle-timezone';
 const SERVER_PREFERENCE_KEY = 'timezone';
+const RESOLVED_PREFERENCE_KEY = 'timezone_resolved';
+
+function saveBrowserTimezone(): void {
+	if (!browser) return;
+	try {
+		const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		if (isValidTimezone(zone)) preferenceSync.save(RESOLVED_PREFERENCE_KEY, zone);
+	} catch { /* server uses labelled UTC when detection is unavailable */ }
+}
 
 
 /** "local" means use the browser's default timezone */
@@ -55,7 +64,7 @@ function saveToLocalStorage(tz: string): void {
 }
 
 function saveToServer(tz: string): void {
- preferenceSync.save(SERVER_PREFERENCE_KEY, tz);
+	preferenceSync.save(SERVER_PREFERENCE_KEY, tz);
 }
 
 // Guard against HMR duplicate registration
@@ -93,14 +102,16 @@ export const timezonePreference = {
 	},
 
 	async syncFromServer(): Promise<void> {
- await preferenceSync.refresh(SERVER_PREFERENCE_KEY);
-},
+		await preferenceSync.refresh(SERVER_PREFERENCE_KEY);
+		saveBrowserTimezone();
+	},
 
 	setTimezone(tz: string): void {
 		_state = tz;
 		_notifySubscribers();
 		saveToLocalStorage(tz);
 		saveToServer(tz);
+		if (tz === DEFAULT_TIMEZONE) saveBrowserTimezone();
 	},
 
 	/**
@@ -117,11 +128,20 @@ export const timezonePreference = {
 async function syncFromServer(): Promise<void> {
 	return timezonePreference.syncFromServer();
 }
+preferenceSync.register(RESOLVED_PREFERENCE_KEY, {
+	read: () => browser ? Intl.DateTimeFormat().resolvedOptions().timeZone : undefined,
+	apply() { /* Remote detection must not change this browser or explicit setting. */ }
+});
 preferenceSync.register(SERVER_PREFERENCE_KEY, {
- read: () => _state,
- apply(value) {
-  let next = typeof value === 'string' ? value : DEFAULT_TIMEZONE;
-  if (next !== 'local') { try { new Intl.DateTimeFormat('en', { timeZone: next }); } catch { next = DEFAULT_TIMEZONE; } }
-  _state = next; saveToLocalStorage(next); _notifySubscribers();
- }
+	read: () => _state,
+	apply(value) {
+		let next = typeof value === 'string' ? value : DEFAULT_TIMEZONE;
+		if (next !== 'local') {
+			try { new Intl.DateTimeFormat('en', { timeZone: next }); }
+			catch { next = DEFAULT_TIMEZONE; }
+		}
+		_state = next;
+		saveToLocalStorage(next);
+		_notifySubscribers();
+	}
 });

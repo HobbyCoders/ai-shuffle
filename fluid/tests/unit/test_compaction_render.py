@@ -43,7 +43,7 @@ _EXPAND_RE = re.compile(r'HistoryExpand\("(node_[0-9a-f]+)", offset=(\d+)\)')
 
 
 def _node(nid: str, role: str, blocks: list) -> SessionNode:
-    return SessionNode(node_id=nid, parent_id=None,
+    return SessionNode(node_id=nid, parent_id=None, ts=1_700_000_000.0,
                        message=Message(role=role, content=blocks))
 
 
@@ -161,9 +161,11 @@ def test_identical_notices_delivered_together_collapse_to_one_receipt() -> None:
     rendered = render_steers(steers, CompactionConfig().steer_render(), node=nodes[2])
     assert len(rendered) == 4
     assert "(2 identical copies delivered together)" in rendered[0]
-    assert rendered[1] == user.render()
+    # v4 dates owner deliveries; the two copies stay separate and verbatim.
+    dated_user = "[sent/delivered 2023-11-14 22:13:20 UTC +0000 (UTC)]\n" + user.render()
+    assert rendered[1] == dated_user
     assert "bg-8" in rendered[2] and "identical copies" not in rendered[2]
-    assert rendered[3] == user.render()
+    assert rendered[3] == dated_user
 
     trimmed = _trim_only()
     trimmed.trimmer.trim_batch(nodes)
@@ -244,6 +246,39 @@ def test_v1_decisions_resume_byte_identical_under_a_v2_compactor() -> None:
     v1_trim_only = _trim_only(render_version=1)
     v1_trim_only.rehydrate(legacy_rows)
     assert trim_only.view(nodes) == v1_trim_only.view(nodes)
+
+
+def test_v3_persisted_decisions_resume_byte_identical_under_v4() -> None:
+    """A real v3 trim + digest row replays without adding v4 owner dates."""
+    import hashlib
+    import json
+
+    nodes = [*_turn(0, [_system()]), *_turn(1, [_system()]), *_turn(2, [])]
+    old = Compactor(config=CompactionConfig(
+        render_version=3,
+        trim=TrimConfig(keep_recent_tool_results=0, min_result_chars=500),
+    ))
+    trimmed = old.trimmer.trim_batch(nodes)
+    old._mark_span("node_1a", "node_1d", SPAN_DIGEST)
+    before = old.view(nodes)
+    assert "[sent " not in _flat(before) and "[sent/delivered" not in _flat(before)
+    rows = _persisted([
+        Promotion(tier=1, trimmed=tuple(trimmed)),
+        Promotion(tier=2, spans=(("node_1a", "node_1d", SPAN_DIGEST),)),
+    ], render_version=3)
+    resumed = Compactor(config=CompactionConfig(
+        trim=TrimConfig(keep_recent_tool_results=0, min_result_chars=500),
+    ))
+    assert resumed.render_version == 4
+    resumed.rehydrate(rows)
+    def digest(view):
+        return hashlib.sha256(json.dumps([m.to_dict() for m in view],
+                                         sort_keys=True).encode()).hexdigest()
+    assert resumed.view(nodes) == before
+    # Measured from the pre-time-awareness v3 producer at 10b9ea081, not
+    # regenerated from the upgraded renderer when its output changes.
+    original_digest = "ca5732e7bd0d391e31326223a52948fdf9e62c873a19c7441c16c8b597466c80"
+    assert digest(before) == digest(resumed.view(nodes)) == original_digest
 
 
 def test_v2_decisions_resume_byte_identical() -> None:
@@ -335,7 +370,7 @@ def test_fold_keeps_the_brief_verbatim() -> None:
     assert len(epochs) == 1
     stub = _epoch_text(epochs[0])
     assert BRIEF in stub
-    assert "original request (node_00a):" in stub
+    assert "original request (node_00a) [sent 2023-11-14 22:13:20 UTC +0000 (UTC)]:" in stub
     # Byte-identical on the next render.
     assert compactor.view(nodes) == rendered
 
