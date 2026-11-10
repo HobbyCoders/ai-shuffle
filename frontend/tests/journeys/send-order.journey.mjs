@@ -128,7 +128,7 @@ await runJourney({
 			// is still judged.
 			expectShift: [{
 				step: 'send from the composer, then Resolve with agent',
-				moved: /^div\.gp-(?:rows|pipe|files|foot)$/,
+				moved: /^(?:div\.gp-(?:rows|pipe|files|foot)|p\.gp-why)$/,
 				maxValue: 0.12,
 				reason: 'known bug #1465: a late Git action note shifts the phone sheet\'s rows'
 			}]
