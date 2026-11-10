@@ -522,6 +522,10 @@ def submit(
     kick would only lose the placement-gate race in session_runtime.execute.
     The skip is an optimization, not a correctness gate — the execute-side
     placement check is the backstop either way.
+
+    That hand-off needs a database both runners share. A chat a paired worker
+    runs (its own database) never sees a row queued here; send that work to
+    the owner instead (see the note at the top of ``turn_claim``, #1443).
     """
     reactivated: dict[str, Any] = {}
     try:
