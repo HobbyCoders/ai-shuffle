@@ -239,7 +239,8 @@ jobs:
     needs: build
     continue-on-error: ${{ matrix.advisory }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # One emulator run takes about 17 minutes; leave room for the single retry after an emulator loss.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: android
