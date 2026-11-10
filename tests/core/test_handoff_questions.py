@@ -511,7 +511,9 @@ async def test_failed_detach_does_not_claim_move_or_suppress_a_later_resume(
         first = sh.request("s1", "DesktopWorker", "first move note")
         pending = sh._pending["s1"]
         if outcome == "timeout":
-            pending.expires_at = time.time() + 0.04
+            # Long enough for the first poll to detach the question even with
+            # cold imports; the move still expires because _busy stays True.
+            pending.expires_at = time.time() + 0.5
         move = AsyncMock(side_effect=RuntimeError("target unavailable"))
         with (
             patch("app.network.runners.find", return_value=TARGET),
