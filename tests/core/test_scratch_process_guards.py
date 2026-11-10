@@ -679,3 +679,44 @@ sys.stdin.read(1)
             sweep.close()
     finally:
         child.communicate("x", timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows handle sharing semantics")
+def test_windows_handle_opened_between_paced_slices_keeps_remaining_folder(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    path = session(root, "paced")
+    for name in ("f0", "f1", "f2"):
+        (path / name).write_bytes(b"data")
+        os.utime(path / name, (1, 1))
+    os.utime(path, (1, 1))
+    # The path arrives on stdin, so neither cwd nor cmdline names the folder.
+    script = """
+import ctypes, sys
+from ctypes import wintypes
+kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                              wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+kernel.CreateFileW.restype = wintypes.HANDLE
+handle = kernel.CreateFileW(sys.stdin.readline().strip(), 0x80000000, 7, None, 3, 0x80, None)
+if handle == wintypes.HANDLE(-1).value:
+    raise ctypes.WinError(ctypes.get_last_error())
+print('ready', flush=True)
+sys.stdin.read(1)
+"""
+    child = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, text=True, cwd=tmp_path)
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter([psutil.Process(child.pid)]))
+    monkeypatch.setattr(ss, "_session_rows", lambda key: [{"id": key, "is_active": False, "open_turn": False}])
+    monkeypatch.setattr(ss, "MAX_SLICE_FILES", 1)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 0 and not (path / "f0").exists()  # first paced slice
+        child.stdin.write(str(path / "payload") + "\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "ready"
+        assert sweep.step() == 0
+        assert sweep.reasons["entry open elsewhere"] == 1
+        assert all((path / name).read_bytes() == b"data" for name in ("f1", "f2", "payload"))
+    finally:
+        sweep.close()
+        child.communicate("x", timeout=5)

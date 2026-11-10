@@ -264,6 +264,7 @@ class ScratchSweep:
         self.removed_bytes = 0
         self.slice_files = 0
         self.slice_bytes = 0
+        self.passes = 0
 
     def close_job(self):
         if self.job:
@@ -341,11 +342,32 @@ class ScratchSweep:
                     key.startswith("process_reference pid=") for key in self.reasons) >= 8:
                 reason = "process_reference additional_holders"
             return self._retain(reason)
+        if os.name == "nt" and job.get("probed") != self.passes:
+            # Stands in for psutil open_files on Windows, refreshed in every pass
+            # that deletes: a handle opened since keeps the whole folder.
+            if not self._probe_remaining(job):
+                return self._retain("probe budget reached")
+            job["probed"] = self.passes
         if path.lstat().st_mtime_ns != job["root_modified"]:
             return self._retain("root_changed")
         return True
 
+    def _probe_remaining(self, job):
+        """Open every entry not yet deleted with no sharing; any holder raises."""
+        manifest = job["manifest"]
+        position = manifest.tell()
+        budget = time.monotonic() + PROCESS_SCAN_SECONDS
+        try:
+            while line := manifest.readline():
+                if time.monotonic() >= budget:
+                    return False
+                _windows_remove(job["path"] / json.loads(line)[0], probe=True)
+            return True
+        finally:
+            manifest.seek(position)
+
     def step(self):
+        self.passes += 1
         self.retained = 0
         self.reasons = Counter()
         self.process_notes = set()
@@ -411,10 +433,6 @@ class ScratchSweep:
                     if (_identity(current) != identity or current.st_mtime_ns != modified
                             or (not stat.S_ISDIR(current.st_mode) and current.st_size != size)):
                         raise ValueError("tree changed during scan")
-                    if os.name == "nt":
-                        # Stands in for psutil open_files on Windows: any held
-                        # entry keeps the whole folder, not only that leaf.
-                        _windows_remove(job["path"] / relative, probe=True)
                     scanned += 1
                     self.scan_entries = scanned
                     if scanned >= MAX_SCAN_ENTRIES:
