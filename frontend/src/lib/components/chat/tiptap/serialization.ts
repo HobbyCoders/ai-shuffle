@@ -85,29 +85,40 @@ export function restoreMessageDocument(text: string, uploadPaths: string[] = [],
  *   Editor: "Check this file [chip api.ts] and fix it"
  *   Output: "Check this file @src/lib/api.ts and fix it"
  */
-export function serializeToMessage(editor: Editor): string {
+export function serializeToMessage(editor: Editor, options: SerializeOptions = {}): string {
 	const json = editor.getJSON();
-	return serializeNode(json);
+	return serializeNode(json, options);
+}
+
+export interface SerializeOptions {
+	/** The chat runs on another worker: a note chip is sent as `@Notes/<id>`,
+	 *  which that worker resolves, not as this worker's file path (#1364). */
+	notesAsReferences?: boolean;
+}
+
+/** What a chip stands for in the message text. */
+export function chipMention(attrs: FileChipAttributes, options: SerializeOptions = {}): string {
+	if (attrs.type === 'note' && attrs.noteId && options.notesAsReferences) return `@Notes/${attrs.noteId}`;
+	return `@${attrs.fullPath || attrs.path}`;
 }
 
 /**
  * Recursively serialize a node to text
  */
-function serializeNode(node: JSONContent): string {
+function serializeNode(node: JSONContent, options: SerializeOptions = {}): string {
 	let result = '';
 
 	if (node.type === 'text') {
 		result += node.text || '';
 	} else if (node.type === 'fileChip') {
-		const attrs = node.attrs as FileChipAttributes;
-		result += `@${attrs.fullPath || attrs.path}`;
+		result += chipMention(node.attrs as FileChipAttributes, options);
 	} else if (node.type === 'hardBreak') {
 		result += '\n';
 	} else if (node.type === 'paragraph') {
 		// Process paragraph content
 		if (node.content) {
 			result += node.content
-				.map((child, index) => serializeNode(child) + chipSeparator(child, node.content?.[index + 1]))
+				.map((child, index) => serializeNode(child, options) + chipSeparator(child, node.content?.[index + 1]))
 				.join('');
 		}
 		// Add newline after paragraph (except for last one)
@@ -115,13 +126,13 @@ function serializeNode(node: JSONContent): string {
 	} else if (node.type === 'doc') {
 		// Process document content
 		if (node.content) {
-			const parts = node.content.map(serializeNode);
+			const parts = node.content.map((child) => serializeNode(child, options));
 			// Join and remove trailing newline
 			result = parts.join('').replace(/\n$/, '');
 		}
 	} else if (node.content) {
 		// Generic handling for other nodes with content
-		result += node.content.map(serializeNode).join('');
+		result += node.content.map((child) => serializeNode(child, options)).join('');
 	}
 
 	return result;

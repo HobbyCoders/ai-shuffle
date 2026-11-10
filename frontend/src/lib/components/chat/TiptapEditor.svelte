@@ -13,7 +13,7 @@
 	import { createPlainPasteIntent } from './tiptap/large-paste';
 	import type { FileChipAttributes } from './tiptap/FileChipNode';
 	import type { ChipRemovalNotice } from './tiptap/chip-removal';
-	import { serializeToMessage, isEditorEmpty, findActiveAtMention, getSlashCommand } from './tiptap/serialization';
+	import { serializeToMessage, isEditorEmpty, findActiveAtMention, getSlashCommand, type SerializeOptions } from './tiptap/serialization';
 
 	interface Props {
 		placeholder?: string;
@@ -321,9 +321,9 @@
 	/**
 	 * Get the serialized message content (text with @path references)
 	 */
-	export function getMessage(): string {
+	export function getMessage(options?: SerializeOptions): string {
 		if (!editor) return '';
-		return serializeToMessage(editor);
+		return serializeToMessage(editor, options);
 	}
 
 	/**

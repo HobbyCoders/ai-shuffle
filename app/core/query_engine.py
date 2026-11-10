@@ -115,11 +115,13 @@ _STREAM_DEBUG = bool(
     os.environ.get("STREAM_DEBUG") or os.environ.get("AIHUB_DEBUG_STREAM")
 )
 
-_LEGACY_NOTE_REF = re.compile(r"@Notes/(note-[a-f0-9]+)")
+# What the chat @ menu inserts for a note (#1364); session_runtime refuses to
+# steer a message carrying one, so it runs as a turn that expands it.
+NOTE_REFERENCE = re.compile(r"@Notes/(note-[a-f0-9]+)")
 
 
 def _resolve_note_references_for(prompt: str, api_user_id: Optional[str]) -> str:
-    """Expand legacy ``@Notes/note-<id>`` references the caller may read.
+    """Expand ``@Notes/note-<id>`` references the caller may read.
 
     Same rule as the notes API (``app.api.notes._owned_note``): the owner (no
     key) reaches every note; an API key only the notes it wrote
@@ -136,7 +138,7 @@ def _resolve_note_references_for(prompt: str, api_user_id: Optional[str]) -> str
             return match.group(0)
         return resolve_note_references(match.group(0))
 
-    return _LEGACY_NOTE_REF.sub(expand, prompt)
+    return NOTE_REFERENCE.sub(expand, prompt)
 
 
 def _rate_limit_event_dict(rli: Any, session_id: str) -> Dict[str, Any]:
@@ -1523,7 +1525,14 @@ async def _stream_query_turn(
     plan_scope = AsyncExitStack()
     query_receipt = None
     try:
-        recorder = await plan_scope.enter_async_context(recorded_turn(session_id, prompt, profile_id))
+        # Expand @Notes/<id> as the caller that sent this prompt (#1402); the
+        # chat keeps the typed text, the event records what the agent got.
+        agent_prompt = prompt
+        if prompt and NOTE_REFERENCE.search(prompt):
+            agent_prompt = await run_sync(_resolve_note_references_for, prompt, api_user_id)
+        recorder = await plan_scope.enter_async_context(recorded_turn(
+            session_id, prompt, profile_id, agent_content=agent_prompt,
+        ))
         prepare_completions = getattr(
             state.adapter, "prepare_background_completions", None
         )
@@ -1550,7 +1559,7 @@ async def _stream_query_turn(
             started_at=turn_started_at, overrides=overrides or None,
             payload={"api_user_id": api_user_id} if api_user_id else None,
         )
-        await state.adapter.send_query(prompt)
+        await state.adapter.send_query(agent_prompt)
 
         async for message in state.adapter.receive_events():
             await _record_query_message(recorder, message)

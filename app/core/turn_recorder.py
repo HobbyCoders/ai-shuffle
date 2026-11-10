@@ -823,6 +823,7 @@ class TurnRecorder:
         continued: bool = False,
         accepted_input_id: str | None = None,
         upload_paths: list[str] | None = None,
+        agent_content: str | None = None,
     ) -> None:
         """Append ``turn.started`` then ``message.user``.
 
@@ -834,6 +835,9 @@ class TurnRecorder:
         is what started the turn, in fluid's vocabulary; None leaves it off.
         ``accepted_input_id`` marks the message as the record of the input that
         resumed a parked turn, whose id it shares with the older prompt.
+        ``agent_content`` is the text the agent gets instead of the message
+        as typed (a note reference expanded on this worker, #1401); the
+        rewind guard matches the transcript against it.
         """
         try:
             started: Dict[str, Any] = {"profile_id": profile_id}
@@ -853,6 +857,8 @@ class TurnRecorder:
                         **({"source": source} if source is not None else {}),
                         **({"accepted_input_id": accepted_input_id} if accepted_input_id else {}),
                         **({"upload_paths": upload_paths} if upload_paths else {}),
+                        **({"agent_content": agent_content}
+                           if agent_content and agent_content != user_message else {}),
                     } or None,
                 ))
             await self._append(events)

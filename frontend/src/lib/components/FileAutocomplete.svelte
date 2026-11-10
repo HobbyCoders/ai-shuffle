@@ -400,6 +400,10 @@
       files = notes.map((note) => ({
         name: note.title,
         type: 'note' as const,
+        // `absolute_path` is where the note's file sits on the worker you are
+        // viewing from. The chip keeps `note_id` too: a chat that runs on
+        // another worker is sent `@Notes/<id>` instead (serializeToMessage,
+        // #1364), decided when the message is sent.
         path: note.absolute_path || `${NOTES_FOLDER}/${note.id}`,
         note_id: note.id,
         preview: note.preview,

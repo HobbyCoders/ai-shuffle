@@ -22,15 +22,18 @@ def run_context(recorder):
 
 
 @asynccontextmanager
-async def recorded_turn(session_id, prompt, profile_id, source=None):
-    """HTTP/headless producers own and release the same fenced recorder as API background turns."""
+async def recorded_turn(session_id, prompt, profile_id, source=None, agent_content=None):
+    """HTTP/headless producers own and release the same fenced recorder as API background turns.
+
+    ``agent_content`` is the text the agent gets when it differs from
+    ``prompt`` (an expanded note reference); see ``TurnRecorder.start``."""
     from app.core.turn_recorder import TurnRecorder
 
     recorder = await TurnRecorder.maybe_create(session_id)
     try:
         with run_context(recorder):
             if recorder:
-                await recorder.start(prompt, profile_id=profile_id, source=source)
+                await recorder.start(prompt, profile_id=profile_id, source=source, agent_content=agent_content)
             yield recorder
     finally:
         if recorder:

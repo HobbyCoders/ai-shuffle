@@ -962,7 +962,10 @@ async def test_keep_response_skips_steers_but_retains_real_legacy_boundaries(
         # checkpoint candidates. Preserve the existing command behavior.
         following["payload"]["checkpoint_backed"] = False
     se.append_events(SID, [first, interjection, _asst_ev("reply"), following])
-    _patch_checkpoints(monkeypatch, [_cp("u-1", "again"), _cp("u-2", "again")])
+    # A command is not a transcript checkpoint (checkpoints_from_entries), and
+    # the event log and transcript must count the same prompts with a text.
+    _patch_checkpoints(monkeypatch, [_cp("u-1", "again")]
+                       + ([] if boundary_kind == "command" else [_cp("u-2", "again")]))
     assert _resolve_rewind_from_seq(SID, SDK, WD, "u-1", True, "user") == (4, None)
     assert _resolve_rewind_from_seq(SID, SDK, WD, "u-1", False, "user") == (1, None)
 
@@ -1180,3 +1183,85 @@ async def test_a_call_message_stays_refused_after_its_wrapped_text_is_pasted(rew
     assert "content guard" in (resp.error or "")
     assert rewind_env.truncate_calls == []
     assert se.get_events(SID) == before
+
+
+# ---------------------------------------------------------------------------
+# A chat with no notes resolves exactly as before agent texts were recorded
+# (#1401). A prompt the transcript never got (stopped after it was recorded,
+# before the engine ran) leaves the event log with more prompts of that text
+# than the transcript; that must not refuse a rewind the old code allowed.
+# ---------------------------------------------------------------------------
+
+def _seed_duplicates(kinds, text="do it"):
+    """One prompt per kind: ``c`` completed (event, reply, checkpoint), ``s``
+    stopped before the engine ran (its event only)."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session(SID)
+    events, cps = [], []
+    for i, kind in enumerate(kinds):
+        events.append(_user_ev(text))
+        if kind == "c":
+            events.append(_asst_ev(f"a{i}"))
+            cps.append(_cp(f"u{len(cps)}", text, index=len(cps)))
+    se.append_events(SID, events)
+    return cps
+
+
+def _refused(count, occurrence):
+    return (None, f"Rewind refused: transcript has {count} user prompt(s) matching the "
+                  f"target content, occurrence {occurrence} requested (content guard)")
+
+
+# Expected values were taken from the code before #1401 (b99459d49): per
+# bubble occurrence, the content lookup, then the event seq without and with
+# the reply kept. Seqs: each prompt, then its reply when it completed.
+_BEFORE_1401 = {
+    "ccc": [("u0", 1, 3), ("u1", 3, 5), ("u2", 5, None), _refused(3, 3)],
+    "cs": [("u0", 1, 3), _refused(1, 1), _refused(1, 2)],
+    "sc": [("u0", 1, 2), _refused(1, 1), _refused(1, 2)],
+    "csc": [("u0", 1, 3), ("u1", 3, 4), _refused(2, 2), _refused(2, 3)],
+}
+
+
+@pytest.mark.parametrize("kinds", list(_BEFORE_1401))
+async def test_plain_duplicates_resolve_as_before_recorded_agent_texts(mock_db, monkeypatch, kinds):
+    _patch_checkpoints(monkeypatch, _seed_duplicates(kinds))
+    got = []
+    for occurrence in range(len(kinds) + 1):
+        uuid, err = _resolve_checkpoint_uuid_from_content(SDK, WD, "do it", occurrence, SID)
+        if uuid is None:
+            got.append((None, err))
+            continue
+        kept, err_kept = _resolve_rewind_from_seq(SID, SDK, WD, uuid, True, "user")
+        cut, err_cut = _resolve_rewind_from_seq(SID, SDK, WD, uuid, False, "user")
+        assert (err, err_cut, err_kept) == (None, None, None)
+        got.append((uuid, cut, kept))
+    assert got == _BEFORE_1401[kinds]
+
+
+async def test_a_stopped_repeat_keeps_the_first_message_restorable(rewind_env, monkeypatch):
+    # "hello" completes; "hello" again is stopped after its event was written
+    # but before the engine ran, so the transcript has one checkpoint.
+    _patch_checkpoints(monkeypatch, _seed_duplicates("cs", text="hello"))
+    first, second = [row["seq"] for row in se.get_events(SID) if row["event_type"] == "message.user"]
+    result = await execute_rewind_and_wait(SID, RewindRequestV2(
+        target_uuid="", target_content="hello", target_occurrence=0, include_response=False,
+    ))
+    assert result.success, result.error
+    assert rewind_env.truncate_calls == ["u0"]
+    cut = [row["payload"]["from_seq"] for row in se.get_events(SID) if row["event_type"] == "transcript.rewound"]
+    assert cut == [first]
+    assert second > first
+
+
+async def test_a_stopped_repeat_is_refused_as_before(rewind_env, monkeypatch):
+    # The second bubble has no checkpoint of its own: refused, the same
+    # message as before #1401, and nothing is truncated.
+    _patch_checkpoints(monkeypatch, _seed_duplicates("cs", text="hello"))
+    result = await execute_rewind_and_wait(SID, RewindRequestV2(
+        target_uuid="", target_content="hello", target_occurrence=1, include_response=False,
+    ))
+    assert not result.success
+    assert result.error == _refused(1, 1)[1]
+    assert rewind_env.truncate_calls == []

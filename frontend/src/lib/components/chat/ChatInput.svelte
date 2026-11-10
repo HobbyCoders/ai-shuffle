@@ -76,6 +76,7 @@
 	import { detectProjectMismatch } from './project-mismatch';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
+	import { notesGoAsReferences } from './runs-elsewhere';
 	import { UI_MOUNT } from '$lib/utils/ui-signature';
 	import TiptapEditor from './TiptapEditor.svelte';
 	import type { Editor } from '@tiptap/core';
@@ -1180,8 +1181,29 @@
 		if (need && projectLane !== 'chat' && ((editorRef?.getMessage() ?? '').trim() || uploadedFiles.length > 0)) {
 			if (!(await holdForProjectSetup(need))) return;
 		}
-		// Get serialized message from editor (includes inline @path references)
-		const finalPrompt = editorRef?.getMessage() ?? '';
+		// Get serialized message from editor (includes inline @path references).
+		// A note chip goes as this worker's path only to a chat this worker runs,
+		// else as `@Notes/<id>`. A new chat follows its "Runs on" pick and a
+		// message held for a move goes as references. For an open chat the store
+		// asks the server after its last wait, right before the frame is written:
+		// any earlier answer can be stale by then after a hand-off (#1364).
+		const pathPrompt = editorRef?.getMessage() ?? '';
+		const referencePrompt = editorRef?.getMessage({ notesAsReferences: true }) ?? '';
+		let finalPrompt = pathPrompt;
+		let notesRunHere: (() => Promise<boolean>) | undefined;
+		if (referencePrompt !== pathPrompt) {
+			// The chat the message is for, as captured at Send: during a reload's
+			// restore the store has no id yet but the editor already holds the
+			// chat, and that is still an open chat, not a new one.
+			const openChat = destination.chat;
+			if (openChat && !moveWait) {
+				finalPrompt = referencePrompt;
+				// Read when asked: a move queued meanwhile holds the message too.
+				notesRunHere = async () => !(await notesGoAsReferences({ sessionId: openChat, deviceIntent: null }, !!moveWait));
+			} else if (notesGoAsReferences({ sessionId: openChat, deviceIntent: $activeSession.deviceIntent }, !!moveWait) === true) {
+				finalPrompt = referencePrompt;
+			}
+		}
 
 		// Surface WHY a send is blocked instead of silently swallowing the click,
 		// which read as a dead app. The guards keep the message in the composer and
@@ -1220,11 +1242,11 @@
 
 		// Append any legacy uploaded files (from file upload button) to the end
 		// Note: Files added via @ autocomplete are now inline chips, not in uploadedFiles
-		let messageToSend = finalPrompt;
-		if (uploadedFiles.length > 0) {
-			const fileRefs = uploadedFiles.map(f => `@${f.path}`).join(' ');
-			messageToSend = [finalPrompt.trim(), fileRefs].filter(Boolean).join('\n\n');
-		}
+		const withUploads = (text: string) => uploadedFiles.length > 0
+			? [text.trim(), uploadedFiles.map(f => `@${f.path}`).join(' ')].filter(Boolean).join('\n\n')
+			: text;
+		const messageToSend = withUploads(finalPrompt);
+		const notesForm = notesRunHere ? { pathPrompt: withUploads(pathPrompt), runsHere: notesRunHere } : undefined;
 
 		// The view moved on while a check awaited: keep the words as that chat's
 		// draft, unsent, and say so, instead of sending them to the new view.
@@ -1240,7 +1262,7 @@
 		// Send the message, optionally queued behind a server-owned compaction.
 		// sendMessage clears the composer before its first await, and holds the
 		// next send until the cold check has answered so two sends keep order.
-		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared);
+		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm);
 	}
 
 	/**
@@ -1295,7 +1317,8 @@
 		destination: SendDestination,
 		compactBeforeSend = false,
 		mayGo?: () => Promise<boolean>,
-		released?: () => void
+		released?: () => void,
+		notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> }
 	) {
 		if (!ownsComposer()) return;
 		// Enforce the same capability as the hidden worktree checkbox, even if
@@ -1352,7 +1375,7 @@
 		const priorUploadedFiles = uploadedFiles;
 		// The draft is cleared below, before the cold-cache check lets the
 		// message go: a reload in that wait finds the words here (S3).
-		const pendingNote = mayGo
+		const pendingNote = mayGo || notesForm
 			? notePendingSend(destination.chat, priorDraftJSON, priorUploadedFiles.map((f) => f.full_path).filter(Boolean))
 			: null;
 
@@ -1437,6 +1460,16 @@
 			editorRef?.blur();
 		};
 
+		// Once, when the store has the note form's answer or the send ended
+		// without asking (refused, held, thrown).
+		let notesFormSettled = !notesForm;
+		const settleNotesForm = () => {
+			if (notesFormSettled) return;
+			notesFormSettled = true;
+			released?.();
+			dropPendingSend(pendingNote);
+		};
+
 		try {
 			let mayGoNow = true;
 			try {
@@ -1444,16 +1477,24 @@
 				// send: an update reload waits for it as it waits for the request.
 				mayGoNow = mayGo ? await trackSend(mayGo) : true;
 			} finally {
-				released?.();
-				// Handed over or about to be put back: either way the note is done,
-				// so a reload never brings back words the server already has.
-				dropPendingSend(pendingNote);
+				// A note's form is asked inside the store send: the next send and
+				// the pending note wait for that answer, so sends keep their order.
+				if (!notesForm) {
+					released?.();
+					// Handed over or about to be put back: either way the note is done,
+					// so a reload never brings back words the server already has.
+					dropPendingSend(pendingNote);
+				}
 			}
 			if (!mayGoNow) {
 				restoreOnFailure(true);
 				return;
 			}
+			const late = notesForm
+				? { notesForm: { pathPrompt: notesForm.pathPrompt, runsHere: () => trackSend(notesForm.runsHere).finally(settleNotesForm) } }
+				: {};
 			const sent = await activeSession.sendMessage(finalPrompt, {
+				...late,
 				...(pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : {}),
                 ...(pendingReferences.length ? { pendingUploadReferences: pendingReferences } : {}),
 				...(compactBeforeSend ? { compactFirst: true } : {}),
@@ -1472,6 +1513,7 @@
 			console.error('[ChatInput] sendMessage threw', err);
 			restoreOnFailure();
 		} finally {
+			settleNotesForm();
 			stopWatchingReason();
 		}
 	}
@@ -1574,7 +1616,9 @@
 			fullPath: file.path,
 			size: file.size || 0,
 			type: chipType,
-			mention: true
+			mention: true,
+			// Sent as `@Notes/<id>` if the chat runs elsewhere at send time (#1364).
+			noteId: chipType === 'note' ? file.note_id ?? null : null
 		});
 
 		// Update inputValue to reflect text after chip insertion (for autocomplete state)

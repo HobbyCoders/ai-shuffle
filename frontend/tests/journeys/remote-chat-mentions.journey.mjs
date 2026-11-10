@@ -26,12 +26,20 @@
 //                        draft of a chat that already has a turn
 //   remote-chat-keeps-local-agents a chat on another worker still holding its
 //                        local project lists that project's agents
+//   note-pick-names-the-note a note picked in a chat on another worker keeps
+//                        the note's id on its chip and is sent as
+//                        `@Notes/<id>`, not the viewing worker's file path;
+//                        the running worker (here the same instance) gives the
+//                        model its own file path (#1364)
+//   note-pick-same-worker-keeps-path a note picked in a chat on this worker
+//                        keeps this worker's file path, and the model is sent
+//                        exactly that path
 //
 // Slow desktop and phone only. Shards have little time to spare, and the races
 // here show up under the slow throttle.
 import { runJourney } from './runner.mjs';
 import { readFileSync } from 'node:fs';
-import { PROJECT, SEEDED, composer, expect, gotoApp, isPhone, openFromSidebar, openNewChat, seededChatId, sendButton, showSidebar, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { PROJECT, SEEDED, api, composer, expect, gotoApp, isPhone, openFromSidebar, openNewChat, seededChatId, sendButton, showSidebar, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const PEER = 'Peer worker';
@@ -69,6 +77,13 @@ async function simulateRemoteChat(page, status, key, { offline = false, keepLoca
 			}
 			window.__fileLists = [];
 			window.__subagentLists = [];
+			// What the page sends: a message goes out as a socket frame.
+			window.__sent = [];
+			const socketSend = WebSocket.prototype.send;
+			WebSocket.prototype.send = function (data) {
+				if (typeof data === 'string') window.__sent.push(data);
+				return socketSend.call(this, data);
+			};
 			const local = () => (keepLocalId ? {} : { project_id: null });
 			window.__workerOffline = offline;
 			const urlOf = (input) => new URL(typeof input === 'string' ? input : input.url, location.href);
@@ -172,6 +187,15 @@ function promptWith(status, token) {
 	return readFileSync(status.fake_ai.request_log, 'utf8').split('\n').filter((line) => line.includes(token)).pop() ?? '';
 }
 
+/** Poll a synchronous read until it gives something, or fail with `what`. */
+async function expectEventually(read, timeout, what) {
+	const until = Date.now() + timeout;
+	while (!read()) {
+		if (Date.now() > until) throw new Error(`timed out: ${what}`);
+		await new Promise((done) => setTimeout(done, 250));
+	}
+}
+
 /** Send with the button, then require a reply rather than a refusal. */
 async function sendAndExpectReply(page, status, token, messagesAtLeast) {
 	await sendButton(page).click();
@@ -180,6 +204,27 @@ async function sendAndExpectReply(page, status, token, messagesAtLeast) {
 	const prompt = promptWith(status, token);
 	expect(prompt, `the model received the message carrying ${token}`);
 	return prompt;
+}
+
+/** Real keystrokes: open Notes, find the note by its token, take it with Enter. */
+async function pickNote(page, { title, token }) {
+	await composer(page).click();
+	await page.keyboard.type(`@Notes/${token}`);
+	const menu = page.locator(MENU);
+	await menu.getByText(title).waitFor({ timeout: 15_000 });
+	await page.keyboard.press('Enter');
+	await menu.waitFor({ state: 'detached', timeout: 5_000 });
+	const chip = page.locator(CHIP).first();
+	await chip.waitFor({ timeout: 5_000 });
+	return chip.getAttribute('data-path');
+}
+
+/** A note of this run's own, found in the menu by its token. */
+async function stageNote(page) {
+	const token = uniq();
+	const title = `Mention note ${token}`;
+	const note = await api(page, 'POST', '/notes', { title, content: `Note body ${token}` });
+	return { id: note.id, title, token };
 }
 
 const startNewChat = async ({ page, status }) => { await openNewChat({ page, status }, { project: PROJECT }); };
@@ -331,6 +376,53 @@ await runJourney({
 				expect(asked.every((id) => id && !id.startsWith('pv2-')), `agents are listed for the local project, got ${JSON.stringify(asked)}`);
 				await clearComposer(page);
 				await draftSaved(page);
+			}
+		},
+		{
+			name: 'note-pick-names-the-note',
+			setup: async (ctx) => {
+				await start('long', SEEDED.long, {})(ctx);
+				ctx.note = await stageNote(ctx.page);
+			},
+			async act({ page, mark, status, note }) {
+				await mark('pick a note in a chat on another worker');
+				await pickNote(page, note);
+				const noteId = await page.locator(CHIP).first().getAttribute('data-note-id');
+				expect(noteId === note.id, `the chip keeps the note's id, got ${noteId}`);
+				const token = uniq();
+				// Focus without a tap: on a phone the tap lands on the chip, selecting it.
+				await composer(page).press('ControlOrMeta+End');
+				await page.keyboard.type(` read ${token}`);
+				await mark('send it');
+				await sendButton(page).click();
+				await page.waitForFunction((t) => window.__sent.some((body) => body.includes(t)), token, { timeout: 30_000 });
+				const sent = await page.evaluate((t) => window.__sent.find((body) => body.includes(t)), token);
+				expect(sent.includes(`@Notes/${note.id}`), `the chat on another worker is sent the note's id, got ${sent.slice(0, 400)}`);
+				// One dev instance is also the running worker: it gives the model its own file.
+				await expectEventually(() => promptWith(status, token), 30_000, `the model received the message carrying ${token}`);
+				const prompt = promptWith(status, token);
+				expect(/[\\/]notes[\\/][^/\\]+\.md/.test(prompt) && !prompt.includes(`@Notes/${note.id}`),
+					`the running worker expands the id to its note file, got ${prompt.slice(0, 400)}`);
+				await waitTurnSettled(page, { messagesAtLeast: 1, timeout: 30_000 });
+			}
+		},
+		{
+			name: 'note-pick-same-worker-keeps-path',
+			setup: async (ctx) => {
+				await startNewChat(ctx);
+				ctx.note = await stageNote(ctx.page);
+			},
+			async act({ page, mark, status, note }) {
+				await mark('take the note in a new chat on this worker');
+				const path = await pickNote(page, note);
+				expect(/[\\/]notes[\\/][^/\\]+\.md$/.test(path ?? ''), `the chip keeps this worker's note file, got ${path}`);
+				const token = uniq();
+				// Focus without a tap: on a phone the tap lands on the chip, selecting it.
+				await composer(page).press('ControlOrMeta+End');
+				await page.keyboard.type(` read ${token}`);
+				await mark('send it');
+				const prompt = await sendAndExpectReply(page, status, token, 2);
+				expect(prompt.includes(JSON.stringify(`@${path}`).slice(1, -1)), `the model gets that same path, got ${prompt.slice(0, 400)}`);
 			}
 		}
 	],
