@@ -547,6 +547,65 @@ export function countUserRows(page, needle) {
 	);
 }
 
+/** The chat's own red error banner: the conversation log's alert. */
+export const errorBanner = (page) => page.getByRole('log', { name: 'Conversation messages' }).getByRole('alert');
+
+/**
+ * The transcript's Error row a failed turn leaves in its work log: the
+ * expandable line titled "Error" that says `text` (a string or RegExp). A
+ * failed turn's error shows here; the banner steps aside while this row says
+ * the same words (#1341), so this row, not the banner, is the signal that the
+ * turn failed.
+ */
+export function errorRow(page, text) {
+	return page.getByRole('log', { name: 'Conversation messages' })
+		.getByRole('region', { name: 'Work log' })
+		.getByRole('group')
+		.filter({ has: page.getByText('Error', { exact: true }) })
+		.filter({ hasText: text });
+}
+
+/**
+ * Watch, on every painted frame, how many visible elements of the transcript
+ * area show `needle` as their own text (the error banner and the transcript's
+ * Error rows both count; a collapsed row's hidden detail does not). Returns a function that
+ * stops the watch and resolves `{ frames, max, last }`.
+ */
+export async function watchVisibleCopies(page, needle) {
+	await page.evaluate((n) => {
+		const watch = (window.__visibleCopies = { running: true, frames: 0, max: 0, last: 0 });
+		const visible = (el) => {
+			if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+			const r = el.getBoundingClientRect();
+			return r.width > 0 && r.height > 0;
+		};
+		const count = () => {
+			const owners = new Set();
+			// MessageArea holds both the banner and the transcript rows.
+			const area = document.querySelector('[data-ui-mount="MessageArea"]');
+			if (!area) return 0;
+			const walker = document.createTreeWalker(area, NodeFilter.SHOW_TEXT);
+			for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+				if (node.textContent?.includes(n) && node.parentElement && visible(node.parentElement)) owners.add(node.parentElement);
+			}
+			return owners.size;
+		};
+		const sample = () => {
+			if (!watch.running) return;
+			watch.last = count();
+			watch.max = Math.max(watch.max, watch.last);
+			watch.frames += 1;
+			requestAnimationFrame(sample);
+		};
+		requestAnimationFrame(sample);
+	}, needle);
+	return () => page.evaluate(() => {
+		const watch = window.__visibleCopies;
+		watch.running = false;
+		return { frames: watch.frames, max: watch.max, last: watch.last };
+	});
+}
+
 /**
  * Watch, on every painted frame, how many times `needle` shows as a user's
  * message: transcript user rows plus queued (pending) bubbles. Returns a

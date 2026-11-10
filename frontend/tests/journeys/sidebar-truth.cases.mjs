@@ -44,7 +44,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-	api, chatIdByToken, chatState, expect, openNewChat, pick, pickAccess, pickProject, PROJECT, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
+	api, chatIdByToken, chatState, errorRow, expect, openNewChat, pick, pickAccess, pickProject, PROJECT, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
 	waitChat, waitTurnSettled, withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -409,7 +409,7 @@ const FAILED_OPEN = {
 		const { page, mark, variant, chat } = ctx;
 		await mark('the provider fails the turn');
 		await typeAndSend(page, `fail ${scriptTag(variant, 'error-500')}`);
-		await page.getByRole('log', { name: 'Conversation messages' }).getByRole('alert').filter({ hasText: /HTTP 500/ }).first().waitFor({ timeout: 90_000 });
+		await errorRow(page, /HTTP 500/).first().waitFor({ timeout: 90_000 });
 		await waitChat(page, { streaming: 'false' }, { timeout: 30_000 });
 		await page.waitForTimeout(800);
 		await expectFailedRow(ctx, chat.id);
