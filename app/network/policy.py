@@ -48,6 +48,10 @@ class Collection:
     # Columns that name another device's local path or are otherwise
     # device-specific; they are dropped on serialize and never overwritten.
     local_fields: Tuple[str, ...] = ()
+    # Local columns the collection scan leaves in the database. A whole-table
+    # pass reads every row to compare hashes, so a large column nothing in the
+    # record uses is pure transfer. Must be a subset of ``local_fields``.
+    scan_skip: Tuple[str, ...] = ()
     # Values for NOT NULL local columns a mirror has to fill on insert.
     mirror_defaults: Mapping[str, Any] = field(default_factory=dict)
     # Optional hooks so a collection can adapt identity-bearing values.
@@ -203,6 +207,9 @@ COLLECTIONS: Dict[str, Collection] = {}
 
 
 def _register(collection: Collection) -> Collection:
+    unread = set(collection.scan_skip) - set(collection.local_fields)
+    if unread or set(collection.scan_skip) & set(collection.fields):
+        raise ValueError(f"{collection.name}: scan_skip may only name local columns")
     COLLECTIONS[collection.name] = collection
     return collection
 
@@ -422,6 +429,7 @@ _register(Collection(
     local_fields=("instance_id", "sdk_session_id", "worktree_id", "worktree_branch", "worktree_path",
                   "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream",
                   "workspace_facts"),
+    scan_skip=("context_usage_json", "workspace_facts"),
     notes="Session catalog. Owner-ordered: only the owner device publishes."))
 
 _register(Collection(
