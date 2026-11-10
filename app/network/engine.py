@@ -729,6 +729,11 @@ def materialize(
             from app.db.session_locks import lock_handoff_creation, lock_handoff_history
             lock_handoff_creation(cursor, [record_id])
             lock_handoff_history(cursor, record_id)
+        if coll.name == "connectors":
+            # The local delete's own path: its journal data goes too (#1399).
+            from app.db.connectors import delete_connector_row
+            delete_connector_row(cursor, *keys)
+            return None
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
     record = dict(record)
