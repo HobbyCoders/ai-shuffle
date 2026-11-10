@@ -498,6 +498,7 @@ async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, 
                 lifecycle.assert_called_once_with(None, {
                     "type": "user_session_updated", "session_id": "handoff-test",
                     "updates": {"owner_device_id": b.device_id, "instance_id": b.device_id,
+                                "is_remote": True,
                                 "placement": {"where": "runner:" + b.device_id}},
                 }, user_type="admin")
                 commits.append(body)
