@@ -20,7 +20,7 @@ def target(tmp_path, monkeypatch):
         agent_memory_sync=True, effective_instance_id="test-instance",
         effective_data_dir=tmp_path / "data",
     ))
-    monkeypatch.setattr(memory_sync, "_resolve_target", lambda *args: (KEY, folder))
+    monkeypatch.setattr(memory_sync, "_resolve_target", lambda *args, **kwargs: (KEY, folder))
     memory_sync.reset_state()
     yield folder, fake
     memory_sync.reset_state()
