@@ -186,11 +186,16 @@ class PlayWorkflowTests(unittest.TestCase):
                     result = subprocess.run(["/bin/bash", "-n"], input=step["run"], text=True, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
         steps = job["steps"]
-        self.assertTrue(all("continue-on-error" not in step for step in steps))
+        # Only the first emulator attempt may continue; emulator_result gates the job.
+        self.assertEqual([step.get("id") for step in steps if "continue-on-error" in step], ["emulator_tests"])
         runner = next(step for step in steps if step.get("uses", "").startswith("reactivecircus/android-emulator-runner@"))
         self.assertNotIn("if", runner)
         self.assertEqual(runner["with"]["script"], "bash ci/run-android-ui-tests.sh")
         self.assertEqual(runner["id"], "emulator_tests")
+        self.assertEqual(runner["continue-on-error"], "true")
+        gate = next(step for step in steps if step.get("id") == "emulator_result")
+        self.assertEqual(gate["if"], "always()")
+        self.assertNotIn("continue-on-error", gate)
         summary = next(step for step in steps if step.get("name") == "Report emulator leg outcome")
         self.assertEqual(summary["if"], "always()")
         self.assertEqual(summary["env"]["RESULT"], "${{ steps.emulator_tests.outcome }}")
@@ -200,7 +205,7 @@ class PlayWorkflowTests(unittest.TestCase):
         for script in ("test-emulator-readiness.py", "test-ci-webview.py", "test-instrumentation-parser.py", "test-ui-runner.py"):
             self.assertIn(script, checks)
         reports = next(step for step in steps if step.get("name") == "Upload test reports")
-        self.assertEqual(reports["if"], "failure()")
+        self.assertEqual(reports["if"], "failure() || steps.emulator_tests.outcome == 'failure'")
         self.assertIn("android-emulator/", reports["with"]["path"])
         self.assertIn("android-ui", workflow["jobs"]["publish"]["needs"])
         release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)

@@ -6,6 +6,14 @@ mkdir -p "$out"
 on_exit() {
   local status=$?
   trap - EXIT
+  # Check first, before slower adb calls. The action kills the emulator only
+  # after this script exits, so a missing emulator process here is a real loss.
+  # Only that case is marked for the workflow's single retry; app failures never are.
+  if (( status != 0 )); then
+    local state
+    state="$(timeout 10 adb -s emulator-5554 get-state 2>/dev/null | tr -d '\r')" || true
+    python3 ci/emulator-loss.py --adb-state "$state" || true
+  fi
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     if (( status == 0 )); then
       printf '%s\n' '- Android emulator verification: PASSED (cold-start and full suite).' >> "$GITHUB_STEP_SUMMARY"

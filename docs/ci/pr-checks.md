@@ -148,6 +148,16 @@ remain visible, not app passes. API 34 gates publication. The separate minified
 API 34 and API 36 checks are both required on every PR, with no advisory bypass;
 the image/provider choice and limited boot evidence above apply to them too.
 
+The `android.yml` emulator leg retries one infrastructure failure: the emulator
+process itself vanishing (issue #938; seen right after a passing instrumentation
+run). `android/ci/emulator-loss.py` marks it only when no `qemu-system` process is
+left, adb no longer lists the device, and no instrumentation result shows a test
+failure. The workflow then rebuilds the AVD as the preflight did and runs the same
+emulator step once more; `emulator_result` passes only on a first-attempt pass or
+a passing retry after a marked loss. The first attempt's evidence stays in the
+failure-only artifact under `first-attempt/`. App and test failures, a live but
+hung or offline emulator, a boot failure and a second loss all still fail.
+
 Cloud service checks and deploy workflows live in the private
 [HobbyCoders/hobbycoders-cloud](https://github.com/HobbyCoders/hobbycoders-cloud)
 repository. App checks do not need that checkout. When app docs/install files

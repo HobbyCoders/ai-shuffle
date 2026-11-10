@@ -172,8 +172,11 @@ class ArtifactPolicyTests(unittest.TestCase):
         self.assertEqual(legs["34"]["advisory"], "false")
         self.assertEqual(legs["36"]["advisory"], "true")
         self.assertEqual(jobs["android-ui"]["continue-on-error"], "${{ matrix.advisory }}")
-        for step in jobs["android-ui"]["steps"]:
-            self.assertNotIn("continue-on-error", step)
+        # Only the first emulator attempt continues (single emulator-loss retry);
+        # the always-run emulator_result step still fails the job.
+        self.assertEqual([s.get("id") for s in jobs["android-ui"]["steps"] if "continue-on-error" in s], ["emulator_tests"])
+        gate = next(s for s in jobs["android-ui"]["steps"] if s.get("id") == "emulator_result")
+        self.assertEqual(gate["if"], "always()")
         self.assertEqual(jobs["publish"]["needs"], ["build", "android-ui"])
 
     def test_both_api36_readiness_callers_cache_and_verify_the_alternate_provider(self):
@@ -281,7 +284,10 @@ class ArtifactPolicyTests(unittest.TestCase):
         for (file, job), name in diagnostics.items():
             with self.subTest(file=file):
                 step = next(s for s in uploads(workflow(file)["jobs"][job]) if s["with"]["name"] == name)
-                self.assertEqual(step["if"], "failure()")
+                # A recovered emulator loss keeps the first attempt's evidence too.
+                expected = ("failure() || steps.emulator_tests.outcome == 'failure'"
+                            if file == "android.yml" else "failure()")
+                self.assertEqual(step["if"], expected)
                 self.assertEqual(step["with"]["retention-days"], "3")
         # Release evidence is kept whatever the outcome; this policy must not touch it.
         release = uploads(workflow("docker-publish.yml")["jobs"]["build"])[0]
