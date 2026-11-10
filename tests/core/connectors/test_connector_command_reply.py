@@ -233,3 +233,50 @@ async def test_command_rounds_stop_at_the_cap_and_a_user_message_starts_again(
             task.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
         await connector.disconnect()
+
+
+async def test_a_plain_reply_to_a_person_restarts_the_count_while_results_wait() -> None:
+    """A person's turn ends the run of rounds even when its reply runs no command.
+
+    Results stay in flight (the chat is held), so the count is not dropped as
+    idle. Before the fix, the next result's command counted on from 4 to 5.
+    A notification (it answers no turn) leaves the count alone.
+    """
+    from app.core.connectors.base import OutgoingMessage
+
+    release = asyncio.Event()
+
+    async def incoming(message: IncomingMessage) -> None:
+        await release.wait()
+
+    async def permission(*args: Any) -> None:
+        return None
+
+    connector = HomeAssistantConnector("connector", "homeassistant",
+                                       {"url": "http://ha.test", "access_token": "token"},
+                                       incoming, permission)
+    connector._http_client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=[])))
+
+    async def reply(text: str, to: Any) -> None:
+        await connector.send_message(OutgoingMessage(platform_chat_id=CHAT, text=text, reply_to_message_id=to))
+
+    def newest_result() -> str:
+        return list(connector._result_chats)[-1]
+
+    try:
+        await reply("status", "person-1")
+        for _ in range(3):  # three more rounds, each answering the last result
+            await reply("status", newest_result())
+        assert connector._command_rounds[CHAT] == 4
+        await reply("It is 20 degrees.", "person-2")  # a person's turn, answered in plain text
+        assert CHAT not in connector._command_rounds
+        await reply("status", newest_result())  # a result still waiting from before
+        assert connector._command_rounds[CHAT] == 1
+        await reply("status", newest_result())
+        assert connector._command_rounds[CHAT] == 2
+        await reply("status", None)  # a notification that runs a command
+        assert connector._command_rounds[CHAT] == 2
+    finally:
+        release.set()
+        await connector.disconnect()

@@ -291,8 +291,15 @@ async def create_connector(
         # 5. Persist the connector, pinned to this install so that — when two
         # installs share one Postgres — only the install that created it starts
         # the live client (see ConnectorManager.start_all).
+        # On a worker network the worker it was made on runs it (#1382), set
+        # in the same INSERT so no published copy is ever unowned. A fenced or
+        # not yet admitted worker leaves it for the claimant. Nothing is
+        # published here: the regular scan sends the row after the API user
+        # it references, so a peer never receives the connector first.
         from app.core.config import settings
+        from app.network import ownership
 
+        owner = ownership.my_device_id() if ownership.enrolled() and ownership.execution_eligible() else None
         connector = database.create_connector(
             connector_id=connector_id,
             connector_type=connector_type,
@@ -301,24 +308,13 @@ async def create_connector(
             events=events,
             api_user_id=api_user_id,
             runner_id=settings.effective_instance_id,
+            owner_device_id=owner,
         )
 
         if not connector:
             if auto_created:
                 database.delete_api_user(api_user_id)
             raise RuntimeError("Failed to create connector in database")
-        # On a worker network the worker it was made on runs it (#1382). A
-        # fenced or not yet admitted worker leaves it for the claimant. Only
-        # the row is written: the regular scan publishes it after the API user
-        # it references, so a peer never receives the connector first.
-        from app.network import ownership
-        if ownership.enrolled() and ownership.execution_eligible():
-            from app.db.base import get_db
-            with get_db() as conn:
-                conn.cursor().execute(
-                    "UPDATE connectors SET owner_device_id = %s WHERE id = %s AND owner_device_id IS NULL",
-                    (ownership.my_device_id(), connector_id))
-            connector = database.get_connector(connector_id) or connector
         return connector
 
     def _create_with_package():
@@ -417,7 +413,7 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
         # when this worker runs (or claims) the connector, otherwise a config
         # edit here would connect a duplicate live client. On a network the
         # owner restarts its own client when the synced record lands
-        # (ConnectorManager.note_synced_row).
+        # (ConnectorManager.start_connector compares the config).
         owns_locally = runs_here(updated)
         return updated, config_changed, owns_locally, connector_type
 

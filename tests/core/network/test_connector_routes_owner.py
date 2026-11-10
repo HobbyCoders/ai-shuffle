@@ -118,6 +118,29 @@ async def test_a_connector_made_on_a_worker_is_owned_there_and_activates(net):
     assert managers[high.name].get_running_instance(created["id"]) is not None
 
 
+async def test_a_copy_published_during_create_is_already_owned(net, monkeypatch):
+    """S2: a scan right after the INSERT must not hand the claimant an unowned row."""
+    a, b, low, high, managers, scheduled = net
+    real_create = database.create_connector
+    claimed = []
+
+    def create_then_scan(**kwargs):
+        row = real_create(**kwargs)
+        _sync(high, low)  # the regular scan runs between the INSERT and anything after it
+        with low.active():
+            claimed.append(ownership.claim("connectors", row["id"]))  # what low's start or activate does
+        _sync(low, high)
+        return row
+
+    monkeypatch.setattr(database, "create_connector", create_then_scan)
+    created = await _create(high)
+    assert claimed == [False]
+    assert created["owner_device_id"] == high.device_id
+    for worker in (high, low):
+        with worker.active():
+            assert database.get_connector(created["id"])["owner_device_id"] == high.device_id
+
+
 async def _owned_by(owner, other, net):
     a, b, low, high, managers, scheduled = net
     created = await _create(owner)
@@ -186,6 +209,59 @@ async def test_an_unrelated_synced_change_does_not_restart_the_owner(net):
         assert database.get_connector(cid)["name"] == "Renamed"
     assert managers[b.name].get_running_instance(cid) is live
     assert live.status == ConnectorStatus.CONNECTED
+
+
+async def test_a_config_edit_synced_during_a_start_reaches_the_new_client(net, monkeypatch):
+    """S1a: an edit that lands while the owner's start is still connecting is not lost."""
+    a, b, low, high, managers, scheduled = net
+    cid = await _owned_by(b, a, net)
+    with b.active():
+        await connectors_api.activate_connector(cid, "owner")
+    _sync(b, a)
+    await _drain(scheduled)
+    await managers[b.name].stop_connector(cid)
+
+    gate, connecting = asyncio.Event(), asyncio.Event()
+
+    async def slow_connect(self):
+        connecting.set()
+        await gate.wait()
+        self.status = ConnectorStatus.CONNECTED
+        return True
+
+    monkeypatch.setattr(_Client, "connect", slow_connect)
+    with b.active():  # B's database stays in place for its start; A's edits nest inside
+        start = asyncio.create_task(managers[b.name].start_connector(cid))  # e.g. a membership reconcile
+        await connecting.wait()
+        for path in ("hook-edit-1", "hook-edit-2"):  # two edits in a row, both while connecting
+            with a.active():
+                await connectors_api.update_connector_endpoint(
+                    cid, ConnectorUpdate(config={"inbound_path": path}), "owner")
+            _sync(a, b)
+        gate.set()
+        assert await start
+    await _drain(scheduled)
+    live = managers[b.name].get_running_instance(cid)
+    assert live.config["inbound_path"] == "hook-edit-2"
+    await _drain(scheduled)  # nothing left to replace: the next reconcile keeps it
+    with b.active():
+        await startup._reconcile_owned_connectors([cid])
+    assert managers[b.name].get_running_instance(cid) is live
+
+
+async def test_a_collection_wide_notice_replaces_a_client_with_an_old_config(net):
+    """S1b: a peer state copy names no connector ("") and must still apply a changed config."""
+    a, b, low, high, managers, scheduled = net
+    cid = await _owned_by(b, a, net)
+    with b.active():
+        await connectors_api.activate_connector(cid, "owner")
+        first = managers[b.name].get_running_instance(cid)
+        # What a state copy writes: the row only, then one notice for the whole collection.
+        database.update_connector(cid, config={**HOOK, "inbound_path": "hook-copied"})
+        startup._on_applied([("connectors", "", "upsert")])
+    await _drain(scheduled)
+    second = managers[b.name].get_running_instance(cid)
+    assert second is not first and second.config["inbound_path"] == "hook-copied"
 
 
 async def test_deactivate_and_restart_on_a_non_owner(net):
@@ -441,3 +517,54 @@ async def test_single_install_action_answer_is_unchanged(workers, monkeypatch):
     error = await _execute(solo, "conn-elsewhere")
     assert (error.status_code, error.detail, error.headers) == (
         409, "Connector 'conn-elsewhere' is not running. Activate it first.", None)
+
+
+async def _toggle(connector_id, active):
+    from app.mcp.config_connectors import _create_connector_tools
+    from tests.mcp.tool_helpers import get_tool, tool_result_json
+    tool = get_tool(_create_connector_tools(is_admin=True), "toggleConnector")
+    return tool_result_json(await tool.handler({"connector_id": connector_id, "active": active}))
+
+
+async def test_toggle_connector_tool_follows_the_owner(net):
+    """S4: on a worker that does not run it, the tool saves the switch and names the owner."""
+    a, b, low, high, managers, scheduled = net
+    cid = await _owned_by(b, a, net)
+    with a.active():
+        answer = await _toggle(cid, True)
+        assert database.get_connector(cid)["is_active"]
+    assert answer["success"] and answer["applies_on"] == b.device_id
+    assert "Worker B" in answer["message"] and b.device_id in answer["message"]
+    assert managers[a.name].get_running_instance(cid) is None
+    _sync(a, b)
+    await _drain(scheduled)
+    assert managers[b.name].get_running_instance(cid) is not None
+
+    with b.active():  # the owner stops its own client and saves the switch
+        stopped = await _toggle(cid, False)
+        assert not database.get_connector(cid)["is_active"]
+    assert stopped == {"success": True, "message": "Connector 'Hook' stopped."}
+    assert managers[b.name].get_running_instance(cid) is None
+    with a.active():
+        missing = await _toggle("conn-missing", True)
+    assert missing == {"success": False, "error": "Connector not found: conn-missing"}
+
+
+async def test_toggle_connector_tool_on_a_single_install(workers, monkeypatch):
+    """S4: it saves the switch, and a start that fails is reported as a failure."""
+    solo = workers("worker-solo")
+    manager = manager_mod.ConnectorManager()
+    monkeypatch.setattr(manager_mod, "connector_manager", manager)
+    with solo.active():
+        created = await _create(solo)
+        assert (await _toggle(created["id"], True))["message"] == "Connector 'Hook' started."
+        assert database.get_connector(created["id"])["is_active"]
+        assert manager.get_running_instance(created["id"]) is not None
+        await _toggle(created["id"], False)
+
+        async def refuse(self):
+            return False
+
+        monkeypatch.setattr(_Client, "connect", refuse)
+        failed = await _toggle(created["id"], True)
+        assert not failed["success"] and "Failed to start connector" in failed["error"]

@@ -476,15 +476,9 @@ def _on_applied(touched) -> None:
         request_connector_reconcile()
     connector_ids = [r for c, r, _op in touched if c == "connectors"]
     if connector_ids:
-        # A config edit made on another worker: the reconcile below replaces
-        # this worker's client only when the config it started with changed.
-        from app.core.connectors.manager import connector_manager
-        for connector_id in connector_ids:
-            try:
-                connector_manager.note_synced_row(connector_id)
-            except Exception:  # noqa: BLE001 - a bad row must not hold up the others
-                logger.warning("Checking connector %s config failed", connector_id, exc_info=True)
-        # A move, a switch on or off, or a delete made on another worker.
+        # A move, a switch on or off, a delete or a config edit made on
+        # another worker (``start_connector`` replaces a client whose row's
+        # config differs from the one it started with).
         request_connector_reconcile(connector_ids)
     settled_ids = [r for c, r, op in touched if c == "session_active" and op == "upsert"]
     if settled_ids:

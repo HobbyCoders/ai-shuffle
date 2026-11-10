@@ -101,25 +101,41 @@ def _create_connector_tools(is_admin: bool) -> list:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
 
-        # Only a read: the start/stop below are coroutines that must run on the
-        # caller's loop, so there is nothing to fold this into.
-        connector = await run_sync(database.get_connector, args["connector_id"])
-        if not connector:
-            return _error(f"Connector not found: {args['connector_id']}")
+        # The activate and deactivate routes' rule (#1382): save the switch,
+        # and start or stop the live client only on the worker that runs it.
+        from fastapi import HTTPException
 
+        from app.api import connectors as routes
+
+        connector_id = args["connector_id"]
         try:
-            from app.core.connectors.manager import connector_manager
-
             if args["active"]:
-                await connector_manager.start_connector(args["connector_id"])
-                msg = f"Connector '{connector.get('name')}' started."
+                row = await routes.activate_connector(connector_id, token=None)
             else:
-                await connector_manager.stop_connector(args["connector_id"])
-                msg = f"Connector '{connector.get('name')}' stopped."
-
-            return _tool_result({"success": True, "message": msg})
+                row = await routes.deactivate_connector(connector_id, token=None)
+        except HTTPException as e:
+            if e.status_code == 404:
+                return _error(str(e.detail))
+            return _error(f"Failed to toggle connector: {e.detail}")
         except Exception as e:
             return _error(f"Failed to toggle connector: {str(e)}")
+
+        done = "started" if args["active"] else "stopped"
+        msg = f"Connector '{row.get('name')}' {done}."
+        result = {"success": True, "message": msg}
+        if "applies_on" in row:  # saved here; another worker (or install) runs the client
+            from app.network import ownership
+            owner = row["applies_on"]
+            switched = "switched on" if args["active"] else "switched off"
+            if owner is None:
+                where = "No worker runs it yet; the worker that claims it applies the change."
+            elif ownership.enrolled():
+                where = f"It runs on worker {ownership.owner_label(owner)}, which applies the change."
+            else:
+                where = f"It runs on install {owner}, which applies the change when it restarts."
+            result = {"success": True, "message": f"Connector '{row.get('name')}' {switched}. {where}",
+                      "applies_on": owner}
+        return _tool_result(result)
 
     tools.append(toggle_connector)
 

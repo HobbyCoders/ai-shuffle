@@ -324,8 +324,17 @@ class BaseConnector(ABC):
         Results it queues then count as the next round after the message the
         reply answers. Set for the rest of the calling task; every
         ``send_message`` sets it again before it queues anything.
+
+        A reply to a turn a command result did not start (a person's message,
+        a poll event) ends the chat's run of rounds here, whether or not the
+        reply is a command. A send that answers no turn (a notification) leaves
+        the count alone: no person spoke in the chat.
         """
-        _REPLYING_TO.set(message.reply_to_message_id)
+        parent = message.reply_to_message_id
+        _REPLYING_TO.set(parent)
+        if parent is not None and parent not in self._result_chats:
+            self._command_rounds.pop(message.platform_chat_id, None)
+            self._capped_chats.discard(message.platform_chat_id)
 
     def queue_reply_message(self, message: "IncomingMessage") -> None:
         """Hand a connector-made message, such as a command's result, to its chat later.
@@ -340,7 +349,7 @@ class BaseConnector(ABC):
         An agent that answers every result with another command would loop with
         no person in it, each round a paid turn. Each chat counts the turns, started
         by a result, whose reply was a command; a reply to any other turn (a
-        person's message, a poll event) starts the count again. All of one
+        person's message, a poll event) starts the count again (``replying_to``). All of one
         command's results (a long listing's parts) are one round. Past
         ``MAX_COMMAND_ROUNDS`` the result is not fed back: the command ran, the
         chat gets nothing more.
@@ -354,9 +363,8 @@ class BaseConnector(ABC):
             if parent not in self._counted_results:
                 self._counted_results.add(parent)
                 self._command_rounds[chat] = self._command_rounds.get(chat, 0) + 1
-        else:
-            self._command_rounds[chat] = 1
-            self._capped_chats.discard(chat)
+        else:  # the first round after a person's turn (``replying_to`` reset it) or a notification
+            self._command_rounds.setdefault(chat, 1)
         if self._command_rounds[chat] > MAX_COMMAND_ROUNDS:
             if chat not in self._capped_chats:
                 self._capped_chats.add(chat)
