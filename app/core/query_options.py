@@ -624,14 +624,18 @@ async def ensure_pending_checkout(
 
     path = session_row.get("worktree_path")
     restored = False
-    if is_worker_branch(branch, session_row.get("id") or "") and path:
+    # A worker that switched its own checkout to another branch is bound to
+    # that branch; its missing folder still needs restoring (#944). The
+    # restore helper itself decides whether a missing folder is a Task's own.
+    if path and (is_worker_branch(branch, session_row.get("id") or "") or not Path(path).is_dir()):
         from app.core.turn_scheduler import message_resume_lock
 
         # An old finisher may already be deleting the initially existing cwd.
         # Wait before checking it; a later finisher sees this queued/live turn.
         async with message_resume_lock(session_row["id"]):
             if not Path(path).is_dir():
-                restored, _note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
+                ok, _note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
+                restored = ok and Path(path).is_dir()
     # Even after restoration, claim/wait for a queued operation below. Another
     # chat bound to this branch must not pretend it restored the owner's cwd.
     try:

@@ -491,7 +491,11 @@ async def restore_worker_checkout_async(worker_session_id: str, *, follow_live_s
     # Ordinary peer messages must not queue behind Git provisioning. The
     # synchronous helper rechecks the binding after this cheap eligibility read.
     row = await asyncio.to_thread(database.get_session, worker_session_id) or {}
-    if not is_worker_branch(row.get("branch") or "", worker_session_id) or not row.get("worktree_path"):
+    path = row.get("worktree_path")
+    if not path:
+        return True, None
+    if (not is_worker_branch(row.get("branch") or "", worker_session_id)
+            and not await asyncio.to_thread(_is_own_checkout_path, row, worker_session_id)):
         return True, None
     from app.core.remote_task import _start_executor
 
@@ -513,8 +517,20 @@ def restore_worker_checkout(worker_session_id: str, *, follow_live_switch: bool 
         row = database.get_session(worker_session_id) or {}
         branch = row.get("branch") or ""
         path = row.get("worktree_path")
-        if not is_worker_branch(branch, worker_session_id) or not path:
+        if not path:
             return True, None
+        if not is_worker_branch(branch, worker_session_id):
+            # The worker switched its own checkout to another branch and turn
+            # end moved the binding with it (#944). Finisher cleanup may have
+            # removed that checkout once its work was pushed.
+            if not _is_own_checkout_path(row, worker_session_id):
+                return True, None
+            if follow_live_switch:
+                from app.db import turns
+
+                if turns.get_live_turn(worker_session_id) is not None:
+                    return True, None
+            return _restore_switched_checkout(row, branch, path)
         if follow_live_switch:
             from app.db import turns
 
@@ -559,6 +575,128 @@ def restore_worker_checkout(worker_session_id: str, *, follow_live_switch: bool 
     except Exception:  # noqa: BLE001 — a refusal, reported by the caller
         logger.warning("worker_checkout: could not restore %s", worker_session_id, exc_info=True)
         return False, None
+
+
+def _same_folder(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _own_checkout_base(path: str, worker_session_id: str) -> Optional[str]:
+    """The base checkout ``path`` hangs off when it is this worker's own
+    deterministic checkout path (current or legacy task branch name), else None.
+
+    Derived from the saved path alone, so it still answers after the worker
+    switched branches and cleanup removed the folder.
+    """
+    from pathlib import Path
+
+    from app.core import checkout_manager
+
+    try:
+        saved = Path(checkout_manager._resolve_checkout_path(path))
+        base = str(saved.parents[2])
+        for branch in (worker_branch(worker_session_id), legacy_worker_branch(worker_session_id)):
+            try:
+                own = checkout_manager._branch_checkout_path(base, branch)
+            except checkout_manager.WorktreeError:
+                continue
+            if _same_folder(str(own), str(saved)):
+                return base
+    except (IndexError, ValueError, OSError):
+        return None
+    return None
+
+
+def _is_own_checkout_path(row: Mapping[str, Any], worker_session_id: str) -> bool:
+    path = row.get("worktree_path")
+    return bool(path and worker_session_id and _own_checkout_base(path, worker_session_id))
+
+
+def _restore_switched_checkout(row: Mapping[str, Any], branch: str, path: str) -> Tuple[bool, Optional[str]]:
+    """Restore a worker's own checkout, bound to the branch it switched to (#944).
+
+    Re-adds the bound branch at exactly the saved path, from the local branch
+    or its pushed copy on origin, never from a recorded tip (that is the
+    worker's starting commit, not this branch's work). Anything else is a
+    refusal naming the branch, so no turn is admitted into a missing folder.
+    """
+    from app.core import checkout_manager, project_resolver
+    from app.core.config import settings
+    from app.core.git_service import git_service
+    from app.core.git_worktree_ops import WorktreeAddError, WorktreeError, repo_worktree_lock
+    from app.core.worktree_manager import fetch_repo_cached
+    from app.db import checkouts
+
+    worker_session_id = str(row.get("id") or "")
+
+    def refuse(why: str) -> Tuple[bool, str]:
+        return False, (f"its dedicated checkout was cleaned up after its work on branch '{branch}' "
+                       f"was pushed, and {why}. Dispatch a new Task that checks out branch "
+                       f"'{branch}' instead")
+
+    # A Windows cwd lock can leave an empty folder after cleanup; Git reuses it.
+    remnant = checkout_manager._is_empty_cleanup_remnant(path, {"path": path})
+    if os.path.isdir(path) and not remnant:
+        # Usable folders behave as before. Only a restore that stopped
+        # part-way (its write-ahead marker is still there) is refused.
+        try:
+            with repo_worktree_lock(path):
+                git_service.require_complete_worktree(path)
+        except (WorktreeError, WorktreeAddError):
+            return refuse("restoring it stopped part-way, so the folder may be incomplete")
+        return True, None
+    if not branch or branch.startswith("-"):
+        return refuse("it is not bound to a branch that can be checked out again")
+    project = project_resolver.resolve_project_v2(dict(row))
+    base_path = _base_checkout_path(project["id"]) if project else None
+    own_base = _own_checkout_base(path, worker_session_id)
+    if not base_path or not own_base or not _same_folder(base_path, own_base):
+        return refuse("the project's checkout is not available on this device")
+    runner = settings.effective_instance_id
+    valid = git_service._run_git(base_path, ["check-ref-format", "--branch", branch], timeout=5)
+    if valid.returncode:
+        return refuse("that branch name cannot be checked out again")
+
+    def has_ref(ref: str) -> bool:
+        return git_service._run_git(
+            base_path, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], timeout=5).returncode == 0
+
+    with _project_lock(project["id"]):
+        if has_ref(f"refs/heads/{branch}"):
+            new_branch, start = False, None
+        else:
+            if not has_ref(f"refs/remotes/origin/{branch}"):
+                try:
+                    fetch_repo_cached(git_service, base_path)
+                except Exception:  # noqa: BLE001 — offline: the local refs decide
+                    logger.debug("worker_checkout: fetch before restoring %s failed", branch, exc_info=True)
+            if not has_ref(f"refs/remotes/origin/{branch}"):
+                return refuse("that branch no longer exists here or on origin")
+            # add_worktree creates the branch from origin/<branch>, its pushed tip.
+            new_branch, start = True, branch
+        with repo_worktree_lock(base_path):
+            if os.path.lexists(path) and not checkout_manager._is_empty_cleanup_remnant(path, {"path": path}):
+                return refuse("another restore of the same folder is in progress")
+            # Write ahead, as checkout_manager does: an interrupted add is
+            # never published as an active checkout.
+            for existing in checkouts.get_checkouts_by_path(path, project_id=project["id"], runner_id=runner):
+                checkouts.set_checkout_status(existing["id"], "incomplete")
+            added, _err = git_service.add_worktree(base_path, path, branch, new_branch=new_branch,
+                                                   base_branch=start, fetch_base=False)
+            if not added:
+                return refuse("Git refused to check that branch out again (it may be checked out in "
+                              "another folder)")
+            try:
+                checkout_manager._require_branch_binding(path, branch)
+                git_service.require_complete_worktree(path, force=True)
+            except (WorktreeError, WorktreeAddError):
+                return refuse("the restored folder did not pass validation")
+        try:
+            checkout_manager._accept_branch_checkout(path, project["id"], runner, branch)
+        except (WorktreeError, WorktreeAddError):
+            return refuse("the restored folder did not pass validation")
+    logger.info("worker_checkout: restored %s's checkout on its bound branch %r", worker_session_id, branch)
+    return True, None
 
 
 def _recreate_branch_from_recorded_tip(project_id: str, branch: str) -> None:
