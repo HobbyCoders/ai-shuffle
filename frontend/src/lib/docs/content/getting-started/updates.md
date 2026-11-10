@@ -61,6 +61,16 @@ In **Settings → System → Updates → Update details**, **Running app** and *
 
 Docker supervisors also reuse verified tools and browser build outputs when their source, build recipe and dependency/runtime inputs match. Reuse never skips signed-source verification, dependency integrity checks, rollback or active-work protections.
 
+A Docker update that reuses the shared Python dependencies also compiles its Python bytecode while it is being prepared, with the old version still running (the **Bytecode compilation** stage). The app does not write bytecode itself, so without this step every start compiles each module from source. If the step fails, the update is still ready and the app compiles as it starts. Set `AI_SHUFFLE_PERF_UPDATE_BYTECODE=0` on the container to turn the step off.
+
+### The database copy before a Docker update
+
+**Update and restart** stops the app, copies the database, then starts the new version. If that first start fails, the copy is put back and the previous version runs again. The time the copy takes is downtime.
+
+On a data volume that can share file blocks between files (btrfs, XFS with reflink, ZFS with block cloning) the copy is a copy-on-write clone of the stopped database directory. It takes seconds whatever the size of the database and needs no free space for a second copy; PostgreSQL is stopped and started once around it. On any other volume, and whenever the clone cannot be taken, the database is copied in full as before, which needs free space for a second copy and takes time in proportion to its size.
+
+The clone is used only when the **Docker image** itself is new enough to put a clone back (image capability `database-clone-v1`). If the container restarts while an update's first start is still unconfirmed, the image's own startup code does the recovery, so an older image keeps the full copy. An in-app update alone does not change this: [update the Docker image](#updating-the-docker-image) once to get the fast copy. Set `AI_SHUFFLE_PERF_DATABASE_CLONE=0` on the container to return to the full copy; a clone that was already taken is still put back.
+
 ### Runtime overlays
 
 An overlay-aware Docker supervisor can install a release's required Python, Node, Chromium and relocatable tools/libraries on the persistent data volume. Nothing changes for an ordinary release: the image's runtimes remain the default. Overlays activate only when a signed release requires a capability the image lacks and includes an archive for this architecture with a pinned SHA-256 and size limits. Downloads and installed contents are verified before use; there are no privileged package-manager operations.
