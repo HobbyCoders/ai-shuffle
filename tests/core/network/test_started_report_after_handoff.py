@@ -711,22 +711,68 @@ async def test_a_report_at_the_hop_limit_is_kept_and_delivered_later(pair, tmp_p
 # Review round 3: no steer for a report with a receipt, an older receiver
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_a_report_for_a_parent_mid_turn_is_queued_with_its_receipt_not_steered(pair, monkeypatch):
-    """S8: a steer is held only in memory. A report with a receipt is a queued
-    wake written with that receipt, so a crash cannot leave the receipt alone."""
+def _steer_taken(monkeypatch):
+    """The parent is mid-turn and its live turn takes every steer."""
     from app.core import turn_scheduler
-    a, _b, _, _ = pair
     steered = []
 
     async def steer(*args, **kwargs):
         steered.append(args[0])
-        return True  # the live turn would take it, then the process dies
+        return True
     monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", steer)
+    return steered
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_report_for_a_parent_mid_turn_is_queued_with_its_receipt_not_steered(pair, monkeypatch):
+    """S8: a steer is held only in memory. A report that can come again (here
+    forwarded by the old worker) is a queued wake written with its receipt,
+    so a crash cannot leave the receipt alone."""
+    a, b, _, _ = pair
+    with a.active():
+        start = _start_child()
+    await _move_parent(a, b, monkeypatch)
+    steered = _steer_taken(monkeypatch)
+    with a.active():
+        await orch.report_settled_start(CHILD, _settle(start), "completed")
+        await orch.deliver_forwarded_reports(force=True)
+        assert orch.pending_forwarded_reports() == []
+    assert steered == []
+    with b.active():
+        [wake] = _reports(PARENT)
+        assert wake["payload"]["pending_frames"][0]["task_id"] == CHILD
+        assert len(_receipts()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_local_report_for_a_parent_mid_turn_steers_as_before(pair, monkeypatch):
+    """S11: the first delivery of this worker's own settled chat to a parent
+    it runs mid-turn steers into the live turn, as before #1443: no queued
+    wake, no receipt, nothing in the outbox."""
+    a, _b, _, _ = pair
+    steered = _steer_taken(monkeypatch)
     with a.active():
         start = _start_child()
         await orch.report_settled_start(CHILD, _settle(start), "completed")
-        assert steered == []
+        assert steered == [PARENT]
+        assert _all_reports(PARENT) == []
+        assert _receipts() == []
+        assert orch.pending_forwarded_reports() == []
+
+
+@pytest.mark.asyncio
+async def test_a_local_report_the_live_turn_does_not_take_is_queued_with_its_receipt(pair, monkeypatch):
+    """S11: a steer the parent's turn refuses falls through to the guarded
+    queued wake with its receipt."""
+    from app.core import turn_scheduler
+    a, _b, _, _ = pair
+
+    async def refused(*args, **kwargs):
+        return False
+    monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", refused)
+    with a.active():
+        start = _start_child()
+        await orch.report_settled_start(CHILD, _settle(start), "completed")
         [wake] = _reports(PARENT)
         assert wake["payload"]["pending_frames"][0]["task_id"] == CHILD
         assert len(_receipts()) == 1

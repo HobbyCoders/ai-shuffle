@@ -2527,13 +2527,13 @@ async def on_started_session_terminal(
     when the starter is at rest and keeps the report on the child. Every
     report passes an ``admit`` guard (``session_orchestration.admit_report``)
     with its durable id: the wake and the deferral are admitted once, on the
-    worker that runs the starter, else ``moved`` (#1443). Such a report is
-    never steered into a live turn: a steer is held only in memory, so its
-    receipt could outlive a crash that loses the report. It is a queued wake,
-    written in the same transaction as its receipt.
+    worker that runs the starter, else ``moved`` (#1443). ``steer`` is only
+    for a first delivery nothing retries (a settled chat of this worker): a
+    steer is held in memory and writes no receipt, as before #1443. A report
+    something may deliver again passes ``steer=False``, so its wake is queued
+    in the same transaction as its receipt. A steer the live turn does not
+    take falls through to that queued wake.
     """
-    if admit is not None:
-        steer = False
     async with _terminal_delivery_lock(session_id):
         from app.core.session_orchestration import defer_started_report, record_started_report
         try:

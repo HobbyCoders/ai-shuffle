@@ -2207,7 +2207,9 @@ async def report_settled_start(session_id, settled, outcome):
             return
         home, device, frame = built
         if home:
-            await deliver_started_report(home, frame)
+            # The first delivery of this worker's own settled chat: nothing
+            # retries it, so it may steer into a live turn without a receipt.
+            await deliver_started_report(home, frame, steer=True)
             return
         from app.network import control
         await control.call(device, REPORT_ACTION, {"session_id": session_id, "report": frame},
@@ -2274,7 +2276,7 @@ async def handle_remote_report(body, from_device):
     """
     from app.db.async_database import run_sync
     home, frame = await run_sync(accept_remote_report, body, from_device)
-    await deliver_started_report(home, frame)
+    await deliver_started_report(home, frame, steer=False)
     return {"delivered": True}
 
 
@@ -2452,7 +2454,7 @@ async def _admit_here(home, frame, event_id, *, steer):
         home, frame, steer=steer, admit=functools.partial(admit_report, home, event_id))
 
 
-async def deliver_started_report(home, frame, *, hops=0, steer=True, event_id=None):
+async def deliver_started_report(home, frame, *, hops=0, steer=False, event_id=None):
     """Wake ``home`` with a started chat's report on the worker that runs it.
 
     Here when this worker runs it; otherwise, or when it cannot take it now,
@@ -2463,6 +2465,8 @@ async def deliver_started_report(home, frame, *, hops=0, steer=True, event_id=No
     ``forwarded`` once the outbox holds it. A report another worker sent here
     (``hops``) goes to the outbox only when the chat moved on, and not past
     the hop limit: otherwise the sender keeps it and retries later.
+    ``steer``: only for a first delivery nothing retries
+    (``on_started_session_terminal``).
     """
     # Every admission carries the report's id, the first local one too, so a
     # retry after an unclear commit or a restart finds its receipt.
