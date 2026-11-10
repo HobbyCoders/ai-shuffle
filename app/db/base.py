@@ -815,8 +815,8 @@ def _background_checkout() -> bool:
 def background_database_work(function):
     """Mark a synchronous function's database work as background.
 
-    For work no turn is waiting on: sync scans and applies, maintenance,
-    compaction. Its checkouts are limited to ``settings.db_pool_background``
+    For work no turn is waiting on: sync scans, sync-log cleanup and
+    maintenance. Its checkouts are limited to ``settings.db_pool_background``
     connections at once, so they cannot take the pool from turns, and they are
     counted apart from the pressure that queues new turns (``start_admission``):
     a scan that holds a connection for 30 seconds is not a slow database. If it
