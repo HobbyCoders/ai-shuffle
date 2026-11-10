@@ -250,6 +250,10 @@ def test_long_turn_segments_preserve_pairing_steers_and_replay() -> None:
     from fluid.messages.content import SteerDelivery
 
     nodes = _growing_turn(50)
+    # A stored send time, as every store load gives a node. The steer has no
+    # accepted_at, so its "[sent/delivered …]" stamp reads its node's ts.
+    for i, n in enumerate(nodes):
+        n.ts = 1_794_280_527.0 + i  # 2026-11-10 03:15:27 UTC onward
     steer = SteerDelivery(text="Do not deploy.\n" + "retain this constraint " * 100, id="real-user")
     block = nodes[2].message.content[0]
     block.delivered_steers = [steer]
@@ -260,9 +264,11 @@ def test_long_turn_segments_preserve_pairing_steers_and_replay() -> None:
     assert any(p.tier == 2 for p in promotions)
     assert rendered[0] == nodes[0].message
     assert steer.render() in "\n".join(_texts(rendered))
+    assert "[sent/delivered 2026-11-10 03:15:29 UTC" in "\n".join(_texts(rendered))
     assert repair_dangling_tool_calls(rendered) is rendered
     assert [n.message.to_dict() for n in nodes] == original
-    replayed_nodes = [SessionNode(node_id=n.node_id, parent_id=n.parent_id,
+    # Replay rebuilds the nodes as a store load does: stored ts included.
+    replayed_nodes = [SessionNode(node_id=n.node_id, parent_id=n.parent_id, ts=n.ts,
                                  message=Message.from_dict(n.message.to_dict())) for n in nodes]
     resumed = Compactor()
     resumed.rehydrate(promotions)
