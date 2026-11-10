@@ -15,7 +15,8 @@
 import { activeSession } from '$lib/stores/active-session';
 import { getInitGeneration } from '$lib/stores/session/session-init';
 import { get } from 'svelte/store';
-import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+import { writeDraft } from '$lib/stores/session/draft-persistence';
+import { chatDraftNow } from '$lib/stores/session/rewound-words';
 import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 import { notify } from '$lib/stores/notifications';
 import { joinDrafts } from './tiptap/serialization';
@@ -186,33 +187,33 @@ export function retirePutBack(chat: string | null): void {
 	putBack.delete(chat);
 }
 
-/** Composers on screen, newest last, by the chat each one shows. */
-const composers: { chat: () => string | null; take: (unsent: string, destination: SendDestination) => void }[] = [];
+/** Composers showing a chat whose draft a refused send just changed. */
+const draftChanged = new Set<(chat: string | null) => void>();
 
-/** A composer is on screen; the returned function takes it off. */
-export function mountComposer(composer: (typeof composers)[number]): () => void {
-	composers.push(composer);
-	return () => {
-		const at = composers.indexOf(composer);
-		if (at >= 0) composers.splice(at, 1);
-	};
+/** Re-show the open chat's draft when keepRefusedSend changes it. */
+export function onDraftChanged(show: (chat: string | null) => void): () => void {
+	draftChanged.add(show);
+	return () => draftChanged.delete(show);
 }
 
 /**
- * A send outlived its composer and was refused: its words go back in front
- * of what the composer now showing its chat holds, or into that chat's draft
- * for the next composer to open with. Never dropped (#1444).
+ * A send refused after its composer went (#1444). `chat` is the chat it was
+ * for, read now: its destination, or the chat its New chat created. Its words
+ * go in front of that chat's draft as it is at this moment (the open chat's
+ * live draft, else the saved one), never another chat's and never an earlier
+ * copy. The composer showing that chat, if any, re-shows its draft; else the
+ * next one opens with it.
  */
-export function handBackUnsent(destination: SendDestination, unsent: string): void {
-	for (let at = composers.length - 1; at >= 0; at--) {
-		if (composers[at].chat() === destination.chat) return composers[at].take(unsent, destination);
-	}
-	const state = get(activeSession);
-	const open = state.sessionId === destination.chat;
-	const draft = putBackUnsent(destination, unsent, (open ? state.draft : '') || readDraft(destination.chat));
+export function keepRefusedSend(destination: SendDestination, chat: string | null, unsent: string): void {
+	const draft = putBackUnsent({ ...destination, chat }, unsent, chatDraftNow(chat));
+	// A send called off later builds on this draft, not an earlier leave.
+	const left = leftDrafts.get(chat);
+	if (left) left.draft = draft;
+	const open = get(activeSession).sessionId === chat;
 	if (open) activeSession.setDraft(draft);
-	else activeSession.saveDraftForSession(destination.chat, draft);
-	writeDraft(destination.chat, draft, { preserveNewChat: true });
+	else activeSession.saveDraftForSession(chat, draft);
+	writeDraft(chat, draft, { preserveNewChat: true });
+	if (open) for (const show of draftChanged) show(chat);
 }
 
 /**

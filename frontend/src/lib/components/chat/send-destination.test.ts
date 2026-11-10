@@ -4,7 +4,7 @@ import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 import { notify } from '$lib/stores/notifications';
 import { hasComposerDraft as hasText } from '$lib/stores/session/composer-suggestion';
 import {
-	captureDestination, draftToKeep, keepUnsentDraft, movedAwayFrom, noteLeftDraft, SEND_MOVED_MESSAGE, stillAtDestination
+	captureDestination, draftToKeep, keepRefusedSend, keepUnsentDraft, movedAwayFrom, noteLeftDraft, SEND_MOVED_MESSAGE, stillAtDestination
 } from './send-destination';
 
 const doc = (text: string) => JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
@@ -118,5 +118,34 @@ describe('send destination (#1077)', () => {
 		expect(readDraft('a')).toBe(doc('sent'));
 		expect(readDraft(null)).toBe(doc('new chat words'));
 		expect(banner).toHaveBeenCalledWith(SEND_MOVED_MESSAGE, expect.objectContaining({ severity: 'warning' }));
+	});
+	// #1444: a send refused after its composer went reads the chat's draft at
+	// that moment, never what a composer held when it left the chat.
+	it('puts a send refused after its composer went in front of the chat\'s draft as it is now', () => {
+		const at = captureDestination({ sessionId: 'a', editorOwner: 'a' });
+		noteLeftDraft('a', EMPTY);
+		// A later composer on chat A saved newer text since.
+		writeDraft('a', doc('newer'));
+		keepRefusedSend(at, 'a', doc('sent'));
+		expect(texts(readDraft('a'))).toEqual(['sent', 'newer']);
+		expect(readDraft(null)).toBeNull();
+	});
+
+	it('keeps both a refused send and a called-off one for a chat, in send order, whichever lands first', () => {
+		for (const gone of [0, 1]) {
+			sessionStorage.clear();
+			const sent = [captureDestination({ sessionId: 'a', editorOwner: 'a' }), captureDestination({ sessionId: 'a', editorOwner: 'a' })];
+			noteLeftDraft('a', doc('third draft'));
+			writeDraft('a', doc('third draft'));
+			const words = (i: number) => doc(i === 0 ? 'first' : 'second');
+			if (gone === 0) {
+				keepRefusedSend(sent[0], 'a', words(0));
+				keepUnsentDraft(sent[1], words(1), true);
+			} else {
+				keepUnsentDraft(sent[0], words(0), true);
+				keepRefusedSend(sent[1], 'a', words(1));
+			}
+			expect(texts(readDraft('a'))).toEqual(['first', 'second', 'third draft']);
+		}
 	});
 });
