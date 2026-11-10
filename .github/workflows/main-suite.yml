@@ -70,6 +70,8 @@ jobs:
     needs: [proven]
     if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.backend != 'true' }}
     uses: ./.github/workflows/ci-backend.yml
+    with:
+      gated_by_caller: true
 
   javascript:
     needs: [proven]
@@ -82,6 +84,7 @@ jobs:
     uses: ./.github/workflows/ci-frontend.yml
     with:
       checks_proven: ${{ needs.proven.outputs.javascript-checks == 'true' }}
+      gated_by_caller: true
 
   fluid:
     needs: [proven]
@@ -94,11 +97,14 @@ jobs:
     uses: ./.github/workflows/windows-suite.yml
     with:
       main_suite: true
+      gated_by_caller: true
 
   browser-workspace:
     needs: [proven]
     if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.browser-workspace != 'true' }}
     uses: ./.github/workflows/ci-browser-workspace.yml
+    with:
+      gated_by_caller: true
 
   container:
     needs: [proven]
@@ -204,69 +210,91 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/ci/main_suite.py update-reach
 
-  journey-issues:
-    name: Report recovered UI journeys (non-blocking)
-    # A red sibling shard must not suppress recovered cases from another shard.
-    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [javascript]
+  # The verdict starts with the run and keeps its runner, so it never waits
+  # for a free runner after the last job finishes (runners are shared with
+  # every open pull request). It reads this run's jobs as they finish
+  # (scripts/ci/main_gate.py): the first failed, cancelled or timed-out
+  # required job cancels the run, since it can no longer publish. The called
+  # workflows skip their own verdict jobs here (gated_by_caller); this job
+  # applies their rules, receipts included. The publisher and nightly_wait.py
+  # read this job by its name.
+  main-suite:
+    name: Main suite
+    if: ${{ !cancelled() }}
+    needs: [proven]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # The publisher checks the WHOLE workflow conclusion, not just Main suite.
-    # Keep this advisory job outside the aggregate AND non-fatal at job level.
-    continue-on-error: true
+    timeout-minutes: 180
     permissions:
       contents: read
-      actions: read
+      # Read the run's jobs and artifacts; cancel the run on the first failure.
+      actions: write
+      # Recovered UI journeys are reported as issues (push to main only).
       issues: write
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Judge every full-suite job as it finishes
+        id: verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: python scripts/ci/main_gate.py
+      - name: Download successful backend shard receipts
+        if: steps.verdict.outputs.backend == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-shard-*-a*
+          path: shard-attempts
+      - name: Fail closed on incomplete backend coverage
+        if: steps.verdict.outputs.backend == 'true'
+        env:
+          BACKEND_NEEDS: ${{ steps.verdict.outputs.backend-needs }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python scripts/ci/shard_evidence.py --prefix backend-shard --count 4 --source shard-attempts --destination shard-results
+          python scripts/ci/backend_gate.py --head "$HEAD_SHA"
+      - name: Download Windows desktop shard receipts
+        if: steps.verdict.outputs.windows == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: windows-desktop-*-a*
+          path: ${{ runner.temp }}/desktop-attempts
+      - name: Prove the Windows desktop shard inventory union
+        if: steps.verdict.outputs.windows == 'true'
+        env:
+          SOURCE: ${{ runner.temp }}/desktop-attempts
+          EVIDENCE: ${{ runner.temp }}/desktop-evidence
+        run: |
+          python scripts/ci/shard_evidence.py --prefix windows-desktop --count 3 --source "$SOURCE" --destination "$EVIDENCE"
+          python tests/scripts/test_ci_parallel_gates.py --desktop-evidence "$EVIDENCE"
+      # Cancelled journey shards still upload their receipts; the cancel stops
+      # the verdict step too, so this waits in its own step (at once when the
+      # verdict was reached: every job has finished then). GitHub force-stops a
+      # cancelled job 5 minutes after the cancel, so this wait (at most 90 s)
+      # and the reporting step together stay within 4 minutes; a shard still
+      # uploading after that is not collected.
+      - name: Wait for cancelled jobs to stop
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        timeout-minutes: 2
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/main_gate.py settle
+      # Best effort and never fatal: a red shard must not hide a recovered case
+      # of another shard, and a reporting failure changes no result.
       - name: Open or update flaky journey issues
         id: report
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
         timeout-minutes: 2
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -m scripts.devloop.journey_issues
       - name: Warn if reporting could not finish
-        if: always() && (failure() || steps.report.outcome == 'failure')
+        if: always() && steps.report.outcome == 'failure'
         run: echo "::warning title=UI journey issue reporting::Reporting could not finish; suite and publication results are unchanged."
-
-  stop-on-failure:
-    name: Stop on first failure (non-blocking)
-    # A run with a failed job cannot publish. Cancel it at once so the fix is
-    # not left waiting behind 20 more minutes of jobs that no longer matter.
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    # Advisory, like the reporter above: outside the aggregate and non-fatal.
-    continue-on-error: true
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Cancel the run when a required job fails
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci/stop_on_failure.py
-
-  main-suite:
-    name: Main suite
-    if: always()
-    needs: [proven, backend, javascript, fluid, windows, browser-workspace, container, identity, policy, desktop-source, desktop, android-and-docs, supply-chain, update-reach]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Require every full-suite dependency
-        env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: python scripts/ci/main_suite.py aggregate

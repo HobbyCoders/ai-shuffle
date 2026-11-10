@@ -9,6 +9,10 @@ on:
         description: main-suite found a pull request's record for every check here but the journeys
         type: boolean
         default: false
+      gated_by_caller:
+        description: The caller judges these jobs itself (main-suite), so the verdict job here does not queue for a runner
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -306,6 +310,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -m scripts.devloop.ci matrix --shards 18 >> "$GITHUB_OUTPUT"
+      # The selection in a step name, where main-suite's gate reads it from the
+      # run's job list (scripts/ci/main_gate.py) to wait for every chosen shard.
+      - name: 'Selected UI journey shards: ${{ steps.select.outputs.shards }}'
+        run: 'true'
 
   journeys:
     name: UI journeys (${{ matrix.shard }}/18)
@@ -474,7 +482,7 @@ jobs:
 
   javascript:
     name: JavaScript package checks
-    if: always()
+    if: always() && inputs.gated_by_caller != true
     needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp, journey-plan, journeys, visual]
     runs-on: ubuntu-latest
     timeout-minutes: 5

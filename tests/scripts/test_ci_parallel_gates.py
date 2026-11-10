@@ -238,7 +238,7 @@ def test_ui_journeys_and_visual_regression_gate_every_pr():
     # Only the shards the selection gave a file start; the selection job plans
     # the same HOSTED_SHARDS split every shard then repeats for its own files.
     assert journeys["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.journey-plan.outputs.shards) }}"
-    select = jobs["journey-plan"]["steps"][-1]["run"]
+    select = next(step for step in jobs["journey-plan"]["steps"] if step.get("id") == "select")["run"]
     assert select == f'python3 -m scripts.devloop.ci matrix --shards {HOSTED_SHARDS} >> "$GITHUB_OUTPUT"'
     shards = range(HOSTED_SHARDS)
     assert journeys["name"] == f"UI journeys (${{{{ matrix.shard }}}}/{HOSTED_SHARDS})"
