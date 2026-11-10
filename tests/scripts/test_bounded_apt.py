@@ -309,11 +309,16 @@ def deb_cache(tmp_path):
         root = pathlib.Path(__file__).parents[1]
         with (root / "events").open("a") as log:
             log.write("cached " + " ".join(pathlib.Path(arg).name for arg in sys.argv[1:]) + "\n")
-        assert sys.argv[1:6] == ["install", "-y", "-q", "--no-download", "--no-install-recommends"]
+        assert sys.argv[1:5] == ["install", "-y", "-q", "--no-install-recommends"]
+        # No remote source: an empty list file and an empty parts directory.
+        sources = sys.argv[5].removeprefix("-oDir::Etc::sourcelist=")
+        parts = sys.argv[6].removeprefix("-oDir::Etc::sourceparts=")
+        assert pathlib.Path(sources).read_text() == "" and not any(pathlib.Path(parts).iterdir())
+        assert all(pathlib.Path(arg).is_absolute() for arg in sys.argv[7:])
         if (root / "cached-fails").exists():
             sys.exit(100)
         (root / "installed").write_text("".join(
-            pathlib.Path(arg).read_text() + "\n" for arg in sys.argv[6:]))
+            pathlib.Path(arg).read_text() + "\n" for arg in sys.argv[7:]))
     ''')
     executable("dpkg-query", r'''
         import pathlib, sys
@@ -383,8 +388,8 @@ def test_a_hit_installs_the_cached_debs_without_running_apt(deb_cache):
     fresh_runner(root)
     result = run(debs)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert events(root) == [("cached install -y -q --no-download --no-install-recommends "
-                             "fonts-a_1.0_all.deb fonts-b_1.0_all.deb")]
+    assert events(root) == [("cached install -y -q --no-install-recommends "
+                             "none.list none fonts-a_1.0_all.deb fonts-b_1.0_all.deb")]
     assert "installed 2 cached packages" in result.stdout
 
 

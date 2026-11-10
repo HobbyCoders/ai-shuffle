@@ -7,8 +7,8 @@ Only missing packages are installed; preinstalled runner libraries are not upgra
 
 ``--debs DIR COMMAND...`` keeps the packages a successful run downloaded in DIR,
 with a manifest, for the workflow to cache. When DIR already holds a manifest
-(a cache hit), those exact signed .deb files are installed with no download and
-no index refresh, and COMMAND runs only if that install or its check fails.
+(a cache hit), those exact signed .deb files are installed with no remote apt
+source, so nothing is downloaded and no index is refreshed, and COMMAND runs only if that install or its check fails.
 """
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def main(args: list[str]) -> int:
         cached_failed, before = False, set()
         if debs is not None:
             if (debs / MANIFEST).is_file():
-                if install_cached(debs):
+                if install_cached(debs, Path(directory)):
                     return 0
                 # Start over from apt; repair whatever the failed install left.
                 cached_failed = True
@@ -160,7 +160,7 @@ def supervise(command: list[str], repair_first: bool = False) -> int:
     return 1
 
 
-def install_cached(debs: Path) -> bool:
+def install_cached(debs: Path, scratch: Path) -> bool:
     """Install a previous run's downloads from DIR; False means use apt as usual."""
     started = time.monotonic()
     packages = (debs / MANIFEST).read_text().split()
@@ -168,11 +168,17 @@ def install_cached(debs: Path) -> bool:
     if not packages or not files:
         print("::warning::The cached dependency packages are empty; using apt", flush=True)
         return False
-    # Local files only: apt still checks dependencies against the installed
-    # system and refuses, before changing anything, whatever needs a download
-    # or a downgrade. Already-installed versions are left as they are.
-    result = bounded(["apt-get", "install", "-y", "-q", "--no-download",
-                      "--no-install-recommends", *files], "clean", CACHED_SECONDS)
+    # Local files only: with no remote source apt knows just the installed
+    # system and these files, so it refuses, before changing anything, whatever
+    # needs another package or a downgrade. Already-installed versions are left
+    # as they are. (--no-download would skip the local copy step too, and apt
+    # then fails with "Pathname to install is not absolute".)
+    (scratch / "none").mkdir()
+    (scratch / "none.list").touch()
+    result = bounded(["apt-get", "install", "-y", "-q", "--no-install-recommends",
+                      f"-oDir::Etc::sourcelist={scratch / 'none.list'}",
+                      f"-oDir::Etc::sourceparts={scratch / 'none'}", *files],
+                     "clean", CACHED_SECONDS)
     if result != 0:
         print(f"::warning::Cached dependency install failed (exit {result}); using apt", flush=True)
         return False

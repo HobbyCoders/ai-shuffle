@@ -336,8 +336,8 @@ playwright-core version and the helper itself. On a miss apt runs as above, and
 after it succeeds the helper copies the `.deb` files that install downloaded,
 with their package names, into that directory for the cache; a run that
 downloaded nothing records no cache. On a hit it installs those same signed
-files with `apt-get install --no-download` (no index refresh, no archive
-traffic) in one 120-second bounded attempt, then checks that every recorded
+files with `apt-get install` given an empty source list (no index refresh, no
+archive traffic) in one 120-second bounded attempt, then checks that every recorded
 package is installed. apt refuses before changing anything when a file needs a
 download, a downgrade or a dependency the image lacks; any failure falls back to
 the normal two apt attempts, starting with `dpkg --configure -a`. The miss path
