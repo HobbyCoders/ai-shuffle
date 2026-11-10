@@ -1107,6 +1107,14 @@
 	// this one's cold-cache check, so two sends keep their order, then goes
 	// (#1344). Held until the check has answered.
 	let pendingSubmit: { cleared: boolean; done: Promise<void> } | null = null;
+	// Places in line taken by submissions still on their way to the store
+	// (#1444). An unmounted composer gives them up: a send it still makes
+	// then goes behind every send made since.
+	const openTurns = new Set<SendReservation>();
+	onDestroy(() => {
+		for (const turn of openTurns) turn.cancel();
+		openTurns.clear();
+	});
 	// Where a send is waiting behind an earlier check. It still shows its words
 	// in the composer, so another activation there is the same message again
 	// and is dropped. A waiter left behind by a chat switch gives up when it
@@ -1139,6 +1147,23 @@
 			// again, not a message. Waiting would send what is typed later.
 			if (!(editorRef?.getMessage() ?? '').trim() && uploadedFiles.length === 0) return;
 			if (waitingSend && stillAtDestination(waitingSend, composerPlace(), { adoptedOwnChat: true })) return;
+		}
+		// The submission is accepted: its place among this chat's sends is
+		// taken now, before any wait below, so a send made elsewhere meanwhile
+		// (the Browser panel) goes after it (#1444). Every path that sends
+		// nothing gives it up (finally, and on unmount).
+		const turn = activeSession.reserveSend();
+		openTurns.add(turn);
+		try {
+			await submitInTurn(compactBeforeSend, turn);
+		} finally {
+			openTurns.delete(turn);
+			turn.cancel();
+		}
+	}
+
+	async function submitInTurn(compactBeforeSend: boolean, turn: SendReservation) {
+		if (pendingSubmit) {
 			// New chat or a switch during the wait: the words stay as the draft
 			// of the chat they were typed in (session-change effect).
 			const clickedIn = captureDestination(composerPlace());
@@ -1160,13 +1185,13 @@
 			releaseSendCircle();
 		};
 		try {
-			await submitComposer(compactBeforeSend, release);
+			await submitComposer(compactBeforeSend, release, turn);
 		} finally {
 			release();
 		}
 	}
 
-	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void) {
+	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void, turn: SendReservation) {
 		if (!ownsComposer() || heldForCatalog || heldForSetup || (compacting && !compactBeforeSend)) return;
 		// The chat this message was typed in. The checks below and the store's
 		// restore wait can await; a New chat or chat switch in that window must
@@ -1263,14 +1288,8 @@
 		// Send the message, optionally queued behind a server-owned compaction.
 		// sendMessage clears the composer before its first await, and holds the
 		// next send until the cold check has answered so two sends keep order.
-		// The store's place in line is taken now, before the cold check, so a
-		// send made elsewhere meanwhile (the Browser panel) goes after (#1444).
-		const turn = activeSession.reserveSend();
-		try {
-			await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm, turn);
-		} finally {
-			turn.cancel();
-		}
+		// It sends in the place taken at the click (handleSubmit).
+		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm, turn);
 	}
 
 	/**

@@ -498,6 +498,33 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		await expect(panel).resolves.toBe(true);
 	});
 
+	// Round 2 S1: the composer's place is taken at submission, before its own
+	// wait behind the earlier submission's cold check.
+	it('writes a composer send queued behind an earlier cold check before a panel prompt sent after it (#1444)', async () => {
+		let answerCache = (_: unknown) => {};
+		net.cache = () => new Promise((resolve) => { answerCache = resolve; });
+		const view = await compose('idle-chat');
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		const editor = (view.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(text: string): void } } }).editor;
+		editor.commands.setContent('second');
+		await fireEvent.submit(form);
+		const panel = activeSession.sendMessage('panel prompt');
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		for (const socket of Socket.all) socket.open();
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(queries()).toEqual([]);
+		net.cache = () => ({ cold: false, warn: false, large: false });
+		answerCache({ cold: false, warn: false, large: false });
+		const opened = setInterval(() => { for (const socket of Socket.all) if (socket.readyState === Socket.CONNECTING) socket.open(); }, 10);
+		try {
+			await waitFor(() => expect(queries()).toHaveLength(3));
+		} finally { clearInterval(opened); }
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'second', 'panel prompt']);
+		await expect(panel).resolves.toBe(true);
+	});
+
 	it('writes a Browser panel prompt sent while a note send waits for its ownership answer after the note (#1444 case 3)', async () => {
 		let answer = (_: unknown) => {};
 		net.live = () => new Promise((resolve) => { answer = resolve; });

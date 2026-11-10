@@ -123,7 +123,15 @@ await runJourney({
 			name: 'composer-then-panel-phone',
 			viewports: ['phone'],
 			...composerThenPanel,
-			allow: [{ kind: 'layout_shift', reason: 'known bug #1465: a late Git action note shifts the phone sheet\'s rows' }]
+			// Only that one move of the sheet's own rows, in that step, up to
+			// 0.12 (measured 0.095); any other shift, the composer's included,
+			// is still judged.
+			expectShift: [{
+				step: 'send from the composer, then Resolve with agent',
+				moved: /^div\.gp-(?:rows|pipe|files|foot)$/,
+				maxValue: 0.12,
+				reason: 'known bug #1465: a late Git action note shifts the phone sheet\'s rows'
+			}]
 		}
 	],
 	allow: DEV_INSTANCE_NOISE

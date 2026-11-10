@@ -29,7 +29,7 @@ import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { claimBootSend, releaseBootSend, getInitGeneration } from './session-init';
 import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
-import { ANY_CHAT, createSendOrder, type SendChat, type SendReservation, type SendTurn } from './send-order';
+import { ANY_CHAT, createSendOrder, type SendLane, type SendReservation, type SendTurn } from './send-order';
 
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
@@ -63,12 +63,12 @@ export async function trackSend<T>(send: () => Promise<T>): Promise<T> {
 
 // Match the streamed typed-text admission deadline in voiceAudioStream.
 const VOICE_CONTEXT_SAVE_TIMEOUT_MS = 10_000;
-// Send order (#1444): the longest a later send to the same chat waits for
-// a compact-first send's admission, for a new chat's first send to be
-// adopted, or for a reserved send the caller never makes.
-const COMPACT_ADMISSION_WAIT_MS = 10_000;
-const NEW_CHAT_ADOPTION_WAIT_MS = 10_000;
-const RESERVED_TURN_LIMIT_MS = 15_000;
+// Send order (#1444): the longest a send waits for an earlier send to its
+// chat to end. Past it the LATER send is refused, never the earlier one.
+export const SEND_ORDER_WAIT_MS = 15_000;
+/** How a send's turn outlives its return: until the chat it creates is
+ *  created, or the create failed. `ended` answers now, without waiting. */
+type CreationEnd = { ended: () => boolean; done: Promise<void> };
 
 /**
  * Who owns the session an unbound compose is about to create. The backend
@@ -438,12 +438,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	// Sends to one chat keep their order (#1444); see the wrapper at the end.
 	const sendOrder = createSendOrder();
+	/** The worktree create in progress, whose own first send (made with
+	 *  skipWorktreeSetup) runs inside the creating send's turn. */
+	let creationTurn: { holdUntil: (after: CreationEnd) => void } | null = null;
 
 	const sender = {
 		/** `letNextGo` is the wrapper's: called where this send's frame is
-		 *  written, so the next send to its chat may go. Given a promise, the
-		 *  next send waits for that instead (a new chat's adoption). */
-		async sendMessage(prompt: string, options?: SendMessageOptions, letNextGo?: (after?: Promise<unknown>) => void): Promise<boolean> {
+		 *  written, it ends this send's turn so the next send to its chat may
+		 *  go. Given a promise, the turn ends when that settles instead (a new
+		 *  chat's creation). Not called, the turn ends when this returns. */
+		async sendMessage(prompt: string, options?: SendMessageOptions, letNextGo?: (after?: CreationEnd) => void): Promise<boolean> {
 			prompt = prompt.trim();
 
 			// Restore-race guard: right after a page load, init() may have adopted
@@ -539,9 +543,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			// Worktree setup on first message
 			if (!options?.skipWorktreeSetup && _state.worktreeIntent === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
-				// A send made during the create is refused by the backstop below,
-				// as before; the create's own first send takes its own turn.
-				letNextGo?.();
+				// The create is this send: its turn lasts until the create ends, so
+				// a send made meanwhile waits and goes to the chat it creates
+				// rather than starting a second create. The create's own first
+				// send runs inside this turn (creationTurn).
 				if (_state.worktreeMode === 'existing' && !_state.worktreeId) {
 					update(s => ({...s, worktreeError:'Please select an available existing worktree before sending.'}));
 					return false;
@@ -554,6 +559,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const creationGen = internal.worktreeCreationGeneration;
 				const bootClaim = claimBootSend();
 				let accepted = false;
+				const outerCreation = creationTurn;
+				creationTurn = { holdUntil: (after) => letNextGo?.(after) };
+				let createEnded!: () => void;
+				let createOver = false;
+				letNextGo?.({ ended: () => createOver, done: new Promise<void>(resolve => { createEnded = resolve; }) });
 				try {
 					if (_state.worktreeMode === 'existing' && _state.worktreeId) {
 						accepted = await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
@@ -565,6 +575,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					accepted ||= creationGen !== internal.worktreeCreationGeneration;
 					return accepted;
 				} finally {
+					createOver = true;
+					createEnded();
+					creationTurn = outerCreation;
 					// Creation can adopt the chat before its inner first send fails.
 					// That live chat still owns boot even when its draft is restored.
 					if (!accepted && !getState().sessionId) releaseBootSend(bootClaim);
@@ -804,12 +817,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// Whether the worker answered that it did not queue this send.
 					let refused = false;
 					try {
-						const compacting = compactSession(_state.sessionId!, query);
-						// The worker admits this send when it answers. Until then a later
-						// send waits, else the socket can admit it first; bounded, so a
-						// slow answer never holds the chat.
-						const handOn = setTimeout(() => letNextGo?.(), COMPACT_ADMISSION_WAIT_MS);
-						const result = await compacting.finally(() => clearTimeout(handOn));
+						// The worker admits this send when it answers; its turn ends when
+						// this returns, so a later send cannot be admitted first.
+						const result = await compactSession(_state.sessionId!, query);
 						if (!result.queued_turn_id) {
 							refused = true;
 							throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
@@ -847,9 +857,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					return true;
 				}
 				querySent = wsConn.send(query);
-				// A new chat's next send goes once this one's chat is adopted, to
-				// that chat: sent unbound too, it would create a second chat.
-				letNextGo?.(requestId && querySent ? untilAdopted(requestId, clientMessageId) : undefined);
+				// A new chat's turn lasts until the chat is created: the next send
+				// goes to it. Sent unbound too, it would create a second chat.
+				letNextGo?.(requestId && querySent ? untilCreated(requestId, clientMessageId) : undefined);
 				if (!querySent) {
 					pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
 					pendingQueue.forgetSendUploads(clientMessageId);
@@ -1500,103 +1510,134 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	// Every send, whichever caller started it, holds off an update reload
 	// until it settles (see trackSend), and is written after every earlier
 	// send to its chat (send-order.ts, #1444). The turn is taken here, as the
-	// send is made; a send with no earlier one waiting goes on without an
-	// await, exactly as before.
-	/** Adopted from an earlier unbound send, in that compose (navigation). */
-	let adoptedHere: { sessionId: string; navigation: number } | null = null;
-	/** A compose whose first send went out and was not adopted in time. */
-	let unadoptedIn: number | null = null;
+	// send is made; a send with no earlier one open goes on without an await,
+	// exactly as before.
 
-	/** Settles once the new chat this send creates is adopted, the send was
-	 *  refused (its echo withdrawn), the user left the compose, or the wait ran
-	 *  out (recorded for the next send). */
-	function untilAdopted(requestId: string, commandId: string): Promise<void> {
+	/** A new chat being created by a send, whose turn lasts until it ends. */
+	type Creation = { lane: SendLane; ended: () => boolean; done: Promise<void> };
+	const creations = new Set<Creation>();
+
+	/** Ends once the new chat this send creates is adopted, or its creation
+	 *  ended another way: refused (its echo withdrawn), replaced, or the user
+	 *  left the compose. Never on time alone. Looked at every 50 ms, and at
+	 *  once whenever another send is made. */
+	function untilCreated(requestId: string, commandId: string): CreationEnd {
 		const navigation = getInitGeneration();
 		const echoed = () => getState().messages.some(m => m.commandId === commandId);
 		const watchEcho = echoed();
-		return new Promise<void>((resolve) => {
-			const finish = (timedOut: boolean) => {
-				clearTimeout(limit);
-				clearInterval(check);
-				const sessionId = getState().sessionId;
-				if (sessionId && internal.pendingRequestId !== requestId && getInitGeneration() === navigation) {
-					adoptedHere = { sessionId, navigation };
-				} else if (timedOut) {
-					unadoptedIn = navigation;
-				}
+		let resolve!: () => void;
+		const done = new Promise<void>(r => { resolve = r; });
+		let over = false;
+		const ended = () => {
+			if (!over && (getState().sessionId || internal.pendingRequestId !== requestId || !internal.awaitingNewSession
+				|| getInitGeneration() !== navigation || (watchEcho && !echoed()))) {
+				over = true;
+				clearInterval(poll);
 				resolve();
-			};
-			const limit = setTimeout(() => finish(true), NEW_CHAT_ADOPTION_WAIT_MS);
-			const check = setInterval(() => {
-				if (internal.pendingRequestId !== requestId || getInitGeneration() !== navigation
-					|| (watchEcho && !getState().sessionId && !echoed())) finish(false);
-			}, 50);
+			}
+			return over;
+		};
+		const poll = setInterval(ended, 50);
+		return { ended, done };
+	}
+
+	type Taken = {
+		lane: SendLane; chat: string | null | typeof ANY_CHAT; navigation: number; turn: SendTurn;
+		/** Made while a creation in its lane had not ended: it goes to the chat
+		 *  that creates, never as a second create. */
+		behindCreation: boolean;
+	};
+	function takeTurn(): Taken {
+		const made = getState();
+		const navigation = getInitGeneration();
+		const compose = `compose:${navigation}`;
+		const behind = (lane: SendLane) => [...creations].some(c => !c.ended() && (c.lane === lane || lane === ANY_CHAT));
+		if (made.isRestoringSession) {
+			return { lane: ANY_CHAT, chat: ANY_CHAT, navigation, behindCreation: behind(ANY_CHAT), turn: sendOrder.take(ANY_CHAT) };
+		}
+		// A chat adopted from this compose stays in its lane while a send of
+		// the compose is open: a send queued there before the id existed keeps
+		// its place ahead of one made after.
+		const lane = !made.sessionId || sendOrder.isOpen(compose) ? compose : `chat:${made.sessionId}`;
+		return { lane, chat: made.sessionId, navigation, behindCreation: behind(lane), turn: sendOrder.take(lane) };
+	}
+
+	/** Was the chat the send was made in left while it waited? Then nothing
+	 *  goes, no error lands in the chat open now, and the caller keeps the
+	 *  words. A new chat's compose counts as left on navigation only: its
+	 *  adoption is the same chat. */
+	function left({ chat, navigation }: Taken): boolean {
+		if (chat === ANY_CHAT) return false;
+		if (chat !== null) return getState().sessionId !== chat;
+		return getInitGeneration() !== navigation;
+	}
+
+	/** Waits for the earlier turns, at most SEND_ORDER_WAIT_MS. */
+	function inTime(ready: Promise<void>): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			const limit = setTimeout(() => resolve(false), SEND_ORDER_WAIT_MS);
+			void ready.then(() => { clearTimeout(limit); resolve(true); });
 		});
 	}
 
-	type Taken = { chat: SendChat; navigation: number; turn: SendTurn };
-	function takeTurn(): Taken {
-		const made = getState();
-		const chat = made.isRestoringSession ? ANY_CHAT : made.sessionId;
-		return { chat, navigation: getInitGeneration(), turn: sendOrder.take(chat) };
-	}
-
-	/** May a send that waited still go? False when the chat it was made in
-	 *  was left; nothing goes, no error lands in the chat open now, and the
-	 *  caller keeps the words. A new chat's send follows the chat its earlier
-	 *  send created. */
-	function stillMayGo({ chat, navigation }: Taken): boolean {
-		if (chat === ANY_CHAT) return true;
-		const now = getState().sessionId;
-		if (now === chat) {
-			if (chat !== null) return true;
-			if (getInitGeneration() !== navigation) return false;
-			if (unadoptedIn === navigation) {
-				update(s => ({ ...s, error: 'This session is still being created — try again in a moment.' }));
-				return false;
-			}
-			return true;
-		}
-		return chat === null && getInitGeneration() === navigation
-			&& adoptedHere?.sessionId === now && adoptedHere.navigation === navigation;
-	}
-
-	const reserved = new WeakMap<SendReservation, Taken & { spent: boolean; limit: ReturnType<typeof setTimeout> }>();
+	const reserved = new WeakMap<SendReservation, Taken & { spent: boolean }>();
 	const send = sender.sendMessage;
 	const ordered = {
 		sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
+			// A worktree create's own first send: part of the creating send,
+			// inside its turn, which lasts while this one's chat is created.
+			if (options?.skipWorktreeSetup && creationTurn) {
+				const creation = creationTurn;
+				return trackSend(() => send(prompt, options, (after) => { if (after) creation.holdUntil(after); }));
+			}
 			const held = options?.turn ? reserved.get(options.turn) : undefined;
 			let taken: Taken;
 			if (held && !held.spent) {
 				held.spent = true;
-				clearTimeout(held.limit);
 				taken = held;
 			} else {
 				taken = takeTurn();
 			}
 			const { turn } = taken;
-			let handOn: Promise<unknown> | null = null;
-			const letNextGo = (after?: Promise<unknown>) => {
-				if (after) handOn = after;
-				else turn.release();
+			// What this send's turn still waits for once it returns (a new
+			// chat's creation). Written with nothing to wait for, it ends now.
+			const holds: Promise<unknown>[] = [];
+			const letNextGo = (after?: CreationEnd) => {
+				if (after) {
+					const creation: Creation = { lane: taken.lane, ...after };
+					creations.add(creation);
+					holds.push(after.done.finally(() => creations.delete(creation)));
+				} else if (!holds.length) turn.release();
 			};
 			return trackSend(async () => {
 				try {
 					if (turn.ready) {
-						await turn.ready;
-						if (!stillMayGo(taken)) return false;
+						if (!(await inTime(turn.ready))) {
+							// An earlier send to this chat has not ended: this one never
+							// goes ahead of it. Refused, the caller keeps the words.
+							if (!left(taken)) {
+								update(s => ({ ...s, error: taken.chat === null
+									? 'This session is still being created — try again in a moment.'
+									: 'An earlier message to this chat is still being sent. This one was not sent; try again in a moment.' }));
+							}
+							return false;
+						}
+						if (left(taken)) return false;
+						// Queued behind a creation that ended without a chat: sent now
+						// it would start a second create the user did not ask for.
+						if (taken.behindCreation && taken.chat === null && !getState().sessionId) return false;
 					}
 					return await send(prompt, options, letNextGo);
 				} finally {
-					if (handOn) void handOn.finally(turn.release);
+					if (holds.length) void Promise.allSettled(holds).then(turn.release);
 					else turn.release();
 				}
 			});
 		},
 		/** Take this send's place in line now, for a caller that awaits before
-		 *  it sends (the composer's cold-cache check, a generation choice's
-		 *  save). Pass it as `options.turn`; cancel it when nothing will be
-		 *  sent. Lapses after a while, so a stuck caller never holds the chat. */
+		 *  it sends (the composer, a generation choice). Pass it as
+		 *  `options.turn`; cancel it on every path that sends nothing. It never
+		 *  lapses: a send made later waits for it, at most SEND_ORDER_WAIT_MS. */
 		reserveSend(): SendReservation {
 			const taken = takeTurn();
 			const reservation: SendReservation = {
@@ -1604,11 +1645,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					const held = reserved.get(reservation);
 					if (!held || held.spent) return;
 					held.spent = true;
-					clearTimeout(held.limit);
 					held.turn.release();
 				},
 			};
-			reserved.set(reservation, { ...taken, spent: false, limit: setTimeout(taken.turn.release, RESERVED_TURN_LIMIT_MS) });
+			reserved.set(reservation, { ...taken, spent: false });
 			return reservation;
 		},
 	};

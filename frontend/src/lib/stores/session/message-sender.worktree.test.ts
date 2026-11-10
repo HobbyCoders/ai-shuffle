@@ -28,7 +28,7 @@ vi.mock('./v2/feed-controller', () => ({
 import { feedController } from './v2/feed-controller';
 import { generateBranchName } from '$lib/api/git';
 
-function setup(overrides: Partial<ActiveSessionState> = {}) {
+function setup(overrides: Partial<ActiveSessionState> = {}, options: { realActiveSession?: boolean } = {}) {
 	let state = {
 		sessionId: null,
 		title: 'New Chat',
@@ -66,9 +66,12 @@ function setup(overrides: Partial<ActiveSessionState> = {}) {
 		appData: { loadSessions: vi.fn(), loadApiUserSessions: vi.fn() },
 		persistSession: vi.fn(),
 		stopTimeout: { get: () => null, set: vi.fn() },
-		getActiveSession: () => ({ sendMessage, createWorktree: vi.fn(), autoCreateWorktree: vi.fn() }),
+		// realActiveSession: the store's own entry points, as activeSession has them.
+		getActiveSession: () => options.realActiveSession ? sender
+			: ({ sendMessage, createWorktree: vi.fn(), autoCreateWorktree: vi.fn() }),
 	};
-	return { sender: createMessageSender(deps), deps, internal, wsConn, sendMessage, state: () => state };
+	const sender = createMessageSender(deps);
+	return { sender, deps, internal, wsConn, sendMessage, state: () => state };
 }
 
 beforeEach(() => {
@@ -464,5 +467,39 @@ describe('back-to-back worktree creation keeps each session independent (#1528)'
 			type: 'query', session_id: 'wt-1', prompt: 'first task',
 			overrides: expect.objectContaining({ effort: 'high', fast: true }),
 		}));
+	});
+});
+
+describe('a second send while the first send creates the worktree (#1444)', () => {
+	const ok = { session_id: 'wt-c', branch_name: 'live/staged', base_branch: 'main', worktree_path: '/w', status: 'ok' };
+	const staged = { worktreeBranch: 'live/staged', worktreeBaseBranch: 'main', worktreeCreateNewBranch: false };
+
+	it('waits for the create and goes to the chat it created, never starting a second create', async () => {
+		let finish!: (value: typeof ok) => void;
+		post.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		const { sender, wsConn } = setup(staged, { realActiveSession: true });
+		const first = sender.sendMessage('first');
+		const second = sender.sendMessage('second');
+		await new Promise(resolve => setTimeout(resolve, 20));
+		finish(ok);
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(post.mock.calls.filter(([path]) => path === '/sessions/with-worktree')).toHaveLength(1);
+		const queries = wsConn.send.mock.calls.map(([frame]) => frame as Record<string, unknown>).filter(frame => frame.type === 'query');
+		expect(queries.map(frame => [frame.prompt, frame.session_id])).toEqual([['first', 'wt-c'], ['second', 'wt-c']]);
+	});
+
+	it('keeps the second send unsent when the create fails', async () => {
+		let fail!: (reason: unknown) => void;
+		post.mockReturnValueOnce(new Promise((_, reject) => { fail = reject; }));
+		const { sender, wsConn } = setup(staged, { realActiveSession: true });
+		const first = sender.sendMessage('first');
+		const second = sender.sendMessage('second');
+		await new Promise(resolve => setTimeout(resolve, 20));
+		fail({ status: 500, detail: 'worktree add failed' });
+		expect(await first).toBe(false);
+		expect(await second).toBe(false);
+		expect(post).toHaveBeenCalledTimes(1);
+		expect(wsConn.send.mock.calls.filter(([frame]) => (frame as { type?: string }).type === 'query')).toEqual([]);
 	});
 });

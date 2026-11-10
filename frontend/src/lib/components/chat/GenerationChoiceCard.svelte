@@ -15,11 +15,12 @@
 	 * collapsing never hides it. Saving never submits, re-quotes or approves.
 	 */
 	import '../deck/cards/card-design-system.css';
-	import { getContext, onMount, untrack } from 'svelte';
+	import { getContext, onDestroy, onMount, untrack } from 'svelte';
 	import { derived, get } from 'svelte/store';
 	import { TRANSCRIPT_PRESENTATION, TRANSCRIPT_ACTIONS, type TranscriptPresentation, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { ChevronDown, Check, Sparkles, TriangleAlert, Image as ImageIcon, Film, AudioLines, Box } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import type { SendReservation } from '$lib/stores/session/send-order';
 	import { generationChoices } from '$lib/stores/generation-choices.svelte';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { getErrorMessage } from '$lib/api/client';
@@ -335,6 +336,11 @@
 		!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving && !collapsed
 	);
 
+	// The pick's place in line while its save runs (#1444); an unmounted card
+	// gives it up.
+	let openTurn: SendReservation | null = null;
+	onDestroy(() => openTurn?.cancel());
+
 	async function use() {
 		const sourceSessionId = get(presentation).sessionId;
 		if (!canUse || !current || (variant === 'chat' && !canAct(sourceSessionId))) return;
@@ -348,6 +354,7 @@
 		// The reply's place in the chat is the click's, not the save's end: a
 		// message sent while the pick saves goes after it (#1444).
 		const turn = variant === 'chat' ? activeSession.reserveSend() : null;
+		openTurn = turn;
 		try {
 			const result =
 				handoff && onpick
@@ -369,6 +376,7 @@
 		} catch (e) {
 			saveError = getErrorMessage(e, 'Could not use this choice.');
 		} finally {
+			if (openTurn === turn) openTurn = null;
 			turn?.cancel();
 			saving = false;
 		}

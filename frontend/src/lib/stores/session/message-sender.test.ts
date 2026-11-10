@@ -2703,7 +2703,28 @@ describe('sends to one chat are written in the order they were sent (#1444)', ()
 		expect(prompts(wsConn)).toEqual(['second']);
 	});
 
-	it('lets the next send go after a while when a compact-first answer never comes', async () => {
+	// Round 2 S2: admission, not elapsed time, ends a compact-first send's turn.
+	it('keeps the next send behind a compact-first send whose admission takes longer than 10 s', async () => {
+		vi.useFakeTimers();
+		try {
+			let answer!: (value: unknown) => void;
+			apiMocks.post.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+			const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+			const sender = createMessageSender(deps);
+			const first = sender.sendMessage('compact then this', { compactFirst: true });
+			const second = sender.sendMessage('second');
+			await vi.advanceTimersByTimeAsync(11_000);
+			expect(prompts(wsConn)).toEqual([]);
+			answer({ turn_id: 'c', queued_turn_id: 'q', session_id: 's1' });
+			expect(await first).toBe(true);
+			expect(await second).toBe(true);
+			expect(prompts(wsConn)).toEqual(['second']);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('refuses the later send, never the earlier one, when a compact-first answer never comes', async () => {
 		vi.useFakeTimers();
 		try {
 			apiMocks.post.mockImplementationOnce(() => new Promise(() => {}));
@@ -2711,11 +2732,10 @@ describe('sends to one chat are written in the order they were sent (#1444)', ()
 			const sender = createMessageSender(deps);
 			void sender.sendMessage('compact then this', { compactFirst: true });
 			const second = sender.sendMessage('second');
-			await vi.advanceTimersByTimeAsync(9_000);
+			await vi.advanceTimersByTimeAsync(16_000);
+			expect(await second).toBe(false);
 			expect(prompts(wsConn)).toEqual([]);
-			await vi.advanceTimersByTimeAsync(2_000);
-			expect(await second).toBe(true);
-			expect(prompts(wsConn)).toEqual(['second']);
+			expect(deps.getState().error).toContain('was not sent');
 		} finally {
 			vi.useRealTimers();
 		}
@@ -2732,6 +2752,25 @@ describe('sends to one chat are written in the order they were sent (#1444)', ()
 		expect(await sender.sendMessage('composer message', { turn })).toBe(true);
 		expect(await panel).toBe(true);
 		expect(prompts(wsConn)).toEqual(['composer message', 'panel prompt']);
+	});
+
+	// Round 2 S5: a reservation never lapses while its owner can still send.
+	it('never lets a later send overtake a reserved place, however long its owner takes', async () => {
+		vi.useFakeTimers();
+		try {
+			const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+			const sender = createMessageSender(deps);
+			// A generation choice reserves at the click, then its save is slow.
+			const turn = sender.reserveSend();
+			const panel = sender.sendMessage('panel prompt');
+			await vi.advanceTimersByTimeAsync(16_000);
+			expect(await panel).toBe(false);
+			expect(prompts(wsConn)).toEqual([]);
+			expect(await sender.sendMessage('picked option', { turn })).toBe(true);
+			expect(prompts(wsConn)).toEqual(['picked option']);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('lets later sends go when a reserved place is given up', async () => {
@@ -2761,20 +2800,59 @@ describe('sends to one chat are written in the order they were sent (#1444)', ()
 		expect(frames[1].request_id).toBeUndefined();
 	});
 
-	it('keeps a new chat\'s second send unsent when the first send\'s chat is never adopted', async () => {
+	// Round 2 S3: an unadopted creation belongs to the lane, so a retry waits too.
+	it('keeps a new chat\'s later sends, a retry included, unsent while the first send\'s chat is not adopted', async () => {
 		vi.useFakeTimers();
 		try {
-			const { deps, wsConn } = makeDeps(baseState({ worktreeIntent: 'local', sessionId: null, messages: [] }));
+			const { deps, wsConn, internal } = makeDeps(baseState({ worktreeIntent: 'local', sessionId: null, messages: [] }));
 			const sender = createMessageSender(deps);
 			expect(await sender.sendMessage('first')).toBe(true);
+			const token = internal.pendingRequestId;
 			const second = sender.sendMessage('second');
-			await vi.advanceTimersByTimeAsync(11_000);
+			await vi.advanceTimersByTimeAsync(16_000);
 			expect(await second).toBe(false);
-			expect(prompts(wsConn)).toEqual(['first']);
 			expect(deps.getState().error).toContain('still being created');
+			// Sent again at once: still behind the first creation.
+			const retry = sender.sendMessage('second');
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(prompts(wsConn)).toEqual(['first']);
+			await vi.advanceTimersByTimeAsync(15_000);
+			expect(await retry).toBe(false);
+			expect(prompts(wsConn)).toEqual(['first']);
+			expect(internal.pendingRequestId).toBe(token);
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	// Round 2 S6: one lane for the compose, before and after adoption.
+	it('keeps a new chat\'s queued send ahead of one made just after the chat is adopted', async () => {
+		const { deps, wsConn, internal } = makeDeps(baseState({ worktreeIntent: 'local', sessionId: null, messages: [] }));
+		const sender = createMessageSender(deps);
+		expect(await sender.sendMessage('A')).toBe(true);
+		const b = sender.sendMessage('B');
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		// session_created adopts A's chat; C is sent before B's next look.
+		internal.pendingRequestId = null;
+		internal.awaitingNewSession = false;
+		deps.update((s) => ({ ...s, sessionId: 'created', title: 'A' }));
+		const c = sender.sendMessage('C');
+		expect(await b).toBe(true);
+		expect(await c).toBe(true);
+		const frames = wsConn.send.mock.calls.map(([frame]) => frame).filter((frame) => frame.type === 'query');
+		expect(frames.map((frame) => [frame.prompt, frame.session_id ?? null])).toEqual([['A', null], ['B', 'created'], ['C', 'created']]);
+	});
+
+	it('does not turn a new chat\'s queued send into a second create when the first creation ends without a chat', async () => {
+		const { deps, wsConn, internal } = makeDeps(baseState({ worktreeIntent: 'local', sessionId: null, messages: [] }));
+		const sender = createMessageSender(deps);
+		expect(await sender.sendMessage('A')).toBe(true);
+		const b = sender.sendMessage('B');
+		// The backend refused A's creation: its token is withdrawn, no chat.
+		internal.pendingRequestId = null;
+		internal.awaitingNewSession = false;
+		expect(await b).toBe(false);
+		expect(prompts(wsConn)).toEqual(['A']);
 	});
 
 	it('lets the next send go once a voice call\'s text frame is written, before its acknowledgement', async () => {
