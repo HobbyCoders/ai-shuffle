@@ -673,11 +673,13 @@ def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
             await _fire(row)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 — a wake failure must never leak.
+        except Exception as exc:  # noqa: BLE001 — a wake failure must never leak.
             logger.exception(
                 "wakeup task failed id=%s session=%s",
                 row.get("id"), row.get("session_id"),
             )
+            if _keeps_row(row):  # its row is still there: retried, never abandoned (#1419)
+                await _rearm_after_failed_submit(row, f"a read before its submit failed ({exc})")
 
     task = asyncio.create_task(_run(), name=f"wakeup-{row.get('session_id')}")
     if not wakeup_id:

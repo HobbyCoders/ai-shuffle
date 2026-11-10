@@ -2173,3 +2173,23 @@ async def test_1419_a_pending_notice_never_travels_with_a_later_move_and_is_drop
     with patch("app.network.control.owner_of", return_value="dev-gaming"):
         await wakeup_service._fire(wake)
     assert _notices() == [] and wakeups.get_session_wakeups("s1", source=sh.FAILED_PAYLOAD) == []
+
+
+async def test_1419_a_notice_whose_eligibility_read_fails_once_is_retried_and_delivered_once():
+    from app.core import wakeup_service
+    from app.db import wakeups
+    _chat()
+    real, calls = wakeups.pending_not_stopped, []
+
+    def _fails_once(wakeup_id):
+        calls.append(wakeup_id)
+        if len(calls) == 1:
+            raise RuntimeError("database unavailable")
+        return real(wakeup_id)
+
+    with patch.object(wakeups, "pending_not_stopped", side_effect=_fails_once), \
+            patch.object(wakeup_service, "_RETRY_BASE_SECONDS", 0.01):
+        await _agent_move_ends("move")
+        await _notice_runs()
+        await _settle(lambda: False, rounds=20)
+    assert len(calls) >= 2 and len(_notices()) == 1 and wakeups.get_session_wakeups("s1") == []
