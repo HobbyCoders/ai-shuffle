@@ -43,6 +43,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const NET_BODY_MARKER = "net-body-marker-12345";
+/** HOLD_MS: how long /review/hold waits, at most, before it answers by itself. */
+const HOLD_MS = 5000;
+/** Answers the /review/hold request a page is blocked on (a synchronous XHR). */
+let answerHold: (() => void) | undefined;
 
 /** Small HTTP app: an HTML page that logs to the console and fetches JSON. */
 function startHttpApp(): Promise<{ server: HttpServer; url: string; holdHistoryStream: () => { request: Promise<void>; release: () => void } }> {
@@ -72,6 +76,14 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
         res.write('<!doctype html><title>Streamed history</title><p>Early prose</p><script>window.persisted=false;addEventListener("pageshow",e=>window.persisted=e.persisted)</script>' + " ".repeat(2048));
         gate?.requested();
         void (gate?.released ?? Promise.resolve()).then(() => res.end('<button>Late streamed button</button><p>Stream finished</p>'));
+        return;
+      }
+      if (url.pathname === "/review/hold") {
+        // Held until the test answers it. The fallback answer keeps a page
+        // whose action never returns from hanging the suite.
+        const answer = () => { clearTimeout(fallback); if (answerHold === answer) answerHold = undefined; res.writeHead(200, { "content-type": "text/plain" }); res.end("ok"); };
+        const fallback = setTimeout(answer, HOLD_MS);
+        answerHold = answer;
         return;
       }
       if (url.pathname === "/review/nested-parent") {
@@ -1279,36 +1291,46 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(await keyEvents(page, "c")).toEqual(["down c", "up c"]);
       expect(await page.inputValue("input")).toMatch(/c$/);
     });
-    // The first key or click the page gets blocks it for 5s, past the 2s ref
-    // budget. The release must not wait for it: the action reaches its
-    // cleanup while the page is still blocked, and the keyups land once it is
-    // free, ahead of the next action's keys.
-    const blockOnce = "if(!window.blocked){window.blocked=1;const t=Date.now();while(Date.now()-t<5000);}";
-    const blockingField = `<input aria-label="Entry" ${keyLog}><script>document.querySelector("input").addEventListener("keydown",()=>{${blockOnce}})</script>`;
-    it.each<[string, string, Partial<ActInput> & { target: string }, string, string[]]>([
-      ["Control+a key press", blockingField, { kind: "key", target: "Entry", key: "a", modifiers: ["Control"] }, "c", ["down c", "up c"]],
-      ["single key press", blockingField, { kind: "key", target: "Entry", key: "a" }, "a", ["down a", "up a", "down a", "up a"]],
-      ["Control-click", `<button onclick="${blockOnce}">Busy</button><input aria-label="Entry" ${keyLog}>`, { kind: "click", target: "Busy", modifiers: ["Control"] }, "c", ["down c", "up c"]],
-    ])("releases the keys of a %s that a blocked page timed out, without waiting for the page", async (_name, html, { target, ...action }, next, events) => {
+    // The first focus, key or click the page gets blocks it on a request the
+    // test answers, past the 2s budget of a ref action. Only keys whose keydown
+    // went out may be released, and the release must not wait for the page: the
+    // action reaches its cleanup while the page is still blocked, and the
+    // keyups land once it is free, ahead of the next action's keys.
+    const blockOnce = 'if(!window.blocked){window.blocked=1;const x=new XMLHttpRequest();x.open("GET","/review/hold",false);x.send();}';
+    const blockOn = (event: string) => `<script>document.querySelector("[aria-label=Entry]").addEventListener("${event}",()=>{${blockOnce}})</script>`;
+    const entry = `<input aria-label="Entry" ${keyLog}>`;
+    const combobox = `<button role="combobox" aria-label="Entry" aria-controls="choices" ${keyLog}>Choose</button><ul id="choices" role="listbox" hidden><li role="option">One</li></ul>`;
+    it.each<[string, string, Partial<ActInput> & { target: string }, string, Record<string, string[]>, string | null]>([
+      ["Control+a key press", entry + blockOn("keydown"), { kind: "key", target: "Entry", key: "a", modifiers: ["Control"] }, "c", { c: ["down c", "up c"], a: [] }, "c"],
+      ["single key press", entry + blockOn("keydown"), { kind: "key", target: "Entry", key: "a" }, "a", { a: ["down a", "up a", "down a", "up a"] }, "aa"],
+      ["Control+Delete on a field whose focus handler blocked", entry + blockOn("focus"), { kind: "key", target: "Entry", key: "Delete", modifiers: ["Control"] }, "c", { c: ["down c", "up c"], Control: [], Delete: [] }, "c"],
+      ["type", entry + blockOn("keydown"), { kind: "type", target: "Entry", value: "ab" }, "a", { a: ["down a", "up a", "down a", "up a"], b: [] }, "aa"],
+      ["combobox select", combobox + blockOn("keydown"), { kind: "select", target: "Entry", value: "One" }, "ArrowDown", { ArrowDown: ["down ArrowDown", "up ArrowDown", "down ArrowDown", "up ArrowDown"] }, null],
+      ["Control-click", `<button onclick='${blockOnce}'>Busy</button>${entry}`, { kind: "click", target: "Busy", modifiers: ["Control"] }, "c", { c: ["down c", "up c"] }, "c"],
+    ])("releases only the keys a %s sent when a blocked page timed it out, without waiting for the page", async (_name, html, { target, ...action }, next, events, value) => {
       const page = await load(html);
       const disposeWatch = session.disposeWatch.bind(session);
       let reached = Infinity;
       const started = performance.now();
       const cleanup = vi.spyOn(session, "disposeWatch").mockImplementation(() => {
         reached = Math.min(reached, performance.now() - started);
+        answerHold?.(); // the page is free from here on, so the run ends promptly
         return disposeWatch();
       });
       try {
         expect(body(await runAct(session, { ...action, ref: await ref(target) } as ActInput))).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
       } finally {
         cleanup.mockRestore();
+        answerHold?.();
       }
-      expect(reached).toBeLessThan(4000);
+      // An action that waited for the page reaches its cleanup only once the
+      // request answers by itself, after HOLD_MS.
+      expect(reached).toBeLessThan(HOLD_MS - 1500);
       await page.evaluate(() => 0); // answers once the page is free again
       expect(body(await runAct(session, { kind: "key", ref: await ref("Entry"), key: next }))).toMatchObject({ ok: true });
-      expect(await keyEvents(page, next)).toEqual(events);
+      for (const [key, expected] of Object.entries(events)) expect(await keyEvents(page, key)).toEqual(expected);
       expect((await keyEvents(page, "Control")).at(-1) ?? "up Control").toBe("up Control");
-      expect(await page.inputValue("input")).toBe(next === "a" ? "aa" : "c");
+      if (value !== null) expect(await page.inputValue("input")).toBe(value);
     }, 15000);
     it("does not count a click as done when the page blocked before Playwright could check it", async () => {
       // The cover appears as the pointer arrives and the page then blocks, so

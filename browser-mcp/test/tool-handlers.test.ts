@@ -272,10 +272,23 @@ describe("browser_upload guards", () => {
 // ---------------------------------------------------------------------------
 // browser_act
 
-function actSession(locator: Record<string, unknown>): Session {
+// A keyboard that refuses keys Playwright does not know, as Playwright does.
+const KNOWN_KEYS = new Set(["Control", "Shift", "Alt", "Meta", "Enter", "ArrowDown", "Delete", "a", "b"]);
+function fakeKeyboard() {
+  const check = (verb: string, key: string) => { if (!KNOWN_KEYS.has(key)) throw new Error(`keyboard.${verb}: Unknown key: "${key}"`); };
   return {
-    ensurePage: async () => ({ url: () => "http://h/" }),
-    resolveRef: () => locator,
+    down: vi.fn(async (key: string) => check("down", key)),
+    up: vi.fn(async (key: string) => check("up", key)),
+    type: vi.fn(async (_text: string) => {}),
+  };
+}
+
+function actSession(locator: Record<string, unknown>, keyboard = fakeKeyboard()): Session {
+  // A ref is focused with an empty type before its keys go out.
+  const target = { pressSequentially: async () => {}, ...locator };
+  return {
+    ensurePage: async () => ({ url: () => "http://h/", keyboard }),
+    resolveRef: () => target,
     beginWatch: async () => {},
     disposeWatch: async () => {},
     invalidateScreenshot: () => {},
@@ -291,10 +304,12 @@ function actSession(locator: Record<string, unknown>): Session {
 describe("browser_act type budget", () => {
   it("scales the ref timeout with the value so a long value is not cut off as stale_ref", async () => {
     const pressSequentially = vi.fn(async () => {});
+    const keyboard = fakeKeyboard();
     const value = "x".repeat(3000);
-    const res = await runAct(actSession({ pressSequentially }), { kind: "type", ref: "e1", value });
+    const res = await runAct(actSession({ pressSequentially }, keyboard), { kind: "type", ref: "e1", value });
     expect(bodyOf(res).ok).toBe(true);
-    expect(pressSequentially).toHaveBeenCalledWith(value, { timeout: typeTimeoutMs(value) });
+    expect(pressSequentially).toHaveBeenCalledWith("", { timeout: typeTimeoutMs(value) });
+    expect(keyboard.type).toHaveBeenCalledTimes(3000);
     expect(typeTimeoutMs(value)).toBe(2000 + 3000 * TYPE_MS_PER_CHAR);
     expect(typeTimeoutMs("")).toBe(2000);
   });
@@ -435,22 +450,36 @@ describe("browser_act outcomes", () => {
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
     expect(String(bodyOf(res).error)).toContain("Unknown key");
   });
-  // A failed key press releases what it may have left down (#1423), and a
-  // release that fails does not replace the press's own error.
-  it.each<[string, Record<string, unknown>, string, string[]]>([
-    ["the modifier before an unknown key", { key: "Foo", modifiers: ["Control"] }, unknownKey("Foo", "Control+Foo"), ["Control"]],
-    ["the key before an unknown key", { key: 'a+a"' }, unknownKey('a"', 'a+a"'), ["a"]],
-    ["nothing for an unknown first key", { key: "Foo+a" }, unknownKey("Foo", "Foo+a"), []],
-    ["every key of a chord that timed out after it began", { key: "a", modifiers: ["Control", "Shift"] }, log("press", 'elementHandle.press("Control+Shift+a")'), ["a", "Shift", "Control"]],
-    ["nothing for a press that timed out before it began", { key: "a", modifiers: ["Control"] }, log("press", "waiting for element to be visible"), []],
-  ])("releases %s", async (_name, input, message, released) => {
-    const press = vi.fn(async () => { throw new Error(message); });
-    const up = vi.fn(async () => { throw new Error("Target closed"); });
-    const session = { ...actSession({ press, count: async () => 1 }), ensurePage: async () => ({ url: () => "http://h/", keyboard: { up } }) } as unknown as Session;
-    const res = await runAct(session, { kind: "key", ref: "e7", ...input } as ActInput);
-    expect(up.mock.calls.map(call => call[0])).toEqual(released);
+  // A failed key press releases the keys whose keydown it sent, and only those
+  // (#1423). A release that fails does not replace the press's own error.
+  const focusTimeout = ["locator.pressSequentially: Timeout 2000ms exceeded.", "Call log:", "  - waiting for locator('aria-ref=e7')", '  - elementHandle.type("")'].join("\n");
+  it.each<[string, Record<string, unknown>, { focus?: string; press?: string }, string[], string]>([
+    ["the modifier before an unknown last key", { key: "Foo", modifiers: ["Control"] }, { press: unknownKey("Foo", "Foo") }, ["Control"], "outcome_unknown"],
+    ["the key before an unknown last key", { key: 'a+a"' }, { press: unknownKey('a"', 'a"') }, ["a"], "outcome_unknown"],
+    ["nothing for an unknown first key", { key: "Foo+a" }, {}, [], "invalid_input"],
+    ["every key of a chord whose last key timed out after its press began", { key: "a", modifiers: ["Control", "Shift"] }, { press: log("press", 'elementHandle.press("a")') }, ["a", "Shift", "Control"], "outcome_unknown"],
+    ["only the modifiers when the last key timed out before its press began", { key: "a", modifiers: ["Control"] }, { press: log("press") }, ["Control"], "outcome_unknown"],
+    ["nothing when focusing the ref timed out", { key: "Delete", modifiers: ["Control"] }, { focus: focusTimeout }, [], "outcome_unknown"],
+  ])("releases %s", async (_name, input, fail, released, code) => {
+    const press = vi.fn(async () => { if (fail.press) throw new Error(fail.press); });
+    const pressSequentially = vi.fn(async () => { if (fail.focus) throw new Error(fail.focus); });
+    const keyboard = fakeKeyboard();
+    keyboard.up.mockImplementation(async () => { throw new Error("Target closed"); });
+    const res = await runAct(actSession({ press, pressSequentially, count: async () => 1 }, keyboard), { kind: "key", ref: "e7", ...input } as ActInput);
+    expect(keyboard.up.mock.calls.map(call => call[0])).toEqual(released);
+    expect(bodyOf(res)).toMatchObject({ ok: false, code });
     expect(String(bodyOf(res).error)).not.toContain("Target closed");
+    if (fail.focus) { expect(keyboard.down).not.toHaveBeenCalled(); expect(press).not.toHaveBeenCalled(); }
   });
+  it("types a ref one character per call and stops the text where the page stopped answering", async () => {
+    const keyboard = fakeKeyboard();
+    keyboard.type.mockImplementation(async (char: string) => { if (char === "b") await new Promise(() => {}); });
+    const res = await runAct(actSession({ count: async () => 1 }, keyboard), { kind: "type", ref: "e7", value: "abc" });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+    expect(String(bodyOf(res).error)).toContain("1 of 3 characters typed");
+    expect(keyboard.type.mock.calls.map(call => call[0])).toEqual(["a", "b"]);
+    expect(keyboard.up).not.toHaveBeenCalled();
+  }, 10000);
   // Words the caller typed are not Playwright's verdict on the input.
   it.each(["Unknown key", "Malformed value", "Element is not a <select> element"])("reports typing %j into a page that never answered as outcome_unknown", async value => {
     const pressSequentially = vi.fn(async () => { throw new Error(["locator.pressSequentially: Timeout 2000ms exceeded.", "Call log:", "  - waiting for locator('aria-ref=e7')", `  - elementHandle.type("${value}")`].join("\n")); });

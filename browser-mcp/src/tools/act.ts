@@ -91,6 +91,8 @@ const PERFORMING_RE = /^\s*-\s*performing \S+(?: and \S+)? action$/;
  * says the input went out only when the call then got no answer.
  */
 const STARTED_RE = /^\s*-\s*(?:elementHandle\.press\(|waiting for element to be visible(?:, enabled and editable| and enabled)$)/;
+/** Call-log line of the empty type that focuses a ref before its keys (focusForKeys). */
+const FOCUS_STARTED_RE = /^\s*-\s*elementHandle\.type\(""\)$/;
 /** Playwright's own budget ran out: the call got no answer. Only its headline says so. */
 const TIMEOUT_RE = /^\S+: Timeout \d+ms exceeded\./;
 /** Call-log line Playwright writes once the page took a pointer gesture on its target. */
@@ -135,16 +137,16 @@ function chordPartlyPressed(message: string, chord: string): boolean {
 }
 
 /**
- * The keys of a chord a failed press may have left down. Playwright presses
- * them in order and stops at the first key it does not know, with the keys
- * before it down; the last key the failure could be naming is used, so an
- * ambiguous name releases more rather than less. Any other failure once the
- * press began may have stopped at any key.
+ * The keys of a chord `page.keyboard.press` left down when it failed. It
+ * presses them in order and stops at the first key it does not know, with the
+ * keys before it down; the last key the failure could be naming is used, so an
+ * ambiguous name releases more rather than less. It has no timeout, so any
+ * other failure (the page went away) may have stopped at any key.
  */
-function keysLeftDown(message: string, chord: string, started: boolean): string[] {
+function keysLeftDown(message: string, chord: string): string[] {
   const keys = chordKeys(chord);
   for (let at = keys.length - 1; at >= 0; at--) if (refusesKey(message, keys[at])) return keys.slice(0, at);
-  return started ? keys : [];
+  return keys;
 }
 
 /**
@@ -166,6 +168,87 @@ async function releaseKeys(page: Page, keys: string[]): Promise<void> {
   await raceWithTimeout(Promise.all(ups), KEY_RELEASE_WAIT_MS, "key release timed out").catch(() => undefined);
 }
 
+const errorText = (err: unknown): string => err instanceof Error ? err.message : String(err);
+
+/** Time left before `deadline`, as a Playwright timeout (0 would mean none). */
+const timeLeft = (deadline: number): number => Math.max(1, Math.ceil(deadline - performance.now()));
+
+/**
+ * Focus a ref the way Playwright's press and type do (an input that was not
+ * focused gets its caret reset), before any key goes out. A press or type that
+ * then times out on a blocked page was blocked by a key, not by the page's
+ * focus handler, so the keys it may have left down are known (#1423). A focus
+ * Playwright began and never heard back from may have run the page's focus
+ * handler, so it counts as sent, as it did when the press focused.
+ */
+async function focusForKeys(locator: Locator, timeout: number, markSent: () => void): Promise<void> {
+  try {
+    await locator.pressSequentially("", { timeout });
+  } catch (err) {
+    const lines = failureLines(errorText(err));
+    if (TIMEOUT_RE.test(lines[0] ?? "") && lines.some(line => FOCUS_STARTED_RE.test(line))) markSent();
+    throw err;
+  }
+}
+
+/**
+ * Press a chord on a ref, leaving none of its keys down when it fails
+ * (#1423). Playwright's own press gives up on a page that stops answering with
+ * the keys it had pressed still down, and says nothing of how far it got. So
+ * the chord's modifiers go down one call at a time, which records each keydown
+ * this action sent, and Playwright presses the last key, which keeps its wait
+ * for a navigation that key started. Only keys whose keydown went out are
+ * released, without waiting on a page that is still blocked.
+ */
+async function pressOnRef(page: Page, locator: Locator, chord: string, markSent: () => void): Promise<void> {
+  const deadline = performance.now() + REF_ACTION_TIMEOUT_MS;
+  await focusForKeys(locator, REF_ACTION_TIMEOUT_MS, markSent);
+  const keys = chordKeys(chord);
+  const last = keys.pop()!;
+  const down: string[] = [];
+  try {
+    for (const key of keys) {
+      markSent();
+      down.push(key);
+      try {
+        await raceWithTimeout(page.keyboard.down(key), timeLeft(deadline), `keyboard.down: Timeout ${REF_ACTION_TIMEOUT_MS}ms exceeded.`);
+      } catch (err) {
+        if (refusesKey(errorText(err), key)) down.pop();
+        throw err;
+      }
+    }
+    try {
+      await locator.press(last, { timeout: timeLeft(deadline) });
+    } catch (err) {
+      // Its keydown went out once Playwright logged the press: the ref is
+      // already focused, so that is the next thing it sends.
+      const msg = errorText(err);
+      if (!refusesKey(msg, last) && inputMayHaveGoneOut(failureLines(msg, chordEchoes(last)))) down.push(last);
+      throw err;
+    }
+  } finally {
+    await releaseKeys(page, down);
+  }
+}
+
+/**
+ * Type into a ref one character per call. Playwright's pressSequentially gives
+ * up on a page that stops answering with the key it was pressing still down
+ * (#1423). A call of its own for each character has no timeout of
+ * Playwright's, so Playwright finishes the key in flight (its keyup goes out
+ * once the page answers) while this stops the text there.
+ */
+async function typeOnRef(page: Page, locator: Locator, value: string, markSent: () => void): Promise<void> {
+  const budget = typeTimeoutMs(value);
+  const deadline = performance.now() + budget;
+  await focusForKeys(locator, budget, markSent);
+  const chars = [...value];
+  for (const [at, char] of chars.entries()) {
+    markSent();
+    await raceWithTimeout(page.keyboard.type(char), timeLeft(deadline), `keyboard.type: Timeout ${budget}ms exceeded with ${at} of ${chars.length} characters typed.`);
+  }
+}
+
 /**
  * Where Playwright quotes this action's text back in a failure: the value of a
  * type or a fill, the chord of a key press, and the key of that chord it does
@@ -177,8 +260,13 @@ function echoedText(input: ActInput): Echo[] {
   if (input.kind === "type") return [['elementHandle.type("', input.value ?? "", '")']];
   if (input.kind === "fill") return [['fill("', input.value ?? "", '")']];
   if (input.kind !== "key") return [];
-  const chord = keyChord(input);
-  return [['elementHandle.press("', chord, '")'], ...chordKeys(chord).map((key): Echo => ['Unknown key: "', key, '"'])];
+  return chordEchoes(keyChord(input));
+}
+
+/** Where Playwright quotes a chord back: a press of it or of its last key, and a key of it it does not know. */
+function chordEchoes(chord: string): Echo[] {
+  const keys = chordKeys(chord);
+  return [['elementHandle.press("', chord, '")'], ['elementHandle.press("', keys[keys.length - 1], '")'], ...keys.map((key): Echo => ['Unknown key: "', key, '"'])];
 }
 
 /**
@@ -664,7 +752,7 @@ async function performAction(
 
     case "type": {
       const value = requireValue(input.value, "type");
-      if (locator) await locator.pressSequentially(value, { timeout: typeTimeoutMs(value) });
+      if (locator) await typeOnRef(page, locator, value, markSent);
       else {
         markSent();
         await page.mouse.click(point![0], point![1]);
@@ -686,7 +774,7 @@ async function performAction(
     }
 
     case "select": {
-      await selectValues(locator!, input, markSent);
+      await selectValues(page, locator!, input, markSent);
       return;
     }
 
@@ -698,14 +786,13 @@ async function performAction(
     case "key": {
       if (!input.key) throw new Error("invalid_input: `key` requires `key`");
       const combo = keyChord(input);
+      if (locator) { await pressOnRef(page, locator, combo, markSent); return; }
+      markSent();
       try {
-        if (locator) await locator.press(combo, refTimeout);
-        else { markSent(); await page.keyboard.press(combo); }
+        await page.keyboard.press(combo);
       } catch (err) {
         // Playwright releases a chord only when the whole press succeeds.
-        const msg = err instanceof Error ? err.message : String(err);
-        const started = !locator || inputMayHaveGoneOut(failureLines(msg, echoedText(input)));
-        await releaseKeys(page, keysLeftDown(msg, combo, started));
+        await releaseKeys(page, keysLeftDown(errorText(err), combo));
         throw err;
       }
       return;
@@ -790,7 +877,7 @@ function readScrollPosition(el: Element, args: { direction: string; point?: numb
   return { x: target.scrollLeft, y: target.scrollTop, max_x: maxX, max_y: maxY, at_end: atEnd };
 }
 
-async function selectValues(locator: Locator, input: ActInput, markSent: () => void): Promise<void> {
+async function selectValues(page: Page, locator: Locator, input: ActInput, markSent: () => void): Promise<void> {
   if (input.value !== undefined && input.values !== undefined) throw new Error("invalid_input: select takes value OR values[], not both");
   const values = input.values ?? [requireValue(input.value, "select")];
   if (!Array.isArray(values) || values.some(value => typeof value !== "string")) throw new Error("invalid_input: values must be an array of option values/labels");
@@ -822,7 +909,7 @@ async function selectValues(locator: Locator, input: ActInput, markSent: () => v
   if (info.role === "combobox") {
     await locator.click({ timeout: REF_ACTION_TIMEOUT_MS });
     markSent();
-    if (!(await scope.getByRole("option").first().isVisible())) await locator.press("ArrowDown", { timeout: REF_ACTION_TIMEOUT_MS });
+    if (!(await scope.getByRole("option").first().isVisible())) await pressOnRef(page, locator, "ArrowDown", markSent);
   }
   const option = scope.getByRole("option", { name: values[0], exact: true });
   try { await option.first().waitFor({ state: "visible", timeout: REF_ACTION_TIMEOUT_MS }); }
