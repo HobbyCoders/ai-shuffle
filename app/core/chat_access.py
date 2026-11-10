@@ -576,37 +576,61 @@ def grant_failure(exc: BaseException) -> tuple[int, str]:
     return 500, "Private access is unavailable on this worker. Check the worker log before retrying."
 
 
-def outcome_frame(request: AccessRequest, grant: Grant | None) -> dict:
+def outcome_frame(request: AccessRequest, grant: Grant | None, *, for_main: bool = False) -> dict:
     """The notice for a service card the owner answered (#1420).
 
     Names only what ``Grant.model_public`` exposes: no address, label or credential.
+    ``for_main`` is the main chat's copy of a subagent's answer: ids and the
+    answer only, never the handle, which belongs to the subagent.
     """
+    asked = f"private {request.kind} access request {request.id}"
+    if for_main:
+        asked += f" from subagent session {request.session_id}"
     if grant is None:
-        status, summary = "declined", (
-            f"The user declined private {request.kind} access request {request.id}. "
-            "Do not request it again without the user's consent.")
+        status, summary = "declined", f"The user declined {asked}. " + (
+            "Do not have it requested again without the user's consent." if for_main
+            else "Do not request it again without the user's consent.")
+    elif for_main:
+        status, summary = "granted", (
+            f"The user approved {asked}. The handle belongs to that subagent and this chat "
+            "cannot use it. If the subagent has ended, message it to continue.")
     else:
         status, summary = "granted", (
-            f"The user approved private {request.kind} access request {request.id}. "
-            f"Usable handle: {json.dumps(grant.model_public())}")
+            f"The user approved {asked}. Usable handle: {json.dumps(grant.model_public())}")
     return {"task_id": f"access-{request.id}", "kind": "access", "status": status, "summary": summary}
 
 
-async def deliver_outcome(session_id: str, frame: dict, *, subagent: bool) -> None:
+def _outcome_target(session_id: str) -> tuple[str | None, bool]:
+    """(chat to notify, whether ``session_id`` is a subagent), from persisted rows."""
+    from app.core.provider_agent import is_subagent_row
+    from app.db import database
+    row = database.get_session(session_id)
+    if not row:
+        raise LookupError("session row missing")
+    if not is_subagent_row(row):
+        return session_id, False
+    return main_session_of(session_id), True
+
+
+async def deliver_outcome(request: AccessRequest, grant: Grant | None) -> None:
     """Steer the notice into a running turn, else queue a wake (turn_scheduler).
 
-    A local Task child gets it only while its own turn runs: a wake would
-    start a turn its parent never collects. ``steer_only`` carries that through
-    the scheduler, so a child that ends after this check is dropped, never
-    woken. An ended child's grant stays usable if the child is resumed.
+    A subagent's own session never gets it, by steer or wake: a finished child
+    would be restarted, a delegated CLI could take it as a follow-up. Its main
+    chat, which shows the card, gets a copy without the handle; nobody does when
+    there is no local main chat or the rows cannot be read.
     """
-    from app.core import session_runtime, turn_scheduler
-    if subagent:
-        if session_runtime.get_live_runtime(session_id) is None:
-            logger.info("Private access outcome for ended subagent %s not delivered", session_id)
-            return
-        frame = {**frame, "steer_only": True}
-    await turn_scheduler.on_access_outcome(session_id, frame)
+    from app.core import turn_scheduler
+    from app.db.async_database import run_sync
+    try:
+        target, subagent = await run_sync(_outcome_target, request.session_id)
+    except Exception as exc:  # noqa: BLE001 — fail closed, never the asker's own lane
+        logger.warning("Private access outcome for %s not delivered: %s", request.session_id, type(exc).__name__)
+        return
+    if target is None:
+        logger.info("Private access outcome for subagent %s not delivered: no main chat here", request.session_id)
+        return
+    await turn_scheduler.on_access_outcome(target, outcome_frame(request, grant, for_main=subagent))
 
 
 class Broker:
@@ -702,7 +726,7 @@ class Broker:
             chat_access_routing.notify_watchers(target, saved=saved)
 
     def _deliver_outcome(self, request: AccessRequest, grant: Grant | None) -> None:
-        """Tell the requesting chat the owner answered its service card.
+        """Tell the requesting chat (a subagent's main chat) the owner answered its service card.
 
         Machine and folder requests are answered by their waiting tool call, so
         they never get a second notice. The scheduler latches one per request.
@@ -713,8 +737,7 @@ class Broker:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        task = loop.create_task(deliver_outcome(request.session_id, outcome_frame(request, grant),
-                                                subagent=request.session_id in self._main))
+        task = loop.create_task(deliver_outcome(request, grant))
         self._notifications.add(task)
         task.add_done_callback(self._notifications.discard)
 

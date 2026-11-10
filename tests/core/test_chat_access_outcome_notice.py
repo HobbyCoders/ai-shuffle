@@ -123,35 +123,6 @@ async def test_user_stopped_chat_gets_no_notice(asker, monkeypatch):
     assert steer.await_count == 0 and _wakes("asker") == []
 
 
-@pytest.mark.asyncio
-async def test_task_child_that_ends_before_the_steer_is_never_woken(asker, monkeypatch):
-    """Live at the broker's check, gone by the steer: drop, never queue a wake.
-
-    A wake would start a turn on a child whose parent already collected its
-    result. The same holds when an accepted steer strands at the turn's end.
-    """
-    from app.core import session_runtime
-
-    chat("child")
-    asker._main["child"] = "asker"
-    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: object())
-    steer = AsyncMock(return_value=False)
-    monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", steer)
-    pending = await asker.request("child", "service", "Read DNS records", service_provider="custom")
-    await _settle(asker)
-
-    await asker.decline("child", pending["request_id"])
-    await _settle(asker)
-
-    assert steer.await_count == 1
-    assert _wakes("child") == []
-
-    frames = steer.await_args.args[2]
-    await turn_scheduler.on_task_notification_stranded(
-        "child", frames, [f["task_id"] for f in frames])
-    assert _wakes("child") == []
-
-
 class _NullProvider:
     name = "null"
 
@@ -205,19 +176,109 @@ async def test_access_notice_is_not_a_background_task_in_the_engine(asker, monke
     await assert_no_receipt()
 
 
+# A subagent's card shows in its main chat. Its own session never gets the
+# notice (a finished child would be restarted, a delegated CLI could take it as
+# a follow-up); the main chat gets a copy without the handle. Identity comes
+# from the persisted rows (is_worker, parent_session_id), never ``_main``.
+
+
+def _notices(session_id):
+    return [f for t in _wakes(session_id) for f in (t.get("payload") or {}).get("pending_frames") or []]
+
+
+def _steered(steer):
+    return [call.args[0] for call in steer.await_args_list]
+
+
 @pytest.mark.asyncio
-async def test_running_task_child_gets_one_steer_and_no_wake(asker, monkeypatch):
+@pytest.mark.parametrize("child_live", [True, False], ids=["child-running", "child-finished"])
+async def test_subagent_outcome_reaches_its_main_chat_never_the_child(asker, monkeypatch, child_live):
     from app.core import session_runtime
 
-    chat("child")
-    asker._main["child"] = "asker"
-    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: object())
+    chat("child", is_worker=True, parent_session_id="asker")
+    if child_live:
+        monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: object())
+    steer = AsyncMock(return_value=False)
+    monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", steer)
+    pending = await asker.request("child", "service", "Read DNS records", service_provider="custom")
+    await _settle(asker)
+    asker._main.clear()  # the evictable UI cache must not decide who is notified
+
+    assert (await asker.fulfill("child", pending["request_id"], _submission()))["granted"]
+    await _settle(asker)
+
+    assert "child" not in _steered(steer) and _wakes("child") == []
+    [notice] = _notices("asker")
+    assert notice["task_id"] == f"access-{pending['request_id']}" and notice["status"] == "granted"
+    [wake] = _wakes("asker")
+    [grant] = asker.grants.values()
+    assert pending["request_id"] in wake["prompt"] and "subagent session child" in wake["prompt"]
+    assert "cannot use it" in wake["prompt"] and "message it to continue" in wake["prompt"]
+    # No handle and nothing about the resource in the main chat's copy.
+    for private in (grant.id, _SECRET, "private-example", _LABEL, "expires_at", "writable"):
+        assert private not in wake["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_nested_subagent_outcome_goes_to_the_root_chat(asker, monkeypatch):
+    chat("child", is_worker=True, parent_session_id="asker")
+    chat("grandchild", is_worker=True, parent_session_id="child")
+    monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", AsyncMock(return_value=False))
+    pending = await asker.request("grandchild", "service", "Read DNS records", service_provider="custom")
+    await asker.decline("grandchild", pending["request_id"])
+    await _settle(asker)
+
+    assert _wakes("grandchild") == [] and _wakes("child") == []
+    [wake] = _wakes("asker")
+    assert "subagent session grandchild" in wake["prompt"] and "<status>declined</status>" in wake["prompt"]
+    assert "Do not have it requested again without the user's consent." in wake["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_two_subagents_answers_are_two_notices_in_the_main_chat(asker, monkeypatch):
+    monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", AsyncMock(return_value=False))
+    ids = []
+    for child in ("child-a", "child-b"):
+        chat(child, is_worker=True, parent_session_id="asker")
+        ids.append((await asker.request(child, "service", "Read DNS records", service_provider="custom"))["request_id"])
+    await asker.decline("child-a", ids[0])
+    assert (await asker.fulfill("child-b", ids[1], _submission()))["granted"]
+    await _settle(asker)
+
+    assert sorted(f["task_id"] for f in _notices("asker")) == sorted(f"access-{i}" for i in ids)
+
+
+@pytest.mark.asyncio
+async def test_stopped_main_chat_gets_no_subagent_notice(asker, monkeypatch):
+    from app.core.task_registry import task_registry
+
+    chat("child", is_worker=True, parent_session_id="asker")
+    monkeypatch.setattr(task_registry, "is_user_stopped", lambda sid: sid == "asker")
     steer = AsyncMock(return_value=True)
     monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", steer)
     pending = await asker.request("child", "service", "Read DNS records", service_provider="custom")
     await asker.decline("child", pending["request_id"])
     await _settle(asker)
-    assert steer.await_count == 1 and "<status>declined</status>" in steer.await_args.args[1]
+    assert steer.await_count == 0 and _wakes("asker") == [] and _wakes("child") == []
 
-    await turn_scheduler.on_access_outcome("child", steer.await_args.args[2][0])
-    assert steer.await_count == 1 and _wakes("child") == []
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing-row", "lookup-error"])
+async def test_unreadable_asker_row_notifies_nobody(asker, monkeypatch, failure):
+    steer = AsyncMock(return_value=True)
+    monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", steer)
+    asker_id = "ghost" if failure == "missing-row" else "asker"
+    pending = await asker.request(asker_id, "service", "Read DNS records", service_provider="custom")
+    await _settle(asker)
+
+    def broken(session_id, *args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    with monkeypatch.context() as patch:
+        if failure == "lookup-error":
+            patch.setattr(database, "get_session", broken)
+        # The owner's answer still succeeds; only the notice is withheld.
+        assert (await asker.fulfill(asker_id, pending["request_id"], _submission()))["granted"]
+        await _settle(asker)
+    assert steer.await_count == 0
+    assert _wakes(asker_id) == [] and _wakes("asker") == []

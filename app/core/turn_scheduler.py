@@ -2420,7 +2420,6 @@ async def on_task_notification_stranded(
     if held_peer_messages:
         _restore_held_peer_messages(session_id, held_peer_messages)
     frames = current_task_frames(session_id, [f for f in (frames or []) if isinstance(f, dict)])
-    frames = [f for f in frames if not f.get("steer_only")]  # never a wake (on_access_outcome)
     if not frames:
         return
     task_ids = [f.get("task_id") for f in frames if f.get("task_id")]
@@ -2511,34 +2510,7 @@ async def on_access_outcome(session_id: str, frame: Dict[str, Any]) -> None:
     steer, Stop latch, archive refusal and one-wake-per-id latch.
     """
     async with _terminal_delivery_lock(session_id):
-        if frame.get("steer_only"):
-            return await _steer_access_outcome_locked(session_id, frame)
         return await _on_task_terminal_locked(session_id, frame, started_session=True)
-
-
-async def _steer_access_outcome_locked(session_id: str, frame: Dict[str, Any]) -> None:
-    """A local Task child's access notice: into its running turn, or nowhere.
-
-    Never a queued wake: it would start a turn on a child whose parent may
-    already have collected its result (``on_task_notification_stranded`` drops
-    a stranded one too).
-    """
-    from app.core import archive_guard
-    from app.core.task_registry import task_registry
-
-    task_id = frame.get("task_id")
-    if (not task_id or await _user_stopped(session_id)
-            or await archive_guard.is_archived_async(session_id)
-            or task_registry.is_woken(session_id, task_id)):
-        return
-    prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
-    if await _try_steer_terminal_notification(session_id, prompt, [frame], [task_id]):
-        task_registry.mark_woken(session_id, task_id)
-        return
-    logger.info(
-        "turn_scheduler: access notice %s for %s dropped — no running turn to steer into",
-        task_id, session_id,
-    )
 
 
 async def _on_task_terminal_locked(
