@@ -77,11 +77,22 @@ def _rewound_from():
     return rows[0]["payload"]["from_seq"]
 
 
-def _bind(request_id, node):
-    """The binding the call request's turn records at its TurnStarted."""
+CALL_TURN = "turn-call"
+
+
+def _bind(request_id, node, turn=CALL_TURN):
+    """The binding the call request's turn records at its TurnStarted (its
+    recorder's turn id is the queued turn row's id)."""
     from app.core.turn_recorder import TurnRecorder
 
-    return TurnRecorder(SID, None, None, None, None).record_call_binding(request_id, node)
+    recorder = TurnRecorder(SID, None, None, None, None)
+    recorder.turn_id = turn
+    return recorder.record_call_binding(request_id, node)
+
+
+def _reply(text, turn=CALL_TURN):
+    """The bound turn's own answer, recorded under its turn id."""
+    return {"type": "message.assistant", "turn_id": turn, "payload": {"content": text, "kind": "text"}}
 
 
 async def _assert_cut(rewind_env, request, node, row, uploads=()):
@@ -136,7 +147,7 @@ async def test_a_bound_call_message_rewinds_at_its_own_checkpoint_and_returns_it
     await _type(call, words, [str(staged_upload)])
     row = _users()[-1]
     assert await _bind(row["payload"]["call_request_id"], "call-cp")
-    session_events.append_events(SID, [_asst_ev("answer", uuid="answer-id")])
+    session_events.append_events(SID, [_reply("answer")])
     _patch_checkpoints(monkeypatch, [_cp("earlier-cp", "earlier"), _cp("call-cp", _checkpoint_text(delegate))])
 
     await _assert_cut(rewind_env, _request(by_content, "call-cp", words), "call-cp", row, [str(staged_upload)])
@@ -238,11 +249,11 @@ async def test_two_call_messages_with_the_same_words_each_cut_only_at_their_own_
     call, delegate = _call(monkeypatch)
     await _type(call, "do it", identity="first")
     if bound:
-        assert await _bind(_users()[0]["payload"]["call_request_id"], "cp-0")
+        assert await _bind(_users()[0]["payload"]["call_request_id"], "cp-0", turn="turn-0")
     await _type(call, "do it", [str(staged_upload)], identity="second")
     rows = _users()
     if bound:
-        assert await _bind(rows[1]["payload"]["call_request_id"], "cp-1")
+        assert await _bind(rows[1]["payload"]["call_request_id"], "cp-1", turn="turn-1")
     _patch_checkpoints(monkeypatch, [_cp(f"cp-{n}", _checkpoint_text(delegate, n)) for n in (0, 1)])
     request = _request(by_content, f"cp-{which}", "do it", occurrence=which)
 
@@ -309,6 +320,22 @@ async def test_a_call_message_queued_behind_a_running_turn_is_refused(staged_upl
     session_events.append_events(SID, [_asst_ev("build finished", uuid="build-id")])
     assert await _bind(request_id, "call-cp")
     _patch_checkpoints(monkeypatch, [_cp("build-cp", "start the build"), _cp("call-cp", text)])
+
+    await _assert_refused(rewind_env, _request(True, None, "inspect this"), _request(False, "call-cp", None))
+
+
+async def test_a_call_message_sent_while_a_reply_still_streams_is_refused(staged_upload, rewind_env, monkeypatch):
+    """Item 1, as the live journey produced it: the running turn's reply
+    streams as deltas with no message row until after the call request's turn
+    has started. The visible cut at the message would hide the rest of that
+    reply; the engine's cut at the node keeps all of it. Refuse."""
+    session_events.append_events(SID, [{"type": "message.user", "turn_id": "turn-slow",
+                                        "payload": {"content": "stream slowly"}}])
+    row, request_id, text = await _bound_call(monkeypatch, staged_upload)
+    session_events.append_events(SID, [{"type": "assistant.text_delta", "turn_id": "turn-slow",
+                                        "payload": {"text": "still streaming"}}])
+    assert await _bind(request_id, "call-cp")
+    _patch_checkpoints(monkeypatch, [_cp("slow-cp", "stream slowly"), _cp("call-cp", text)])
 
     await _assert_refused(rewind_env, _request(True, None, "inspect this"), _request(False, "call-cp", None))
 

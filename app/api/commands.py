@@ -389,9 +389,11 @@ def _load_message_events(session_id: str, *, include_handled_unsent: bool = Fals
 
 def _load_rewind_log(
     session_id: str, *, include_handled_unsent: bool = False,
-) -> tuple[List[dict], List[dict]]:
-    """``(message rows, call bindings)``: :func:`_load_message_events`'s rows,
-    and the ``call.checkpoint_bound`` events still visible, seq order.
+) -> tuple[List[dict], List[dict], dict]:
+    """``(message rows, call bindings, turn spans)``: :func:`_load_message_events`'s
+    rows, the ``call.checkpoint_bound`` events still visible, seq order, and
+    for every turn but a call's own ``voice-`` exchanges the first and last seq
+    of any event it recorded (a reply streams as deltas, not message rows).
 
     A binding a ``transcript.rewound`` erased (seq >= its from_seq) is dropped
     like a message row, so a binding lives exactly as long as the turn that
@@ -402,6 +404,7 @@ def _load_rewind_log(
 
     rows: List[dict] = []
     bindings: List[dict] = []
+    spans: dict = {}
     cursor = 0
     while True:
         page = session_events_db.get_events(session_id, from_seq=cursor, limit=500)
@@ -409,6 +412,10 @@ def _load_rewind_log(
             break
         for row in page:
             cursor = row["seq"]
+            turn = row.get("turn_id")
+            if turn and not str(turn).startswith("voice-"):
+                first, _ = spans.get(turn, (row["seq"], row["seq"]))
+                spans[turn] = (first, row["seq"])
             if row["event_type"] in ("message.user", "message.assistant"):
                 rows.append(row)
             elif row["event_type"] == CALL_BINDING_EVENT:
@@ -444,7 +451,7 @@ def _load_rewind_log(
             row["payload"] = {**payload, "checkpoint_backed": False}
             rows[index] = row
         prompt_turns.add(turn_id)
-    return rows, bindings
+    return rows, bindings, spans
 
 
 def _is_prompt_event(row: dict) -> bool:
@@ -580,7 +587,9 @@ def _binding_fields(binding: dict) -> tuple[str, str]:
             node_id if isinstance(node_id, str) else "")
 
 
-def _bound_node(events: List[dict], bindings: List[dict], user_cps: list, index: int) -> Optional[str]:
+def _bound_node(
+    events: List[dict], bindings: List[dict], user_cps: list, index: int, spans: Optional[dict] = None,
+) -> Optional[str]:
     """The checkpoint the call message ``events[index]`` is bound to, or None.
 
     The binding is the ``call.checkpoint_bound`` event the turn that ran this
@@ -592,9 +601,10 @@ def _bound_node(events: List[dict], bindings: List[dict], user_cps: list, index:
       visible prompt row that carries it;
     * every visible binding of that id names one and the same node, recorded
       after the row, and no binding of another id names that node;
-    * no message of another (non-call) turn lies between the row and the
-      binding, so cutting the visible history at the row and the engine's at
-      the node removes the same messages;
+    * nothing another (non-call) turn recorded lies between the row and the
+      binding (``spans``: a reply still streaming when the call queued behind
+      it), so cutting the visible history at the row and the engine's at the
+      node removes the same messages;
     * that node is exactly one user checkpoint of the current transcript path
       (a node rewound away, compacted out or on another worker's missing tree
       is not, so it refuses).
@@ -627,6 +637,12 @@ def _bound_node(events: List[dict], bindings: List[dict], user_cps: list, index:
     if any(row["seq"] < other["seq"] < first_bound
            and not str(other.get("turn_id") or "").startswith("voice-")
            for other in events):
+        return None
+    own_turns = {b.get("turn_id") for b in own}
+    if spans is None or any(
+        first < first_bound and last > row["seq"]
+        for turn, (first, last) in spans.items() if turn not in own_turns
+    ):
         return None
     if sum(1 for cp in user_cps if cp.uuid == node) != 1:
         return None
@@ -673,7 +689,7 @@ def _resolve_checkpoint_uuid_from_content(
     bound: set = set()
     checkpoints = None
     if session_id:
-        events, bindings = _load_rewind_log(session_id)
+        events, bindings, spans = _load_rewind_log(session_id)
         bound = _bound_nodes(bindings)
         prompts = [row for row in events if _is_prompt_event(row)]
         shown = [row for row in prompts if _shown_text(row) == want]
@@ -684,7 +700,7 @@ def _resolve_checkpoint_uuid_from_content(
                 checkpoints = _get_checkpoints(sdk_session_id, working_dir)
                 node = _bound_node(
                     events, bindings, [cp for cp in checkpoints if cp.role == "user"],
-                    next(i for i, row in enumerate(events) if row is target),
+                    next(i for i, row in enumerate(events) if row is target), spans,
                 )
                 return (node, None) if node else (None, _CALL_REFUSAL)
             # An ordinary prompt counts among ordinary prompts only: a call
@@ -748,7 +764,7 @@ def _resolve_rewind_from_seq(
        ordinal) because the JSONL contains user-role lines the event log
        never records — synthetic interrupt markers, retained discards.
     """
-    events, bindings = _load_rewind_log(session_id)
+    events, bindings, spans = _load_rewind_log(session_id)
     if not events:
         return None, (
             "Rewind refused: the v2 event log has no message events to resolve "
@@ -775,7 +791,7 @@ def _resolve_rewind_from_seq(
         ]
         user_cps = [cp for cp in _get_checkpoints(sdk_session_id, working_dir) if cp.role == "user"]
         if (len(carriers) != 1 or (target_idx is not None and target_idx != carriers[0])
-                or _bound_node(events, bindings, user_cps, carriers[0]) != target_uuid):
+                or _bound_node(events, bindings, user_cps, carriers[0], spans) != target_uuid):
             return None, _CALL_REFUSAL
         target_idx, call_bound = carriers[0], True
 
