@@ -455,3 +455,12 @@ jobs:
           BACKEND_NEEDS: ${{ toJSON(needs) }}
           HEAD_SHA: ${{ github.sha }}
         run: python scripts/ci/backend_gate.py --head "$HEAD_SHA"
+
+  # Leave a record that these checks passed on exactly these files, so
+  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
+  record:
+    needs: [backend]
+    if: needs.backend.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/record-pass.yml
+    with:
+      area: backend

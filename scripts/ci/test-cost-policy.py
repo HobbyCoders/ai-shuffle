@@ -25,13 +25,14 @@ APK_INPUTS = ["android/**", "mobile/**", "frontend/**"]
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
-    "main-suite.yml": {"push", "workflow_dispatch"},
+    "main-suite.yml": {"push", "schedule", "workflow_dispatch"},
     "android-webview-cache.yml": {"push", "schedule", "workflow_dispatch"},
     "android.yml": {"pull_request", "workflow_dispatch", "workflow_call"},
     "ci-android-minified.yml": {"pull_request", "workflow_dispatch", "workflow_call"},
     "runtime-overlay-acceptance.yml": {"pull_request", "workflow_dispatch"},
     **{name: {"pull_request", "workflow_dispatch", "workflow_call"} for name in PR_CHECKS},
 }
+RECORD_PASS = "./.github/workflows/record-pass.yml"
 FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "workflow_run",
              "check_run", "check_suite", "issue_comment", "pull_request_review"}
 
@@ -75,8 +76,16 @@ class CostPolicyTests(unittest.TestCase):
                 })
                 for forbidden in ("secrets.", "pull_request_target", ".draft", "secrets: inherit"):
                     self.assertNotIn(forbidden, text)
-                for job in config["jobs"].values():
-                    self.assertEqual(job.get("permissions", {"contents": "read"}), {"contents": "read"})
+                for key, job in config["jobs"].items():
+                    if job.get("uses") == RECORD_PASS:
+                        # Leaves a pass record for main-suite; runs on ubuntu-latest itself.
+                        self.assertEqual(set(job), {"needs", "if", "uses", "with"})
+                        self.assertIn("github.event_name == 'pull_request'", job["if"])
+                        continue
+                    # Only the journey selection reads earlier runs and pass records.
+                    allowed = ({"contents": "read", "actions": "read"}
+                               if (name, key) == ("ci-frontend.yml", "journey-plan") else {"contents": "read"})
+                    self.assertEqual(job.get("permissions", {"contents": "read"}), allowed)
                     runner = job.get("runs-on")
                     if runner == "${{ matrix.os }}":
                         self.assertEqual(job["strategy"]["matrix"]["os"],
@@ -130,9 +139,15 @@ class CostPolicyTests(unittest.TestCase):
         for forbidden in ("if", "continue-on-error"):
             self.assertNotIn(forbidden, plan)
         self.assertEqual(plan["outputs"], {"only": "${{ steps.select.outputs.only }}",
-                                           "shards": "${{ steps.select.outputs.shards }}"})
+                                           "shards": "${{ steps.select.outputs.shards }}",
+                                           "key": "${{ steps.select.outputs.key }}"})
+        # Reads earlier main-suite runs and pass records; never writes.
+        self.assertEqual(plan["permissions"], {"contents": "read", "actions": "read"})
         checkout, select = plan["steps"]
-        self.assertEqual(checkout["with"], {"fetch-depth": "2"})  # the merge commit's parents
+        # A pull request needs the merge commit's parents; a push the history
+        # back to the last commit main-suite passed on.
+        self.assertEqual(checkout["with"], {"fetch-depth": "${{ github.event_name == 'pull_request' && 2 || 0 }}"})
+        self.assertEqual(select["env"], {"GH_TOKEN": "${{ github.token }}"})
         self.assertEqual(select["run"], 'python3 -m scripts.devloop.ci matrix --shards 16 >> "$GITHUB_OUTPUT"')
         for step in plan["steps"]:
             for forbidden in ("if", "continue-on-error", "shell"):
@@ -148,8 +163,12 @@ class CostPolicyTests(unittest.TestCase):
         expected = json.loads(check.split("const expected = ", 1)[1].split(";", 1)[0])
         self.assertLessEqual({"journey-plan", "journeys"}, set(expected))
         self.assertIn("const noJourneys = plan.result === 'success' && plan.outputs?.shards === '[]';", check)
-        self.assertIn("name === 'journeys' && noJourneys ? 'skipped' : 'success'", check)
+        # The other checks skip only when main-suite found a pull request's record for them.
+        self.assertIn("const proven = process.env.CHECKS_PROVEN === 'true';", check)
+        self.assertIn("const skipped = name === 'journeys' ? noJourneys : name !== 'journey-plan' && proven;", check)
+        self.assertIn("assert.equal(results[name].result, skipped ? 'skipped' : 'success', name);", check)
         self.assertEqual(check.count("'skipped'"), 1)
+        self.assertEqual(gate["steps"][0]["env"]["CHECKS_PROVEN"], "${{ inputs.checks_proven }}")
 
     def test_stable_release_requires_explicit_dispatch(self):
         self.assertEqual(triggers(workflow("release.yml")), {"workflow_dispatch"})
@@ -227,7 +246,8 @@ class CostPolicyTests(unittest.TestCase):
         self.assertIn("contracts", gate["needs"])
         expected = json.loads(gate["steps"][0]["run"].split("const expected = ", 1)[1].split(";", 1)[0])
         self.assertIn("contracts", expected)
-        self.assertNotIn("if", job)
+        # Skipped only when main-suite found a pull request's record for these files.
+        self.assertEqual(job["if"], "inputs.checks_proven != true")
         self.assertNotIn("continue-on-error", job)
         self.assertNotIn("shell", job.get("defaults", {}).get("run", {}))
         step = next(step for step in job["steps"]

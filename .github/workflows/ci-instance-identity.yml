@@ -98,3 +98,12 @@ jobs:
           python -m pytest tests/test_transcript_projection_child_boundary.py
           tests/test_transcript_projection_preparation.py
           --confcutdir=tests/core -o addopts="" -p no:cacheprovider --timeout=45 -q
+
+  # Leave a record that these checks passed on exactly these files, so
+  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
+  record:
+    needs: [identity]
+    if: needs.identity.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/record-pass.yml
+    with:
+      area: identity

@@ -1,0 +1,49 @@
+name: Record a pass
+
+# After a pull request's checks for one area all pass, leave a record named for
+# the exact files they ran on, so main-suite does not run them a second time on
+# the same files (scripts/ci/proven.py reads it). Callers run this only for a
+# pull request from this repository, after every job of the area succeeded.
+on:
+  workflow_call:
+    inputs:
+      area:
+        description: Area name, as main-suite's "proven" job asks for it
+        required: true
+        type: string
+      key:
+        description: Optional suffix for an area that ran only part of its checks
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    name: Record the pass
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      # The tree of the tested merge commit. A failure here only loses the
+      # shortcut: main then runs the area itself.
+      - name: Name the record after the tested files
+        id: name
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AREA: ${{ inputs.area }}
+          KEY: ${{ inputs.key }}
+        run: |
+          tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq .tree.sha)
+          [[ "$tree" =~ ^[0-9a-f]{40,64}$ ]]
+          echo "name=proven-$AREA-$tree${KEY:+-$KEY}" >> "$GITHUB_OUTPUT"
+          echo "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" > proven.txt
+      - if: steps.name.outputs.name != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.name }}
+          path: proven.txt
+          retention-days: 14
+          overwrite: true

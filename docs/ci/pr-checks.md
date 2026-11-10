@@ -156,7 +156,37 @@ and its README; the app still checks `docs/content` against the frontend copy.
 
 ## Hosted main-suite
 
-`main-suite.yml` runs once per push to `main`, or an explicit dispatch on `main`.
+`main-suite.yml` runs once per push to `main`, once a day on a schedule, or on
+an explicit dispatch on `main`.
+
+**A push does not repeat what a pull request already passed on the same files.**
+When every job of an area passes on a pull request from this repository, the
+area's workflow calls `record-pass.yml`, which uploads a tiny artifact named
+`proven-<area>-<tree>`. The tree is the Git tree of the merge commit the checks
+ran on: one id for the content of every file, tests and workflows included. A
+squash merge onto a main that has not moved produces the same tree, so the
+`proven` job of the push run (`scripts/ci/proven.py check`) finds the record
+and that area is skipped; the `Main suite` aggregate accepts a skipped area
+only when the lookup answered `true` for it. If main moved between the pull
+request's run and the merge, the tree differs and the area runs. Nothing lists
+what an area depends on, so a record can never stand for different code.
+
+- Recorded areas: `backend`, `fluid`, `windows`, `browser-workspace`,
+  `container`, `identity`, `desktop-source`, `javascript-checks` (every
+  `ci-frontend.yml` job but the journeys) and `journeys` (see
+  [UI journeys](#ui-journeys)). `policy` and `desktop` run more on main than on
+  a pull request, and `android-and-docs`, `supply-chain` and `update-reach`
+  have no pull-request twin: they always run.
+- Only a live artifact uploaded by this repository's own run counts, never a
+  fork's. Records expire after 14 days. A failed lookup, a missing token or any
+  error answers "not proven": the area runs. Losing a record only loses the
+  shortcut, so the record steps never fail a pull request.
+- Only a push looks for records. The daily scheduled run (08:00 UTC, its own
+  concurrency group so it never displaces a waiting push run) and a dispatch
+  run **everything**. The scheduled run never publishes: the nightly follows
+  push and dispatch runs only. Dispatch `main-suite.yml` on `main` before a
+  stable release to prove the whole tree in one run.
+
 A dispatch on another ref skips the suites and fails the aggregate. A started
 run finishes unless a required job fails: the advisory `stop-on-failure` job
 (`scripts/ci/stop_on_failure.py`) then names the failed jobs in the run summary
@@ -969,7 +999,8 @@ out whether tests pass.
 Both run in `ci-frontend.yml` on free standard runners and feed the required
 `JavaScript package checks` aggregate. The workflow has no path filter. The
 visual comparison runs on every pull request; the journeys a pull request runs
-are selected from its changed files, and every push to main runs all of them.
+are selected from its changed files, a push to main runs the journeys for what
+changed since main last passed, and the daily and dispatched runs run all of them.
 
 ### UI journeys
 
@@ -988,11 +1019,22 @@ and shell overrides on this check, and keeps `contracts` in both the aggregate's
 This validates the selection metadata the pull request selection below relies on.
 
 `Select UI journeys` (`python3 -m scripts.devloop.ci matrix --shards 16`) decides
-what a run needs and prints two outputs: `only` (`*` for every journey, else the
-journey names) and `shards` (the shard numbers that got a file).
+what a run needs and prints three outputs: `only` (`*` for every journey, else
+the journey names), `shards` (the shard numbers that got a file) and `key`
+(`all`, or a hash of the selected names, which names the selection in a pass
+record).
 
-- A push to main (`main-suite.yml`), a dispatch and any caller run **every**
-  journey. Main is where the whole suite gates the nightly.
+- A scheduled run, a dispatch and any other caller run **every** journey.
+- A push to main (`main-suite.yml`) runs the journeys for the files changed
+  since the newest earlier commit that `main-suite` passed on (hence the full
+  history, `fetch-depth: 0`), with the same rules as a pull request below and
+  that commit's `map.json` as the base copy. Every journey held at that commit:
+  it ran there, or that run narrowed the same way from an older green commit.
+  When no such commit is found among the last 30 green runs, every journey runs.
+- A push then starts **no** shard when a pull request left a `journeys` record
+  for the same tree with the same `key` (or with `all`): the same journeys
+  already passed on these exact files. A pull request leaves that record when
+  its selection and all its journey shards succeed.
 - A pull request runs the journeys `select.mjs --ci` names for its changed
   files. The files are the merge commit's own changes (`git diff HEAD^1 HEAD`
   on GitHub's merge of the branch into its base, hence `fetch-depth: 2`; a

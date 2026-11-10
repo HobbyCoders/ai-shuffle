@@ -1,9 +1,15 @@
 name: main-suite
 
-# One full hosted proof per main commit. Dispatches on any other ref fail closed.
+# One hosted proof per main commit. Dispatches on any other ref fail closed.
+# A push skips what a pull request already passed on exactly these files
+# (scripts/ci/proven.py); the daily run and a dispatch run everything.
 on:
   push:
     branches: [main]
+  schedule:
+    # Everything, nothing skipped, on whatever main is at 08:00 UTC. It never
+    # publishes: the nightly follows push and dispatch runs only.
+    - cron: '0 8 * * *'
   workflow_dispatch:
 
 permissions:
@@ -12,8 +18,9 @@ permissions:
 # A started run always finishes; GitHub keeps only the newest waiting run and
 # drops older waiting ones. Cancelling in progress let a burst of merges cancel
 # every run, so nothing was proven and the nightly stalled until main went quiet.
+# The daily run has its own group so it can never displace a waiting push run.
 concurrency:
-  group: main-suite-${{ github.ref }}
+  group: main-suite-${{ github.ref }}${{ github.event_name == 'schedule' && '-daily' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -27,34 +34,76 @@ jobs:
       artifact-name: source-ui-${{ github.sha }}-${{ github.run_attempt }}
       optional: true
 
-  backend:
+  # Which areas a pull request already passed on exactly these files. Only a
+  # push looks; any doubt or error answers "run it".
+  proven:
+    name: Find what a pull request already proved
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      backend: ${{ steps.check.outputs.backend }}
+      fluid: ${{ steps.check.outputs.fluid }}
+      windows: ${{ steps.check.outputs.windows }}
+      browser-workspace: ${{ steps.check.outputs.browser-workspace }}
+      container: ${{ steps.check.outputs.container }}
+      identity: ${{ steps.check.outputs.identity }}
+      desktop-source: ${{ steps.check.outputs.desktop-source }}
+      javascript-checks: ${{ steps.check.outputs.javascript-checks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for pass records of these exact files
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/proven.py check --areas backend,fluid,windows,browser-workspace,container,identity,desktop-source,javascript-checks >> "$GITHUB_OUTPUT"
+
+  backend:
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.backend != 'true' }}
     uses: ./.github/workflows/ci-backend.yml
 
   javascript:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') }}
+    # The journey selection reads earlier runs and pass records.
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/ci-frontend.yml
+    with:
+      checks_proven: ${{ needs.proven.outputs.javascript-checks == 'true' }}
 
   fluid:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.fluid != 'true' }}
     uses: ./.github/workflows/ci-fluid.yml
 
   windows:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.windows != 'true' }}
     uses: ./.github/workflows/windows-suite.yml
     with:
       main_suite: true
 
   browser-workspace:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.browser-workspace != 'true' }}
     uses: ./.github/workflows/ci-browser-workspace.yml
 
   container:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.container != 'true' }}
     uses: ./.github/workflows/container-postgres.yml
 
   identity:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.identity != 'true' }}
     uses: ./.github/workflows/ci-instance-identity.yml
     with:
       main_suite: true
@@ -66,7 +115,8 @@ jobs:
       main_suite: true
 
   desktop-source:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.desktop-source != 'true' }}
     uses: ./.github/workflows/desktop-source-checks.yml
 
   desktop:
@@ -184,7 +234,7 @@ jobs:
   main-suite:
     name: Main suite
     if: always()
-    needs: [backend, javascript, fluid, windows, browser-workspace, container, identity, policy, desktop-source, desktop, android-and-docs, supply-chain, update-reach]
+    needs: [proven, backend, javascript, fluid, windows, browser-workspace, container, identity, policy, desktop-source, desktop, android-and-docs, supply-chain, update-reach]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

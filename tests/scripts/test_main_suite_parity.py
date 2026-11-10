@@ -31,15 +31,21 @@ def test_every_local_full_stage_has_an_explicit_hosted_mapping():
 def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
     config = workflow()
     assert config["permissions"] == {"contents": "read"}
-    assert set(config["on"]) == {"push", "workflow_dispatch"}
+    assert set(config["on"]) == {"push", "schedule", "workflow_dispatch"}
     assert config["on"]["push"] == {"branches": ["main"]}
+    # The daily run skips nothing and cannot displace a waiting push run.
+    assert config["on"]["schedule"] == [{"cron": "0 8 * * *"}]
+    assert config["concurrency"]["group"] == (
+        "main-suite-${{ github.ref }}${{ github.event_name == 'schedule' && '-daily' || '' }}")
     # A burst of merges must not cancel every run and stall the nightly.
     assert config["concurrency"]["cancel-in-progress"] == "false"
     jobs = config["jobs"]
     gate = jobs["main-suite"]
     assert gate["name"] == "Main suite"
     assert gate["if"] == "always()"
-    assert set(gate["needs"]) == set(suite.REQUIRED) == set(jobs) - {"main-suite", "journey-issues", "source-ui", "stop-on-failure"}
+    assert set(gate["needs"]) - {"proven"} == set(suite.REQUIRED) == set(jobs) - {
+        "main-suite", "journey-issues", "source-ui", "stop-on-failure", "proven"}
+    assert "proven" in gate["needs"]
     expected = {
         "backend": "ci-backend", "javascript": "ci-frontend", "fluid": "ci-fluid",
         "windows": "windows-suite", "browser-workspace": "ci-browser-workspace",
@@ -55,11 +61,81 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
         assert called["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
     for job in ["windows", "identity", "desktop", "policy"]:
         assert jobs[job]["with"] == {"main_suite": "true"}
+    on_main = "github.event_name == 'push' || github.ref == 'refs/heads/main'"
     for name in suite.REQUIRED:
-        assert jobs[name]["if"] == "github.event_name == 'push' || github.ref == 'refs/heads/main'"
+        if name in suite.PROVABLE:
+            # Skipped only when the lookup answered "true"; a failed or empty lookup runs it.
+            assert jobs[name]["needs"] == ["proven"]
+            assert jobs[name]["if"] == f"${{{{ !cancelled() && ({on_main}) && needs.proven.outputs.{name} != 'true' }}}}"
+        elif name == "javascript":
+            assert jobs[name]["needs"] == ["proven"]
+            assert jobs[name]["if"] == f"${{{{ !cancelled() && ({on_main}) }}}}"
+        else:
+            assert "needs" not in jobs[name]
+            assert jobs[name]["if"] == on_main
     step = gate["steps"][-1]
     assert step["env"] == {"RESULTS": "${{ toJSON(needs) }}"}
     assert step["run"] == "python scripts/ci/main_suite.py aggregate"
+
+
+def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
+    config = workflow()
+    jobs = config["jobs"]
+    lookup = jobs["proven"]
+    assert lookup["if"] == "github.event_name == 'push' || github.ref == 'refs/heads/main'"
+    assert "needs" not in lookup
+    assert lookup["permissions"] == {"contents": "read", "actions": "read"}
+    areas = [*suite.PROVABLE, "javascript-checks"]
+    assert lookup["outputs"] == {area: f"${{{{ steps.check.outputs.{area} }}}}" for area in areas}
+    step = lookup["steps"][-1]
+    assert step["id"] == "check"
+    assert step["run"] == f'python3 scripts/ci/proven.py check --areas {",".join(areas)} >> "$GITHUB_OUTPUT"'
+    # The JavaScript workflow always runs: it decides the journeys itself.
+    javascript = jobs["javascript"]
+    assert javascript["permissions"] == {"contents": "read", "actions": "read"}
+    assert javascript["with"] == {"checks_proven": "${{ needs.proven.outputs.javascript-checks == 'true' }}"}
+    # Every area main may skip is recorded by exactly one job of its pull-request
+    # workflow, for this repository's own pull requests only, after its checks passed.
+    recorded = {}
+    for job in suite.PROVABLE:
+        called = workflow(jobs[job]["uses"].rsplit("/", 1)[1])["jobs"]
+        (record,) = [item for item in called.values() if item.get("uses") == "./.github/workflows/record-pass.yml"]
+        assert record["with"] == {"area": job}
+        recorded[job] = record
+    called = workflow("ci-frontend.yml")["jobs"]
+    recorded["javascript-checks"] = called["record-checks"]
+    recorded["journeys"] = called["record-journeys"]
+    assert called["record-checks"]["with"] == {"area": "javascript-checks"}
+    assert called["record-journeys"]["with"] == {"area": "journeys", "key": "${{ needs.journey-plan.outputs.key }}"}
+    own = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"
+    for record in recorded.values():
+        needs = record["needs"]
+        assert record["if"] == " && ".join([*(f"needs.{name}.result == 'success'" for name in needs), own])
+    # Main differs from a pull request here, or has no pull-request twin: always run.
+    assert set(suite.REQUIRED) - set(suite.PROVABLE) == {
+        "javascript", "policy", "desktop", "android-and-docs", "supply-chain", "update-reach"}
+    # The non-journey JavaScript jobs are exactly the ones the record stands for.
+    checks = set(called["record-checks"]["needs"])
+    assert checks == set(called["javascript"]["needs"]) - {"journey-plan", "journeys"}
+    for name in checks:
+        assert called[name]["if"] == "inputs.checks_proven != true"
+    assert "if" not in called["journey-plan"]
+
+
+def test_record_pass_names_the_record_as_the_lookup_expects():
+    spec = importlib.util.spec_from_file_location("proven", ROOT / "scripts/ci/proven.py")
+    proven = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(proven)
+    config = workflow("record-pass.yml")
+    assert set(config["on"]) == {"workflow_call"} and config["permissions"] == {"contents": "read"}
+    name, upload = config["jobs"]["record"]["steps"]
+    assert 'echo "name=proven-$AREA-$tree${KEY:+-$KEY}" >> "$GITHUB_OUTPUT"' in name["run"]
+    assert proven.record_name("$AREA", "$tree") == "proven-$AREA-$tree"
+    assert proven.record_name("$AREA", "$tree", "$KEY") == "proven-$AREA-$tree-$KEY"
+    assert "git/commits/$GITHUB_SHA" in name["run"] and ".tree.sha" in name["run"]
+    assert upload["with"]["name"] == "${{ steps.name.outputs.name }}"
+    # Losing a record only loses the shortcut; it must never fail a pull request.
+    assert name["continue-on-error"] == upload["continue-on-error"] == "true"
 
 
 def test_main_suite_has_no_test_secrets_or_paid_runners():
@@ -162,14 +238,47 @@ def test_policy_pr_and_manual_selection_and_dependencies_are_unchanged():
     assert "tests/scripts/test_main_suite_parity.py" in expanded[1]
 
 
+def full(found=None):
+    results = {name: {"result": "success"} for name in suite.REQUIRED}
+    results["proven"] = {"result": "success", "outputs": dict(found or {})}
+    return results
+
+
 def test_complete_main_suite_aggregate_accepts():
-    suite.aggregate({name: {"result": "success"} for name in suite.REQUIRED})
+    suite.aggregate(full())
+
+
+def test_aggregate_accepts_a_skip_only_for_an_area_the_lookup_proved():
+    for area in suite.PROVABLE:
+        results = full({area: "true"})
+        results[area]["result"] = "skipped"
+        suite.aggregate(results)
+        for found in ({}, {area: "false"}, {area: ""}, {"javascript-checks": "true"}):
+            results = full(found)
+            results[area]["result"] = "skipped"
+            with pytest.raises(ValueError):
+                suite.aggregate(results)
+        # A lookup that did not finish proves nothing.
+        results = full({area: "true"})
+        results[area]["result"] = "skipped"
+        results["proven"]["result"] = "failure"
+        with pytest.raises(ValueError):
+            suite.aggregate(results)
+    for area in set(suite.REQUIRED) - set(suite.PROVABLE):
+        results = full({area: "true"})
+        results[area]["result"] = "skipped"
+        with pytest.raises(ValueError):
+            suite.aggregate(results)
+    results = full()
+    del results["proven"]
+    with pytest.raises(ValueError):
+        suite.aggregate(results)
 
 
 @pytest.mark.parametrize("name", suite.REQUIRED)
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped", None])
 def test_missing_or_incomplete_parity_dependency_fails_aggregate(name, result):
-    results = {key: {"result": "success"} for key in suite.REQUIRED}
+    results = full()
     if result is None:
         del results[name]
     else:

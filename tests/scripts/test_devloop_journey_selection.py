@@ -54,9 +54,10 @@ def test_unreadable_merge_diff_is_reported_as_unknown(tmp_path):
     assert ci.pull_request_files(empty) is None
 
 
-@pytest.mark.parametrize("event", [None, "push", "workflow_dispatch", "workflow_call", "schedule"])
-def test_only_a_pull_request_is_narrowed(event, monkeypatch):
-    monkeypatch.setattr(ci, "pull_request_files", lambda root=ci.ROOT: pytest.fail("must not read a diff"))
+@pytest.mark.parametrize("event", [None, "workflow_dispatch", "workflow_call", "schedule"])
+def test_only_a_pull_request_or_a_push_is_narrowed(event, monkeypatch):
+    monkeypatch.setattr(ci, "files_since", lambda base, root=ci.ROOT: pytest.fail("must not read a diff"))
+    monkeypatch.setattr(ci, "last_green_main", lambda root=ci.ROOT: pytest.fail("must not look for a base"))
     only, why = ci.selection_for_event(event)
     assert only is None and why.startswith("every journey")
 
@@ -104,12 +105,101 @@ def test_an_edited_map_is_judged_against_the_base_copy_and_never_drops_a_journey
     # The workflow passes the base copy only when the map changed, and all when it cannot be read.
     seen = []
     monkeypatch.setattr(ci, "select_journeys", lambda files, previous_map=None: seen.append(previous_map) or [])
-    monkeypatch.setattr(ci, "base_journey_map", lambda root=ci.ROOT: "BASE")
+    monkeypatch.setattr(ci, "base_journey_map", lambda root=ci.ROOT, base="HEAD^1": f"MAP AT {base}")
     monkeypatch.setattr(ci, "pull_request_files", lambda root=ci.ROOT: ["docs/readme.md"])
     ci.selection_for_event("pull_request")
     monkeypatch.setattr(ci, "pull_request_files", lambda root=ci.ROOT: [ci.JOURNEY_MAP])
     ci.selection_for_event("pull_request")
-    assert seen == [None, "BASE"]
+    # A push compares with the map at the commit it narrows from.
+    monkeypatch.setattr(ci, "last_green_main", lambda root=ci.ROOT: "c" * 40)
+    monkeypatch.setattr(ci, "files_since", lambda base, root=ci.ROOT: [ci.JOURNEY_MAP])
+    ci.selection_for_event("push")
+    assert seen == [None, "MAP AT HEAD^1", "MAP AT " + "c" * 40]
+
+
+def _main_history(tmp_path):
+    """main with three commits; returns (repo, [first, second, third])."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    commits = []
+    for name in ("one.txt", "two.txt", "three.txt"):
+        (repo / name).write_text(name)
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", name)
+        commits.append(subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                      capture_output=True, text=True).stdout.strip())
+    return repo, commits
+
+
+def test_a_push_runs_what_changed_since_the_last_commit_main_suite_passed_on(tmp_path, monkeypatch):
+    from scripts.ci import proven
+
+    repo, (first, second, third) = _main_history(tmp_path)
+    assert ci.files_since(first, repo) == ["three.txt", "two.txt"]
+    assert ci.files_since("f" * 40, repo) is None
+    monkeypatch.setattr(proven, "environment", lambda: ("o/r", "token"))
+    # The newest green ancestor wins; HEAD itself and commits not in this history never do.
+    monkeypatch.setattr(proven, "green_main_commits", lambda *where: [third, "e" * 40, second, first])
+    assert ci.last_green_main(repo) == second
+    monkeypatch.setattr(proven, "green_main_commits", lambda *where: [third, "e" * 40])
+    assert ci.last_green_main(repo) is None
+    monkeypatch.setattr(proven, "green_main_commits", lambda *where: 1 / 0)
+    assert ci.last_green_main(repo) is None
+    # Off a push to main nothing is looked up at all.
+    monkeypatch.setattr(proven, "environment", lambda: None)
+    monkeypatch.setattr(proven, "green_main_commits", lambda *where: pytest.fail("must not ask"))
+    assert ci.last_green_main(repo) is None
+
+    seen = []
+    monkeypatch.setattr(ci, "select_journeys", lambda files, previous_map=None: seen.append(files) or [NAMES[0]])
+    monkeypatch.setattr(ci, "last_green_main", lambda root=ci.ROOT: first)
+    only, why = ci.selection_for_event("push", repo)
+    assert only == [NAMES[0]] and seen == [["three.txt", "two.txt"]] and first[:12] in why
+    # No green base, or a base whose diff cannot be read: every journey.
+    monkeypatch.setattr(ci, "last_green_main", lambda root=ci.ROOT: "f" * 40)
+    assert ci.selection_for_event("push", repo)[0] is None
+    monkeypatch.setattr(ci, "last_green_main", lambda root=ci.ROOT: None)
+    assert ci.selection_for_event("push", repo)[0] is None
+    assert len(seen) == 1
+
+
+def test_a_selection_key_names_exactly_the_journeys_chosen():
+    assert ci.selection_key(None) == "all"
+    one = ci.selection_key([NAMES[0], NAMES[3]])
+    assert one == ci.selection_key([NAMES[3], NAMES[0]]) and len(one) == 16
+    assert len({one, ci.selection_key([NAMES[0]]), ci.selection_key([]), "all"}) == 4
+
+
+def test_journeys_are_skipped_only_for_a_record_of_the_same_files_and_selection(tmp_path, monkeypatch, capsys):
+    from scripts.ci import proven
+
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    only = [NAMES[0], NAMES[3]]
+    key = ci.selection_key(only)
+    monkeypatch.setattr(ci, "selection_for_event", lambda event: (only, "test"))
+    monkeypatch.setattr(proven, "head_tree", lambda root=ci.ROOT: "t" * 40)
+    asked = []
+
+    def shards(records, where=("o/r", "token")):
+        asked.clear()
+        monkeypatch.setattr(proven, "environment", lambda: where)
+        monkeypatch.setattr(proven, "exists", lambda name, *rest: asked.append(name) or name in records)
+        assert ci.main(["matrix"]) == 0
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[2] == f"key={key}" and lines[0] != "only="
+        return json.loads(lines[1].split("=", 1)[1])
+
+    mine, whole = f"proven-journeys-{'t' * 40}-{key}", f"proven-journeys-{'t' * 40}-all"
+    assert shards({mine}) == [] and asked == [mine]
+    # A pull request that passed every journey on these files covers any selection.
+    assert shards({whole}) == [] and asked == [mine, whole]
+    assert len(shards({f"proven-journeys-{'u' * 40}-{key}", "proven-journeys-" + "t" * 40})) == 2
+    # Not a push to main: the records are not even read.
+    assert len(shards({mine}, where=None)) == 2 and asked == []
+    monkeypatch.setattr(proven, "exists", lambda name, *rest: 1 / 0)
+    assert ci.main(["matrix"]) == 0
+    assert len(json.loads(capsys.readouterr().out.splitlines()[1].split("=", 1)[1])) == 2
 
 
 def test_base_map_is_read_from_the_merge_commits_first_parent(tmp_path):
@@ -174,12 +264,13 @@ def test_a_selection_is_split_exactly_and_the_shards_repeat_it():
 @pytest.mark.parametrize(("only", "expected_only", "count"), [
     (None, "*", ci.HOSTED_SHARDS), ([], "", 0), ([NAMES[0], NAMES[3]], None, 2),
 ])
-def test_matrix_prints_exactly_the_two_step_outputs(only, expected_only, count, monkeypatch, capsys):
+def test_matrix_prints_exactly_the_three_step_outputs(only, expected_only, count, monkeypatch, capsys):
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.setattr(ci, "selection_for_event", lambda event: (only, "test"))
     assert ci.main(["matrix"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert [line.split("=", 1)[0] for line in lines] == ["only", "shards"]
+    assert [line.split("=", 1)[0] for line in lines] == ["only", "shards", "key"]
+    assert lines[2] == f"key={ci.selection_key(only)}"
     shown, shards = lines[0].split("=", 1)[1], json.loads(lines[1].split("=", 1)[1])
     if expected_only is None:
         expected_only = ",".join(name.removesuffix(ci.SUFFIX) for name in only)

@@ -39,12 +39,22 @@ REQUIRED = (
     "android-and-docs", "supply-chain", "update-reach",
 )
 
+# Areas whose pull-request checks are the same as main's: a push may skip one
+# when the "proven" job found a pull request's pass record for the same files.
+PROVABLE = ("backend", "fluid", "windows", "browser-workspace", "container", "identity", "desktop-source")
+LOOKUP = "proven"
+
 
 def aggregate(results):
-    if not isinstance(results, dict) or set(results) != set(REQUIRED):
+    if not isinstance(results, dict) or set(results) != {*REQUIRED, LOOKUP}:
         raise ValueError("Missing or unexpected main-suite dependency")
+    lookup = results[LOOKUP]
+    found = (lookup.get("outputs") or {}) if lookup.get("result") == "success" else {}
     for name in REQUIRED:
-        if results[name].get("result") != "success":
+        result = results[name].get("result")
+        if result == "skipped" and name in PROVABLE and found.get(name) == "true":
+            continue
+        if result != "success":
             raise ValueError(f"Main-suite dependency {name} did not succeed")
 
 
@@ -54,7 +64,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.stage == "aggregate":
         aggregate(json.loads(os.environ["RESULTS"]))
-        print("Every hosted full-suite dependency succeeded.")
+        print("Every hosted full-suite dependency succeeded, or a pull request passed it on these exact files.")
     elif args.stage == "android-and-docs":
         import local_ci
         ctx = local_ci.Context("full", "HEAD^", None, sys.executable)
