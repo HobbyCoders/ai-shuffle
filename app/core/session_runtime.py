@@ -1609,14 +1609,15 @@ class SessionRuntime:
                 await asyncio.to_thread(upload_transfer.validate_turn_uploads, turn_payload, session)
                 self.turn["payload"] = turn_payload
             record_user = not resume and not already_recorded and not awaiting_uploads
+            agent_content = await self._note_expanded(prompt) if record_user else None
             await recorder.start(
                 prompt,
                 profile_id=self.turn.get("profile_id"),
                 record_user=record_user,
-                agent_content=await self._note_expanded(prompt) if record_user else None,
                 source=fluid_turn_source(app_source),
                 owner_receipt=owner_receipt,
                 upload_paths=turn_payload.get("upload_paths") or None,
+                **({"agent_content": agent_content} if agent_content else {}),
                 **({"continued": True} if turn_payload.get("continued_turn") else {}),
                 **({"accepted_input_id": turn_payload["accepted_input_id"]}
                    if turn_payload.get("accepted_input_id") else {}),
