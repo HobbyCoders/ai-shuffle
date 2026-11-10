@@ -136,6 +136,11 @@
 			"globs": ["frontend/tests/journeys/settings-memory.journey.mjs", "frontend/src/lib/components/settings/memory/**", "frontend/src/lib/settings/entries/memory.ts"]
 		},
 		{
+			"why": "Settings pages keep their loaded row shapes while a reload waits for the worker",
+			"journeys": ["settings-reload"],
+			"globs": ["frontend/tests/journeys/settings-reload.journey.mjs", "frontend/src/lib/components/settings/pages/SecurityPage.svelte", "frontend/src/lib/components/settings/pages/editors/SecurityInstructionsEditor.svelte", "frontend/src/lib/components/settings/pages/SpendingRows.svelte", "frontend/src/lib/components/settings/pages/UsagePage.svelte", "frontend/src/lib/components/settings/rows/ExpandToggle.svelte"]
+		},
+		{
 			"why": "Settings deep links show the requested phone detail and preserve both Back steps",
 			"journeys": ["settings-detail-link"],
 			"globs": ["frontend/tests/journeys/settings-detail-link.journey.mjs", "frontend/src/lib/components/settings/shell/SettingsShell.svelte", "frontend/src/lib/components/settings/shell/BackRow.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte"]

@@ -241,10 +241,11 @@
 }
 /* Secondary labels remain primary ink even inside a muted list summary. */
 .settings-shell .st-btn:not(.primary, .danger, .warn) { color: var(--st-fg); }
-.settings-shell .st-btn:hover:not(:disabled) {
+/* aria-disabled: busy but still focusable, so the keyboard keeps its place. */
+.settings-shell .st-btn:hover:not(:disabled, [aria-disabled='true']) {
 	background: var(--st-hover);
 }
-.settings-shell .st-btn:disabled {
+.settings-shell .st-btn:is(:disabled, [aria-disabled='true']) {
 	opacity: 0.45;
 }
 .settings-shell .st-btn.primary {

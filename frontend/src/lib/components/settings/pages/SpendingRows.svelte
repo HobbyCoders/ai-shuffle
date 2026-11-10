@@ -14,7 +14,6 @@
 	import Switch from '../rows/Switch.svelte';
 	import NumberField from '../rows/NumberField.svelte';
 	import SelectField from '../rows/SelectField.svelte';
-	import ValueText from '../rows/ValueText.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import { Spending, SPEND_BOUNDS, formatJobTime, formatMoney, jobTimeOptions } from './spending-limits.svelte';
 
@@ -65,7 +64,16 @@
 				{/if}
 			</div>
 		{:else}
-			<ValueText value={model.forbidden ? 'Owner only' : 'Loading…'} />
+			<!-- The meter's own box until the limits are read (or cannot be): a narrow
+			     page drops the meter under the label, so a short text beside the
+			     label would change the row's height when the meter lands (#1301). -->
+			{@const placeholder = model.forbidden ? 'forbidden' : model.loadError ? 'error' : 'loading'}
+			<div class="spend" data-state={placeholder} aria-busy={placeholder === 'loading' || undefined}>
+				<span class="spend-figures"
+					><b class="pending">{placeholder === 'forbidden' ? 'Owner only' : placeholder === 'error' ? 'Unavailable' : 'Loading…'}</b></span
+				>
+				<span class="spend-bar" aria-hidden="true"></span>
+			</div>
 		{/if}
 	</SettingRow>
 	<SettingRow id="usage.spendLimit" value={l?.spend_limit_enabled} onReset={() => void model.save({ spend_limit_enabled: true })}>
@@ -150,6 +158,10 @@
 		font-weight: 600;
 		letter-spacing: -0.01em;
 		color: var(--st-fg);
+	}
+	.spend-figures b.pending {
+		font-weight: 400;
+		color: var(--st-mfg);
 	}
 	.of {
 		font-size: 12.5px;
