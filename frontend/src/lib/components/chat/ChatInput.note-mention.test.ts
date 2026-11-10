@@ -637,6 +637,39 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		expect(queries()).toEqual([]);
 	});
 
+	// Review round 5, blocker 1: the chat's saved draft at refusal time is the
+	// one the words go into, never what a composer saw when it left the chat.
+	it('puts a send refused after its composers are gone in front of the newer text its chat holds now (#1444)', async () => {
+		let answerCache = (_: unknown) => {};
+		net.cache = () => new Promise((resolve) => { answerCache = resolve; });
+		const view = await compose('stale-chat');
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		// Leave the chat and come back in this composer: it holds nothing then.
+		activeSession.switchSession('stale-b');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('stale-b'));
+		activeSession.switchSession('stale-chat');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('stale-chat'));
+		view.unmount();
+		// A replacement composer on the chat gets newer text, then goes too,
+		// and another chat is opened.
+		const replacement = render(ChatInput);
+		await typeNewer(replacement, 'stale-chat');
+		replacement.unmount();
+		activeSession.switchSession('stale-b');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('stale-b'));
+		answerCache(COLD);
+		await waitFor(() => expect(readDraft('stale-chat')).toContain(NOTE_ID));
+		expect(readDraft('stale-chat')).toContain('newer text');
+		expect(readDraft('stale-b') ?? '').not.toContain('read');
+		activeSession.switchSession('stale-chat');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('stale-chat'));
+		const reopened = render(ChatInput);
+		await waitFor(() => expect(reopened.container.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(reopened.container.querySelector('.ProseMirror')?.textContent).toMatch(/read[\s\S]*newer text/);
+		expect(queries()).toEqual([]);
+	});
+
 	it('sends a generation choice\'s reply in its place when the card unmounts while the pick saves (#1444)', async () => {
 		vi.spyOn(generationChoices, 'load').mockResolvedValue(undefined);
 		let finish!: (value: never) => void;
@@ -672,5 +705,54 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		Socket.all[0].onmessage?.({ data: JSON.stringify({ type: 'error', client_message_id: queries()[0].client_message_id, message: 'Missing agent' }) });
 		expect(await second).toBe(false);
 		expect(queries()).toHaveLength(1);
+	});
+});
+
+// Review round 5, blocker 2: a new chat's first send that created its chat
+// (a worktree create binds the chat, then its first message is refused) keeps
+// its words with the chat it created, never in New chat.
+describe('a refused first send whose composer is gone, after it created its chat (#1444)', () => {
+	const WORDS = 'read the plan';
+	async function sendCreating(chat: string) {
+		let refuse!: () => void;
+		sends.mockImplementationOnce(() => new Promise<boolean>((resolve) => { refuse = () => resolve(false); }));
+		start(null, null, { worktreeIntent: 'worktree' }, false);
+		const hero = render(ChatInput);
+		await waitFor(() => expect(hero.container.querySelector('.ProseMirror')?.textContent).toBe(WORDS));
+		await fireEvent.submit(hero.container.querySelector('form')!);
+		await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+		// The create binds the chat it made, and the New chat screen gives way.
+		Object.assign(activeSession.current, { sessionId: chat });
+		activeSession.clearError();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		hero.unmount();
+		return () => refuse();
+	}
+
+	it('puts its words in front of what the chat\'s composer holds now', async () => {
+		const refuse = await sendCreating('wt-made');
+		const chatView = render(ChatInput);
+		await waitFor(() => expect(chatView.container.querySelector('.ProseMirror')).toBeTruthy());
+		const editor = (chatView.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(text: string): void } } }).editor;
+		editor.commands.setContent('newer text');
+		await waitFor(() => expect(readDraft('wt-made')).toContain('newer text'));
+		refuse();
+		await waitFor(() => expect(chatView.container.querySelector('.ProseMirror')?.textContent).toMatch(/read the plan[\s\S]*newer text/));
+		expect(readDraft('wt-made')).toContain(WORDS);
+		expect(readDraft('wt-made')).toContain('newer text');
+		expect(readDraft(null) ?? '').not.toContain(WORDS);
+	});
+
+	it('keeps its words as that chat\'s draft after the user opened another chat', async () => {
+		const refuse = await sendCreating('wt-left');
+		activeSession.switchSession('other-chat');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('other-chat'));
+		const other = render(ChatInput);
+		await waitFor(() => expect(other.container.querySelector('.ProseMirror')).toBeTruthy());
+		refuse();
+		await waitFor(() => expect(readDraft('wt-left')).toContain(WORDS));
+		expect(readDraft(null) ?? '').not.toContain(WORDS);
+		expect(readDraft('other-chat') ?? '').not.toContain(WORDS);
+		expect(other.container.querySelector('.ProseMirror')?.textContent).toBe('');
 	});
 });
