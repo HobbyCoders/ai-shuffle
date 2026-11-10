@@ -384,9 +384,24 @@ def _load_message_events(session_id: str, *, include_handled_unsent: bool = Fals
     from_seq) are dropped, mirroring the client reducer — resolution must run
     against the transcript the client actually renders.
     """
+    return _load_rewind_log(session_id, include_handled_unsent=include_handled_unsent)[0]
+
+
+def _load_rewind_log(
+    session_id: str, *, include_handled_unsent: bool = False,
+) -> tuple[List[dict], List[dict]]:
+    """``(message rows, call bindings)``: :func:`_load_message_events`'s rows,
+    and the ``call.checkpoint_bound`` events still visible, seq order.
+
+    A binding a ``transcript.rewound`` erased (seq >= its from_seq) is dropped
+    like a message row, so a binding lives exactly as long as the turn that
+    recorded it is in the visible history (#1265).
+    """
+    from app.core.voice_prompts import CALL_BINDING_EVENT
     from app.db import session_events as session_events_db
 
     rows: List[dict] = []
+    bindings: List[dict] = []
     cursor = 0
     while True:
         page = session_events_db.get_events(session_id, from_seq=cursor, limit=500)
@@ -396,6 +411,8 @@ def _load_message_events(session_id: str, *, include_handled_unsent: bool = Fals
             cursor = row["seq"]
             if row["event_type"] in ("message.user", "message.assistant"):
                 rows.append(row)
+            elif row["event_type"] == CALL_BINDING_EVENT:
+                bindings.append(row)
             elif (not include_handled_unsent and row["event_type"] == "system.note"
                   and (row.get("payload") or {}).get("subtype") == "unsent_restored"):
                 target = ((row.get("payload") or {}).get("data") or {}).get("message_id")
@@ -404,6 +421,7 @@ def _load_message_events(session_id: str, *, include_handled_unsent: bool = Fals
                 from_seq = (row.get("payload") or {}).get("from_seq")
                 if isinstance(from_seq, int):
                     rows = [r for r in rows if r["seq"] < from_seq]
+                    bindings = [b for b in bindings if b["seq"] < from_seq]
         if len(page) < 500:
             break
     # Old recorder events predate checkpoint_backed. A later user message in
@@ -426,7 +444,7 @@ def _load_message_events(session_id: str, *, include_handled_unsent: bool = Fals
             row["payload"] = {**payload, "checkpoint_backed": False}
             rows[index] = row
         prompt_turns.add(turn_id)
-    return rows
+    return rows, bindings
 
 
 def _is_prompt_event(row: dict) -> bool:
@@ -521,7 +539,9 @@ def _recorded_agent_target(
     and no count check, as before #1401. Otherwise it FAILS CLOSED when the
     event log has no such shown occurrence.
     """
-    prompts = [row for row in _load_message_events(session_id) if _is_prompt_event(row)]
+    # Call messages never match by text (#1265): ordinary prompts only.
+    prompts = [row for row in _load_message_events(session_id)
+               if _is_prompt_event(row) and not _is_call_message(row)]
     if not _text_translated(prompts, shown):
         return (shown, occurrence, None), None
     shown_rows = [i for i, row in enumerate(prompts) if _shown_text(row) == shown]
@@ -534,6 +554,89 @@ def _recorded_agent_target(
     agent = _agent_text(prompts[index])
     same = [i for i, row in enumerate(prompts) if _agent_text(row) == agent]
     return (agent, same.index(index), len(same)), None
+
+
+_CALL_SOURCES = ("voice", "typed")
+_CALL_REFUSAL = (
+    "Rewind refused: this message was sent in a call and no checkpoint is bound to it "
+    "(content guard)"
+)
+
+
+def _is_call_message(row: dict) -> bool:
+    """A caller's words recorded from a voice call (spoken or typed into it).
+
+    Its checkpoint holds the call context the chat agent got, not these words,
+    so text never ties the two (#1265): both rewind lookups resolve such a row
+    only through its binding (:func:`_bound_node`) and refuse it otherwise.
+    """
+    return (row.get("payload") or {}).get("source") in _CALL_SOURCES
+
+
+def _binding_fields(binding: dict) -> tuple[str, str]:
+    payload = binding.get("payload") or {}
+    request_id, node_id = payload.get("call_request_id"), payload.get("node_id")
+    return (request_id if isinstance(request_id, str) else "",
+            node_id if isinstance(node_id, str) else "")
+
+
+def _bound_node(events: List[dict], bindings: List[dict], user_cps: list, index: int) -> Optional[str]:
+    """The checkpoint the call message ``events[index]`` is bound to, or None.
+
+    The binding is the ``call.checkpoint_bound`` event the turn that ran this
+    message's request recorded when its TurnStarted named the node it wrote
+    (SessionRuntime). It resolves only when all of these hold, else None and
+    the rewind is refused as before bindings existed:
+
+    * the row carries a well-formed ``call_request_id`` and is the only
+      visible prompt row that carries it;
+    * every visible binding of that id names one and the same node, recorded
+      after the row, and no binding of another id names that node;
+    * no message of another (non-call) turn lies between the row and the
+      binding, so cutting the visible history at the row and the engine's at
+      the node removes the same messages;
+    * that node is exactly one user checkpoint of the current transcript path
+      (a node rewound away, compacted out or on another worker's missing tree
+      is not, so it refuses).
+    """
+    from app.core.voice_prompts import CALL_REQUEST_FIELD, is_call_request_id
+
+    row = events[index]
+    request_id = (row.get("payload") or {}).get(CALL_REQUEST_FIELD)
+    if not is_call_request_id(request_id):
+        return None
+    carriers = [
+        i for i, other in enumerate(events)
+        if _is_prompt_event(other) and (other.get("payload") or {}).get(CALL_REQUEST_FIELD) == request_id
+    ]
+    if carriers != [index]:
+        return None
+    own = [b for b in bindings if _binding_fields(b)[0] == request_id]
+    nodes = {_binding_fields(b)[1] for b in own}
+    if len(nodes) != 1 or any(b["seq"] <= row["seq"] for b in own):
+        return None
+    node = nodes.pop()
+    if not node or any(_binding_fields(b)[1] == node and _binding_fields(b)[0] != request_id for b in bindings):
+        return None
+    # The call recorded the message when it was sent; the turn started later.
+    # Any other turn's message in between (one still running when the call
+    # queued behind it) is in the checkpoint's history but after the message
+    # in the visible one, so the two cuts would differ: refuse. The call's own
+    # exchanges (``voice-`` turns) are not in the engine's history at all.
+    first_bound = min(b["seq"] for b in own)
+    if any(row["seq"] < other["seq"] < first_bound
+           and not str(other.get("turn_id") or "").startswith("voice-")
+           for other in events):
+        return None
+    if sum(1 for cp in user_cps if cp.uuid == node) != 1:
+        return None
+    return node
+
+
+def _bound_nodes(bindings: List[dict]) -> set:
+    """Every node a visible binding names: a call request's checkpoint, never
+    an ordinary prompt's, so ordinary prompts are counted without them."""
+    return {node for _, node in map(_binding_fields, bindings) if node}
 
 
 def _resolve_checkpoint_uuid_from_content(
@@ -567,15 +670,35 @@ def _resolve_checkpoint_uuid_from_content(
             "(content guard)"
         )
     expected = None
+    bound: set = set()
+    checkpoints = None
     if session_id:
+        events, bindings = _load_rewind_log(session_id)
+        bound = _bound_nodes(bindings)
+        prompts = [row for row in events if _is_prompt_event(row)]
+        shown = [row for row in prompts if _shown_text(row) == want]
+        if 0 <= target_occurrence < len(shown):
+            target = shown[target_occurrence]
+            if _is_call_message(target):
+                # A call message resolves only through its binding (#1265).
+                checkpoints = _get_checkpoints(sdk_session_id, working_dir)
+                node = _bound_node(
+                    events, bindings, [cp for cp in checkpoints if cp.role == "user"],
+                    next(i for i, row in enumerate(events) if row is target),
+                )
+                return (node, None) if node else (None, _CALL_REFUSAL)
+            # An ordinary prompt counts among ordinary prompts only: a call
+            # message showing the same words has no checkpoint with them.
+            target_occurrence = [row for row in shown if not _is_call_message(row)].index(target)
         recorded, error = _recorded_agent_target(session_id, want, target_occurrence)
         if error:
             return None, error
         want, target_occurrence, expected = recorded
-    checkpoints = _get_checkpoints(sdk_session_id, working_dir)
+    if checkpoints is None:
+        checkpoints = _get_checkpoints(sdk_session_id, working_dir)
     matches = [
         cp for cp in checkpoints
-        if cp.role == "user" and (cp.full_message or "").strip() == want
+        if cp.role == "user" and cp.uuid not in bound and (cp.full_message or "").strip() == want
     ]
     if expected is not None and expected != len(matches):
         return None, (
@@ -625,7 +748,7 @@ def _resolve_rewind_from_seq(
        ordinal) because the JSONL contains user-role lines the event log
        never records — synthetic interrupt markers, retained discards.
     """
-    events = _load_message_events(session_id)
+    events, bindings = _load_rewind_log(session_id)
     if not events:
         return None, (
             "Rewind refused: the v2 event log has no message events to resolve "
@@ -638,6 +761,24 @@ def _resolve_rewind_from_seq(
             target_idx = i
             break
 
+    bound_by = {request for request, node in map(_binding_fields, bindings) if node == target_uuid}
+    call_bound = False
+    if target_role == "user" and bound_by:
+        # A call request's checkpoint: the message is the one row its binding
+        # names, and that row must resolve back to this very node (#1265).
+        from app.core.voice_prompts import CALL_REQUEST_FIELD
+
+        carriers = [
+            i for i, row in enumerate(events)
+            if len(bound_by) == 1 and _is_prompt_event(row) and _is_call_message(row)
+            and (row.get("payload") or {}).get(CALL_REQUEST_FIELD) in bound_by
+        ]
+        user_cps = [cp for cp in _get_checkpoints(sdk_session_id, working_dir) if cp.role == "user"]
+        if (len(carriers) != 1 or (target_idx is not None and target_idx != carriers[0])
+                or _bound_node(events, bindings, user_cps, carriers[0]) != target_uuid):
+            return None, _CALL_REFUSAL
+        target_idx, call_bound = carriers[0], True
+
     if target_idx is None:
         if target_role != "user":
             return None, (
@@ -645,7 +786,9 @@ def _resolve_rewind_from_seq(
                 f"the event log (assistant targets resolve by uuid only)"
             )
         checkpoints = _get_checkpoints(sdk_session_id, working_dir)
-        user_cps = [cp for cp in checkpoints if cp.role == "user"]
+        # A call request's checkpoint is never an ordinary prompt's (#1265).
+        bound = _bound_nodes(bindings)
+        user_cps = [cp for cp in checkpoints if cp.role == "user" and cp.uuid not in bound]
         pos = next(
             (k for k, cp in enumerate(user_cps) if cp.uuid == target_uuid), None
         )
@@ -659,7 +802,8 @@ def _resolve_rewind_from_seq(
             1 for cp in user_cps[:pos]
             if (cp.full_message or "").strip() == want
         )
-        prompt_rows = [(i, row) for i, row in enumerate(events) if _is_prompt_event(row)]
+        prompt_rows = [(i, row) for i, row in enumerate(events)
+                       if _is_prompt_event(row) and not _is_call_message(row)]
         if not _text_translated([row for _, row in prompt_rows], want):
             # Nothing involved translates: the exact match on the shown text,
             # as before agent texts were recorded (#1401).
@@ -695,6 +839,11 @@ def _resolve_rewind_from_seq(
                 f"{len(prompts)} (content guard)"
             )
         target_idx = prompts[occurrence][0]
+
+    if target_role == "user" and _is_call_message(events[target_idx]) and not call_bound:
+        # Never cut the visible history at a call's message by words or by a
+        # stamped uuid: only its binding ties it to a checkpoint (#1265).
+        return None, _CALL_REFUSAL
 
     if target_role == "assistant" or include_response:
         # Keep the target (and its response); drop from the NEXT user prompt.
