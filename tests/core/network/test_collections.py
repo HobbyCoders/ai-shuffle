@@ -139,12 +139,19 @@ def test_facts_and_skills_reach_other_workers(workers, monkeypatch):
         ops = [o for o in store.ops_since({}) if o["collection"] == "memory"]
         ids_a = [o["record_id"] for o in ops]
         assert "skill:greet" in ids_a
-        assert any(r.startswith("memory-v2:") for r in ids_a)
+        # One record per fact plus the store's barrier; with no other worker
+        # nothing needs the whole-store copy.
+        assert sum(r.startswith("memory-fact:") for r in ids_a) == 1
+        assert sum(r.startswith("memory-barrier:") for r in ids_a) == 1
+        assert not any(r.startswith("memory-v2:") for r in ids_a)
     join(a, b)
     with b.active():
-        rows = b.sql("SELECT id, kind FROM network_memory_records ORDER BY id")
-        assert [r["kind"] for r in rows] == ["fact", "skill"]
-        assert memory_records.apply_to_files([r["id"] for r in rows]) == 2
+        rows = b.sql("SELECT id, kind, deleted FROM network_memory_records ORDER BY id")
+        # A republished its whole store too once B joined: B's presence had
+        # not reached A yet, so A could not tell B reads per-fact records.
+        assert sorted((r["id"].split(":", 1)[0], r["kind"]) for r in rows) == [
+            ("memory-barrier", "fact"), ("memory-fact", "fact"), ("memory-v2", "fact"), ("skill", "skill")]
+        assert memory_records.apply_to_files([r["id"] for r in rows]) >= 3
         root = _skills_root(b)
         facts_b = SkillStore(root)
         imported = facts_b.memories()[0]
@@ -154,9 +161,11 @@ def test_facts_and_skills_reach_other_workers(workers, monkeypatch):
         assert not (root / "journal.jsonl").exists()
         facts_b.save_memory("B likes spaces.", protected=True)
         time.sleep(memory_records.WRITE_QUIET_SECONDS + .01)
-        assert memory_records.publish() == 1
+        memory_records.publish()
         ids_b = [o["record_id"] for o in store.ops_since({}) if o["collection"] == "memory" and o["origin_device_id"] == b.device_id]
-        assert len(ids_b) == 1 and ids_b[0].startswith("memory-v2:")
+        # B publishes its own view of both facts it holds, under its device id.
+        assert sorted(r.split(":", 1)[0] for r in ids_b if not r.startswith("memory-v2:")) == [
+            "memory-barrier", "memory-fact", "memory-fact"]
     converge([a, b])
     with a.active():
         memory_records.apply_to_files(ids_b)

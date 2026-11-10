@@ -208,8 +208,27 @@ attention, at most once a day per worker. The thresholds are first estimates.
 
 ## Replication and concurrency
 
-`app/network/memory_records.py` publishes the durable snapshot through the
-existing memory collection. The committed local file is the durable source for
+`app/network/memory_records.py` publishes the durable store through the
+existing memory collection as one small record per fact
+(`memory-fact:<device>:<owner-hash>:<fact-hash>`, live and archived facts) and
+one barrier record per store (`memory-barrier:<device>:<owner-hash>`: its
+tombstones and forget filter). The merge is entry-wise, so one fact's record
+merges exactly like that fact inside a whole snapshot, and a change to one fact
+sends only that fact's record. Records are keyed by the publishing worker, so
+two workers' different views of one fact never overwrite each other. A fact a
+worker stops holding has its record marked deleted, and receivers ignore
+deleted fact records: forgetting travels only through the barrier. A receiver
+merges one apply batch's records per store in one write. While another active
+worker does not advertise `memory_fact_records` in its signed presence (or its
+presence is unknown), each worker also keeps writing the older whole-store
+record (`memory-v2:<device>:<owner-hash>`); once every other worker advertises
+it, that record is marked deleted. A receiver merges every live whole-store
+record, whoever published it, so mixed-version networks keep converging.
+Received records are committed before they are written to the files, so each
+worker re-applies every peer's live memory record once at network start (a
+crash between the two) and again on the next publish pass after a write failed
+with an I/O error; its own records are left out, since its files are their
+source. The committed local file is the durable source for
 retrying publication, so a crash between a save and a publish does not lose the
 save. A local receipt does not claim that an offline worker has received it.
 User-level prose skill folders (`~/.fluid/skills/<name>/SKILL.md`) travel in

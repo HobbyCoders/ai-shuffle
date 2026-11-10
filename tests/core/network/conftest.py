@@ -87,7 +87,7 @@ def _reset_request_limiters():
 
 @pytest.fixture(autouse=True)
 def _isolate_memory_publisher(monkeypatch):
-    """Start every network test with no memory write hook and no open window.
+    """Start every network test with no memory write hook, no open window and no owed reconcile.
 
     The app installs Fluid's post-commit hook, and #1224 defers ``publish()``
     until a committed save's quiet gap. Both are process globals: a hook left
@@ -97,3 +97,4 @@ def _isolate_memory_publisher(monkeypatch):
     """
     monkeypatch.setattr(transactions, "_change_callback", None, raising=False)
     monkeypatch.setattr(memory_records, "_write_window", None)
+    monkeypatch.setattr(memory_records, "_reconcile_owed", False)

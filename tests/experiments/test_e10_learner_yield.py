@@ -237,3 +237,27 @@ def test_citation_heuristic():
     assert e10.cites(fact, "so the web app keeps the theme under a key")
     assert not e10.cites(fact, "the theme is dark")
     assert e10.cites("anything", "use style.tabs here", key="style.tabs")
+
+
+def test_db_snapshots_dedupe_per_store_not_per_device():
+    # One worker, two stores: A still has a live whole-store record (and its
+    # per-fact records), B has only per-fact records. Both count, A once.
+    store_a = {"schema": 2, "owner": "local", "store_id": "store-a",
+               "entries": [learner("m1", "Store A fact.", DAY1, "store-a")], "tombstones": []}
+    head_b = {"schema": 2, "owner": "api:user-1", "store_id": "store-b"}
+    with get_db() as conn:
+        cur = conn.cursor()
+        rows = [
+            ("memory-v2:dev1:ownera", store_a),
+            ("memory-fact:dev1:ownera:f1", store_a),
+            ("memory-barrier:dev1:ownera", {**store_a, "entries": []}),
+            ("memory-fact:dev1:ownerb:f2", {**head_b, "entries": [learner("m2", "Store B fact.", DAY1, "store-b")]}),
+            ("memory-barrier:dev1:ownerb", {**head_b, "entries": [], "tombstones": []}),
+        ]
+        for rid, doc in rows:
+            cur.execute("INSERT INTO network_memory_records (id, kind, scope, content, content_hash, deleted) "
+                        "VALUES (%s, 'fact', 'global', %s, 'h', FALSE)", (rid, json.dumps(doc)))
+    snapshots = e10.load_db_snapshots(get_db=get_db)
+    assert sorted(s.store_id for s in snapshots) == ["store-a", "store-b"]
+    (b,) = [s for s in snapshots if s.store_id == "store-b"]
+    assert [e["text"] for e in b.doc["entries"]] == ["Store B fact."]

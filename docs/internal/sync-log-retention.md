@@ -227,9 +227,9 @@ format-1 protocol coverage is not a claim to have run an older installed binary.
 
 ## Memory op compaction
 
-The `memory` collection syncs one whole-store record per worker and owner
-(`memory-v2:<device>:<owner-hash>`), so every memory change appends a signed
-copy of the entire fact store. A later field measurement found 792 kB average
+Before per-fact records, the `memory` collection synced one whole-store record
+per worker and owner (`memory-v2:<device>:<owner-hash>`), so every memory
+change appended a signed copy of the entire fact store. A later field measurement found 792 kB average
 envelopes (961 kB max) and 1,666 copies of one worker's record in 30 days
 (1.3 GB), 2.1 GB for 27 records, nearly all superseded. The generic pass only
 dropped them after 30 days.
@@ -262,13 +262,25 @@ cancel. Each pass logs `Memory sync operation compaction` with `deleted_ops`,
 `bytes_estimate`, peer frontiers and expired peers. Disable it with
 `AI_SHUFFLE_SYNC_MEMORY_OP_COMPACTION=0` (`false`/`off` also work).
 
-What it does not change: bytes **written** per memory change are the same
-(one whole-store envelope). What it bounds is bytes **kept**: roughly one
-envelope per memory record plus whatever recent peers have not yet received
-and up to a day of new copies, instead of 30 days. Per-fact or delta records
-would also cut the bytes written, but would need a new record format, merge
-rules shared with the fact store, and a mixed-version plan (older peers would
-ignore per-fact records and stop converging). That is left as a follow-up.
+What it bounds is bytes **kept**: roughly one envelope per memory record plus
+whatever recent peers have not yet received and up to a day of new copies,
+instead of 30 days.
+
+Bytes **written** are cut by per-fact records (#1167): each worker publishes
+one small record per fact (`memory-fact:<device>:<owner-hash>:<fact-hash>`) and
+one barrier record per store (`memory-barrier:<device>:<owner-hash>`, the
+tombstones and forget filter), so a change to one fact appends one envelope of
+that fact's size. The whole-store `memory-v2:` record is still written while
+another active worker does not advertise `memory_fact_records` in its signed
+presence (or its presence has not arrived), and is marked deleted once every
+other worker does; receivers merge every live one. A per-fact record is sent
+once, so a worker re-applies every peer's live memory record at network start
+and after a failed write instead of waiting for a later whole-store copy.
+Compaction still applies to all of these records: an edited fact's
+older envelopes are superseded like any other. A fact a worker no longer holds
+(dropped, expired from the archive, forgotten) leaves its record marked deleted
+with empty content; nothing collects deleted memory records yet, so they stay
+as small rows (one envelope each after compaction).
 
 `tests/core/network/test_memory_op_compaction_postgres.py` covers it with real
 PostgreSQL workers, the real memory producer and signed exchange through the

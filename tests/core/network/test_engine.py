@@ -637,7 +637,7 @@ async def test_account_connection_starts_before_runner_approval_and_stops_cleanl
     import asyncio
     from unittest.mock import AsyncMock, Mock
     from app.core import cluster, managed_connection
-    from app.network import enrollment, hub, startup, transport
+    from app.network import enrollment, hub, memory_records, startup, transport
     worker = workers("waiting-for-approval")
     entered, stopped = asyncio.Event(), asyncio.Event()
     async def connection():
@@ -653,6 +653,7 @@ async def test_account_connection_starts_before_runner_approval_and_stops_cleanl
     monkeypatch.setattr(hub, "start", Mock(return_value=[]))
     monkeypatch.setattr(hub, "stop", AsyncMock())
     monkeypatch.setattr(enrollment, "resume_enrollment", Mock())
+    monkeypatch.setattr(memory_records, "reconcile_files", Mock(return_value=0))
     monkeypatch.setattr(startup, "_tasks", [])
     with worker.active():
         database.register_install(install_id="existing-worker", device_name="Existing",

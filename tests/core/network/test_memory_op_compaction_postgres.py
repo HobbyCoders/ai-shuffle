@@ -29,8 +29,14 @@ SEED_FACTS = 60
 
 @pytest.fixture(autouse=True)
 def write_hook(_isolate_memory_publisher, monkeypatch):
-    """The production post-commit hook (#1224), on the shared clean publisher state."""
+    """The production post-commit hook (#1224), on the shared clean publisher state.
+
+    An old worker (no per-fact records) is taken to be a member throughout,
+    so every change still writes a whole-store copy: those copies are what
+    this file compacts. Per-fact records: test_memory_fact_records_postgres.
+    """
     monkeypatch.setattr(transport, "request_scan", lambda *args, **kwargs: None)
+    monkeypatch.setattr(memory_records, "_snapshot_readers", lambda ctx: True)
     memory_records.install_write_hook()
 
 
@@ -54,15 +60,18 @@ def seed(worker):
 
 
 def change(worker, n):
-    """One memory change through the real producer: one new whole-store envelope."""
+    """One memory change through the real producer: one new whole-store envelope
+    (and the new fact's own record)."""
     with worker.active():
         facts(worker).save_memory(f"Change {n}: remember detail number {n}.", protected=True)
-        assert publish() == 1
+        assert publish() == 2
 
 
-def memory_ops(worker):
+def memory_ops(worker, *, snapshots_only=True):
+    """By default the whole-store envelopes: a new fact supersedes no per-fact record."""
+    only = " AND record_id LIKE 'memory-v2:%%'" if snapshots_only else ""
     return worker.sql("SELECT record_id, seq, pg_column_size(envelope) AS bytes FROM sync_ops "
-                      "WHERE collection = 'memory' ORDER BY ingest_id")
+                      "WHERE collection = 'memory'" + only + " ORDER BY ingest_id")
 
 
 def memory_records_of(worker):
@@ -195,10 +204,10 @@ def test_compaction_keeps_heads_newest_records_and_reports_bytes(pg_workers, cap
         # A skill record shares the collection; its single op is its newest.
         (source.data_dir / "fluid" / "skills" / "greet.py").write_text("def run():\n    return 'hi'\n")
         assert publish() == 1
-    ops = memory_ops(source)
+    ops = memory_ops(source, snapshots_only=False)
     with source.active(), caplog.at_level("INFO", logger=store.__name__):
         assert store.compact_memory_ops(source.device_id, {}) == 3
-    kept = memory_ops(source)
+    kept = memory_ops(source, snapshots_only=False)
     assert sorted(r["record_id"] for r in kept) == sorted({r["record_id"] for r in ops})
     assert {r["seq"] for r in kept} == {max(r["seq"] for r in ops if r["record_id"] == rid)
                                         for rid in {r["record_id"] for r in ops}}
