@@ -142,14 +142,14 @@ it('lists what every other worker answered when the update goes to all workers',
 	expect(screen.queryByTestId('claude-cli-peers')).toBeNull();
 	current = { ...current, job: job('succeeded', 'update') };
 	mocks.post.mockResolvedValueOnce({ ...current, workers: [
-		{ device_id: 'a', device_name: 'GamingPC', outcome: 'accepted', reason: 'done' },
+		{ device_id: 'a', device_name: 'Desktop', outcome: 'accepted', reason: 'done' },
 		{ device_id: 'b', device_name: 'Laptop', outcome: 'offline', reason: 'offline' },
 		{ device_id: 'c', device_name: 'Old box', outcome: 'refused', reason: 'not-owned' }
 	] });
 	await fireEvent.click(screen.getByRole('button', { name: 'Check for update' }));
 	const rows = within(await screen.findByRole('list', { name: 'Other workers' })).getAllByRole('listitem');
 	expect(rows.map((row) => row.textContent)).toEqual([
-		'GamingPCUpdate started', 'LaptopOffline · not queued', 'Old boxThis CLI is managed outside AI Shuffle']);
+		'DesktopUpdate started', 'LaptopOffline · not queued', 'Old boxThis CLI is managed outside AI Shuffle']);
 	// This worker's own result still shows next to the others.
 	expect(screen.getByText('Claude Code updated from 2.1.280 to 2.1.285.')).toBeTruthy();
 });

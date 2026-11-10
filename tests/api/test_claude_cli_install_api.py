@@ -60,7 +60,7 @@ def test_update_reaches_other_workers_only_when_update_all_is_on(client, monkeyp
     started = []
     monkeypatch.setattr(ci, "start", lambda kind: started.append(kind) or _payload())
     monkeypatch.setattr(ci, "payload", _payload)
-    peers = [{"device_id": "peer", "device_name": "GamingPC", "outcome": "accepted", "reason": "done", "status": None}]
+    peers = [{"device_id": "peer", "device_name": "Desktop", "outcome": "accepted", "reason": "done", "status": None}]
     asked = []
     async def fanout():
         asked.append(list(started))  # this worker's own job starts first
