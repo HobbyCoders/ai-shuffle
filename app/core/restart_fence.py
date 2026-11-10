@@ -31,9 +31,12 @@ nothing needs fencing any more.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextvars
 import itertools
 import logging
 import re
+import threading
 import time
 from typing import Any, Callable, Dict, Optional, Set
 
@@ -105,12 +108,24 @@ class Admission:
         operation.add_done_callback(done)
         return operation
 
-    def _pinned(self, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """``fn`` for a worker thread, holding this admission until it returns."""
+    async def run_in_executor(self, executor: Any, fn: Callable[[], Any]) -> Any:
+        """``loop.run_in_executor`` whose thread keeps the admission busy until
+        it returns, even when the awaiting coroutine is cancelled first.
+
+        The reference is dropped exactly once: by the thread when ``fn``
+        returns, or by the cancelled awaiter when the work was still queued.
+        Queued work that was given up never runs ``fn``, so a start cancelled
+        behind a full executor cannot hold the fence busy for good."""
         loop = asyncio.get_running_loop()
         self._refs += 1
+        lock = threading.Lock()
+        state = ["queued"]  # queued -> running | abandoned, decided under the lock
 
         def run() -> Any:
+            with lock:
+                if state[0] != "queued":
+                    raise concurrent.futures.CancelledError()
+                state[0] = "running"
             try:
                 return fn()
             finally:
@@ -119,16 +134,23 @@ class Admission:
                 except RuntimeError:  # loop closed: the process is exiting
                     pass
 
-        return run
+        def abandoned(future: "asyncio.Future[Any]") -> None:
+            if not future.cancelled():
+                return
+            with lock:
+                if state[0] != "queued":
+                    return  # the thread has it: it drops the reference itself
+                state[0] = "abandoned"
+            self._unref()
+
+        future = loop.run_in_executor(executor, run)
+        future.add_done_callback(abandoned)
+        return await future
 
     async def to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """``asyncio.to_thread`` whose thread keeps the admission busy until it
-        returns, even when the awaiting coroutine is cancelled first."""
-        return await asyncio.to_thread(self._pinned(lambda: fn(*args, **kwargs)))
-
-    async def run_in_executor(self, executor: Any, fn: Callable[[], Any]) -> Any:
-        """``loop.run_in_executor`` with the same guarantee as :meth:`to_thread`."""
-        return await asyncio.get_running_loop().run_in_executor(executor, self._pinned(fn))
+        """``asyncio.to_thread`` with the same guarantee as :meth:`run_in_executor`."""
+        context = contextvars.copy_context()
+        return await self.run_in_executor(None, lambda: context.run(fn, *args, **kwargs))
 
     def __enter__(self) -> "Admission":
         return self
@@ -181,13 +203,18 @@ def in_flight() -> list[str]:
     return [admission.label for admission in _admissions.values()]
 
 
-async def reserve(token: str) -> Dict[str, Any]:
+async def reserve(token: str, *, final: bool = False) -> Dict[str, Any]:
     """Close admission for an idle restart, or refuse and change nothing.
 
     ``token`` is chosen by the caller, so it can release a reservation whose
     answer it never received. The same token reserving again renews the lease
     while it is held; after the lease ran out it is a fresh request, granted
     only if the worker is idle again.
+
+    ``final`` is the quiesce itself asking (stop-sessions with a token): a
+    grant then has no lease, because this process is about to be stopped and
+    replaced, and a lease running out before that would let new work start
+    only to be stopped. Only :func:`release` or the process ending reopens it.
     """
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
         raise ValueError("Invalid restart reservation token")
@@ -203,10 +230,9 @@ async def reserve(token: str) -> Dict[str, Any]:
     _expire_if_due()
     if _reservation is not None:
         if _reservation["token"] == token:
-            # The holder asking again renews its lease (the supervisor does
-            # this right before it quiesces, after a verification of any length).
-            _latch(token)
-            return {"reserved": True, "lease_seconds": LEASE_SECONDS}
+            # The holder asking again renews its lease.
+            _latch(token, final)
+            return {"reserved": True, "lease_seconds": None if final else LEASE_SECONDS}
         return {"reserved": False, "active_sessions": 0, "admissions": len(_admissions),
                 "queries": 0, "reason": "Another restart is already being prepared"}
     busy = desktop_lifecycle.active_session_ids()
@@ -215,22 +241,25 @@ async def reserve(token: str) -> Dict[str, Any]:
     if busy or _admissions or queries:
         return {"reserved": False, "active_sessions": len(busy), "admissions": len(_admissions),
                 "queries": queries, "reason": "Finish active sessions before restarting"}
-    _latch(token)
+    _latch(token, final)
     logger.info("Restart fence: admission closed for an idle restart")
-    return {"reserved": True, "lease_seconds": LEASE_SECONDS}
+    return {"reserved": True, "lease_seconds": None if final else LEASE_SECONDS}
 
 
-def _latch(token: str) -> None:
-    """Hold admission closed for ``token`` for one full lease from now."""
+def _latch(token: str, final: bool = False) -> None:
+    """Hold admission closed for ``token``: for one full lease from now, or
+    with no lease when ``final``."""
     global _reservation
     if _reservation is not None and _reservation.get("timer") is not None:
         _reservation["timer"].cancel()
     timer = None
-    try:
-        timer = asyncio.get_running_loop().call_later(LEASE_SECONDS + 0.05, _expire_if_due)
-    except RuntimeError:
-        pass
-    _reservation = {"token": token, "expires_at": time.monotonic() + LEASE_SECONDS, "timer": timer}
+    if not final:
+        try:
+            timer = asyncio.get_running_loop().call_later(LEASE_SECONDS + 0.05, _expire_if_due)
+        except RuntimeError:
+            pass
+    expires_at = float("inf") if final else time.monotonic() + LEASE_SECONDS
+    _reservation = {"token": token, "expires_at": expires_at, "timer": timer}
 
 
 def release(token: str) -> bool:

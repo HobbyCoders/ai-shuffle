@@ -2114,16 +2114,23 @@ def _reserve_restart(updates):
     return None
 
 
-def _confirm_restart(updates, token):
+def _quiesce(updates, token):
+    """Ask the app to stop its sessions; True when it did.
+
+    With a reservation the request carries its token, and the app decides in
+    one step whether admission is still closed (or the worker is still idle)
+    and latches it until the process is replaced. Verification may have
+    outlasted the lease, and this supervisor may be delayed before or after
+    this call: neither can stop work that started in between. A refusal (409)
+    stops nothing."""
     if token is None:
-        return
+        return updates.lifecycle("stop-sessions").get("stopped") is True
     try:
-        held = updates.lifecycle(f"restart-reserve?token={token}").get("reserved") is True
+        return updates.lifecycle(f"stop-sessions?token={token}").get("stopped") is True
     except Exception as exc:
-        _release_restart(updates, token)
-        raise RestartRejected("Application update preflight failed") from exc
-    if not held:
-        raise RestartRejected("Finish active sessions before restarting")
+        if getattr(getattr(exc, "response", None), "status_code", None) == 409:
+            raise RestartRejected("Finish active sessions before restarting") from exc
+        raise
 
 
 def restart_into_update(current, updates, env, before_start=None):
@@ -2143,14 +2150,10 @@ def restart_into_update(current, updates, env, before_start=None):
         if not isinstance(exc, Exception):
             raise
         raise RestartRejected("Application update preflight failed", str(exc) if _update_error(exc) else None) from exc
-    # Verification can outlast the reservation's lease, which reopens
-    # admission. Asking again with the same token renews a held lease, or
-    # takes a new one only if the worker is still idle.
-    _confirm_restart(updates, token)
     # Admission is closed, so this quiesce finds nothing new to stop; an
     # older app without the fence keeps today's behaviour.
     # Once sent, even a timeout cannot prove the worker is still usable.
-    if updates.lifecycle("stop-sessions").get("stopped") is not True:
+    if not _quiesce(updates, token):
         raise RuntimeFailure("Could not quiesce the worker")
     stop_group(current, APP_STOP_SECONDS)
     updates.activating()  # copies the database when the update needs it, then records the first start

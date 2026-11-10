@@ -100,6 +100,62 @@ async def test_the_same_token_after_expiry_is_refused_when_work_started_meanwhil
     assert (await restart_fence.reserve(TOKEN))["reserved"] is True
 
 
+async def test_the_quiesce_latch_has_no_lease_and_only_release_reopens_it(monkeypatch, _idle):
+    monkeypatch.setattr(restart_fence, "LEASE_SECONDS", 0.05)
+    await restart_fence.reserve(TOKEN)
+    assert (await restart_fence.reserve(TOKEN, final=True)) == {"reserved": True, "lease_seconds": None}
+    await asyncio.sleep(0.2)  # far past the lease: the supervisor may be this late
+    assert restart_fence.is_closed()
+    with pytest.raises(restart_fence.AdmissionClosed):
+        restart_fence.admit("late start")
+    assert restart_fence.release(TOKEN) is True
+    assert not restart_fence.is_closed()
+
+
+async def test_the_quiesce_after_expiry_is_refused_when_work_started_meanwhile(monkeypatch):
+    monkeypatch.setattr(restart_fence, "LEASE_SECONDS", 0.05)
+    await restart_fence.reserve(TOKEN)
+    await asyncio.sleep(0.2)
+    admission = restart_fence.admit("started after the lease ran out")
+    assert (await restart_fence.reserve(TOKEN, final=True))["reserved"] is False
+    assert not restart_fence.is_closed()
+    admission.release()
+
+
+async def test_a_start_cancelled_while_still_queued_does_not_hold_the_fence_busy():
+    """Behind a full executor the cancelled start never runs: its admission
+    must be dropped, or every later idle restart would be refused."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    occupied, finish, ran = threading.Event(), threading.Event(), []
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        blocker = asyncio.get_running_loop().run_in_executor(executor, lambda: (occupied.set(), finish.wait(5)))
+        await asyncio.to_thread(occupied.wait, 5)
+        admission = restart_fence.admit("queued start")
+
+        async def producer():
+            try:
+                await admission.run_in_executor(executor, lambda: ran.append(True))
+            finally:
+                admission.release()
+
+        task = asyncio.create_task(producer())
+        await asyncio.sleep(0.05)  # queued behind the blocker
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert restart_fence.in_flight() == []
+        finish.set()
+        await blocker
+        await asyncio.sleep(0.05)
+        assert ran == [] and restart_fence.in_flight() == []
+        assert (await restart_fence.reserve(TOKEN))["reserved"] is True
+    finally:
+        finish.set()
+        executor.shutdown(wait=True)
+
+
 async def test_cancelled_thread_admission_stays_busy_until_the_thread_returns():
     started, finish = threading.Event(), threading.Event()
 

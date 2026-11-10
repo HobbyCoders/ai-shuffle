@@ -404,7 +404,10 @@ async def test_idle_restart_never_stops_a_turn_admitted_during_verification(heal
                 await _wait_state(turns, arriving["id"], "completed")
             else:
                 assert await asyncio.wait_for(restart, 10) == "new-app"
-                assert actions == ["restart-reserve", "restart-reserve", "stop-sessions"]
+                assert actions == ["restart-reserve", "stop-sessions"]
+                # The quiesce latched admission with no lease: it stays closed
+                # until this process is replaced, however late that happens.
+                assert restart_fence.is_closed()
                 # Nothing was running to stop; the turn is durable for the next boot.
                 assert began.empty()
                 assert turns.get_turn(arriving["id"])["state"] == "queued"
@@ -450,6 +453,59 @@ async def test_idle_restart_refuses_a_turn_registered_at_the_fence_without_stopp
             assert turns.get_turn(existing["id"])["state"] == "running"
             finish.set()
             await _wait_state(turns, existing["id"], "completed")
+
+
+async def test_idle_restart_whose_lease_ran_out_never_stops_the_turn_that_started(healthy, mock_db, monkeypatch):
+    """Verification outlasts the lease, admission reopens and a turn starts.
+    The quiesce carries the reservation token, so the app refuses it in the
+    same step that would have latched admission: the turn is never stopped."""
+    from app.core import restart_fence, session_runtime, startup
+    from app.db import turns
+    from tests.core.test_session_runtime import _runtime_env
+
+    monkeypatch.setattr(restart_fence, "LEASE_SECONDS", 0.2)
+    loop = asyncio.get_running_loop()
+    verifying, started = asyncio.Event(), threading.Event()
+    began, finish = asyncio.Queue(), asyncio.Event()
+
+    def launch(env, activate=False):
+        loop.call_soon_threadsafe(verifying.set)
+        assert started.wait(10), "the turn did not start during verification"
+        return ["true"], None, env
+
+    async def pump(**kwargs):
+        began.put_nowait(True)
+        await finish.wait()
+        yield {"type": "done"}
+
+    late = turns.enqueue_turn("after-the-lease", "user", prompt="new work")
+    async with _internal_client() as client:
+        actions = _idle_restart_harness(healthy, monkeypatch, loop, client, launch)
+        stopped = Mock()
+        monkeypatch.setattr(runtime, "stop_group", stopped)
+        with _runtime_env(pump=pump) as env:
+            env["registry"].active_session_ids.return_value = []
+            env["registry"].get_active.return_value = []
+            restart = asyncio.create_task(asyncio.to_thread(runtime.restart_into_update, "old-app", healthy, {}))
+            try:
+                await asyncio.wait_for(verifying.wait(), 10)
+                assert restart_fence.is_closed()
+                # Held back while fenced; the lease then runs out while the
+                # supervisor still verifies, and the expiry starts the turn.
+                assert await session_runtime.execute(late) is None
+                await asyncio.wait_for(began.get(), 10)
+                assert not restart_fence.is_closed()
+                assert turns.get_turn(late["id"])["state"] == "running"
+            finally:
+                started.set()
+            with pytest.raises(runtime.RestartRejected):
+                await asyncio.wait_for(restart, 10)
+            assert actions == ["restart-reserve", "stop-sessions"]
+            stopped.assert_not_called()
+            assert not restart_fence.is_closed() and not startup.is_shutting_down
+            assert turns.get_turn(late["id"])["state"] == "running"
+            finish.set()
+            await _wait_state(turns, late["id"], "completed")
 
 
 async def test_lost_reserve_answer_is_released_and_admission_reopens(healthy, mock_db, monkeypatch):
