@@ -140,3 +140,26 @@ async def test_receiver_delete_after_finalize_recovers_a_lost_commit_reply(pair,
         assert database.get_session(SID)["owner_device_id"] == b.device_id
     await _delete_on_receiver(b)
     _assert_deleted_everywhere(a, b)
+
+
+@pytest.mark.asyncio
+async def test_receiver_delete_of_a_chat_moved_from_an_unsynced_mirror(pair, monkeypatch):  # noqa: F811
+    a, b, _, _ = pair
+    with b.active(), get_db() as conn:
+        # The receiver's local mirror of a chat it created on the source,
+        # before the source's first sync of it arrived: no sync record.
+        conn.cursor().execute("DELETE FROM sync_records WHERE collection='sessions' AND record_id=%s", (SID,))
+    assert _record(b) is None
+    await _move_to_receiver(a, b, monkeypatch)
+    assert _record(b) is None
+    await _delete_on_receiver(b)
+    _assert_deleted_everywhere(a, b)
+
+
+def test_a_chat_the_network_never_knew_gets_no_tombstone(pair):  # noqa: F811
+    _, b, _, _ = pair
+    with b.active():
+        database.create_session("local-only", "default", title="Local")
+        assert _record(b, "local-only") is None
+        assert database.delete_session("local-only")
+    assert _record(b, "local-only") is None

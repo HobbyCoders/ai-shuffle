@@ -1906,16 +1906,21 @@ def _record_owner_tombstone(cursor, session_id: str, row: dict) -> bool:
     """The owner's delete and its tombstone commit together (#1308).
 
     The owner-only scan retracts only records this worker signed. A chat that
-    arrived by hand-off still carries the previous owner's record. A chat the
-    network never knew has no record and gets no tombstone. The caller holds
-    N, so no incoming op can recreate the chat between the delete and this
-    record.
+    arrived by hand-off still carries the previous owner's record, or none at
+    all when the hand-off used a local mirror the network had not synced yet.
+    The receipt the acceptance left in ``placement`` is that chat's evidence
+    that the network knows it, so its tombstone is forced. A chat the network
+    never knew has neither and gets no tombstone. The caller holds N, so no
+    incoming op can recreate the chat between the delete and this record.
     """
+    from app.db.base import parse_jsonb
     from app.network import control, engine
 
     if control.owner_of(row) is not None:
         return False
-    return engine.record(cursor, "sessions", session_id, None) is not None
+    placement = parse_jsonb(row.get("placement")) or {}
+    received = isinstance(placement, dict) and bool(placement.get("handoff"))
+    return engine.record(cursor, "sessions", session_id, None, force=received) is not None
 
 
 def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
