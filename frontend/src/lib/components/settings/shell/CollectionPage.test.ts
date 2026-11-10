@@ -128,6 +128,20 @@ describe('CollectionPage width', () => {
 		expect(document.activeElement?.textContent).toBe('Item A');
 	});
 
+	it('moves focus to the open item when the list divider hides under it', () => {
+		settingsNav.selectItem('a');
+		const { coll, lcol } = setup();
+		resize(coll, 940);
+		const divider = coll.querySelector<HTMLElement>('.st-divider')!;
+		divider.focus();
+		expect(document.activeElement).toBe(divider);
+
+		resize(coll, 460);
+		divider.blur(); // hidden with the list, so it drops focus
+		resize(lcol, 0);
+		expect(document.activeElement?.textContent).toBe('Item A');
+	});
+
 	it('returns the list to the remembered width after a squeeze, without saving', () => {
 		localStorage.setItem(LIST_WIDTH_STORAGE_KEY, '420');
 		const { coll, listWidth } = setup();

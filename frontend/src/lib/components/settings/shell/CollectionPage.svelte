@@ -149,8 +149,10 @@
 	// fall to the page, so it moves to the detail's title instead.
 	let lcol: HTMLDivElement | undefined = $state();
 	let listFocused = false;
+	// The list divider hides with the list, so it counts as part of it.
+	const inList = (node: Element) => !!lcol?.contains(node) || (node.parentElement === el && node.matches('.st-divider'));
 	function onfocusin(event: FocusEvent) {
-		listFocused = !!lcol?.contains(event.target as Node);
+		listFocused = event.target instanceof Element && inList(event.target);
 	}
 	$effect(() => {
 		if (!lcol || typeof ResizeObserver === 'undefined') return;
@@ -159,7 +161,7 @@
 			// Stacked mode moves focus with its own steps.
 			if ((entries[0]?.contentRect.width ?? 1) > 0 || !listFocused || settingsNav.stacked) return;
 			const active = document.activeElement;
-			if (active && active !== document.body && !list.contains(active)) return;
+			if (active && active !== document.body && !inList(active)) return;
 			listFocused = false;
 			el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')?.focus({ preventScroll: true });
 		});
