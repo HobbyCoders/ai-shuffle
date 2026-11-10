@@ -422,6 +422,30 @@ def test_delete_vs_report_clear_and_answer(private_pool, monkeypatch, path):
     _delete_behind_writer(private_pool, monkeypatch, sid, write, boundary)
 
 
+def test_delete_vs_guarded_report_deferral_for_a_remote_child(private_pool, monkeypatch):
+    """#1443: a report deferred through admit_report, for a starter at rest
+    whose child runs on another worker (absent here), records the deferral on
+    the starter. Its run/counter locks come before the starter's session row,
+    never after it, so a concurrent delete of the starter waits, no deadlock."""
+    import asyncio
+    import functools
+    from unittest.mock import AsyncMock
+    from app.core import session_orchestration
+    from app.services import notification_service
+
+    sid = "delete-mutation-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO sessions (id) VALUES (%s)", (sid,))
+    runs.claim_run(sid, "mutation", 60)
+    monkeypatch.setattr(notification_service, "emit_notification", AsyncMock())
+    frame = {"task_id": "remote-child-" + uuid4().hex, "agent_message_turn_id": "finished", "status": "completed"}
+    admit = functools.partial(session_orchestration.admit_report, sid,
+                              session_orchestration.report_event_id(sid, frame))
+    write = lambda: asyncio.run(session_orchestration.defer_started_report(sid, frame, admit=admit))
+    boundary = lambda sql: "FROM sessions WHERE id=" in sql and "FOR UPDATE" in sql
+    _delete_behind_writer(private_pool, monkeypatch, sid, write, boundary)
+
+
 
 def test_fork_cannot_message_parent_before_or_during_admission(private_pool, monkeypatch):
     from app.db import database
