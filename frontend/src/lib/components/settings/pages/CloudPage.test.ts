@@ -149,6 +149,15 @@ describe('free', () => {
 		expectNoKeyWording();
 	});
 
+	it('shows an older hub\'s 2-worker free account as 2', async () => {
+		status = { ...free, message: 'Free account: 2 remote workers.', seats: 2, remote_worker_limit: 2 };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Free'));
+		expect(currentRow()).toBe(tierNamed('Free account'));
+		expect(tierNamed('Free account').textContent).toMatch(/2\s*·\s*remote workers, no card/);
+		expect(seats()).toBe('2 remote workers included');
+	});
+
 	it('shows how many of the 3 are in use when the account says', async () => {
 		status = { ...free, seats_used: 1 };
 		render(CloudPage);
@@ -187,6 +196,26 @@ describe('paid, from a hub that names no plan', () => {
 		await waitFor(() => expect(state()).toContain('Paid'));
 		expect(tierNamed('Paid plan').textContent).toMatch(/12\s*·\s*remote workers and sync/);
 		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('3 of 12 in use');
+	});
+
+	it('shows an older hub\'s 4-worker paid plan as 4', async () => {
+		status = { ...paid, message: 'Paid plan: 4 remote workers.', seats: 4, seats_used: 1, remote_worker_limit: 4 };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Paid'));
+		expect(currentRow()).toBe(tierNamed('Paid plan'));
+		expect(tierNamed('Paid plan').textContent).toMatch(/4\s*·\s*remote workers and sync/);
+		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('1 of 4 in use');
+	});
+
+	it.each([
+		[{ seats: 100, remote_worker_limit: 4 }, '1 of 4 in use', /4\s*·\s*remote workers and sync/],
+		[{ seats: 4, remote_worker_limit: 100 }, '1 in use', /Unlimited/],
+	])('shows the hub limit, not the seat count, when they differ (%o)', async (extra, shown, row) => {
+		status = { ...paid, seats_used: 1, ...extra };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Paid'));
+		expect(seats()).toBe(shown);
+		expect(tierNamed('Paid plan').textContent).toMatch(row);
 	});
 
 	it('shows 100 seats with 2 in use as unlimited, without a meter', async () => {

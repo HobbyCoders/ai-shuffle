@@ -8,11 +8,12 @@
 	 *
 	 * - not_linked: what a free account adds, Link an account (the Devices
 	 *   sign-in) and pricing.
-	 * - free: 3 remote workers (or "N of 3 in use"), Upgrade.
-	 * - paid: the account's seat count (10 when it gives none), how many are in
-	 *   use when the hub says, and the renewal date. The account's `tier` only
-	 *   names the plan (Pro or Ultimate); a custom licence, an older hub or an
-	 *   unknown name keeps the "Paid plan" row. 100 seats and up read as unlimited.
+	 * - free: the account's remote workers (3 when it gives none, or "N of 3 in
+	 *   use"), Upgrade.
+	 * - paid: the account's remote worker limit (10 when it gives none), how many
+	 *   are in use when the hub says, and the renewal date. The account's `tier`
+	 *   only names the plan (Pro or Ultimate); a custom licence, an older hub or an
+	 *   unknown name keeps the "Paid plan" row. A limit of 100 reads as unlimited.
 	 *
 	 * Replaces System > License; the endpoint keeps its `/license` name.
 	 */
@@ -49,11 +50,10 @@
 	const tier = $derived(status?.state ?? null);
 	const paid = $derived(tier === 'paid');
 
-	/** Remote workers the account allows: the paid seat count, else the limit, else the plan default. */
+	/** Remote workers the account allows: the hub's limit (not its seat count), else the plan default. */
 	const cap = $derived.by(() => {
 		if (!status || tier === 'not_linked') return 0;
-		if (paid) return status.seats || status.remote_worker_limit || PAID_WORKERS;
-		return status.remote_worker_limit || FREE_WORKERS;
+		return status.remote_worker_limit || (paid ? PAID_WORKERS : FREE_WORKERS);
 	});
 	const unlimited = $derived(paid && cap >= UNLIMITED_SEATS);
 	const used = $derived(status?.seats_used ?? null);

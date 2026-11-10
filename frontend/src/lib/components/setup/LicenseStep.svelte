@@ -14,7 +14,7 @@
 	import { onMount } from 'svelte';
 	import { BadgeCheck, Loader2 } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { getLicense, PAID_WORKERS, paidPlanName, UNLIMITED_SEATS, type LicenseStatus } from '$lib/api/license';
+	import { FREE_WORKERS, getLicense, PAID_WORKERS, paidPlanName, UNLIMITED_SEATS, type LicenseStatus } from '$lib/api/license';
 
 	interface Props {
 		onContinue: () => void;
@@ -27,7 +27,8 @@
 	let loading = $state(true);
 
 	const paid = $derived(status?.state === 'paid');
-	const workers = $derived(status?.seats || status?.remote_worker_limit || PAID_WORKERS);
+	/* The hub's limit, never its seat count; the plan default only when it gives none. */
+	const workers = $derived(status?.remote_worker_limit || (paid ? PAID_WORKERS : FREE_WORKERS));
 	const planName = $derived(paidPlanName(status));
 
 	async function load() {
@@ -64,7 +65,7 @@
 				<h2 class="text-sm font-semibold text-foreground mb-1">Local use is free</h2>
 				<p class="text-sm text-muted-foreground">
 					Everything works on your own machines and network without an account. A free AI Shuffle Cloud
-					account adds three remote workers, with no card. A paid plan follows the account you sign in with, so
+					account adds {workers} remote {workers === 1 ? 'worker' : 'workers'}, with no card. A paid plan follows the account you sign in with, so
 					there is no key to enter. You can link it later in Settings > Cloud.
 				</p>
 			</div>

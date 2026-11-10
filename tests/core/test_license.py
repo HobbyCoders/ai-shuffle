@@ -47,11 +47,20 @@ def test_free_before_hub_deployment_or_activation(monkeypatch, hub_status):
 
 
 @pytest.mark.parametrize("account_plan", ["free", "paid"])
-def test_status_none_is_free(monkeypatch, account_plan):
-    monkeypatch.setattr(account_hub, "call", Mock(return_value=plan(plan=account_plan, status="none", remote_worker_limit=None)))
+@pytest.mark.parametrize("reported, shown", [(2, 2), (3, 3), (None, 3)])
+def test_status_none_is_free(monkeypatch, account_plan, reported, shown):
+    # An older hub gives free accounts 2; the app shows what the hub reports.
+    monkeypatch.setattr(account_hub, "call", Mock(return_value=plan(plan=account_plan, status="none", remote_worker_limit=reported)))
     result = licensing.status()
     assert result["state"] == result["plan"] == "free"
-    assert result["remote_worker_limit"] == result["seats"] == 3
+    assert result["remote_worker_limit"] == result["seats"] == shown
+
+
+@pytest.mark.parametrize("stale", [4, 10, 100])
+def test_lapsed_paid_never_shows_stale_paid_limit(monkeypatch, stale):
+    monkeypatch.setattr(account_hub, "call", Mock(return_value=plan(status="none", remote_worker_limit=stale, seats=stale)))
+    result = licensing.status()
+    assert result["state"] == "free" and result["remote_worker_limit"] == result["seats"] == 3
 
 
 @pytest.mark.parametrize("state", ["active", "trialing", "grace"])

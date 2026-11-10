@@ -61,7 +61,9 @@ def _normalize(value):
     if not _count(limit) or limit < 1:
         limit = PAID_WORKERS if paid else FREE_WORKERS
     if not paid and value["plan"] == "paid":
-        limit = FREE_WORKERS
+        # A lapsed plan never shows its stale paid size, nor more than the hub
+        # reports (older hubs give free accounts fewer workers).
+        limit = min(limit, FREE_WORKERS)
     # A tier that disagrees with the plan (a lapsed Pro, a paid "free") or that
     # this version does not know is dropped, so the label falls back to the plan.
     tier = value.get("tier")
