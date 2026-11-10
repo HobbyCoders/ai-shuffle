@@ -377,7 +377,8 @@ jobs:
           python -m pytest --durations=50 --junitxml=reports/security-13-3.xml tests/core/test_start_model_replay_scope.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
 
-      # Full controls once per database; repeat only both primary ratchets on main.
+      # Full controls once per database, then both primary ratchets four more times
+      # (about 15s). Pull requests repeat too: main skips this job on their record.
       # Ordinary backend shards still cover the complete isolated test tree.
       - name: Measure large-fold contention on both databases
         env:
@@ -385,7 +386,7 @@ jobs:
           AI_SHUFFLE_TRANSCRIPT_PRODUCER: '1'
           AI_SHUFFLE_ENV_FILE: /dev/null
           PYTHONPATH: .
-          CONTENTION_ATTEMPTS: ${{ github.ref == 'refs/heads/main' && '5' || '1' }}
+          CONTENTION_ATTEMPTS: '5'
         run: |
           for attempt in $(seq 1 "$CONTENTION_ATTEMPTS"); do
             selection=()

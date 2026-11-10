@@ -97,8 +97,14 @@ def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
     audits = "\n".join(step.get("run", "") for step in jobs["supply-chain"]["steps"])
     backend_audit = next(step for step in workflow("ci-backend.yml")["jobs"]["backend-security"]["steps"]
                          if step.get("name") == "Audit public Python dependencies")
-    for line in backend_audit["run"].strip().splitlines():
-        assert line.strip() in audits
+    security = workflow("ci-backend.yml")["jobs"]["backend-security"]["steps"]
+    install = next(step for step in security if "pip install -e ./fluid" in step.get("run", ""))
+    by_name = {step.get("name"): step for step in jobs["supply-chain"]["steps"]}
+    assert by_name["Install what the Python audit inspects"]["run"].split() == install["run"].split()
+    assert by_name["Audit public Python dependencies"]["run"].split() == backend_audit["run"].split()
+    assert by_name["Audit public Python dependencies"]["timeout-minutes"] == backend_audit["timeout-minutes"]
+    # No environment switch makes a recorded backend job do less on a pull request than on main.
+    assert "refs/heads/main" not in (ROOT / ".github/workflows/ci-backend.yml").read_text()
     assert "for package in frontend tools browser-mcp; do" in audits
     assert 'npx -y npm@11 audit --audit-level=high' in audits
     javascript_text = (ROOT / ".github/workflows/ci-frontend.yml").read_text()
