@@ -201,13 +201,15 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
     row = resolve_worker(worker)
     how = ("moves this session and its history there" if _without_checkout(session_id)
            else "commits and pushes the branch and moves this session there")
+    # Read before taking _state_lock: busy_state does DB work (#1416).
+    holding = _holding_text(session_id)
     with _state_lock:
         _check_cancelling(session_id)
         current = _active(session_id)
         if current is not None and current.target_id != row["device_id"]:
             raise ValueError(f"A move to {current.label} is already queued. Cancel it first.")
         message = ("Finish this turn now with a short summary of where the work stands; once the turn "
-                   f"and any background work end, the app {how}.")
+                   f"and any background work end, the app {how}.{holding}")
         if current is not None:
             # The same move again: the queued one stands (with its time limit).
             return {"queued": True, "worker": current.label, "handoff_id": current.handoff_id,
@@ -218,6 +220,35 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
         _pending[session_id] = pending
         return {"queued": True, "worker": pending.label, "handoff_id": pending.handoff_id,
                 "message": f"Hand-off to {pending.label} is queued. {message}"}
+
+
+def _holding_text(session_id: str) -> str:
+    """What holds a just-queued move besides the calling turn, for its result (#1416).
+
+    The calling turn is always running, so ``running`` is left out. Empty when
+    the state cannot be read: the result then says nothing either way.
+    """
+    try:
+        state = busy_state(session_id)
+    except Exception:  # noqa: BLE001 — wording only
+        logger.warning("Could not read what holds the move of %s", session_id, exc_info=True)
+        return ""
+    parts: List[str] = []
+    queued = int(state.get("queued") or 0)
+    if queued:
+        parts.append("1 queued message" if queued == 1 else f"{queued} queued messages")
+    tasks = [" ".join(str(task).split())[:80] for task in state.get("tasks") or []]
+    if tasks:
+        shown = ", ".join(tasks[:5]) + (f" and {len(tasks) - 5} more" if len(tasks) > 5 else "")
+        parts.append(f"1 background task: {shown}" if len(tasks) == 1
+                     else f"{len(tasks)} background tasks: {shown}")
+    if state.get("wake"):
+        parts.append("a wake-up due within a minute")
+    if not parts:
+        return " Nothing else holds it now."
+    minutes = max(1, round(IDLE_TIMEOUT_S / 60))
+    return (f" Held by {'; '.join(parts)}. Stop them or let them end: the move waits at most "
+            f"{minutes} minutes, then it is cancelled.")
 
 
 def _check_cancelling(session_id: str) -> None:

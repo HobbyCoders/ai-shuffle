@@ -714,15 +714,84 @@ def _request_receipt(cursor, root_id, command_id, fingerprint):
     return previous
 
 
-def _start_model_scope(sender, context, data, principal, runtime_model=None):
+ORIGIN_GONE = ("Orchestration origin no longer exists. Retry after the owner's next message, "
+               "which starts a new chain; nothing was sent or started.")
+
+
+def _arrived_by_move(session):
+    """Whether this worker took ``session`` over by a hand-off (its ownership receipt)."""
+    from app.db.base import parse_jsonb
+    placement = parse_jsonb((session or {}).get("placement"))
+    return isinstance(placement, dict) and bool((placement.get("handoff") or {}).get("token"))
+
+
+# Written on every request receipt queued under a stand-in root: the missing
+# root it stands in for. Receipts are the chain's dedupe and budget rows, so
+# the stand-in is fixed in the same transaction that first counts against it.
+STAND_IN_KEY = "orchestration_stands_in_for"
+
+
+def _chain_root(cursor, sender, context, *, lock=False):
+    """The turn that scopes this call's dedupe and budget: the chain's root.
+
+    Human input starts a chain (the turn itself); automated turns carry its
+    ``orchestration_root``. After a hand-off (#1417) that can be a turn on the
+    worker the chat ran on before. The chain then continues here under one
+    local stand-in, so every report of that chain shares one budget and dedupe
+    scope: the root of the receipts already marked as standing in for it, or
+    else the oldest turn of this chat carrying the missing root. Only a chat
+    that arrived by a move picks a stand-in, and only while the recorded root
+    is missing here; any other missing root (a deleted turn) still refuses.
+    ``lock`` locks the returned row, serialising budget checks per chain.
+    """
+    recorded = (context.get("payload") or {}).get("orchestration_root")
+    root = recorded or context["id"]
+    suffix = " FOR UPDATE" if lock else ""
+    cursor.execute("SELECT id FROM turns WHERE id=%s" + suffix, (root,))
+    if cursor.fetchone():
+        return root
+    if recorded:
+        cursor.execute("SELECT receipt.parent_turn_id AS id FROM turns receipt "
+                       "JOIN turns stand_in ON stand_in.id = receipt.parent_turn_id "
+                       "WHERE stand_in.session_id=%s AND receipt.payload ->> %s = %s "
+                       "ORDER BY receipt.created_at ASC, receipt.id ASC LIMIT 1",
+                       (sender["id"], STAND_IN_KEY, recorded))
+        row = cursor.fetchone()
+        if row is None and _arrived_by_move(sender):
+            cursor.execute("SELECT id FROM turns WHERE session_id=%s AND payload ->> 'orchestration_root'=%s "
+                           "ORDER BY insert_order ASC, created_at ASC, id ASC LIMIT 1",
+                           (sender["id"], recorded))
+            row = cursor.fetchone()
+        if row:
+            if lock:
+                cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (row["id"],))
+            return row["id"]
+    raise ValueError(ORIGIN_GONE)
+
+
+def _stand_in(context, root_id):
+    """The receipt payload that marks ``root_id`` as the stand-in of the
+    chain's missing root; empty when the recorded root is the root."""
+    recorded = (context.get("payload") or {}).get("orchestration_root")
+    return {STAND_IN_KEY: recorded} if recorded and recorded != root_id else {}
+
+
+def _locked_root(cursor, sender, context, root_id):
+    """Inside the queuing transaction: lock ``root_id`` and check it is still the root."""
+    if _chain_root(cursor, sender, context, lock=True) != root_id:
+        raise ValueError("Orchestration chain changed while queuing; retry the same request.")
+
+
+def _start_model_scope(sender, context, data, principal, runtime_model=None, *, root_id):
     """Bind an answer/readback to the caller and input checked before the wait.
 
     Exclude turn state/lease timestamps: settlement is not a new owner request.
     Include payload and prompt because an in-place owner wake can keep its id.
+    ``root_id`` is :func:`_chain_root` for ``context``.
     """
     command_id, fingerprint = _request_identity(sender["id"], data, "start")
     return {
-        "root_id": (context.get("payload") or {}).get("orchestration_root") or context["id"],
+        "root_id": root_id,
         "command_id": command_id, "fingerprint": fingerprint,
         "context": {key: context.get(key) for key in ("id", "source", "prompt", "payload", "overrides")},
         "sender": {key: sender.get(key) for key in (
@@ -744,14 +813,12 @@ def _start_model_plan(sender_id, data, remote, runtime_model=None):
     from app.db.base import get_db
     sender = _caller(sender_id)
     context = _context(sender_id)
-    scope = _start_model_scope(sender, context, data, _principal(sender_id), runtime_model)
     overrides = context.get("overrides") or {}
     baseline = _inherited_model(sender, overrides, runtime_model)
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM turns WHERE id=%s", (scope["root_id"],))
-        if not cursor.fetchone():
-            raise ValueError("Orchestration origin no longer exists.")
+        scope = _start_model_scope(sender, context, data, _principal(sender_id), runtime_model,
+                                   root_id=_chain_root(cursor, sender, context))
         previous = _request_receipt(cursor, scope["root_id"], scope["command_id"], scope["fingerprint"])
     if previous and previous["session_id"].startswith(REMOTE_RECEIPT_PREFIX):
         # Recovery uses only the reserved body, never today's catalog/baseline.
@@ -1244,9 +1311,7 @@ def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id,
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sender["id"],))
-        cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
-        if not cursor.fetchone():
-            raise ValueError("Orchestration origin no longer exists.")
+        _locked_root(cursor, sender, context, root_id)
         cursor.execute("SELECT * FROM turns WHERE parent_turn_id=%s AND command_id=%s",
                        (root_id, command_id))
         previous = turns._row(cursor.fetchone())
@@ -1275,7 +1340,7 @@ def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id,
         if task_registry.is_user_stopped(sender["id"]):
             raise ValueError("The user stopped a participating session.")
         receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": peer["device_id"],
-                           "remote_session_id": session_id}
+                           "remote_session_id": session_id, **_stand_in(context, root_id)}
         if reply_to:
             receipt_payload["orchestration_reply_to"] = body["reply_to"] = reply_to
         receipt = turns.enqueue_turn(
@@ -1619,7 +1684,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
     text = _text(data, "prompt" if action == "start" else "message", 8000)
     # Human input starts a fresh budget; all automated descendants share it.
     ancestry = context.get("payload") or {}
-    root_id = ancestry.get("orchestration_root") or context["id"]
+    from app.db.base import get_db
+    with get_db() as conn:
+        root_id = _chain_root(conn.cursor(), sender, context)
     # The depth is recorded for tracing only: the owner decided chains have no
     # hop limit (guardrails such as Stop, settle and the action and start
     # budgets are theirs to use).
@@ -1688,7 +1755,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
     target_context = context if action == "start" else _context(target["id"], allow_empty=True)
     principals = {sid: _principal(sid) for sid in {sender_id, target["id"]}}
     if model_plan and model_plan.get("scope") != _start_model_scope(
-            sender, context, data, principals[sender_id], runtime_model):
+            sender, context, data, principals[sender_id], runtime_model, root_id=root_id):
         raise ValueError("Model consent context changed; retry from the current owner request.")
     # Never retry a rejected peer's work by waking it through a different tool.
     terminal = turn_scheduler._turn_terminal_payload(target["id"], target_context["id"])
@@ -1729,9 +1796,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
         # This path enqueues turns only: it never appends or locks runs/counters.
         for sid in sorted({sender_id, target["id"]}):
             cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
-        cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
-        if not cursor.fetchone():
-            raise ValueError("Orchestration origin no longer exists.")
+        _locked_root(cursor, sender, context, root_id)
         previous = _request_receipt(cursor, root_id, command_id, fingerprint)
         _recheck(cursor, (sender, target), principals)
         if model_plan:
@@ -1739,7 +1804,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
             # A new owner turn or an in-place human wake invalidates the answer.
             current_context = _context(sender_id, _conn=conn)
             if model_plan.get("scope") != _start_model_scope(
-                    sender, current_context, data, principals[sender_id], runtime_model):
+                    sender, current_context, data, principals[sender_id], runtime_model,
+                    root_id=_chain_root(cursor, sender, current_context)):
                 raise ValueError("Model consent context changed; retry from the current owner request.")
             if model_plan.get("receipt_id") and (
                     not previous or previous["id"] != model_plan["receipt_id"]):
@@ -1783,7 +1849,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                                 project_v2_id=project_v2_id, assistant=assistant, model_plan=plan,
                                 permission_mode=started_mode, runtime_model=runtime_model)
             receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": remote["device_id"],
-                               "remote_session_id": body["session_id"], "remote_start_body": body}
+                               "remote_session_id": body["session_id"], "remote_start_body": body,
+                               **_stand_in(context, root_id)}
             if plan:
                 receipt_payload["model_override"] = _override_record(plan)
             if assistant:
@@ -1819,7 +1886,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
             profile_id=target["profile_id"], project_id=target.get("project_id"),
             worktree_id=None if placement is not None or checkout is not None else (
                 target_context.get("worktree_id") or target.get("worktree_id")),
-            overrides=overrides, payload=payload, command_id=command_id,
+            overrides=overrides, payload={**payload, **_stand_in(context, root_id)}, command_id=command_id,
             parent_turn_id=root_id, _conn=conn,
         )
     result = {"session_id": target["id"], "turn_id": turn["id"], "status": "queued",
