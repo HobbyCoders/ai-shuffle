@@ -116,6 +116,39 @@ def test_session_payload_reads_preserve_legacy_ownership_and_deletion(worker, mo
             assert not store.get_record(cur, "sessions", "foreign-deleted")["deleted"]
 
 
+def test_session_scan_leaves_large_local_columns_in_the_database(worker, monkeypatch):
+    """A whole-catalog pass reads every owned chat; these two columns were most of each row."""
+    with worker.active():
+        seed(worker)
+        with store.get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET context_usage_json = %s, workspace_facts = %s",
+                                  ("x" * 4096, "y" * 4096))
+        with returned_rows(monkeypatch, engine) as reads:
+            assert engine.scan_collection("sessions", owner_only=True) == 4
+        payloads = [row for query, rows in reads if "FROM sessions" in query for row in rows]
+        assert len(payloads) == 4
+        for row in payloads:
+            assert not {"context_usage_json", "workspace_facts"} & set(row)
+            # Columns the scan and the serializer do read still arrive.
+            assert {"id", "title", "owner_device_id", "instance_id", "status"} <= set(row)
+        # The skipped columns are local: a change to them alone publishes nothing.
+        with store.get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET context_usage_json = %s", ("z" * 4096,))
+        assert engine.scan_collection("sessions", owner_only=True) == 0
+        assert engine.scan_collection("sessions", owner_only=True, record_ids=["legacy"]) == 0
+
+
+def test_scan_skip_can_only_name_local_columns():
+    from app.network import policy
+
+    sessions = policy.collection("sessions")
+    assert set(sessions.scan_skip) <= set(sessions.local_fields)
+    with pytest.raises(ValueError, match="scan_skip"):
+        policy._register(policy.Collection(name="bad", table="bad", keys=("id",), fields=("id", "title"),
+                                           scan_skip=("title",)))
+    assert "bad" not in policy.COLLECTIONS
+
+
 @pytest.mark.parametrize("collection", ["session_tags", "pending_interactions"])
 def test_child_payload_reads_and_tombstones_keep_strict_session_ownership(worker, monkeypatch, collection):
     with worker.active():

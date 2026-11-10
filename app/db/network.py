@@ -558,37 +558,71 @@ def list_members(_conn=None, *, include_revoked: bool = True) -> List[dict]:
         return [_member_row(r) for r in cursor.fetchall()]
 
 
+# ``last_seen`` is shown in the worker list and nothing reads it for decisions.
+MEMBER_SEEN_REFRESH_SECONDS = 60
+MEMBER_HEARTBEAT_LOCK_MS = 500
+
+
 def touch_member(device_id: str, *, capabilities: Optional[dict] = None, endpoints: Optional[list] = None,
                  version: Optional[str] = None, incarnation: Optional[int] = None, name: Optional[str] = None,
-                 platform: Optional[str] = None, _conn=None) -> None:
+                 platform: Optional[str] = None, heartbeat: bool = False, _conn=None) -> bool:
+    """Record that a member was heard from and what it said about itself.
+
+    The row is rewritten only when a described value changed or ``last_seen``
+    is older than ``MEMBER_SEEN_REFRESH_SECONDS``. Peers call this on every
+    exchange with the same description, and an unconditional write took the
+    row lock and rewrote both JSON columns each time.
+
+    ``heartbeat`` is for callers whose own work does not depend on the write
+    (an exchange, a token issue): it waits ``MEMBER_HEARTBEAT_LOCK_MS`` for a
+    busy row instead of the session default, then gives up and returns False.
+    The next contact repeats the same description.
+    """
     sets = ["last_seen = %s", "updated_at = %s"]
     now = _now()
     params: List[Any] = [now, now]
+    changed = ["last_seen IS NULL", "last_seen < %s"]
+    stale = datetime.now(timezone.utc) - timedelta(seconds=MEMBER_SEEN_REFRESH_SECONDS)
+    conditions: List[Any] = [stale.isoformat()]
+
+    def describe(column: str, value: Any, cast: str = "") -> None:
+        sets.append(f"{column} = %s")
+        params.append(value)
+        changed.append(f"{column} IS DISTINCT FROM %s{cast}")
+        conditions.append(value)
+
     if capabilities is not None:
-        sets.append("capabilities = %s")
-        params.append(_json(capabilities))
+        describe("capabilities", _json(capabilities), "::jsonb")
     if endpoints is not None:
-        sets.append("endpoints = %s")
-        params.append(_json(endpoints))
+        describe("endpoints", _json(endpoints), "::jsonb")
     if version is not None:
-        sets.append("version = %s")
-        params.append(version)
+        describe("version", version)
     if incarnation is not None:
-        sets.append("incarnation = %s")
-        params.append(incarnation)
+        describe("incarnation", incarnation)
     if name:
-        sets.append("name = %s")
-        params.append(name)
+        describe("name", name)
     if platform:
-        sets.append("platform = %s")
-        params.append(platform)
-    params.append(device_id)
-    sql = "UPDATE network_members SET " + ", ".join(sets) + " WHERE device_id = %s"
+        describe("platform", platform)
+    sql = ("UPDATE network_members SET " + ", ".join(sets) + " WHERE device_id = %s AND ("
+           + " OR ".join(changed) + ")")
+    values = (*params, device_id, *conditions)
     if _conn is not None:
-        _conn.cursor().execute(sql, tuple(params))
-        return
-    with get_db() as conn:
-        conn.cursor().execute(sql, tuple(params))
+        _conn.cursor().execute(sql, values)
+        return True
+    if not heartbeat:
+        with get_db() as conn:
+            conn.cursor().execute(sql, values)
+        return True
+    import psycopg2
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SET LOCAL lock_timeout = '{MEMBER_HEARTBEAT_LOCK_MS}ms'")
+            cursor.execute(sql, values)
+        return True
+    except psycopg2.errors.LockNotAvailable:
+        logger.debug("Member %s is being updated elsewhere; skipping this heartbeat", device_id)
+        return False
 
 
 def pin_token_binding(device_id: str, signing_public: str) -> None:
