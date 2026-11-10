@@ -4,15 +4,19 @@
  * The app is free to run and has no license key. The plan comes from the
  * Cloud account this worker is signed in with (`source: 'account'`), and it
  * only decides how many remote workers the hub serves: none without an
- * account, two on a free account, four on a paid plan by default (up to the
- * plan's seat count). Nothing here can stop a local agent run, so `allowed`
- * is always true and `banner` always null; both stay for older callers.
+ * account, three on a free account, and on a paid plan (Pro, Ultimate or a
+ * custom licence) the account's own count, ten when it gives none. Nothing
+ * here can stop a local agent run, so `allowed` is always true and `banner`
+ * always null; both stay for older callers.
  * The route keeps its `/license` name for compatibility.
  */
 import { api } from './client';
 
 /** What the account gives this worker. */
 export type CloudState = 'not_linked' | 'free' | 'paid';
+
+/** The account's named plan. Display only: the worker count is always `remote_worker_limit`. */
+export type CloudTier = 'free' | 'pro' | 'ultimate' | 'custom';
 
 export interface LicenseStatus {
 	mode: 'cloud';
@@ -28,6 +32,8 @@ export interface LicenseStatus {
 	reason: null;
 	banner: null;
 	plan: 'free' | 'paid' | null;
+	/** The plan's name from the account, or null when the account does not say. Absent on older workers. */
+	tier?: CloudTier | null;
 	/** The paid plan's seat count; null when the account does not say. */
 	seats: number | null;
 	/** Remote workers in use on the account; null when unknown. */
@@ -45,14 +51,26 @@ export interface LicenseStatus {
 
 export const getLicense = () => api.get<LicenseStatus>('/license');
 
-/** Public pricing page for the paid plan. */
+/** Public pricing page for the paid plans. */
 export const CLOUD_PRICING_URL = 'https://hobbycoders.com/ai-shuffle/pricing';
 /** In-app docs page (Docs panel deep link). */
 export const CLOUD_DOCS = 'getting-started/cloud';
 
 /** Remote workers on a free account. */
-export const FREE_WORKERS = 2;
-/** Remote workers on the paid plan when the account gives no seat count. */
-export const PAID_WORKERS = 4;
+export const FREE_WORKERS = 3;
+/** Remote workers on a paid plan when the account gives no seat count. */
+export const PAID_WORKERS = 10;
+/** What Pro and Ultimate include, for the plan list only; an account's own count comes from the hub. */
+export const PRO_WORKERS = 10;
+export const ULTIMATE_WORKERS = 30;
 /** Seat counts from here up read as unlimited. */
 export const UNLIMITED_SEATS = 100;
+
+/**
+ * "Pro" or "Ultimate" for a paid account that names one of those plans, else
+ * null: a custom licence, an older hub or an unknown name keeps the paid wording.
+ */
+export function paidPlanName(status: Pick<LicenseStatus, 'state' | 'tier'> | null): 'Pro' | 'Ultimate' | null {
+	if (status?.state !== 'paid') return null;
+	return status.tier === 'pro' ? 'Pro' : status.tier === 'ultimate' ? 'Ultimate' : null;
+}

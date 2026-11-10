@@ -33,15 +33,15 @@ const notLinked = {
 	lease_state: 'none',
 	server_configured: false
 };
-const free = { ...notLinked, state: 'free', linked: true, message: 'Free account: 2 remote workers.', remote_worker_limit: 2, plan: 'free' };
+const free = { ...notLinked, state: 'free', linked: true, message: 'Free account: 3 remote workers.', remote_worker_limit: 3, plan: 'free' };
 const paid = {
 	...notLinked,
 	state: 'paid',
 	linked: true,
-	message: 'Paid Cloud plan. Local use does not depend on this plan.',
-	remote_worker_limit: 4,
+	message: 'Paid plan: 10 remote workers.',
+	remote_worker_limit: 10,
 	plan: 'paid',
-	seats: 4,
+	seats: 10,
 	seats_used: 1,
 	expires_at: '2026-10-25T12:00:00Z'
 };
@@ -66,6 +66,7 @@ const state = () => screen.getByTestId('cloud-state').textContent ?? '';
 const seats = () => screen.getByTestId('cloud-seats').textContent?.replace(/\s+/g, ' ').trim() ?? '';
 const tierNamed = (name: string) =>
 	within(screen.getByTestId('cloud-tiers')).getByText(name).closest('.st-row') as HTMLElement;
+const currentRow = () => screen.getByTestId('cloud-tiers').querySelector('[aria-current]')?.closest('.st-row') as HTMLElement;
 
 /** Nothing on the page talks about keys, leases or blocked agents any more. */
 function expectNoKeyWording() {
@@ -88,9 +89,12 @@ describe('not linked', () => {
 		expect(screen.queryByTestId('cloud-message')).toBeNull();
 		expect(tierNamed('This worker').querySelector('[aria-current]')?.getAttribute('aria-current')).toBe('true');
 		expect(tierNamed('This worker').textContent).toContain('Local use, no account');
-		expect(tierNamed('Free account').textContent).toMatch(/2\s*·\s*remote workers, no card/);
-		expect(tierNamed('Paid plan').textContent).toMatch(/4\s*·\s*remote workers and sync/);
-		expect(screen.queryByText('A free account adds two')).toBeNull();
+		expect(tierNamed('Free account').textContent).toMatch(/3\s*·\s*remote workers, no card/);
+		expect(tierNamed('Pro plan').textContent).toMatch(/10\s*·\s*remote workers and sync/);
+		expect(tierNamed('Ultimate plan').textContent).toMatch(/30\s*·\s*remote workers and sync/);
+		expect(within(screen.getByTestId('cloud-tiers')).queryByText('Paid plan')).toBeNull();
+		expect(screen.getByRole('link', { name: /See plans/ }).closest('.st-row')).toBe(tierNamed('Ultimate plan'));
+		expect(document.body.textContent).not.toMatch(/founder|yearly|\/year/i);
 		expect(screen.queryByTestId('cloud-seats')).toBeNull();
 		expect(screen.queryByText('Renews')).toBeNull();
 		const plans = screen.getByRole('link', { name: /See plans/ });
@@ -129,12 +133,12 @@ describe('free', () => {
 		expect(seats()).toBe('3 of 5 in use');
 	});
 
-	it('shows the 2 included remote workers and an upgrade link', async () => {
+	it('shows the 3 included remote workers and an upgrade link', async () => {
 		status = { ...free };
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Free'));
 		expect(screen.getByText('Linked to AI Shuffle Cloud')).toBeTruthy();
-		expect(seats()).toBe('2 remote workers included');
+		expect(seats()).toBe('3 remote workers included');
 		expect(tierNamed('Free account').querySelector('[aria-current]')?.getAttribute('aria-current')).toBe('true');
 		expect(tierNamed('This worker').querySelector('[aria-current]')).toBeNull();
 		const upgrade = screen.getByRole('link', { name: /See plans/ });
@@ -145,20 +149,29 @@ describe('free', () => {
 		expectNoKeyWording();
 	});
 
-	it('shows how many of the 2 are in use when the account says', async () => {
+	it('shows an older hub\'s 2-worker free account as 2', async () => {
+		status = { ...free, message: 'Free account: 2 remote workers.', seats: 2, remote_worker_limit: 2 };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Free'));
+		expect(currentRow()).toBe(tierNamed('Free account'));
+		expect(tierNamed('Free account').textContent).toMatch(/2\s*·\s*remote workers, no card/);
+		expect(seats()).toBe('2 remote workers included');
+	});
+
+	it('shows how many of the 3 are in use when the account says', async () => {
 		status = { ...free, seats_used: 1 };
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Free'));
-		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('1 of 2 in use');
+		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('1 of 3 in use');
 	});
 });
 
-describe('paid', () => {
+describe('paid, from a hub that names no plan', () => {
 	it('shows seats in use of total and the renewal date, with no upgrade', async () => {
 		status = { ...paid };
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Paid'));
-		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('1 of 4 in use');
+		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('1 of 10 in use');
 		expect(screen.getByText('Renews')).toBeTruthy();
 		expect(screen.getByTestId('cloud-renewal').textContent).toContain('Oct 25, 2026');
 		expect(tierNamed('Paid plan').querySelector('[aria-current]')?.getAttribute('aria-current')).toBe('true');
@@ -168,12 +181,12 @@ describe('paid', () => {
 		expectNoKeyWording();
 	});
 
-	it('defaults to 4 remote workers when the account gives no seat count', async () => {
-		status = { ...paid, seats: null, seats_used: null, remote_worker_limit: 4 };
+	it('defaults to 10 remote workers when the account gives no seat count', async () => {
+		status = { ...paid, seats: null, seats_used: null, remote_worker_limit: 0 };
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Paid'));
-		expect(seats()).toBe('4 remote workers included');
-		expect(tierNamed('Paid plan').textContent).toMatch(/4\s*·\s*remote workers and sync/);
+		expect(seats()).toBe('10 remote workers included');
+		expect(tierNamed('Paid plan').textContent).toMatch(/10\s*·\s*remote workers and sync/);
 		expect(screen.queryByRole('meter')).toBeNull();
 	});
 
@@ -183,6 +196,26 @@ describe('paid', () => {
 		await waitFor(() => expect(state()).toContain('Paid'));
 		expect(tierNamed('Paid plan').textContent).toMatch(/12\s*·\s*remote workers and sync/);
 		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('3 of 12 in use');
+	});
+
+	it('shows an older hub\'s 4-worker paid plan as 4', async () => {
+		status = { ...paid, message: 'Paid plan: 4 remote workers.', seats: 4, seats_used: 1, remote_worker_limit: 4 };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Paid'));
+		expect(currentRow()).toBe(tierNamed('Paid plan'));
+		expect(tierNamed('Paid plan').textContent).toMatch(/4\s*·\s*remote workers and sync/);
+		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('1 of 4 in use');
+	});
+
+	it.each([
+		[{ seats: 100, remote_worker_limit: 4 }, '1 of 4 in use', /4\s*·\s*remote workers and sync/],
+		[{ seats: 4, remote_worker_limit: 100 }, '1 in use', /Unlimited/],
+	])('shows the hub limit, not the seat count, when they differ (%o)', async (extra, shown, row) => {
+		status = { ...paid, seats_used: 1, ...extra };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Paid'));
+		expect(seats()).toBe(shown);
+		expect(tierNamed('Paid plan').textContent).toMatch(row);
 	});
 
 	it('shows 100 seats with 2 in use as unlimited, without a meter', async () => {
@@ -233,6 +266,66 @@ describe('paid', () => {
 		render(CloudPage);
 		await waitFor(() => expect(state()).toContain('Paid'));
 		expect(screen.queryByText('Renews')).toBeNull();
+	});
+});
+
+describe('named plans (tier)', () => {
+	it('shows Pro as the current plan with the account count, and no extra Paid plan row', async () => {
+		status = { ...paid, tier: 'pro', seats: 10, remote_worker_limit: 10, seats_used: 4 };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Pro'));
+		expect(currentRow()).toBe(tierNamed('Pro plan'));
+		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('4 of 10 in use');
+		expect(tierNamed('Ultimate plan').textContent).toMatch(/30\s*·\s*remote workers and sync/);
+		expect(within(screen.getByTestId('cloud-tiers')).queryByText('Paid plan')).toBeNull();
+		expect(screen.getByRole('link', { name: /See plans/ }).closest('.st-row')).toBe(tierNamed('Ultimate plan'));
+		expect(screen.getByTestId('cloud-renewal').textContent).toContain('Oct 25, 2026');
+	});
+
+	it('shows Ultimate as the current plan', async () => {
+		status = { ...paid, tier: 'ultimate', seats: 30, remote_worker_limit: 30, seats_used: 12 };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Ultimate'));
+		expect(currentRow()).toBe(tierNamed('Ultimate plan'));
+		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('12 of 30 in use');
+		expect(tierNamed('Pro plan').textContent).toMatch(/10\s*·\s*remote workers and sync/);
+		expect(within(screen.getByTestId('cloud-tiers')).queryByText('Paid plan')).toBeNull();
+	});
+
+	it('takes the worker count from the account, never from the tier', async () => {
+		status = { ...paid, tier: 'pro', seats: 25, remote_worker_limit: 25, seats_used: null };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Pro'));
+		expect(tierNamed('Pro plan').textContent).toMatch(/25\s*·\s*remote workers and sync/);
+		expect(seats()).toBe('25 remote workers included');
+	});
+
+	it('keeps a custom 100-seat licence on the Paid plan row as unlimited', async () => {
+		status = { ...paid, tier: 'custom', seats: 100, remote_worker_limit: 100, seats_used: null };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Paid'));
+		expect(currentRow()).toBe(tierNamed('Paid plan'));
+		expect(tierNamed('Paid plan').textContent).toContain('Unlimited');
+		expect(seats()).toBe('Unlimited remote workers');
+		expect(tierNamed('Ultimate plan').textContent).toMatch(/30\s*·/);
+		expect(screen.getByRole('link', { name: /See plans/ }).closest('.st-row')).toBe(tierNamed('Paid plan'));
+	});
+
+	it.each(['enterprise', null, undefined])('falls back to the paid wording for tier %s', async (tier) => {
+		status = { ...paid, tier, seats: 12, remote_worker_limit: 12, seats_used: 3 };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Paid'));
+		expect(currentRow()).toBe(tierNamed('Paid plan'));
+		expect(tierNamed('Paid plan').textContent).toMatch(/12\s*·\s*remote workers and sync/);
+		expect(screen.getByRole('meter', { name: 'Remote workers in use' }).getAttribute('aria-valuetext')).toBe('3 of 12 in use');
+	});
+
+	it('ignores a paid tier on a free account', async () => {
+		status = { ...free, tier: 'pro' };
+		render(CloudPage);
+		await waitFor(() => expect(state()).toContain('Free'));
+		expect(currentRow()).toBe(tierNamed('Free account'));
+		expect(tierNamed('Pro plan').textContent).toMatch(/10\s*·/);
 	});
 });
 
