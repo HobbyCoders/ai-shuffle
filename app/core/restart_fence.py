@@ -97,22 +97,30 @@ class Admission:
         operation.add_done_callback(lambda _: self._unref())
         return operation
 
-    async def to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """``asyncio.to_thread`` whose thread keeps the admission busy until it
-        returns, even when the awaiting coroutine is cancelled first."""
+    def _pinned(self, fn: Callable[[], Any]) -> Callable[[], Any]:
+        """``fn`` for a worker thread, holding this admission until it returns."""
         loop = asyncio.get_running_loop()
         self._refs += 1
 
         def run() -> Any:
             try:
-                return fn(*args, **kwargs)
+                return fn()
             finally:
                 try:
                     loop.call_soon_threadsafe(self._unref)
                 except RuntimeError:  # loop closed: the process is exiting
                     pass
 
-        return await asyncio.to_thread(run)
+        return run
+
+    async def to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """``asyncio.to_thread`` whose thread keeps the admission busy until it
+        returns, even when the awaiting coroutine is cancelled first."""
+        return await asyncio.to_thread(self._pinned(lambda: fn(*args, **kwargs)))
+
+    async def run_in_executor(self, executor: Any, fn: Callable[[], Any]) -> Any:
+        """``loop.run_in_executor`` with the same guarantee as :meth:`to_thread`."""
+        return await asyncio.get_running_loop().run_in_executor(executor, self._pinned(fn))
 
     def __enter__(self) -> "Admission":
         return self

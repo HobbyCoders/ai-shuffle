@@ -349,7 +349,27 @@ def _forget_job(worker_id: str) -> None:
         logger.debug("remote_task: could not forget the link of %s", worker_id, exc_info=True)
 
 
-async def dispatch_remote(
+async def dispatch_remote(**kwargs: Any) -> Dict[str, Any]:
+    """Start a Task child on another worker (:func:`_dispatch_remote`).
+
+    Admitted through the idle-restart fence (#1121) before the first await and
+    held until the child is registered here (``track_dispatch``) or its start
+    was refused; the code after registration does not await. While a restart
+    is reserved the start is refused, retryably, before anything is sent.
+    """
+    from app.core import restart_fence
+
+    try:
+        admission = restart_fence.admit("remote Task dispatch")
+    except restart_fence.AdmissionClosed as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        return await _dispatch_remote(**kwargs)
+    finally:
+        admission.release()
+
+
+async def _dispatch_remote(
     *,
     worker: Mapping[str, Any],
     caller_row: Mapping[str, Any],
@@ -1010,14 +1030,42 @@ async def _start_lock(key: str):
             _start_locks.pop(key, None)
 
 
+def _fenced_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, Any]:
+    """A start while an idle restart is being prepared here (#1121): answer a
+    retry of a child that already exists, refuse a new one (nothing created)."""
+    from app.core import restart_fence
+
+    _require_worker_member(from_device)
+    start = _parse(body, from_device)
+    existing = _existing(start, from_device)
+    if existing is not None:
+        return existing
+    raise ValueError(restart_fence.RETRY_MESSAGE)
+
+
 async def handle_task_start(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     """``task-start`` control action: start a Task child another worker asked for."""
-    from app.core import turn_scheduler
+    from app.core import restart_fence, turn_scheduler
 
     key = str((body or {}).get("worker_session_id") or "")[:64]
-    async with _start_lock(key):
-        prepare = functools.partial(contextvars.copy_context().run, prepare_task_start, body, from_device)
-        answer = await asyncio.get_running_loop().run_in_executor(_start_executor, prepare)
+    # Admitted before the first await and held, past a cancelled awaiter,
+    # until the provisioning thread has committed or rolled back the child.
+    try:
+        admission = restart_fence.admit("remote task start")
+    except restart_fence.AdmissionClosed:
+        admission, start_fn = None, _fenced_task_start
+    else:
+        start_fn = prepare_task_start
+    try:
+        async with _start_lock(key):
+            prepare = functools.partial(contextvars.copy_context().run, start_fn, body, from_device)
+            if admission is None:
+                answer = await asyncio.get_running_loop().run_in_executor(_start_executor, prepare)
+            else:
+                answer = await admission.run_in_executor(_start_executor, prepare)
+    finally:
+        if admission is not None:
+            admission.release()
     if answer["created"]:
         turn_scheduler.kick(answer["worker_session_id"])
         try:
