@@ -643,7 +643,8 @@ async def _run_background_query_impl(
             await pool.remove_dead(session_id)
 
     # Durable end-of-turn writes (parked marker, branch resync, summary flush).
-    await persist_turn_end_state(session_id)
+    # Fenced to this turn's lease: a rewind may have handed the chat on (#1285).
+    await persist_turn_end_state(session_id, writer=lease)
 
     # Clean up per-session state that is no longer needed.
     # Permission rules and pending requests accumulate per session and are

@@ -237,3 +237,94 @@ async def test_replaced_runtime_deregisters_without_stopping_or_completing_direc
             await asyncio.wait_for(running, 5)
             if direct is not None:
                 await wait_for_lease_release(direct)
+
+
+@pytest.mark.parametrize("delay", ["before_write", "inside_write"])
+async def test_rewind_timeout_fences_old_parked_marker_write_and_broadcast(mock_db, delay):
+    """A's delayed parked-marker clear can neither undo nor publish over B's marker (#1285).
+
+    The real turn-end helper and the real row update run; only the update's
+    worker thread is held. ``before_write`` holds it before the update starts
+    (the issue's interleaving: B writes while A waits). ``inside_write`` holds
+    it after A passed its ownership check, while the rewind still ran, so B's
+    write has to queue behind A's instead of landing first.
+    """
+    import threading
+
+    from app.core import turn_finalize
+    from app.db import database
+
+    database.create_session(session_id=SID, profile_id="default")
+    turn = turns.enqueue_turn(SID, "user", prompt="old turn")
+    real_persist = turn_finalize.persist_turn_end_state
+    real_write = database.set_session_parked_task_kind
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def held_write(session_id, kind, **kwargs):
+        calls.append(kind)
+        if len(calls) == 1:  # turn A's write
+            guard = kwargs.get("still_owner")
+            if delay == "inside_write" and guard is not None:
+                def checked_then_held():
+                    owner = guard()
+                    entered.set()
+                    assert release.wait(5)
+                    return owner
+                kwargs["still_owner"] = checked_then_held
+            else:
+                entered.set()
+                assert release.wait(5)
+        return real_write(session_id, kind, **kwargs)
+
+    published = []
+
+    async def broadcast(*, user_id, session_id, updates, **kwargs):
+        if "parked_task_kind" in updates:
+            published.append(updates["parked_task_kind"])
+
+    with _runtime_env(pump=pump) as env, patch(
+        "app.core.turn_finalize.persist_turn_end_state", new=real_persist,
+    ), patch.object(database, "set_session_parked_task_kind", side_effect=held_write), patch(
+        "app.core.sync_engine.sync_engine.broadcast_user_session_updated", side_effect=broadcast,
+    ), patch("app.core.session_pr_state.schedule_session_pr_reconcile"), patch(
+        "app.core.session_handoff.schedule",
+    ), patch("app.core.pg_session_store.flush_summary_folds"), patch.object(
+        admission, "_ENDING_WAIT_SECONDS", 0.01,
+    ):
+        rt = session_runtime.SessionRuntime(turn)
+        running = asyncio.create_task(rt.execute())
+        direct = successor = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 5), "turn A never reached its marker write"
+            old = rt._admission_lease
+            rewind = await admission.begin_rewind(SID)
+            assert admission.take_for_rewind(rewind) is old
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(old.exited.wait(), 0.01)
+            await wait_for_lease_release(rewind)
+            # Turn B is admitted, starts background work and records its park.
+            direct = await admission.acquire(SID)
+            env["registry"].get_parking_background_work.return_value = [{"kind": "agent"}]
+            successor = asyncio.create_task(turn_finalize.persist_turn_end_state(SID, resync_branch=False))
+            if delay == "before_write":
+                await asyncio.wait_for(successor, 5)
+                assert database.get_session(SID)["parked_task_kind"] == "agent"
+            else:
+                while len(calls) < 2:  # B's write thread has started
+                    await asyncio.sleep(0.01)
+                done, _ = await asyncio.wait({successor}, timeout=0.2)
+                assert not done, "B's park landed while A's checked write was still in flight"
+            release.set()
+            assert await asyncio.wait_for(running, 5) == "aborted"
+            await asyncio.wait_for(successor, 5)
+            assert database.get_session(SID)["parked_task_kind"] == "agent", "A's stale clear overwrote B's park"
+            assert published == ["agent"], f"A published a stale marker update: {published}"
+            assert admission._holders[SID] is direct
+        finally:
+            release.set()
+            await asyncio.wait_for(running, 5)
+            if successor is not None:
+                await asyncio.wait_for(successor, 5)
+            if direct is not None:
+                await wait_for_lease_release(direct)

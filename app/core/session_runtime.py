@@ -2947,9 +2947,11 @@ class SessionRuntime:
             from app.core.turn_finalize import persist_turn_end_state
 
             if self._resync_branch:
-                await self._await_finalization(persist_turn_end_state(sid))
+                await self._await_finalization(persist_turn_end_state(sid, writer=self._admission_lease))
             else:
-                await self._await_finalization(persist_turn_end_state(sid, resync_branch=False))
+                await self._await_finalization(persist_turn_end_state(
+                    sid, resync_branch=False, writer=self._admission_lease,
+                ))
         except _FinalizationReplaced:
             raise
         except Exception:
@@ -3120,7 +3122,9 @@ class SessionRuntime:
                 )):
                     from app.core.turn_finalize import settle_stopped_monitor_parks
 
-                    settled_by_stop = await self._await_finalization(settle_stopped_monitor_parks(sid))
+                    settled_by_stop = await self._await_finalization(settle_stopped_monitor_parks(
+                        sid, writer=self._admission_lease,
+                    ))
                     if not settled_by_stop:
                         row = await self._await_finalization(asyncio.to_thread(turns_db.get_turn, tid))
                         settled_by_stop = bool(row and row.get("state") == "completed")

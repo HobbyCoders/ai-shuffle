@@ -16,7 +16,7 @@ end-of-turn side effects extracted from ``live_session_store.end_streaming``.
 
 import asyncio
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -241,8 +241,9 @@ async def test_background_turn_records_full_event_sequence(mock_db):
     sync.broadcast_stream_chunk.assert_not_called()
     sync.broadcast_stream_end.assert_not_called()
 
-    # The durable end-of-turn helper ran.
-    finalize.assert_awaited_once_with(sid)
+    # The durable end-of-turn helper ran, fenced to this turn's lease (#1285).
+    finalize.assert_awaited_once_with(sid, writer=ANY)
+    assert finalize.await_args.kwargs["writer"] is not None
 
     # The pooled client got exactly one prompt and is idle again.
     state.adapter.send_query.assert_awaited_once_with("hello")
