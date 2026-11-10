@@ -248,3 +248,17 @@ async def test_a_worker_that_does_not_own_the_chat_never_writes_the_fact(pair, m
         catalog.publish_owned()
     exchange(a, b)
     assert _fact(b) is None
+
+
+def test_a_pending_deletion_outlives_retention_and_a_published_one_does_not(pair):  # noqa: F811
+    _, b, _, _ = pair
+    with b.active(), get_db() as conn:
+        cur = conn.cursor()
+        store.remember_session_deletion(cur, "old-published", pending=False)
+        store.remember_session_deletion(cur, "old-pending", pending=True)
+        store.remember_session_deletion(cur, "recent", pending=False)
+        cur.execute("UPDATE network_session_deletions SET deleted_at = %s WHERE session_id <> 'recent'",
+                    ("2000-01-01T00:00:00+00:00",))
+        assert store.prune_session_deletions(cur) == 1
+        cur.execute("SELECT session_id FROM network_session_deletions ORDER BY session_id")
+        assert [row["session_id"] for row in cur.fetchall()] == ["old-pending", "recent"]
