@@ -16,8 +16,10 @@ from tests.api.test_chat_ws_dispatch_contract import (
     ws_env,  # noqa: F401 — fixture for the real serialized dispatcher
 )
 from tests.api.test_chat_ws_handler_watch import (
+    QUEUE_HYDRATION_HANG_GUARD_SECONDS,
     WATCH,
     _HandlerHarness,
+    _await_queue_hydration,
     _queue_frames,
     _watch_and_hydrate,
 )
@@ -241,7 +243,7 @@ async def test_hydration_rereads_after_newer_queue_mutation(
     try:
         async with _connect(ws_env) as conn:
             conn.wire.push({"type": "watch_session", "session_id": sid})
-            await asyncio.wait_for(read_done.wait(), 1)
+            await asyncio.wait_for(read_done.wait(), QUEUE_HYDRATION_HANG_GUARD_SECONDS)
             frame = {"type": mutation, "session_id": sid, "content": "keep this queued"}
             if queued is not None:
                 frame["message_id"] = queued["id"]
@@ -277,7 +279,7 @@ async def test_hydration_rereads_after_newer_queue_mutation(
             # The newer authoritative snapshot has reached the observer already.
             # Resume the earlier read; hydration must discard it and read again.
             release.set()
-            await asyncio.wait_for(conn.handler._queue_watch_task, 1)
+            await _await_queue_hydration(conn.handler)
             await conn.wait_for(lambda fs: any(
                 f.get("event_type") == "queue_updated"
                 and f["data"].get("queue_status") == "available" for f in fs
