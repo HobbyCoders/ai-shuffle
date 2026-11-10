@@ -171,6 +171,36 @@ describe('CollectionPage with an item that is only a state', () => {
 		expect(document.activeElement?.getAttribute('data-settings-item')).toBe('a');
 	});
 
+	it('leaves focus on a control the reader moved to when the gone item closes', async () => {
+		settingsNav.selectItem('gone');
+		const { coll } = setupNotFound();
+		resize(coll, 460);
+		// Settings search, say, while a delete is still settling.
+		const outside = document.createElement('input');
+		document.body.appendChild(outside);
+		try {
+			outside.focus();
+			settingsNav.clearSelection('hooks');
+			flushSync();
+			await tick();
+			expect(document.activeElement).toBe(outside);
+		} finally {
+			outside.remove();
+		}
+	});
+
+	it('gives the list focus when it fell to the page with the gone item', async () => {
+		settingsNav.selectItem('gone');
+		const { coll } = setupNotFound();
+		resize(coll, 460);
+		(document.activeElement as HTMLElement | null)?.blur();
+		expect(document.activeElement).toBe(document.body);
+		settingsNav.clearSelection('hooks');
+		flushSync();
+		await tick();
+		expect(document.activeElement?.getAttribute('data-settings-item')).toBe('a');
+	});
+
 	it('adds nothing with no item open', () => {
 		const { coll } = setupNotFound();
 		resize(coll, 460);

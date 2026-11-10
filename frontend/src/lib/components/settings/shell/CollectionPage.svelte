@@ -127,14 +127,20 @@
 				(item) => item.dataset.settingsItem === previous
 			);
 			// An item the list no longer has (deleted, not found) has no row:
-			// the list's first row, else its title, takes focus instead.
+			// the list's first row, else its title, takes focus instead, but
+			// only when focus was lost with the item (its Back or the detail went
+			// away). A control the reader moved to meanwhile keeps it.
+			const active = document.activeElement;
+			const lost = !active || active === document.body || !active.isConnected || !!pane?.contains(active);
 			const target = current
 				? el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')
 				: (row?.matches('[data-settings-nav-item]')
 						? row
 						: row?.querySelector<HTMLElement>('[data-settings-nav-item]')) ??
-					lcol?.querySelector<HTMLElement>('[data-settings-list] [data-settings-nav-item]') ??
-					lcol?.querySelector<HTMLElement>('[data-settings-heading="page"]');
+					(lost
+						? (lcol?.querySelector<HTMLElement>('[data-settings-list] [data-settings-nav-item]') ??
+							lcol?.querySelector<HTMLElement>('[data-settings-heading="page"]'))
+						: null);
 			target?.focus({ preventScroll: !current });
 		});
 	});
