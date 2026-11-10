@@ -382,12 +382,22 @@ const cases = [{
 		// Anchored on the Error row's arrival (#1341: no banner repeats it).
 		const banners = frames.filter(f => f.errorRow);
 		expect(banners.length > 4, 'the real CLI error row appeared and was sampled');
+		// The banner was chrome, so it stayed put while the queue handed off. The
+		// row is transcript: once the first queued message leaves the pending list
+		// a follower rightly scrolls to that new turn. The row holds still until
+		// then; the held slot checks below still run through the handoff (#1341).
+		const handoff = frames.findIndex(f => f.errorRow && !f.rows.some(row => row.pending && row.text.startsWith('waiting-0 ')));
+		const resting = (handoff < 0 ? frames : frames.slice(0, handoff)).filter(f => f.errorRow);
 		if (scrolledUp) expect(travel(frames, 'anchor') <= 2, 'error and Stop leave the older row being read alone');
 		else {
-			expect(travel(banners, 'errorRow') <= 2, `the error stays still through Stop (${travel(banners, 'errorRow').toFixed(1)}px)`);
+			log(`error row resting frames before handoff: ${resting.length}`);
+			expect(!resting.length || travel(resting, 'errorRow') <= 2, `the error row stays still until the queue hands off (${travel(resting, 'errorRow').toFixed(1)}px over ${resting.length} frames)`);
 			// Both flex boxes must retain the already-presented queue slot.
 			// Shrinking either during follow-scroll was the pre-Stop 0.082
 			// CLS; separate paints could hide it below 0.05.
+			// #1341: on phone the held slot holds through the queue handoff but moves
+			// down 52-96px when Stop drains the last queued message (no banner keeps
+			// it). Desktop holds. Open finding; not loosened.
 			expect(travel(banners, 'tailControls') <= 2, `the error's queue slot stays still through handoff (${travel(banners, 'tailControls').toFixed(1)}px)`);
 			expect(travel(banners, 'pendingList') <= 2, `the pending list shares the held slot (${travel(banners, 'pendingList').toFixed(1)}px)`);
 			const retained = banners.map(frame => ({ pending: frame.rows.find(row => row.pending && row.text.startsWith('waiting-1 '))?.bubble })).filter(frame => frame.pending);
@@ -778,18 +788,20 @@ cases.push({
 		expect(held >= 150, `two confirmed queued bubbles produced a real held slot (${held}px)`);
 	},
 	async act({ page, mark, log, freshQueueToken }) {
-		const readState = () => page.evaluate(token => ({
+		const readState = () => page.evaluate(({ token, probe }) => ({
 			streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming,
 			session: document.querySelector('[data-ui-state="chat"]')?.dataset.uiSession,
 			users: document.querySelectorAll('[data-user-turn-id]').length,
 			freshInTranscript: [...document.querySelectorAll('[data-user-turn-id]')].some(row => row.textContent.includes(token)),
 			freshPending: document.querySelector('.pending-messages')?.textContent.includes(token) ?? false,
 			slot: parseFloat(document.querySelector('.tail-controls')?.style.minHeight),
-			error: !!document.querySelector('.chat-error-banner')
-		}), freshQueueToken);
+			error: !!document.querySelector('.chat-error-banner'),
+			// The failure is presented by its own Error row once the banner steps aside (#1341).
+			errorRow: [...document.querySelectorAll(probe.rows)].some(d => [...d.querySelectorAll(':scope > summary > span')].some(s => s.textContent.trim() === probe.title))
+		}), { token: freshQueueToken, probe: ERROR_ROW_PROBE });
 		await mark('fresh local send during the automatically delivered queued stream');
 		const before = await readState();
-		expect(before.streaming === 'true' && before.slot >= 150 && before.error,
+		expect(before.streaming === 'true' && before.slot >= 150 && (before.error || before.errorRow),
 			'fresh send starts during real queued streaming with the presented error slot, not after completion');
 		await typeAndSend(page, `${freshQueueToken} [script:slow tps=1]`);
 		await page.locator('.pending-messages .bubble-text').filter({ hasText: freshQueueToken }).waitFor();
