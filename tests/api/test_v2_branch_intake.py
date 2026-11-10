@@ -179,6 +179,49 @@ async def test_spawn_materializes_deterministic_checkout_and_submits_worktree_tu
     assert resp.query_started is True
 
 
+async def test_first_turn_carries_the_senders_command_id(monkeypatch):
+    """#1351: the first turn is stamped with the sender's own command id, so its
+    ``message.user`` reconciles onto the sender's local row by id. The stored
+    prompt names the checkout's copy of each upload, so a text match fails."""
+    m = _wire_v2(monkeypatch)
+    command_id = "client-" + "ab" * 16
+
+    await worktree_api._create_v2_branch_session(
+        body=_body(prompt="build the feature", client_message_id=command_id),
+        project={"id": "proj-A", "settings": {}},
+        api_user_id=None,
+    )
+
+    m["submit"].assert_called_once()
+    assert m["submit"].call_args.kwargs["command_id"] == command_id
+
+
+async def test_endpoint_refuses_a_client_message_id_that_is_not_a_client_handle(monkeypatch):
+    monkeypatch.setattr(worktree_api, "run_sync", _passthrough_run_sync)
+    monkeypatch.setattr(worktree_api, "get_api_user_from_request", lambda req: None)
+    monkeypatch.setattr(
+        worktree_api,
+        "require_origin_access",
+        lambda **kw: {
+            "origin": "local:proj-A",
+            "project_v2": {"id": "pv2-abc123"},
+            "legacy": {"id": "proj-A", "settings": {}},
+        },
+    )
+    v2_helper = AsyncMock()
+    monkeypatch.setattr(worktree_api, "_create_v2_branch_session", v2_helper)
+
+    with pytest.raises(HTTPException) as exc:
+        await worktree_api.create_session_with_worktree(
+            request=MagicMock(),
+            body=_body(prompt="hi", client_message_id="build the feature"),
+            token="tok",
+        )
+
+    assert exc.value.status_code == 400
+    v2_helper.assert_not_awaited()
+
+
 async def test_promptless_create_stores_the_composer_picks_as_run_binding(monkeypatch):
     """No prompt means no first turn to persist the composer's model and
     permission mode, so the create stores them (the call button relies on it).

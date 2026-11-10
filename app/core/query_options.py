@@ -438,6 +438,9 @@ def worktree_unavailable_error(session_row: Dict[str, Any]) -> Optional[Worktree
 def _resolve_checkout_for_options(session_row: Dict[str, Any]) -> Optional[str]:
     from app.core import project_resolver
 
+    # Only turn starts build options: a clean detached checkout of this
+    # session's own goes back on its branch before the binding check (#1437).
+    project_resolver.reattach_own_detached_checkout(session_row)
     try:
         return project_resolver.resolve_cwd(session_row, raise_add_errors=True)
     except WorktreeAddError as exc:

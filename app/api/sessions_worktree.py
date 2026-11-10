@@ -530,6 +530,7 @@ async def _create_remote_branch_session(
                     remote_device, session_id=session_id, source="worktree", prompt=prompt,
                     profile_id=portable_profile, project_id=None,
                     overrides=body.overrides, payload=payload or None, owner_send=True,
+                    command_id=body.client_message_id,
                 )
             else:
                 await turn_manager.submit_async(
@@ -537,6 +538,7 @@ async def _create_remote_branch_session(
                     project_id=body.project_id or None, overrides=body.overrides,
                     explicit_permission=True,
                     payload=payload or None, no_kick=True,
+                    command_id=body.client_message_id,
                 )
                 await run_sync(turn_claim.notify_turns_changed, session_id)
             query_started = True
@@ -770,6 +772,7 @@ async def _create_v2_branch_session(
                 project_id=body.project_id or None,
                 overrides=body.overrides,
                 explicit_permission=True,
+                command_id=body.client_message_id,
                 payload={
                     **({"api_user_id": api_user_id} if api_user_id else {}),
                     **({"upload_paths": list(migrated_paths.values())} if migrated_paths else {}),
@@ -831,6 +834,12 @@ async def create_session_with_worktree(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ATTACHMENTS_NEED_LOCAL_CHECKOUT,
+        )
+    from app.api.chat_ws_handler import _valid_client_message_id
+    if body.client_message_id is not None and not _valid_client_message_id(body.client_message_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="client_message_id must be a client- handle",
         )
     # Assigned agents bind the agent before the project-default fallback, so a
     # restricted key never lands on a default outside its set.

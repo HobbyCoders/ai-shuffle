@@ -678,7 +678,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// and the watch_session snapshot below confirms or replaces them.
 		pendingQueue.park(state.sessionId, state.queuedMessages);
 		queueHydration.cancel();
-		const parkedQueue = pendingQueue.unpark(sessionId);
+		const parkedQueue = pendingQueue.unpark(sessionId, state.sessionId !== sessionId);
 
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
 		const row = appData.current.sessions.find((s) => s.id === sessionId);

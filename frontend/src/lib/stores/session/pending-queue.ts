@@ -94,6 +94,8 @@ export interface PendingEntry {
 	clientMessageId?: string;
 	status?: QueuedMessage['status'];
 	unconfirmed?: boolean;
+	uploadPaths?: string[];
+	recorded?: boolean;
 }
 
 /** Legacy optimistic ids, retained for old snapshots/tests (new sends use client ids). */
@@ -118,9 +120,15 @@ interface Delivery {
 	seq: number;
 	/** The delivered command, when the receipt carries one: it then answers only its own bubble. */
 	commandId?: string;
+	/** Set on the message that opened this turn: a drained row's id IS its turn id, so it answers that row only. */
+	turnId?: string;
+	/** Set on a steer: the running turn it joined. It is never that turn's own row. */
+	joinedTurnId?: string;
 	/** The entry this delivery retired — a delivery answers exactly one bubble. */
 	matchedEntryId: string | null;
 	createdAt?: number;
+	/** False until the transcript publishes this message's row: until then it retires nothing. */
+	onScreen: boolean;
 }
 
 let sessionId: string | null = null;
@@ -131,6 +139,13 @@ let lastAuthorityAt = 0;
 const firstSeen = new Map<string, number>();
 /** Turn ids delivered on the transcript (#588: a drained queue row's id IS its turn id). */
 const deliveredTurnIds = new Set<string>();
+/**
+ * Turn ids of live deliveries the transcript has not published yet (#1052). The
+ * feed notes a `message.user` when it arrives and shows its row at the next fold,
+ * a frame later; a queue snapshot landing in between must not take the bubble
+ * down before that row is up. `published` clears it.
+ */
+const turnIdsAwaitingFold = new Set<string>();
 /** Entry ids already retired — sticky, so a stale snapshot cannot resurrect them. */
 const prunedIds = new Set<string>();
 let deliveries: Delivery[] = [];
@@ -146,6 +161,19 @@ const replayedCommands = new Map<string, number>();
 const MAX_PARKED_SESSIONS = 50;
 /** Session id → the pending bubbles it showed when the user left it. */
 const parked = new Map<string, PendingEntry[]>();
+/**
+ * Session id → the bubbles a return to that chat put back on screen (the
+ * parked ones, and any still held for a delivery when the chat was left),
+ * until the first authoritative snapshot after the return speaks for them.
+ * That snapshot is the server's whole answer about a queue this page was not
+ * watching: a bubble it no longer lists ran or was cancelled while the chat was
+ * closed, so it is neither held nor kept held for a delivery (#524, #1052).
+ * The mark outlives a re-open of the same chat and a later departure; only its
+ * snapshot, the next return, a deleted chat or a full reset ends it.
+ */
+const returned = new Map<string, Set<string>>();
+/** The returned bubbles the snapshot being recorded right now answers for. */
+let returnSnapshot: { id: string | null; keys: Set<string> } | null = null;
 // Keep an unresolved cancellation visible even if a queue-cleared frame wins
 // the race with its verdict. No text matching or expiring local-id map.
 interface CancellationState {
@@ -158,6 +186,10 @@ interface CancellationState {
 	sends: Map<string, PendingEntry>;
 	/** Command id → marks its send unconfirmed now (the admission timeout, run early). */
 	unconfirm: Map<string, () => void>;
+	/** Confirmed rows a snapshot dropped, still on screen until their own delivery (#1052). */
+	delivering: Map<string, PendingEntry>;
+	/** Row ids whose delivery hold timed out or was withdrawn: gone until a snapshot lists them. */
+	releasedRows: Set<string>;
 }
 // Cancellation transactions belong to a session, not its currently mounted
 // feed. A socket verdict can arrive after that feed has been torn down.
@@ -185,10 +217,13 @@ export function restoredDraftFields(s: RestoreSlots, restore: WithdrawnRestore |
 // receipt, refusal, a frame that never left, the chat's deletion; see
 // forgetSendUploads, settleWithdrawalReceipt and forgetSession).
 const sendUploads = new Map<string, SendUploads>();
-function draftOf(key: string, content: string): WithdrawnDraft {
+function draftOf(key: string, content: string, recordedPaths: string[] = []): WithdrawnDraft {
 	const uploads = sendUploads.get(key);
 	sendUploads.delete(key);
-	return uploads ? { content, uploads } : { content };
+	if (uploads) return { content, uploads };
+	// A row this page did not send (reload, another device) still names the
+	// paths its send recorded, so they come back as chips, not raw @paths.
+	return recordedPaths.length ? { content, uploads: { sessionId: null, paths: [...recordedPaths], references: [] } } : { content };
 }
 // Idle transcript echoes are recoverable drafts, not queue authority. The
 // command survives null -> assigned-session adoption; receipts clear it by id.
@@ -207,12 +242,19 @@ function recoverySend(id: string | null, key: string) {
 function cancellationState(id: string | null): CancellationState {
 	let state = cancellations.get(id);
 	if (!state) {
-		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), terminalVerdicts: new Map(), drafts: [], timers: new Map(), sends: new Map(), unconfirm: new Map() };
+		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), terminalVerdicts: new Map(), drafts: [], timers: new Map(), sends: new Map(), unconfirm: new Map(), delivering: new Map(), releasedRows: new Set() };
 		cancellations.set(id, state);
 	}
 	return state;
 }
 const removalKey = (entry: PendingEntry) => entry.clientMessageId ?? entry.id;
+/**
+ * How long a confirmed row a snapshot dropped stays up waiting for its delivery
+ * (#1052). The snapshot (WebSocket) and the delivered row (events feed) take
+ * separate routes; the row usually lands 50-170 ms later, but a failing feed
+ * retry once took 9.7 s. Same bound as admission and cancellation.
+ */
+export const DELIVERY_HOLD_MS = 10_000;
 
 function normalize(content: string): string {
 	return content.trim();
@@ -224,6 +266,7 @@ function resetState(next: string | null): void {
 	lastAuthorityAt = 0;
 	firstSeen.clear();
 	deliveredTurnIds.clear();
+	turnIdsAwaitingFold.clear();
 	prunedIds.clear();
 	deliveries = [];
 	replayedCommands.clear();
@@ -249,6 +292,16 @@ function answeredByHistory(entry: PendingEntry): boolean {
 	return answeredAt !== undefined && answeredByReceipt(entry, answeredAt);
 }
 
+/**
+ * Has this page seen the message of a `recorded` row? A re-queued steer keeps
+ * its command id, so any receipt for that command, live or replayed, is it.
+ */
+function sawRecordedMessage(id: string | null, entry: PendingEntry): boolean {
+	const command = entry.clientMessageId;
+	if (!command || id !== sessionId) return false;
+	return replayedCommands.has(command) || deliveries.some(d => d.onScreen && d.commandId === command);
+}
+
 /** Bind feed observations to a session; cancellation transactions are separate. */
 function useSession(id: string | null): void {
 	if (id !== sessionId) resetState(id);
@@ -272,6 +325,8 @@ export const pendingQueue = {
 			for (const state of cancellations.values()) for (const timer of state.timers.values()) clearTimeout(timer);
 			cancellations.clear();
 			parked.clear();
+			returned.clear();
+			returnSnapshot = null;
 			recoverySends.clear();
 			sendUploads.clear();
 		}
@@ -296,15 +351,22 @@ export const pendingQueue = {
 	/**
 	 * The bubbles to show the instant a session is re-opened, before its queue
 	 * snapshot lands. Withdrawn entries stay gone; everything else waits for the
-	 * server to say it was consumed or cancelled.
+	 * server to say it was consumed or cancelled. `away` is false when the
+	 * chat never left the screen (a re-open of the open chat): its queue was
+	 * watched throughout, so a row its next snapshot drops is a live delivery.
 	 */
-	unpark(id: string | null): PendingEntry[] {
+	unpark(id: string | null, away = true): PendingEntry[] {
 		if (!id) return [];
 		const entries = parked.get(id);
 		parked.delete(id);
-		if (!entries) return [];
-		const { withdrawn } = cancellationState(id);
-		return entries.filter(e => !withdrawn.has(removalKey(e)) && !withdrawn.has(e.id));
+		const { withdrawn, delivering } = cancellationState(id);
+		const back = (entries ?? []).filter(e => !withdrawn.has(removalKey(e)) && !withdrawn.has(e.id));
+		if (away) {
+			const keys = new Set([...back.map(removalKey), ...delivering.keys()]);
+			if (keys.size) returned.set(id, keys);
+			else returned.delete(id);
+		}
+		return back;
 	},
 
 	/** Test/diagnostic hook: the bubbles parked for a session. */
@@ -339,6 +401,12 @@ export const pendingQueue = {
 		sendUploads.set(key, { sessionId: id, paths: [...paths], references: [...references] });
 	},
 
+	/** The upload paths this page recorded for its own send, for its chips. */
+	sendUploadPaths(key: string | undefined): string[] {
+		const uploads = key ? sendUploads.get(key) : undefined;
+		return uploads ? [...uploads.paths, ...uploads.references.map(reference => reference.path)] : [];
+	},
+
 	/** Test/diagnostic hook: whether a send's attachments are still kept. */
 	hasSendUploads(key: string): boolean {
 		return sendUploads.has(key);
@@ -364,6 +432,8 @@ export const pendingQueue = {
 	 * server re-queue of the same command; it leaves that attempt's files alone.
 	 */
 	settleWithdrawalReceipt(key: string, createdAt: string | undefined, live: boolean): boolean {
+		// Withdrawn anywhere (another tab or device too): never hold it for a delivery.
+		for (const id of [...cancellations.keys()]) this.releaseHeld(id, key);
 		for (const [id, state] of cancellations) {
 			const removal = state.removals.get(key);
 			if (!removal) continue;
@@ -381,6 +451,7 @@ export const pendingQueue = {
 		for (const timer of cancellations.get(id)?.timers.values() ?? []) clearTimeout(timer);
 		cancellations.delete(id);
 		parked.delete(id);
+		returned.delete(id);
 		for (const [key, send] of recoverySends) if (send.sessionId === id) recoverySends.delete(key);
 		for (const [key, uploads] of sendUploads) if (uploads.sessionId === id) sendUploads.delete(key);
 	},
@@ -410,8 +481,21 @@ export const pendingQueue = {
 	noteAuthoritative(id: string | null, rows: PendingEntry[]): void {
 		useSession(id);
 		lastAuthorityAt = Date.now();
+		const back = id ? returned.get(id) : undefined;
+		if (id) returned.delete(id);
+		returnSnapshot = back ? { id, keys: back } : null;
+		const state = cancellations.get(id);
+		if (back) {
+			// The return snapshot also ends a hold that began before the chat was
+			// left: reconcile would otherwise put that bubble back.
+			const listed = new Set(rows.map(removalKey));
+			for (const key of back) if (!listed.has(key)) this.releaseHeld(id, key);
+		}
 		for (const row of rows) {
 			stamp(row.id);
+			// Listed again: the server says it exists, so it is neither held nor released.
+			state?.releasedRows.delete(row.id);
+			if (state?.delivering.has(removalKey(row))) this.endHold(id, removalKey(row));
 			if (row.clientMessageId) this.acknowledgeSend(id, row.clientMessageId);
 		}
 	},
@@ -423,6 +507,13 @@ export const pendingQueue = {
 	 * not an answer to anything pending now, and content-matching it would eat a
 	 * legitimately queued repeat of the same prompt. Turn ids are harvested in
 	 * both phases — that match is exact.
+	 *
+	 * `steered` is the recorder's own mark for a message that joined a running
+	 * turn (`checkpoint_backed: false`): its turn id is that turn's, not a row's.
+	 *
+	 * `awaitingFold` is set by the feed, which shows the message's row at its next
+	 * fold rather than now: a live delivery then retires no bubble until
+	 * `published`, so the bubble and its row change in the same update (#1052).
 	 */
 	noteDelivered(
 		id: string | null,
@@ -430,9 +521,18 @@ export const pendingQueue = {
 		turnId?: string,
 		live = true,
 		commandId?: string,
-		createdAt?: string
+		createdAt?: string,
+		steered = false,
+		awaitingFold = false
 	): void {
 		useSession(id);
+		// Only the message that OPENS a turn names a queue row by turn id. A steer
+		// names no row of its own, so it must stay free to retire its bubble by
+		// text. The recorder marks a steer; an older worker's unmarked one is a
+		// later message with a turn id already seen.
+		const opensTurn = !!turnId && !steered && !deliveredTurnIds.has(turnId);
+		const onScreen = !(live && awaitingFold);
+		if (turnId && !onScreen && !deliveredTurnIds.has(turnId)) turnIdsAwaitingFold.add(turnId);
 		if (turnId) deliveredTurnIds.add(turnId);
 		if (commandId) {
 			this.acknowledgeSend(id, commandId);
@@ -452,13 +552,23 @@ export const pendingQueue = {
 		}
 		const text = normalize(content);
 		if (!text && !commandId) return;
-		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}) });
+		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, onScreen, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}), ...(opensTurn ? { turnId } : turnId ? { joinedTurnId: turnId } : {}) });
 		// A long session delivers a lot of messages and only the recent ones can
 		// still be answering something pending. Forgetting the oldest only ever
 		// makes pruning more conservative.
 		if (deliveries.length > MAX_TRACKED_DELIVERIES) {
 			deliveries = deliveries.slice(-MAX_TRACKED_DELIVERIES);
 		}
+	},
+
+	/**
+	 * The feed published every message it has noted so far: their rows are in the
+	 * `messages` of the update this precedes, so they may now retire bubbles.
+	 */
+	published(id: string | null): void {
+		if (id !== sessionId) return;
+		for (const d of deliveries) d.onScreen = true;
+		turnIdsAwaitingFold.clear();
 	},
 
 	/** An × requests a verdict; it is not evidence of withdrawal. */
@@ -484,6 +594,72 @@ export const pendingQueue = {
 		else if (entry) state!.removals.set(key, { ...entry, status: undefined });
 		const rows = parked.get(id ?? '');
 		if (rows) parked.set(id!, rows.map(e => removalKey(e) === key ? { ...e, status: undefined } : e));
+	},
+
+	/**
+	 * #1052: an authoritative snapshot no longer lists a confirmed bubble that was
+	 * on screen. The server took it out of the queue to run it, but its delivered
+	 * `message.user` row comes on the events feed, a separate route that usually
+	 * lands later. Keep the bubble until that row retires it in `reconcile` (by
+	 * command id, turn id, or the existing text rule for rows without ids) or
+	 * DELIVERY_HOLD_MS passes; `onRelease` then re-folds the queue.
+	 *
+	 * Only rows already confirmed and waiting are held: an echo still awaiting
+	 * admission (or unconfirmed) is kept by `sends`, a cancelling row by
+	 * `removals`, and a withdrawn, delivered or pruned row is gone for good.
+	 * A `recorded` row's run adds no transcript row. A re-queued steer is held
+	 * only until this page has seen the message it already recorded (the events
+	 * feed can trail the queue), which is at once when it has: `inTranscript`
+	 * answers for a transcript this page opened without replaying it. A row with
+	 * no command id (a voice hand-off) has no message of its own to wait for.
+	 * A bubble put back on return to a chat is not held by the first snapshot
+	 * after that return: it left the queue while the chat was closed.
+	 */
+	holdDelivering(
+		id: string | null, previous: PendingEntry[], rows: PendingEntry[], onRelease: () => void,
+		inTranscript?: (commandId: string) => boolean
+	): void {
+		const state = cancellationState(id);
+		const listed = new Set(rows.map(removalKey));
+		const back = returnSnapshot?.id === id ? returnSnapshot.keys : null;
+		for (const entry of previous) {
+			const key = removalKey(entry);
+			if (listed.has(key) || back?.has(key) || entry.status || entry.unconfirmed || state.delivering.has(key)
+				|| (entry.recorded && (!entry.clientMessageId || sawRecordedMessage(id, entry)
+					|| inTranscript?.(entry.clientMessageId)))
+				|| state.sends.has(key) || state.removals.has(key)
+				|| state.withdrawn.has(key) || state.withdrawn.has(entry.id) || state.releasedRows.has(entry.id)
+				|| state.deliveredRows.has(entry.id) || prunedIds.has(entry.id)) continue;
+			state.delivering.set(key, { ...entry });
+			state.timers.set(`deliver:${key}`, setTimeout(() => {
+				if (this.releaseHeld(id, key)) onRelease();
+			}, DELIVERY_HOLD_MS));
+		}
+	},
+
+	/** Whether this bubble is held for its delivery: the server no longer has it to withdraw. */
+	isHeld(id: string | null, entry: PendingEntry): boolean {
+		return cancellations.get(id)?.delivering.has(removalKey(entry)) ?? false;
+	},
+
+	/** End a hold without hiding the row (its delivery or a snapshot now speaks for it). */
+	endHold(id: string | null, key: string): void {
+		const state = cancellations.get(id);
+		clearTimeout(state?.timers.get(`deliver:${key}`));
+		state?.timers.delete(`deliver:${key}`);
+		state?.delivering.delete(key);
+	},
+
+	/**
+	 * Take a held bubble down: its delivery did not show in time, or it was
+	 * withdrawn elsewhere. True when one was held, so the caller re-folds.
+	 */
+	releaseHeld(id: string | null, key: string): boolean {
+		const entry = cancellations.get(id)?.delivering.get(key);
+		if (!entry) return false;
+		this.endHold(id, key);
+		cancellations.get(id)!.releasedRows.add(entry.id);
+		return true;
 	},
 
 	/** Keep recoverable words until admission/refusal/receipt. Without a timeout
@@ -577,11 +753,12 @@ export const pendingQueue = {
 			withdrawn.add(key);
 			if (entry) {
 				withdrawn.add(entry.id);
-				drafts.push(draftOf(key, entry.content));
+				drafts.push(draftOf(key, entry.content, entry.uploadPaths));
 			}
 			sendUploads.delete(key);
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);
+			this.endHold(id, key);
 		} else if (verdict === 'already_delivered') {
 			// Retire both names of this attempt, not future rows for the command.
 			// The durable id can arrive in a verdict before its queue snapshot.
@@ -604,28 +781,46 @@ export const pendingQueue = {
 	 */
 	reconcile(id: string | null, entries: PendingEntry[]): PendingEntry[] {
 		useSession(id);
-		const { removals, withdrawn, deliveredRows, sends } = cancellationState(id);
+		const { removals, withdrawn, deliveredRows, sends, delivering, releasedRows } = cancellationState(id);
 		const keys = new Set(entries.map(removalKey));
 		const unresolved = new Map([...sends, ...removals]);
-		const candidates = [...entries, ...[...unresolved].filter(([key]) => !keys.has(key)).map(([, entry]) => entry)];
+		const missing = (map: Map<string, PendingEntry>) => [...map].filter(([key]) => !keys.has(key)).map(([, entry]) => entry);
+		// A held row left the queue's front to run: it stays where it was, first.
+		const held = missing(delivering);
+		const candidates = [...held, ...entries, ...missing(unresolved).filter(e => !delivering.has(removalKey(e)))];
+		// Only messages already on screen answer a bubble (#1052): one the feed has
+		// not folded yet would leave neither its row nor its bubble showing.
+		const shown = deliveries.filter(d => d.onScreen);
+		// A delivery that names a bubble by turn id answers that bubble, so its text
+		// must not also retire another bubble with the same words.
+		for (const d of shown) {
+			if (d.matchedEntryId === null && d.turnId
+				&& (prunedIds.has(d.turnId) || candidates.some(e => e.id === d.turnId))) d.matchedEntryId = d.turnId;
+		}
 		const kept: PendingEntry[] = [];
 		for (const entry of candidates) {
 			const key = removalKey(entry);
 			const bornAt = stamp(entry.id), text = normalize(entry.content);
 			// Identity beats first-sighting order; server timestamps still allow a
 			// genuinely new re-queue after an interrupted delivered steer.
-			const delivery = deliveries.find(d => d.commandId && entry.clientMessageId
+			const delivery = shown.find(d => d.commandId && entry.clientMessageId
 				? d.commandId === entry.clientMessageId && (isOptimistic(entry)
 					|| !Number.isFinite(d.createdAt) || entry.queuedAt <= d.createdAt!)
-				: d.matchedEntryId === null && bornAt < d.seq && d.content === text);
+				: d.matchedEntryId === null && d.joinedTurnId !== entry.id && bornAt < d.seq && d.content === text);
 			if (withdrawn.has(key) || withdrawn.has(entry.id)
-				|| deliveredRows.has(entry.id) || deliveredTurnIds.has(entry.id) || prunedIds.has(entry.id)
-				|| answeredByHistory(entry) || delivery) {
+				|| deliveredRows.has(entry.id) || (deliveredTurnIds.has(entry.id) && !turnIdsAwaitingFold.has(entry.id))
+				|| prunedIds.has(entry.id)
+				|| answeredByHistory(entry) || delivery
+				// A held re-queued steer waits only for the message it already recorded.
+				|| (entry.recorded && delivering.get(key)?.id === entry.id && sawRecordedMessage(id, entry))) {
 				if (delivery) delivery.matchedEntryId = entry.id;
 				prunedIds.add(entry.id);
 				this.removalFailed(id, key, true);
+				if (delivering.get(key)?.id === entry.id) this.endHold(id, key);
 				continue;
 			}
+			// A hold that ran out (or was withdrawn) leaves; a snapshot listing it again brings it back.
+			if (releasedRows.has(entry.id) && !delivering.has(key)) continue;
 			const removal = removals.get(key);
 			if (removal) {
 				const retained = { ...entry, status: removal.status };

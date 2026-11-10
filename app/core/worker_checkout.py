@@ -553,6 +553,10 @@ def restore_worker_checkout(worker_session_id: str, *, follow_live_switch: bool 
                                "part-way, or a restore retained the snapshot. The folder may not contain all "
                                f"the saved work; {worktree_reclaim.archive_note(base_path, branch)}. "
                                "Dispatch a new Task instead")
+            # An idle worker left its clean checkout detached: put it back on
+            # its branch under the same rules as a turn start (#1437). A live
+            # turn returned above; a checkout already on a branch is untouched.
+            project_resolver.reattach_own_detached_checkout(dict(row))
             try:
                 from app.core.git_worktree_ops import repo_worktree_lock
 

@@ -896,6 +896,19 @@ describe('message-sender send during a live turn', () => {
 		expect(getState().messages).toHaveLength(1);
 	});
 
+	it('keeps the echo\'s attachment chips when an unrelated queue snapshot rebuilds it', async () => {
+		const { deps, getState } = makeDeps(streamingState());
+
+		await createMessageSender(deps).sendMessage('read this', { pendingUploadPaths: ['/uploads/a.png'] });
+
+		expect(getState().queuedMessages[0].uploadPaths).toEqual(['/uploads/a.png']);
+		// A snapshot from before this send's admission lists nothing: the bubble is
+		// rebuilt from the tracked send and must still carry its chips.
+		pendingQueue.noteAuthoritative('ses-1', []);
+		const rebuilt = pendingQueue.reconcile('ses-1', []).find(m => m.content === 'read this');
+		expect(rebuilt?.uploadPaths).toEqual(['/uploads/a.png']);
+	});
+
 	it('rolls the pending echo back when the query never goes out', async () => {
 		const { deps, wsConn, getState } = makeDeps(streamingState());
 		wsConn.send.mockImplementation((data: Record<string, unknown>) => data?.type !== 'query');

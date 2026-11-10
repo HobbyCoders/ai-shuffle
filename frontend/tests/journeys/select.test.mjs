@@ -141,7 +141,7 @@ test('an edited map selects what either copy names and never drops a journey', (
 test('a split journey: its shared cases or either half selects both halves', () => {
 	const map = loadMap();
 	const journeys = allJourneys();
-	for (const stem of ['chat-position-stability', 'stop-with-queued-messages', 'sidebar-truth']) {
+	for (const stem of ['chat-position-stability', 'stop-with-queued-messages', 'sidebar-truth', 'queue-while-busy']) {
 		for (const file of [`${stem}.cases.mjs`, `${stem}.journey.mjs`, `${stem}-2.journey.mjs`]) {
 			const picked = selectForCi([`frontend/tests/journeys/${file}`], map, journeys);
 			assert.equal(picked.all, false, file);
