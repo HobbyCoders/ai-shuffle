@@ -950,6 +950,32 @@ async def test_pending_wakes_move_with_the_chat(pair, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_pending_hand_off_failure_notice_stays_and_does_not_refuse_the_move(pair, monkeypatch):
+    """#1419: the notice of an earlier failed move is about this worker. It is
+    not sent with a later move, and the commit does not count it as changed."""
+    import time
+    from app.core import session_handoff as sh
+    from app.core import wakeup_service
+    from app.db import wakeups
+    a, b, _, _ = pair
+    with a.active():
+        wakeups.create_wakeup(id="wake-1", session_id="handoff-test", prompt="check CI", fire_at=time.time() + 3600,
+                              instance_id=settings.effective_instance_id)
+        wakeups.create_wakeup(id=sh.FAILED_COMMAND_PREFIX + "move-0", session_id="handoff-test", prompt="notice",
+                              fire_at=time.time() + 3600, source=sh.FAILED_PAYLOAD,
+                              instance_id=settings.effective_instance_id)
+    _owner_calls(a, b, monkeypatch)
+    monkeypatch.setattr(handoff, "wake_carry", lambda target: True)
+    monkeypatch.setattr(wakeup_service, "arm_persisted", lambda row: None)
+    with b.active():
+        await handoff.receive(database.get_session("handoff-test"))
+        assert [row["id"] for row in wakeups.get_session_wakeups("handoff-test")] == ["wake-1"]
+    with a.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
+        assert [row["source"] for row in wakeups.get_session_wakeups("handoff-test")] == [sh.FAILED_PAYLOAD]
+
+
+@pytest.mark.asyncio
 async def test_a_wake_an_older_worker_cannot_keep_is_named_in_the_chat(pair, monkeypatch):
     """#1819 rule 3: never drop a wake silently."""
     import time

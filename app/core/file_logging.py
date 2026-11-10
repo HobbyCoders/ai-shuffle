@@ -571,14 +571,22 @@ def _flush_and_close_file_handler() -> None:
         pass
 
 
-def log_shutdown_banner() -> None:
+def log_shutdown_banner(unfinished=()) -> None:
     """Log a clean shutdown line so a normal stop is distinguishable from a crash.
+
+    ``unfinished`` names saving still running at the stop deadline
+    (desktop_lifecycle.unfinished_saving); the line then says so instead of
+    claiming a clean stop. Startup recovery completes that work.
 
     Requests a bounded drain of the file queue: shutdown can be cut short
     (SIGTERM grace window). Call off the event loop. A stuck disk may still
     prevent the banner from reaching disk before the process exits.
     """
-    logger.info("=== AI Shuffle shutting down (pid=%s) ===", os.getpid())
+    if unfinished:
+        logger.warning("=== AI Shuffle shutting down with saving unfinished (%s); "
+                       "startup recovery completes it (pid=%s) ===", ", ".join(unfinished), os.getpid())
+    else:
+        logger.info("=== AI Shuffle shutting down (pid=%s) ===", os.getpid())
     if _file_handler is not None:
         try:
             _file_handler.flush()
