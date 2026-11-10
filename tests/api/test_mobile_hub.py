@@ -610,6 +610,242 @@ def test_hub_outage_on_device_check_is_still_an_outage(setup, monkeypatch, hub_s
     assert failure.value.status_code == 503
 
 
+def _fake_clock(monkeypatch, start=1000.0):
+    """account_hub's monotonic clock under test control; the rest of ``time`` stays real."""
+    import time as real_time
+    clock = [start]
+
+    class Clock:
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        def monotonic(self):
+            return clock[0]
+
+    monkeypatch.setattr(account_hub, 'time', Clock())
+    return clock
+
+
+@pytest.mark.parametrize('hub_status, expected', [(403, 401), (401, 401), (503, 503), (429, 503), ('inactive', 401)])
+def test_unconfirmed_device_costs_one_hub_call_per_ttl(setup, monkeypatch, hub_status, expected):
+    """#1424: an open phone socket re-checks every 30 s. A hub answer that does
+    not confirm the device (refusal, outage, rate limit) used to be forgotten, so
+    every re-check asked the hub again: 2,880 calls a day for one phone."""
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    clock = _fake_clock(monkeypatch)
+    if hub_status == 'inactive':
+        hub = Mock(side_effect=lambda *a, **k: {'active': False, 'account_id': ACCOUNT, 'device_id': DEVICE})
+        monkeypatch.setattr(account_hub, 'call', hub)
+        asked = lambda: hub.call_count
+    else:
+        remaining = _hub_answers(monkeypatch, *[hub_status] * 5)  # spares expose extra calls
+        asked = lambda: 5 - len(remaining)
+    for elapsed in (0, 30, 60, 89):  # four re-checks inside one TTL
+        clock[0] = 1000.0 + elapsed
+        with pytest.raises(HTTPException) as failure:
+            account_hub.require_active(owner)
+        assert failure.value.status_code == expected
+    assert asked() == 1
+    clock[0] = 1090.0  # the TTL has passed: the hub is asked again and can confirm
+    monkeypatch.setattr(account_hub, 'call', active)
+    assert account_hub.require_active(owner)['server_id'] == SERVER
+
+
+def test_replayed_outage_still_rides_on_the_grace_window(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=90, grace=110)
+    clock = _fake_clock(monkeypatch)
+    monkeypatch.setattr(account_hub, 'call', active)
+    account_hub.require_active(owner)
+    outage = Mock(side_effect=HTTPException(503, 'Account hub is rate limiting this worker'))
+    monkeypatch.setattr(account_hub, 'call', outage)
+    for elapsed in (90, 100, 109):  # asked once at 90; the replays still ride on grace
+        clock[0] = 1000.0 + elapsed
+        assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert outage.call_count == 1
+    clock[0] = 1000.0 + 120  # grace over, outage still inside its TTL: fails without asking
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 503
+    assert outage.call_count == 1
+
+
+def test_sign_out_reset_forgets_a_remembered_refusal(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    _fake_clock(monkeypatch)
+    remaining = _hub_answers(monkeypatch, 403, 200)
+    with pytest.raises(HTTPException):
+        account_hub.require_active(owner)
+    account_hub.reset_verification_cache()
+    assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert remaining == []
+
+
+def test_fresh_sign_in_is_checked_now_not_refused_from_memory(setup, monkeypatch):
+    """A refusal remembered for this device must not reject the sign-in that
+    fixed it: the ticket exchange is followed by a live hub check."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    clock = _fake_clock(monkeypatch)
+    monkeypatch.setattr(account_hub, 'call', lambda *a, **k: {'active': False, 'account_id': ACCOUNT,
+                                                              'device_id': DEVICE})
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 401
+    clock[0] += 1  # the user signs in again a second later, well inside the TTL
+    checks = []
+
+    def hub(binding, method, suffix, body=None):
+        if suffix == 'exchange':
+            return identity()
+        checks.append(suffix)
+        return active()
+
+    monkeypatch.setattr(account_hub, 'call', hub)
+    response = setup.post('/api/v1/mobile/hub/enroll',
+                          json={'ticket': 'fresh-ticket', 'device_info': info().model_dump()})
+    assert response.status_code == 200, response.text
+    assert checks == [f'devices/{DEVICE}']
+    # The live confirmation now answers the device's own re-checks.
+    assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert checks == [f'devices/{DEVICE}']
+
+
+def _slow_then_fresh(monkeypatch, slow_active, fresh_active):
+    """The first hub check blocks until released; the next answers at once."""
+    import threading
+    entered, release, calls = threading.Event(), threading.Event(), []
+
+    def hub(binding, method, suffix, body=None):
+        calls.append(suffix)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+            return {'active': slow_active, 'account_id': ACCOUNT, 'device_id': DEVICE}
+        return {'active': fresh_active, 'account_id': ACCOUNT, 'device_id': DEVICE}
+
+    monkeypatch.setattr(account_hub, 'call', hub)
+    return entered, release, calls
+
+
+def _run_slow_check(owner):
+    import threading
+    outcome = {}
+
+    def check():
+        try:
+            outcome['value'] = account_hub.require_active(owner)
+        except HTTPException as exc:
+            outcome['value'] = exc.status_code
+
+    thread = threading.Thread(target=check)
+    thread.start()
+    return thread, outcome
+
+
+def test_an_older_slow_allow_does_not_undo_a_fresh_refusal(setup, monkeypatch):
+    """A background check that started before a sign-in and answers after it
+    must not overwrite the sign-in's fresh refusal (#1424)."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    _fake_clock(monkeypatch)
+    entered, release, calls = _slow_then_fresh(monkeypatch, slow_active=True, fresh_active=False)
+    thread, outcome = _run_slow_check(owner)
+    assert entered.wait(5)
+    with pytest.raises(HTTPException) as fresh:
+        account_hub.require_active(owner, fresh=True)
+    assert fresh.value.status_code == 401
+    release.set()
+    thread.join(5)
+    assert outcome['value']['server_id'] == SERVER  # its own caller still gets its answer
+    with pytest.raises(HTTPException) as later:
+        account_hub.require_active(owner)
+    assert later.value.status_code == 401
+    assert len(calls) == 2  # the fresh refusal is replayed, not re-asked
+
+
+def test_an_older_slow_allow_cannot_undo_a_fresh_refusal_under_cache_pressure(setup, monkeypatch):
+    """Checks for many other devices while the old check is still out must
+    not erase the record that the fresh refusal came later (#1424)."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(account_hub, '_VERDICT_CAP', 4)
+    entered, release, calls = _slow_then_fresh(monkeypatch, slow_active=True, fresh_active=False)
+    thread, outcome = _run_slow_check(owner)
+    assert entered.wait(5)
+    with pytest.raises(HTTPException):
+        account_hub.require_active(owner, fresh=True)
+
+    def others(binding, method, suffix, body=None):
+        calls.append(suffix)
+        return {'active': True, 'account_id': ACCOUNT, 'device_id': suffix.split('/')[-1]}
+
+    monkeypatch.setattr(account_hub, 'call', others)
+    for n in range(8):
+        account_hub.require_active({**owner, 'hub_device_id': f'44444444-4444-4444-4444-{n:012d}'})
+    release.set()
+    thread.join(5)
+    assert outcome['value']['server_id'] == SERVER
+    asked = len(calls)
+    with pytest.raises(HTTPException) as later:
+        account_hub.require_active(owner)
+    assert later.value.status_code == 401
+    assert len(calls) == asked  # still the fresh refusal, replayed unasked
+    assert not account_hub._open_checks  # nothing left behind once all checks close
+
+
+def test_an_older_slow_refusal_does_not_undo_a_fresh_allow(setup, monkeypatch):
+    """The inverse: an old refusal that lands after a fresh confirmation must
+    not block the phone for a TTL (#1424)."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    _fake_clock(monkeypatch)
+    entered, release, calls = _slow_then_fresh(monkeypatch, slow_active=False, fresh_active=True)
+    thread, outcome = _run_slow_check(owner)
+    assert entered.wait(5)
+    assert account_hub.require_active(owner, fresh=True)['server_id'] == SERVER
+    release.set()
+    thread.join(5)
+    assert outcome['value'] == 401
+    assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert len(calls) == 2  # the fresh confirmation answers, unasked
+
+
+def test_fresh_check_asks_the_hub_even_with_a_remembered_allow(setup, monkeypatch):
+    """A sign-in is checked live even while a confirmation is young, and its
+    refusal replaces that confirmation (#1424)."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=1800)
+    clock = _fake_clock(monkeypatch)
+    monkeypatch.setattr(account_hub, 'call', active)
+    account_hub.require_active(owner)
+    clock[0] += 1
+    refuse = Mock(return_value={'active': False, 'account_id': ACCOUNT, 'device_id': DEVICE})
+    monkeypatch.setattr(account_hub, 'call', refuse)
+    with pytest.raises(HTTPException) as fresh:
+        account_hub.require_active(owner, fresh=True)
+    assert fresh.value.status_code == 401
+    assert refuse.call_count == 1
+    with pytest.raises(HTTPException) as later:
+        account_hub.require_active(owner)
+    assert later.value.status_code == 401
+    assert refuse.call_count == 1
+
+
 def test_binding_deactivation_bypasses_cache(setup, monkeypatch):
     bind()
     insert()

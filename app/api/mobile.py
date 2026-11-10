@@ -163,7 +163,9 @@ async def register_device(request: MobileDeviceRegisterRequest):
             raise HTTPException(409, 'This saved worker authorization cannot be repaired.')
         # Local administration must first unregister this one device. A live
         # account check alone never overrides a worker's revocation decision.
-        binding = await run_sync(account_hub.require_active, owner)
+        # Re-pairing exchanges a credential: ask the hub now, not a refusal
+        # remembered from before the account was recovered (#1424).
+        binding = await run_sync(account_hub.require_active, owner, fresh=True)
         client = await run_sync(db.get_paired_client, owner['paired_client_id'])
         if (not binding or not client or not client.get('revoked_at')
                 or client.get('device_id') != owner['device_id']):
