@@ -14,7 +14,6 @@
 	import Switch from '../rows/Switch.svelte';
 	import NumberField from '../rows/NumberField.svelte';
 	import SelectField from '../rows/SelectField.svelte';
-	import ValueText from '../rows/ValueText.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import { Spending, SPEND_BOUNDS, formatJobTime, formatMoney, jobTimeOptions } from './spending-limits.svelte';
 
@@ -64,13 +63,15 @@
 					<span class="spend-bar" aria-hidden="true"><i style:width="{model.usedRatio * 100}%"></i></span>
 				{/if}
 			</div>
-		{:else if model.forbidden || model.loadError}
-			<ValueText value={model.forbidden ? 'Owner only' : 'Unavailable'} />
 		{:else}
-			<!-- The meter's own box while it loads: a narrow page drops it under the
-			     label, so a short "Loading…" beside it would grow the row (#1301). -->
-			<div class="spend" data-state="loading" aria-busy="true">
-				<span class="spend-figures"><b class="pending">Loading…</b></span>
+			<!-- The meter's own box until the limits are read (or cannot be): a narrow
+			     page drops the meter under the label, so a short text beside the
+			     label would change the row's height when the meter lands (#1301). -->
+			{@const placeholder = model.forbidden ? 'forbidden' : model.loadError ? 'error' : 'loading'}
+			<div class="spend" data-state={placeholder} aria-busy={placeholder === 'loading' || undefined}>
+				<span class="spend-figures"
+					><b class="pending">{placeholder === 'forbidden' ? 'Owner only' : placeholder === 'error' ? 'Unavailable' : 'Loading…'}</b></span
+				>
 				<span class="spend-bar" aria-hidden="true"></span>
 			</div>
 		{/if}

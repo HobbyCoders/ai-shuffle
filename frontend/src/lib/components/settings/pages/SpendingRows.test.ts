@@ -105,5 +105,8 @@ it("holds the meter's box while today's spend loads, then says when it could not
 
 	answer(new Response(JSON.stringify({ detail: 'boom' }), { status: 500 }));
 	expect(await screen.findByText('Unavailable')).toBeTruthy();
-	expect(container.querySelector('.spend')).toBeNull();
+	// Still the meter's box, so the row keeps its height; no longer busy.
+	const failed = container.querySelector('.spend[data-state="error"]');
+	expect(failed?.querySelector('.spend-bar')).toBeTruthy();
+	expect(failed?.hasAttribute('aria-busy')).toBe(false);
 });

@@ -41,9 +41,9 @@
 	let lanBusy = $state(false);
 	let signInError = $state('');
 
-	/* Until the status lands, the row already has its loaded shape: a hint line
-	   and the value button (which a narrow page drops under the label), so the
-	   rows under it are not pushed down when it does (#1301). */
+	/* Loading, loaded or failed, the row keeps one shape: a hint line and the
+	   value button (which a narrow page drops under the label), so the rows
+	   under it are not pushed around when the status lands (#1301). */
 	const ownerPending = $derived(!owner && !ownerFailure);
 	const ownerHint = $derived(
 		ownerOutcome === 'changed'
@@ -56,7 +56,11 @@
 						: 'Not set yet'
 					: ownerPending
 						? 'Loading…'
-						: undefined
+						: ownerFailure?.reason === 'unsupported'
+							? 'Needs a newer worker'
+							: ownerFailure?.reason === 'error' && ownerFailure.code === 403
+								? 'Owner only'
+								: 'Could not load'
 	);
 
 	async function loadOwner() {
@@ -346,11 +350,11 @@
 			{#if owner}
 				<ExpandToggle value={owner.password_set ? 'Set' : 'Not set'} bind:open={ownerOpen} />
 			{:else if ownerFailure?.reason === 'unsupported'}
-				<ValueText value="Not supported" />
+				<ExpandToggle value="Not supported" open={false} disabled />
 			{:else if ownerFailure?.reason === 'error' && ownerFailure.code === 403}
-				<ValueText value={FORBIDDEN_TEXT} />
+				<ExpandToggle value={FORBIDDEN_TEXT} open={false} disabled />
 			{:else if ownerFailure}
-				<ValueText value="Could not load" />
+				<ExpandToggle value="Unavailable" open={false} disabled />
 				<button type="button" class="st-btn sm" disabled={ownerLoading} onclick={() => void loadOwner()}>
 					{ownerLoading ? 'Retrying…' : 'Try again'}
 				</button>
@@ -435,11 +439,9 @@
 		<SettingRow id="security.secInstr" expanded={instrOpen && instrLoad === 'ok' ? instrEditor : undefined}>
 			{#if instrLoad === 'ok'}
 				<ExpandToggle value={instrValue} bind:open={instrOpen} />
-			{:else if instrLoad === 'loading'}
-				<!-- Holds the loaded row's shape (#1301). -->
-				<ExpandToggle value={instrValue} open={false} pending />
 			{:else}
-				<ValueText value={instrValue} />
+				<!-- Holds the loaded row's shape (#1301). -->
+				<ExpandToggle value={instrValue} open={false} pending={instrLoad === 'loading'} disabled={instrLoad !== 'loading'} />
 			{/if}
 		</SettingRow>
 	</RowGroup>

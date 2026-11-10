@@ -12,8 +12,9 @@
 	 * disabled by read-only mode (the editor's fieldset is).
 	 *
 	 * `pending` draws the same button, disabled and busy, while the row's data
-	 * loads, so the row already has the shape it keeps once the value lands
-	 * (a narrow page drops this button under its label; #1301).
+	 * loads, and `disabled` keeps it (not busy) when the value could not be
+	 * read, so the row has one shape from loading to loaded or failed (a
+	 * narrow page drops this button under its label; #1301).
 	 */
 	import { ChevronDown } from 'lucide-svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -28,9 +29,11 @@
 		label?: string;
 		/** The value is still loading: shown, but it cannot open yet. */
 		pending?: boolean;
+		/** The value could not be read: shown, but it cannot open. */
+		disabled?: boolean;
 	}
 
-	let { value, open = $bindable(false), onToggle, mono = false, label, pending = false }: Props = $props();
+	let { value, open = $bindable(false), onToggle, mono = false, label, pending = false, disabled = false }: Props = $props();
 
 	const row = getRowContext();
 	const uid = $props.id();
@@ -38,7 +41,7 @@
 
 	$effect(() => {
 		const id = row?.id;
-		if (id && !pending && settingsNav.pendingOpen === id && settingsNav.consumeOpen(id) && !open) {
+		if (id && !pending && !disabled && settingsNav.pendingOpen === id && settingsNav.consumeOpen(id) && !open) {
 			open = true;
 			onToggle?.(true);
 		}
@@ -59,7 +62,7 @@
 	aria-labelledby={!label && row ? `${row.labelId} ${valueId}` : undefined}
 	aria-describedby={row?.hintId}
 	aria-busy={pending || undefined}
-	disabled={pending}
+	disabled={pending || disabled}
 	onclick={toggle}
 >
 	<span id={valueId} class:st-mono={mono}>{value}</span><ChevronDown />
@@ -81,7 +84,14 @@
 	}
 	.st-vbtn:disabled {
 		color: var(--st-mfg);
+		cursor: default;
+	}
+	.st-vbtn[aria-busy='true'] {
 		cursor: progress;
+	}
+	/* It cannot open yet (or at all): the chevron fades, as a disabled control's does. */
+	.st-vbtn:disabled > :global(svg) {
+		opacity: 0.4;
 	}
 	.st-vbtn > span {
 		overflow: hidden;

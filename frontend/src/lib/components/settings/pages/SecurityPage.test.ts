@@ -139,11 +139,20 @@ describe('while loading', () => {
 		expect(((await screen.findByRole('button', { name: 'Chat instructions Customized' })) as HTMLButtonElement).disabled).toBe(false);
 	});
 
-	it('drops the busy button once the status fails, for a plain value and a retry', async () => {
+	it('keeps the same shape when the data cannot be read: a disabled, not busy, value and a retry', async () => {
 		owner.fetchOwnerStatus.mockResolvedValue({ ok: false, reason: 'unreachable' });
+		transport.get.mockImplementation((path: string) =>
+			path === '/settings/security-instructions' ? Promise.reject(new Error('boom')) : Promise.resolve({})
+		);
 		render(SecurityPage);
-		expect(await screen.findByText('Could not load')).toBeTruthy();
-		expect(screen.queryByRole('button', { name: /^Owner password/ })).toBeNull();
+		const password = await screen.findByRole('button', { name: 'Owner password Unavailable' });
+		expect((password as HTMLButtonElement).disabled).toBe(true);
+		expect(password.hasAttribute('aria-busy')).toBe(false);
+		expect(password.closest('.st-row')?.querySelector('.st-rh')?.textContent).toBe('Could not load');
+		expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+		const chat = await screen.findByRole('button', { name: 'Chat instructions Unavailable' });
+		expect((chat as HTMLButtonElement).disabled).toBe(true);
+		expect(chat.hasAttribute('aria-busy')).toBe(false);
 	});
 });
 
