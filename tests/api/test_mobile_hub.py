@@ -610,6 +610,85 @@ def test_hub_outage_on_device_check_is_still_an_outage(setup, monkeypatch, hub_s
     assert failure.value.status_code == 503
 
 
+def _fake_clock(monkeypatch, start=1000.0):
+    """account_hub's monotonic clock under test control; the rest of ``time`` stays real."""
+    import time as real_time
+    clock = [start]
+
+    class Clock:
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        def monotonic(self):
+            return clock[0]
+
+    monkeypatch.setattr(account_hub, 'time', Clock())
+    return clock
+
+
+@pytest.mark.parametrize('hub_status, expected', [(403, 401), (401, 401), (503, 503), (429, 503), ('inactive', 401)])
+def test_unconfirmed_device_costs_one_hub_call_per_ttl(setup, monkeypatch, hub_status, expected):
+    """#1424: an open phone socket re-checks every 30 s. A hub answer that does
+    not confirm the device (refusal, outage, rate limit) used to be forgotten, so
+    every re-check asked the hub again: 2,880 calls a day for one phone."""
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    clock = _fake_clock(monkeypatch)
+    if hub_status == 'inactive':
+        hub = Mock(side_effect=lambda *a, **k: {'active': False, 'account_id': ACCOUNT, 'device_id': DEVICE})
+        monkeypatch.setattr(account_hub, 'call', hub)
+        asked = lambda: hub.call_count  # noqa: E731
+    else:
+        remaining = _hub_answers(monkeypatch, *[hub_status] * 5)  # spares expose extra calls
+        asked = lambda: 5 - len(remaining)  # noqa: E731
+    for elapsed in (0, 30, 60, 89):  # four re-checks inside one TTL
+        clock[0] = 1000.0 + elapsed
+        with pytest.raises(HTTPException) as failure:
+            account_hub.require_active(owner)
+        assert failure.value.status_code == expected
+    assert asked() == 1
+    clock[0] = 1090.0  # the TTL has passed: the hub is asked again and can confirm
+    monkeypatch.setattr(account_hub, 'call', active)
+    assert account_hub.require_active(owner)['server_id'] == SERVER
+
+
+def test_replayed_outage_still_rides_on_the_grace_window(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=90, grace=110)
+    clock = _fake_clock(monkeypatch)
+    monkeypatch.setattr(account_hub, 'call', active)
+    account_hub.require_active(owner)
+    outage = Mock(side_effect=HTTPException(503, 'Account hub is rate limiting this worker'))
+    monkeypatch.setattr(account_hub, 'call', outage)
+    for elapsed in (90, 100, 109):  # asked once at 90; the replays still ride on grace
+        clock[0] = 1000.0 + elapsed
+        assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert outage.call_count == 1
+    clock[0] = 1000.0 + 120  # grace over, outage still inside its TTL: fails without asking
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 503
+    assert outage.call_count == 1
+
+
+def test_sign_out_reset_forgets_a_remembered_refusal(setup, monkeypatch):
+    bind()
+    insert()
+    owner = store.ownership(DEVICE)
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    _fake_clock(monkeypatch)
+    remaining = _hub_answers(monkeypatch, 403, 200)
+    with pytest.raises(HTTPException):
+        account_hub.require_active(owner)
+    account_hub.reset_verification_cache()
+    assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert remaining == []
+
+
 def test_binding_deactivation_bypasses_cache(setup, monkeypatch):
     bind()
     insert()
