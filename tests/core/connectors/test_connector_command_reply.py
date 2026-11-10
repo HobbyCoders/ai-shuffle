@@ -139,33 +139,43 @@ async def test_disconnect_cancels_a_queued_command_result() -> None:
     assert not connector._reply_tasks
 
 
+@pytest.mark.parametrize("lamps", [1, 6])
 async def test_command_rounds_stop_at_the_cap_and_a_user_message_starts_again(
     mock_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    lamps: int,
 ) -> None:
     """An agent that answers every command result with another command stops after the cap.
 
     Every round is a paid turn with no person in it, so after
     ``MAX_COMMAND_ROUNDS`` results in a row the next one is not fed back. The
-    owner's next message is answered and starts the count again.
+    owner's next message is answered and starts the count again. With six
+    lamps each result comes in parts, and every part's turn answers with a
+    command: the chat still stops after ``MAX_COMMAND_ROUNDS`` commands.
     """
     import logging
 
     from app.core.connectors import base
 
     cap = getattr(base, "MAX_COMMAND_ROUNDS", 5)
-    hard_limit = 20  # without a cap the loop would never end; the test fails instead
+    hard_limit = 60  # without a cap the loop would never end; the test fails instead
     database.create_api_user("connector-user", "Connector user", "test-hash", profile_ids=["default"])
     database.create_connector("connector", "homeassistant", "Home", {}, [], api_user_id="connector-user")
     manager = ConnectorManager()
-    states = [{"entity_id": "light.lamp", "state": "on", "attributes": {"friendly_name": "Lamp"}}]
+    states = [{"entity_id": f"light.lamp_{i}", "state": "on",
+               "attributes": {"friendly_name": f"Lamp {i}"}} for i in range(lamps)]
     connector = HomeAssistantConnector(
         "connector", "homeassistant", {"url": "http://ha.test", "access_token": "token"},
         manager.handle_incoming_message, manager.handle_permission_response,
         on_trigger=manager._handle_trigger)
     connector._http_client = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, json=states)))
+    connector.MAX_MESSAGE_LENGTH = 80
     manager._connectors["connector"] = connector
-    listing = "Entities (1):\n" + connector._format_entity_line(states[0])
+    listing = f"Entities ({lamps}):\n" + "\n".join(connector._format_entity_line(s) for s in states)
+    parts = chunk_text(listing, connector.MAX_MESSAGE_LENGTH)
+    assert len(parts) == (1 if lamps == 1 else 3)
+    # One result per command, each in `parts` messages; the cap counts commands, not parts.
+    run = parts * cap
 
     prompts: list[str] = []
     workers: list[asyncio.Task[Any]] = []
@@ -207,15 +217,15 @@ async def test_command_rounds_stop_at_the_cap_and_a_user_message_starts_again(
             await asyncio.wait_for(manager.handle_incoming_message(_user_message("hello", "1")), 5)
             await asyncio.wait_for(settled(), 10)
             # The owner's message, then exactly `cap` results fed back; the next is dropped.
-            assert prompts == ["hello", *[listing] * cap]
+            assert prompts[0] == "hello" and sorted(prompts[1:]) == sorted(run)
             assert len(cap_warnings()) == 1
 
             # The owner's next message is answered and starts the count again.
             await asyncio.wait_for(manager.handle_incoming_message(_user_message("again", "2")), 5)
             await asyncio.wait_for(settled(), 10)
-            assert prompts == ["hello", *[listing] * cap, "again", *[listing] * cap]
+            assert prompts[len(run) + 1] == "again" and sorted(prompts[len(run) + 2:]) == sorted(run)
             assert len(cap_warnings()) == 2
-        assert not connector._reply_rounds
+        assert not connector._result_chats and not connector._command_rounds
     finally:
         turn_manager.register_kick(None)
         for task in workers:

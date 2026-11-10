@@ -308,9 +308,11 @@ class BaseConnector(ABC):
         self._task: Optional[asyncio.Task] = None
         self._arrival_tails: Dict[str, asyncio.Future[None]] = {}
         self._reply_tasks: Set[asyncio.Task[None]] = set()
-        # Queued result id -> its command round, while its turn runs.
-        self._reply_rounds: Dict[str, int] = {}
-        self._reply_capped: Set[str] = set()
+        # Command rounds per chat (see queue_reply_message), while results are in flight.
+        self._result_chats: Dict[str, str] = {}  # queued result id -> its chat
+        self._counted_results: Set[str] = set()  # results whose turn already counted a round
+        self._command_rounds: Dict[str, int] = {}
+        self._capped_chats: Set[str] = set()
 
     def arrival_place(self, platform_chat_id: str) -> ArrivalPlace:
         """Reserve a message's turn in its chat now; see ``ArrivalPlace``."""
@@ -336,46 +338,66 @@ class BaseConnector(ABC):
         ``cancel_reply_messages``.
 
         An agent that answers every result with another command would loop with
-        no person in it, each round a paid turn. A result answering a turn that
-        a result started is the next round; any other turn (a person's message,
-        a poll event) starts at round one. Past ``MAX_COMMAND_ROUNDS`` the result
-        is not fed back: the command ran, the chat gets nothing more. All of a
-        command's results (a long listing's parts) are one round.
+        no person in it, each round a paid turn. Each chat counts the turns, started
+        by a result, whose reply was a command; a reply to any other turn (a
+        person's message, a poll event) starts the count again. All of one
+        command's results (a long listing's parts) are one round. Past
+        ``MAX_COMMAND_ROUNDS`` the result is not fed back: the command ran, the
+        chat gets nothing more.
         """
         # Imported here: the isolated connector worker loads base.py before it.
         from app.core.detached_tasks import spawn_detached
 
+        chat = message.platform_chat_id
         parent = _REPLYING_TO.get()
-        command_round = self._reply_rounds.get(parent, 0) + 1 if parent else 1
-        if command_round > MAX_COMMAND_ROUNDS:
-            if parent not in self._reply_capped:
-                self._reply_capped.add(parent)
+        if parent in self._result_chats:
+            if parent not in self._counted_results:
+                self._counted_results.add(parent)
+                self._command_rounds[chat] = self._command_rounds.get(chat, 0) + 1
+        else:
+            self._command_rounds[chat] = 1
+            self._capped_chats.discard(chat)
+        if self._command_rounds[chat] > MAX_COMMAND_ROUNDS:
+            if chat not in self._capped_chats:
+                self._capped_chats.add(chat)
                 logger.warning(
                     "%s connector %s: chat %s answered %d command results in a row "
                     "with more commands; not feeding the next result back to the agent",
-                    self.connector_type, self.connector_id, message.platform_chat_id,
-                    MAX_COMMAND_ROUNDS,
+                    self.connector_type, self.connector_id, chat, MAX_COMMAND_ROUNDS,
                 )
+            self._forget_chat_if_idle(chat)
             return
-        # Its own id: the reply to it names it, which is how the next round is counted.
+        # Its own id: the agent's reply names it, which is how its turn is known.
         key = message.platform_message_id = f"{self.connector_type}-reply-{uuid.uuid4().hex}"
-        self._reply_rounds[key] = command_round
-        place = self.arrival_place(message.platform_chat_id)
+        self._result_chats[key] = chat
+        place = self.arrival_place(chat)
 
         async def deliver() -> None:
             try:
                 with place:
                     await place.hand_off(message)
             finally:
-                self._reply_rounds.pop(key, None)
-                self._reply_capped.discard(key)
+                self._result_done(key)
 
         task = spawn_detached(deliver(), name=f"{self.connector_type}-reply")
         if task is not None:
             self._reply_tasks.add(task)
             task.add_done_callback(self._reply_tasks.discard)
         else:
-            self._reply_rounds.pop(key, None)
+            self._result_done(key)
+
+    def _result_done(self, key: str) -> None:
+        chat = self._result_chats.pop(key, None)
+        self._counted_results.discard(key)
+        if chat is not None:
+            self._forget_chat_if_idle(chat)
+
+    def _forget_chat_if_idle(self, chat: str) -> None:
+        # The next round is queued inside the turn of a result still in flight,
+        # so a chat with none in flight has ended its run of rounds.
+        if chat not in self._result_chats.values():
+            self._command_rounds.pop(chat, None)
+            self._capped_chats.discard(chat)
 
     async def cancel_reply_messages(self) -> None:
         """Cancel every ``queue_reply_message`` still waiting or running."""
