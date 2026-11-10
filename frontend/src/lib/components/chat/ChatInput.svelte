@@ -1105,6 +1105,9 @@
 	// this one's cold-cache check, so two sends keep their order, then goes
 	// (#1344). Held until the check has answered.
 	let pendingSubmit: { cleared: boolean; done: Promise<void> } | null = null;
+	// The waiting send still shows its words in the composer, so another
+	// activation during the wait is the same message again and is dropped.
+	let submitWaiting = false;
 
 	// Send clears the composer at the click, and an empty composer offers Talk
 	// in Send's place. The Send circle keeps the slot through a double click's
@@ -1127,11 +1130,16 @@
 
 	async function handleSubmit(compactBeforeSend = false) {
 		if (pendingSubmit) {
-			if (!pendingSubmit.cleared) return;
+			if (!pendingSubmit.cleared || submitWaiting) return;
+			submitWaiting = true;
 			// New chat or a switch during the wait: the words stay as the draft
 			// of the chat they were typed in (session-change effect).
 			const clickedIn = captureDestination(composerPlace());
-			while (pendingSubmit) await pendingSubmit.done;
+			try {
+				while (pendingSubmit) await pendingSubmit.done;
+			} finally {
+				submitWaiting = false;
+			}
 			if (!stillAtDestination(clickedIn, composerPlace(), { adoptedOwnChat: true })) return;
 		}
 		let settle!: () => void;
