@@ -971,3 +971,62 @@ async def test_a_report_kept_while_its_worker_is_out_of_the_network_reaches_the_
     with a.active():
         [wake] = _reports("boss")
         assert wake["payload"]["pending_frames"][0]["task_id"] == PARENT
+
+
+@pytest.mark.asyncio
+async def test_a_starter_deleted_elsewhere_is_known_after_leaving_the_network(pair, monkeypatch):
+    """S15: "boss" is deleted on A. B, which holds the chat boss started,
+    applies the tombstone, leaves the network (clearing sync_records) and
+    loses its process-local deletion mark. When the chat settles, its report
+    still stays on it (one deferral, one bell) and nothing waits in the outbox."""
+    from app.db import session_locks, sessions
+    from app.services import notification_service
+    a, b, _, _ = pair
+    _mirror_child_on_b(a, b, monkeypatch)
+    bells = []
+
+    async def bell(*args, **kwargs):
+        bells.append(kwargs)
+    monkeypatch.setattr(notification_service, "emit_notification", bell)
+    with b.active():
+        await handoff.receive(database.get_session(PARENT))
+        _working(PARENT)
+    with a.active():
+        assert sessions.delete_session("boss")
+        engine.scan_all()
+    converge([a, b])
+    with b.active():
+        assert database.get_session("boss") is None
+        assert sessions.chat_was_deleted("boss")
+        engine.leave_network()
+        monkeypatch.setattr(session_locks, "_DELETED", {})
+        work = turns.enqueue_turn(PARENT, "agent_message", prompt="more", profile_id="default",
+                                  payload={"orchestration_sender": "boss"})
+        assert turns.start_turn(work["id"])
+        await orch.report_settled_start(PARENT, _settle(work), "completed")
+        await orch.report_settled_start(PARENT, turns.get_turn(work["id"]), "completed")
+        await orch.deliver_forwarded_reports(force=True)
+        assert len(_deferred_events("boss")) == 1
+        assert [b["title"] for b in bells] == ["Session work finished"]
+        assert orch.pending_forwarded_reports() == []
+        assert _all_reports("boss") == []
+
+
+def test_applying_a_session_tombstone_again_records_it_once(pair):
+    """S15: the tombstone's record is idempotent (re-apply, later delete)."""
+    from app.db import sessions
+    from app.network import policy
+    _, b, _, _ = pair
+    with b.active():
+        database.create_session("gone", "default", title="Gone")
+        with get_db() as conn:
+            cursor = conn.cursor()
+            coll = policy.collection("sessions")
+            engine.materialize(cursor, coll, "gone", None)
+            engine.materialize(cursor, coll, "gone", None)
+            sessions.record_deleted_chat(cursor, "gone")
+            cursor.execute("SELECT COUNT(*) AS n FROM turns WHERE session_id=%s AND command_id='gone'",
+                           (sessions.DELETED_CHATS,))
+            assert cursor.fetchone()["n"] == 1
+        assert sessions.chat_was_deleted("gone")
+        assert not sessions.chat_was_deleted(PARENT)

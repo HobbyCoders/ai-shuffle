@@ -1956,11 +1956,12 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
                 f"DELETE FROM {table} WHERE session_id = {_ph}", (session_id,)
             )
         cursor.execute(f"DELETE FROM sessions WHERE id = {_ph}", (session_id,))
-        if cursor.rowcount > 0:
-            _record_deleted_chat(cursor, session_id)
+        removed = cursor.rowcount > 0
+        if removed:
+            record_deleted_chat(cursor, session_id)
         if expected_project_id is not None:
-            return dict(row) if cursor.rowcount > 0 else None
-        return cursor.rowcount > 0
+            return dict(row) if removed else None
+        return removed
 
 
 # Durable proof that a chat was deleted here (#1443): one settled ``turns`` row
@@ -1969,20 +1970,27 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
 # keeping it for a starter that may still arrive. The process-local mark in
 # session_locks is lost on restart and evicted after 1024 deletes, and
 # ``sync_records`` is cleared on leaving the network; this row is neither.
+# A chat deleted elsewhere is recorded when its tombstone is applied here
+# (``engine.materialize``).
 DELETED_CHATS = "deleted-chats"
 DELETED_CHAT_DAYS = 90
 
 
-def _record_deleted_chat(cursor: Any, session_id: str) -> None:
-    """Record ``session_id`` as deleted and drop records older than
-    ``DELETED_CHAT_DAYS``. Takes no lock beyond the new row and the rows it
-    prunes; the delete already writes ``turns``."""
+def record_deleted_chat(cursor: Any, session_id: str) -> None:
+    """Record ``session_id`` as deleted, in the caller's transaction, and drop
+    records older than ``DELETED_CHAT_DAYS``. Idempotent: a chat already
+    recorded gets no second row. Call it only once the session row is gone.
+    Takes no lock beyond the new row and the rows it prunes."""
     from datetime import timedelta
     import uuid
     _ph = ph()
     cutoff = datetime.now(timezone.utc) - timedelta(days=DELETED_CHAT_DAYS)
     cursor.execute(f"DELETE FROM turns WHERE session_id = {_ph} AND created_at < {_ph}",
                    (DELETED_CHATS, cutoff))
+    cursor.execute(f"SELECT 1 FROM turns WHERE session_id = {_ph} AND command_id = {_ph} LIMIT 1",
+                   (DELETED_CHATS, session_id))
+    if cursor.fetchone() is not None:
+        return
     cursor.execute(
         "INSERT INTO turns (id, session_id, state, source, command_id, position, "
         "started_at, ended_at, stop_reason) "
@@ -1992,8 +2000,8 @@ def _record_deleted_chat(cursor: Any, session_id: str) -> None:
 
 
 def chat_was_deleted(session_id: str) -> bool:
-    """True when this worker deleted ``session_id`` in the last
-    ``DELETED_CHAT_DAYS`` days."""
+    """True when ``session_id`` was deleted here, or its deletion was applied
+    here, in the last ``DELETED_CHAT_DAYS`` days."""
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
