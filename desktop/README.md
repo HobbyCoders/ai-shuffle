@@ -117,7 +117,8 @@ hosted public downloads or GitHub download permissions.
 - Starts its bundled PostgreSQL, then the worker (`python -m app.main` in
   local mode, listening on 127.0.0.1:8000), and opens the worker's UI once it
   answers. The worker also listens on all interfaces at port 8003
-  (`SHUFFLE_LAN_PORT`, the local port + 3) for sealed sync with other workers
+  (the app sets `SHUFFLE_LAN_PORT` to the local port + 3 unless the variable is
+  already set; `0` or `off` turns it off) for sealed sync with other workers
   of the account on the same LAN, and refuses every other request there; the
   owner UI and API stay on loopback. The first time it opens that port,
   Windows may ask whether to allow the worker's Python through Windows

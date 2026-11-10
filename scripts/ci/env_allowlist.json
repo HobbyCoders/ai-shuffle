@@ -2395,7 +2395,7 @@
   },
   "SHUFFLE_LAN_PORT": {
     "kind": "infra",
-    "reason": "Port of the LAN-sync-only listener a loopback-bound (desktop) worker opens on all interfaces; 0/off disables",
+    "reason": "Port of the LAN-sync-only listener a loopback-bound worker opens on all interfaces; off unless set (the desktop app sets it), 0/off disables",
     "base_settings": false
   },
   "SHUFFLE_LAUNCHER_VERSION": {

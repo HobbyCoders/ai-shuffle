@@ -217,6 +217,7 @@ def test_supervisor_selects_protected_port_without_changing_trust(
 
     monkeypatch.setattr(serve, "bind_listener", bind)
     monkeypatch.delenv("SHUFFLE_PREVIEW_PORT", raising=False)
+    monkeypatch.setenv("SHUFFLE_LAN_PORT", "18003")  # as the desktop app passes it
     monkeypatch.setattr(preview_access, "_listener_port", None)  # run() records the port
     server = MagicMock()
     monkeypatch.setattr(uvicorn, "Server", _recording_server(server))
@@ -299,21 +300,21 @@ def test_lan_port_only_for_loopback_bound_workers():
 
     # Bound to the network already (Docker, server installs): no extra listener.
     for host in ("0.0.0.0", "10.0.0.5", "::", ""):
-        assert configured_lan_port({}, host, 8000, 8001, 8002) is None
+        assert configured_lan_port({"SHUFFLE_LAN_PORT": "8003"}, host, 8000, 8001, 8002) is None
+    # Opt-in: a loopback-bound worker opens one only when the port is named.
     for host in ("127.0.0.1", "::1", "[::1]", "localhost"):
-        assert configured_lan_port({}, host, 8000, 8001, 8002) == 8003
-    assert configured_lan_port({}, "127.0.0.1", 18080, 18081, 18082) == 18083
-    # The default steps over the protected and preview ports.
-    assert configured_lan_port({}, "127.0.0.1", 7998, 8001, 8002) == 8003
-    assert configured_lan_port({"SHUFFLE_LAN_PORT": "9100"}, "127.0.0.1", 8000, 8001, 8002) == 9100
-    for off in ("0", "off", "OFF", "false", "no"):
+        assert configured_lan_port({}, host, 8000, 8001, 8002) is None
+        assert configured_lan_port({"SHUFFLE_LAN_PORT": " 8003 "}, host, 8000, 8001, 8002) == 8003
+    assert configured_lan_port({"SHUFFLE_LAN_PORT": "18083"}, "127.0.0.1", 18080, 18081, 18082) == 18083
+    for off in ("", "  ", "0", "off", "OFF", "false", "no"):
         assert configured_lan_port({"SHUFFLE_LAN_PORT": off}, "127.0.0.1", 8000, 8001, 8002) is None
-    for bad in ("8000", "8001", "8002", "65536", "-1", "port"):
+    for bad in ("8000", "8001", "8002", "65536", "-1", "port", "abc"):
         with pytest.raises(ValueError):
             configured_lan_port({"SHUFFLE_LAN_PORT": bad}, "127.0.0.1", 8000, 8001, 8002)
 
 
-def test_network_bound_worker_opens_no_lan_listener(monkeypatch):
+@pytest.mark.parametrize("host,lan_port", [("0.0.0.0", "18003"), ("127.0.0.1", None)])
+def test_worker_opens_no_lan_listener_unless_loopback_bound_and_opted_in(monkeypatch, host, lan_port):
     from types import SimpleNamespace
     from unittest.mock import MagicMock
     from app import serve
@@ -322,7 +323,10 @@ def test_network_bound_worker_opens_no_lan_listener(monkeypatch):
     monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
     monkeypatch.delenv("SHUFFLE_PREVIEW_PORT", raising=False)
     monkeypatch.delenv("SHUFFLE_PREVIEW_HOST", raising=False)
-    monkeypatch.delenv("SHUFFLE_LAN_PORT", raising=False)
+    if lan_port is None:
+        monkeypatch.delenv("SHUFFLE_LAN_PORT", raising=False)
+    else:
+        monkeypatch.setenv("SHUFFLE_LAN_PORT", lan_port)
     binds = []
 
     def bind(host, port):
@@ -336,8 +340,8 @@ def test_network_bound_worker_opens_no_lan_listener(monkeypatch):
     monkeypatch.setattr(lan, "_listener_port", 9)
     server = MagicMock()
     monkeypatch.setattr(uvicorn, "Server", _recording_server(server))
-    serve.run(None, SimpleNamespace(host="0.0.0.0", port=18000, log_level="error"))
-    assert binds == [("0.0.0.0", 18000), ("127.0.0.1", 8001), ("0.0.0.0", 18002)]
+    serve.run(None, SimpleNamespace(host=host, port=18000, log_level="error"))
+    assert binds == [(host, 18000), ("127.0.0.1", 8001), (host, 18002)]
     assert server.call_args.args[0].app.lan_port is None
     assert lan.listener_port() is None
 
@@ -351,7 +355,7 @@ def test_worker_starts_when_the_lan_port_is_taken(monkeypatch, caplog):
     monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
     monkeypatch.delenv("SHUFFLE_PREVIEW_PORT", raising=False)
     monkeypatch.delenv("SHUFFLE_PREVIEW_HOST", raising=False)
-    monkeypatch.delenv("SHUFFLE_LAN_PORT", raising=False)
+    monkeypatch.setenv("SHUFFLE_LAN_PORT", "18003")
     binds = []
 
     def bind(host, port):
@@ -375,6 +379,54 @@ def test_worker_starts_when_the_lan_port_is_taken(monkeypatch, caplog):
     assert len(server.return_value.run.call_args.kwargs["sockets"]) == 3
     warnings = [r.getMessage() for r in caplog.records if "LAN sync listener is off" in r.getMessage()]
     assert len(warnings) == 1 and "address already in use" in warnings[0]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux shares a reuse-address bind")
+def test_worker_starts_when_another_process_wins_the_lan_listen(monkeypatch, caplog):
+    """Both reuse-address binds succeed and the other socket listens first:
+    the LAN listener is dropped, closed and never recorded, the worker runs."""
+    import socket
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from app import serve
+    from app.network import lan
+
+    rival = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    rival.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    rival.bind((serve.LAN_HOST, 0))
+    lan_port = rival.getsockname()[1]
+    monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
+    monkeypatch.delenv("SHUFFLE_PREVIEW_PORT", raising=False)
+    monkeypatch.delenv("SHUFFLE_PREVIEW_HOST", raising=False)
+    monkeypatch.setenv("SHUFFLE_LAN_PORT", str(lan_port))
+    real_bind, lan_sockets = serve.bind_listener, []
+
+    def bind(host, port):
+        if port == lan_port:
+            sock = real_bind(host, port)
+            lan_sockets.append(sock)
+            rival.listen()
+            return sock
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        sock.getsockname.return_value = (host, port)
+        return sock
+
+    monkeypatch.setattr(serve, "bind_listener", bind)
+    monkeypatch.setattr(lan, "_listener_port", 9)
+    server = MagicMock()
+    monkeypatch.setattr(uvicorn, "Server", _recording_server(server))
+    try:
+        with caplog.at_level("WARNING", logger="app.serve"):
+            serve.run(None, SimpleNamespace(host="127.0.0.1", port=18000, log_level="error"))
+    finally:
+        rival.close()
+    assert lan_sockets and lan_sockets[0].fileno() == -1
+    sockets = server.return_value.run.call_args.kwargs["sockets"]
+    assert len(sockets) == 3 and lan_sockets[0] not in sockets
+    assert server.call_args.args[0].app.lan_port is None
+    assert lan.listener_port() is None
+    assert len([r for r in caplog.records if "LAN sync listener is off" in r.getMessage()]) == 1
 
 
 def _lan_wrapper(received):

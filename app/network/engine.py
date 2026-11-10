@@ -3333,6 +3333,7 @@ def _own_endpoints() -> List[str]:
     except Exception:  # noqa: BLE001
         enabled, extra = False, []
     from app.serve import is_loopback_host
+    listener = None
     if is_loopback_host(settings.host):
         # Bound only to loopback (the desktop app's worker): nothing answers on
         # the guessed address. Peers on the LAN reach the LAN-sync listener
@@ -3340,8 +3341,7 @@ def _own_endpoints() -> List[str]:
         if source == "guess":
             url, source = None, "none"
         listener = lan.listener_endpoint() if enabled else None
-        if listener:
-            extra = [listener] + [address for address in extra if address != listener]
+    tunnels = len(endpoints)
     for address in lan.advertised_addresses(tunnel=bool(endpoints), advertise=url, source=source,
                                             docker=not settings.is_local_mode(), enabled=enabled, extra=extra):
         if address not in endpoints:
@@ -3350,6 +3350,11 @@ def _own_endpoints() -> List[str]:
     for address in advertisements.owner_urls():
         if address not in endpoints:
             endpoints.append(address)
+    # The listener is dialed first on the LAN, but only takes a free slot of
+    # the wire limit: an owner-configured address is never dropped for it.
+    from app.network.endpoints import MAX_ENDPOINTS
+    if listener and listener not in endpoints and len(endpoints) < MAX_ENDPOINTS:
+        endpoints.insert(tunnels, listener)
     return endpoints
 
 

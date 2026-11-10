@@ -55,24 +55,19 @@ def configured_lan_port(env, host, local_port: int, remote_port: int, preview_po
     the LAN, so workers on the same network could only sync with it through
     its tunnel. It gets one more listener, on all interfaces, that serves the
     sealed LAN-sync handshake and calls and nothing else (``app.network.lan``).
-    A worker already listening on the network needs none. ``SHUFFLE_LAN_PORT``
-    names the port; ``0`` or ``off`` disables the listener. The default sits
-    three above the local port (8003 beside 8000/8001/8002).
+    A worker already listening on the network needs none. Opt-in:
+    ``SHUFFLE_LAN_PORT`` names the port (the desktop app passes its local port
+    + 3); unset, ``0`` or ``off`` means no listener.
     """
     if not is_loopback_host(host):
         return None
     raw = str(env.get("SHUFFLE_LAN_PORT", "")).strip().lower()
-    if raw in ("0", "off", "false", "no"):
+    if raw in ("", "0", "off", "false", "no"):
         return None
-    if raw:
-        try:
-            port = int(raw)
-        except ValueError as exc:
-            raise ValueError("SHUFFLE_LAN_PORT must be a port number, 0 or off") from exc
-    else:
-        port = local_port + 3
-        while port in (remote_port, preview_port):
-            port += 1
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError("SHUFFLE_LAN_PORT must be a port number, 0 or off") from exc
     if not 1 <= port <= 65535 or port in (local_port, remote_port, preview_port):
         raise ValueError("The LAN sync listener needs a valid port of its own")
     return port
@@ -261,7 +256,17 @@ def run(app, settings) -> None:
         try:
             wanted = configured_lan_port(os.environ, settings.host, settings.port, remote_port, preview_port)
             if wanted is not None:
-                lan_listener = stack.enter_context(bind_listener(LAN_HOST, wanted))
+                lan_listener = bind_listener(LAN_HOST, wanted)
+                try:
+                    # Listen here, inside the guard: on POSIX another process
+                    # can share the bind and win the listen, which would
+                    # otherwise fail the whole server start. Uvicorn's own
+                    # listen() on this socket then only adjusts the backlog.
+                    lan_listener.listen()
+                except OSError:
+                    lan_listener.close()
+                    raise
+                stack.enter_context(lan_listener)
                 lan_port = lan_listener.getsockname()[1]
                 sockets.append(lan_listener)
         except (OSError, ValueError) as exc:
