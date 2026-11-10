@@ -184,7 +184,7 @@ def test_journeys_are_skipped_only_for_a_record_of_the_same_files_and_selection(
     def shards(records, where=("o/r", "token")):
         asked.clear()
         monkeypatch.setattr(proven, "environment", lambda: where)
-        monkeypatch.setattr(proven, "exists", lambda name, *rest, area: asked.append(name) or (area == "journeys" and name in records))
+        monkeypatch.setattr(proven, "exists", lambda name, *rest, area, tree: asked.append(name) or (area == "journeys" and tree == "t" * 40 and name in records))
         assert ci.main(["matrix"]) == 0
         lines = capsys.readouterr().out.splitlines()
         assert lines[2] == f"key={key}" and lines[0] != "only="
@@ -197,7 +197,7 @@ def test_journeys_are_skipped_only_for_a_record_of_the_same_files_and_selection(
     assert len(shards({f"proven-journeys-{'u' * 40}-{key}", "proven-journeys-" + "t" * 40})) == 2
     # Not a push to main: the records are not even read.
     assert len(shards({mine}, where=None)) == 2 and asked == []
-    monkeypatch.setattr(proven, "exists", lambda name, *rest, area: 1 / 0)
+    monkeypatch.setattr(proven, "exists", lambda name, *rest, area, tree: 1 / 0)
     assert ci.main(["matrix"]) == 0
     assert len(json.loads(capsys.readouterr().out.splitlines()[1].split("=", 1)[1])) == 2
 

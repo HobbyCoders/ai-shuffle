@@ -14,7 +14,7 @@ TREE = "a" * 40
 NAME = f"proven-backend-{TREE}"
 
 
-SHA, HEAD, RUN = "c" * 40, "d" * 40, 7
+SHA, HEAD, RUN, MERGE = "c" * 40, "d" * 40, 7, "9" * 40
 
 
 BRANCH, NUMBER = "fix/thing", 12
@@ -26,9 +26,19 @@ def artifact(name=NAME, expired=False, repository=1, head=1, head_sha=HEAD, run=
                              "head_sha": head_sha, "head_branch": branch}}
 
 
+def used(commit=MERGE, ref=f"refs/pull/{NUMBER}/merge", name="record-pass.yml", repo="owner/repo"):
+    """GitHub's note of the commit a run took a called workflow from."""
+    return {"path": f"{repo}/.github/workflows/{name}@{commit}", "sha": commit, "ref": ref}
+
+
 def the_run(**changes):
     return {"event": "pull_request", "head_sha": HEAD, "head_branch": BRANCH,
-            "head_repository": {"full_name": "owner/repo"}, "path": ".github/workflows/ci-backend.yml", **changes}
+            "head_repository": {"full_name": "owner/repo"}, "path": ".github/workflows/ci-backend.yml",
+            "referenced_workflows": [used()], **changes}
+
+
+def job(status="completed", conclusion="success"):
+    return {"status": status, "conclusion": conclusion}
 
 
 def pull(merged="2026-01-01T00:00:00Z", commit=SHA, base="main", repo="owner/repo", head=HEAD, number=NUMBER,
@@ -37,12 +47,14 @@ def pull(merged="2026-01-01T00:00:00Z", commit=SHA, base="main", repo="owner/rep
             "head": {"sha": head, "ref": branch, "repo": {"full_name": repo}}}
 
 
-def github(artifacts=(), pulls=None, run=None, jobs=None, asked=None, branch_pulls=None):
+def github(artifacts=(), pulls=None, run=None, jobs=None, asked=None, branch_pulls=None, events=None,
+           merge_tree=TREE):
     """A fake GitHub: the record, the pull request merged as SHA, its run and that run's jobs."""
     pulls = [pull()] if pulls is None else pulls
     run = the_run() if run is None else run
     branch_pulls = [{"number": NUMBER}] if branch_pulls is None else branch_pulls
-    jobs = [{"conclusion": "success"}, {"conclusion": "skipped"}, {"conclusion": None}] if jobs is None else jobs
+    jobs = [job(), job(conclusion="skipped"), job("in_progress", None)] if jobs is None else jobs
+    events = [{"event": "labeled"}, {"event": "merged"}, {"event": "closed"}] if events is None else events
 
     def call(path, token):
         if asked is not None:
@@ -53,6 +65,10 @@ def github(artifacts=(), pulls=None, run=None, jobs=None, asked=None, branch_pul
             return pulls
         if path.endswith("/pulls?state=all&per_page=100&head=owner%3Afix/thing"):
             return branch_pulls
+        if path.endswith(f"/issues/{NUMBER}/events?per_page=100"):
+            return events
+        if path.endswith(f"/git/commits/{MERGE}"):
+            return {"sha": MERGE, "tree": {"sha": merge_tree}}
         if path.endswith(f"/actions/runs/{RUN}"):
             return run
         if path.endswith(f"/actions/runs/{RUN}/jobs?filter=latest&per_page=100"):
@@ -63,7 +79,8 @@ def github(artifacts=(), pulls=None, run=None, jobs=None, asked=None, branch_pul
 
 
 def found(*artifacts, area="backend", **world):
-    return proven.exists(NAME, "owner/repo", "token", call=github(artifacts, **world), area=area, commit=SHA)
+    return proven.exists(NAME, "owner/repo", "token", call=github(artifacts, **world), area=area, tree=TREE,
+                         commit=SHA)
 
 
 def on_main_push(monkeypatch, event="push", ref="refs/heads/main", token="token"):
@@ -100,11 +117,14 @@ def test_head_tree_is_the_same_for_the_same_files_on_different_commits(tmp_path)
 
 def test_only_a_live_record_from_this_repositorys_own_run_counts():
     asked = []
-    assert proven.exists(NAME, "owner/repo", "token", call=github([artifact()], asked=asked), area="backend", commit=SHA)
+    assert proven.exists(NAME, "owner/repo", "token", call=github([artifact()], asked=asked), area="backend",
+                         tree=TREE, commit=SHA)
     assert asked == [f"/repos/owner/repo/actions/artifacts?per_page=100&name={NAME}",
                      f"/repos/owner/repo/commits/{SHA}/pulls?per_page=100",
                      "/repos/owner/repo/pulls?state=all&per_page=100&head=owner%3Afix/thing",
+                     f"/repos/owner/repo/issues/{NUMBER}/events?per_page=100",
                      f"/repos/owner/repo/actions/runs/{RUN}",
+                     f"/repos/owner/repo/git/commits/{MERGE}",
                      f"/repos/owner/repo/actions/runs/{RUN}/jobs?filter=latest&per_page=100"]
     assert found(artifact(expired=True), artifact(head=2), artifact())
     assert not found()
@@ -115,7 +135,8 @@ def test_only_a_live_record_from_this_repositorys_own_run_counts():
     assert not found(artifact(name=NAME + "-other"))
     assert not found(artifact(run=None))
     assert not found({"name": NAME, "expired": False})
-    assert not proven.exists(NAME, "owner/repo", "token", call=lambda path, token: {}, area="backend", commit=SHA)
+    assert not proven.exists(NAME, "owner/repo", "token", call=lambda path, token: {}, area="backend", tree=TREE,
+                             commit=SHA)
 
 
 def test_a_name_alone_proves_nothing():
@@ -150,12 +171,42 @@ def test_a_branch_with_a_second_pull_request_proves_nothing():
     assert not found(record, branch_pulls={"message": "error"})
     assert not found(record, area="fluid")
     assert not found(record, area="unknown")
-    assert not proven.exists(NAME, "owner/repo", "token", call=github([record]), area="backend", commit="")
+    assert not proven.exists(NAME, "owner/repo", "token", call=github([record]), area="backend", tree=TREE, commit="")
+    assert not proven.exists(NAME, "owner/repo", "token", call=github([record]), area="backend", tree="", commit=SHA)
 
 
-@pytest.mark.parametrize("conclusion", sorted(proven.BAD))
-def test_a_run_with_a_failed_or_cancelled_job_proves_nothing(conclusion):
-    assert not found(artifact(), jobs=[{"conclusion": "success"}, {"conclusion": conclusion}])
+def test_a_retargeted_pull_request_proves_nothing():
+    """Opened against an unreviewed base, checked there, then pointed at main and merged."""
+    record = artifact()
+    assert found(record, events=[])
+    assert not found(record, events=[{"event": "base_ref_changed"}, {"event": "merged"}])
+    # No history, an odd answer, or more than one page of it: unknown, so not proven.
+    assert not found(record, events={"message": "error"})
+    assert not found(record, events=[{"event": "merged"}, "odd"])
+    assert not found(record, events=[{"event": None}])
+    assert not found(record, events=[{"event": "labeled"}] * 100)
+
+
+def test_the_run_must_have_used_the_pull_requests_own_merge_with_exactly_these_files():
+    """The record's name is written by the run; what GitHub notes about the run is not."""
+    record = artifact()
+    assert found(record)
+    # The run merged the head into something else: its files differ whatever the name says.
+    assert not found(record, merge_tree="b" * 40)
+    for called in ([], [used(), used()], [used(ref="refs/heads/main")], [used(ref=f"refs/pull/{NUMBER + 1}/merge")],
+                   [used(ref=None)], [used(name="other.yml")], [used(repo="fork/repo")],
+                   [{**used(), "sha": "8" * 40}], [{**used(), "sha": None}], ["odd"]):
+        assert not found(record, run=the_run(referenced_workflows=called)), called
+    assert not found(record, run=the_run(referenced_workflows=None))
+
+
+@pytest.mark.parametrize("bad", [
+    job(conclusion="failure"), job(conclusion="cancelled"), job(conclusion="timed_out"),
+    job(conclusion="action_required"), job(conclusion="neutral"), job(conclusion="new-kind"),
+    job(conclusion=None), job("in_progress", "success"), job("new-status", None), {}, "odd"])
+def test_a_job_that_failed_or_has_an_unknown_state_proves_nothing(bad):
+    assert found(artifact(), jobs=[job()])
+    assert not found(artifact(), jobs=[job(), bad])
     assert not found(artifact(), jobs=[])
 
 
@@ -164,7 +215,7 @@ def test_a_job_list_that_did_not_fit_one_page_proves_nothing():
         answer = github([artifact()])(path, token)
         return {**answer, "total_count": 101} if "/jobs?" in path else answer
 
-    assert not proven.exists(NAME, "owner/repo", "token", call=call, area="backend", commit=SHA)
+    assert not proven.exists(NAME, "owner/repo", "token", call=call, area="backend", tree=TREE, commit=SHA)
 
 
 def test_every_recorded_area_names_its_workflow():

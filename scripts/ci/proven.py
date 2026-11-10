@@ -57,7 +57,6 @@ WORKFLOWS = {
     "identity": "ci-instance-identity.yml", "desktop-source": "desktop-source-checks.yml",
     "javascript-checks": "ci-frontend.yml", "journeys": "ci-frontend.yml",
 }
-BAD = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
 
 
 def merged_pulls(repository: str, commit: str, token: str, call=request) -> dict[str, dict]:
@@ -87,33 +86,74 @@ def only_pull(pull: dict, repository: str, token: str, call=request) -> bool:
     return isinstance(found, list) and [item.get("number") for item in found] == [pull["number"]]
 
 
-def passed(run_id, area: str, head: str, pull: dict, repository: str, token: str, call=request) -> bool:
-    """True when that run is the area's own pull request workflow, on the merged head, with nothing failed."""
+def never_retargeted(pull: dict, repository: str, token: str, call=request) -> bool:
+    """True when the pull request's base was main from the start, as far as its whole history shows."""
+    events = call(f"/repos/{repository}/issues/{pull['number']}/events?per_page=100", token)
+    if not isinstance(events, list) or len(events) >= 100:
+        return False  # no history, or more than one page of it: unknown
+    return all(isinstance(event, dict) and isinstance(event.get("event"), str)
+               and event["event"] != "base_ref_changed" for event in events)
+
+
+def ran_on(run: dict, pull: dict, tree: str, repository: str, token: str, call=request) -> bool:
+    """True when GitHub's own record of the run says it used the pull request's merge with exactly these files.
+
+    The record's name is written by the run and could say anything. GitHub
+    itself notes which commit a run took ``record-pass.yml`` from: for the
+    pull request's own checks that is its test merge commit.
+    """
+    path = f"{repository}/.github/workflows/record-pass.yml@"
+    used = [item for item in run.get("referenced_workflows") or []
+            if isinstance(item, dict) and str(item.get("path", "")).startswith(path)]
+    if len(used) != 1 or used[0].get("ref") != f"refs/pull/{pull['number']}/merge":
+        return False
+    commit = used[0].get("sha")
+    if not isinstance(commit, str) or used[0]["path"] != path + commit:
+        return False
+    return (call(f"/repos/{repository}/git/commits/{commit}", token).get("tree") or {}).get("sha") == tree
+
+
+WAITING = {"queued", "in_progress", "waiting", "pending", "requested"}
+
+
+def passed(run_id, area: str, head: str, pull: dict, tree: str, repository: str, token: str, call=request) -> bool:
+    """True when that run is the area's own pull request workflow, on these files, with nothing failed."""
     run = call(f"/repos/{repository}/actions/runs/{run_id}", token)
     if (run.get("event") != "pull_request" or run.get("head_sha") != head or run.get("head_branch") != pull["ref"]
             or (run.get("head_repository") or {}).get("full_name") != repository
-            or run.get("path") != f".github/workflows/{WORKFLOWS[area]}"):
+            or run.get("path") != f".github/workflows/{WORKFLOWS[area]}"
+            or not ran_on(run, pull, tree, repository, token, call)):
         return False
     data = call(f"/repos/{repository}/actions/runs/{run_id}/jobs?filter=latest&per_page=100", token)
-    jobs = data.get("jobs") or []
-    if not jobs or data.get("total_count") != len(jobs):
+    jobs = data.get("jobs")
+    if not isinstance(jobs, list) or not jobs or data.get("total_count") != len(jobs):
         return False
-    return not any(job.get("conclusion") in BAD for job in jobs)
+    # Other jobs may still be running when the record is read; anything else must have passed.
+    return all(isinstance(job, dict) and (
+        (job.get("status") == "completed" and job.get("conclusion") in ("success", "skipped"))
+        or (job.get("status") in WAITING and job.get("conclusion") is None)) for job in jobs)
 
 
-def exists(name: str, repository: str, token: str, call=request, *, area: str, commit: str | None = None) -> bool:
+def exists(name: str, repository: str, token: str, call=request, *, area: str, tree: str,
+           commit: str | None = None) -> bool:
     """True when the checks of the pull request merged as ``commit`` left a live record with that name.
 
-    A name alone proves nothing: any run in the repository can upload an
-    artifact. The record counts only when its run is the area's own workflow,
-    started by a pull request of this repository (never a fork) whose head was
-    then merged to main as exactly this commit, that pull request is the only
-    one its branch ever opened, and no job of that run failed.
+    The rule: every workflow in the run came from main plus the reviewed,
+    merged head, and the run used exactly the files of ``tree``. So the record
+    counts only when all of this holds, and any doubt means it does not:
+
+    - its run is the area's own workflow, started by a pull request of this
+      repository (never a fork) whose head was merged to main as this commit;
+    - that pull request is the only one its branch ever opened and its base
+      was never changed, so no run on that head used another base's workflows;
+    - GitHub's own record of the run names that pull request's test merge
+      commit, and that commit holds exactly ``tree``;
+    - no job of the run failed, was cancelled or has an unknown state.
     """
     commit = commit or os.environ.get("GITHUB_SHA", "")
-    if area not in WORKFLOWS or not commit:
+    if area not in WORKFLOWS or not commit or not tree:
         return False
-    pulls, sole = None, {}
+    pulls, trusted = None, {}
     data = call(f"/repos/{repository}/actions/artifacts?per_page=100&name={urllib.parse.quote(name)}", token)
     for artifact in data.get("artifacts") or []:
         run = artifact.get("workflow_run") or {}
@@ -126,9 +166,10 @@ def exists(name: str, repository: str, token: str, call=request, *, area: str, c
         pull = pulls.get(head)
         if pull is None or run.get("head_branch") != pull["ref"]:
             continue
-        if head not in sole:
-            sole[head] = only_pull(pull, repository, token, call)
-        if sole[head] and passed(run["id"], area, head, pull, repository, token, call):
+        if head not in trusted:
+            trusted[head] = (only_pull(pull, repository, token, call)
+                             and never_retargeted(pull, repository, token, call))
+        if trusted[head] and passed(run["id"], area, head, pull, tree, repository, token, call):
             return True
     return False
 
@@ -159,7 +200,7 @@ def check(areas: list[str], root: Path = ROOT, call=request) -> dict[str, bool]:
     try:
         tree = head_tree(root)
         for area in areas:
-            found[area] = exists(record_name(area, tree), *where, call=call, area=area)
+            found[area] = exists(record_name(area, tree), *where, call=call, area=area, tree=tree)
     except Exception as error:  # noqa: BLE001 - a lookup must never fail the run
         print(f"[proven] lookup failed, running everything not yet found: {error}", file=sys.stderr)
     return found
