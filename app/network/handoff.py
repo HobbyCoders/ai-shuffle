@@ -972,7 +972,8 @@ def _commit(sid, target, payload, token):
                 from app.db.base import parse_jsonb
                 receipt = (parse_jsonb(session.get("placement")) or {}).get("handoff") or {}
                 held_messages = receipt.get("held_messages", 0)
-                return {"committed": True, **({"held_messages": held_messages} if held_messages else {})}
+                return {"committed": True, "clock": _network_clock(cur),
+                        **({"held_messages": held_messages} if held_messages else {})}
     control._require_owned(sid)
     project = project_resolver.resolve_project_v2(session)
     if project and payload.get("plain_folder") is True:
@@ -1063,7 +1064,30 @@ def _commit(sid, target, payload, token):
     global_events.resources_changed("sessions")
     _announce_owner(sid, target, session)
     engine.kick()
-    return {"committed": True, **({"held_messages": held_messages} if held_messages else {})}
+    with get_db() as conn:
+        clock = _network_clock(conn.cursor())
+    return {"committed": True, "clock": clock, **({"held_messages": held_messages} if held_messages else {})}
+
+
+def _network_clock(cur):
+    """This worker's sync clock, at or past the commit's ownership record (#1308)."""
+    cur.execute("SELECT clock FROM network_state WHERE id=1")
+    row = cur.fetchone()
+    return int(row["clock"]) if row else 0
+
+
+def _observe_commit_clock(clock):
+    """Order the receiver's next writes after the source's commit record (#1308).
+
+    The commit reply reaches the receiver before the source's sync op does.
+    Without this, a delete the new owner makes right away is signed with an
+    older clock than the commit record, which then wins on both workers and
+    brings the chat back. Its own transaction: N alone (app/db/session_locks.py).
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        network_store.lock_state(cur)
+        network_store.observe_clock(cur, clock)
 
 
 # Long Git/history operations must not occupy a single HTTP response: tunnel
@@ -2098,6 +2122,9 @@ async def _owner_commit(owner, payload):
         if payload.get("token"):
             await run_sync(_discard_history, payload["session_id"], payload["token"])
         raise ValueError(reason)
+    clock = result.get("clock")
+    if isinstance(clock, int) and not isinstance(clock, bool) and clock > 0:
+        await run_sync(_observe_commit_clock, clock)  # an older source sends none
     return result
 
 

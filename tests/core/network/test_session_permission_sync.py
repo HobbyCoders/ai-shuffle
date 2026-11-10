@@ -89,8 +89,8 @@ def test_a_handoff_carries_the_binding_and_moves_the_authority(workers, monkeypa
         token = json.loads(crypto.decrypt_payload(
             key, reserved["payload"], handoff._aad("member-chat", target.device_id)))["token"]
     with owner.active():
-        assert handoff.finish("member-chat", target.device_id,
-                              {"phase": "commit", "token": token, **COMMIT}) == {"committed": True}
+        assert {**handoff.finish("member-chat", target.device_id,
+                              {"phase": "commit", "token": token, **COMMIT}), "clock": 0} == {"committed": True, "clock": 0}
     with target.active():
         handoff._accept_owner("member-chat", target.device_id, COMMIT["branch"])
     converge(everyone)

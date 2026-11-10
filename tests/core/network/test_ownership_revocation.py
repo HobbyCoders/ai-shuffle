@@ -145,9 +145,9 @@ async def _two_claims_one_lease(workers, monkeypatch):
         with pytest.raises(ValueError, match="reservation expired"):
             handoff.finish("moving", c.device_id, {"phase": "commit", "token": token, **COMMIT})
         assert database.get_session("moving")["owner_device_id"] == a.device_id
-        assert handoff.finish("moving", b.device_id, {"phase": "commit", "token": token, **COMMIT}) == {"committed": True}
+        assert {**handoff.finish("moving", b.device_id, {"phase": "commit", "token": token, **COMMIT}), "clock": 0} == {"committed": True, "clock": 0}
         # A retried commit is idempotent, not a second transfer.
-        assert handoff.finish("moving", b.device_id, {"phase": "commit", "token": token, **COMMIT}) == {"committed": True}
+        assert {**handoff.finish("moving", b.device_id, {"phase": "commit", "token": token, **COMMIT}), "clock": 0} == {"committed": True, "clock": 0}
     with b.active():
         handoff._accept_owner("moving", b.device_id, COMMIT["branch"])
     converge([a, b, c])

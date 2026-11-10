@@ -6,6 +6,10 @@ ownership flip, and the receiver publishes the row itself only on its next
 scan. The owner-only scan retracts only records this worker originated, so a
 delete on the receiver before that scan published no tombstone, and the
 previous owner kept the chat for good.
+
+When the source's commit record reaches the receiver only after that delete,
+it must not outrank the tombstone and bring the chat back on both workers:
+the receiver observes the commit's clock from the commit reply.
 """
 import pytest
 from fastapi import BackgroundTasks
@@ -30,6 +34,10 @@ async def _move_to_receiver(a, b, monkeypatch):
     for worker in (a, b):
         with worker.active(), get_db() as conn:
             conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL,branch=NULL WHERE id=%s", (SID,))
+    with a.active(), get_db() as conn:
+        # The source published far more than the receiver has seen: its
+        # commit record's clock is ahead of anything the receiver signs.
+        store.observe_clock(conn.cursor(), 10_000)
 
     async def call(device, action, body, **kwargs):
         with a.active():
