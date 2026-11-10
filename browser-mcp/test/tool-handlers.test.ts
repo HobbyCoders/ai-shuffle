@@ -273,7 +273,7 @@ describe("browser_upload guards", () => {
 // browser_act
 
 // A keyboard that refuses keys Playwright does not know, as Playwright does.
-const KNOWN_KEYS = new Set(["Control", "Shift", "Alt", "Meta", "Enter", "ArrowDown", "Delete", "a", "b"]);
+const KNOWN_KEYS = new Set(["Control", "Shift", "Alt", "Meta", "Enter", "\n", "ArrowDown", "Delete", "a", "b"]);
 function fakeKeyboard() {
   const check = (verb: string, key: string) => { if (!KNOWN_KEYS.has(key)) throw new Error(`keyboard.${verb}: Unknown key: "${key}"`); };
   return {
@@ -397,12 +397,10 @@ describe("browser_act outcomes", () => {
   });
   it.each<[string, string, Record<string, unknown>, string[]]>([
     ["a click sent but not confirmed", "click", { kind: "click" }, [...ready, "performing click action"]],
-    ["a key press", "press", { kind: "key", key: "Enter" }, ['elementHandle.press("Enter")']],
     ["a fill the page never answered", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable]],
     ["a check whose click went out", "setChecked", { kind: "check" }, [...ready, "performing click action", "click action done"]],
     ["a fill on a field that turned enabled and then never answered", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable, "element is not enabled", "retrying fill action", "waiting 20ms", editable]],
     ["a fill of a single line break", "fill", { kind: "fill", value: "\n" }, ['fill("\n")', "attempting fill action", editable]],
-    ["a line break key the page never answered", "press", { kind: "key", key: "\n" }, ['elementHandle.press("\n")']],
     ["a fill whose text reads like a refusal", "fill", { kind: "fill", value: "x\n  - element is not enabled" }, ['fill("x\n  - element is not enabled")', "attempting fill action", editable]],
   ])("reports a timeout after %s as outcome_unknown", async (_name, method, input, lines) => {
     const fail = vi.fn(async () => { throw new Error(log(method, ...lines)); });
@@ -425,7 +423,6 @@ describe("browser_act outcomes", () => {
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
   });
   const chordFirst = (chord: string) => { let key = ""; for (const char of chord) { if (char === "+" && key) break; key += char; } return key; };
-  const unknownKey = (key: string, chord: string) => [`locator.press: Unknown key: "${key}"`, "Call log:", "  - waiting for locator('aria-ref=e7')", `  - elementHandle.press("${chord}")`].join("\n");
   const stepLike = "\n  - performing click action\n";
   // Playwright stops a chord at the first key it does not know: nothing is down yet.
   it.each<[string, Record<string, unknown>, string]>([
@@ -435,41 +432,52 @@ describe("browser_act outcomes", () => {
     // `value` is not part of a key press, so it must not change what is cut.
     ["that ends in an unused value", { key: `${stepLike}Enter`, value: "Enter" }, `${stepLike}Enter`],
   ])("keeps an unknown key %s as invalid_input", async (_name, input, chord) => {
-    const press = vi.fn(async () => { throw new Error(unknownKey(chordFirst(chord), chord)); });
-    const res = await runAct(actSession({ press, count: async () => 1 }), { kind: "key", ref: "e7", ...input } as ActInput);
+    const keyboard = fakeKeyboard();
+    const res = await runAct(actSession({ count: async () => 1 }, keyboard), { kind: "key", ref: "e7", ...input } as ActInput);
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
+    expect(keyboard.down.mock.calls.map(call => call[0])).toEqual([chordFirst(chord)]);
   });
   // The keys before the unknown one are already down.
-  it.each<[string, Record<string, unknown>, string, string]>([
-    ["a modifier", { key: "Foo", modifiers: ["Control"] }, "Foo", "Control+Foo"],
-    ["a key", { key: "a+Foo" }, "Foo", "a+Foo"],
-    ["a key it starts with", { key: 'a+a"' }, 'a"', 'a+a"'],
-  ])("reports an unknown key pressed after %s as outcome_unknown", async (_name, input, key, chord) => {
-    const press = vi.fn(async () => { throw new Error(unknownKey(key, chord)); });
-    const res = await runAct(actSession({ press, count: async () => 1 }), { kind: "key", ref: "e7", ...input } as ActInput);
+  it.each<[string, Record<string, unknown>]>([
+    ["a modifier", { key: "Foo", modifiers: ["Control"] }],
+    ["a key", { key: "a+Foo" }],
+    ["a key it starts with", { key: 'a+a"' }],
+  ])("reports an unknown key pressed after %s as outcome_unknown", async (_name, input) => {
+    const res = await runAct(actSession({ count: async () => 1 }), { kind: "key", ref: "e7", ...input } as ActInput);
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
     expect(String(bodyOf(res).error)).toContain("Unknown key");
   });
   // A failed key press releases the keys whose keydown it sent, and only those
   // (#1423). A release that fails does not replace the press's own error.
   const focusTimeout = ["locator.pressSequentially: Timeout 2000ms exceeded.", "Call log:", "  - waiting for locator('aria-ref=e7')", '  - elementHandle.type("")'].join("\n");
-  it.each<[string, Record<string, unknown>, { focus?: string; press?: string }, string[], string]>([
-    ["the modifier before an unknown last key", { key: "Foo", modifiers: ["Control"] }, { press: unknownKey("Foo", "Foo") }, ["Control"], "outcome_unknown"],
-    ["the key before an unknown last key", { key: 'a+a"' }, { press: unknownKey('a"', 'a"') }, ["a"], "outcome_unknown"],
+  it.each<[string, Record<string, unknown>, { focus?: string; hangOn?: string }, string[], string]>([
+    ["the modifier before an unknown last key", { key: "Foo", modifiers: ["Control"] }, {}, ["Control"], "outcome_unknown"],
+    ["the key before an unknown last key", { key: 'a+a"' }, {}, ["a"], "outcome_unknown"],
     ["nothing for an unknown first key", { key: "Foo+a" }, {}, [], "invalid_input"],
-    ["every key of a chord whose last key timed out after its press began", { key: "a", modifiers: ["Control", "Shift"] }, { press: log("press", 'elementHandle.press("a")') }, ["a", "Shift", "Control"], "outcome_unknown"],
-    ["only the modifiers when the last key timed out before its press began", { key: "a", modifiers: ["Control"] }, { press: log("press") }, ["Control"], "outcome_unknown"],
+    ["every key of a chord whose last keydown the page never answered", { key: "a", modifiers: ["Control", "Shift"] }, { hangOn: "a" }, ["a", "Shift", "Control"], "outcome_unknown"],
+    ["only the keys sent down when a modifier's keydown was never answered", { key: "a", modifiers: ["Control", "Shift"] }, { hangOn: "Shift" }, ["Shift", "Control"], "outcome_unknown"],
+    ["a line break key the page never answered", { key: "\n" }, { hangOn: "\n" }, ["\n"], "outcome_unknown"],
     ["nothing when focusing the ref timed out", { key: "Delete", modifiers: ["Control"] }, { focus: focusTimeout }, [], "outcome_unknown"],
   ])("releases %s", async (_name, input, fail, released, code) => {
-    const press = vi.fn(async () => { if (fail.press) throw new Error(fail.press); });
     const pressSequentially = vi.fn(async () => { if (fail.focus) throw new Error(fail.focus); });
     const keyboard = fakeKeyboard();
+    const known = keyboard.down.getMockImplementation()!;
+    keyboard.down.mockImplementation(async (key: string) => { if (key === fail.hangOn) await new Promise(() => {}); return known(key); });
     keyboard.up.mockImplementation(async () => { throw new Error("Target closed"); });
-    const res = await runAct(actSession({ press, pressSequentially, count: async () => 1 }, keyboard), { kind: "key", ref: "e7", ...input } as ActInput);
+    const res = await runAct(actSession({ pressSequentially, count: async () => 1 }, keyboard), { kind: "key", ref: "e7", ...input } as ActInput);
     expect(keyboard.up.mock.calls.map(call => call[0])).toEqual(released);
     expect(bodyOf(res)).toMatchObject({ ok: false, code });
     expect(String(bodyOf(res).error)).not.toContain("Target closed");
-    if (fail.focus) { expect(keyboard.down).not.toHaveBeenCalled(); expect(press).not.toHaveBeenCalled(); }
+    if (fail.focus) expect(keyboard.down).not.toHaveBeenCalled();
+  }, 10000);
+  it("presses a chord on a ref down in order and up in reverse, all at page level", async () => {
+    const keyboard = fakeKeyboard();
+    const order: string[] = [];
+    keyboard.down.mockImplementation(async (key: string) => { order.push(`down ${key}`); });
+    keyboard.up.mockImplementation(async (key: string) => { order.push(`up ${key}`); });
+    const res = await runAct(actSession({ count: async () => 1 }, keyboard), { kind: "key", ref: "e7", key: "a", modifiers: ["Control", "Shift"] });
+    expect(bodyOf(res).ok).toBe(true);
+    expect(order).toEqual(["down Control", "down Shift", "down a", "up a", "up Shift", "up Control"]);
   });
   it("types a ref one character per call and stops the text where the page stopped answering", async () => {
     const keyboard = fakeKeyboard();

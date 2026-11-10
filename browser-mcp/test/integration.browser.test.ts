@@ -1324,14 +1324,38 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         answerHold?.();
       }
       // An action that waited for the page reaches its cleanup only once the
-      // request answers by itself, after HOLD_MS.
-      expect(reached).toBeLessThan(HOLD_MS - 1500);
+      // request answers by itself, HOLD_MS after the page asked, so anything
+      // under that proves it did not wait. One that did not wait gets there
+      // after its 2s budget and the 250ms release; the 500ms margin below
+      // HOLD_MS leaves a slow runner more than 2s of slack.
+      expect(reached).toBeLessThan(HOLD_MS - 500);
       await page.evaluate(() => 0); // answers once the page is free again
       expect(body(await runAct(session, { kind: "key", ref: await ref("Entry"), key: next }))).toMatchObject({ ok: true });
       for (const [key, expected] of Object.entries(events)) expect(await keyEvents(page, key)).toEqual(expected);
       expect((await keyEvents(page, "Control")).at(-1) ?? "up Control").toBe("up Control");
       if (value !== null) expect(await page.inputValue("input")).toBe(value);
     }, 15000);
+    // Key events as the document sees them, with the field each one reached.
+    const docKeyLog = `<script>const log=e=>(window.keys=window.keys||[]).push(e.type.slice(3)+' '+e.key+(e.ctrlKey?' ctrl':'')+' '+(e.target.getAttribute('aria-label')||'page'));addEventListener("keydown",log,true);addEventListener("keyup",log,true)</script>`;
+    it("sends no keyup for a key whose keydown never went out when the field blocks a second focus", async () => {
+      // The first focus is undone at once and a second one blocks. Pressing
+      // focuses the ref once, so the key goes where focus is, down then up.
+      const page = await load(`<input aria-label="Entry">${docKeyLog}<script>let focuses=0;const el=document.querySelector("input");el.addEventListener("focus",()=>{if(++focuses===1)queueMicrotask(()=>el.blur());else{${blockOnce}}})</script>`);
+      try {
+        await runAct(session, { kind: "key", ref: await ref("Entry"), key: "Delete" });
+      } finally {
+        answerHold?.();
+      }
+      await page.evaluate(() => 0);
+      expect(await keyEvents(page, "Delete")).toEqual(["down Delete page", "up Delete page"]);
+    }, 15000);
+    it("sends a chord's keys where the page moved focus between them, as Playwright's press does", async () => {
+      // Control moves focus to the second field, so Control+A selects its text.
+      const page = await load(`<input aria-label="Source" value="xx"><input aria-label="Other" value="yyy">${docKeyLog}<script>document.querySelector("[aria-label=Source]").addEventListener("keydown",e=>{if(e.key==="Control")document.querySelector("[aria-label=Other]").focus()})</script>`);
+      expect(body(await runAct(session, { kind: "key", ref: await ref("Source"), key: "a", modifiers: ["Control"] }))).toMatchObject({ ok: true });
+      expect(await page.evaluate(() => (window as unknown as { keys: string[] }).keys)).toEqual(["down Control ctrl Source", "down a ctrl Other", "up a ctrl Other", "up Control Other"]);
+      expect(await page.evaluate(() => { const other = document.querySelector<HTMLInputElement>("[aria-label=Other]")!; return [document.activeElement === other, other.selectionStart, other.selectionEnd]; })).toEqual([true, 0, 3]);
+    });
     it("does not count a click as done when the page blocked before Playwright could check it", async () => {
       // The cover appears as the pointer arrives and the page then blocks, so
       // Playwright sent the click but never learned that the cover took it.
