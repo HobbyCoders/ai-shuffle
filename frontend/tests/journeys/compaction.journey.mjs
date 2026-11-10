@@ -50,28 +50,32 @@ const FOLDED = /^Show work details: .*compacted the context/i;
 const cards = (page) => page.locator('[data-testid="compaction-card"]');
 const meter = (page) => page.getByRole('button', { name: /^Context and usage — / }).first();
 
-/** The meter's words: on the composer on a wide screen, a row in Chat controls on a phone. */
+/**
+ * The meter's words: on the composer on a wide screen, a row in Chat controls
+ * on a phone. `evidence` is for a failure's message only and is never parsed.
+ */
 async function meterLabel(page) {
 	const controls = page.getByRole('button', { name: /^All chat controls/ });
-	if (!(await controls.isVisible())) return (await meter(page).getAttribute('aria-label')) || '';
+	if (!(await controls.isVisible())) return { label: (await meter(page).getAttribute('aria-label')) || '', evidence: '' };
 	const sheet = page.getByRole('dialog', { name: 'Chat controls' });
 	await controls.click();
 	await sheet.waitFor({ timeout: 10_000 });
 	const row = sheet.getByRole('button', { name: /^Context and usage: / });
 	const label = (await row.getAttribute('aria-label')) || '';
 	// The row's own "tokens of window" line, so the log names the window (#1362).
-	const tokens = (await row.locator('small').allTextContents()).join(' ').trim();
+	const evidence = (await row.locator('small').allTextContents()).join(' ').trim();
 	await page.keyboard.press('Escape');
 	await sheet.waitFor({ state: 'hidden', timeout: 5000 });
-	return tokens ? `${label} (${tokens})` : label;
+	return { label, evidence };
 }
 
 /** The context meter's reading as a number (percent, or tokens when the window is unknown). */
 async function meterReading(page) {
-	const label = await meterLabel(page);
-	const percent = label.match(/(\d+)% (?:of context window )?used/);
+	const { label: words, evidence } = await meterLabel(page);
+	const label = evidence ? `${words} (${evidence})` : words;
+	const percent = words.match(/(\d+)% (?:of context window )?used/);
 	if (percent) return { label, value: Number(percent[1]) };
-	const tokens = label.match(/([\d.,]+)\s*([kKmM]?) tokens/);
+	const tokens = words.match(/([\d.,]+)\s*([kKmM]?) tokens/);
 	if (!tokens) return { label, value: NaN };
 	const scale = { k: 1e3, m: 1e6 }[tokens[2].toLowerCase()] || 1;
 	return { label, value: Number(tokens[1].replace(/,/g, '')) * scale };
