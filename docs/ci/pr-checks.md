@@ -181,8 +181,15 @@ what an area depends on, so a record can never stand for different code.
   fork's. Records expire after 14 days. A failed lookup, a missing token or any
   error answers "not proven": the area runs. Losing a record only loses the
   shortcut, so the record steps never fail a pull request.
+- Dependency audits depend on advisory lists, which change without any file
+  changing, so a record cannot stand for them: the blocking Python and npm
+  audits of the backend and JavaScript checks also run in the always-running
+  `supply-chain` job.
+- The lookup job is only a shortcut. If it fails, every area runs and the run
+  can still pass; the failure watcher ignores it.
 - Only a push looks for records. The daily scheduled run (08:00 UTC, its own
-  concurrency group so it never displaces a waiting push run) and a dispatch
+  concurrency groups, in `main-suite.yml` and every workflow it calls, so it
+  never queues with or displaces a push run) and a dispatch
   run **everything**. The scheduled run never publishes: the nightly follows
   push and dispatch runs only. Dispatch `main-suite.yml` on `main` before a
   stable release to prove the whole tree in one run.

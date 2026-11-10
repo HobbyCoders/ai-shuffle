@@ -49,7 +49,8 @@ def aggregate(results):
     if not isinstance(results, dict) or set(results) != {*REQUIRED, LOOKUP}:
         raise ValueError("Missing or unexpected main-suite dependency")
     lookup = results[LOOKUP]
-    found = (lookup.get("outputs") or {}) if lookup.get("result") == "success" else {}
+    # The lookup may fail without failing the run; its outputs are then empty.
+    found = lookup.get("outputs") or {}
     for name in REQUIRED:
         result = results[name].get("result")
         if result == "skipped" and name in PROVABLE and found.get(name) == "true":

@@ -55,6 +55,8 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
     for job, name in expected.items():
         assert jobs[job]["uses"] == f"./.github/workflows/{name}.yml"
         called = workflow(name + ".yml")
+        # The daily run never shares a queue with a push run's called workflows.
+        assert called["concurrency"]["group"].endswith("${{ github.event_name == 'schedule' && '-daily' || '' }}")
         assert "workflow_call" in called["on"]
         assert called["on"]["pull_request"] == ""
         assert called["permissions"] == {"contents": "read"}
@@ -84,6 +86,26 @@ def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
     lookup = jobs["proven"]
     assert lookup["if"] == "github.event_name == 'push' || github.ref == 'refs/heads/main'"
     assert "needs" not in lookup
+    # A failed lookup neither fails the run nor stops it: every area then runs.
+    assert lookup["continue-on-error"] == "true"
+    spec = importlib.util.spec_from_file_location("stop_on_failure", ROOT / "scripts/ci/stop_on_failure.py")
+    stop = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stop)
+    assert stop.is_advisory(lookup["name"])
+    # Advisory lists change with no file changing, so the blocking audits of the
+    # recorded areas always run on main, with the pull-request commands.
+    audits = "\n".join(step.get("run", "") for step in jobs["supply-chain"]["steps"])
+    backend_audit = next(step for step in workflow("ci-backend.yml")["jobs"]["backend-security"]["steps"]
+                         if step.get("name") == "Audit public Python dependencies")
+    for line in backend_audit["run"].strip().splitlines():
+        assert line.strip() in audits
+    assert "for package in frontend tools browser-mcp; do" in audits
+    assert 'npx -y npm@11 audit --audit-level=high' in audits
+    javascript_text = (ROOT / ".github/workflows/ci-frontend.yml").read_text()
+    assert javascript_text.count("npx -y npm@11 audit --audit-level=high") == 3
+    for name in suite.PROVABLE:
+        text = (ROOT / ".github/workflows" / jobs[name]["uses"].rsplit("/", 1)[1]).read_text()
+        assert (" audit --audit-level" in text or "pip_audit" in text) == (name == "backend")
     assert lookup["permissions"] == {"contents": "read", "actions": "read"}
     areas = [*suite.PROVABLE, "javascript-checks"]
     assert lookup["outputs"] == {area: f"${{{{ steps.check.outputs.{area} }}}}" for area in areas}
@@ -144,7 +166,7 @@ def test_main_suite_has_no_test_secrets_or_paid_runners():
         assert "secrets" not in (ROOT / ".github/workflows" / name).read_text()
         for name, job in config["jobs"].items():
             assert "environment" not in job
-            if name in ("journey-issues", "stop-on-failure"):
+            if name in ("journey-issues", "stop-on-failure", "proven"):
                 assert job["continue-on-error"] == "true"
             else:
                 assert "continue-on-error" not in job
@@ -258,10 +280,10 @@ def test_aggregate_accepts_a_skip_only_for_an_area_the_lookup_proved():
             results[area]["result"] = "skipped"
             with pytest.raises(ValueError):
                 suite.aggregate(results)
-        # A lookup that did not finish proves nothing.
-        results = full({area: "true"})
+        # A lookup that failed has no outputs and proves nothing.
+        results = full()
         results[area]["result"] = "skipped"
-        results["proven"]["result"] = "failure"
+        results["proven"] = {"result": "failure", "outputs": {}}
         with pytest.raises(ValueError):
             suite.aggregate(results)
     for area in set(suite.REQUIRED) - set(suite.PROVABLE):

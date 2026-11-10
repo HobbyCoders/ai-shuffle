@@ -17,7 +17,8 @@ permissions:
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  group: ci-frontend-${{ github.event.pull_request.number || github.ref }}
+  # main-suite's daily run gets its own group so it never queues with a push run.
+  group: ci-frontend-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

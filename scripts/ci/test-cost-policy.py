@@ -71,7 +71,8 @@ class CostPolicyTests(unittest.TestCase):
                 self.assertEqual(config["on"]["pull_request"], "")
                 self.assertEqual(config["permissions"], {"contents": "read"})
                 self.assertEqual(config["concurrency"], {
-                    "group": name[:-4] + "-${{ github.event.pull_request.number || github.ref }}",
+                    "group": name[:-4] + "-${{ github.event.pull_request.number || github.ref }}"
+                             "${{ github.event_name == 'schedule' && '-daily' || '' }}",
                     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
                 })
                 for forbidden in ("secrets.", "pull_request_target", ".draft", "secrets: inherit"):

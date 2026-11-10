@@ -41,6 +41,8 @@ jobs:
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Only a shortcut: if this job fails, every area runs and the run can still pass.
+    continue-on-error: true
     permissions:
       contents: read
       actions: read
@@ -143,12 +145,13 @@ jobs:
   supply-chain:
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -156,6 +159,23 @@ jobs:
       # Identical report-only audit semantics to local/full (all locked packages,
       # including source-publisher). Existing hosted audits remain blocking too.
       - run: python scripts/dependency_audit.py
+      # The advisory lists change without any file changing, so a pull request's
+      # pass record cannot stand for them: the blocking audits of the backend
+      # and JavaScript checks always run here, with the same commands.
+      - name: Audit public Python dependencies
+        timeout-minutes: 8
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ./fluid
+          python -m pip install pip-audit==2.10.1
+          python scripts/pip_audit_retry.py --skip-editable
+          python scripts/pip_audit_retry.py -r requirements-voice.lock
+      - name: Audit JavaScript dependencies
+        run: |
+          for package in frontend tools browser-mcp; do
+            (cd "$package" && npx -y npm@11 audit --audit-level=high)
+          done
 
   update-reach:
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
