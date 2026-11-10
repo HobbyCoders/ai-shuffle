@@ -50,6 +50,7 @@ def create_wakeup(
     instance_id: Optional[str] = None,
     created_at: Any = None,
     stop_seq: Optional[int] = None,
+    _conn: Any = None,
 ) -> Dict[str, Any]:
     """Insert a pending wakeup and return the persisted row as a dict.
 
@@ -58,10 +59,10 @@ def create_wakeup(
 
     ``created_at`` and ``stop_seq`` are when the wake was first armed, for a retry
     of it: every rule that sets a wake against a person's message or a Stop reads
-    them.
+    them. ``_conn`` writes it in the caller's transaction.
     """
     _ph = ph()
-    with get_db() as conn:
+    with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = get_cursor(conn)
         cursor.execute(
             f"""INSERT INTO pending_wakeups
@@ -122,6 +123,14 @@ def claim_wakeup(wakeup_id: str) -> bool:
     return True
 
 
+def current_stop_seq(session_id: str) -> int:
+    """The session's Stop sequence now: a wake stamped with it is cancelled by any later Stop."""
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(f"SELECT {CURRENT_STOP_SEQ} AS stop_seq", (session_id,))
+        return int(cursor.fetchone()["stop_seq"])
+
+
 def _cancelled_by_stop(cursor: Any, row: Dict[str, Any]) -> bool:
     """Whether a user Stop came after this wake was armed, and so cancelled it.
 
@@ -155,7 +164,8 @@ def pop_session_wakeups(
 
     ``exclude_source`` keeps that source's rows when ``source`` is None.
     A human input (which excludes held_peer_promotion) supersedes timers, not
-    the note-bearing handoff_resume. Delete uses no exclusion and retires it.
+    the note-bearing handoff_resume or a failed hand-off's notice (sent after the
+    held messages it would see as newer). Delete uses no exclusion and retires it.
     """
     _ph = ph()
     with get_db() as conn:
@@ -170,7 +180,7 @@ def pop_session_wakeups(
             cursor.execute(
                 f"SELECT id FROM pending_wakeups WHERE session_id = {_ph} "
                 f"AND (source IS NULL OR source <> {_ph}) "
-                + ("AND (source IS NULL OR source <> 'handoff_resume')"
+                + ("AND (source IS NULL OR source NOT IN ('handoff_resume', 'handoff_failed'))"
                    if exclude_source == "held_peer_promotion" else ""),
                 (session_id, exclude_source),
             )
@@ -235,7 +245,7 @@ def superseded_by_person(wakeup_id: str) -> bool:
             f"SELECT 1 AS newer FROM pending_wakeups w JOIN turns t ON t.session_id=w.session_id "
             f"WHERE w.id={_ph} AND t.created_at>w.created_at "
             f"AND t.payload ->> 'person_input' IS NOT NULL "
-            f"AND (w.source IS NULL OR w.source NOT IN ('held_peer_promotion', 'handoff_resume')) "
+            f"AND (w.source IS NULL OR w.source NOT IN ('held_peer_promotion', 'handoff_resume', 'handoff_failed')) "
             f"LIMIT 1",
             (wakeup_id,),
         )

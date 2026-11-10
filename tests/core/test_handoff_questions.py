@@ -543,11 +543,24 @@ async def test_failed_detach_does_not_claim_move_or_suppress_a_later_resume(
                 assert await user_question_handler._answer_nonblocking(
                     card, {"Which branch?": "Existing"}, None, human_input=True
                 )
-            [answer] = turns.get_queued_turns("s1")
+            # The failed hand-off's notice to the agent (#1419) is a wake-up; it
+            # queues on its timer, here after the owner's answer.
+            assert await _settle(lambda: len(turns.get_queued_turns("s1")) == 2)
+            [notice] = [t for t in turns.get_queued_turns("s1") if sh.FAILED_PAYLOAD in (t["payload"] or {})]
+            [answer] = [t for t in turns.get_queued_turns("s1") if t is not notice and t["id"] != notice["id"]]
+            assert notice["payload"][sh.FAILED_PAYLOAD]["handoff_id"] == first["handoff_id"]
             assert (
                 answer["prompt"] == "Answer to your question:\nWhich branch?\nExisting"
             )
         else:
+            # The agent retries from the failure notice (#1419), which has run by then.
+            assert await _settle(lambda: len(turns.get_queued_turns("s1")) == 1)
+            [notice] = turns.get_queued_turns("s1")
+            assert notice["payload"][sh.FAILED_PAYLOAD]["handoff_id"] == first["handoff_id"]
+            from app.db.base import get_db
+
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (notice["id"],))
             second = sh.request("s1", "DesktopWorker", "second move note must arrive")
             assert second["handoff_id"] != first["handoff_id"]
 

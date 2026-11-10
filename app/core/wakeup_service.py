@@ -450,7 +450,7 @@ async def _fire(row: Dict[str, Any]) -> None:
     model = row.get("model")
     overrides = {"model": model} if model else None
 
-    from app.core import turn_manager
+    from app.core import session_handoff, turn_manager
 
     try:
         if row.get("source") == HELD_PEER_SOURCE:
@@ -472,8 +472,11 @@ async def _fire(row: Dict[str, Any]) -> None:
                 profile_id=profile_id,
                 project_id=row.get("project_id"),
                 overrides=overrides,
-                **({"command_id": str(wakeup_id)} if row.get("source") == "handoff_resume" else {}),
-                payload={"wake_stop_seq": row.get("stop_seq"),
+                **({"command_id": str(wakeup_id)}
+                   if row.get("source") in ("handoff_resume", "handoff_failed") else {}),
+                payload={**(session_handoff.notice_payload(session_id, str(wakeup_id))
+                            if row.get("source") == "handoff_failed" else {}),
+                         "wake_stop_seq": row.get("stop_seq"),
                          **({"api_user_id": api_user_id} if api_user_id else {})},
             )
     except asyncio.CancelledError:

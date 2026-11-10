@@ -153,10 +153,32 @@ def held_withdrawal(
 def take(session_id: str) -> Optional[Dict[str, Any]]:
     """Delete the queued move of ``session_id`` and return it (held messages included)."""
     with get_db() as conn:
-        cursor = get_cursor(conn)
-        cursor.execute(f"SELECT * FROM session_moves WHERE session_id={ph()}", (session_id,))
-        row = cursor.fetchone()
-        if not row:
-            return None
-        cursor.execute(f"DELETE FROM session_moves WHERE session_id={ph()}", (session_id,))
+        return _take(get_cursor(conn), session_id)
+
+
+def _take(cursor: Any, session_id: str) -> Optional[Dict[str, Any]]:
+    cursor.execute(f"SELECT * FROM session_moves WHERE session_id={ph()}", (session_id,))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    cursor.execute(f"DELETE FROM session_moves WHERE session_id={ph()}", (session_id,))
     return _parse(dict(row))
+
+
+def take_ended(session_id: str, *, take: bool,
+               wake: Optional[Dict[str, Any]]) -> "tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]":
+    """End the queued move of ``session_id`` here in one transaction: take its
+    row when ``take`` and write ``wake``, the ordinary persisted wake-up that
+    tells an agent its move ended (#1419), unless a retry finds it written.
+    Returns (the taken row, the written wake)."""
+    from app.db import wakeups
+
+    row = written = None
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        row = _take(cursor, session_id) if take else None
+        if wake:
+            cursor.execute(f"SELECT 1 FROM pending_wakeups WHERE id={ph()}", (wake["id"],))
+            if cursor.fetchone() is None:
+                written = wakeups.create_wakeup(**wake, _conn=conn)
+    return row, written

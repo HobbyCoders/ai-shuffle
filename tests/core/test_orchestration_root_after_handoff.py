@@ -81,6 +81,53 @@ def test_a_missing_root_without_a_hand_off_still_refuses_and_says_what_to_do(pee
 
 
 # ---------------------------------------------------------------------------
+# #1419 review: the failed-move notice keeps the chain context any wake of the
+# chat inherits, so it cannot start chats or reset a budget the turn that
+# called HandOffSession could not.
+# ---------------------------------------------------------------------------
+
+def _notice_after(session_id, payload):
+    """The turn that called HandOffSession ended carrying ``payload``; its move
+    failed and the agent's notice turn is now the running context."""
+    import asyncio
+    import time
+
+    from app.core import session_handoff as sh
+
+    ended = turns.enqueue_turn(session_id, "unpark", prompt="handing off", profile_id="agent", payload=payload)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed', ended_at=NOW() WHERE id=%s", (ended["id"],))
+    from app.core import wakeup_service
+    from app.db import wakeups
+
+    pending = sh.PendingHandoff("dev-b", "Worker B", "", time.time())
+    wake = wakeups.create_wakeup(**sh._notice_wake(session_id, pending, "Hand-off to Worker B failed: offline."))
+    asyncio.run(wakeup_service._fire(wake))
+    [notice] = [row for row in turns.get_queued_turns(session_id) if (row.get("payload") or {}).get(sh.FAILED_PAYLOAD)]
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='running' WHERE id=%s", (notice["id"],))
+    return notice
+
+
+def test_the_failed_move_notice_of_a_remote_origin_chat_cannot_start_chats(peers):
+    root = peers[0][1]["id"]
+    notice = _notice_after("caller", {"orchestration_root": root, "orchestration_depth": 1,
+                                      "orchestration_remote_origin": "dev-a"})
+    assert notice["payload"]["orchestration_remote_origin"] == "dev-a"
+    with pytest.raises(ValueError, match="started from another worker"):
+        orch._queue("caller", {"title": "Work", "prompt": "go", "request_id": "s1"}, "start")
+
+
+def test_the_failed_move_notice_continues_the_chain_it_ended(peers):
+    root = peers[0][1]["id"]
+    notice = _notice_after("caller", {"orchestration_root": root, "orchestration_depth": 2})
+    assert notice["payload"]["orchestration_root"] == root
+    assert notice["payload"]["orchestration_depth"] == 2
+    sent = orch._queue("caller", {"session_id": "peer", "message": "hi", "request_id": "m1"}, "message")
+    assert turns.get_turn(sent["turn_id"])["payload"]["orchestration_root"] == root
+
+
+# ---------------------------------------------------------------------------
 # The stand-in stays the chain's root here once a request was counted under
 # it, whatever turn carrying the old root arrives later.
 # ---------------------------------------------------------------------------
@@ -143,4 +190,3 @@ async def test_the_report_of_a_started_chat_that_also_moved_can_message(peers):
     sent = orch._queue("caller", {"session_id": "peer", "message": "Review it", "request_id": "m1"}, "message")
     assert sent["delivery_status"] == "queued"
     assert turns.get_turn(sent["turn_id"])["payload"]["orchestration_root"] == report["id"]
-

@@ -2,6 +2,7 @@
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -1491,7 +1492,10 @@ async def test_2012_a_cancelled_or_failed_hand_off_gets_no_resume():
     assert outcome == "Hand-off to DesktopWorker failed: DesktopWorker went offline"
     assert record.await_args.args[2] == {"status": "failed", "worker": "DesktopWorker", "handoff_id": result["handoff_id"]}
     submit.assert_not_awaited()
-    assert turns_sent == [] and _queued() == []
+    # Nothing resumes there; here the agent is told its hand-off failed (#1419).
+    assert turns_sent == []
+    assert await _settle(lambda: [(source, prompt.split(":")[0]) for source, prompt in _queued()] == [
+        ("wakeup", "[hand-off] Your HandOffSession move did not happen")])
     # A pending hand-off cancelled after it was read never resumes either.
     pending = sh.PendingHandoff("dev-gaming", "DesktopWorker", "", time.time(), by="agent")
     pending.cancelled = True
@@ -1632,3 +1636,328 @@ def test_1416_a_queued_hand_off_says_when_nothing_else_holds_it():
         result = sh.request("s1", "DesktopWorker")
     assert "Nothing else holds it now." in result["message"]
     assert "Held by" not in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# #1419: an agent's hand-off that ends here without moving is reported back to
+# the agent in one wake-up turn, after the held messages.
+# ---------------------------------------------------------------------------
+
+def _queued_rows(session_id="s1"):
+    from app.db import turns
+    return turns.get_queued_turns(session_id)
+
+
+def _notices(session_id="s1"):
+    return [turn for turn in _queued_rows(session_id) if (turn.get("payload") or {}).get(sh.FAILED_PAYLOAD)]
+
+
+async def _notice_runs():
+    """The notice is an ordinary wake-up: wait for its timer to queue its turn."""
+    assert await _settle(lambda: len(_notices()) == 1)
+    return _notices()[0]
+
+
+async def _agent_move_ends(failure, *, owner=None, archived=False):
+    """Queue an agent hand-off of s1 and let it end by ``failure``."""
+    result = sh.request("s1", "DesktopWorker", "halfway")
+    if failure == "timeout":
+        sh.pending_for("s1").expires_at = 1
+    with patch.object(sh, "busy_state", return_value={"running": False, "tasks": [], "queued": 0, "wake": False}), \
+            patch.object(sh, "_open_prompt", return_value=failure == "open_prompt"), \
+            patch.object(sh, "_record", AsyncMock()), \
+            patch("app.api.sessions.move_session_to",
+                  AsyncMock(side_effect=HTTPException(409, "project isn't checked out on DesktopWorker"))), \
+            patch.object(sh, "_owner_now", return_value=owner), \
+            patch.object(sh, "_moved", AsyncMock(return_value="Handed off")), \
+            patch("app.core.archive_guard.is_archived", return_value=archived):
+        await sh.run_pending("s1")
+    return result
+
+
+async def _restart():
+    """This worker stops and starts again: its timers and memory are gone."""
+    from app.core import wakeup_service
+    from app.core.task_registry import task_registry
+    for task in list(wakeup_service._timers.values()):
+        task.cancel()
+    wakeup_service._timers.clear()
+    task_registry.clear_user_stop("s1")
+    sh._pending.clear(), sh._waiting.clear(), sh._moving.clear(), sh._running.clear()
+    with patch.object(sh, "_record", AsyncMock()), \
+            patch("app.network.handoff.recover_history_staging", return_value=False), \
+            patch("app.network.handoff.recover_revoked_transfers"):
+        await sh.on_boot()
+    await wakeup_service.rehydrate_pending()
+
+
+@contextmanager
+def _submit_for_notice(decide):
+    """Every submit of the notice asks ``decide()``: "real", "none" (refused
+    admission, no turn id) or "raise". Covers the sync and the async submit."""
+    from app.core import turn_manager
+    real_sync, real_async = turn_manager.submit, turn_manager.submit_async
+
+    def _notice(kwargs):
+        return str(kwargs.get("command_id") or "").startswith(sh.FAILED_COMMAND_PREFIX)
+
+    def _answer():
+        verdict = decide()
+        if verdict == "raise":
+            raise RuntimeError("database unavailable")
+        return verdict
+
+    def _sync(session_id, source, **kwargs):
+        if _notice(kwargs) and _answer() == "none":
+            return None
+        return real_sync(session_id, source, **kwargs)
+
+    async def _async(session_id, source, **kwargs):
+        if _notice(kwargs) and _answer() == "none":
+            return None
+        return await real_async(session_id, source, **kwargs)
+
+    with patch.object(turn_manager, "submit", side_effect=_sync), \
+            patch.object(turn_manager, "submit_async", side_effect=_async):
+        yield
+
+
+@contextmanager
+def _after_held(prompt, then):
+    """Run ``then()`` once, right after the held message ``prompt`` is published here."""
+    from app.core import turn_manager
+    outer, done = turn_manager.submit, []
+
+    def _submit(session_id, source, **kwargs):
+        turn_id = outer(session_id, source, **kwargs)
+        if kwargs.get("prompt") == prompt and not done:
+            done.append(then())
+        return turn_id
+
+    with patch.object(turn_manager, "submit", side_effect=_submit):
+        yield
+
+
+def _never_delivered():
+    return "raise"
+
+
+@pytest.mark.parametrize("failure, reason", [
+    ("timeout", "still busy after 10 minutes"),
+    ("open_prompt", "Answer or dismiss the open prompt first."),
+    ("move", "failed: project isn't checked out on DesktopWorker"),
+])
+async def test_1419_a_failed_agent_hand_off_starts_one_turn_telling_the_agent(failure, reason):
+    _chat()
+    result = await _agent_move_ends(failure)
+    notice = await _notice_runs()
+    assert notice["source"] == "wakeup"
+    assert notice["command_id"] == sh.FAILED_COMMAND_PREFIX + result["handoff_id"]
+    assert notice["payload"][sh.FAILED_PAYLOAD]["handoff_id"] == result["handoff_id"]
+    assert reason in notice["prompt"]
+    assert "call HandOffSession again, or tell the owner why you cannot" in notice["prompt"]
+
+
+async def test_1419_the_notice_runs_after_the_held_messages_and_only_once():
+    from app.db import session_moves
+    _chat()
+    sh.request("s1", "DesktopWorker")
+    pending = sh.pending_for("s1")
+    session_moves.append_held("s1", {"id": "held-1", "source": "user", "prompt": "one", "profile_id": "default"})
+    pending.expires_at = 1
+    with patch.object(sh, "busy_state", return_value={"running": True, "tasks": [], "queued": 0, "wake": False}), \
+            patch.object(sh, "_record", AsyncMock()):
+        await sh.run_pending("s1")
+        await _notice_runs()
+        # The same failed hand-off ended again (a retry or a restart) adds nothing.
+        await sh._end_here("s1", pending, "Hand-off to DesktopWorker failed: again.", release=False)
+        await _settle(lambda: False, rounds=20)
+    prompts = _queued_prompts()
+    assert prompts[0] == "one" and len(prompts) == 2 and "still busy" in prompts[1]
+
+
+async def test_1419_an_expired_agent_move_found_at_restart_tells_the_agent_once():
+    from app.db import session_moves
+    _chat()
+    session_moves.save("s1", target_id="dev-gaming", label="DesktopWorker", note="", requested_by="agent",
+                       requested_at=time.time() - 700, expires_at=time.time() - 100, handoff_id="move-1")
+    with patch.object(sh, "busy_state", return_value={"running": False, "tasks": [], "queued": 0, "wake": False}), \
+            patch.object(sh, "_record", AsyncMock()):
+        await sh.resume_queued()
+        await sh.resume_queued()
+    notice = await _notice_runs()
+    assert notice["command_id"] == sh.FAILED_COMMAND_PREFIX + "move-1"
+
+
+@pytest.mark.parametrize("case", ["owner", "stopped", "archived", "moved"])
+async def test_1419_no_notice_for_an_owner_move_a_stopped_or_archived_chat_or_a_move_that_landed(case):
+    from app.core.task_registry import task_registry
+    from app.db import wakeups
+    _chat()
+    if case == "owner":
+        with patch.object(sh, "busy_state", return_value={"running": False, "tasks": [], "queued": 0, "wake": False}), \
+                patch.object(sh, "_open_prompt", return_value=False), \
+                patch.object(sh, "_record", AsyncMock()), \
+                patch("app.api.sessions.move_session_to", AsyncMock(side_effect=HTTPException(409, "offline"))), \
+                patch.object(sh, "_owner_now", return_value=None):
+            await sh.queue_move("s1", "DesktopWorker")
+            assert await _settle(lambda: sh.pending_for("s1") is None and "s1" not in sh._running)
+    elif case == "stopped":
+        task_registry.mark_user_stopped("s1")
+        try:
+            await _agent_move_ends("move")
+        finally:
+            task_registry.clear_user_stop("s1")
+    elif case == "archived":
+        await _agent_move_ends("move", archived=True)  # archived after the move was queued
+    else:
+        await _agent_move_ends("move", owner="dev-gaming")
+    await _settle(lambda: False, rounds=20)
+    assert _notices() == [] and wakeups.get_session_wakeups("s1") == []
+
+
+async def test_1419_a_hand_off_the_agent_cancelled_starts_no_turn():
+    from app.db import wakeups
+    _chat()
+    sh.request("s1", "DesktopWorker")
+    pending = sh.pending_for("s1")
+    assert sh.cancel("s1")
+    await sh._end_here("s1", pending, "Hand-off to DesktopWorker failed: x", release=False)
+    assert _notices() == [] and wakeups.get_session_wakeups("s1") == []
+
+
+@pytest.mark.parametrize("published", ["notice", "held"])
+@pytest.mark.parametrize("failure", ["timeout", "move"])
+async def test_1419_a_retry_the_moment_a_turn_is_published_queues_a_new_move(failure, published):
+    """A claimer may start the notice (or a held message) the instant it is
+    inserted, before any kick: HandOffSession there must queue a new move,
+    and that move must outlive the end of the failed one."""
+    from app.db import session_moves
+    _chat()
+    retries = []
+
+    def _retry():
+        retries.append(sh.request("s1", "DesktopWorker"))
+
+    def _notice_published():
+        if published == "notice" and not retries:
+            _retry()  # the instant the notice is published
+        return "real"
+
+    sh.request("s1", "DesktopWorker")
+    if published == "held":
+        session_moves.append_held("s1", {"id": "held-1", "source": "user", "prompt": "one", "profile_id": "default"})
+    with _submit_for_notice(_notice_published), _after_held("one", _retry):
+        first = await _agent_move_ends(failure)
+        await _notice_runs()
+    [retry] = retries
+    assert retry["handoff_id"] != first["handoff_id"]
+    assert "is queued" in retry["message"]
+    assert sh.pending_for("s1") is not None and sh.pending_for("s1").handoff_id == retry["handoff_id"]
+    assert (session_moves.get("s1") or {}).get("handoff_id") == retry["handoff_id"]
+
+
+async def test_1419_a_held_list_is_sent_here_whole_when_its_first_message_queues_a_new_move():
+    """Held messages A and B: A's turn calls HandOffSession the moment A is
+    published. B still goes here, as the outcome says, not into the new move."""
+    from app.db import session_moves
+    _chat()
+    retries = []
+    sh.request("s1", "DesktopWorker")
+    for n, text in enumerate(("one", "two")):
+        session_moves.append_held("s1", {"id": f"held-{n}", "source": "user", "prompt": text, "profile_id": "default"})
+    with _after_held("one", lambda: retries.append(sh.request("s1", "DesktopWorker"))):
+        await _agent_move_ends("move")
+        await _notice_runs()
+    [retry] = retries
+    assert _queued_prompts()[:2] == ["one", "two"]
+    assert (session_moves.get("s1") or {}).get("handoff_id") == retry["handoff_id"]
+    assert session_moves.get("s1")["held"] == []
+
+
+async def test_1419_an_end_whose_database_write_fails_once_is_retried_and_tells_the_agent():
+    from app.db import session_moves
+    _chat()
+    real = session_moves.take_ended
+    calls = []
+
+    def _flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("database unavailable")
+        return real(*args, **kwargs)
+
+    with patch.object(session_moves, "take_ended", side_effect=_flaky), \
+            patch.object(sh, "END_RETRY_DELAYS", (0,), create=True):
+        result = await _agent_move_ends("move")
+        notice = await _notice_runs()
+    assert notice["command_id"] == sh.FAILED_COMMAND_PREFIX + result["handoff_id"]
+    assert session_moves.get("s1") is None and sh.pending_for("s1") is None
+    # A restart finds no move to resume and no second notice to send.
+    with patch("app.api.sessions.move_session_to", AsyncMock()) as move:
+        await _restart()
+        await _settle(lambda: False, rounds=20)
+    move.assert_not_awaited()
+    assert len(_notices()) == 1
+
+
+async def test_1419_a_notice_refused_admission_is_retried_and_delivered_once():
+    from app.core import wakeup_service
+    _chat()
+    refused = []
+
+    def _once_no_turn():
+        refused.append(1)
+        return "none" if len(refused) == 1 else "real"  # e.g. the missing working directory breaker
+
+    with _submit_for_notice(_once_no_turn), patch.object(wakeup_service, "_RETRY_BASE_SECONDS", 0.01):
+        result = await _agent_move_ends("move")
+        notice = await _notice_runs()
+        await _settle(lambda: False, rounds=20)
+    assert refused and len(_notices()) == 1
+    assert notice["command_id"] == sh.FAILED_COMMAND_PREFIX + result["handoff_id"]
+
+
+async def test_1419_a_stop_before_the_notice_runs_holds_across_a_restart():
+    from app.core.task_registry import task_registry
+    from app.db import turns
+    _chat()
+    with _submit_for_notice(_never_delivered):
+        await _agent_move_ends("move")
+        await _settle(lambda: False, rounds=20)
+    assert _notices() == []
+    # The owner presses Stop before the notice ran; then the worker restarts.
+    turns.read_stop_receipt("s1")
+    task_registry.mark_user_stopped("s1")
+    await _restart()
+    await _settle(lambda: False, rounds=30)
+    assert _notices() == []
+
+
+def _rows_of(session_id):
+    """Every table that still has a row of ``session_id``."""
+    from app.db.base import get_db
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        left = []
+        for table in [row["name"] for row in cursor.fetchall()]:
+            cursor.execute(f"PRAGMA table_info({table})")
+            if any(column["name"] == "session_id" for column in cursor.fetchall()):
+                cursor.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE session_id=%s", (session_id,))
+                if cursor.fetchone()["n"]:
+                    left.append(table)
+    return left
+
+
+async def test_1419_deleting_the_chat_with_the_notice_pending_leaves_nothing():
+    from app.db import sessions
+    _chat()
+    with _submit_for_notice(_never_delivered):
+        await _agent_move_ends("move")
+        await _settle(lambda: False, rounds=20)
+    assert sessions.delete_session("s1")
+    assert _rows_of("s1") == []
+    await _restart()
+    await _settle(lambda: False, rounds=30)
+    assert _rows_of("s1") == []
