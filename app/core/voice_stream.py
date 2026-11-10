@@ -708,18 +708,25 @@ class VoiceStream:
         user = self.pending["user"].rstrip()
         return bool(user) and not is_noise(user) and not user.endswith("?") and is_backchannel(self.pending["assistant"])
 
-    async def flush(self, *, keep_reply: bool = False, request_id: str | None = None):
+    async def flush(self, *, keep_reply: bool = False, request_id: str | None = None,
+                    span: tuple[int, int] | None = None) -> bool:
         """Store the pending exchange as one voice turn.
 
         ``keep_reply`` stores only the caller's words and keeps a reply that is
         still being spoken pending, so a handoff never cuts it in two (#1798).
         ``request_id`` is the chat request those words are sent as: recorded
-        on the stored caller message, if this flush writes one.
+        on the stored caller message, if this flush writes one. With ``span``
+        (the transcript seqs a handoff captured, exclusive start and inclusive
+        end) it is recorded only while the pending caller words are still
+        exactly that span: none of it stored yet and no caller words after it.
+        Returns whether the identity was recorded (#1265).
         """
         # Checkpoint, handoff and speaker changes can flush concurrently. Keep
         # their durable turns in arrival order, including during barge-in.
         async with self.flush_lock:
-            if request_id is not None:
+            tagged = request_id is not None and (
+                span is None or (self.stored_seq <= span[0] and self.last_user_seq <= span[1]))
+            if tagged:
                 self.pending_request_id = request_id
             user, assistant = self.pending["user"], self.pending["assistant"]
             if keep_reply:
@@ -729,6 +736,7 @@ class VoiceStream:
                 self.pending = {"user": "", "assistant": ""}
                 self.reply_starts, self.reply_timed = [], True
             await self._store(user, assistant, new_reply=not keep_reply)
+            return tagged
 
     async def _store(self, user: str, assistant: str, *, new_reply: bool) -> None:
         """Record one exchange; the caller holds ``flush_lock``."""
@@ -945,7 +953,8 @@ class VoiceStream:
             await self.flush()
 
     async def run_delegation(self, delegation_id: str, entries=None, *, file_note: str = "", uploads: dict | None = None,
-                             request_id: str | None = None, alone: bool = False):
+                             request_id: str | None = None, alone: bool = False,
+                             span: tuple[int, int] | None = None):
         """Send one request to the chat agent.
 
         ``request_id`` is the identity typed text was already stored with; a
@@ -957,6 +966,9 @@ class VoiceStream:
         identity, since its checkpoint would hold caller words another message
         shows, and this message's rewind stays refused. (The voice's own
         replies are call-only rows the engine never had as messages.)
+        ``span`` is the transcript range a spoken handoff captured: if those
+        caller words were stored or joined by later ones before this handoff
+        stores them, the request also goes without its identity.
         """
         stored = request_id is not None
         request_id = request_id or new_call_request_id()
@@ -981,7 +993,10 @@ class VoiceStream:
                 return
             # Store the request before the chat turn starts, but not the reply
             # the voice is speaking right now: it is stored whole once spoken.
-            await self.flush(keep_reply=True, **({} if stored else {"request_id": request_id}))
+            if stored:
+                await self.flush(keep_reply=True)
+            elif not await self.flush(keep_reply=True, request_id=request_id, span=span):
+                sent_id = None
             # The caller's own words: what an owning worker records (#700).
             spoken = " ".join(e["text"].strip() for e in conversation
                               if e["role"] == "user" and not is_noise(e["text"])).strip().removeprefix(TYPED_MESSAGE_PREFIX)
@@ -1041,6 +1056,7 @@ class VoiceStream:
         # owns the earlier history.
         entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
         alone = self.stored_seq <= self.delegated_seq
+        span = (self.delegated_seq, self.transcript_seq)
         self.delegated_seq = self.transcript_seq
         for extra in ids[1:]:
             try:
@@ -1064,7 +1080,7 @@ class VoiceStream:
                 # A quick status question reads the app's task state directly.
                 await self.answer_status(ids[0])
                 return
-        await self.run_delegation(ids[0], entries, alone=alone)
+        await self.run_delegation(ids[0], entries, alone=alone, span=span)
 
     async def upstream_frames(self):
         if self.first_frame is not None:

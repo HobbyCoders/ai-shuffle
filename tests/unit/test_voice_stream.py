@@ -1041,3 +1041,55 @@ def test_split_attachment_note_reads_only_a_whole_note():
     from app.core.voice_prompts import attachment_note, split_attachment_note
     assert split_attachment_note("Read" + attachment_note(["/up/a", "/up/b"])) == ("Read", ["/up/a", "/up/b"])
     assert split_attachment_note("Read") == ("Read", [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply,expected", [
+    ("It is sunny and warm today.", [("Request A.", "It is sunny and warm today.", None), ("Message B.", None, None)]),
+    ("Sure.", [("Request A. Message B.", None, None)]),  # A listening sound joins B to A's words.
+])
+async def test_a_handoff_whose_words_changed_meanwhile_gives_no_message_its_identity(monkeypatch, reply, expected):
+    """Request A is captured, then the voice answers and the caller says B
+    while the merged handoff is acknowledged: that stores A without an
+    identity, or joins B to A's words. A's identity must not land on words
+    its request does not hold, and the request goes without it, so a rewind
+    of either message is refused (#1265)."""
+    from app.core import turn_recorder
+    call = stream()
+    call.upstream = Upstream([])
+    record, delegate = AsyncMock(), AsyncMock(return_value="Done.")
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    monkeypatch.setattr(call, "settle_speech", AsyncMock())
+    await call.caption("user", "Request A.")
+    sent = []
+
+    async def send(event):
+        sent.append(event)
+        if event.get("content") == voice_stream.MERGED_REQUEST_NOTE:
+            await call.caption("assistant", reply)
+            await call.caption("user", "Message B.")
+    monkeypatch.setattr(call, "send", send)
+    call.settling = ["first", "second"]
+    await call.dispatch_when_settled()
+    stored = [(c.args[1], c.args[2], c.kwargs.get("call_request_id")) for c in record.await_args_list]
+    assert stored == expected
+    assert delegate.await_args.kwargs["request_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_handoff_whose_words_are_unchanged_keeps_its_identity(monkeypatch):
+    from app.core import turn_recorder
+    call = stream()
+    call.upstream = Upstream([])
+    record, delegate = AsyncMock(), AsyncMock(return_value="Done.")
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    monkeypatch.setattr(call, "settle_speech", AsyncMock())
+    monkeypatch.setattr(call, "send", AsyncMock())
+    await call.caption("user", "Request A.")
+    call.settling = ["first", "second"]
+    await call.dispatch_when_settled()
+    record.assert_awaited_once()
+    assert record.await_args.args[1] == "Request A."
+    assert record.await_args.kwargs["call_request_id"] == delegate.await_args.kwargs["request_id"] is not None
