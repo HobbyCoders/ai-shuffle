@@ -2690,9 +2690,11 @@ class ChatWebSocketHandler:
             return
         if not await self._authorize_mobile_session(self.current_session_id):
             return
-        # Pending questions are read straight from the shared
-        # ``pending_interactions`` table, which every install sees — no
-        # relay, so the reply is always authoritative (never `stale`).
+        # Read from this worker's ``pending_interactions`` table. For a chat
+        # that runs on another worker that table is a synced copy, so a row
+        # can arrive after this read; the worker then sends the
+        # ``session_prompts`` signal (app/network/startup.py) and the open
+        # chat asks again.
         await self.send_json({
             "type": "pending_questions",
             "session_id": self.current_session_id,
