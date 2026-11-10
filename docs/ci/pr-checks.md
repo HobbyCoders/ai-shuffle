@@ -32,7 +32,7 @@ These workflows retain manual dispatch and also run on unfiltered
 - `ci-frontend.yml`: four full frontend Vitest shards, production build (including
   mobile postbuild), frontend/mobile typechecks, mobile tests, contracts/docs/audit,
   tools/WebCrypto vectors, Browser MCP, `Select UI journeys` with the
-  `UI journeys (N/16)` shards it starts, and `Visual regression (4 viewports)`
+  `UI journeys (N/18)` shards it starts, and `Visual regression (4 viewports)`
   run in parallel. The stable `JavaScript package checks` aggregate requires
   every branch to succeed (the journeys may be skipped only when the selection
   succeeded and chose none), so the selected journeys and the visual comparison
@@ -327,9 +327,9 @@ unsharded file inventory without duplicates or omissions, including dynamic docs
 consumers. The five-minute aggregate fails on failed, cancelled, skipped or missing
 branches. Browser MCP runs independently on another standard runner with a
 15-minute job budget and feeds that aggregate. Managed Chromium uses a
-lockfile-keyed browser cache, while OS dependencies are installed on every run.
-The three workspace cases reuse the same browser-cache policy and always install
-OS prerequisites; each retains its 25-minute limit and real-browser/UI opt-ins.
+lockfile-keyed browser cache. Its OS dependencies come from a package cache
+(below) or, on a miss, from apt. The three workspace cases and every UI journey
+shard reuse the same browser and package caches; each retains its 25-minute limit and real-browser/UI opt-ins.
 Windows desktop shards retain 60-minute limits, cache pip/npm downloads by
 requirements/lockfiles, and build independently before Node's native sharding.
 No runner shares mutable `node_modules`; mobile links the frontend install via
@@ -358,6 +358,21 @@ installs only missing packages (`--no-upgrade` semantics), reusing runner-image
 libraries rather than downloading newer candidates, and refreshes only signed
 Ubuntu indexes without translations. apt still verifies and installs missing
 packages normally; no system directories or package databases are cached.
+The Chromium jobs (Browser MCP, the workspace cases and every UI journey shard)
+pass `--debs ~/.cache/chromium-debs`, which `actions/cache` keys on the hosted
+image (`ImageOS`, `ImageVersion`), the runner architecture, browser-mcp's
+playwright-core version and the helper itself. On a miss apt runs as above, and
+after it succeeds the helper copies the `.deb` files that install downloaded,
+with their package names, into that directory for the cache; a run that
+downloaded nothing records no cache. On a hit it installs those same signed
+files with `apt-get install` given an empty source list (no index refresh, no
+archive traffic) in one 25-second bounded attempt (it takes 4–12 seconds), then checks that every recorded
+package is installed. apt refuses before changing anything when a file needs a
+download, a downgrade or a dependency the image lacks; any failure falls back to
+the normal two apt attempts, starting with `dpkg --configure -a`. The miss path
+refreshes about 27 MB of indexes and fetches about 21 MB of fonts and libraries:
+about 22 seconds normally, but 73–181 seconds on 3 to 6 of 16 journey shards per
+main run in November 2026, and a run waits for its slowest shard.
 Its elevated supervisor kills the entire attempt's process group (including root
 apt children) with a ten-second termination grace and logs elapsed install times.
 Lock waiting and `dpkg --configure -a` after an interrupted attempt are included
@@ -1072,7 +1087,7 @@ and shell overrides on this check, and keeps `contracts` in both the aggregate's
 `needs` and its expected-results list.
 This validates the selection metadata the pull request selection below relies on.
 
-`Select UI journeys` (`python3 -m scripts.devloop.ci matrix --shards 16`) decides
+`Select UI journeys` (`python3 -m scripts.devloop.ci matrix --shards 18`) decides
 what a run needs and prints three outputs: `only` (`*` for every journey, else
 the journey names), `shards` (the shard numbers that got a file) and `key`
 (`all`, or a hash of the selected names, which names the selection in a pass
@@ -1117,21 +1132,21 @@ each repeats the same split with `--only`. With an empty selection the
 success in every other case. A regression in a journey the pull request did
 not select is caught by the full run on main, before the nightly is published.
 
-`UI journeys (N/16)`: each shard installs the Python and JavaScript
+`UI journeys (N/18)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
-playwright-core build, cached), builds and stamps the desktop UI, then runs
-`python -m scripts.devloop.ci journeys --shard N/16 --only <selection> --retry-failures`. That starts a fresh dev
+playwright-core build and its OS packages, both cached), builds and stamps the
+desktop UI, then runs
+`python -m scripts.devloop.ci journeys --shard N/18 --only <selection> --retry-failures`. That starts a fresh dev
 instance (`python -m scripts.devloop up --ci`: real app, its own throwaway
 PostgreSQL 16 from the runner's `/usr/lib/postgresql/16/bin`, seed data, the
 scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
-`down`. The plan step splits the selected journey files across the sixteen shards by
+`down`. The plan step splits the selected journey files across the eighteen shards by
 measured hosted runtime, longest first, each file exactly once
-(`python -m scripts.devloop.ci plan --shards 16 --only <selection>`). The checked-in medians are
+(`python -m scripts.devloop.ci plan --shards 18 --only <selection>`). The checked-in medians are
 in `scripts/devloop/journey_weights.json`, when the current unfiltered `--list`
 case count matches the recorded inventory. New files and changed case counts
-use the current count times the measured median seconds per case, with explicit
-conservative floors. For stale measurements the estimate is also at least the
+use the current count times the measured median seconds per case. For stale measurements the estimate is also at least the
 old runtime, scaled by the old per-case cost when the case count grows. Thus a
 grown slow file cannot silently keep its old short runtime or become cheaper
 because of the global median. Only that file switches to the fallback; matching
@@ -1144,7 +1159,7 @@ job log and step summary (excluding instance setup/teardown); stdout remains
 the JSON partition consumed by the workflow. A shard with no file stops after
 the plan, and a plan with no journey file at all fails.
 
-Sixteen free standard-runner shards preserve the original 1110-second journey
+Eighteen free standard-runner shards preserve the original 1110-second journey
 bound and all operational allowances: 30 seconds of setup, the full 180-second
 retry phase, and 180 seconds of teardown inside the unchanged 1500-second step.
 The planning budget additionally reserves the 120-second prediction error allowed
@@ -1161,17 +1176,31 @@ branches. Sixteen shards then still peaked at 944.27 seconds, because one file
 filled a shard by itself. Those two and `sidebar-truth` now run as two journey
 files each: the cases live in `<name>.cases.mjs`, `<name>.journey.mjs` runs the
 cases its `FIRST_HALF` names and `<name>-2.journey.mjs` runs every other one
-(`lib/split.mjs`). All sixteen shards now plan at about 13.5 step minutes with
-over 200 seconds of headroom. The six halves use planning budgets in
-`UNMEASURED_BUDGET_FLOORS` until a green main run is refreshed into the
-weights. A regression test refuses any file estimated above 600 seconds: split
-it the same way. `queue-while-busy` was split like that when three cases joined
-it: its first half keeps the seven cases the hosted measurement timed, so that
-measurement still applies, and the new cases run in `queue-while-busy-2`. The one-percent-refresh regression also
-preserves the uncertainty reserve when it adds two new journeys. Older green runs with changed app/journey
-workloads cannot refresh these measurements: the guarded producer refuses them.
-New or grown files keep their conservative case-count fallbacks until a complete
-matching green main run supplies fresh measurements.
+(`lib/split.mjs`). A regression test refuses any file estimated above 600
+seconds: split it the same way. `queue-while-busy` was split like that when
+three cases joined it: its first half keeps the seven cases the hosted
+measurement timed, so that measurement still applies, and the new cases run in
+`queue-while-busy-2`. The one-percent-refresh regression also
+preserves the uncertainty reserve when it adds two new journeys.
+
+The Nov 10 refresh from green main runs `42759196182` and `42761789009` gave the
+six halves measured medians (2742 seconds in total, against 3030 seconds of
+guessed budgets) and caught journeys that had grown well past their old weights:
+`open-unloaded-chat` 482 → 554 seconds, `stop-holds-the-reader` 425 → 501 and
+`shell-geometry` 75 → 124. On those runs the slowest of sixteen shards ran 76–117
+seconds over its plan, and about 12,570 seconds of journeys over sixteen shards
+is at least 786 seconds each before about 150 seconds of setup, so the slowest
+job took about 19.5 minutes. Eighteen shards plan at about 13.1 step minutes
+(about 756 seconds of journeys at most) with about 234 seconds of headroom; that
+includes `queue-while-busy-2` and the grown `new-worktree-session` and
+`stop-holds-the-reader`, which use the case-count fallback until refreshed.
+Runner minutes stay about flat: 16 jobs of about 17.4 minutes before, 18 of
+about 15.2 after, since the journey work is the same and setup is a small share
+of each job. Those two runs' shared runtime differs slightly (one backend module
+and the terminal panel), so the stricter per-file workload rule below would
+accept only one of them from either revision, and neither from later trees. The
+checked-in medians stay as measured and reviewed; the next refresh should use
+runs on one revision.
 
 The earlier 9/10/11-shard changes guarded point estimates but not their allowed
 error. Across eleven main-suite runs on Nov 7–8, the slowest measured steps took
@@ -1183,28 +1212,47 @@ current or reserve prediction uncertainty. Refreshed matched measurements and
 the stronger planning bound address both causes; the frozen historical
 calibration remains unchanged. Continued hosted headroom is tracked in #1197.
 
-Refresh after journey runtime changes, using a few recent completed green
-`main-suite.yml` and `ci-frontend.yml` run IDs with authenticated `gh`:
-`python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]`. This reads
+Refresh after journey runtime changes, using one or more recent green
+`main-suite.yml` run IDs with authenticated `gh`, in a checkout of the runs'
+revision (for example a detached checkout of the newest run's commit):
+`python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]`
+(`--out` writes elsewhere and leaves the checked-in file alone). A matching
+case count does not show that a timing still describes the code: a journey, or
+the runtime under it, can get slower with the same cases. So each run's
+revision is compared with the checkout (committed, uncommitted and untracked
+changes) over the journey workload: `app`, `fluid`, `frontend`, `browser-mcp`,
+`tools`, `requirements*.txt`, `scripts/devloop` (including `ci.py`) and
+`.github/workflows/ci-frontend.yml`, without documentation, unit tests, the
+weights file and the journey selection metadata. The workflow and `ci.py` count
+because they set how journeys run (for example `JOURNEY_SHEETS`), so editing
+either drops every earlier sample. A changed
+journey file, or a module it reaches by relative import (for example
+`runner.mjs`, `lib/*.mjs` or its `.cases.mjs`), drops that run's samples for
+the journeys that import it. Any other workload change, or a revision this
+checkout cannot compare, drops every sample from that run before its logs are
+downloaded. This reads
 timestamped whole-job logs from the runs' logs archives, measures each
 `[ci] running <file>` through its own completed case-count footer (including
 the last journey, excluding instance teardown), and stores median seconds per
 journey. A footer may include the runner's `, N known bug` clause only when
-passed plus known-bug cases equals the positive total; a real failure or
-mismatched count is still refused. The fallback is the median of each sample's
-seconds divided by its total case count, including known-bug cases. Use completed
-green runs on **attempt 1**, with no journey retries.
-All re-runs (`attempt != 1`) are refused: GitHub's logs archive contains only
-the latest attempt's jobs, so it cannot prove earlier attempts had no retries.
-A retry marker anywhere in a journey log, including after unterminated output,
-also refuses the run. Each run must measure every `*.journey.mjs` in the current
-checkout exactly once, with no extra journeys; each measured case count must
-also match this checkout's unfiltered `--list` count. Both planning and refresh
-refuse unreadable case lists rather than fabricating a one-case inventory. Missing coverage
-cannot be filled by another run or by an already-incomplete weights file. Use
-complete runs whose journey inventory and case counts match this checkout. Failed, incomplete,
-duplicate, partial or retried measurements are refused with a clear message
-before replacing the file. Estimates are not first-attempt time limits: keep
+passed plus known-bug cases equals the positive total. The fallback is the
+median of each sample's seconds divided by its total case count, including
+known-bug cases. Each run must be a completed green push to `main` from
+`main-suite` on **attempt 1**: re-runs (`attempt != 1`) are refused because
+GitHub's logs archive contains only the latest attempt's jobs. Pull request and
+other runs are refused because their headSha does not name the checkout.
+Within a run, a shard job with a retry marker anywhere in its log (including
+after unterminated output), or with an unfinished or failed journey, adds no
+samples at all; a duplicate measurement refuses the run. A sample counts only
+when its case count matches the file's current unfiltered `--list` count;
+both planning and refresh refuse unreadable case lists rather than fabricating
+a one-case inventory. Runs may each lack files (a push to main runs only the
+journeys its change selects), so samples are combined per file across runs. A
+file with no usable sample keeps its existing entry and the case count it was
+measured at, so planning still treats it as stale, and a file without one
+keeps the case-count fallback. Files no longer in the checkout are dropped;
+stderr names every skipped sample and kept file. Nothing is written when no run
+supplies a usable sample. Estimates are not first-attempt time limits: keep
 measurements current and check headroom against the unchanged 25-minute journey
 step on the five standard hosted runners. A shard's first pass must finish
 within 19 minutes to keep the full retry budget.

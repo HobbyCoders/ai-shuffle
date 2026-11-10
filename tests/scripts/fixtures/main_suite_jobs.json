@@ -1,5 +1,5 @@
 {
- "_source": "Job names of a green push run of main-suite (run 42795525982), reshaped to this gate: the called workflows' own verdict jobs skipped, the old watcher and reporter jobs gone. The selection job's step that names its shards is added, as ci-frontend.yml now names it.",
+ "_source": "Job names of a green push run of main-suite (run 42795525982), reshaped to this gate: the called workflows' own verdict jobs skipped, the old watcher and reporter jobs gone. The selection job's step that names its shards is added, as ci-frontend.yml now names it. The journey shards follow the 18-shard plan: the 16 shards of that run are listed as the 18 names GitHub gave the shards of an 18-shard run (pull request run 42856985149), and the selection names all 18.",
  "jobs": [
   {
    "id": 1,
@@ -265,7 +265,7 @@
      "conclusion": "success"
     },
     {
-     "name": "Selected UI journey shards: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]",
+     "name": "Selected UI journey shards: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18]",
      "status": "completed",
      "conclusion": "success"
     }
@@ -279,97 +279,109 @@
   },
   {
    "id": 48,
-   "name": "javascript / UI journeys (1/16)",
+   "name": "javascript / UI journeys (1/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 49,
-   "name": "javascript / UI journeys (10/16)",
+   "name": "javascript / UI journeys (10/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 50,
-   "name": "javascript / UI journeys (11/16)",
+   "name": "javascript / UI journeys (11/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 51,
-   "name": "javascript / UI journeys (12/16)",
+   "name": "javascript / UI journeys (12/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 52,
-   "name": "javascript / UI journeys (13/16)",
+   "name": "javascript / UI journeys (13/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 53,
-   "name": "javascript / UI journeys (14/16)",
+   "name": "javascript / UI journeys (14/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 54,
-   "name": "javascript / UI journeys (15/16)",
+   "name": "javascript / UI journeys (15/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 55,
-   "name": "javascript / UI journeys (16/16)",
+   "name": "javascript / UI journeys (16/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 56,
-   "name": "javascript / UI journeys (2/16)",
+   "name": "javascript / UI journeys (17/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 57,
-   "name": "javascript / UI journeys (3/16)",
+   "name": "javascript / UI journeys (18/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 58,
-   "name": "javascript / UI journeys (4/16)",
+   "name": "javascript / UI journeys (2/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 59,
-   "name": "javascript / UI journeys (5/16)",
+   "name": "javascript / UI journeys (3/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 60,
-   "name": "javascript / UI journeys (6/16)",
+   "name": "javascript / UI journeys (4/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 61,
-   "name": "javascript / UI journeys (7/16)",
+   "name": "javascript / UI journeys (5/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 62,
-   "name": "javascript / UI journeys (8/16)",
+   "name": "javascript / UI journeys (6/18)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 63,
-   "name": "javascript / UI journeys (9/16)",
+   "name": "javascript / UI journeys (7/18)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 78,
+   "name": "javascript / UI journeys (8/18)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 79,
+   "name": "javascript / UI journeys (9/18)",
    "status": "completed",
    "conclusion": "success"
   },

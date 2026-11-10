@@ -16,6 +16,7 @@ import { runJourney } from './runner.mjs';
 let caretBeforeSwitch = 5;
 import {
 	SEEDED,
+	chatState,
 	composer,
 	expect,
 	gotoApp,
@@ -51,6 +52,11 @@ async function expectAtTail(page, what) {
  * cases judge the long chat across a switch away and back; a first open of a
  * short chat from another chat flashes the loading placeholder (#806), which no
  * marker may hide, and which open-unloaded-chat gains a case for once fixed.
+ *
+ * Returns what that open showed: the chat's session tag and its last row. The
+ * seeded short chat is shared and writable (many journeys send into it, one
+ * clears it), so a case that comes back to it judges it against what it showed
+ * here, never against the seed's original rows.
  */
 async function warmOtherChat(page, status) {
 	await gotoApp(page, status);
@@ -58,6 +64,9 @@ async function warmOtherChat(page, status) {
 	await page.waitForTimeout(1000);
 	await openFromSidebar(page, SEEDED.no_project);
 	await waitChatOpen(page, { messagesAtLeast: 2, hold: 1000 });
+	const shown = { session: (await chatState(page)).session, row: await lastRowInPage(page) };
+	expect(shown.row, `the other chat shows its rows (${JSON.stringify(shown)})`);
+	return shown;
 }
 
 await runJourney({
@@ -66,10 +75,10 @@ await runJourney({
 		{
 			name: 'away-and-back',
 			// Starts from the other chat, already opened once (warmOtherChat).
-			async setup({ page, status }) {
-				await warmOtherChat(page, status);
+			async setup(ctx) {
+				ctx.other = await warmOtherChat(ctx.page, ctx.status);
 			},
-			async act({ page, mark }) {
+			async act({ page, mark, other }) {
 				await mark('open the long chat (first time)');
 				await openFromSidebar(page, SEEDED.long);
 				await waitChatOpen(page, { messagesAtLeast: 50 });
@@ -78,8 +87,10 @@ await runJourney({
 				await mark('open another chat');
 				await openFromSidebar(page, SEEDED.no_project);
 				await waitChatOpen(page, { messagesAtLeast: 2 });
-				// In the transcript: the turn navigator shows the same question as its title.
-				await page.getByLabel('Conversation messages').getByText('What is 2 + 2?').waitFor();
+				// The same chat, back at the last row it showed before (it was read at its bottom).
+				const session = (await chatState(page)).session;
+				expect(session === other.session, `the other chat opened (${session}, want ${other.session})`);
+				await page.getByLabel('Conversation messages').locator(`[data-ui-row=${JSON.stringify(other.row)}]`).waitFor({ timeout: 5000 });
 
 				await mark('back to the long chat');
 				await openFromSidebar(page, SEEDED.long);

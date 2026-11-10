@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import urllib.error
 
@@ -436,6 +437,26 @@ def test_an_unreadable_selection_is_never_complete(change):
         with pytest.raises(SystemExit):
             watch(run)
         assert not run.cancelled
+
+
+def test_the_gate_expects_exactly_the_journey_shards_the_workflow_names():
+    # The shard count lives in the planner and in the selection command; the
+    # gate derives the shard names from the job's name template. All three and
+    # the recorded listing must agree, or main waits for shards that never appear.
+    hosted = int(re.search(r"^HOSTED_SHARDS = (\d+)$", (ROOT / "scripts/devloop/ci.py").read_text(),
+                           re.MULTILINE)[1])
+    jobs = workflow("ci-frontend.yml")["jobs"]
+    select = next(step for step in jobs["journey-plan"]["steps"] if step.get("id") == "select")
+    assert f"--shards {hosted} " in select["run"]
+    assert jobs["journeys"]["name"] == f"UI journeys (${{{{ matrix.shard }}}}/{hosted})"
+    expected = [f"javascript / UI journeys ({shard}/{hosted})" for shard in range(1, hosted + 1)]
+    assert SHARDS == expected
+    without = [job for job in listing() if job["name"] not in SHARDS]
+    assert gate.missing(PLAN, selection(without, list(range(1, hosted + 1)))) == expected
+    # Shards named for another count are not the selected shards: every real one stays missing.
+    stale = [{"id": 800 + shard, "name": f"javascript / UI journeys ({shard}/16)", "status": "completed",
+              "conclusion": "success"} for shard in range(1, 17)]
+    assert gate.missing(PLAN, selection(without + stale, list(range(1, hosted + 1)))) == expected
 
 
 def test_the_selection_job_names_its_choice_in_a_step():
