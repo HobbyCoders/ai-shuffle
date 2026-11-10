@@ -102,6 +102,7 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
         "/review/slowreload": '<title>Reload</title><form method="post" action="/review/slowreload"><button>Save</button></form>',
         "/review/stalledreload": '<title>Reload</title><form method="post" action="/review/stalledreload"><button>Save</button></form>',
         "/review/latereload": '<title>Reload</title><button onclick="setTimeout(()=>location.reload(),400)">Later</button>',
+        "/review/slowpage": '<title>Slow page</title><p>Slow page</p>',
       };
       let html = pages[url.pathname];
       if (url.pathname === "/review/loading") {
@@ -119,6 +120,8 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
       if (url.pathname === "/review/slowreload" && req.method === "POST") setTimeout(send, 400);
       // Answered after the 2s ref-action budget: the click lands long before the reload.
       else if (url.pathname === "/review/stalledreload" && req.method === "POST") setTimeout(send, 2500);
+      // Answered after the 2s ref-action budget, like stalledreload.
+      else if (url.pathname === "/review/slowpage") setTimeout(send, 2500);
       else send();
       return;
     }
@@ -1348,6 +1351,19 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       }
       await page.evaluate(() => 0);
       expect(await keyEvents(page, "Delete")).toEqual(["down Delete page", "up Delete page"]);
+    }, 15000);
+    it("reports a key press whose focus started a navigation that outlasted the action as outcome_unknown", async () => {
+      // The first key press in a tab, so the press also turns its Page events on.
+      const home = session.currentTabId()!;
+      const tab = JSON.parse(firstText(await runTabs(session, { op: "create" }))).tab_id as string;
+      try {
+        const page = await load(`<input aria-label="Entry" onfocus="location.href='/review/slowpage'">`);
+        expect(body(await runAct(session, { kind: "key", ref: await ref("Entry"), key: "a" }))).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+        await page.waitForURL(/\/review\/slowpage$/, { timeout: 5000 });
+      } finally {
+        await runTabs(session, { op: "select", tab_id: home });
+        await runTabs(session, { op: "close", tab_id: tab });
+      }
     }, 15000);
     it("sends a chord's keys where the page moved focus between them, as Playwright's press does", async () => {
       // Control moves focus to the second field, so Control+A selects its text.

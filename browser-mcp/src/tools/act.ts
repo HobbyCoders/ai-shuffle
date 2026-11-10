@@ -252,15 +252,19 @@ async function watchNavigation(session: Session, deadline: number): Promise<{ se
  * page's own focus changes between them, as they do in Playwright's press, and
  * a failure releases exactly the keys whose keydown went out, without waiting
  * on a page that is still blocked. A navigation the keys started is waited for
- * as Playwright's press waits for it.
+ * as Playwright's press waits for it, and so is one the focus started: if it
+ * has not committed when the budget runs out, the press may have reached
+ * either page.
  */
 async function pressOnRef(session: Session, page: Page, locator: Locator, chord: string, markSent: () => void): Promise<void> {
   const deadline = performance.now() + REF_ACTION_TIMEOUT_MS;
-  await focusForKeys(locator, REF_ACTION_TIMEOUT_MS, markSent);
+  // Watching starts before the focus, which can start a navigation too, as it
+  // can in Playwright's press.
   const navigation = await watchNavigation(session, deadline);
   const send = (verb: "down" | "up", key: string) => raceWithTimeout(page.keyboard[verb](key), timeLeft(deadline), `keyboard.${verb}: Timeout ${REF_ACTION_TIMEOUT_MS}ms exceeded.`);
   const down: string[] = [];
   try {
+    await focusForKeys(locator, timeLeft(deadline), markSent);
     for (const key of chordKeys(chord)) {
       markSent();
       down.push(key);
