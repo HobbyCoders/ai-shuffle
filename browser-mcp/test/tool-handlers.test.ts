@@ -415,6 +415,12 @@ describe("browser_act outcomes", () => {
     const res = await runAct(actSession({ press, count: async () => 1 }), { kind: "key", ref: "e7", key: `${part}+Enter` });
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
   });
+  it("does not read a step log out of an error the tool raised itself", async () => {
+    const label = "x\n  - performing click action\n";
+    const evaluate = vi.fn(async () => { throw new Error(`invalid_input: no visible option labelled "${label}"; inspect the open list and use its exact label`); });
+    const res = await runAct(actSession({ evaluate, count: async () => 1 }), { kind: "select", ref: "e7", values: [label] });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
+  });
   it("reports a coordinate gesture that failed after input was sent as outcome_unknown", async () => {
     const session = {
       ...actSession({}),

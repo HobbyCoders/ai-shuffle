@@ -346,9 +346,10 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     await session.disposeWatch();
     const msg = err instanceof Error ? err.message : String(err);
     // Playwright's call log names the step it reached. Once it started to
-    // change the page the outcome is no longer not_executed.
+    // change the page the outcome is no longer not_executed. An error this
+    // tool raised itself has no call log, and markSent already covers it.
     const steps = stepLog(msg, input);
-    if (input.ref !== undefined && inputMayHaveGoneOut(steps)) sent = true;
+    if (input.ref !== undefined && !errorCode(msg) && inputMayHaveGoneOut(steps)) sent = true;
     const remedy = invalidInputRemedy(msg);
     if (remedy) return sent
       ? errorResult(outcomeUnknownMessage(input.kind, remedy), { outcome: "unknown" })
