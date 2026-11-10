@@ -2185,9 +2185,8 @@ async def report_settled_start(session_id, settled, outcome):
         if not built:
             return
         home, device, frame = built
-        from app.core import turn_scheduler
         if home:
-            await turn_scheduler.on_started_session_terminal(home, frame)
+            await deliver_started_report(home, frame)
             return
         from app.network import control
         await control.call(device, REPORT_ACTION, {"session_id": session_id, "report": frame},
@@ -2247,12 +2246,285 @@ def accept_remote_report(body, from_device):
 
 
 async def handle_remote_report(body, from_device):
-    """``orchestration-report`` control action: wake the assistant with the report."""
-    from app.core import turn_scheduler
+    """``orchestration-report`` control action: wake the assistant with the report.
+
+    The receipt that admits it is fixed at start; when the assistant has moved
+    to another worker since, the report is forwarded there (#1443).
+    """
     from app.db.async_database import run_sync
     home, frame = await run_sync(accept_remote_report, body, from_device)
-    await turn_scheduler.on_started_session_terminal(home, frame)
+    await deliver_started_report(home, frame)
     return {"delivered": True}
+
+
+# ---------------------------------------------------------------------------
+# Reports for an assistant another worker runs now (#1443)
+#
+# Each worker has its own database and ``turns`` is not synced, so a report
+# turn queued here for a chat that moved away would never run. The report is
+# kept in this worker's outbox (settled rows under REPORT_OUTBOX, never
+# runnable work) and sent to the worker that runs the chat until that worker
+# takes it. The receiver records the report's stable id in its inbox, so a
+# retry after a lost reply wakes the chat once.
+# ---------------------------------------------------------------------------
+
+FORWARD_REPORT_ACTION = "orchestration-report-forward"
+REPORT_OUTBOX = "orchestration-report-outbox"
+REPORT_INBOX = "orchestration-report-inbox"
+_FORWARD_PENDING = "report_forward_pending"
+_FORWARD_REFUSED = "report_forward_refused"
+_RECEIVED = "report_received"
+# A chat that keeps moving is followed this many workers, then refused.
+MAX_FORWARD_HOPS = 4
+_FORWARD_RETRY_SECONDS = (5, 15, 30, 60, 120, 300)
+_delivery_tasks: set = set()
+_report_locks: dict = {}
+
+
+def _report_lock(name):
+    """One outbox pass and one inbox delivery at a time, per event loop."""
+    loop = asyncio.get_running_loop()
+    lock = _report_locks.get((name, loop))
+    if lock is None:
+        lock = _report_locks[(name, loop)] = asyncio.Lock()
+    return lock
+
+
+def report_event_id(home, frame):
+    """One id per report: the started chat, the turn it reports, and its home."""
+    key = f"{home}:{frame.get('task_id')}:{frame.get('agent_message_turn_id')}"
+    return "orchestration:report:" + hashlib.sha256(key.encode()).hexdigest()
+
+
+def _report_owner(home):
+    """The worker that runs ``home`` when another one does, else None."""
+    from app.db import sessions
+    from app.network import control
+    row = sessions.get_session(home)
+    return control.owner_of(row) if row else None
+
+
+def _owe_forward(home, device, frame, hops):
+    """Keep the report in the outbox. One row per report id; True when new."""
+    from app.db import turns
+    from app.db.base import transaction
+    event_id = report_event_id(home, frame)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s", (REPORT_OUTBOX, event_id))
+        if cursor.fetchone():
+            return False
+        row = turns.enqueue_turn(REPORT_OUTBOX, "agent_message", command_id=event_id, payload={
+            "home": home, "device_id": device, "report": frame, "hops": hops,
+            "attempts": 0, "next_attempt_at": 0}, _conn=conn)
+        # Settled at birth, like the remote start receipts: never runnable.
+        cursor.execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW(), "
+                       "stop_reason=%s WHERE id=%s", (_FORWARD_PENDING, row["id"]))
+    return True
+
+
+def pending_forwarded_reports():
+    """Outbox rows still to deliver."""
+    from app.db import turns
+    from app.db.base import get_db
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND state='completed' AND stop_reason=%s "
+                       "ORDER BY insert_order", (REPORT_OUTBOX, _FORWARD_PENDING))
+        return [turns._row(row) for row in cursor.fetchall()]
+
+
+def _settle_forward(row_id, *, delivered=False, refused=None, attempts=None, device=None):
+    import time
+    from app.db.base import get_db
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if delivered:
+            cursor.execute("DELETE FROM turns WHERE id=%s AND session_id=%s", (row_id, REPORT_OUTBOX))
+            return
+        cursor.execute("SELECT payload FROM turns WHERE id=%s", (row_id,))
+        found = cursor.fetchone()
+        if not found:
+            return
+        payload = found["payload"]
+        payload = dict(json.loads(payload) if isinstance(payload, str) else payload or {})
+        if refused is not None:
+            payload["error"] = refused[:500]
+            cursor.execute("UPDATE turns SET stop_reason=%s, payload=%s WHERE id=%s",
+                           (_FORWARD_REFUSED, json.dumps(payload), row_id))
+            return
+        payload["attempts"] = attempts
+        payload["device_id"] = device or payload.get("device_id")
+        delay = _FORWARD_RETRY_SECONDS[min(max(attempts - 1, 0), len(_FORWARD_RETRY_SECONDS) - 1)]
+        payload["next_attempt_at"] = time.time() + delay
+        cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row_id))
+
+
+async def deliver_started_report(home, frame, *, hops=0):
+    """Wake ``home`` with a started chat's report on the worker that runs it.
+
+    Here when this worker runs it; otherwise the report goes to the outbox and
+    is sent to its owner, so nothing is queued on a worker that does not run
+    the chat (#1443). Also the path of the mirror case: a started chat that
+    moved away reports from its new worker to the one that still runs ``home``.
+    """
+    from app.core import turn_scheduler
+    owner = await asyncio.to_thread(_report_owner, home)
+    if owner is None:
+        await turn_scheduler.on_started_session_terminal(home, frame)
+        return
+    if hops >= MAX_FORWARD_HOPS:
+        raise ValueError("The chat this report is for keeps moving between workers; report not delivered.")
+    await asyncio.to_thread(_owe_forward, home, owner, frame, hops)
+    log.info("Report from started chat %s is for %s, which runs on %s: sending it there",
+             frame.get("task_id"), home, owner)
+    task = asyncio.create_task(deliver_forwarded_reports())
+    _delivery_tasks.add(task)
+    task.add_done_callback(_delivery_tasks.discard)
+
+
+async def deliver_forwarded_reports(*, force=False):
+    """Send every due outbox report to the worker that runs its chat now.
+
+    Run after each new report and from the remote report sweep (boot, then
+    every 30 s). An unreachable or older owner is retried with backoff; a
+    refusal is final and kept as ``report_forward_refused``. Returns how many
+    were delivered."""
+    async with _report_lock("outbox"):
+        return await _deliver_forwarded_locked(force)
+
+
+async def _deliver_forwarded_locked(force):
+    import time
+    from app.core import turn_scheduler
+    from app.network import control
+    delivered = 0
+    for row in await asyncio.to_thread(pending_forwarded_reports):
+        payload = row.get("payload") or {}
+        if not force and float(payload.get("next_attempt_at") or 0) > time.time():
+            continue
+        home, frame = payload.get("home"), payload.get("report") or {}
+        attempts = int(payload.get("attempts") or 0) + 1
+        device = payload.get("device_id")
+        try:
+            # Follow the chat if it moved again; back here, it wakes here.
+            owner = await asyncio.to_thread(_report_owner, home)
+            if owner is None and await asyncio.to_thread(_has_session, home):
+                await turn_scheduler.on_started_session_terminal(home, frame)
+                await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
+                delivered += 1
+                continue
+            device = owner or device
+            body = {"home": home, "event_id": row["command_id"], "report": frame,
+                    "hops": int(payload.get("hops") or 0) + 1}
+            answer = await asyncio.wait_for(
+                control.call(device, FORWARD_REPORT_ACTION, body, timeout=REMOTE_TIMEOUT),
+                timeout=REMOTE_TIMEOUT)
+        except control.ControlRefused as exc:
+            if "Unknown control action" in str(exc):
+                # An older owner: kept until that worker is updated.
+                await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts)
+                continue
+            log.warning("Worker refused the report of started chat %s for %s: %s",
+                        frame.get("task_id"), home, exc)
+            await asyncio.to_thread(_settle_forward, row["id"], refused=str(exc))
+            continue
+        except Exception as exc:  # noqa: BLE001 — unreachable or a lost reply: retry later
+            log.info("Report of started chat %s for %s not delivered yet: %s",
+                     frame.get("task_id"), home, exc or type(exc).__name__)
+            await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts, device=device)
+            continue
+        if isinstance(answer, dict) and answer.get("delivered") is True:
+            await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
+            delivered += 1
+        else:
+            await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts, device=device)
+    return delivered
+
+
+def _has_session(session_id):
+    from app.db import sessions
+    return sessions.get_session(session_id) is not None
+
+
+def _received(event_id):
+    from app.db.base import get_db
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s", (REPORT_INBOX, event_id))
+        return cursor.fetchone() is not None
+
+
+def _record_received(event_id, home, from_device):
+    from app.db import turns
+    from app.db.base import transaction
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s", (REPORT_INBOX, event_id))
+        if cursor.fetchone():
+            return
+        row = turns.enqueue_turn(REPORT_INBOX, "agent_message", command_id=event_id,
+                                 payload={"home": home, "from_device": from_device}, _conn=conn)
+        cursor.execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW(), "
+                       "stop_reason=%s WHERE id=%s", (_RECEIVED, row["id"]))
+
+
+def accept_forwarded_report(body, from_device):
+    """Receiving side of a report another worker forwards: the checks, and the
+    report as the frame a local one would be. Same trust as a relayed
+    MessageSession: an active worker of this account, into an owner chat."""
+    member = _calling_worker(from_device, "forward reports here")
+    home = _remote_text(body, "home", 200)
+    report = body.get("report")
+    if not isinstance(report, dict):
+        raise ValueError("report must be an object")
+    event_id = _remote_text(body, "event_id", 120)
+    if event_id != report_event_id(home, report):
+        raise ValueError("Invalid report identity")
+    hops = body.get("hops")
+    if type(hops) is not int or not 1 <= hops <= MAX_FORWARD_HOPS:
+        raise ValueError("Invalid report hops")
+    from app.db import sessions
+    if sessions.get_session(home) is None or not is_owner_session(home):
+        raise ValueError("The owner session that started this chat is not here.")
+    status = report.get("status")
+    if status not in REPORT_STATUSES:
+        raise ValueError("Invalid report status")
+    from app.core.provider_agent import bound_report
+    summary = report.get("summary") if isinstance(report.get("summary"), str) else ""
+    title = report.get("title") if isinstance(report.get("title"), str) else ""
+    needs = report.get("needs_owner") or []
+    if not isinstance(needs, list):
+        raise ValueError("Invalid needs_owner")
+    frame = {"task_id": _remote_text(report, "task_id", 200), "status": status,
+             "agent_message_turn_id": _remote_text(report, "agent_message_turn_id", 64),
+             "summary": bound_report(defang_harness_markers(summary)
+                                     or "The chat ended without a written report.")[0],
+             "kind": "session", "title": defang_harness_markers(title[:160])}
+    for key in ("orchestration_root", "orchestration_depth"):
+        value = report.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool) and len(str(value)) <= 200:
+            frame[key] = value
+    worker = report.get("worker")
+    if isinstance(worker, str) and worker.strip():
+        frame["worker"] = defang_harness_markers(worker[:200])
+    needs = [defang_harness_markers(str(item)[:300]) for item in needs[:MAX_NEEDS_OWNER] if str(item).strip()]
+    if needs:
+        frame["needs_owner"] = needs
+    return home, frame, event_id, hops, member
+
+
+async def handle_forwarded_report(body, from_device):
+    """``orchestration-report-forward``: wake the chat here once per report id,
+    or forward it on when the chat moved again."""
+    from app.db.async_database import run_sync
+    home, frame, event_id, hops, _ = await run_sync(accept_forwarded_report, body, from_device)
+    async with _report_lock("inbox"):
+        if await run_sync(_received, event_id):
+            return {"delivered": True, "duplicate": True}
+        await deliver_started_report(home, frame, hops=hops)
+        await run_sync(_record_received, event_id, home, from_device)
+    return {"delivered": True, "duplicate": False}
 
 
 def make_handler(supplier):
