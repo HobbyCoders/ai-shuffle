@@ -430,3 +430,95 @@ async def test_replay_lookup_failure_keeps_the_marker(real_lookup):
     await memory_sync.publish_pending_memory()
 
     assert env.db.uploads == [] and len(_markers(env)) == 1
+
+
+# --- The replay is unfinished saving until it has ended (S5) -----------------
+
+async def _queued_marker(env):
+    _write(env.folder, "MEMORY.md", "fact")
+    await _stop_during_stalled_push(
+        env, lambda: memory_sync.push_memory("project", str(env.folder), "native"))
+
+
+@pytest.fixture
+def blocking_lookup(target, monkeypatch):
+    """The replay's project lookup blocks until ``release`` is set."""
+    env = target
+    env.looking_up, env.lookup_release = threading.Event(), threading.Event()
+
+    def get_project(project_id):
+        env.looking_up.set()
+        assert env.lookup_release.wait(10)
+        return env.projects.get(project_id)
+
+    monkeypatch.setattr(memory_sync, "database", SimpleNamespace(get_project=get_project))
+    yield env
+    env.lookup_release.set()
+
+
+async def test_replay_is_unfinished_while_it_resolves_its_project(blocking_lookup):
+    env = blocking_lookup
+    await _queued_marker(env)
+    replay = asyncio.create_task(memory_sync.publish_pending_memory())
+    assert await asyncio.to_thread(env.looking_up.wait, 5)
+
+    assert memory_sync.pending_publications() == 1
+    env.lookup_release.set()
+    await replay
+    assert memory_sync.pending_publications() == 0 and _markers(env) == []
+
+
+async def test_replay_thread_outliving_its_cancelled_awaiter_stays_counted(blocking_lookup):
+    env = blocking_lookup
+    await _queued_marker(env)
+    replay = asyncio.create_task(memory_sync.publish_pending_memory())
+    assert await asyncio.to_thread(env.looking_up.wait, 5)
+    replay.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await replay
+
+    assert memory_sync.pending_publications() == 1  # The thread is still running.
+    env.lookup_release.set()
+    for _ in range(500):
+        if memory_sync.pending_publications() == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert memory_sync.pending_publications() == 0 and _markers(env) == []
+
+
+@pytest.fixture
+async def one_busy_thread():
+    """The loop's only worker thread is busy, so the next dispatch waits in line."""
+    from concurrent.futures import ThreadPoolExecutor
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    busy, release = threading.Event(), threading.Event()
+    occupant = loop.run_in_executor(None, lambda: (busy.set(), release.wait(10)))
+    assert busy.wait(5)
+    yield release
+    release.set()
+    await occupant
+
+
+@pytest.mark.parametrize("which", ["replay", "turn-end push"])
+async def test_cancelled_while_queued_for_a_thread_is_not_counted_forever(
+        target, one_busy_thread, which):
+    env = target
+    _write(env.folder, "MEMORY.md", "fact")
+    if which == "replay":
+        memory_sync._queue_publication("project", str(env.folder), "native")
+        memory_sync.reset_state()  # Left by a previous process.
+        start = memory_sync.publish_pending_memory
+    else:
+        def start():
+            return memory_sync.push_memory("project", str(env.folder), "native")
+    waiting = asyncio.create_task(start())
+    await asyncio.sleep(0.05)
+
+    assert memory_sync.pending_publications() == 1  # Queued for a thread: still owed.
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert memory_sync.pending_publications() == 0
+    assert env.db.uploads == [] and len(_markers(env)) == 1  # The next start retries it.

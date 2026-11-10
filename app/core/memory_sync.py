@@ -487,7 +487,7 @@ async def push_memory(project_id: Optional[str], working_dir: Optional[str],
         if token is None:
             await run_sync(push_memory_sync, project_id, working_dir, leg)
         else:
-            await run_sync(_publish, project_id, working_dir, leg, token)
+            await _run_counted(token, _publish, project_id, working_dir, leg, token)
     except Exception:  # noqa: BLE001
         if token is not None:
             # Ended (or never dispatched); its marker stays for the next start.
@@ -516,7 +516,38 @@ _PENDING_DIR = "memory-sync-pending"
 _pending_lock = threading.Lock()
 # Tokens of publications this process issued that have not ended yet (still
 # queued for a thread or running). Shutdown reports these as unfinished saving.
+# Two writers: ``push_memory`` (one token per push, from ``_queue_publication``)
+# and ``publish_pending_memory`` (one token for the whole startup replay, from
+# before it resolves any project). ``_run_counted`` removes a token when its
+# thread ends, or when its awaiter is cancelled while still queued.
 _in_flight: set = set()
+
+
+async def _run_counted(token: str, fn, *args):
+    """Run ``fn`` in a thread; ``token`` (already in ``_in_flight``) counts
+    until that thread has ended. Cancelled while still queued for a thread, it
+    stops counting (the marker stays); a queued thread that starts anyway
+    counts again while it runs."""
+    started = False
+
+    def counted():
+        nonlocal started
+        with _pending_lock:
+            started = True
+            _in_flight.add(token)
+        try:
+            return fn(*args)
+        finally:
+            with _pending_lock:
+                _in_flight.discard(token)
+
+    try:
+        return await run_sync(counted)
+    except BaseException:
+        with _pending_lock:
+            if not started:
+                _in_flight.discard(token)
+        raise
 
 
 def _pending_path(project_id: str) -> Path:
@@ -621,8 +652,6 @@ def publish_pending() -> int:
         if not project:
             _finish_publication(project_id, token, True)
             continue
-        with _pending_lock:
-            _in_flight.add(token)
         try:
             _publish(project_id, working_dir, leg, token, recovery=True, project=project)
         except Exception:  # noqa: BLE001
@@ -637,11 +666,18 @@ def publish_pending() -> int:
 
 
 async def publish_pending_memory() -> None:
-    """Startup entry point for ``publish_pending``; never raises."""
+    """Startup entry point for ``publish_pending``; never raises.
+
+    Unfinished saving for shutdown from before it is dispatched until its
+    thread has ended, while it resolves projects too (see ``_in_flight``).
+    """
     if not settings.agent_memory_sync:
         return
+    token = f"replay-{uuid.uuid4().hex}"
+    with _pending_lock:
+        _in_flight.add(token)
     try:
-        await run_sync(publish_pending)
+        await _run_counted(token, publish_pending)
     except Exception:  # noqa: BLE001
         logger.warning("memory_sync: queued publications retained for the next start",
                        exc_info=True)
