@@ -380,8 +380,11 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
         row = db_rows.get(rel)
         if recovery:
             if row is None or row.get("deleted") or row.get("content_hash") != local_hash:
+                # Never later than now: a file dated ahead of the clock must
+                # not outrank every later write until the clock catches up.
+                stamp = min(local_mtime, datetime.now(timezone.utc))
                 memdb.upsert_memory_file_if_not_newer(
-                    memory_key, rel, content, local_hash, instance_id, local_mtime.isoformat())
+                    memory_key, rel, content, local_hash, instance_id, stamp.isoformat())
             continue
         if row is None:
             memdb.upsert_memory_file(memory_key, rel, content, local_hash, instance_id)
@@ -629,7 +632,10 @@ def publish_pending() -> int:
     completed = 0
     for path in markers:
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
+            # Under the lock: on Windows a concurrent os.replace of an open
+            # marker fails, which would lose a newer push's marker.
+            with _pending_lock:
+                record = json.loads(path.read_text(encoding="utf-8"))
             project_id, working_dir = record["project_id"], record["working_dir"]
             leg, token = record["leg"], record["token"]
             if not all(isinstance(value, str) and value

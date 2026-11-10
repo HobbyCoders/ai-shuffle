@@ -10,7 +10,7 @@ import asyncio
 import json
 import os
 import threading
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -345,6 +345,19 @@ async def test_replay_revives_an_older_peer_delete(target):
     row = env.db.get_memory_file(KEY, "topic.md")
     assert not row["deleted"] and row["content"] == "re-created fact"
     assert _stamp(env, "topic.md") == T0 + timedelta(seconds=60)
+
+
+async def test_replay_of_a_file_dated_ahead_of_the_clock_is_stamped_now(target):
+    env = target
+    future = _write(env.folder, "MEMORY.md", "fact", offset=0)
+    await _stop_during_stalled_push(
+        env, lambda: memory_sync.push_memory("project", str(env.folder), "native"))
+    ahead = datetime.now(timezone.utc) + timedelta(days=365)
+    os.utime(future, (ahead.timestamp(),) * 2)
+
+    await memory_sync.publish_pending_memory()
+
+    assert _stamp(env, "MEMORY.md") <= datetime.now(timezone.utc)
 
 
 @pytest.mark.parametrize("deleted", [False, True])
