@@ -57,10 +57,13 @@ async function meterLabel(page) {
 	const sheet = page.getByRole('dialog', { name: 'Chat controls' });
 	await controls.click();
 	await sheet.waitFor({ timeout: 10_000 });
-	const label = (await sheet.getByRole('button', { name: /^Context and usage: / }).getAttribute('aria-label')) || '';
+	const row = sheet.getByRole('button', { name: /^Context and usage: / });
+	const label = (await row.getAttribute('aria-label')) || '';
+	// The row's own "tokens of window" line, so the log names the window (#1362).
+	const tokens = (await row.locator('small').allTextContents()).join(' ').trim();
 	await page.keyboard.press('Escape');
 	await sheet.waitFor({ state: 'hidden', timeout: 5000 });
-	return label;
+	return tokens ? `${label} (${tokens})` : label;
 }
 
 /** The context meter's reading as a number (percent, or tokens when the window is unknown). */
@@ -91,7 +94,33 @@ async function waitMeter(page, before, { atMost = false, above = false, timeout 
 		now = await meterReading(page);
 	}
 	const what = above ? 'go up after a read' : 'go down after the compaction';
-	throw new Error(`the context meter did not ${what}: "${before.label}" then "${now.label}"`);
+	throw new Error(`the context meter did not ${what}: "${before.label}" then "${now.label}" (${await meterEvidence(page)})`);
+}
+
+/**
+ * What the meter was measured against, for a failed wait's message (#1362,
+ * #1363: a reading of 2% where the fake's smallest context is 6% of the
+ * Standard window). The server's own answer for the open chat (its tokens and
+ * window, or why it has none) and the composer's saved window pick.
+ */
+async function meterEvidence(page) {
+	try {
+		return await page.evaluate(async () => {
+			const id = JSON.parse(sessionStorage.getItem('ai-shuffle-active-session') || 'null')?.sessionId;
+			const pick = `saved window pick ${localStorage.getItem('aihub_lastContextWindowChoice') ?? 'none'}`;
+			if (typeof id !== 'string') return `no open chat, ${pick}`;
+			const res = await fetch(`/api/v1/sessions/${encodeURIComponent(id)}/context-usage`, { credentials: 'same-origin' });
+			if (!res.ok) return `the server's context usage: HTTP ${res.status}, ${pick}`;
+			const body = await res.json();
+			const usage = body.usage || {};
+			const answer = body.available
+				? `${body.source}, ${usage.totalTokens} of ${usage.maxTokens} tokens (${usage.autocompactSource ?? 'no'} window source)`
+				: `unavailable (${body.reason})`;
+			return `the server's context usage: ${answer}, ${pick}`;
+		});
+	} catch (error) {
+		return `the server's context usage could not be read: ${String(error).split('\n')[0]}`;
+	}
 }
 
 /** Fresh Claude Code chat on the new-session screen, Dev sandbox, Bypass. */
