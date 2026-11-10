@@ -411,6 +411,7 @@ async def start_services() -> None:
     from app.core import composer_suggestions
     composer_suggestions.start()
     from app.core.connectors.manager import connector_manager
+    connector_manager.reopen()  # a previous shutdown in this process refused starts
     await connector_manager.start_all()
     connector_manager.start_event_relay()
 

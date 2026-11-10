@@ -52,6 +52,9 @@ class FakeManager:
         self.start_error = None
 
     # App startup/shutdown hooks: nothing to connect in a test.
+    def reopen(self):
+        pass
+
     async def start_all(self):
         pass
 
