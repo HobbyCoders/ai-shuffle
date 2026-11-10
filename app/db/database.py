@@ -28,6 +28,7 @@ from app.core.config import settings
 # Import shared database utilities from base module.
 # Re-exported here so existing ``from app.db.database import get_db`` still works.
 from app.db.base import (  # noqa: F401
+    background_database_work,
     exempt_from_start_pressure,
     get_connection,
     get_db,
@@ -3936,6 +3937,7 @@ def _prune_notifications_cap(cap, *, stop=None):
     return total
 
 
+@background_database_work
 def run_database_maintenance(
     skip_vacuum: bool = False, *, stop: Optional[Event] = None,
 ) -> dict[str, Any]:

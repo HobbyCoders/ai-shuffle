@@ -44,7 +44,7 @@ from uuid import uuid4
 
 from app.core import encryption, native_providers
 from app.db import network as store
-from app.db.base import get_db
+from app.db.base import background_database_work, get_db
 from app.db.profiles import RETIRED_BUILTIN_IDS
 from app.network import crypto, envelope as envelope_mod, identity as identity_mod, membership, policy, nested_secret_sync
 from app.network.envelope import Envelope, OP_DELETE, OP_UPSERT
@@ -1257,6 +1257,7 @@ def _scan_columns(cursor, coll: policy.Collection) -> str:
     return ", ".join('"' + name.replace('"', '""') + '"' for name in names) if names else "*"
 
 
+@background_database_work
 def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True,
              strict: bool = False, collections: Optional[Iterable[str]] = None,
              session_ids: Optional[Iterable[str]] = None) -> int:

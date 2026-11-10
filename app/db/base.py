@@ -6,6 +6,8 @@ Uses PostgreSQL via psycopg2 with a threaded connection pool.
 All domain modules import from here. Do NOT import domain modules from this file.
 """
 
+import functools
+import inspect
 import json
 import re
 import uuid
@@ -97,13 +99,16 @@ def parse_database_url(db_url: str) -> Dict[str, Any]:
 class _Hold:
     """One checkout and what is known about it. See _HOLD_CHECK_SECONDS.
 
-    Three things stop it counting as pressure, and nothing else does: PostgreSQL
+    Four things stop it counting as pressure, and nothing else does: PostgreSQL
     confirmed its backend exited (final), PostgreSQL recently said it is idle (only
-    until ``idle_until``), or it was declared maintenance.
+    until ``idle_until``), it was declared maintenance, or it was taken by
+    background work (``background_database_work``).
     """
     owner: tuple
     backend: Optional[tuple]  # (pid, tag); None for doubles, which are never asked about.
     maintenance: bool = False
+    # Background work is counted apart from the start: see background_database_work.
+    background: bool = False
     exited: bool = False
     idle_until: float = 0.0
     reported: Optional[bool] = None  # The last verdict logged, so each is logged once.
@@ -112,7 +117,7 @@ class _Hold:
         return self.exited or now < self.idle_until
 
     def exempt(self, now: float) -> bool:
-        return self.maintenance or self.silent(now)
+        return self.maintenance or self.background or self.silent(now)
 
 
 # Cleanup runs off the driver lock and has a client-side bound even when
@@ -167,9 +172,16 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
     """Open the startup minimum, then retain healthy connections up to maxconn."""
 
     def __init__(
-        self, minconn: int, maxconn: int, *args: Any, reserved: int = 0, **kwargs: Any
+        self, minconn: int, maxconn: int, *args: Any, reserved: int = 0,
+        background: int = 0, **kwargs: Any
     ) -> None:
         self._reserved = min(reserved, maxconn - 1)
+        # Most connections background work may hold at once; 0 leaves it unlimited.
+        # Always leaves at least one ordinary slot background work cannot take.
+        self._background_limit = max(0, min(background, maxconn - self._reserved - 1))
+        self._background_held = set()
+        self._background_waiters = deque()
+        self._background_exhaustion_logged = False
         self._lease_waiters = deque()
         # Separate lock: snapshots and sleeping acquirers never block on libpq.
         self._available = threading.Condition()
@@ -183,12 +195,15 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             "connections_opened", "connections_discarded", "connections_stale",
             "acquisitions",
             "acquisition_waits", "acquisition_timeouts", "waiting", "waiting_peak", "holds",
+            "background_acquisitions", "background_acquisition_timeouts",
+            "background_waiting", "background_holds",
         ), 0)
         self._pressure.update(dict.fromkeys((
             "acquisition_seconds_total", "acquisition_seconds_max",
             "wait_seconds_total", "wait_seconds_max",
             "timeout_seconds_total", "timeout_seconds_max",
             "hold_seconds_total", "hold_seconds_max",
+            "background_hold_seconds_total", "background_hold_seconds_max",
         ), 0.0))
         # Only live physical connections and active checkouts; bounded by maxconn.
         self._physical = set()
@@ -225,13 +240,18 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         driver's lock. The generation closes the failed-getconn/wait race.
         """
         start = time.monotonic()
+        lease = _lease_checkout.get()
+        background = not lease and _background_checkout()
         wait_seconds = _pool_acquire_wait.get()
         if wait_seconds is None:
-            wait_seconds = _POOL_ACQUIRE_MAX_WAIT_SECONDS
+            wait_seconds = (_BACKGROUND_ACQUIRE_MAX_WAIT_SECONDS if background
+                            else _POOL_ACQUIRE_MAX_WAIT_SECONDS)
         deadline = start + wait_seconds
         ticket = object()
-        lease = _lease_checkout.get()
-        waiters = self._lease_waiters if lease else self._waiters
+        # Each class queues apart, so a full background share never holds up the
+        # ordinary line and the lease line never waits behind either.
+        waiters = (self._lease_waiters if lease
+                   else self._background_waiters if background else self._waiters)
         waited = timed_out = False
         with self._available:
             waiters.append(ticket)
@@ -247,13 +267,17 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                     if waiters[0] is not ticket:
                         if not waited:
                             waited = True
-                            self._wait_started()
+                            (self._background_wait_started if background
+                             else self._wait_started)()
                         self._available.wait(remaining)
                         continue
                     generation = self._generation
                 try:
                     conn = self.getconn()
-                    if not lease:
+                    if background:
+                        with self._available:
+                            self._background_exhaustion_logged = False
+                    elif not lease:
                         with self._available:
                             self._exhaustion_logged = False
                     break
@@ -263,15 +287,23 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                             raise
                         if not waited:
                             waited = True
-                            self._wait_started()
+                            (self._background_wait_started if background
+                             else self._wait_started)()
                         if generation == self._generation:
                             self._available.wait(max(0, deadline - time.monotonic()))
             # Include setup in timing; advance the queue even if setup fails.
             yield conn
         finally:
-            exhaustion = None
+            exhaustion = share = None
             with self._available:
-                if timed_out and not self._exhaustion_logged:
+                if timed_out and background:
+                    if not self._background_exhaustion_logged:
+                        self._background_exhaustion_logged = True
+                        with self._pressure_lock:
+                            share = (len(self._background_held), self._background_limit,
+                                     len(self._held_since), self.maxconn,
+                                     len(self._background_waiters))
+                elif timed_out and not self._exhaustion_logged:
                     self._exhaustion_logged = True
                     with self._pressure_lock:
                         in_use = len(self._held_since)
@@ -280,7 +312,14 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                     )
                 waiters.remove(ticket)
                 self._available.notify_all()
-            self._acquisition_finished(time.monotonic() - start, waited, timed_out)
+            self._acquisition_finished(time.monotonic() - start, waited, timed_out, background)
+            if share is not None:
+                logger.warning(
+                    "PostgreSQL background share exhausted: background_in_use=%d limit=%d "
+                    "in_use=%d max=%d background_waiters=%d (acquisition deadline %.1fs; "
+                    "once until background admission recovers)",
+                    *share, wait_seconds,
+                )
             if exhaustion is not None:
                 logger.warning(
                     "PostgreSQL pool exhausted: in_use=%d max=%d waiters=%d "
@@ -306,6 +345,8 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         with self._pressure_lock:
             stats = dict(self._pressure)
             stats["ordinary_capacity"] = self.maxconn - self._reserved
+            stats["background_capacity"] = self._background_limit
+            stats["background_in_use"] = len(self._background_held)
             stats["oldest_hold_seconds"] = (
                 now - min(self._held_since.values()) if self._held_since else 0.0
             )
@@ -394,7 +435,8 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
             silent = hold.exited or idle
             if hold.reported is not silent:
                 hold.reported = silent
-                reports.append((silent, now - self._held_since[key], hold.owner, pid, backend))
+                reports.append((silent, now - self._held_since[key], hold.owner, pid, backend,
+                                hold.background))
         return reports
 
     def _duration(self, prefix, elapsed):
@@ -403,6 +445,10 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         self._pressure[prefix + "_seconds_max"] = max(
             self._pressure[prefix + "_seconds_max"], elapsed)
 
+    def _background_wait_started(self):
+        with self._pressure_lock:
+            self._pressure["background_waiting"] += 1
+
     def _wait_started(self):
         with self._pressure_lock:
             self._pressure["waiting"] += 1
@@ -410,8 +456,15 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 self._pressure["waiting_peak"], self._pressure["waiting"])
             self._pressure["acquisition_waits"] += 1
 
-    def _acquisition_finished(self, elapsed, waited, timed_out):
+    def _acquisition_finished(self, elapsed, waited, timed_out, background=False):
         with self._pressure_lock:
+            if background:
+                # Counted apart: time spent waiting for the background share says
+                # nothing about how quickly a turn gets a connection.
+                self._pressure["background_acquisitions"] += 1
+                self._pressure["background_waiting"] -= bool(waited)
+                self._pressure["background_acquisition_timeouts"] += bool(timed_out)
+                return
             self._pressure["acquisitions"] += 1
             self._duration("acquisition", elapsed)
             if waited:
@@ -449,13 +502,20 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
                 and key not in self._used
                 and len(self._used) >= self.maxconn - self._reserved):
             raise psycopg2.pool.PoolError("connection pool exhausted")
+        background = not _lease_checkout.get() and _background_checkout()
+        if (background and self._background_limit and key not in self._used
+                and len(self._background_held) >= self._background_limit):
+            raise psycopg2.pool.PoolError("connection pool exhausted")
         conn = super()._getconn(key)
         with self._pressure_lock:
             if id(conn) not in self._held_since:
                 self._held_since[id(conn)] = time.monotonic()
                 thread = threading.current_thread()
                 self._holds[id(conn)] = _Hold(
-                    (thread.ident, thread.name), self._backends.get(id(conn)))
+                    (thread.ident, thread.name), self._backends.get(id(conn)),
+                    background=background)
+                if background:
+                    self._background_held.add(id(conn))
         return conn
 
     def idle_seconds(self, conn) -> float:
@@ -479,8 +539,12 @@ class _RetainingThreadedConnectionPool(psycopg2.pool.ThreadedConnectionPool):
         # Called under the driver's lock, including the force-reclaim path.
         with self._pressure_lock:
             started = self._held_since.pop(id(conn), None)
-            self._holds.pop(id(conn), None)
-            if started is not None:
+            hold = self._holds.pop(id(conn), None)
+            self._background_held.discard(id(conn))
+            if started is not None and hold is not None and hold.background:
+                self._pressure["background_holds"] += 1
+                self._duration("background_hold", time.monotonic() - started)
+            elif started is not None:
                 self._pressure["holds"] += 1
                 self._duration("hold", time.monotonic() - started)
             if discarded:
@@ -607,6 +671,7 @@ def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
         min_conn,
         max_conn,
         reserved=2,
+        background=settings.db_pool_background,
         **settings.get_database_connection(),
     )
     logger.info(
@@ -693,7 +758,7 @@ def _backend_shows_no_work(backend) -> bool:
             and backend["state_age"] >= _HOLD_CHECK_SECONDS)
 
 
-def _report_long_hold(silent, age, owner, backend_pid, backend) -> None:
+def _report_long_hold(silent, age, owner, backend_pid, backend, background=False) -> None:
     """Name a long checkout once per verdict, with where its thread and backend are.
 
     Thread, pid, frame locations and wait state only: no SQL, parameters or locals.
@@ -703,7 +768,9 @@ def _report_long_hold(silent, age, owner, backend_pid, backend) -> None:
         thread_id, thread_name = owner or (0, "unknown")
         logger.warning(
             "Database connection %s %.1fs: thread=%s backend_pid=%s backend=%s frames=%s",
-            "retained, not counted as pressure," if silent else "held, still counted as pressure,",
+            "retained, not counted as pressure," if silent
+            else "held by background work, not counted as pressure," if background
+            else "held, still counted as pressure,",
             age, thread_name, backend_pid,
             "gone" if backend is None else "state={state} wait={wait_type}:{wait} "
             "state_age={state_age:.1f}".format(**backend),
@@ -731,6 +798,45 @@ _POOL_ACQUIRE_MAX_WAIT_SECONDS = 2.0
 # They share the ordinary FIFO and cannot consume the lease-only reservation.
 _TURN_POOL_ACQUIRE_MAX_WAIT_SECONDS = 20.0
 _pool_acquire_wait: ContextVar[Optional[float]] = ContextVar("db_acquire_wait", default=None)
+# Background work is patient: it waits for its own share instead of failing a
+# whole scan or maintenance pass on a two-second deadline.
+_BACKGROUND_ACQUIRE_MAX_WAIT_SECONDS = 10.0
+
+# A thread-local, not a ContextVar: a context is copied into every task and
+# thread hand-off made while it is set, so a turn woken from inside a sync pass
+# would inherit the mark and run its own writes as background work.
+_background = threading.local()
+
+
+def _background_checkout() -> bool:
+    return getattr(_background, "depth", 0) > 0
+
+
+def background_database_work(function):
+    """Mark a synchronous function's database work as background.
+
+    For work no turn is waiting on: sync scans and applies, maintenance,
+    compaction. Its checkouts are limited to ``settings.db_pool_background``
+    connections at once, so they cannot take the pool from turns, and they are
+    counted apart from the pressure that queues new turns (``start_admission``):
+    a scan that holds a connection for 30 seconds is not a slow database. If it
+    really does slow the database, the turns' own checkouts show it.
+
+    The mark covers checkouts made on the calling thread only. Lease checkouts
+    inside it keep their reserved slots.
+    """
+    if inspect.iscoroutinefunction(function):
+        raise TypeError("background_database_work marks synchronous functions only")
+
+    @functools.wraps(function)
+    def marked(*args, **kwargs):
+        _background.depth = getattr(_background, "depth", 0) + 1
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _background.depth -= 1
+
+    return marked
 
 # A connection that has sat in the pool longer than this is probed with
 # SELECT 1 before it is handed out. Below the threshold we rely on the two
