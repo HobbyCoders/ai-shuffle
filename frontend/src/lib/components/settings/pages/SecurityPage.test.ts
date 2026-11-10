@@ -327,6 +327,32 @@ describe('a failed load inserts nothing between the groups (#1403)', () => {
 		expect(screen.queryByRole('alert')).toBeNull();
 		expect(container.querySelector('p.st-msg')).toBeNull();
 	});
+
+	it('drops the load error when a later read says owner only, and stays quiet once a read works', async () => {
+		let answer: 500 | 403 | 200 = 500;
+		transport.get.mockImplementation(async (path: string) => {
+			if (path === '/settings/security-instructions') {
+				if (answer !== 200) throw { status: answer, detail: answer === 500 ? 'Database unavailable' : 'Forbidden' };
+				return { ...instructions };
+			}
+			return {};
+		});
+		const { container } = render(SecurityPage);
+		await screen.findByRole('button', { name: 'Chat instructions Unavailable' });
+		await waitFor(() => expect(screen.getAllByRole('alert').map((a) => a.textContent)).toContain('Database unavailable'));
+
+		answer = 403;
+		resourceSync.invalidate(['settings']);
+		await screen.findByRole('button', { name: 'Chat instructions Available after approval' });
+		expect(screen.queryByText('Database unavailable')).toBeNull();
+		expect(container.querySelector('p.st-msg')).toBeNull();
+
+		answer = 200;
+		resourceSync.invalidate(['settings']);
+		await loadedButton(/^Chat instructions/);
+		expect(screen.queryByText('Database unavailable')).toBeNull();
+		expect(container.querySelector('p.st-msg')).toBeNull();
+	});
 });
 
 describe('trusted LAN', () => {
@@ -456,6 +482,20 @@ describe('chat instructions', () => {
 			expect(transport.put).toHaveBeenCalledWith('/settings/security-instructions', { instructions: 'Never push to main.' })
 		);
 		await waitFor(() => expect(screen.queryByText('Unsaved changes')).toBeNull());
+	});
+
+	it('keeps a failed save\'s message through a background read', async () => {
+		render(SecurityPage);
+		const area = await openEditor();
+		transport.put.mockRejectedValueOnce({ status: 500, detail: 'Disk full' });
+		await fireEvent.input(area, { target: { value: 'Never push to main.' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+		await screen.findByText('Disk full');
+		const reads = transport.get.mock.calls.length;
+		resourceSync.invalidate(['settings']);
+		await waitFor(() => expect(transport.get.mock.calls.length).toBeGreaterThan(reads));
+		await Promise.resolve();
+		expect(screen.getByText('Disk full')).toBeTruthy();
 	});
 
 	it('reverts to the default only after confirming', async () => {

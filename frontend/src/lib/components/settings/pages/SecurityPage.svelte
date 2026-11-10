@@ -227,6 +227,9 @@
 	let instrLoad = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
 	/** The failed first load's HTTP status (null: no answer), for the row's hint. */
 	let instrLoadCode = $state<number | null>(null);
+	/** Why the first load failed, kept apart from a save or revert error so any
+	    later answer (a read, or a 403) clears it without hiding those. */
+	let instrLoadError = $state('');
 	let instrBusy = $state(false);
 	let instrError = $state('');
 	let instrOpen = $state(false);
@@ -246,7 +249,7 @@
 		try {
 			const value = await api.get<Instructions>('/settings/security-instructions');
 			// A later read recovered from a failed first load: its message is stale.
-			if (instrLoad === 'error') instrError = '';
+			instrLoadError = '';
 			instrLoad = 'ok';
 			if (quiet && (!clean || instrBusy || instrText !== instrSaved)) {
 				if (value.current !== instrSaved) instrRemote = value;
@@ -254,11 +257,14 @@
 			}
 			applyInstructions(value);
 		} catch (e: unknown) {
-			if (isForbidden(e)) instrLoad = 'forbidden';
-			else if (!quiet) {
+			if (isForbidden(e)) {
+				// A non-owner is a quiet state, not a failure: drop an older load error.
+				instrLoad = 'forbidden';
+				instrLoadError = '';
+			} else if (!quiet) {
 				instrLoad = 'error';
 				instrLoadCode = isApiError(e) ? e.status : null;
-				instrError = getErrorMessage(e, 'Could not load the chat instructions.');
+				instrLoadError = getErrorMessage(e, 'Could not load the chat instructions.');
 			}
 		}
 	}
@@ -473,7 +479,7 @@
 	<!-- A failed load is the row's hint (#1403); a failed save or revert, after
 	     the reader acted, keeps its visible line. -->
 	{#if instrLoad === 'error'}
-		<p class="st-vh" role="alert">{instrError}</p>
+		<p class="st-vh" role="alert">{instrLoadError}</p>
 	{:else if instrError && !instrOpen}
 		<p class="st-msg err" role="alert">{instrError}</p>
 	{/if}
