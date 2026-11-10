@@ -656,6 +656,7 @@ describe('memory health', () => {
 		expect(await screen.findByText(/Recall cannot recover a deleted copy\./)).toBeTruthy();
 		expect(screen.getByText(/^Last checked /)).toBeTruthy();
 		expect(document.querySelector('.st-banner.warn')).toBeNull();
+		await waitFor(() => expect(document.activeElement).toBe(within(row).getByRole('button', { name: /Needs attention/ })));
 	});
 
 	it('stays quiet when healthy, and says when it has not checked yet', async () => {

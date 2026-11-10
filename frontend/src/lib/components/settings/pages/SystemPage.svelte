@@ -277,6 +277,14 @@
 		openSupportReport({ error: { message: input.description, source: 'frontend' } });
 	}
 
+	function openMemoryDetails() {
+		memoryOpen = true;
+		// The Details button goes away with the notice; keep focus on the row's toggle.
+		requestAnimationFrame(() =>
+			document.querySelector<HTMLElement>('[data-setting-anchor="system.memoryHealth"] button[aria-expanded]')?.focus()
+		);
+	}
+
 	function closeReport() {
 		reportOpen = false;
 		// The editor held focus; give it back to the row's toggle.
@@ -468,7 +476,7 @@
 		<InlineBanner tone="warn">
 			{memoryWarning}
 			{#snippet actions()}
-				<button type="button" class="st-btn sm" onclick={() => (memoryOpen = true)}>Details</button>
+				<button type="button" class="st-btn sm" onclick={openMemoryDetails}>Details</button>
 			{/snippet}
 		</InlineBanner>
 	{/if}
