@@ -122,6 +122,8 @@ interface Delivery {
 	commandId?: string;
 	/** Set on the message that opened this turn: a drained row's id IS its turn id, so it answers that row only. */
 	turnId?: string;
+	/** Set on a steer: the running turn it joined. It is never that turn's own row. */
+	joinedTurnId?: string;
 	/** The entry this delivery retired — a delivery answers exactly one bubble. */
 	matchedEntryId: string | null;
 	createdAt?: number;
@@ -265,6 +267,16 @@ function answeredByHistory(entry: PendingEntry): boolean {
 	if (!entry.clientMessageId) return false;
 	const answeredAt = replayedCommands.get(entry.clientMessageId);
 	return answeredAt !== undefined && answeredByReceipt(entry, answeredAt);
+}
+
+/**
+ * Has this page seen the message of a `recorded` row? A re-queued steer keeps
+ * its command id, so any receipt for that command, live or replayed, is it.
+ */
+function sawRecordedMessage(id: string | null, entry: PendingEntry): boolean {
+	const command = entry.clientMessageId;
+	if (!command || id !== sessionId) return false;
+	return replayedCommands.has(command) || deliveries.some(d => d.commandId === command);
 }
 
 /** Bind feed observations to a session; cancellation transactions are separate. */
@@ -491,7 +503,7 @@ export const pendingQueue = {
 		}
 		const text = normalize(content);
 		if (!text && !commandId) return;
-		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}), ...(opensTurn ? { turnId } : {}) });
+		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}), ...(opensTurn ? { turnId } : turnId ? { joinedTurnId: turnId } : {}) });
 		// A long session delivers a lot of messages and only the recent ones can
 		// still be answering something pending. Forgetting the oldest only ever
 		// makes pruning more conservative.
@@ -536,15 +548,23 @@ export const pendingQueue = {
 	 * Only rows already confirmed and waiting are held: an echo still awaiting
 	 * admission (or unconfirmed) is kept by `sends`, a cancelling row by
 	 * `removals`, and a withdrawn, delivered or pruned row is gone for good.
-	 * A `recorded` row (a re-queued steer) already has its transcript row and
-	 * its run adds none, so no delivery will come to end a hold.
+	 * A `recorded` row's run adds no transcript row. A re-queued steer is held
+	 * only until this page has seen the message it already recorded (the events
+	 * feed can trail the queue), which is at once when it has: `inTranscript`
+	 * answers for a transcript this page opened without replaying it. A row with
+	 * no command id (a voice hand-off) has no message of its own to wait for.
 	 */
-	holdDelivering(id: string | null, previous: PendingEntry[], rows: PendingEntry[], onRelease: () => void): void {
+	holdDelivering(
+		id: string | null, previous: PendingEntry[], rows: PendingEntry[], onRelease: () => void,
+		inTranscript?: (commandId: string) => boolean
+	): void {
 		const state = cancellationState(id);
 		const listed = new Set(rows.map(removalKey));
 		for (const entry of previous) {
 			const key = removalKey(entry);
-			if (listed.has(key) || entry.status || entry.unconfirmed || entry.recorded || state.delivering.has(key)
+			if (listed.has(key) || entry.status || entry.unconfirmed || state.delivering.has(key)
+				|| (entry.recorded && (!entry.clientMessageId || sawRecordedMessage(id, entry)
+					|| inTranscript?.(entry.clientMessageId)))
 				|| state.sends.has(key) || state.removals.has(key)
 				|| state.withdrawn.has(key) || state.withdrawn.has(entry.id) || state.releasedRows.has(entry.id)
 				|| state.deliveredRows.has(entry.id) || prunedIds.has(entry.id)) continue;
@@ -721,10 +741,12 @@ export const pendingQueue = {
 			const delivery = deliveries.find(d => d.commandId && entry.clientMessageId
 				? d.commandId === entry.clientMessageId && (isOptimistic(entry)
 					|| !Number.isFinite(d.createdAt) || entry.queuedAt <= d.createdAt!)
-				: d.matchedEntryId === null && bornAt < d.seq && d.content === text);
+				: d.matchedEntryId === null && d.joinedTurnId !== entry.id && bornAt < d.seq && d.content === text);
 			if (withdrawn.has(key) || withdrawn.has(entry.id)
 				|| deliveredRows.has(entry.id) || deliveredTurnIds.has(entry.id) || prunedIds.has(entry.id)
-				|| answeredByHistory(entry) || delivery) {
+				|| answeredByHistory(entry) || delivery
+				// A held re-queued steer waits only for the message it already recorded.
+				|| (entry.recorded && delivering.get(key)?.id === entry.id && sawRecordedMessage(id, entry))) {
 				if (delivery) delivery.matchedEntryId = entry.id;
 				prunedIds.add(entry.id);
 				this.removalFailed(id, key, true);

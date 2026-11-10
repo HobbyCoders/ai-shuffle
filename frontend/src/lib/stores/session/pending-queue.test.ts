@@ -751,13 +751,71 @@ describe('pendingQueue — a delivered row keeps its bubble until it renders (#1
 		expect(pendingQueue.isHeld(SID, b)).toBe(false);
 	});
 
-	it('does not hold a row whose words are already in the transcript', () => {
-		// A re-queued steer: its run records no message, so no delivery would end a hold.
-		const again = { ...queued('turn-a2', 'queued a'), recorded: true };
+	it('retires a marked steer with the same words as the re-run turn it joined', () => {
+		// As above, but A and B say the same thing: B's delivery carries A's turn
+		// id, which already retires A, so its words must still answer B.
+		const a = queued('turn-a', 'repeat');
+		const b = queued('turn-b', 'repeat');
+		let shown = snapshot(snapshot([], [a]), []);
+		shown = snapshot(snapshot(shown, [b]), []);
+		expect(shown.map(e => e.id)).toEqual(['turn-a', 'turn-b']);
+		pendingQueue.noteDelivered(SID, 'repeat', 'turn-a', true, undefined, undefined, true);
+		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
+		expect(pendingQueue.isHeld(SID, a)).toBe(false);
+		expect(pendingQueue.isHeld(SID, b)).toBe(false);
+	});
+
+	it.each([
+		['live', true],
+		['replayed from history', false],
+	])('does not hold a re-queued steer whose message this page has seen (%s)', (_name, live) => {
+		// Its run records no message, so no later delivery would end a hold.
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-live', live, 'client-a', new Date(2000).toISOString(), true);
+		const again = { ...queued('turn-a2', 'queued a', 'client-a', 3000), recorded: true };
 		const shown = snapshot([], [again]);
 		expect(shown.map(e => e.id)).toEqual(['turn-a2']);
 		expect(snapshot(shown, [])).toEqual([]);
 		expect(pendingQueue.isHeld(SID, again)).toBe(false);
+	});
+
+	it('does not hold a re-queued steer whose message is in a transcript opened without a replay', () => {
+		const again = { ...queued('turn-a2', 'queued a', 'client-a', 3000), recorded: true };
+		pendingQueue.noteAuthoritative(SID, [again]);
+		const shown = pendingQueue.reconcile(SID, [again]);
+		pendingQueue.noteAuthoritative(SID, []);
+		pendingQueue.holdDelivering(SID, shown, [], () => {}, command => command === 'client-a');
+		expect(pendingQueue.reconcile(SID, [])).toEqual([]);
+		expect(pendingQueue.isHeld(SID, again)).toBe(false);
+	});
+
+	it('holds a re-queued steer until the message it already recorded shows', () => {
+		// The events feed trails the queue: the steer was recorded, its turn
+		// failed and it was re-queued and taken to run before its row arrived.
+		const first = queued('turn-a', 'queued a', 'client-a', 1000);
+		let shown = snapshot(snapshot([], [first]), []);
+		const again = { ...queued('turn-a2', 'queued a', 'client-a', 3000), recorded: true };
+		shown = snapshot(shown, [again]);
+		shown = snapshot(shown, []);
+		expect(shown.map(e => e.id)).toEqual(['turn-a2']);
+		expect(pendingQueue.isHeld(SID, again)).toBe(true);
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-live', true, 'client-a', new Date(2000).toISOString(), true);
+		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
+		expect(pendingQueue.isHeld(SID, again)).toBe(false);
+	});
+
+	it('keeps a re-queued steer waiting in the queue when its recorded message shows', () => {
+		const again = { ...queued('turn-a2', 'queued a', 'client-a', 3000), recorded: true };
+		const shown = snapshot([], [again]);
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-live', true, 'client-a', new Date(2000).toISOString(), true);
+		expect(pendingQueue.reconcile(SID, shown).map(e => e.id)).toEqual(['turn-a2']);
+	});
+
+	it('does not hold a recorded row with no command id (a voice hand-off)', () => {
+		const voice = { ...queued('turn-v', 'call transcript'), recorded: true };
+		const shown = snapshot([], [voice]);
+		expect(shown.map(e => e.id)).toEqual(['turn-v']);
+		expect(snapshot(shown, [])).toEqual([]);
+		expect(pendingQueue.isHeld(SID, voice)).toBe(false);
 	});
 
 	it('shows a server re-queue (same command, new row) once, not hidden and not doubled', () => {

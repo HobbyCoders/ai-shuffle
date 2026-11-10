@@ -576,7 +576,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// its rows become "Not sent" rows, which the Stop hold covers.
 				if (!state.stopRequestedTurnId) pendingQueue.holdDelivering(sid, state.queuedMessages, rows, () => {
 					update(s => s.sessionId === sid ? { ...s, queuedMessages: pendingQueue.reconcile(sid, s.queuedMessages) } : s);
-				});
+				}, command => state.messages.some(m => m.role === 'user' && m.commandId === command));
 				const reconciled = pendingQueue.reconcile(sid, rows);
 				const peers = (syncData?.pending_peer_messages ?? []) as Array<{
 					id: string; content: string; sender_label: string; sender_session_id?: string; created_at: string;

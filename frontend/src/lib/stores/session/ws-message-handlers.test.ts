@@ -3069,9 +3069,22 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		handlers.handleMessage(frame([]));
 		expect(pendingIds()).toEqual(['turn-a']);
 		pendingQueue.noteDelivered('session-1', 'queued a', 'turn-a');
-		// A re-queued steer: the worker marks it, and its run records no message.
+		// A row the worker marks as already in the transcript, with no command id
+		// (a voice hand-off): its run records no message, so nothing is waited for.
 		handlers.handleMessage(frame([{ id: 'turn-b', content: 'steer b', recorded: true }]));
 		expect(pendingIds()).toEqual(['turn-b']);
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual([]);
+	});
+
+	it('holds a re-queued steer taken to run only while its recorded message is not on screen', () => {
+		const again = [{ id: 'turn-b', content: 'steer b', client_message_id: 'client-b', recorded: true }];
+		handlers.handleMessage(frame(again));
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual(['turn-b']);
+		// Listed again, and now its message is in the transcript this page shows.
+		handlers.handleMessage(frame(again));
+		state.messages = [{ id: 'm1', role: 'user', content: 'steer b', commandId: 'client-b' }];
 		handlers.handleMessage(frame([]));
 		expect(pendingIds()).toEqual([]);
 	});
