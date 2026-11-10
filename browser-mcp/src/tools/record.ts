@@ -76,20 +76,27 @@ interface ActiveRecording {
   timer?: ReturnType<typeof setTimeout>;
   /** Resources released by the max-duration timer; the page still holds the data. */
   expired: boolean;
+  /** The one release in flight or done; every caller awaits the same one. */
+  releasing?: Promise<void>;
+  /** Release finished: throttling is cleared and the CDP session detached. */
   released: boolean;
 }
 
 const recordings = new WeakMap<Session, ActiveRecording>();
 
 /** Is a recording running for this session? (browser_status, tests) */
-export function activeRecording(session: Session): { id: string; expired: boolean } | undefined {
+export function activeRecording(session: Session): { id: string; expired: boolean; released: boolean } | undefined {
   const active = recordings.get(session);
-  return active && !active.page.isClosed() ? { id: active.id, expired: active.expired } : undefined;
+  return active && !active.page.isClosed() ? { id: active.id, expired: active.expired, released: active.released } : undefined;
 }
 
-async function release(active: ActiveRecording): Promise<void> {
-  if (active.released) return;
-  active.released = true;
+/** Release once. A stop during the max-duration release waits for it instead of returning early. */
+function release(active: ActiveRecording): Promise<void> {
+  active.releasing ??= releaseNow(active).finally(() => { active.released = true; });
+  return active.releasing;
+}
+
+async function releaseNow(active: ActiveRecording): Promise<void> {
   if (active.timer) clearTimeout(active.timer);
   try { await active.screencast?.stop(); } catch { /* target gone */ }
   await clearThrottle(active.cdp, { cpu: active.throttle.cpu, network: active.throttle.network });
