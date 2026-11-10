@@ -10,6 +10,8 @@
 	 *
 	 * Selection lives in the navigation store per category (ListItem reads and
 	 * sets it). In stacked mode the list and the detail are separate steps.
+	 * Narrower than the list plus a usable detail (SPLIT_WIDTH_MIN), an open
+	 * item replaces the list, as `replaceOnSelect` does at every width.
 	 */
 	import { tick, untrack, type Snippet } from 'svelte';
 	import { ListFilter, Plus, Search } from 'lucide-svelte';
@@ -17,7 +19,7 @@
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { categoryById } from '$lib/settings/categories';
-	import { clampListWidth, readListWidth } from '$lib/settings/list-width';
+	import { clampListWidth, readListWidth, showsOnePane } from '$lib/settings/list-width';
 	import type { CategoryId } from '$lib/settings/types';
 	import ListDivider from './ListDivider.svelte';
 	import PageTitle from './PageTitle.svelte';
@@ -82,6 +84,15 @@
 
 	let el: HTMLDivElement | undefined = $state();
 	const openItem = $derived(category ? settingsNav.selectedItem(category) : null);
+	/** The reader's width: remembered, or last set with the divider. */
+	let preferred = readListWidth();
+	let width = $state(preferred);
+	let containerWidth = $state(0);
+	// Too narrow for the list beside a usable detail (a narrow window, a phone
+	// held sideways, a wide sidebar beside Settings): one at a time, as
+	// replaceOnSelect pages always do. Stacked mode has its own steps.
+	const narrow = $derived(!settingsNav.stacked && showsOnePane(containerWidth));
+	const replace = $derived(replaceOnSelect || narrow);
 
 	// The open detail scrolls on its own beside the list, so a newly picked item
 	// starts at its top rather than where the previous item was scrolled to.
@@ -100,7 +111,7 @@
 		const current = openItem ?? null;
 		const previous = lastOpen;
 		lastOpen = current;
-		if (!replaceOnSelect || settingsNav.stacked || previous === undefined || previous === current) return;
+		if (!untrack(() => replace) || settingsNav.stacked || previous === undefined || previous === current) return;
 		void tick().then(() => {
 			const row = [...(el?.querySelectorAll<HTMLElement>('[data-settings-item]') ?? [])].find(
 				(item) => item.dataset.settingsItem === previous
@@ -113,8 +124,18 @@
 			target?.focus({ preventScroll: !current });
 		});
 	});
-	let width = $state(readListWidth());
-	let containerWidth = $state(0);
+	// Going narrow with an item open hides the list: focus left on a list row
+	// would fall to the page, so it moves to the detail's title instead.
+	$effect(() => {
+		if (!narrow || replaceOnSelect || !openItem) return;
+		untrack(() => {
+			void tick().then(() => {
+				const active = document.activeElement;
+				if (!active || !el?.querySelector(':scope > .st-lcol')?.contains(active)) return;
+				el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')?.focus({ preventScroll: true });
+			});
+		});
+	});
 
 	$effect(() => {
 		if (!el || typeof ResizeObserver === 'undefined') return;
@@ -125,12 +146,14 @@
 		return () => ro.disconnect();
 	});
 
-	// Re-clamp (without saving) when the space changes.
+	// Re-clamp (without saving) when the space changes, from the width the
+	// reader chose: a squeeze (a narrow window, the one-pane state) must not
+	// leave the list at its minimum once the room comes back.
 	$effect(() => {
 		const cw = containerWidth;
 		if (!cw) return;
 		untrack(() => {
-			const next = clampListWidth(width, cw);
+			const next = clampListWidth(preferred, cw);
 			if (next !== width) width = next;
 		});
 	});
@@ -140,9 +163,10 @@
 	class="st-coll"
 	bind:this={el}
 	style:--st-list-width="{width}px"
-	data-replace={replaceOnSelect ? (openItem ? 'detail' : 'list') : undefined}
+	data-replace={replace ? (openItem ? 'detail' : 'list') : undefined}
+	data-narrow={narrow ? '' : undefined}
 >
-	<ListDivider bind:width {containerWidth} />
+	<ListDivider bind:width {containerWidth} onchange={(w) => (preferred = w)} />
 	<div class="st-lcol">
 		<div class="st-lhead">
 			{#if onBack !== null}<BackRow label="Settings" onclick={() => (onBack ? onBack() : settingsNav.back())} />{/if}
