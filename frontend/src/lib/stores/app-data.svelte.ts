@@ -172,6 +172,13 @@ const _pendingEdits = new Map<string, PendingRowEdit>();
 // clobbering the newer results.
 let _loadSessionsRequestId = 0;
 
+// #1364: signals that a chat may have changed workers (any "sessions"
+// invalidation) and how many of them the committed list was fetched after.
+// The composer trusts a row's owner only while the list has answered them all.
+export interface SessionOwnership { signals: number; answered: number }
+let sessionOwnerSignals = 0;
+let sessionOwnersAnswered = 0;
+
 function recordLocalEdit(sessionId: string, patch: Partial<Session>): void {
 	const prev = _pendingEdits.get(sessionId);
 	_pendingEdits.set(sessionId, {
@@ -611,6 +618,7 @@ function loadSessionsInternal(tagId?: string | null, pages?: number): Promise<vo
 
 async function fetchSessionList(tagId?: string | null, requestedPages?: number) {
 	const requestId = ++_loadSessionsRequestId;
+	const ownerSignals = sessionOwnerSignals;
 	// Resolved when the fetch starts, not when it was queued, so a page the
 	// user appended in between is included.
 	const pages = requestedPages ?? refreshPageCount(tagId ?? null);
@@ -682,6 +690,7 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 		_loadedSessionPages = Math.max(INITIAL_SESSION_PAGES, pagesFetched);
 		sessionListCommits++;
 		sessionListCommitRequest = requestId;
+		sessionOwnersAnswered = Math.max(sessionOwnersAnswered, ownerSignals);
 		commitSessions(rows, {
 			total: rows.length + (hasMore ? 1 : 0),
 			offset: rows.length,
@@ -1062,10 +1071,21 @@ export const appData = {
 
 	// ── Session Operations ──────────────────────────────────────────────
 
+	/** A "sessions" signal arrived: a chat may now run on another worker (#1364). */
+	sessionOwnersMayHaveChanged() {
+		sessionOwnerSignals++;
+	},
+
+	/** Signals seen, and how many the committed list was fetched after (#1364). */
+	sessionOwnership(): SessionOwnership {
+		return { signals: sessionOwnerSignals, answered: sessionOwnersAnswered };
+	},
+
 	async loadSessions(tagId: string | null = _state.sessionsTagFilter) {
 		const early = sessionPrefetch;
 		sessionPrefetch = null;
-		if (early && early.tagId === (tagId ?? null)) {
+		// A signal since the boot load started needs a list fetched after it.
+		if (early && early.tagId === (tagId ?? null) && sessionOwnersAnswered === sessionOwnerSignals) {
 			// In flight, and nothing asked for a newer load since: wait for it.
 			if (early.settledAt === undefined && sessionLoad === early.promise
 				&& (pendingSessionLoad === null || pendingSessionLoad === early.request)) {

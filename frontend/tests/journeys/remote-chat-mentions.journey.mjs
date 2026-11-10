@@ -26,9 +26,11 @@
 //                        draft of a chat that already has a turn
 //   remote-chat-keeps-local-agents a chat on another worker still holding its
 //                        local project lists that project's agents
-//   note-pick-names-the-note a note picked in a chat on another worker is
-//                        inserted as `Notes/<id>`, not the viewing worker's
-//                        file path (#1364)
+//   note-pick-names-the-note a note picked in a chat on another worker keeps
+//                        the note's id on its chip and is sent as
+//                        `@Notes/<id>`, not the viewing worker's file path;
+//                        the running worker (here the same instance) gives the
+//                        model its own file path (#1364)
 //   note-pick-same-worker-keeps-path a note picked in a chat on this worker
 //                        keeps this worker's file path, and the model is sent
 //                        exactly that path
@@ -75,6 +77,13 @@ async function simulateRemoteChat(page, status, key, { offline = false, keepLoca
 			}
 			window.__fileLists = [];
 			window.__subagentLists = [];
+			// What the page sends: a message goes out as a socket frame.
+			window.__sent = [];
+			const socketSend = WebSocket.prototype.send;
+			WebSocket.prototype.send = function (data) {
+				if (typeof data === 'string') window.__sent.push(data);
+				return socketSend.call(this, data);
+			};
 			const local = () => (keepLocalId ? {} : { project_id: null });
 			window.__workerOffline = offline;
 			const urlOf = (input) => new URL(typeof input === 'string' ? input : input.url, location.href);
@@ -176,6 +185,15 @@ async function pickReadme(page) {
 /** What the model was sent for the message carrying `token`. */
 function promptWith(status, token) {
 	return readFileSync(status.fake_ai.request_log, 'utf8').split('\n').filter((line) => line.includes(token)).pop() ?? '';
+}
+
+/** Poll a synchronous read until it gives something, or fail with `what`. */
+async function expectEventually(read, timeout, what) {
+	const until = Date.now() + timeout;
+	while (!read()) {
+		if (Date.now() > until) throw new Error(`timed out: ${what}`);
+		await new Promise((done) => setTimeout(done, 250));
+	}
 }
 
 /** Send with the button, then require a reply rather than a refusal. */
@@ -366,12 +384,26 @@ await runJourney({
 				await start('long', SEEDED.long, {})(ctx);
 				ctx.note = await stageNote(ctx.page);
 			},
-			async act({ page, mark, note }) {
+			async act({ page, mark, status, note }) {
 				await mark('pick a note in a chat on another worker');
-				const path = await pickNote(page, note);
-				expect(path === `Notes/${note.id}`, `the chip names the note, not this worker's file, got ${path}`);
-				await clearComposer(page);
-				await draftSaved(page);
+				await pickNote(page, note);
+				const noteId = await page.locator(CHIP).first().getAttribute('data-note-id');
+				expect(noteId === note.id, `the chip keeps the note's id, got ${noteId}`);
+				const token = uniq();
+				// Focus without a tap: on a phone the tap lands on the chip, selecting it.
+				await composer(page).press('ControlOrMeta+End');
+				await page.keyboard.type(` read ${token}`);
+				await mark('send it');
+				await sendButton(page).click();
+				await page.waitForFunction((t) => window.__sent.some((body) => body.includes(t)), token, { timeout: 30_000 });
+				const sent = await page.evaluate((t) => window.__sent.find((body) => body.includes(t)), token);
+				expect(sent.includes(`@Notes/${note.id}`), `the chat on another worker is sent the note's id, got ${sent.slice(0, 400)}`);
+				// One dev instance is also the running worker: it gives the model its own file.
+				await expectEventually(() => promptWith(status, token), 30_000, `the model received the message carrying ${token}`);
+				const prompt = promptWith(status, token);
+				expect(/[\\/]notes[\\/][^/\\]+\.md/.test(prompt) && !prompt.includes(`@Notes/${note.id}`),
+					`the running worker expands the id to its note file, got ${prompt.slice(0, 400)}`);
+				await waitTurnSettled(page, { messagesAtLeast: 1, timeout: 30_000 });
 			}
 		},
 		{

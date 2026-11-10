@@ -84,6 +84,8 @@ export function startLiveSync() {
  let projectsInvalidatedAt = 0;
  const invalidate = (names?: string[]) => {
   if (!names || names.includes('projects')) projectsInvalidatedAt = performance.now();
+  // Until the list this triggers lands, a chat's owner is unknown (#1364).
+  if (!names || names.includes('sessions')) appData.sessionOwnersMayHaveChanged();
   resourceSync.invalidate(names);
  };
  const unsubscribeResources = [

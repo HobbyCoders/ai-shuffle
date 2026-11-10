@@ -1149,7 +1149,8 @@
 		// Decided now, against where the message goes: a "Runs on" or owner change
 		// after a note was picked counts (#1364).
 		const finalPrompt = editorRef?.getMessage({ notesAsReferences: chatRunsElsewhere(
-			$activeSession, $sessions.find((session) => session.id === $activeSession.sessionId), !!moveWait
+			$activeSession, $sessions.find((session) => session.id === $activeSession.sessionId), !!moveWait,
+			appData.sessionOwnership()
 		) }) ?? '';
 
 		// Surface WHY a send is blocked instead of silently swallowing the click,

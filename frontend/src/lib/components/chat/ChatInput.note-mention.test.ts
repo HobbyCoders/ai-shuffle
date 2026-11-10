@@ -3,18 +3,32 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import ChatInput from './ChatInput.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
+import { appData } from '$lib/stores/app-data.svelte';
+import { startLiveSync } from '$lib/services/live-sync';
 import type { ChatMessage } from '$lib/stores/types';
 import '$lib/test-stubs/composer-dom';
 
 // #1364: a note chip is sent as this worker's file path to a chat on this
 // worker and as `@Notes/<id>` to one on another worker, decided at send time.
 
+// The session list the server holds, and a hold on the next list read.
+const net = vi.hoisted(() => ({ rows: [] as Record<string, unknown>[], hold: null as Promise<void> | null }));
 vi.hoisted(() => {
+	// live-sync loads the theme store, which reads the system theme on import.
+	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
 	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
 		const url = String(input);
+		if (url.includes('/sessions/cursor') && net.hold) await net.hold;
 		const data = url.includes('/auth/status')
-			? { authenticated: true, has_any_credential: true, onboarding_complete: true }
-			: url.includes('/commands') ? { commands: [] } : [];
+			? { authenticated: true, has_any_credential: true, onboarding_complete: true,
+				preference_identity: { user_type: 'account', user_id: 'owner' } }
+			: url.includes('/commands') ? { commands: [] }
+			: url.includes('/preferences/all') ? { preferences: {}, versions: {} }
+			: url.includes('/sessions/count') ? { total: 0 }
+			: url.includes('membership=settled')
+				? { items: net.rows, next_cursor: null, next_cursor_id: null, has_more: false }
+			: url.includes('/sessions/cursor') ? { items: [], next_cursor: null, next_cursor_id: null, has_more: false }
+			: [];
 		return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
 	}));
 });
@@ -101,6 +115,53 @@ describe('a note chip at send time', () => {
 
 	it('sends the path of a chip saved before chips kept the note id', async () => {
 		start(null, null, { deviceIntent: PEER });
+		expect(await send()).toBe(`read @${PATH}`);
+	});
+});
+
+describe('a note chip after a hand-off signal', () => {
+	// What a managed-account or paired socket gets for a hand-off: a bare
+	// "sessions" signal, never the owner. Until the list it triggers lands, the
+	// row's `is_remote: false` is the old owner's answer.
+	class Socket {
+		static OPEN = 1; static CLOSED = 3; static all: Socket[] = []; readyState = 1;
+		onopen?: () => void; onmessage?: (event: { data: string }) => void; onclose?: (event: { code: number }) => void;
+		constructor() { Socket.all.push(this); }
+		send = vi.fn(); close = vi.fn();
+		emit(data: unknown) { this.onmessage?.({ data: JSON.stringify(data) }); }
+	}
+	let stop = () => {};
+	let release = () => {};
+	const row = { id: 'local-chat', title: 'Plan', is_remote: false, device_name: null };
+
+	beforeEach(async () => {
+		Socket.all = [];
+		vi.stubGlobal('WebSocket', Socket);
+		net.rows = [row];
+		net.hold = null;
+		await appData.loadSessions();
+		start('local-chat', NOTE_ID, { isRemote: false });
+		stop = startLiveSync();
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		net.hold = new Promise((resolve) => { release = () => { net.hold = null; resolve(); }; });
+	});
+	afterEach(() => {
+		release();
+		stop();
+		net.rows = [];
+	});
+
+	it('sends the note id while the list the signal asked for has not landed', async () => {
+		Socket.all[0].emit({ type: 'resources_changed', resources: ['sessions'] });
+		expect(await send()).toBe(`read @Notes/${NOTE_ID}`);
+	});
+
+	it('sends the path again once the list says the chat still runs here', async () => {
+		Socket.all[0].emit({ type: 'resources_changed', resources: ['sessions'] });
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		const answered = appData.sessionOwnership().signals;
+		release();
+		await waitFor(() => expect(appData.sessionOwnership().answered).toBe(answered));
 		expect(await send()).toBe(`read @${PATH}`);
 	});
 });

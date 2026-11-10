@@ -28,3 +28,16 @@ it('counts a message held for a queued move as elsewhere', () => {
 	expect(chatRunsElsewhere({ ...open, isRemote: false }, { is_remote: false }, true)).toBe(true);
 	expect(chatRunsElsewhere({ ...open, isRemote: false }, { is_remote: false }, false)).toBe(false);
 });
+
+it('counts an open chat as elsewhere until the session list answers a "sessions" signal', () => {
+	const local = { ...open, isRemote: false };
+	const row = { is_remote: false };
+	// A signal (a hand-off, a reconnect) the list has not answered yet.
+	expect(chatRunsElsewhere(local, row, false, { signals: 2, answered: 1 })).toBe(true);
+	// Answered: the row is the list fetched after the signal.
+	expect(chatRunsElsewhere(local, row, false, { signals: 2, answered: 2 })).toBe(false);
+	// Answered, but this chat has no row there: /live may predate the signal.
+	expect(chatRunsElsewhere(local, null, false, { signals: 2, answered: 2 })).toBe(true);
+	// No signal since the page loaded: /live's answer still stands.
+	expect(chatRunsElsewhere(local, null, false, { signals: 0, answered: 0 })).toBe(false);
+});
