@@ -6,7 +6,8 @@ import { auth } from '$lib/stores/auth.svelte';
 import { appData } from '$lib/stores/app-data.svelte';
 import { startLiveSync } from '$lib/services/live-sync';
 import type { ChatMessage } from '$lib/stores/types';
-import { readDraft } from '$lib/stores/session/draft-persistence';
+import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
 import '$lib/test-stubs/composer-dom';
 
 // #1364: a note chip is sent as this worker's file path to a chat on this
@@ -344,6 +345,33 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		Socket.all[0].open();
 		await waitFor(() => expect(queries()).toHaveLength(1));
 		expect(queries()[0]).toMatchObject({ session_id: 'restoring-chat', prompt: REF });
+	});
+
+	it('asks the server for a saved tab chat restoring after a reload, before the store has its id', async () => {
+		// The reload's state: the store has no chat yet, the editor already
+		// holds the tab's saved chat and its draft, "Runs on" is this worker.
+		activeSession.newChat();
+		// A fresh tab load: no "New chat was picked" mark from the reset above.
+		sessionStorage.clear();
+		sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, JSON.stringify({ sessionId: 'saved-chat', title: 'Saved' }));
+		writeDraft('saved-chat', draftWith(NOTE_ID));
+		Object.assign(activeSession.current, {
+			sessionId: null, isRestoringSession: true, deviceIntent: null, mode: 'chat', profile: 'coding',
+			isStreaming: false, liveTurnId: null, error: null, worktreeError: null, isRemote: false
+		});
+		const view = render(ChatInput);
+		await waitFor(() => expect(view.container.querySelector('[data-file-chip]')).toBeTruthy());
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		// The chat moves to another worker during the restore, then is adopted.
+		net.live = () => ({ session_meta: { is_remote: true } });
+		Object.assign(activeSession.current, { sessionId: 'saved-chat', isRestoringSession: false });
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		await waitFor(() => expect(queries()).toHaveLength(1));
+		expect(queries()[0]).toMatchObject({ session_id: 'saved-chat', prompt: REF });
+		expect(net.liveCalls).toHaveLength(1);
+		expect(net.liveCalls[0]).toContain('/sessions/saved-chat/live?');
 	});
 
 	it('still sends the file path to a chat that runs here after the waits', async () => {

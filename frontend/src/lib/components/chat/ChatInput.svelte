@@ -1156,12 +1156,15 @@
 		let finalPrompt = pathPrompt;
 		let notesRunHere: (() => Promise<boolean>) | undefined;
 		if (referencePrompt !== pathPrompt) {
-			const openChat = $activeSession.sessionId;
+			// The chat the message is for, as captured at Send: during a reload's
+			// restore the store has no id yet but the editor already holds the
+			// chat, and that is still an open chat, not a new one.
+			const openChat = destination.chat;
 			if (openChat && !moveWait) {
 				finalPrompt = referencePrompt;
 				// Read when asked: a move queued meanwhile holds the message too.
 				notesRunHere = async () => !(await notesGoAsReferences({ sessionId: openChat, deviceIntent: null }, !!moveWait));
-			} else if (notesGoAsReferences($activeSession, !!moveWait) === true) {
+			} else if (notesGoAsReferences({ sessionId: openChat, deviceIntent: $activeSession.deviceIntent }, !!moveWait) === true) {
 				finalPrompt = referencePrompt;
 			}
 		}
