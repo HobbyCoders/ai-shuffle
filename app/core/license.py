@@ -15,6 +15,12 @@ from app.db import mobile_hub
 PLAN_TTL = 600.0
 RETRY_INTERVAL = PLAN_TTL  # Failed reads must also respect the hub polling budget.
 PLAN_TIMEOUT = 2.0
+FREE_WORKERS = 3
+# Paid plan size when the hub gives no limit. The tier never sets the limit.
+PAID_WORKERS = 10
+# Hub plan names for display only; older hubs send none.
+PAID_TIERS = ("pro", "ultimate", "custom")
+TIER_NAMES = {"pro": "Pro plan", "ultimate": "Ultimate plan"}
 _LOCK = threading.Lock()
 _entry = None
 _generation = 0
@@ -37,8 +43,8 @@ def invalidate_plan_cache():
 
 
 def _free_plan():
-    return {"plan": "free", "status": "none", "remote_worker_limit": 2,
-            "seats": 2, "used": None, "renews_at": None}
+    return {"plan": "free", "status": "none", "remote_worker_limit": FREE_WORKERS,
+            "seats": FREE_WORKERS, "used": None, "renews_at": None, "tier": None}
 
 
 def _count(value):
@@ -53,9 +59,14 @@ def _normalize(value):
     paid = value["plan"] == "paid" and value["status"] in ("active", "trialing", "grace")
     limit = value.get("remote_worker_limit")
     if not _count(limit) or limit < 1:
-        limit = 4 if paid else 2
+        limit = PAID_WORKERS if paid else FREE_WORKERS
     if not paid and value["plan"] == "paid":
-        limit = 2
+        limit = FREE_WORKERS
+    # A tier that disagrees with the plan (a lapsed Pro, a paid "free") or that
+    # this version does not know is dropped, so the label falls back to the plan.
+    tier = value.get("tier")
+    if tier not in (PAID_TIERS if paid else ("free",)):
+        tier = None
     seats = value.get("seats")
     if seats is not None and not _count(seats):
         raise ValueError("Invalid account seats")
@@ -72,7 +83,7 @@ def _normalize(value):
         datetime.fromtimestamp(renewal / 1000, timezone.utc)
     return {"plan": "paid" if paid else "free", "status": value["status"],
             "remote_worker_limit": limit, "seats": seats if paid else limit,
-            "used": used, "renews_at": renewal}
+            "used": used, "renews_at": renewal, "tier": tier}
 
 
 def _account_plan(binding):
@@ -126,16 +137,17 @@ def status() -> dict:
         "key_hint": None, "install_id": None, "issued_at": None, "expires_at": None,
         "renews_at": None, "grace": False, "grace_until": None,
         "last_refresh_at": None, "next_refresh_at": None, "last_error": None,
-        "server_status": None, "server_configured": False,
+        "server_status": None, "server_configured": False, "tier": None,
     }
     if plan is not None:
         paid = plan["plan"] == "paid"
         limit = plan["remote_worker_limit"]
         renewal = plan["renews_at"]
+        name = TIER_NAMES.get(plan["tier"]) or ("Paid plan" if paid else "Free account")
         result.update(
             state=plan["plan"], plan=plan["plan"], seats=plan["seats"],
-            seats_used=plan["used"], remote_worker_limit=limit,
-            message=f"{'Paid plan' if paid else 'Free account'}: {limit} remote workers.",
+            seats_used=plan["used"], remote_worker_limit=limit, tier=plan["tier"],
+            message=f"{name}: {limit} remote workers.",
             renews_at=renewal,
             expires_at=datetime.fromtimestamp(renewal / 1000, timezone.utc).isoformat() if renewal is not None else None,
             grace=paid and plan["status"] == "grace",

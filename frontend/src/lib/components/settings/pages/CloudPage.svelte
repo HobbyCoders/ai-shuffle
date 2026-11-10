@@ -8,9 +8,11 @@
 	 *
 	 * - not_linked: what a free account adds, Link an account (the Devices
 	 *   sign-in) and pricing.
-	 * - free: 2 remote workers (or "N of 2 in use"), Upgrade.
-	 * - paid: 4 remote workers by default or the account's seat count, how many
-	 *   are in use when the hub says, and the renewal date.
+	 * - free: 3 remote workers (or "N of 3 in use"), Upgrade.
+	 * - paid: the account's seat count (10 when it gives none), how many are in
+	 *   use when the hub says, and the renewal date. The account's `tier` only
+	 *   names the plan (Pro or Ultimate); a custom licence, an older hub or an
+	 *   unknown name keeps the "Paid plan" row. 100 seats and up read as unlimited.
 	 *
 	 * Replaces System > License; the endpoint keeps its `/license` name.
 	 */
@@ -22,6 +24,9 @@
 		FREE_WORKERS,
 		getLicense,
 		PAID_WORKERS,
+		paidPlanName,
+		PRO_WORKERS,
+		ULTIMATE_WORKERS,
 		UNLIMITED_SEATS,
 		type LicenseStatus
 	} from '$lib/api/license';
@@ -57,7 +62,7 @@
 		if (!status) {
 			return { text: load === 'forbidden' ? FORBIDDEN_TEXT : 'Unavailable' };
 		}
-		if (tier === 'paid') return { text: 'Paid', tone: 'ok' };
+		if (tier === 'paid') return { text: paidPlanName(status) ?? 'Paid', tone: 'ok' };
 		if (tier === 'free') return { text: 'Free', tone: 'ok' };
 		return { text: 'Not linked', tone: 'off' };
 	});
@@ -78,19 +83,29 @@
 			: date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 	}
 
-	/* ---------- the three tiers, top of the page ---------- */
+	/* ---------- the plans, top of the page ---------- */
 
+	const planName = $derived(paidPlanName(status));
+	const currentTier = $derived(
+		tier === 'paid' ? (planName === 'Pro' ? 'pro' : planName === 'Ultimate' ? 'ultimate' : 'paid')
+			: tier === 'free' ? 'free' : tier ? 'local' : null
+	);
+	/* The account's own count on its current plan; the others show what they include. */
+	const paidFigure = (id: string, size: number) =>
+		id === currentTier ? (unlimited ? 'Unlimited' : String(cap)) : String(size);
+	const paidUnit = (id: string) => (id === currentTier && unlimited ? 'remote workers' : 'remote workers and sync');
 	const tiers = $derived([
 		{ id: 'local', name: 'This worker', figure: 'Free', unit: 'Local use, no account' },
 		{ id: 'free', name: 'Free account', figure: String(tier === 'free' ? cap : FREE_WORKERS), unit: 'remote workers, no card' },
-		{
-			id: 'paid',
-			name: 'Paid plan',
-			figure: unlimited ? 'Unlimited' : String(paid ? cap : PAID_WORKERS),
-			unit: unlimited ? 'remote workers' : 'remote workers and sync'
-		}
+		{ id: 'pro', name: 'Pro plan', figure: paidFigure('pro', PRO_WORKERS), unit: paidUnit('pro') },
+		{ id: 'ultimate', name: 'Ultimate plan', figure: paidFigure('ultimate', ULTIMATE_WORKERS), unit: paidUnit('ultimate') },
+		/* A paid account that names neither plan (a custom licence, an older hub). */
+		...(currentTier === 'paid'
+			? [{ id: 'paid', name: 'Paid plan', figure: paidFigure('paid', PAID_WORKERS), unit: paidUnit('paid') }]
+			: [])
 	]);
-	const currentTier = $derived(tier === 'paid' ? 'paid' : tier === 'free' ? 'free' : tier ? 'local' : null);
+	/* See plans sits on the last row. */
+	const lastTier = $derived(tiers[tiers.length - 1].id);
 
 	/* ---------- loading and actions ---------- */
 
@@ -130,7 +145,7 @@
 	<section class:cl-pending={loading} aria-label="Plans" aria-busy={loading} data-testid="cloud-tiers">
 		<RowGroup title="Plans">
 			{#each tiers as t (t.id)}
-				<SettingRow label={t.name} hint={`${t.figure} · ${t.unit}`} stackOnPhone={t.id === 'paid' || (t.id === currentTier && used !== null)}>
+				<SettingRow label={t.name} hint={`${t.figure} · ${t.unit}`} stackOnPhone={t.id === lastTier || (t.id === currentTier && used !== null)}>
 					{#snippet badge()}
 						{#if t.id === currentTier}<span class="cl-here" aria-current="true">You are here</span>{/if}
 					{/snippet}
@@ -151,7 +166,7 @@
 							</span>
 						</span>
 					{/if}
-					{#if t.id === 'paid'}
+					{#if t.id === lastTier}
 						<a class="st-btn phone-action" data-setting-anchor="cloud.upgrade" href={CLOUD_PRICING_URL} target="_blank" rel="noopener noreferrer"><ExternalLink />See plans</a>
 					{/if}
 				</SettingRow>

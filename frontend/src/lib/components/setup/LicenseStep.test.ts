@@ -28,13 +28,15 @@ function expectNoKeyEntry() {
 describe('setup Cloud step', () => {
 	it.each([
 		['not linked', base],
-		['on a free account', { ...base, state: 'free', linked: true, plan: 'free', remote_worker_limit: 2 }],
+		['on a free account', { ...base, state: 'free', linked: true, plan: 'free', remote_worker_limit: 3 }],
+		['on a free account that names its tier', { ...base, state: 'free', linked: true, plan: 'free', tier: 'free', remote_worker_limit: 3 }],
 	])('says local use is free, with no key to enter, %s', async (_name, status) => {
 		mocks.getLicense.mockResolvedValue(status);
 		const onContinue = vi.fn();
 		render(LicenseStep, { onContinue });
 		expect(await screen.findByText('Local use is free')).toBeTruthy();
-		expect(document.body.textContent).toContain('adds two remote workers');
+		expect(document.body.textContent).toContain('adds three remote workers');
+		expect(document.body.textContent).not.toMatch(/founder|yearly|\/year/i);
 		expect(document.body.textContent).toContain('follows the account you sign in with');
 		expectNoKeyEntry();
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
@@ -53,14 +55,20 @@ describe('setup Cloud step', () => {
 	});
 
 	it.each([
-		[{ seats: null, remote_worker_limit: 4 }, '4 remote workers'],
-		[{ seats: 12, remote_worker_limit: 12 }, '12 remote workers'],
-		[{ seats: 100, seats_used: 2, remote_worker_limit: 100 }, 'unlimited remote workers'],
-	])('shows a paid plan that came with the signed-in account (%o)', async (extra, shows) => {
+		[{ seats: null, remote_worker_limit: 0 }, '10 remote workers', 'Paid Cloud plan active'],
+		[{ seats: 12, remote_worker_limit: 12 }, '12 remote workers', 'Paid Cloud plan active'],
+		[{ seats: 100, seats_used: 2, remote_worker_limit: 100 }, 'unlimited remote workers', 'Paid Cloud plan active'],
+		[{ tier: 'pro', seats: 10, remote_worker_limit: 10 }, '10 remote workers', 'Pro plan active'],
+		[{ tier: 'ultimate', seats: 30, remote_worker_limit: 30 }, '30 remote workers', 'Ultimate plan active'],
+		// The count is the account's, whatever the tier usually includes.
+		[{ tier: 'pro', seats: 25, remote_worker_limit: 25 }, '25 remote workers', 'Pro plan active'],
+		[{ tier: 'custom', seats: 100, remote_worker_limit: 100 }, 'unlimited remote workers', 'Paid Cloud plan active'],
+		[{ tier: 'enterprise', seats: 12, remote_worker_limit: 12 }, '12 remote workers', 'Paid Cloud plan active'],
+	])('shows a paid plan that came with the signed-in account (%o)', async (extra, shows, heading) => {
 		mocks.getLicense.mockResolvedValue({ ...base, state: 'paid', linked: true, plan: 'paid', ...extra });
 		const onContinue = vi.fn();
 		render(LicenseStep, { onContinue });
-		expect(await screen.findByText('Paid Cloud plan active')).toBeTruthy();
+		expect(await screen.findByText(heading)).toBeTruthy();
 		expect(document.body.textContent?.replace(/\s+/g, ' ')).toContain(`From your signed-in Cloud account: ${shows} and sync.`);
 		expectNoKeyEntry();
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
