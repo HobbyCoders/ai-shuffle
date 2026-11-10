@@ -16,6 +16,7 @@
 	 *   - provider model       → `encodeProviderModel(providerId, modelId)`
 	 *   - custom free-text     → CUSTOM_VALUE
 	 */
+	import { tick } from 'svelte';
 	import { ChevronDown } from 'lucide-svelte';
 	import { decodeProviderModel, CUSTOM_VALUE } from '$lib/constants/models';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
@@ -84,28 +85,49 @@
 	// trigger or shrink its height to fit, whichever side has room.
 	const PANEL_PREFERRED_HEIGHT = 346;
 	const PANEL_MIN_HEIGHT = 180;
+	const PANEL_PREFERRED_WIDTH = 360;
 	// The panel stops 24px short of whatever edge it opens toward.
 	const VIEWPORT_MARGIN = 24;
+	// Sideways it may come closer to the clipping edge: 8px.
+	const SIDE_MARGIN = 8;
 	let openUpward = $state(false);
 	let panelHeight = $state(PANEL_PREFERRED_HEIGHT);
+	/** Grow rightward from the trigger's left edge instead of leftward from its right. */
+	let alignStart = $state(false);
+	/** Set only when neither side has room for the preferred width. */
+	let panelWidth = $state<number | null>(null);
+
+	interface Bounds { top: number; bottom: number; left: number; right: number }
 
 	/**
-	 * Vertical bounds the panel can be seen in: the viewport, narrowed by every
+	 * Bounds the panel can be seen in: the viewport, narrowed by every
 	 * scrolling ancestor. Inside a dialog the body scrolls and ends at the
 	 * footer, so measuring against the window alone let the panel open into
-	 * the hidden part of the body, behind the footer (#1811).
+	 * the hidden part of the body, behind the footer (#1811). Sideways every
+	 * ancestor that clips its overflow counts: a Settings detail pane cut off
+	 * a right-anchored panel that grew past its left edge (#1338).
 	 */
-	function visibleBounds(el: HTMLElement): { top: number; bottom: number } {
-		let top = 0;
-		let bottom = window.innerHeight;
+	function visibleBounds(el: HTMLElement): Bounds {
+		const b: Bounds = { top: 0, bottom: window.innerHeight, left: 0, right: window.innerWidth };
 		for (let node = el.parentElement; node; node = node.parentElement) {
-			const { overflowY } = getComputedStyle(node);
-			if (overflowY !== 'auto' && overflowY !== 'scroll') continue;
+			const { overflowX, overflowY } = getComputedStyle(node);
+			const clipsY = overflowY === 'auto' || overflowY === 'scroll';
+			const clipsX = overflowX !== '' && overflowX !== 'visible';
+			if (!clipsX && !clipsY) continue;
 			const r = node.getBoundingClientRect();
-			top = Math.max(top, r.top);
-			bottom = Math.min(bottom, r.bottom);
+			if (clipsY) {
+				b.top = Math.max(b.top, r.top);
+				b.bottom = Math.min(b.bottom, r.bottom);
+			}
+			if (clipsX) {
+				// The padding box: a vertical scrollbar is not room for the panel.
+				const left = r.left + (node.clientLeft || 0);
+				const width = node.clientWidth || r.width;
+				b.left = Math.max(b.left, left);
+				b.right = Math.min(b.right, left + width);
+			}
 		}
-		return { top, bottom };
+		return b;
 	}
 
 	function positionPanel() {
@@ -120,6 +142,21 @@
 		} else {
 			openUpward = false;
 			panelHeight = Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_PREFERRED_HEIGHT, spaceBelow));
+		}
+		// Sideways: keep the right-anchored default when it fits, else grow
+		// rightward, else take the roomier side at the width it has.
+		const width = Math.min(PANEL_PREFERRED_WIDTH, window.innerWidth * 0.92);
+		const roomLeftward = rect.right - (bounds.left + SIDE_MARGIN);
+		const roomRightward = bounds.right - SIDE_MARGIN - rect.left;
+		if (roomLeftward >= width) {
+			alignStart = false;
+			panelWidth = null;
+		} else if (roomRightward >= width) {
+			alignStart = true;
+			panelWidth = null;
+		} else {
+			alignStart = roomRightward > roomLeftward;
+			panelWidth = Math.floor(Math.max(roomLeftward, roomRightward));
 		}
 	}
 
@@ -148,16 +185,27 @@
 		const next = !open;
 		if (next) positionPanel();
 		open = next;
+		// Measure again once the panel is in: if opening moved the trigger, the
+		// panel follows it instead of keeping the side picked for the old spot.
+		if (next) void tick().then(() => { if (open) positionPanel(); });
+	}
+
+	let triggerEl = $state<HTMLButtonElement | null>(null);
+
+	/** Close the panel; Escape also hands focus back to the trigger (#1339). */
+	function close(returnFocus = false) {
+		open = false;
+		if (returnFocus) triggerEl?.focus({ preventScroll: true });
 	}
 
 	// Close on outside click / Escape while open.
 	function onDocClick(e: MouseEvent) {
-		if (rootEl && !rootEl.contains(e.target as Node)) open = false;
+		if (rootEl && !rootEl.contains(e.target as Node)) close();
 	}
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key !== 'Escape') return;
 		e.preventDefault();
-		open = false;
+		close(rootEl?.contains(document.activeElement) ?? false);
 		// This Escape closed the panel; keep it from also closing a dialog the
 		// picker sits in (those listen on window, after this document listener).
 		e.stopPropagation();
@@ -172,12 +220,28 @@
 			document.removeEventListener('keydown', onKeydown);
 		};
 	});
+
+	// Close when the picker stops being shown. Settings stays mounted behind
+	// the chat with `display: none`, so leaving it with the keyboard (no
+	// outside mouse press) left the panel open and the trigger expanded in the
+	// hidden page, and it came back open (#1345). A hidden element reports a
+	// zero-size box, which the observer delivers.
+	$effect(() => {
+		const el = rootEl;
+		if (!open || !el || typeof ResizeObserver === 'undefined') return;
+		const ro = new ResizeObserver(() => {
+			if (el.getClientRects().length === 0) close();
+		});
+		ro.observe(el);
+		return () => ro.disconnect();
+	});
 </script>
 
 <div class="mpk" bind:this={rootEl}>
 	<button
 		type="button"
 		{id}
+		bind:this={triggerEl}
 		class="mpk-trigger"
 		class:open
 		aria-haspopup="listbox"
@@ -195,7 +259,8 @@
 		<div
 			class="mpk-panel"
 			class:mpk-panel-up={openUpward}
-			style="--mpp-height: {panelHeight}px"
+			class:mpk-panel-start={alignStart}
+			style="--mpp-height: {panelHeight}px{panelWidth === null ? '' : `; --mpp-width: ${panelWidth}px`}"
 		>
 			<ModelPickerPanel
 				groups={catalog.groups}
@@ -204,7 +269,8 @@
 				onSelect={selectOption}
 				{leadingRows}
 				{trailingRows}
-				onRequestClose={() => (open = false)}
+				onRequestClose={() => close(true)}
+				focusSearchOnOpen
 			/>
 		</div>
 	{/if}
@@ -263,8 +329,10 @@
 		position: absolute;
 		z-index: 40;
 		top: calc(100% + 4px);
-		/* Right-anchored: the picker sits near the clipped right edge of its
-		   `.set-group` (overflow: hidden), so extra width must grow LEFTWARD. */
+		/* Right-anchored by default: most pickers sit near the clipped right edge
+		   of their `.set-group` (overflow: hidden), so extra width grows LEFTWARD.
+		   positionPanel() switches to `.mpk-panel-start` or narrows the panel when
+		   that would cross the left edge of what clips it (#1338). */
 		right: 0;
 		--mpp-width: min(360px, 92vw);
 		border: 1px solid var(--menu-border);
@@ -279,5 +347,11 @@
 	.mpk-panel.mpk-panel-up {
 		top: auto;
 		bottom: calc(100% + 4px);
+	}
+
+	/* Grow rightward from the trigger's left edge when leftward has no room. */
+	.mpk-panel.mpk-panel-start {
+		right: auto;
+		left: 0;
 	}
 </style>

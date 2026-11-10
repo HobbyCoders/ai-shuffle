@@ -24,7 +24,7 @@
 	 * the panel via `--mpp-height` / `--mpp-width`.
 	 */
 	import { Check, Lock, Search, Star } from 'lucide-svelte';
-	import { onDestroy, tick } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
 	import { matchesPickerQuery } from '$lib/constants/model-picker';
 	import {
@@ -47,6 +47,7 @@
 		getModelWindowInfo,
 		saveModelWindow
 	} from '$lib/stores/model-window';
+	import { canFocusModelSearch } from './model-picker-focus';
 
 	interface ExtraRow {
 		value: string;
@@ -77,6 +78,12 @@
 		onContextStandardChange?: (tokens: number) => void | Promise<void>;
 		/** Escape pressed inside the search box. */
 		onRequestClose?: () => void;
+		/**
+		 * The panel was just opened by the owner (a popover, not an inline card):
+		 * focus the search box so the arrow keys move the highlight at once.
+		 * Skipped on touch-first devices, where it would raise the keyboard.
+		 */
+		focusSearchOnOpen?: boolean;
 	}
 
 	let {
@@ -92,7 +99,8 @@
 		onContextChoiceSelect,
 		contextStandardTokens = null,
 		onContextStandardChange,
-		onRequestClose
+		onRequestClose,
+		focusSearchOnOpen = false
 	}: Props = $props();
 
 	let query = $state('');
@@ -114,6 +122,10 @@
 		const mo = typeof MutationObserver === 'undefined' ? null : new MutationObserver(measureMoreBelow);
 		mo?.observe(el, { childList: true, subtree: true });
 		return () => { ro?.disconnect(); mo?.disconnect(); };
+	});
+
+	onMount(() => {
+		if (focusSearchOnOpen && canFocusModelSearch()) searchEl?.focus({ preventScroll: true });
 	});
 
 	const isSearching = $derived(query.trim().length > 0);

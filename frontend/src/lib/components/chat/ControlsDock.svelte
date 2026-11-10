@@ -165,6 +165,15 @@
 		openPopover = null;
 	}
 
+	/** Escape: close, and give focus back to the chip if it was in the popover (#1339). */
+	function dismissPopover() {
+		const wrap = openPopover ? wrapFor(openPopover) : null;
+		const active = document.activeElement;
+		const hadFocus = !!active && (!!wrap?.contains(active) || !!modelLayerRef?.contains(active));
+		closePopover();
+		if (hadFocus) wrap?.querySelector<HTMLButtonElement>('button[aria-expanded]')?.focus({ preventScroll: true });
+	}
+
 	function handleDocumentClick(e: MouseEvent) {
 		if (!openPopover) return;
 		const wrap = wrapFor(openPopover);
@@ -176,7 +185,7 @@
 		if (e.key === 'Escape' && openPopover) {
 			e.preventDefault();
 			e.stopPropagation();
-			closePopover();
+			dismissPopover();
 		}
 	}
 
@@ -682,7 +691,8 @@
 							// Stay open so context-window controls remain reachable.
 							activeSession.setModelOverride(v);
 						}}
-						onRequestClose={closePopover}
+						onRequestClose={dismissPopover}
+						focusSearchOnOpen
 					/>
 				</div>
 			</div>

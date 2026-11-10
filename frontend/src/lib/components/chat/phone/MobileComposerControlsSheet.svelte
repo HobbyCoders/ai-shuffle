@@ -60,6 +60,7 @@
 	import RunningTasksList from '$lib/components/chat/RunningTasksList.svelte';
 	import ChatExportActions from '$lib/components/layout/ChatExportActions.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
+	import { focusModelSearch } from '$lib/components/settings/model-picker-focus';
 	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
@@ -285,9 +286,14 @@
 		requestOpen(false);
 	}
 
+	const focusModelPage = () => focusModelSearch(panelRef?.querySelector('[data-page="model"]'));
+
 	async function focusPanel() {
 		await tick();
 		if (pageName === 'main') panelRef?.focus({ preventScroll: true });
+		// The model page with a mouse and keyboard: its search box, so the
+		// arrow keys move the highlight at once (#1339). Never on touch.
+		else if (pageName === 'model' && focusModelPage()) return;
 		// A page opened straight from the bar has no way back, only out.
 		else (direct ? closeRef : backRef)?.focus({ preventScroll: true });
 	}
@@ -311,6 +317,7 @@
 		pushPageEntry(target);
 		void tick().then(() => {
 			panelRef?.querySelector<HTMLElement>(`[data-page="${target}"] .mcp-scroll`)?.scrollTo?.({ top: 0 });
+			if (target === 'model' && focusModelPage()) return;
 			backRef?.focus({ preventScroll: true });
 		});
 	}
@@ -460,7 +467,12 @@
 					direct = false;
 					opener = null;
 				}, 400);
-				if (panelRef?.contains(document.activeElement)) controlsCellRef?.focus({ preventScroll: true });
+				if (panelRef?.contains(document.activeElement)) {
+					// A page opened straight from its bar cell hands focus back to
+					// that cell (Escape on the model page, #1339); else the controls cell.
+					const cell = direct ? barRef?.querySelector<HTMLElement>(`[data-cell="${pageName}"]`) : null;
+					(cell ?? controlsCellRef)?.focus({ preventScroll: true });
+				}
 				if (historyEntry) {
 					historyEntry = false;
 					// Pop the page's entry too, so no dead Back press is left behind.

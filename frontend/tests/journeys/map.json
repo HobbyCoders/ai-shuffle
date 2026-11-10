@@ -141,6 +141,20 @@
 			"globs": ["frontend/tests/journeys/settings-detail-link.journey.mjs", "frontend/src/lib/components/settings/shell/SettingsShell.svelte", "frontend/src/lib/components/settings/shell/BackRow.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte"]
 		},
 		{
+			"why": "the model picker panel: rows inside the pane it opens in, keyboard focus on open and Escape, closing when Settings is hidden",
+			"journeys": ["model-picker"],
+			"globs": [
+				"frontend/tests/journeys/model-picker.journey.mjs",
+				"frontend/src/lib/components/settings/ModelPicker.svelte",
+				"frontend/src/lib/components/settings/ModelPickerPanel.svelte",
+				"frontend/src/lib/components/settings/model-picker-focus.ts",
+				"frontend/src/lib/components/settings/shell/settings.css",
+				"frontend/src/lib/components/settings/integrations/ApiUserDetail.svelte",
+				"frontend/src/lib/components/chat/ControlsDock.svelte",
+				"frontend/src/lib/components/chat/phone/MobileComposerControlsSheet.svelte"
+			]
+		},
+		{
 			"why": "content-first data destinations keep their shared phone header, ranges, states and filters reachable",
 			"journeys": ["data-pages"],
 			"globs": ["frontend/tests/journeys/data-pages.journey.mjs", "frontend/src/lib/components/deck/cards/StatsCard.svelte", "frontend/src/lib/components/deck/cards/PrInboxCard.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/rows/ListItem.svelte"]
