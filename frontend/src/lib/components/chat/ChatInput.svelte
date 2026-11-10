@@ -44,7 +44,7 @@
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
 	import { joinDrafts, restoreMessageDocument } from './tiptap/serialization';
-	import { captureDestination, keepUnsentDraft, movedAwayFrom, noteLeftDraft, putBackUnsent, retirePutBack, SEND_MOVED_MESSAGE, stillAtDestination, type SendDestination } from './send-destination';
+	import { captureDestination, handBackUnsent, keepUnsentDraft, mountComposer, movedAwayFrom, noteLeftDraft, putBackUnsent, retirePutBack, SEND_MOVED_MESSAGE, stillAtDestination, type SendDestination } from './send-destination';
 	import type { SendReservation } from '$lib/stores/session/send-order';
 	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
@@ -1107,13 +1107,19 @@
 	// this one's cold-cache check, so two sends keep their order, then goes
 	// (#1344). Held until the check has answered.
 	let pendingSubmit: { cleared: boolean; done: Promise<void> } | null = null;
-	// Places in line taken by submissions still on their way to the store
-	// (#1444). An unmounted composer gives them up: such a submission then
-	// sends nothing, and keeps its draft as on any refusal.
-	const openTurns = new Set<SendReservation>();
+	// A submission outlives an unmounted composer and still sends in its place
+	// in line (#1444). Refused then, its words go to the composer now showing
+	// its chat, in front of what is typed there (handBackUnsent).
+	let composerGone = false;
+	const unmountComposer = mountComposer({
+		chat: () => prevSessionId,
+		take: (unsent, destination) => {
+			if (ownsComposer()) setComposerDraft(putBackUnsent(destination, unsent, getDraftJSON()));
+		},
+	});
 	onDestroy(() => {
-		for (const turn of openTurns) turn.cancel();
-		openTurns.clear();
+		composerGone = true;
+		unmountComposer();
 	});
 	// Where a send is waiting behind an earlier check. It still shows its words
 	// in the composer, so another activation there is the same message again
@@ -1151,13 +1157,11 @@
 		// The submission is accepted: its place among this chat's sends is
 		// taken now, before any wait below, so a send made elsewhere meanwhile
 		// (the Browser panel) goes after it (#1444). Every path that sends
-		// nothing gives it up (finally, and on unmount).
+		// nothing gives it up.
 		const turn = activeSession.reserveSend();
-		openTurns.add(turn);
 		try {
 			await submitInTurn(compactBeforeSend, turn);
 		} finally {
-			openTurns.delete(turn);
 			turn.cancel();
 		}
 	}
@@ -1448,7 +1452,14 @@
 				// A send held by the cold-cache check is otherwise named by its notice.
 				const calledOff = !stillAtDestination(destination, composerPlace(), { adoptedOwnChat: true });
 				if (calledOff) refuseSend(SEND_MOVED_MESSAGE, 'warning');
-				else if (!held) refuseSend('Message not sent. Try again.', 'warning');
+				// A held send's notice was in the composer that has gone.
+				else if (!held || composerGone) refuseSend('Message not sent. Try again.', 'warning');
+			}
+			if (composerGone) {
+				const paths = priorUploadedFiles.map((f) => f.full_path).filter(Boolean);
+				const files = JSON.stringify(restoreMessageDocument('', paths));
+				handBackUnsent(destination, !paths.length ? priorDraftJSON : hasComposerDraft(priorDraftJSON) ? joinDrafts(priorDraftJSON, files) : files);
+				return;
 			}
 			// A slow create can fail after the user started a new message: put
 			// the refused one back in front of it instead of replacing it.

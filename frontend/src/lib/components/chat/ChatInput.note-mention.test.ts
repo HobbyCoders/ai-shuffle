@@ -558,25 +558,84 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		} finally { earlier.cancel(); vi.useRealTimers(); }
 	});
 
-	// Review round 3 (S10): an unmount gives the place up, and the send it
-	// belonged to is then called off rather than sent late, after a later one.
-	it('sends nothing late from a composer unmounted during its cold-cache check (#1444)', async () => {
+	// Review round 3 (S10) and round 4 (S11): a send outlives its unmounted
+	// component and still goes in the place taken at the click, never after a
+	// later send; refused, its words go to the composer now on the chat.
+	const COLD = { context_tokens: 412_000, idle_seconds: 5400, cache_ttl_seconds: 3600, cache_write_ttl: '1h', threshold_tokens: 150_000, cold: true, large: true, warn: true };
+	async function remountDuringColdCheck(chat: string) {
 		let answerCache = (_: unknown) => {};
 		net.cache = () => new Promise((resolve) => { answerCache = resolve; });
-		const view = await compose('unmount-chat');
+		const view = await compose(chat);
 		await fireEvent.submit(view.container.querySelector('form')!);
 		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
 		view.unmount();
+		return (answer: unknown) => answerCache(answer);
+	}
+	async function typeNewer(view: { container: HTMLElement }, chat: string) {
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')).toBeTruthy());
+		const editor = (view.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(text: string): void } } }).editor;
+		editor.commands.setContent('newer text');
+		await waitFor(() => expect(readDraft(chat)).toContain('newer text'));
+	}
+
+	it('writes a composer send unmounted during its cold-cache check before a panel prompt sent after it (#1444)', async () => {
+		const answerCache = await remountDuringColdCheck('unmount-chat');
+		// Queued behind the composer's place, the panel prompt waits for it.
 		const panel = activeSession.sendMessage('panel prompt');
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(Socket.all).toHaveLength(0);
+		answerCache({ cold: false, warn: false, large: false });
 		await waitFor(() => expect(Socket.all).toHaveLength(1));
 		Socket.all[0].open();
 		expect(await panel).toBe(true);
-		answerCache({ cold: false, warn: false, large: false });
-		await new Promise((resolve) => setTimeout(resolve, 150));
-		expect(queries().map((frame) => frame.prompt)).toEqual(['panel prompt']);
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'panel prompt']);
 	});
 
-	it('sends nothing late from a generation choice unmounted while its pick saves (#1444)', async () => {
+	it('sends a send once, in order, when its composer remounts during the cold-cache check, and keeps the newer text (#1444)', async () => {
+		const answerCache = await remountDuringColdCheck('remount-chat');
+		const replacement = render(ChatInput);
+		await typeNewer(replacement, 'remount-chat');
+		answerCache({ cold: false, warn: false, large: false });
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		await waitFor(() => expect(queries()).toHaveLength(1));
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH]);
+		expect(replacement.container.querySelector('.ProseMirror')?.textContent).toBe('newer text');
+		expect(readDraft('remount-chat')).toContain('newer text');
+		expect(readDraft('remount-chat')).not.toContain(NOTE_ID);
+	});
+
+	it('puts a refused send from a remounted composer in front of the newer text in the replacement (#1444)', async () => {
+		const answerCache = await remountDuringColdCheck('refused-remount-chat');
+		const replacement = render(ChatInput);
+		await typeNewer(replacement, 'refused-remount-chat');
+		answerCache(COLD);
+		await waitFor(() => expect(replacement.container.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(replacement.container.querySelector('.ProseMirror')?.textContent).toMatch(/read[\s\S]*newer text/);
+		expect(readDraft('refused-remount-chat')).toContain(NOTE_ID);
+		expect(readDraft('refused-remount-chat')).toContain('newer text');
+		// Handed over, so its reload note is done, and it survives another remount.
+		const { takePendingSends } = await import('$lib/stores/session/pending-send-note');
+		expect(takePendingSends('refused-remount-chat', 'another-page')).toBe('');
+		replacement.unmount();
+		const reopened = render(ChatInput);
+		await waitFor(() => expect(reopened.container.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(reopened.container.querySelector('.ProseMirror')?.textContent).toMatch(/read[\s\S]*newer text/);
+		expect(queries()).toEqual([]);
+	});
+
+	it('keeps a refused send as its chat\'s draft when no composer is on screen, for the next one to open with (#1444)', async () => {
+		const answerCache = await remountDuringColdCheck('gone-chat');
+		answerCache(COLD);
+		await waitFor(() => expect(readDraft('gone-chat')).toContain(NOTE_ID));
+		const reopened = render(ChatInput);
+		await waitFor(() => expect(reopened.container.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(reopened.container.querySelector('.ProseMirror')?.textContent).toContain('read');
+		expect(queries()).toEqual([]);
+	});
+
+	it('sends a generation choice\'s reply in its place when the card unmounts while the pick saves (#1444)', async () => {
 		const { default: GenerationChoiceCard } = await import('./GenerationChoiceCard.svelte');
 		const { generationChoices } = await import('$lib/stores/generation-choices.svelte');
 		vi.spyOn(generationChoices, 'load').mockResolvedValue(undefined);
@@ -590,12 +649,15 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		// Same chat: its transcript window unmounts this row while saving.
 		view.unmount();
 		const panel = activeSession.sendMessage('panel prompt');
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(Socket.all).toHaveLength(0);
+		finish(undefined as never);
 		await waitFor(() => expect(Socket.all).toHaveLength(1));
 		Socket.all[0].open();
 		expect(await panel).toBe(true);
-		finish(undefined as never);
-		await new Promise((resolve) => setTimeout(resolve, 150));
-		expect(queries().map((frame) => frame.prompt)).toEqual(['panel prompt']);
+		const prompts = queries().map((frame) => frame.prompt);
+		expect(prompts).toHaveLength(2);
+		expect(prompts[1]).toBe('panel prompt');
 	});
 
 	// Review round 3 (S7): through the real refusal handler.

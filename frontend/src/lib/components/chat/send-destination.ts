@@ -14,7 +14,8 @@
  */
 import { activeSession } from '$lib/stores/active-session';
 import { getInitGeneration } from '$lib/stores/session/session-init';
-import { writeDraft } from '$lib/stores/session/draft-persistence';
+import { get } from 'svelte/store';
+import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 import { notify } from '$lib/stores/notifications';
 import { joinDrafts } from './tiptap/serialization';
@@ -183,6 +184,35 @@ export function putBackUnsent(destination: SendDestination, unsent: string, curr
 /** The composer is sending this chat's draft: the words put back go with it. */
 export function retirePutBack(chat: string | null): void {
 	putBack.delete(chat);
+}
+
+/** Composers on screen, newest last, by the chat each one shows. */
+const composers: { chat: () => string | null; take: (unsent: string, destination: SendDestination) => void }[] = [];
+
+/** A composer is on screen; the returned function takes it off. */
+export function mountComposer(composer: (typeof composers)[number]): () => void {
+	composers.push(composer);
+	return () => {
+		const at = composers.indexOf(composer);
+		if (at >= 0) composers.splice(at, 1);
+	};
+}
+
+/**
+ * A send outlived its composer and was refused: its words go back in front
+ * of what the composer now showing its chat holds, or into that chat's draft
+ * for the next composer to open with. Never dropped (#1444).
+ */
+export function handBackUnsent(destination: SendDestination, unsent: string): void {
+	for (let at = composers.length - 1; at >= 0; at--) {
+		if (composers[at].chat() === destination.chat) return composers[at].take(unsent, destination);
+	}
+	const state = get(activeSession);
+	const open = state.sessionId === destination.chat;
+	const draft = putBackUnsent(destination, unsent, (open ? state.draft : '') || readDraft(destination.chat));
+	if (open) activeSession.setDraft(draft);
+	else activeSession.saveDraftForSession(destination.chat, draft);
+	writeDraft(destination.chat, draft, { preserveNewChat: true });
 }
 
 /**
