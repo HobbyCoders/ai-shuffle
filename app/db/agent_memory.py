@@ -87,6 +87,45 @@ def upsert_memory_file(
         )
 
 
+def upsert_memory_file_if_not_newer(
+    memory_key: str,
+    relative_path: str,
+    content: str,
+    content_hash: str,
+    updated_by: Optional[str],
+    updated_at: str,
+) -> bool:
+    """Publish a live file stamped ``updated_at``, unless the row is newer.
+
+    For an edit published late (the startup replay in app/core/memory_sync.py):
+    it inserts, or replaces the existing row, live or tombstone, only when that
+    row's ``updated_at`` is not newer than the stamp. One statement, so a newer
+    write that lands concurrently is never overwritten and a row's stamp never
+    moves backwards. Returns whether a row was written.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO agent_memory_files
+                (id, memory_key, relative_path, content, content_hash,
+                 deleted, updated_at, updated_by)
+            VALUES (%s, %s, %s, %s, %s, FALSE, %s, %s)
+            ON CONFLICT (memory_key, relative_path) DO UPDATE SET
+                content = EXCLUDED.content,
+                content_hash = EXCLUDED.content_hash,
+                deleted = FALSE,
+                updated_at = EXCLUDED.updated_at,
+                updated_by = EXCLUDED.updated_by
+            WHERE agent_memory_files.updated_at IS NULL
+               OR agent_memory_files.updated_at <= EXCLUDED.updated_at
+            """,
+            (uuid.uuid4().hex, memory_key, relative_path, content,
+             content_hash, updated_at, updated_by),
+        )
+        return cursor.rowcount > 0
+
+
 def tombstone_memory_file(
     memory_key: str,
     relative_path: str,

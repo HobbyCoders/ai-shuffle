@@ -54,8 +54,12 @@ The gate and the baseline are therefore keyed per dir, not per memory_key.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import re
+import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -101,6 +105,8 @@ def reset_state() -> None:
     """Clear all in-memory sync state (reconcile gate + baselines). For tests."""
     _reconciled_keys.clear()
     _local_baseline.clear()
+    with _pending_lock:
+        _in_flight.clear()
 
 
 def _sha256(text: str) -> str:
@@ -214,7 +220,8 @@ def memory_leg_for_options(options: object) -> str:
 
 
 def _resolve_target(
-    project_id: str, working_dir: str, leg: str = "delegated"
+    project_id: str, working_dir: str, leg: str = "delegated", *,
+    project: Optional[dict] = None, strict: bool = False,
 ) -> Tuple[Optional[str], Optional[Path]]:
     """Resolve a session's (memory_key, memory_dir), anchored on the project.
 
@@ -227,12 +234,19 @@ def _resolve_target(
 
     ``leg`` picks the projects root; the memory_key is the same
     either way, which is what makes the two mirrors one shared memory.
+
+    ``project`` skips the lookup when the caller already holds the record.
+    ``strict`` lets a failed lookup raise instead of reading as "no project":
+    a queued publication must not be cleared when the answer is unknown.
     """
-    try:
-        project = database.get_project(project_id)
-    except Exception:  # noqa: BLE001 — never break the caller
-        logger.debug("memory_sync: get_project failed for %s", project_id, exc_info=True)
-        project = None
+    if project is None:
+        try:
+            project = database.get_project(project_id)
+        except Exception:  # noqa: BLE001 — never break the caller
+            if strict:
+                raise
+            logger.debug("memory_sync: get_project failed for %s", project_id, exc_info=True)
+            project = None
     memory_key = memory_key_for_project(project)
     if not memory_key:
         return None, None
@@ -246,7 +260,15 @@ def _resolve_target(
     return memory_key, memory_dir_for_working_dir(anchor, leg)
 
 
-def _scan_local(memory_dir: Path) -> _LocalState:
+def _scan_local(memory_dir: Path, stable: bool = False) -> _LocalState:
+    """Local memory files. ``stable`` pairs each content with ITS mtime.
+
+    The ordinary scan reads, then stats, so an edit in between pairs the old
+    content with the new mtime; harmless where the push stamps uploads "now".
+    The startup replay stamps an upload with the mtime, so it stats before and
+    after reading and skips a file that changed meanwhile (its own turn
+    publishes it).
+    """
     state: _LocalState = {}
     if not memory_dir.exists():
         return state
@@ -264,9 +286,13 @@ def _scan_local(memory_dir: Path) -> _LocalState:
             logger.warning("memory_sync: skipping out-of-tree memory file %s", path)
             continue
         try:
+            before = path.stat().st_mtime_ns if stable else None
             content = path.read_text(encoding="utf-8")
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            stat = path.stat()
+            mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
         except (OSError, UnicodeDecodeError):
+            continue
+        if stable and stat.st_mtime_ns != before:
             continue
         rel = path.relative_to(memory_dir).as_posix()
         state[rel] = (content, _sha256(content), mtime)
@@ -338,13 +364,28 @@ def reconcile(memory_key: str, memory_dir: Path, instance_id: Optional[str],
 
 
 def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
-         allow_deletes: bool, leg: str = "delegated") -> None:
-    """Upload local changes to the DB; tombstone local deletions if allowed."""
+         allow_deletes: bool, leg: str = "delegated", *, recovery: bool = False) -> None:
+    """Upload local changes to the DB; tombstone local deletions if allowed.
+
+    ``recovery`` is the startup replay of a push a previous process did not
+    finish. It publishes an OLD edit late, so each upload keeps the file's
+    mtime as its stamp and the database replaces a row (live or tombstone)
+    only when that row is not newer. It never tombstones, never writes a local
+    file and leaves the reconcile baseline alone.
+    """
     db_rows = {r["relative_path"]: r for r in memdb.get_memory_files(memory_key)}
-    local = _scan_local(memory_dir)
+    local = _scan_local(memory_dir, stable=recovery)
 
     for rel, (content, local_hash, local_mtime) in local.items():
         row = db_rows.get(rel)
+        if recovery:
+            if row is None or row.get("deleted") or row.get("content_hash") != local_hash:
+                # Never later than now: a file dated ahead of the clock must
+                # not outrank every later write until the clock catches up.
+                stamp = min(local_mtime, datetime.now(timezone.utc))
+                memdb.upsert_memory_file_if_not_newer(
+                    memory_key, rel, content, local_hash, instance_id, stamp.isoformat())
+            continue
         if row is None:
             memdb.upsert_memory_file(memory_key, rel, content, local_hash, instance_id)
             continue
@@ -353,6 +394,11 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
             # is always overwritten by a present local file (revive).
             if row.get("deleted") or local_mtime >= _as_dt(row.get("updated_at")):
                 memdb.upsert_memory_file(memory_key, rel, content, local_hash, instance_id)
+
+    if recovery:
+        logger.info("memory_sync: replayed push key=%s leg=%s dir=%s db_files=%d local_files=%d",
+                    memory_key, leg, memory_dir, len(db_rows), len(local))
+        return
 
     if allow_deletes:
         # Only tombstone a GENUINE local delete: a path we had in our baseline
@@ -398,19 +444,24 @@ def reconcile_memory_sync(project_id: Optional[str], working_dir: Optional[str],
 
 
 def push_memory_sync(project_id: Optional[str], working_dir: Optional[str],
-                     leg: str = "delegated") -> None:
-    # Native only — see reconcile_memory_sync.
+                     leg: str = "delegated", *, recovery: bool = False,
+                     project: Optional[dict] = None, strict: bool = False) -> None:
+    # Native only — see reconcile_memory_sync. ``project``/``strict``: see
+    # _resolve_target; the queued-publication path (_publish) passes strict.
     if leg != "native":
         return
     if not settings.agent_memory_sync or not project_id or not working_dir:
         return
-    memory_key, memory_dir = _resolve_target(project_id, working_dir, leg)
+    memory_key, memory_dir = _resolve_target(project_id, working_dir, leg,
+                                             project=project, strict=strict)
     if not memory_key or memory_dir is None:
         return
     allow_deletes = (
-        _state_key(memory_key, memory_dir) in _reconciled_keys and memory_dir.exists()
+        not recovery
+        and _state_key(memory_key, memory_dir) in _reconciled_keys and memory_dir.exists()
     )
-    push(memory_key, memory_dir, settings.effective_instance_id, allow_deletes, leg)
+    push(memory_key, memory_dir, settings.effective_instance_id, allow_deletes, leg,
+         recovery=recovery)
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +483,207 @@ async def push_memory(project_id: Optional[str], working_dir: Optional[str],
                       leg: str = "delegated") -> None:
     if not settings.agent_memory_sync:
         return
+    # Queued before dispatch: a push still waiting for a thread when the stop
+    # deadline cancels this awaiter is owed just like one stalled mid-write.
+    token = _queue_publication(project_id, working_dir, leg)
     try:
-        await run_sync(push_memory_sync, project_id, working_dir, leg)
+        if token is None:
+            await run_sync(push_memory_sync, project_id, working_dir, leg)
+        else:
+            await _run_counted(token, _publish, project_id, working_dir, leg, token)
     except Exception:  # noqa: BLE001
+        # Ended (or never dispatched): a marker stays for the next start, and
+        # _run_counted has already stopped counting it.
         logger.debug("memory_sync: push failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Durable publication queue (#1305)
+#
+# One small JSON marker per project under ``<data_dir>/memory-sync-pending/``,
+# on this install's local disk (a stalled database cannot block writing it).
+# Writers: ``push_memory`` (before dispatch) overwrites it with a new token;
+# ``_finish_publication`` deletes it only when the push that wrote that token
+# ran to completion, so a newer queued push is never cleared by an older one.
+# Reader: ``publish_pending`` at startup runs ``push`` in recovery mode for each
+# marker: every upload keeps the local file's mtime as its stamp and replaces a
+# row (live or tombstone) only when that row is not newer, in one conditional
+# statement, so a late replay never outranks a newer turn edit, peer copy or
+# delete. It never writes a local file and never tombstones. Re-running it is
+# idempotent per file version (unchanged hashes are not uploaded), so a process
+# killed during the retry simply retries again on the next start.
+# ---------------------------------------------------------------------------
+
+_PENDING_DIR = "memory-sync-pending"
+_pending_lock = threading.Lock()
+# Tokens of publications this process issued that have not ended yet (still
+# queued for a thread or running). Shutdown reports these as unfinished saving.
+# Two writers: ``push_memory`` (one token per push, from ``_queue_publication``)
+# and ``publish_pending_memory`` (one token for the whole startup replay, from
+# before it resolves any project). Only ``_run_counted`` removes a token: when
+# its thread ends, or when its awaiter is cancelled while still queued. Marker
+# cleanup never does, because the startup replay can complete the marker of a
+# turn-end push whose own thread is still running.
+_in_flight: set = set()
+
+
+async def _run_counted(token: str, fn, *args):
+    """Run ``fn`` in a thread; ``token`` (already in ``_in_flight``) counts
+    until that thread has ended. Cancelled while still queued for a thread, it
+    stops counting (the marker stays); a queued thread that starts anyway
+    counts again while it runs."""
+    started = False
+
+    def counted():
+        nonlocal started
+        with _pending_lock:
+            started = True
+            _in_flight.add(token)
+        try:
+            return fn(*args)
+        finally:
+            with _pending_lock:
+                _in_flight.discard(token)
+
+    try:
+        return await run_sync(counted)
+    except BaseException:
+        with _pending_lock:
+            if not started:
+                _in_flight.discard(token)
+        raise
+
+
+def _pending_path(project_id: str) -> Path:
+    name = hashlib.sha256(project_id.encode("utf-8")).hexdigest()[:32]
+    return Path(settings.effective_data_dir) / _PENDING_DIR / f"{name}.json"
+
+
+def _queue_publication(project_id: Optional[str], working_dir: Optional[str],
+                       leg: str) -> Optional[str]:
+    """Record an owed native push; None when nothing would be pushed."""
+    if leg != "native" or not settings.agent_memory_sync or not project_id or not working_dir:
+        return None
+    token = uuid.uuid4().hex
+    with _pending_lock:
+        _in_flight.add(token)
+        try:
+            path = _pending_path(project_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f".{token}.tmp")
+            temporary.write_text(json.dumps({
+                "project_id": project_id, "working_dir": working_dir,
+                "leg": leg, "token": token,
+            }), encoding="utf-8")
+            os.replace(temporary, path)
+        except Exception:  # noqa: BLE001 — the push itself still runs.
+            logger.warning("memory_sync: could not queue publication for retry", exc_info=True)
+    return token
+
+
+def _finish_publication(project_id: str, token: str, completed: bool) -> None:
+    if not completed:
+        return  # Still owed: the next start retries it.
+    with _pending_lock:
+        try:
+            path = _pending_path(project_id)
+            if json.loads(path.read_text(encoding="utf-8")).get("token") == token:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001 — a leftover marker only retries a no-op push.
+            logger.debug("memory_sync: could not clear queued publication", exc_info=True)
+
+
+def _publish(project_id: str, working_dir: str, leg: str, token: str,
+             recovery: bool = False, project: Optional[dict] = None) -> None:
+    # Completed means published, or genuinely nothing to publish (no such
+    # project, no folder). A failed lookup raises: unknown keeps the marker.
+    completed = False
+    try:
+        push_memory_sync(project_id, working_dir, leg, recovery=recovery,
+                         project=project, strict=True)
+        completed = True
+    finally:
+        _finish_publication(project_id, token, completed)
+
+
+def pending_publications() -> int:
+    """Publications this process issued that have not ended (for shutdown)."""
+    with _pending_lock:
+        return len(_in_flight)
+
+
+def publish_pending() -> int:
+    """Finish pushes a previous process queued but did not complete.
+
+    Sync turned off: nothing is pushed and markers stay for when it is back on.
+    A project that no longer exists (or a memory folder that is gone) has
+    nothing to publish, so its marker is dropped. A database error keeps the
+    marker for the next start. Returns how many publications completed.
+    """
+    if not settings.agent_memory_sync:
+        return 0
+    folder = Path(settings.effective_data_dir) / _PENDING_DIR
+    try:
+        markers = sorted(folder.glob("*.json"))
+    except OSError:
+        return 0
+    completed = 0
+    for path in markers:
+        try:
+            # Under the lock: on Windows a concurrent os.replace of an open
+            # marker fails, which would lose a newer push's marker.
+            with _pending_lock:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            project_id, working_dir = record["project_id"], record["working_dir"]
+            leg, token = record["leg"], record["token"]
+            if not all(isinstance(value, str) and value
+                       for value in (project_id, working_dir, leg, token)):
+                raise ValueError("incomplete marker")
+            if _pending_path(project_id) != path or leg != "native":
+                raise ValueError("marker does not name a native project")
+        except FileNotFoundError:
+            continue
+        except Exception:  # noqa: BLE001 — unreadable: nothing to retry.
+            logger.warning("memory_sync: dropping unreadable queued publication %s", path.name)
+            path.unlink(missing_ok=True)
+            continue
+        try:
+            project = database.get_project(project_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("memory_sync: queued publication retained; project lookup failed",
+                           exc_info=True)
+            continue
+        if not project:
+            _finish_publication(project_id, token, True)
+            continue
+        try:
+            _publish(project_id, working_dir, leg, token, recovery=True, project=project)
+        except Exception:  # noqa: BLE001
+            logger.warning("memory_sync: queued publication retained for the next start",
+                           exc_info=True)
+            continue
+        completed += 1
+    if completed:
+        logger.info("memory_sync: published %d queued memory folder(s) from a previous run",
+                    completed)
+    return completed
+
+
+async def publish_pending_memory() -> None:
+    """Startup entry point for ``publish_pending``; never raises.
+
+    Unfinished saving for shutdown from before it is dispatched until its
+    thread has ended, while it resolves projects too (see ``_in_flight``).
+    """
+    if not settings.agent_memory_sync:
+        return
+    token = f"replay-{uuid.uuid4().hex}"
+    with _pending_lock:
+        _in_flight.add(token)
+    try:
+        await _run_counted(token, publish_pending)
+    except Exception:  # noqa: BLE001
+        logger.warning("memory_sync: queued publications retained for the next start",
+                       exc_info=True)
