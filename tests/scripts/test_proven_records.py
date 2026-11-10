@@ -20,6 +20,12 @@ SHA, HEAD, RUN, MERGE = "c" * 40, "d" * 40, 7, "9" * 40
 BRANCH, NUMBER = "fix/thing", 12
 
 
+@pytest.fixture(autouse=True)
+def no_commit_from_the_runner(monkeypatch):
+    """On a runner GITHUB_SHA is set; a test that passes no commit must not pick it up."""
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+
+
 def artifact(name=NAME, expired=False, repository=1, head=1, head_sha=HEAD, run=RUN, branch=BRANCH):
     return {"name": name, "expired": expired,
             "workflow_run": {"id": run, "repository_id": repository, "head_repository_id": head,
