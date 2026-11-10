@@ -31,20 +31,24 @@ def test_runtime_partition_is_deterministic_and_exact(shards):
     assert len(buckets) == shards
 
 
-def test_new_heavy_producer_has_an_explicit_unmeasured_budget():
+def test_split_journeys_have_an_explicit_unmeasured_budget():
     data = json.loads(ci.WEIGHTS.read_text())
-    name = "chat-position-stability.journey.mjs"
-    assert 42107295628 not in data["source_runs"]  # red evidence is NOT a green measurement
-    estimate = ci.estimated_seconds()[name]
-    if data["case_counts"].get(name) == ci.case_count(ci.JOURNEYS / name, strict=True):
-        assert estimate == data["seconds"][name]
-    else:
-        assert estimate >= 18 * 60
+    estimates = ci.estimated_seconds()
+    assert len(ci.UNMEASURED_BUDGET_FLOORS) == 6
+    for name, floor in ci.UNMEASURED_BUDGET_FLOORS.items():
+        assert (ci.JOURNEYS / name).is_file(), name
+        if data["case_counts"].get(name) == ci.case_count(ci.JOURNEYS / name, strict=True):
+            assert estimates[name] == data["seconds"][name]
+        else:
+            assert estimates[name] >= floor
+    # No file may fill a hosted shard by itself again: split it instead.
+    assert max(estimates.values()) <= 600, max(estimates, key=estimates.get)
 
 
 def test_unmeasured_budget_never_overrides_a_green_median(tmp_path, monkeypatch):
     name = "chat-position-stability.journey.mjs"
     (tmp_path / name).touch()
+    monkeypatch.setattr(ci, "UNMEASURED_BUDGET_FLOORS", {name: 18 * 60})
     monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: 47)
     assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}))[name] == 18 * 60
     assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {name: 900}, counts={name: 47}))[name] == 900
@@ -212,6 +216,7 @@ def test_stale_heavy_measurement_restores_the_conservative_floor(
         tmp_path, monkeypatch, per_case, expected):
     name = "chat-position-stability.journey.mjs"
     (tmp_path / name).touch()
+    monkeypatch.setattr(ci, "UNMEASURED_BUDGET_FLOORS", {name: 18 * 60})
     path = _weights(tmp_path, {name: 900}, per_case, counts={name: 47})
     monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: 48)
     assert ci.estimated_seconds(tmp_path, path) == {name: expected}
