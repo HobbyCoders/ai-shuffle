@@ -575,7 +575,7 @@ async def peer_token(body: TokenRequest) -> dict:
                             binding_present=bool({"endpoint", "bound_signature"} & body.model_fields_set))
     await run_sync(store.touch_member, body.device_id, capabilities=body.capabilities or {},
                    endpoints=body.endpoints or None, version=body.version, incarnation=body.incarnation,
-                   platform=body.platform)
+                   platform=body.platform, heartbeat=True)
     transport.note_contact(body.device_id)
     return {**result, "expires_in": tokens.TOKEN_TTL_SECONDS}
 
@@ -601,7 +601,8 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
 
         def _work():
             store.touch_member(device_id, capabilities=body.capabilities or {}, endpoints=body.endpoints or None,
-                               version=body.version, incarnation=body.incarnation, platform=body.platform)
+                               version=body.version, incarnation=body.incarnation, platform=body.platform,
+                               heartbeat=True)
             released = False
             if engine.outbox_held():
                 # The journal is the durable offline buffer. Once this comparison
@@ -875,7 +876,7 @@ async def peer_lan_session(body: LanSessionRequest) -> dict:
     except lan.LanRejected as exc:
         raise HTTPException(403, str(exc)) from exc
     # Only liveness here: the member's description arrives sealed, with the exchange.
-    await run_sync(store.touch_member, body.device_id)
+    await run_sync(store.touch_member, body.device_id, heartbeat=True)
     transport.note_contact(body.device_id)
     return result
 

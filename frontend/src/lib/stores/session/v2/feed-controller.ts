@@ -896,6 +896,12 @@ export interface FeedController {
 	stop: () => void;
 	/** True when currently feeding (optionally: feeding this specific session). */
 	isFeeding: (sessionId?: string) => boolean;
+	/** This worker's prompt rows changed (a peer's question or approval was
+	 *  applied, answered or removed): re-read both kinds for the chat being
+	 *  fed. The `interaction.requested` event and its row sync separately, so
+	 *  the read that event triggers can run before the row exists here; this
+	 *  is the read that follows the row. No-op unless feeding. */
+	resyncPending: () => void;
 	/** The socket raised an `error` banner for this session: tie it to its
 	 *  failed turn (`turnId` from the frame, or null) so the feed clears it once
 	 *  the log moves past that failure (turn-error-banner.ts). 'outlived' when
@@ -1373,6 +1379,15 @@ export const feedController: FeedController = {
 	isFeeding(sessionId?: string) {
 		if (feed === null || currentSessionId === null) return false;
 		return sessionId === undefined || sessionId === currentSessionId;
+	},
+
+	resyncPending() {
+		if (feed === null || currentSessionId === null) return;
+		pendingResyncDirty.add('question');
+		pendingResyncDirty.add('permission');
+		// Before the feed has caught up this only marks the kinds; the
+		// caught_up flush sends the read.
+		schedulePendingResync(currentSessionId, feedGeneration);
 	},
 
 	raiseTurnError(sessionId: string, message: string, turnId: string | null) {

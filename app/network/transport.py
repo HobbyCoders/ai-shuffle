@@ -814,7 +814,7 @@ class PeerLink:
         await asyncio.to_thread(store.touch_member, self.device_id,
                                 capabilities=capabilities if isinstance(capabilities, dict) else {},
                                 endpoints=their_endpoints or None, version=exchange.get("version"),
-                                incarnation=exchange.get("incarnation"))
+                                incarnation=exchange.get("incarnation"), heartbeat=True)
         if their_endpoints:
             # When the peer's tunnel appeared, the plain-http token is dropped
             # and the push below authenticates over the tunnel (``call``).

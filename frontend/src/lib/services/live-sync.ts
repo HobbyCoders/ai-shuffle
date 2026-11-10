@@ -165,7 +165,11 @@ export function startLiveSync() {
    } else if (data.type === 'preferences_changed' && Array.isArray(data.keys)) {
     for (const key of new Set(data.keys)) if (typeof key === 'string') void preferenceSync.refresh(key);
    } else if (data.type === 'resources_changed' && Array.isArray(data.resources)) {
-    invalidate(data.resources.filter((v): v is string => typeof v === 'string'));
+    const names = data.resources.filter((v): v is string => typeof v === 'string');
+    // A peer's question or approval rows changed on this worker: the open
+    // chat re-reads its own (the signal names no session).
+    if (names.includes('session_prompts')) feedController.resyncPending();
+    invalidate(names);
    } else handleGlobalUserEvent(data);
   };
   ws.onopen = () => {

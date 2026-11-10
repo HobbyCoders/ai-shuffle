@@ -407,6 +407,11 @@ _events_only_last = float("-inf")
 _events_only_trailing = False
 
 
+# Sent beside "sessions" when a peer's prompt rows are applied here. It names
+# no session and carries no prompt content; open chats re-read their own.
+PROMPTS_RESOURCE = "session_prompts"
+
+
 def _emit_resource(resource: str) -> None:
     from app.core.global_events import global_events
     try:
@@ -545,6 +550,12 @@ def _on_applied(touched) -> None:
         if collection in ("membership", "presence"):
             resources.update(("network", "sessions"))
             session_sources.add(collection)
+    if any(c == "pending_interactions" for c, _r, _o in touched):
+        # A prompt row (question or approval) landed, changed or was removed.
+        # A chat that is open here re-reads its prompts on this signal: the
+        # row and the session event that announces it sync separately, so the
+        # read the event triggers can run before the row exists here.
+        resources.add(PROMPTS_RESOURCE)
     if session_sources == {"session_events"}:
         resources.discard("sessions")
         _sessions_changed_by_events()

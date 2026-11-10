@@ -265,12 +265,41 @@ def test_installer_runs_existing_local_producer(monkeypatch):
     start.assert_called_once_with("install")
 
 
-def test_update_requires_install_and_refuses_running_cli(monkeypatch):
-    monkeypatch.setattr(ws.claude_cli_install, "payload", lambda: {
-        "can_install": True, "installed": False, "installed_by_app": False, "job": None})
+def test_update_requires_install_and_only_install_waits_for_an_idle_cli(monkeypatch):
+    state = {"can_install": True, "installed": False, "installed_by_app": False, "job": None}
+    monkeypatch.setattr(ws.claude_cli_install, "payload", lambda: state)
+    start = Mock()
+    monkeypatch.setattr(ws.claude_cli_install, "start", start)
     assert ws._local_action(ws.ClaudeInstall(operation="claude-update"))["reason"] == "not-installed"
     monkeypatch.setattr(ws.claude_cli_install, "_in_use", lambda: [123])
     assert ws._local_action(ws.ClaudeInstall(operation="claude-install"))["reason"] == "busy"
+    start.assert_not_called()
+    # A worker running Claude chats still takes an update, like its own button.
+    state.update(installed=True, installed_by_app=True)
+    assert ws._local_action(ws.ClaudeInstall(operation="claude-update"))["outcome"] == "accepted"
+    start.assert_called_once_with("update")
+    state["job"] = {"state": "running"}
+    assert ws._local_action(ws.ClaudeInstall(operation="claude-update"))["reason"] == "busy"
+
+
+@pytest.mark.asyncio
+async def test_claude_update_for_all_workers_asks_every_peer_but_not_this_worker(monkeypatch):
+    rows = [row("self", is_self=True), row("peer"), row("off", online=False)]
+    monkeypatch.setattr(ws, "_directory", lambda: rows)
+    local = Mock()
+    monkeypatch.setattr(ws, "_local_action", local)
+    calls = []
+    async def call(device, action, body, **_):
+        calls.append((device, action, body["action"]))
+        return ws._result("accepted", "done")
+    monkeypatch.setattr(control, "call", call)
+    result = await ws.update_claude_on_peers()
+    assert calls == [("peer", "worker-settings", {"operation": "claude-update"})]
+    assert [(r["device_id"], r["outcome"]) for r in result] == [("peer", "accepted"), ("off", "offline")]
+    local.assert_not_called()
+    # A lone worker has nobody to ask; that is an empty answer, not an error.
+    monkeypatch.setattr(ws, "_directory", lambda: [row("self", is_self=True)])
+    assert await ws.update_claude_on_peers() == []
 
 
 @pytest.mark.asyncio
