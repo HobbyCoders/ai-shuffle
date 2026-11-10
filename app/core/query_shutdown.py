@@ -8,8 +8,8 @@ fresh timeout for every query. Only raw engine reads are cancelled here.
 The absolute drain deadline is set once when stopping. Retired non-streaming
 finalization outlives its HTTP reader, while durable receipts cover process death
 or writes that cannot finish before that deadline. Lifecycle shutdown
-(desktop_lifecycle.stop_running_sessions, from the pre-stop route and the
-lifespan) uses this same deadline and reports unfinished saving instead of a
+(desktop_lifecycle.stop_running_sessions) uses this same deadline in the
+lifespan, and it and the pre-stop route report unfinished saving instead of a
 clean stop; memory_sync queues an interrupted memory-folder push for startup.
 """
 from __future__ import annotations

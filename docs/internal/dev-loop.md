@@ -71,8 +71,9 @@ qualifying native/project turn. This requires sync to be enabled and the
 original files still present. The separate durable `Remember` fact store is not
 this legacy replication tail; already-issued `run_sync` writes may finish after
 awaiter cancellation. Docker's larger reserve lets the controlled two-second
-tail finish within its 30 seconds. Session stops share the same absolute stop
-deadline and report unfinished saving instead of a clean stop
+tail finish within its 30 seconds. Session stops in the lifespan share the same absolute
+stop deadline, and both the lifespan and the pre-stop route report unfinished
+saving instead of a clean stop
 ([#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305)); launcher
 budgets are unchanged. Forced disposable dev-loop teardown still has its separate
 four-second budget; it is not the normal app's graceful-stop guarantee.

@@ -18,7 +18,7 @@ from app.api import internal
 from app.core import desktop_lifecycle, memory_sync, query_shutdown, session_runtime, startup
 
 BUDGET = 1.0  # Stands in for the 10 s desktop SIGTERM budget.
-SETTLE = 3.0  # Stands in for SHUTDOWN_SETTLE_SECONDS (25 s): longer than the budget.
+SETTLE = 2.5  # Stands in for SHUTDOWN_SETTLE_SECONDS (25 s): longer than the budget.
 SLACK = 0.5
 
 
@@ -88,30 +88,27 @@ class SlowSave:
 
 
 @pytest.mark.parametrize("step", ["turn", "flush"])
-async def test_pre_stop_reports_unfinished_saving_at_the_shared_deadline(monkeypatch, step):
+async def test_pre_stop_reports_unfinished_saving_after_its_own_allowance(monkeypatch, step):
     slow = SlowSave(monkeypatch, step)
     loop = asyncio.get_running_loop()
     started = loop.time()
     try:
-        with pytest.raises(RuntimeError, match="not finished saving"):
+        with pytest.raises(RuntimeError, match="not finished saving: session turns"):
             await internal.desktop_stop_sessions(SimpleNamespace())
         elapsed = loop.time() - started
-        assert elapsed < BUDGET + SLACK  # The shared deadline, not the 25 s settle cap.
+        # The route's own allowance, not the shorter SIGTERM budget: no kill
+        # timer runs during pre-stop, and its callers wait 30 s or more.
+        assert BUDGET + SLACK < elapsed < SETTLE + SLACK
         assert slow.writing.is_set() and slow.saved == []
         if slow.task is not None:
             assert not slow.task.done()  # Not cancelled: left to finish or for recovery.
-
-        # A second stop signal (a retried pre-stop) does not renew the deadline.
-        again = loop.time()
-        with pytest.raises(RuntimeError, match="not finished saving"):
-            await internal.desktop_stop_sessions(SimpleNamespace())
-        assert loop.time() - again < SLACK
+        # The stop deadline was captured once, at the first stop signal.
         assert query_shutdown.begin_shutdown() == pytest.approx(started + BUDGET - 0.1, abs=0.05)
     finally:
         await slow.finish()
-    assert set(slow.saved) == {step}  # The retry issued its own flush; none was lost.
-    # Once the write has landed and nothing is left queued, a retry past the
-    # deadline reports the clean stop truthfully (an idle flush is one step).
+    assert set(slow.saved) == {step}
+    # Once the write has landed and nothing is left queued, a retry reports
+    # the clean stop truthfully.
     monkeypatch.setattr("app.core.task_persistence.flush", AsyncMock())
     assert await internal.desktop_stop_sessions(SimpleNamespace()) == {"stopped": True}
 
@@ -127,12 +124,12 @@ async def test_pre_stop_reports_an_unfinished_memory_publication(monkeypatch, tm
 
 async def test_idle_pre_stop_still_acknowledges_a_clean_stop(monkeypatch):
     monkeypatch.setattr("app.core.task_persistence.flush", AsyncMock())
-    # A default drain inside the stop deadline, so a capture without grace=0 shows.
+    # A default drain inside the stop deadline, so a capture without grace=0 would show.
     monkeypatch.setattr(query_shutdown, "configured_grace_seconds", lambda environ=None: 0.8)
     started = asyncio.get_running_loop().time()
     assert await internal.desktop_stop_sessions(SimpleNamespace()) == {"stopped": True}
-    # Pre-stop still retires request reads at once (grace=0), not after the
-    # default finite-request drain, although it now captures the deadline itself.
+    # Pre-stop retires request reads at once (grace=0), not after the default
+    # finite-request drain.
     assert query_shutdown._retire_at <= started + SLACK
 
 

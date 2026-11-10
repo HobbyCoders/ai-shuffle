@@ -78,14 +78,15 @@ event, fresh unread/settle marker, usage booking, or session-activity timestamp.
 Work-time backfill also skips the unknown interval. Both terminal/receipt
 atomicity and normal-completion accounting remain unchanged.
 
-**Shutdown deadline and outcome (#1305):** `stop_running_sessions` (from the
-pre-stop route and the lifespan) waits on the same absolute deadline that
+**Shutdown deadline and outcome (#1305):** in the lifespan, where a kill timer
+is running, `stop_running_sessions` waits on the same absolute deadline that
 `query_shutdown.begin_shutdown` captures at the first stop signal, capped by its
-own 25 seconds; a later stop signal never renews it. When session turns, the
-task-persistence flush, request queries or a memory-folder publication are
-still unfinished at that deadline, `/desktop/stop-sessions` fails instead of
-answering `{"stopped": true}` and the lifespan's exit banner says saving was
-unfinished. Startup completes that work: boot reconcile and request-query
+own 25 seconds; a later stop signal never renews it. The pre-stop route runs
+before any kill timer and keeps the 25 seconds, which fit inside every caller's
+request timeout. When session turns, the task-persistence flush, request
+queries or a memory-folder publication are still unfinished at the end of that
+wait, `/desktop/stop-sessions` fails instead of answering `{"stopped": true}`
+and the lifespan's exit banner says saving was unfinished. Startup completes that work: boot reconcile and request-query
 receipts for turns, and the durable publication queue for memory folders.
 `push_memory` (native per-project file replication, not the durable `Remember`
 store) writes one local marker per project before dispatching and clears it

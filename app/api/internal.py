@@ -183,14 +183,12 @@ async def desktop_stop_sessions(request: Request):
         async def stop_all():
             # Windows terminates the process without SIGTERM after this route.
             # Headless queries are not in the session pool/runtime registry.
-            # Both share the one absolute deadline of the first stop signal; a
-            # retried call re-checks without renewing it (#1305).
-            # grace=0 as settle() below uses: whichever captures first, pre-stop
-            # retires request reads at once.
-            deadline = query_shutdown.begin_shutdown(grace=0)
+            # Sessions keep this route's own allowance (25 s, inside every
+            # caller's request timeout): no kill timer runs yet, so the shorter
+            # SIGTERM budget does not apply here. Neither result is a clean stop
+            # while saving is unfinished (#1305).
             sessions_settled, queries_settled = await asyncio.gather(
-                stop_running_sessions(deadline=deadline),
-                query_shutdown.settle(grace=0),
+                stop_running_sessions(), query_shutdown.settle(grace=0),
             )
             unfinished = unfinished_saving(sessions=bool(sessions_settled), queries=queries_settled)
             if unfinished:

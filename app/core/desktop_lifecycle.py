@@ -216,8 +216,9 @@ async def stop_running_sessions(*, deadline: Optional[float] = None) -> bool:
 
     Do not sweep shared database rows: another desktop may own those sessions.
     Allow at most 25 seconds for stops, settlement/lease release and persistence
-    together, and never past ``deadline``: shutdown passes the one absolute stop
-    deadline captured at the first stop signal (query_shutdown.begin_shutdown).
+    together, and never past ``deadline``: the lifespan, where a kill timer is
+    running, passes the one absolute stop deadline captured at the first stop
+    signal (query_shutdown.begin_shutdown). The pre-stop route passes none.
     Process exit ends work still unwinding; boot reconcile aborts a turn left
     behind with a dead lease. Returns False when a stop, a turn or the flush
     was still unfinished at the deadline, so the caller must not report a
