@@ -187,6 +187,44 @@ def mask_config(config: Dict, connector_type: str) -> Dict:
 # CRUD operations
 # ---------------------------------------------------------------------------
 
+def runs_here(connector: Dict[str, Any]) -> bool:
+    """Whether THIS worker runs *connector*'s live client: the one rule every route uses (#1382).
+
+    On a worker network the owner device runs it (``ownership.decide_connector``):
+    an unowned row is claimed only by the worker ``claim`` lets through. With
+    no network, the install-runner rule: two installs can share one Postgres,
+    so only the install pinned in ``runner_id`` (or the one that wins the
+    atomic claim of a NULL runner) operates the client.
+    Blocking (it may claim); call it from a worker thread.
+    """
+    from app.network import ownership
+    if ownership.enrolled():
+        decision = ownership.decide_connector(connector)
+        if decision == "claim":
+            if ownership.claim("connectors", connector["id"]):
+                return True
+            # Lost to another claim (possibly this worker's own start): the row decides.
+            connector = database.get_connector(connector["id"]) or connector
+            decision = ownership.decide_connector(connector)
+        return decision == "start"
+    from app.core.config import settings
+    me = settings.effective_instance_id
+    runner_id = connector.get("runner_id")
+    if runner_id == me:
+        return True
+    if runner_id is None:
+        return database.claim_connector_runner(connector["id"], me)
+    return False
+
+
+def applies_on(connector: Dict[str, Any]) -> Optional[str]:
+    """Who runs *connector* when this worker does not: the owner device on a network, else the install."""
+    from app.network import ownership
+    if ownership.enrolled():
+        return ownership.owner_of(connector)
+    return connector.get("runner_id")
+
+
 async def create_connector(
     name: str,
     connector_type: str,
@@ -253,8 +291,15 @@ async def create_connector(
         # 5. Persist the connector, pinned to this install so that — when two
         # installs share one Postgres — only the install that created it starts
         # the live client (see ConnectorManager.start_all).
+        # On a worker network the worker it was made on runs it (#1382), set
+        # in the same INSERT so no published copy is ever unowned. A fenced or
+        # not yet admitted worker leaves it for the claimant. Nothing is
+        # published here: the regular scan sends the row after the API user
+        # it references, so a peer never receives the connector first.
         from app.core.config import settings
+        from app.network import ownership
 
+        owner = ownership.my_device_id() if ownership.enrolled() and ownership.execution_eligible() else None
         connector = database.create_connector(
             connector_id=connector_id,
             connector_type=connector_type,
@@ -263,6 +308,7 @@ async def create_connector(
             events=events,
             api_user_id=api_user_id,
             runner_id=settings.effective_instance_id,
+            owner_device_id=owner,
         )
 
         if not connector:
@@ -364,15 +410,11 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
             return None, config_changed, False, connector_type
 
         # Restart if the connector is active and config was changed — but only
-        # when this install owns (or claims) the connector, otherwise a config
-        # edit on a non-owning install would connect a duplicate live client
-        # here.
-        from app.core.config import settings
-        me = settings.effective_instance_id
-        runner_id = updated.get("runner_id")
-        owns_locally = runner_id == me or (
-            runner_id is None and database.claim_connector_runner(connector_id, me)
-        )
+        # when this worker runs (or claims) the connector, otherwise a config
+        # edit here would connect a duplicate live client. On a network the
+        # owner restarts its own client when the synced record lands
+        # (ConnectorManager.start_connector compares the config).
+        owns_locally = runs_here(updated)
         return updated, config_changed, owns_locally, connector_type
 
     updated, config_changed, owns_locally, connector_type = await run_sync(

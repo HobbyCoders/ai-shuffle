@@ -170,11 +170,17 @@ class ConnectorManager:
         registered client that has errored or disconnected, or that is stuck
         connecting (its client task ended, or its handshake has run past
         ``CONNECTING_STALE_SECONDS``), is torn down and replaced.
-        Config changes go through ``restart_connector``, which stops first.
+        A live client whose row now holds a different config (an edit made
+        on another worker, synced here) is replaced as well (#1382).
+        Config changes made here go through ``restart_connector``, which stops first.
         """
+        current_config = None
+        if isinstance(getattr(self._connectors.get(connector_id), "_started_config_fingerprint", None), str):
+            current_config = await run_sync(self._row_config_fingerprint, connector_id)
         async with self._lock:
             existing = self._connectors.get(connector_id)
-            if existing is not None and self._is_live(connector_id, existing):
+            if (existing is not None and self._is_live(connector_id, existing)
+                    and self._same_config(connector_id, existing, current_config)):
                 logger.info(f"Connector already running: {connector_id}")
                 return True
             if existing is not None:
@@ -217,6 +223,7 @@ class ConnectorManager:
 
             # Decrypt sensitive configuration fields
             config = self._decrypt_config(config, connector_type)
+            fingerprint = self._config_fingerprint(config)
             if connector_type == "msteams":
                 from app.core.connector_service import teams_runtime_config
                 config = teams_runtime_config(connector_id, config)
@@ -232,7 +239,7 @@ class ConnectorManager:
                 database.update_connector_status(connector_id, "error", error=str(e))
                 return None
             return {"row": connector_row, "type": connector_type,
-                    "config": config, "cls": cls}
+                    "config": config, "cls": cls, "fingerprint": fingerprint}
 
         prepared = await run_sync(_prepare_blocking)
         if prepared is None:
@@ -270,6 +277,7 @@ class ConnectorManager:
             on_permission_response=self.handle_permission_response,
             on_trigger=self._handle_trigger,
         )
+        instance._started_config_fingerprint = prepared["fingerprint"]
 
         # Attempt to connect
         try:
@@ -318,6 +326,42 @@ class ConnectorManager:
                 connector_id, "error", error="connect() returned False",
             )
             return False
+
+    @staticmethod
+    def _config_fingerprint(decrypted_config: Dict[str, Any]) -> str:
+        """What a client depends on: the decrypted config, minus the owner's
+        sender ids (read per message, so changing them needs no reconnect)."""
+        import hashlib
+        import json
+
+        from app.core.connector_service import _without_owner_ids
+        body = json.dumps(_without_owner_ids(dict(decrypted_config or {})), sort_keys=True, default=str)
+        return hashlib.sha256(body.encode()).hexdigest()
+
+    def _row_config_fingerprint(self, connector_id: str) -> Optional[str]:
+        """The fingerprint of the config the row holds now; None when it cannot be read.
+
+        No connector writes its own ``config`` while it runs (only the
+        connector routes, OAuth and the MCP tools do, and the key rotation
+        rewrites the same plaintext), so a difference always means an edit.
+        """
+        from app.core import encryption
+        row = database.get_connector(connector_id)
+        if not row:
+            return None  # deleted: the reconcile stops it
+        config = row.get("config") or {}
+        if not encryption.is_encryption_ready() and any(
+                isinstance(v, str) and encryption.is_encrypted(v) for v in config.values()):
+            return None  # the key is not loaded: keep the client rather than restart it without its secrets
+        return self._config_fingerprint(self._decrypt_config(config, row["type"]))
+
+    @staticmethod
+    def _same_config(connector_id: str, instance: BaseConnector, current: Optional[str]) -> bool:
+        started = getattr(instance, "_started_config_fingerprint", None)
+        if not isinstance(started, str) or current is None or current == started:
+            return True
+        logger.info(f"Connector {connector_id}: its config changed; restarting its client")
+        return False
 
     @staticmethod
     def _still_eligible(connector_id: str) -> bool:

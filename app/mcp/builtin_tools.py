@@ -2201,10 +2201,10 @@ def create_builtin_tools_server(
         if not aid:
             return _err("automation_id is required.")
         try:
-            from app.core.automation_manager import AutomationDisabledError, automation_manager
+            from app.core.automation_manager import AutomationTriggerRefused, automation_manager
             try:
                 result = await automation_manager.trigger_manual(aid)
-            except AutomationDisabledError as disabled:
+            except AutomationTriggerRefused as disabled:
                 return _err(f"{disabled}. Nothing was run.", automation_id=aid)
             if result is None:
                 return _err("automation not found.", automation_id=aid)

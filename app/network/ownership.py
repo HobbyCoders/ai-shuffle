@@ -4,9 +4,11 @@ A definition (an automation, a connector) is shared data; the work it does
 is not. Only the device named in ``owner_device_id`` fires it or holds its
 platform session. A definition that arrives on a worker with no owner, or
 with an owner this worker is not, stays inactive here. Reassigning an owner
-is an explicit action that rewrites the definition. A scheduled automation
-fire reads the owner again, so the previous owner stops at its next scheduled
-fire (event, webhook and manual runs do not check it yet: #1397). A
+is an explicit action that rewrites the definition. Every automation start
+(schedule, connector event or trigger, webhook, manual run, approved run)
+reads the owner again in ``AutomationManager``, so the previous owner stops
+at its next start; a start that reaches a worker that does not own the
+automation is dropped there with a log line (#1397). A
 connector is reconciled when its new revision lands: on the worker that made
 the move right after ``assign``, and on every other worker when the synced
 record is applied (``app/network/startup.py``). The worker that lost it
@@ -58,6 +60,16 @@ can_execute_local = execution_eligible
 
 def owner_of(row: Mapping[str, Any]) -> Optional[str]:
     return (row or {}).get("owner_device_id") or None
+
+
+def owner_label(device_id: Optional[str]) -> str:
+    """A member's name and device id for messages a person reads."""
+    if not device_id:
+        return "no worker"
+    ctx = engine.context()
+    member = ctx.member(device_id) if ctx else None
+    name = getattr(member, "name", None)
+    return f"{name} ({device_id})" if name else device_id
 
 
 def owns(row: Mapping[str, Any]) -> bool:
@@ -122,7 +134,7 @@ def assign(table: str, row_id: str, device_id: Optional[str]) -> dict:
 
 
 def decide_automation(automation: Mapping[str, Any]) -> Optional[Tuple[bool, str]]:
-    """Network rule for a scheduled fire, or None to let the legacy election decide."""
+    """Network rule for any automation start, or None to let the legacy rule decide."""
     if not enrolled():
         return None
     if not execution_eligible():

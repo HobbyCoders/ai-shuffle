@@ -476,7 +476,9 @@ def _on_applied(touched) -> None:
         request_connector_reconcile()
     connector_ids = [r for c, r, _op in touched if c == "connectors"]
     if connector_ids:
-        # A move, a switch on or off, or a delete made on another worker.
+        # A move, a switch on or off, a delete or a config edit made on
+        # another worker (``start_connector`` replaces a client whose row's
+        # config differs from the one it started with).
         request_connector_reconcile(connector_ids)
     settled_ids = [r for c, r, op in touched if c == "session_active" and op == "upsert"]
     if settled_ids:

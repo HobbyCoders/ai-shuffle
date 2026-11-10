@@ -198,6 +198,7 @@ class SpotifyConnector(BaseConnector):
     async def disconnect(self) -> None:
         """Cancel the poll task and close the HTTP client."""
         try:
+            await self.cancel_reply_messages()
             if self._poll_task is not None and not self._poll_task.done():
                 self._poll_task.cancel()
                 try:
@@ -326,6 +327,7 @@ class SpotifyConnector(BaseConnector):
 
     async def send_message(self, message: OutgoingMessage) -> bool:
         """Parse the message text as a playback command and execute it."""
+        self.replying_to(message)
         if self._http_client is None:
             logger.error("Cannot send message: HTTP client is not initialised")
             return False
@@ -507,8 +509,13 @@ class SpotifyConnector(BaseConnector):
             )
             return False
 
-    async def _emit_response(self, platform_chat_id: str, text: str) -> None:
-        """Send a synthetic IncomingMessage back with the response text."""
+    async def _emit_response(self, platform_chat_id: str, text: str, *, queue: bool = True) -> None:
+        """Send a synthetic IncomingMessage back with the response text.
+
+        A command's result is queued: it runs inside the turn that holds the
+        chat (#1400). A notification (``queue=False``) is not, so its caller
+        still learns whether it was delivered.
+        """
         chunks = chunk_text(text, self.MAX_MESSAGE_LENGTH)
         for chunk in chunks:
             msg = IncomingMessage(
@@ -518,7 +525,10 @@ class SpotifyConnector(BaseConnector):
                 platform_user_name="Spotify",
                 text=chunk,
             )
-            await self._on_incoming_message(msg)
+            if queue:
+                self.queue_reply_message(msg)
+            else:
+                await self._on_incoming_message(msg)
 
     async def send_permission_prompt(
         self, platform_chat_id: str, prompt: PermissionPrompt
@@ -532,7 +542,7 @@ class SpotifyConnector(BaseConnector):
         """Send a notification as a synthetic IncomingMessage."""
         try:
             text = f"[{event_type}] {data}"
-            await self._emit_response(platform_chat_id, text)
+            await self._emit_response(platform_chat_id, text, queue=False)
             return True
         except Exception as exc:
             logger.exception(

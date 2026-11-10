@@ -86,22 +86,26 @@ def create_connector(
     api_user_id: Optional[str] = None,
     is_active: bool = False,
     runner_id: Optional[str] = None,
+    owner_device_id: Optional[str] = None,
 ) -> Optional[ConnectorRow]:
     """Create a new connector.
 
     *runner_id* pins the connector to the install that created it, so that when
     two installs share one Postgres only the owning install starts the live
     client (see ConnectorManager.start_all). NULL means unowned — claim-on-start
-    will assign the first install that starts it.
+    will assign the first install that starts it. *owner_device_id* is the
+    worker-network owner, written in the same INSERT so no copy of the row is
+    ever unowned (#1382); NULL leaves it to the claimant.
     """
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO connectors (id, type, name, api_user_id, config, events, is_active, runner_id, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            """INSERT INTO connectors (id, type, name, api_user_id, config, events, is_active, runner_id,
+                                       owner_device_id, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (connector_id, connector_type, name, api_user_id,
-             json.dumps(config), json.dumps(events), is_active, runner_id, now, now)
+             json.dumps(config), json.dumps(events), is_active, runner_id, owner_device_id, now, now)
         )
     return get_connector(connector_id)
 

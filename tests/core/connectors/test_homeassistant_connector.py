@@ -77,6 +77,20 @@ class FakeHA:
         return [(p, b) for m, p, b in self.requests if m == "POST"]
 
 
+def deliver_queued_replies(conn):
+    """Command results are queued for their chat (#1400); deliver them before asserting."""
+    send = conn.send_message
+
+    async def send_and_deliver(message):
+        ok = await send(message)
+        while conn._reply_tasks:
+            await asyncio.gather(*tuple(conn._reply_tasks))
+        return ok
+
+    conn.send_message = send_and_deliver
+    return conn
+
+
 def make_ha(api=None, *, config=None, on_trigger=None, preload=True):
     conn = HomeAssistantConnector(
         connector_id="ha-1",
@@ -92,7 +106,7 @@ def make_ha(api=None, *, config=None, on_trigger=None, preload=True):
             conn._entity_states = {
                 e["entity_id"]: e["state"] for e in api.states if conn._matches_filter(e["entity_id"])
             }
-    return conn
+    return deliver_queued_replies(conn)
 
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
