@@ -1,7 +1,8 @@
 /** Mounted-view state for owner-requested CLI jobs. No work continues after disposal. */
 import { getErrorMessage } from '$lib/api/client';
 import { getClaudeCliInstallation, installClaudeCli, updateClaudeCli, removeClaudeCli,
-	setClaudeCliKeepInstalled, type ClaudeCliInstallation, type ClaudeCliJob } from '$lib/api/claude-cli';
+	setClaudeCliKeepInstalled, type ClaudeCliInstallation, type ClaudeCliJob,
+	type ClaudeCliPeerResult } from '$lib/api/claude-cli';
 import { auth } from '$lib/stores/auth.svelte';
 import { providers } from '$lib/stores/providers.svelte';
 
@@ -10,6 +11,9 @@ export class ClaudeCliInstallState {
 	error = $state('');
 	busy = $state(false);
 	now = $state(Date.now());
+	/** The other workers' answers to the last update sent from this view:
+	 *  undefined when none was sent to them, null when they could not be asked. */
+	peers = $state<ClaudeCliPeerResult[] | null | undefined>(undefined);
 	#disposed = false;
 	#timer: ReturnType<typeof setTimeout> | undefined;
 	#onFinished: () => void | Promise<void>;
@@ -45,7 +49,12 @@ export class ClaudeCliInstallState {
 	async start(kind: ClaudeCliJob['kind']) {
 		if (this.busy || this.running || this.#disposed) return;
 		this.busy = true; this.error = '';
-		try { await this.#accept(await ({ install: installClaudeCli, update: updateClaudeCli, remove: removeClaudeCli }[kind])()); }
+		this.peers = undefined;
+		try {
+			const next = await ({ install: installClaudeCli, update: updateClaudeCli, remove: removeClaudeCli }[kind])();
+			if (!this.#disposed) this.peers = next.workers;
+			await this.#accept(next);
+		}
 		catch (e) { this.error = getErrorMessage(e, 'Could not start the job. Try again.'); }
 		finally { this.busy = false; }
 	}
