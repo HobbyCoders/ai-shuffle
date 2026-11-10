@@ -3,6 +3,11 @@ name: CI Browser Workspace
 on:
   pull_request:
   workflow_call:
+    inputs:
+      gated_by_caller:
+        description: The caller judges these jobs itself (main-suite), so the verdict job here does not queue for a runner
+        type: boolean
+        default: false
   workflow_dispatch:
 
 concurrency:
@@ -121,7 +126,7 @@ jobs:
 
   browser-workspace:
     name: Real browser workspace
-    if: always()
+    if: always() && inputs.gated_by_caller != true
     needs: [smoke, workspace]
     runs-on: ubuntu-latest
     timeout-minutes: 5
