@@ -123,6 +123,9 @@ def test_a_table_named_through_a_constant_or_a_loop_is_counted_with_its_value():
     # A constant is read where it is set, not where the statement is.
     ("BASE = 'rate_limits'\nTABLE = BASE\ndef drop(cursor):\n    BASE = 'request_log'\n"
      "    cursor.execute(f'DROP TABLE {TABLE}')\n", "BASE = 'sessions'"),
+    # Using the name as a key is not a binding of it.
+    ("TABLE = 'rate_limits'\ndef drop(cursor):\n    processed = {}\n    processed[TABLE] = True\n"
+     "    cursor.execute(f'DROP TABLE {TABLE}')\n", "TABLE = 'sessions'"),
     # A variable named like a builtin is still a variable.
     ("id = 'rate_limits'\ndef drop(cursor):\n    cursor.execute(f'DROP TABLE {id}')\n", "id = 'sessions'"),
     # The nearest binding wins over the module's.
@@ -157,6 +160,8 @@ def test_names_that_refer_to_each_other_end():
     "table = 'a'\ndef drop(cursor):\n    if (table := 'sessions'):\n        cursor.execute(f'DROP TABLE {table}')\n",
     "from names import *\ntable = 'a'\ndef drop(cursor):\n    cursor.execute(f'DROP TABLE {table}')\n",
     "class Drop:\n    table = 'a'\n    def run(self, cursor):\n        cursor.execute(f'DROP TABLE {table}')\n",
+    "TABLES = ['a', 'b']\ndef drop(cursor):\n    TABLES[1:] = ['sessions']\n    for table in TABLES:\n"
+    "        cursor.execute(f'DROP TABLE {table}')\n",
     "def drop(cursor):\n    cursor.execute(f\"DROP TABLE {'rate':_<8}\")\n",
     "TABLE = 'a'\ndef drop(cursor):\n    cursor.execute(f'DROP TABLE {TABLE!r}')\n",
 ])

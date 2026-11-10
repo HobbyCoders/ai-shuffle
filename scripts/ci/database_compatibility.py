@@ -105,8 +105,8 @@ def _bound(name, site, parents, declared):
     """(note, value, binding statement) for every value ``name`` can take at
     ``site``, from the nearest scope that binds it. None when it cannot be
     followed: the scope binds it any other way than plain assignment or a for
-    loop, a class binds it, a global or nonlocal statement names it, or
-    nothing in the file binds it."""
+    loop, a class binds it, a global or nonlocal statement names it, the
+    file writes into it (``declared``), or nothing in the file binds it."""
     if name in declared:
         return None
     scope = parents.get(id(site))
@@ -123,7 +123,7 @@ def _bound(name, site, parents, declared):
                 else:
                     continue
                 for leaf in (leaf for target in targets for leaf in ast.walk(target)):
-                    if isinstance(leaf, ast.Name) and leaf.id == name:
+                    if isinstance(leaf, ast.Name) and leaf.id == name and isinstance(leaf.ctx, ast.Store):
                         followed.add(id(leaf))
                         found.append((f"{name} {how} {ast.unparse(value)}", value, node))
             if any(_binds(node, name) and id(node) not in followed for node in _own(scope)):
@@ -163,6 +163,12 @@ def statements_in(source):
         return []
     parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     declared = {name for node in ast.walk(tree) if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names}
+    for node in ast.walk(tree):  # TABLES[1:] = ..., TABLES.x = ...: the value changes without a binding
+        if isinstance(node, (ast.Subscript, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
+            while isinstance(node, (ast.Subscript, ast.Attribute)):
+                node = node.value
+            if isinstance(node, ast.Name):
+                declared.add(node.id)
     docstrings = {id(node.value) for node in ast.walk(tree)
                   if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
     inside = {id(part) for node in ast.walk(tree) if isinstance(node, ast.JoinedStr) for part in node.values}
