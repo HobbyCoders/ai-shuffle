@@ -68,6 +68,49 @@ async function fixture(t) {
   return { root, deps, d, outside, tree1 };
 }
 
+/** The files of a build whose start failed, kept for diagnostics, with no build.json. */
+async function failedFolder(root) {
+  await file(path.join(root, 'versions', FAILED, 'release.json'), '{}');
+  await file(path.join(root, 'versions', FAILED, 'server/app/main.py'));
+}
+
+for (const [name, state, record] of [
+  ['listed as failed', { failed: [FAILED] }],
+  ['listed as failed and superseded', { failed: [FAILED], supersededFailed: [FAILED] }],
+  ['kept only by its database-migration mark', { mayHaveMigrated: { [FAILED]: null } }],
+  ['listed as failed, with a record cut off mid-write', { failed: [FAILED] }, '{"revision":'],
+]) test(`a build kept only for diagnostics (${name}) with no usable record does not stop the cleanup, start after start (#894)`, async t => {
+  const { root, d, tree1 } = await fixture(t);
+  await failedFolder(root);
+  if (record !== undefined) await fs.writeFile(path.join(root, 'versions', FAILED, 'build.json'), record);
+  // What its links still name is kept; the tree it ran Python from is recorded nowhere any more.
+  await link(d('node/tools', gen('0'), 'node_modules'), path.join(root, 'versions', FAILED, 'source/tools/node_modules'));
+  await fs.writeFile(path.join(root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: A, previous: B, ...state }));
+  const kept = [d(tree1, 'python', P1.slice(0, 24), 'Scripts/python.exe'), d('node/tools', gen('e'), 'node_modules'),
+    d('node/desktop', gen('f'), 'node_modules/electron/dist/electron.exe'), d('node/browser-mcp', gen('9'), 'node_modules'),
+    d('node/frontend', gen('6'), 'node_modules'), d(K2, 'node/tools', gen('7'), 'node_modules'), d(K2, 'node/desktop', gen('8'), 'node_modules'),
+    d('node/tools', gen('0'), 'node_modules'), path.join(root, 'versions', FAILED, 'release.json'), path.join(root, 'versions', FAILED, 'server/app/main.py')];
+
+  const first = await pruneDependencies(root, R, quiet);
+  assert.equal(first.skipped, undefined);
+  assert.deepEqual(first.failed, []);
+  assert.deepEqual(first.removed.sort(), [ORPHAN, `${K2}/node/tools/${gen('0')}`, `${tree1}/python/${P0.slice(0, 24)}`,
+    `${tree1}/python/${P1.slice(0, 24)}.tmp-abcdef12`, `node/tools/${gen('e', '-mabc99-0123abcd.tmp-abcdef12')}`].sort());
+  for (const name of kept) assert.ok(await exists(name), name);
+
+  // A later start, after another repair left a new unused set: still cleaned, the same things still kept.
+  await file(d('node/desktop', gen('a'), 'node_modules/.package-lock.json'));
+  const second = await pruneDependencies(root, R, quiet);
+  assert.equal(second.skipped, undefined);
+  assert.deepEqual(second.removed, [`node/desktop/${gen('a')}`]);
+  for (const name of kept) assert.ok(await exists(name), name);
+
+  const third = await pruneDependencies(root, R, quiet);
+  assert.equal(third.skipped, undefined);
+  assert.deepEqual(third.removed, []);
+  assert.equal(await exists(path.join(root, 'update.lock')), false);
+});
+
 test('unused dependency trees and npm sets are removed; everything a kept or running build uses survives', async t => {
   const { root, d, outside, tree1 } = await fixture(t);
   const result = await pruneDependencies(root, R, quiet);
@@ -106,6 +149,32 @@ for (const [name, damage] of [
   ['the running build is missing its record', async ({ root }) => fs.rm(path.join(root, 'versions', R, 'build.json'))],
   ['the active build sits under a temporary name with no record', async ({ root }) => { await fs.rm(path.join(root, 'versions', A, 'build.json')); await fs.rename(path.join(root, 'versions', A), path.join(root, 'versions', A + '.restoring')); }],
   ['a kept older build has files but no record', async ({ root }) => fs.rm(path.join(root, 'versions', B, 'build.json'))],
+  // #894: only a build kept for diagnostics alone may be without a record. One that can still be
+  // started (the rollback target, an update in flight, a database restore) keeps stopping the cleanup.
+  ['a failed build with no record is also the rollback target', async ({ root }) => {
+    await fs.rm(path.join(root, 'versions', B, 'build.json'));
+    await fs.writeFile(path.join(root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: A, previous: B, failed: [B], supersededFailed: [B] }));
+  }],
+  ['a failed build with no record is waiting to be started again', async ({ root }) => {
+    await failedFolder(root);
+    await fs.writeFile(path.join(root, 'state.json'), JSON.stringify({ schemaVersion: 1, active: A, previous: B, pending: FAILED, failed: [FAILED] }));
+  }],
+  ['a failed build with no record is named by the database restore journal', async ({ root }) => {
+    await failedFolder(root);
+    await fs.writeFile(path.join(root, 'restore-point.json'), JSON.stringify({ revision: FAILED, previous: A }));
+  }],
+  ['a failed build\'s record is there but cannot be opened', async ({ root }) => {
+    await failedFolder(root);
+    await dir(path.join(root, 'versions', FAILED, 'build.json'));
+  }],
+  ['a failed build\'s record is readable but not a build record', async ({ root }) => {
+    await failedFolder(root);
+    await fs.writeFile(path.join(root, 'versions', FAILED, 'build.json'), JSON.stringify({ revision: FAILED, runtimeKey: 'unknown' }));
+  }],
+  ['a failed build with no record sits under a temporary name', async ({ root }) => {
+    await failedFolder(root);
+    await fs.rename(path.join(root, 'versions', FAILED), path.join(root, 'versions', FAILED + '.restoring'));
+  }],
 ]) test(`nothing is removed when ${name}`, async t => {
   const f = await fixture(t);
   await damage(f);

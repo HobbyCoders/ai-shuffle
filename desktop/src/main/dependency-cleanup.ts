@@ -12,6 +12,9 @@
  *   and by where that path really is. Records only ever add protection;
  * - deletes nothing at all when any of those cannot be read, the active or running
  *   build has no readable record, or a link points somewhere unexpected;
+ * - does not let a build that is kept only for diagnostics stop it for good (#894): a
+ *   failed build with no build.json cannot be started again (see diagnosticOnly), so
+ *   its missing record is not an unknown. What its links name is still kept;
  * - never follows a junction or symlink: links are read with readlink, never
  *   walked, and a link is removed as a link. A link anywhere on the way to a
  *   folder it would list or delete, including updates/dependencies itself, stops
@@ -162,17 +165,29 @@ async function assertPlain(dependencies: string, real: string, segments: string[
 async function protectedPaths(root: string, state: SourceState, running: string | null, real: string): Promise<Set<string>> {
   const versions = path.join(root, 'versions'), staging = path.join(root, 'staging'), dependencies = path.join(root, 'dependencies');
   const required = new Set([state.active, running].filter((value): value is string => !!value));
-  const revisions = new Set<string>([state.active, state.previous, state.pending, state.staged, state.booting, state.waiting,
-    ...(state.failed ?? []), ...(state.supersededFailed ?? []), ...Object.keys(state.mayHaveMigrated ?? {}), running ?? undefined]
+  // Builds the updater may still start: the active and running ones, the rollback target,
+  // an update in flight, and whatever a database restore is putting back.
+  const startable = new Set<string>([state.active, state.previous, state.pending, state.staged, state.booting, state.waiting, running ?? undefined]
     .filter((value): value is string => !!value));
+  const revisions = new Set<string>([...startable, ...(state.failed ?? []), ...(state.supersededFailed ?? []), ...Object.keys(state.mayHaveMigrated ?? {})]);
   try {
     const journal = JSON.parse(await fs.readFile(path.join(root, 'restore-point.json'), 'utf8'));
     for (const revision of [journal?.revision, journal?.previous, journal?.state?.active, journal?.state?.previous]) {
       if (revision !== undefined && (typeof revision !== 'string' || !REVISION.test(revision))) throw new Unsafe('the database restore journal is invalid');
-      if (revision) revisions.add(revision);
+      if (revision) { revisions.add(revision); startable.add(revision); }
     }
   } catch (error) { if (error instanceof Unsafe) throw error; if (!missing(error)) throw new Unsafe('the database restore journal cannot be read'); }
   for (const revision of revisions) if (!REVISION.test(revision)) throw new Unsafe(`an unexpected revision ${revision} is recorded`);
+  /**
+   * A build kept only because its start failed (state.failed, supersededFailed or a
+   * database-migration mark) and nothing else. Its files stay for diagnostics. Without a
+   * build.json that parses it can never be started again: every launcher reads that
+   * record before it runs a build (SourceUpdates.application, which a retry of a failed
+   * build goes through too). So a missing or cut-off record there leaves no unknown
+   * dependency to protect, and it must not keep the cleanup switched off for as long as
+   * the folder is kept, which has no end (#894).
+   */
+  const diagnosticOnly = (revision: string) => revisions.has(revision) && !startable.has(revision);
   for (const container of [versions, staging]) {
     let stat;
     try { stat = await fs.lstat(container); } catch (error) { if (missing(error)) continue; throw new Unsafe(`${path.basename(container)}/ cannot be read`); }
@@ -220,7 +235,11 @@ async function protectedPaths(root: string, state: SourceState, running: string 
     const name = path.basename(folder), origin = folder === staging ? 'staging/build.json' : `versions/${name}/build.json`;
     let built: Record<string, unknown> | null = null;
     try { built = JSON.parse(await fs.readFile(path.join(folder, 'build.json'), 'utf8')); }
-    catch (error) { if (!missing(error)) throw new Unsafe(`${origin} cannot be read`); }
+    catch (error) {
+      // A record that is not JSON counts as no record for a diagnostics-only build under its
+      // own name; one that cannot be opened may read fine next time, so it still stops everything.
+      if (!missing(error) && !(error instanceof SyntaxError && diagnosticOnly(name))) throw new Unsafe(`${origin} cannot be read`);
+    }
     if (built) {
       const { revision, runtimeKey, pythonKey, layout, nodeGenerations, electron } = built as { revision: unknown; runtimeKey: unknown; pythonKey: unknown; layout: unknown; nodeGenerations: unknown; electron: unknown };
       if ((revision !== undefined && (typeof revision !== 'string' || !REVISION.test(revision))) ||
@@ -247,10 +266,13 @@ async function protectedPaths(root: string, state: SourceState, running: string 
   // A kept revision with files in versions/ (under any name) must have a readable build
   // record, or what it runs from is unknown. The active and running builds always need
   // one; only an older revision may have no files here (pruned, or the installer's copy).
+  // The one exception is a diagnostics-only build under its own name (see diagnosticOnly);
+  // under a temporary name something is moving it, and that still stops everything.
   for (const revision of revisions) {
     if (recorded.has(revision)) continue;
     if (required.has(revision)) throw new Unsafe(`the build record of the ${revision === running ? 'running' : 'active'} version ${revision} cannot be found`);
-    if (entries.some(entry => entry.name.startsWith(revision))) throw new Unsafe(`the build record of the kept version ${revision} cannot be found`);
+    const named = entries.filter(entry => entry.name.startsWith(revision));
+    if (named.length && !(diagnosticOnly(revision) && named.every(entry => entry.name === revision))) throw new Unsafe(`the build record of the kept version ${revision} cannot be found`);
   }
   return keep;
 }
