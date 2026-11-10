@@ -525,26 +525,43 @@ class ClaudeCliUpdate(BaseModel):
     keep_installed: StrictBool
 
 
+def _claude_cli_payload(payload=None):
+    """The install state, plus whether "Check for update" reaches every worker."""
+    from app.core import application_updates, claude_cli_install
+    return {**(payload or claude_cli_install.payload()),
+            "update_all_workers": application_updates.all_workers()}
+
+
 @router.get("/claude-cli")
 async def get_claude_cli(token: str = Depends(require_admin)):
-    from app.core import claude_cli_install
-    return await run_sync(claude_cli_install.payload)
+    return await run_sync(_claude_cli_payload)
 
 
 @router.put("/claude-cli")
 async def put_claude_cli(request: ClaudeCliUpdate, token: str = Depends(require_admin)):
     from app.core import claude_cli_install
     await run_sync(claude_cli_install.set_keep_installed, request.keep_installed)
-    return await run_sync(claude_cli_install.payload)
+    return await run_sync(_claude_cli_payload)
 
 
 @router.post("/claude-cli/{kind}")
 async def manage_claude_cli(kind: Literal["install", "update", "remove"], token: str = Depends(require_admin)):
+    """Start a job on this worker. With "Update all workers" on, an update is
+    also sent to every other worker; ``workers`` then holds one result per
+    worker (null when they could not be asked)."""
     from app.core import claude_cli_install
     try:
-        return await run_sync(claude_cli_install.start, kind)
+        result = await run_sync(_claude_cli_payload, await run_sync(claude_cli_install.start, kind))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    if kind == "update" and result["update_all_workers"]:
+        from app.core import worker_settings
+        try:
+            result["workers"] = await worker_settings.update_claude_on_peers()
+        except Exception:  # noqa: BLE001 - this worker's own update already started
+            logger.warning("Could not send the Claude Code update to the other workers", exc_info=True)
+            result["workers"] = None
+    return result
 
 
 @router.get("/claude-auth")
