@@ -19,7 +19,9 @@ back up. PostgreSQL resolves a cycle by aborting one side (DeadlockDetected).
 
 Who takes what (keep this table and the code in step):
 
-  - local delete (``sessions.delete_session``): G, X, H, then R/C/S of the
+  - local delete (``sessions.delete_session``): G, N (only on a network
+    member; the owner's tombstone is recorded in the same transaction, so no
+    incoming op recreates the chat in between, #1308), X, H, then R/C/S of the
     sorted family. Its FK cascade deletes the staged hand-off rows, so H must
     be held before S: reaching H through the cascade after S deadlocks
     (#1215). H locks only headers that exist, so X keeps a new header from

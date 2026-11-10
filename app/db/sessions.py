@@ -1891,40 +1891,39 @@ def delete_session(session_id: str, *, expected_project_id: Optional[str] = None
         # commands, and any git failure never blocks the delete.
         _cleanup_working_set_ref(session_id)
         _cleanup_pending_wakeups(session_id)
-    deleted = _delete_session_rows(session_id, expected_project_id)
+    deleted, tombstoned = _delete_session_rows(session_id, expected_project_id)
     if conditional and deleted:
         _cleanup_working_set_ref(session_id, row=deleted)
         _cleanup_pending_wakeups(session_id)
-    if deleted:
-        _publish_owner_tombstone(session_id, deleted)
+    if tombstoned:
+        from app.network import engine
+
+        engine.kick()
     return bool(deleted)
 
 
-def _publish_owner_tombstone(session_id: str, row: dict) -> None:
-    """The owner publishes its delete now, whoever signed the chat's record (#1308).
+def _record_owner_tombstone(cursor, session_id: str, row: dict) -> bool:
+    """The owner's delete and its tombstone commit together (#1308).
 
     The owner-only scan retracts only records this worker signed. A chat that
-    arrived by hand-off still carries the previous owner's record until this
-    worker republishes it, so a delete before that published nothing and the
-    chat stayed on the other workers. Its own short transaction after the
-    delete commits: the delete's lock order has no network_state (N) step
-    after S. A chat the network never knew gets no tombstone. Best-effort.
+    arrived by hand-off still carries the previous owner's record. A chat the
+    network never knew has no record and gets no tombstone. The caller holds
+    N, so no incoming op can recreate the chat between the delete and this
+    record.
     """
-    try:
-        from app.network import control, engine
+    from app.network import control, engine
 
-        if control.owner_of(row) is None:
-            engine.record_after_commit("sessions", session_id)
-    except Exception:  # noqa: BLE001 — the delete itself has committed
-        logger.warning("Could not publish the deletion of session %s", session_id, exc_info=True)
+    if control.owner_of(row) is not None:
+        return False
+    return engine.record(cursor, "sessions", session_id, None) is not None
 
 
 def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
     """The transaction of :func:`delete_session`.
 
-    Returns the deleted row (for post-commit cleanup and the owner's
-    tombstone), or None when the chat is gone or, conditional, now belongs to
-    another project.
+    Returns ``(row, tombstoned)``: the deleted row (for post-commit cleanup),
+    or None when the chat is gone or, conditional, now belongs to another
+    project; and whether the owner's tombstone was recorded.
     """
     _ph = ph()
     with get_db() as conn:
@@ -1941,6 +1940,11 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
                        (session_id, session_id))
         family = {session_id, *(row["id"] for row in cursor.fetchall())}
         lock_multi_session_mutation(cursor)
+        # N right after G (app/db/session_locks.py): the owner's tombstone is
+        # recorded in this transaction (#1308). Off a network there is no
+        # state row and this locks nothing.
+        from app.db import network as network_store
+        networked = network_store.lock_state(cursor) is not None
         cursor.execute("SELECT id FROM sessions WHERE parent_session_id=%s ORDER BY id", (session_id,))
         family.update(row["id"] for row in cursor.fetchall())
         # The cascade below deletes this chat's staged hand-off rows: take
@@ -1954,7 +1958,7 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
         if expected_project_id is not None and (row is None or row["project_id"] != expected_project_id):
             # Re-checked under the session lock: a chat moved to another
             # project after the caller listed it keeps its data (review S10).
-            return None
+            return None, False
         # Under this chat's counter: a mirror op that arrives after this
         # delete commits must store nothing (#1222).
         mark_sessions_deleted([session_id])
@@ -1977,7 +1981,10 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
                 f"DELETE FROM {table} WHERE session_id = {_ph}", (session_id,)
             )
         cursor.execute(f"DELETE FROM sessions WHERE id = {_ph}", (session_id,))
-        return dict(row) if cursor.rowcount > 0 else None
+        if cursor.rowcount <= 0:
+            return None, False
+        deleted = dict(row)
+        return deleted, networked and _record_owner_tombstone(cursor, session_id, deleted)
 
 
 def _cleanup_pending_wakeups(session_id: str) -> None:

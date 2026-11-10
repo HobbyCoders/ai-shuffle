@@ -23,6 +23,7 @@ from app.api import sessions as sessions_api
 from app.core import session_handoff
 from app.db import database, session_moves, wakeups
 from app.db import network as store
+from app.db import sessions as sessions_db
 from app.db.base import get_db
 from app.network import catalog, control, handoff
 from tests.core.network.harness import converge, exchange
@@ -94,6 +95,25 @@ async def test_receiver_delete_right_after_handoff_reaches_the_source(pair, monk
         assert _record(b)["origin_device_id"] == a.device_id
 
     await _delete_on_receiver(b)
+    _assert_deleted_everywhere(a, b)
+
+
+@pytest.mark.asyncio
+async def test_commit_record_arriving_right_after_the_delete_commits_cannot_undo_it(pair, monkeypatch):  # noqa: F811
+    a, b, _, _ = pair
+    await _move_to_receiver(a, b, monkeypatch)
+    rows = sessions_db._delete_session_rows
+
+    def deliver_commit_after_delete(*args):
+        deleted = rows(*args)
+        exchange(a, b)  # the source's delayed commit record lands now
+        return deleted
+
+    monkeypatch.setattr(sessions_db, "_delete_session_rows", deliver_commit_after_delete)
+    with b.active():
+        await sessions_api._delete_session(database.get_session(SID), BackgroundTasks())
+        assert database.get_session(SID) is None
+        catalog.publish_owned()
     _assert_deleted_everywhere(a, b)
 
 
