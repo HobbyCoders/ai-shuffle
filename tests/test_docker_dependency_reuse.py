@@ -35,7 +35,8 @@ def build_feed(feed, monkeypatch, request):
         if command[1:3] == ["-m", "venv"]:
             if request.node.name.startswith((
                     "test_signed_second_revision_reuses_all_third_party_dependencies",
-                    "test_corrupt_completed_cache", "test_semantically_broken_cache", "test_nested_source")):
+                    "test_corrupt_completed_cache", "test_semantically_broken_cache", "test_nested_source",
+                    "test_bytecode")):
                 subprocess.run([*command, "--without-pip"], check=True, env=env,
                                capture_output=True, timeout=20)
             else:
@@ -414,3 +415,82 @@ def test_retention_protects_references_and_bounds_unused_complete_and_partial(fe
     assert entries[0].exists()
     assert sum(entry.exists() for entry in entries) == 3  # referenced + two warm
     assert not entries[-1].exists()
+
+
+def _really_compile(updater, monkeypatch, fail=False):
+    """Run the bytecode step for real; every other build command stays a stub."""
+    stub, ran = updater.run_build, []
+
+    def run(command, cwd, env):
+        if updates.BYTECODE_SCRIPT in command:
+            ran.append(list(command))
+            if fail:
+                raise updates.UpdateError("Application build failed; see application-updates/build.log on the data volume")
+            subprocess.run(command, cwd=cwd, env=env, check=True, capture_output=True, timeout=60)
+            return
+        stub(command, cwd, env)
+
+    monkeypatch.setattr(updater, "run_build", run)
+    return ran
+
+
+APP_FILES = {"app/__init__.py": "", "app/fixture_module.py": "VALUE = 'app code'\n"}
+
+
+def _stage_outcome(updater, name):
+    return [item["outcome"] for item in updater.diagnostics["stages"] if item["stage"] == name]
+
+
+def test_bytecode_is_compiled_while_preparing_and_only_into_the_updates_own_directory(build_feed, monkeypatch):
+    updater, stage, _ = build_feed
+    ran = _really_compile(updater, monkeypatch)
+    stage(B, 2, APP_FILES)
+    assert len(ran) == 1 and _stage_outcome(updater, "bytecode") == ["completed"]
+    directory = updater.directory(B)
+    compiled = {path.name.split(".")[0] for path in (directory / "pycache").rglob("*.pyc")}
+    # The app, this revision's Fluid, the shared dependencies and the standard library.
+    assert {"fixture_module", "fixture_revision", "third_party_fixture", "argparse"} <= compiled
+    assert not list((directory / "source").rglob("*.pyc")), "the verified source tree gains no files"
+    # A start that may not write bytecode (PYTHONDONTWRITEBYTECODE=1, as the
+    # app runs) finds it: the file names the source it was compiled from.
+    probe = ("import importlib.util, sys, app.fixture_module as m; "
+             "print(m.__cached__.startswith(sys.pycache_prefix)); print(importlib.util.source_from_cache(m.__cached__) == m.__file__)")
+    found = subprocess.check_output([str(directory / "venv/bin/python"), "-B", "-c", probe],
+                                    cwd=directory / "source", text=True, timeout=20)
+    assert found.split() == ["True", "True"]
+    # The shared installation is still the one its integrity record describes.
+    second = stage(C, 3, APP_FILES)
+    assert installs(second) == [], "compiling must not change the shared dependencies"
+    assert len(ran) == 2
+
+
+def test_bytecode_kill_switch_and_uncached_builds_leave_compilation_to_the_app(build_feed, monkeypatch):
+    updater, stage, _ = build_feed
+    ran = _really_compile(updater, monkeypatch)
+    monkeypatch.setenv("AI_SHUFFLE_PERF_UPDATE_BYTECODE", "0")
+    stage(B, 2, APP_FILES)
+    assert ran == [] and _stage_outcome(updater, "bytecode") == ["disabled"]
+    monkeypatch.delenv("AI_SHUFFLE_PERF_UPDATE_BYTECODE")
+    # Without a shared dependency cache the update has no bytecode directory of its own.
+    monkeypatch.setenv("AI_SHUFFLE_PERF_DOCKER_DEPENDENCY_REUSE", "0")
+    stage(C, 3, APP_FILES)
+    assert ran == [] and _stage_outcome(updater, "bytecode") == ["disabled"]
+    assert updater.state["pending"] == C
+
+
+def test_bytecode_failure_never_fails_the_update(build_feed, monkeypatch):
+    updater, stage, _ = build_feed
+    ran = _really_compile(updater, monkeypatch, fail=True)
+    stage(B, 2, APP_FILES)
+    assert len(ran) == 1 and _stage_outcome(updater, "bytecode") == ["failed"]
+    assert updater.state["pending"] == B, "the update is ready; the app compiles as it starts"
+
+
+def test_bytecode_script_writes_nothing_outside_the_directory_it_was_given(tmp_path):
+    source = tmp_path / "app"
+    source.mkdir()
+    (source / "module.py").write_text("VALUE = 1\n")
+    result = subprocess.run([sys.executable, "-I", "-c", updates.BYTECODE_SCRIPT, str(source), "1", str(tmp_path / "elsewhere")],
+                            capture_output=True, timeout=60)
+    assert result.returncode == 3
+    assert [path.name for path in tmp_path.rglob("*") if path.name != "app"] == ["module.py"]

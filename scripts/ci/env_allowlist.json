@@ -159,6 +159,16 @@
     "kind": "internal",
     "reason": "Desktop updater rollback to the existing 30-second bridge heartbeat; command expiry, atomic consumption and authenticated control access are unchanged."
   },
+  "AI_SHUFFLE_PERF_UPDATE_BYTECODE": {
+    "kind": "internal",
+    "reason": "Default-on updater rollback switch for compiling an update's bytecode during preparation; 0/false/off leaves compilation to each app start as before.",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_PERF_DATABASE_CLONE": {
+    "kind": "internal",
+    "reason": "Default-on supervisor rollback switch for the copy-on-write database copy an update takes; 0/false/off copies with CREATE DATABASE as before. Restoring an existing clone is unaffected.",
+    "base_settings": false
+  },
   "AI_SHUFFLE_PERF_DOCKER_BUILD_REUSE": {
     "kind": "internal",
     "reason": "Default-on supervisor rollback switch for verified tools/browser Node-output reuse; 0/false/off rebuild from source while input/output hashes and per-revision UI/Fluid builds remain mandatory.",

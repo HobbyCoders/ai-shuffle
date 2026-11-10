@@ -48,7 +48,8 @@ Peer control allow-lists only `worker-settings` status/actions (and extends
 check active worker membership, exact arguments, request ID and a 15-second
 expiry. Short-lived receipts suppress duplicate delivery. No recursive fanout,
 arbitrary HTTP paths or shell commands are accepted. CLI operations retain
-platform/ownership/busy checks; channels retain launcher/downgrade checks.
+platform/ownership/busy checks (an install also waits until no Claude session
+is running; an update does not); channels retain launcher/downgrade checks.
 `claude_sign_in_supported:false` is an explicit extension point, not an
 implemented sign-in operation.
 

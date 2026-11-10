@@ -4,6 +4,8 @@
 	import '../../shell/settings.css';
 	import '../providers.css';
 	import { ClaudeCliInstallState } from '../claude-cli-install.svelte';
+	import { OUTCOME_TEXT } from '../../devices/machine-settings.svelte';
+	import type { ClaudeCliPeerResult } from '$lib/api/claude-cli';
 	import RowGroup from '../../rows/RowGroup.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
 	import Switch from '../../rows/Switch.svelte';
@@ -29,6 +31,12 @@
 	function remove() { confirming = false; removedHere = true; void installer.start('remove'); }
 	const manual = $derived(status?.platform !== 'docker' && (desktop?.platform === 'win32' || (!desktop && typeof navigator !== 'undefined' && /Win/i.test(navigator.platform)))
 		? 'irm https://claude.ai/install.ps1 | iex' : 'curl -fsSL https://claude.ai/install.sh | bash');
+	// "Update all workers" (Settings > System) also sends the update to every other worker.
+	const updateHint = $derived(status?.update_all_workers ? 'Checks every online worker' : 'Checks the connected worker');
+	function peerText(peer: ClaudeCliPeerResult): string {
+		if (peer.outcome === 'accepted') return 'Update started';
+		return OUTCOME_TEXT[peer.reason] ?? OUTCOME_TEXT[peer.outcome] ?? 'No confirmation';
+	}
 	onMount(() => { if (isAdmin) void installer.load(); });
 	onDestroy(() => installer.dispose());
 </script>
@@ -45,7 +53,7 @@
 			<SettingRow label="Path"><ValueText mono value="Checking" /></SettingRow>
 			<SettingRow id="providers.cliKeepInstalled"><Switch checked={false} disabled /></SettingRow>
 			<p class="cli-helper keep-helper">When on, this worker reinstalls the CLI at start if it is missing. When off, starting the worker never downloads it.</p>
-			<SettingRow id="providers.cliUpdate"><button type="button" class="st-btn" disabled>Check for update</button></SettingRow>
+			<SettingRow id="providers.cliUpdate" hint={updateHint}><button type="button" class="st-btn" disabled>Check for update</button></SettingRow>
 		</RowGroup>
 		<span class="sr-only" role="status">Checking Claude Code installation</span>
 	</div>
@@ -95,7 +103,7 @@
 					<Switch checked={status.keep_installed} disabled={disabled} onchange={(v) => installer.keep(v)} />
 				</SettingRow>
 				<p class="cli-helper keep-helper">When on, this worker reinstalls the CLI at start if it is missing. When off, starting the worker never downloads it.</p>
-				<SettingRow id="providers.cliUpdate">
+				<SettingRow id="providers.cliUpdate" hint={updateHint}>
 					<button type="button" class="st-btn" disabled={disabled || !status.can_install} onclick={() => installer.start('update')}>Check for update</button>
 				</SettingRow>
 				{#if status.can_remove}<SettingRow id="providers.cliRemove">
@@ -103,6 +111,17 @@
 				</SettingRow>{/if}
 			</RowGroup>
 			{#if status.job?.state === 'succeeded' && status.job.message && !installer.error}<p class="pv-msg" role="status">{status.job.message}</p>{/if}
+			{#if installer.peers === null}
+				<p class="pv-msg err" role="alert">The other workers could not be asked. Update them in Settings &gt; Devices.</p>
+			{:else if installer.peers?.length}
+				<ul class="cli-peers" aria-label="Other workers" data-testid="claude-cli-peers">
+					{#each installer.peers as peer (peer.device_id)}
+						<li><span class="cli-peer-name">{peer.device_name}</span><span class="cli-helper">{peerText(peer)}</span></li>
+					{/each}
+				</ul>
+			{:else if installer.peers}
+				<p class="pv-msg" role="status">No other workers to update.</p>
+			{/if}
 		{/if}
 		{#if installer.error}<p class="pv-msg err" role="alert">{installer.error}</p><button type="button" class="st-btn" onclick={() => installer.load()}>Check again</button>{/if}
 	</div>
@@ -121,6 +140,9 @@
 	.cli-helper { color: var(--st-mfg, var(--muted-foreground)); font-size: 12px; }
 	.cli-install > button { justify-self: start; min-height: 44px; }
 	.cli-install .keep-helper { padding: 0 16px 12px; }
+	.cli-peers { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+	.cli-peers li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; min-width: 0; }
+	.cli-peer-name { overflow-wrap: anywhere; }
 	/* Phone widths and touch screens: 44px targets, not the shell's 30px. */
 	@media (max-width: 600px), (pointer: coarse) {
 		.cli-install :global(.st-btn) { height: auto; min-height: 44px; }
