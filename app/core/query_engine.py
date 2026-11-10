@@ -1525,7 +1525,12 @@ async def _stream_query_turn(
     plan_scope = AsyncExitStack()
     query_receipt = None
     try:
-        recorder = await plan_scope.enter_async_context(recorded_turn(session_id, prompt, profile_id))
+        # Expand @Notes/<id> as the caller that sent this prompt (#1402); the
+        # chat keeps the typed text, the event records what the agent got.
+        agent_prompt = await asyncio.to_thread(_resolve_note_references_for, prompt, api_user_id)
+        recorder = await plan_scope.enter_async_context(recorded_turn(
+            session_id, prompt, profile_id, agent_content=agent_prompt,
+        ))
         prepare_completions = getattr(
             state.adapter, "prepare_background_completions", None
         )
@@ -1552,7 +1557,7 @@ async def _stream_query_turn(
             started_at=turn_started_at, overrides=overrides or None,
             payload={"api_user_id": api_user_id} if api_user_id else None,
         )
-        await state.adapter.send_query(prompt)
+        await state.adapter.send_query(agent_prompt)
 
         async for message in state.adapter.receive_events():
             await _record_query_message(recorder, message)

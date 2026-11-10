@@ -95,14 +95,20 @@ async def _run_background_query(
     recorder = None
     from app.core.session_plan import run_context
 
+    from app.core.query_engine import _resolve_note_references_for
+
     try:
         recorder = await TurnRecorder.maybe_create(session_id)
+        # Expand @Notes/<id> as the caller that sent this prompt (#1402); the
+        # chat keeps the typed text, the event records what the agent got.
+        agent_prompt = await asyncio.to_thread(_resolve_note_references_for, prompt, api_user_id)
         with run_context(recorder):
             if recorder:
-                await recorder.start(prompt, profile_id=profile.get("id"))
+                await recorder.start(prompt, profile_id=profile.get("id"), agent_content=agent_prompt)
             await _run_background_query_impl(
                 session_id=session_id,
                 prompt=prompt,
+                agent_prompt=agent_prompt,
                 profile=profile,
                 project=project,
                 overrides=overrides,
@@ -132,6 +138,7 @@ async def _run_background_query_impl(
     api_user_id: Optional[str],
     recorder=None,
     lease: Optional[Lease] = None,
+    agent_prompt: Optional[str] = None,
 ):
     """
     Run a streaming query in the background, independent of HTTP connection.
@@ -434,7 +441,7 @@ async def _run_background_query_impl(
         set_emergency = getattr(state.adapter, "set_emergency_compaction", None)
         if callable(set_emergency):
             set_emergency(bool(getattr(options, "aih_emergency_compaction", False)))
-        await state.adapter.send_query(prompt)
+        await state.adapter.send_query(prompt if agent_prompt is None else agent_prompt)
 
         async for message in state.adapter.receive_events():
             if isinstance(message, SystemMessage):
