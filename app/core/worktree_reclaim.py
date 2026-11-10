@@ -362,25 +362,39 @@ def _session_folder(context, cwd):
     return folder
 
 
+def _base_folder(session):
+    """This worker's base folder of the project a session is bound to.
+
+    The report's lookup, not the session resolver: the resolver heals legacy
+    bindings as it reads (it writes session and project rows), which a cleanup
+    pass and a report must never do. A session bound to no project resolves
+    to nothing here and stays unknown.
+    """
+    from app.core import checkout_manager
+    from app.core.project_resolver import _local_checkout
+
+    project = session.get("project_v2_id")
+    row = _local_checkout(project, settings.effective_instance_id) if project else None
+    return checkout_manager._resolve_checkout_path(row["path"]) if row and row.get("path") else None
+
+
 def _unrecorded_folder(context, session):
     """``(folder, its branch)`` of an open session that records neither.
 
     Such a session used to count as a user of every checkout of its project:
     one ordinary chat in the project's main folder stopped all cleanup for as
     long as it stayed open, and finished checkouts piled up by the hundred.
-    The folder is the one the session itself resolves at run time (a pure
-    read, the same answer the Git activity guard uses). None means it could
-    not be established, and the caller still treats that session as a possible
-    user of everything.
+    A session with no branch runs in its project's base folder on this worker
+    (:func:`_base_folder`, a pure read). None means that folder could not be
+    established, and the caller still treats the session as a possible user
+    of everything.
     """
     cache = context.setdefault("_unrecorded_folders", {})
     key = session.get("id")
     if key not in cache:
         found = None
         try:
-            from app.core.project_resolver import resolve_session_cwd
-
-            cwd = resolve_session_cwd(dict(session)) if key else None
+            cwd = _base_folder(session) if key else None
             if cwd and os.path.isdir(cwd):
                 folder = str(Path(cwd).resolve())
                 found = (os.path.normcase(folder),
