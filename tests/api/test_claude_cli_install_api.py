@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.api import auth, settings as api
-from app.core import claude_cli_install as ci
+from app.core import application_updates, claude_cli_install as ci, worker_settings
 
 BASE = "/api/v1/settings/claude-cli"
 
@@ -34,7 +34,8 @@ def _payload():
 
 def test_get_put_and_actions_share_contract(client, monkeypatch):
     client.app.dependency_overrides[auth.require_admin] = lambda: "owner"
-    payload = _payload()
+    monkeypatch.setattr(application_updates, "all_workers", lambda: False)
+    payload = {**_payload(), "update_all_workers": False}
     monkeypatch.setattr(ci, "payload", lambda: dict(payload))
     monkeypatch.setattr(ci, "set_keep_installed", lambda value: payload.update(keep_installed=value))
     def start(kind):
@@ -50,6 +51,42 @@ def test_get_put_and_actions_share_contract(client, monkeypatch):
         response = client.post(BASE + "/" + kind)
         assert response.status_code == 200 and response.json() == payload
         assert client.get(BASE).json() == response.json()
+
+
+@pytest.mark.parametrize("all_workers", [False, True])
+def test_update_reaches_other_workers_only_when_update_all_is_on(client, monkeypatch, all_workers):
+    client.app.dependency_overrides[auth.require_admin] = lambda: "owner"
+    monkeypatch.setattr(application_updates, "all_workers", lambda: all_workers)
+    started = []
+    monkeypatch.setattr(ci, "start", lambda kind: started.append(kind) or _payload())
+    monkeypatch.setattr(ci, "payload", _payload)
+    peers = [{"device_id": "peer", "device_name": "GamingPC", "outcome": "accepted", "reason": "done", "status": None}]
+    asked = []
+    async def fanout():
+        asked.append(list(started))  # this worker's own job starts first
+        return peers
+    monkeypatch.setattr(worker_settings, "update_claude_on_peers", fanout)
+    body = client.post(BASE + "/update").json()
+    assert started == ["update"] and body["update_all_workers"] is all_workers
+    if all_workers:
+        assert asked == [["update"]] and body["workers"] == peers
+    else:
+        assert asked == [] and "workers" not in body
+    # Installing or removing stays on the connected worker.
+    for kind in ("install", "remove"):
+        assert "workers" not in client.post(BASE + "/" + kind).json()
+    assert len(asked) == (1 if all_workers else 0)
+
+
+def test_update_still_starts_here_when_other_workers_cannot_be_asked(client, monkeypatch):
+    client.app.dependency_overrides[auth.require_admin] = lambda: "owner"
+    monkeypatch.setattr(application_updates, "all_workers", lambda: True)
+    monkeypatch.setattr(ci, "start", lambda kind: _payload())
+    async def fanout():
+        raise RuntimeError("directory unavailable")
+    monkeypatch.setattr(worker_settings, "update_claude_on_peers", fanout)
+    response = client.post(BASE + "/update")
+    assert response.status_code == 200 and response.json()["workers"] is None
 
 
 def test_remove_refusal(client, monkeypatch):

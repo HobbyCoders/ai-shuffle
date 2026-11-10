@@ -311,7 +311,7 @@ def test_entrypoint_decision(tmp_path, marker, has_data, has_cli, expected):
 
 def test_cli_settings_stay_on_this_worker():
     from app.network.policy import is_shared_setting_key
-    for name in ("claude_cli_keep_installed", "claude_cli_installed_by_app"):
+    for name in ("claude_cli_keep_installed", "claude_cli_installed_by_app", "claude_cli_startup_check_at"):
         assert not is_shared_setting_key(name + ":same-instance-id")
 
 
@@ -436,3 +436,59 @@ def test_setting_failure_never_stops_boot(worker, monkeypatch):
     monkeypatch.setattr(ci, "ensure_recorded", Mock(side_effect=OSError("read-only data dir")))
     startup.check_prerequisites()
     start.assert_not_called()
+
+
+# --- Update check when the worker starts --------------------------------------
+
+@pytest.fixture
+def real_start(monkeypatch):
+    # The suite and branch previews share the real install, so both skip the check.
+    monkeypatch.delenv("TESTING", raising=False)
+    monkeypatch.delenv("AI_SHUFFLE_PREVIEW", raising=False)
+    start = Mock()
+    monkeypatch.setattr(ci, "start", start)
+    return start
+
+
+def test_startup_runs_the_cli_updater_once_per_start(worker, real_start, monkeypatch):
+    store, cli, _ = worker
+    cli.installed = True
+    assert ci.update_on_startup(cli) is True
+    real_start.assert_called_once_with("update")
+    # A worker restarting in a loop does not ask again straight away.
+    assert ci.update_on_startup(cli) is False
+    assert real_start.call_count == 1
+    store[ci._key("claude_cli_startup_check_at")] = str(ci.time.time() - ci.STARTUP_CHECK_SECONDS - 1)
+    assert ci.update_on_startup(cli) is True
+    assert real_start.call_count == 2
+
+
+@pytest.mark.parametrize("installed,env", [(False, None), (True, "TESTING"), (True, "AI_SHUFFLE_PREVIEW")])
+def test_startup_update_check_skips_missing_cli_tests_and_previews(worker, real_start, monkeypatch, installed, env):
+    _, cli, _ = worker
+    cli.installed = installed
+    if env:
+        monkeypatch.setenv(env, "1")
+    assert ci.update_on_startup(cli) is False
+    real_start.assert_not_called()
+
+
+def test_worker_start_checks_for_an_update_and_survives_a_failure(worker, monkeypatch, caplog):
+    from app.core import startup, credential_gate, claude_relogin_notice
+    _, cli, _ = worker
+    cli.installed = True
+    check = Mock(side_effect=[True, RuntimeError("database unavailable")])
+    monkeypatch.setattr(ci, "update_on_startup", check)
+    monkeypatch.setattr(ci, "start", Mock())
+    monkeypatch.setattr(ci.claude_auth_mode, "ensure_mode_recorded", lambda signed_in: "subscription")
+    monkeypatch.setattr(claude_relogin_notice, "mark_if_needed", lambda: None)
+    monkeypatch.setattr(credential_gate, "record_startup", lambda cli: None)
+    monkeypatch.setattr(startup.auth_service, "is_setup_required", lambda: True)
+    monkeypatch.setattr(startup, "_check_browser_mcp_prereqs", lambda: None)
+    monkeypatch.setattr(startup, "_warn_removed_env_vars", lambda: None)
+    with caplog.at_level("INFO"):
+        startup.check_prerequisites()
+        startup.check_prerequisites()
+    assert check.call_count == 2 and check.call_args.args == (cli,)
+    assert "checking for an update" in caplog.text
+    assert "Could not check for a Claude Code update" in caplog.text

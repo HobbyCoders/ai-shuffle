@@ -328,6 +328,13 @@ def check_prerequisites() -> None:
             claude_cli_install.start("install")
     except Exception:
         logger.warning("Could not apply Keep Claude Code installed", exc_info=True)
+    # Check for a newer Claude Code on every start. Never fatal, never awaited:
+    # the job runs in its own thread and logs what it did.
+    try:
+        if claude_cli_install.update_on_startup(cli):
+            logger.info("Claude Code CLI: checking for an update")
+    except Exception:
+        logger.warning("Could not check for a Claude Code update", exc_info=True)
     claude_relogin_notice.mark_if_needed()
 
     # Record the Claude Code auth mode once for an install that has none, so a

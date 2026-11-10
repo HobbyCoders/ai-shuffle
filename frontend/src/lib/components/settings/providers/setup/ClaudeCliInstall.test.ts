@@ -129,6 +129,40 @@ it('shows the update result from the worker', async () => {
 	expect(mocks.post).toHaveBeenCalledWith('/settings/claude-cli/update', {});
 	expect(await screen.findByText('Claude Code updated from 2.1.280 to 2.1.285.')).toBeTruthy();
 });
+it('says which workers the update button reaches', async () => {
+	current = { ...base, installed: true, update_all_workers: false };
+	const view = render(ClaudeCliInstall, { manage: true }); await loaded();
+	expect(screen.getByText('Checks the connected worker')).toBeTruthy();
+	view.unmount();
+	current = { ...current, update_all_workers: true }; render(ClaudeCliInstall, { manage: true }); await loaded();
+	expect(await screen.findByText('Checks every online worker')).toBeTruthy();
+});
+it('lists what every other worker answered when the update goes to all workers', async () => {
+	current = { ...base, installed: true, update_all_workers: true }; render(ClaudeCliInstall, { manage: true }); await loaded();
+	expect(screen.queryByTestId('claude-cli-peers')).toBeNull();
+	current = { ...current, job: job('succeeded', 'update') };
+	mocks.post.mockResolvedValueOnce({ ...current, workers: [
+		{ device_id: 'a', device_name: 'GamingPC', outcome: 'accepted', reason: 'done' },
+		{ device_id: 'b', device_name: 'Laptop', outcome: 'offline', reason: 'offline' },
+		{ device_id: 'c', device_name: 'Old box', outcome: 'refused', reason: 'not-owned' }
+	] });
+	await fireEvent.click(screen.getByRole('button', { name: 'Check for update' }));
+	const rows = within(await screen.findByRole('list', { name: 'Other workers' })).getAllByRole('listitem');
+	expect(rows.map((row) => row.textContent)).toEqual([
+		'GamingPCUpdate started', 'LaptopOffline · not queued', 'Old boxThis CLI is managed outside AI Shuffle']);
+	// This worker's own result still shows next to the others.
+	expect(screen.getByText('Claude Code updated from 2.1.280 to 2.1.285.')).toBeTruthy();
+});
+it('says so when the other workers could not be asked, or there are none', async () => {
+	current = { ...base, installed: true, update_all_workers: true }; render(ClaudeCliInstall, { manage: true }); await loaded();
+	mocks.post.mockResolvedValueOnce({ ...current, workers: null });
+	await fireEvent.click(screen.getByRole('button', { name: 'Check for update' }));
+	expect(await screen.findByText(/other workers could not be asked/)).toBeTruthy();
+	mocks.post.mockResolvedValueOnce({ ...current, workers: [] });
+	await fireEvent.click(screen.getByRole('button', { name: 'Check for update' }));
+	expect(await screen.findByText('No other workers to update.')).toBeTruthy();
+	expect(screen.queryByText(/other workers could not be asked/)).toBeNull();
+});
 it('replaces an earlier success with a later failure', async () => {
 	current = { ...base, installed: true, job: job('succeeded') };
 	render(ClaudeCliInstall, { manage: true });
