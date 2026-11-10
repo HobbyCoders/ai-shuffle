@@ -1126,13 +1126,14 @@ def _description() -> dict:
 
 
 def _capabilities() -> dict:
+    from app.network import memory_records
     from app.network.nested_secret_sync import CAPABILITY
     try:
         from app.core.runner_capabilities import detect_capabilities
         capabilities = detect_capabilities()
     except Exception:  # noqa: BLE001
         capabilities = {}
-    return {**capabilities, CAPABILITY: 1}
+    return {**capabilities, CAPABILITY: 1, memory_records.CAPABILITY: 1}
 
 
 

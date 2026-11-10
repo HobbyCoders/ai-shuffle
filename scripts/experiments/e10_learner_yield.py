@@ -422,6 +422,29 @@ def load_db_snapshots(*, get_db: Callable | None = None) -> list[Snapshot]:
             device = parts[1] if len(parts) >= 3 else str(row["id"])
             store_id = str(doc.get("store_id") or device)
             snapshots.append(Snapshot(label=f"device:{device}", store_id=store_id, doc=doc))
+        # Workers that all read per-fact records publish one record per fact
+        # and a barrier per store instead (memory-fact:/memory-barrier:).
+        cur.execute("SELECT id, content FROM network_memory_records "
+                    "WHERE (id LIKE %s OR id LIKE %s) AND deleted = FALSE",
+                    ("memory-fact:%", "memory-barrier:%"))
+        stores: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in cur.fetchall():
+            parts = str(row["id"]).split(":")
+            try:
+                part = json.loads(row["content"] or "{}")
+            except ValueError:
+                continue
+            if len(parts) < 3 or not isinstance(part, dict):
+                continue
+            doc = stores.setdefault((parts[1], parts[2]), {"entries": [], "tombstones": []})
+            doc["store_id"] = part.get("store_id") or doc.get("store_id")
+            doc["entries"] += part.get("entries") or []
+            doc["tombstones"] += part.get("tombstones") or []
+        seen = {s.label for s in snapshots}
+        for (device, _owner), doc in sorted(stores.items()):
+            if f"device:{device}" not in seen:
+                snapshots.append(Snapshot(label=f"device:{device}", store_id=str(doc.get("store_id") or device),
+                                          doc=doc))
     return snapshots
 
 

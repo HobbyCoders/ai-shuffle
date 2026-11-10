@@ -3519,10 +3519,12 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
         # a heartbeat interval. An explicit empty/old map remains explicit.
         from app.network.transport import _capabilities
         capabilities = _capabilities()
+    from app.network import memory_records  # imports this module
     row = {
         "device_id": ctx.device_id,
         "endpoints": endpoints if endpoints is not None else _own_endpoints(),
         "capabilities": {nested_secret_sync.CAPABILITY: 1, native_providers.CAPABILITY: 1,
+                         memory_records.CAPABILITY: 1,
                          **capabilities},
         "version": version,
         "source_revision": running_revision(),

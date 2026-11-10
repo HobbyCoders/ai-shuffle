@@ -296,12 +296,12 @@ Committed fact changes (including local imports, metadata edits, retirement and
 forget), Python skill save/delete and skill curation now request the targeted
 memory publisher through the existing fixed 100 ms scanner debounce. The
 publisher also waits for a 100 ms write-quiet gap so a burst straddling scanner
-passes does not emit intermediate whole-store snapshots; sustained writes are
+passes does not emit intermediate records; sustained writes are
 flushed within two seconds rather than starving synchronization. The hint
 runs after all enclosing file locks release. Peer materialization suppresses
 hints; recall/inference accounting is not an urgent mutation. External edits
-(including prose skill folders) still use periodic full reconciliation. The
-wire format and whole-store fact snapshots are unchanged.
+(including prose skill folders) still use periodic full reconciliation. Facts
+now travel as per-fact records (see docs/internal/sync-log-retention.md).
 
 The JSON contains raw samples, nearest-rank p50/p75/max/n (same convention as
 `stats.mjs`), signed-operation-correlated stages, envelope bytes, seed sizes,

@@ -1,4 +1,4 @@
-"""Real PostgreSQL: committed bursts produce a signed, recallable peer snapshot."""
+"""Real PostgreSQL: committed bursts produce one signed, recallable publish pass."""
 import time
 
 from app.core import fluid_memory, resource_sync
@@ -31,18 +31,22 @@ def test_committed_burst_targets_files_and_peer_apply_does_not_echo(pg_workers, 
             assert engine.scan_all(collections={"memory"}, include_catalog=False, strict=True) == 0
         assert dirty == {"memory"}, "committed facts still wait for a periodic full scan"
         time.sleep(memory_records.WRITE_QUIET_SECONDS + .01)
-        assert engine.scan_all(collections=dirty, include_catalog=False, strict=True) == 1
+        published = engine.scan_all(collections=dirty, include_catalog=False, strict=True)
         ops = source.sql("SELECT envelope FROM sync_ops WHERE collection = 'memory'")
-    assert len(ops) == 1  # one whole-store envelope, not one per save
-    envelope = ops[0]["envelope"]
+    ids = [op["envelope"]["record_id"] for op in ops]
+    # One pass after the burst: each record once, no intermediate copies.
+    # The peer's presence has not reached the source, so the whole-store
+    # record is still written next to the ten fact records and the barrier.
+    assert published == len(ids) == len(set(ids)) == 12
+    assert sorted({rid.split(":", 1)[0] for rid in ids}) == ["memory-barrier", "memory-fact", "memory-v2"]
     dirty.clear()
     with peer.active():
-        assert engine.apply_batch([envelope]).applied == 1
-        memory_records.apply_to_files([envelope["record_id"]])
+        assert engine.apply_batch([op["envelope"] for op in ops]).applied == len(ops)
+        memory_records.apply_to_files(ids)
         replica = fluid_memory.store_for_owner("local")
         assert {e.text for e in replica._facts.entries()} == set(texts)
         assert dirty == set(), "peer application requested a republish"
         replica.save_memory("Peer's own widget preference", when="Choosing widgets")
         assert dirty == {"memory"}
         time.sleep(memory_records.WRITE_QUIET_SECONDS + .01)
-        assert engine.scan_all(collections=dirty, include_catalog=False, strict=True) == 1
+        assert engine.scan_all(collections=dirty, include_catalog=False, strict=True) >= 1
