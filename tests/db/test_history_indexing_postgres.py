@@ -35,15 +35,57 @@ def hold_autovacuum(enabled: bool = False) -> None:
     Production's run_pass defers that pass and retries; these tests call
     migrate() directly and expect progress. Taking the ALTER's lock waits out a
     running autovacuum, and a new one re-reads the option before it starts.
+    A worker that read the option just before the ALTER committed still runs
+    with the old value, so the hold also waits until no autovacuum worker is
+    on these tables.
     """
+    oids = []
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("SET LOCAL lock_timeout = '30s'")
         for table in hi.TABLES:
-            cur.execute("SELECT to_regclass(%s) AS oid", (table,))
-            if cur.fetchone()["oid"]:
+            cur.execute("SELECT to_regclass(%s)::oid AS oid", (table,))
+            oid = cur.fetchone()["oid"]
+            if oid:
+                oids.append(oid)
                 option = "RESET (autovacuum_enabled)" if enabled else "SET (autovacuum_enabled = false)"
                 cur.execute(f"ALTER TABLE {table} {option}")
+    if not enabled and oids:
+        _wait_out_autovacuum(oids)
+
+
+def _wait_out_autovacuum(oids: list[int]) -> None:
+    """Return once no autovacuum worker has held, wanted or named these tables
+    for 250 ms (one migration lock check), or fail after 30 s."""
+    names = [t.rsplit(".", 1)[-1] for t in hi.TABLES]
+    deadline = time.monotonic() + 30
+    quiet_since = None
+    while True:
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            # pg_locks covers a worker that holds or waits for a table lock;
+            # the activity text covers one between choosing the table and
+            # asking for the lock (readable when the role may see it).
+            cur.execute(
+                "SELECT a.pid, a.query FROM pg_stat_activity a "
+                "WHERE a.backend_type = 'autovacuum worker' "
+                "AND a.datname = current_database() AND ("
+                " EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid"
+                "         AND l.relation = ANY(%s::oid[]))"
+                " OR a.query ~ ANY(SELECT '\\.' || n || '\\M' FROM unnest(%s::text[]) n))",
+                (oids, names),
+            )
+            busy = cur.fetchall()
+        now = time.monotonic()
+        if busy:
+            quiet_since = None
+            if now > deadline:
+                pytest.fail(f"autovacuum stayed on the history tables: {busy}")
+        elif quiet_since is None:
+            quiet_since = now
+        elif now - quiet_since >= 0.25:
+            return
+        time.sleep(0.05)
 
 
 @pytest.fixture(scope="module", autouse=True)
