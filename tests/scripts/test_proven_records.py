@@ -17,20 +17,31 @@ NAME = f"proven-backend-{TREE}"
 SHA, HEAD, RUN = "c" * 40, "d" * 40, 7
 
 
-def artifact(name=NAME, expired=False, repository=1, head=1, head_sha=HEAD, run=RUN):
+BRANCH, NUMBER = "fix/thing", 12
+
+
+def artifact(name=NAME, expired=False, repository=1, head=1, head_sha=HEAD, run=RUN, branch=BRANCH):
     return {"name": name, "expired": expired,
-            "workflow_run": {"id": run, "repository_id": repository, "head_repository_id": head, "head_sha": head_sha}}
+            "workflow_run": {"id": run, "repository_id": repository, "head_repository_id": head,
+                             "head_sha": head_sha, "head_branch": branch}}
 
 
-def pull(merged="2026-01-01T00:00:00Z", commit=SHA, base="main", repo="owner/repo", head=HEAD):
-    return {"merged_at": merged, "merge_commit_sha": commit, "base": {"ref": base},
-            "head": {"sha": head, "repo": {"full_name": repo}}}
+def the_run(**changes):
+    return {"event": "pull_request", "head_sha": HEAD, "head_branch": BRANCH,
+            "head_repository": {"full_name": "owner/repo"}, "path": ".github/workflows/ci-backend.yml", **changes}
 
 
-def github(artifacts=(), pulls=None, run=None, jobs=None, asked=None):
+def pull(merged="2026-01-01T00:00:00Z", commit=SHA, base="main", repo="owner/repo", head=HEAD, number=NUMBER,
+         branch=BRANCH):
+    return {"number": number, "merged_at": merged, "merge_commit_sha": commit, "base": {"ref": base},
+            "head": {"sha": head, "ref": branch, "repo": {"full_name": repo}}}
+
+
+def github(artifacts=(), pulls=None, run=None, jobs=None, asked=None, branch_pulls=None):
     """A fake GitHub: the record, the pull request merged as SHA, its run and that run's jobs."""
     pulls = [pull()] if pulls is None else pulls
-    run = {"event": "pull_request", "head_sha": HEAD, "path": ".github/workflows/ci-backend.yml"} if run is None else run
+    run = the_run() if run is None else run
+    branch_pulls = [{"number": NUMBER}] if branch_pulls is None else branch_pulls
     jobs = [{"conclusion": "success"}, {"conclusion": "skipped"}, {"conclusion": None}] if jobs is None else jobs
 
     def call(path, token):
@@ -40,6 +51,8 @@ def github(artifacts=(), pulls=None, run=None, jobs=None, asked=None):
             return {"artifacts": list(artifacts)}
         if path.endswith(f"/commits/{SHA}/pulls?per_page=100"):
             return pulls
+        if path.endswith("/pulls?state=all&per_page=100&head=owner%3Afix/thing"):
+            return branch_pulls
         if path.endswith(f"/actions/runs/{RUN}"):
             return run
         if path.endswith(f"/actions/runs/{RUN}/jobs?filter=latest&per_page=100"):
@@ -90,6 +103,7 @@ def test_only_a_live_record_from_this_repositorys_own_run_counts():
     assert proven.exists(NAME, "owner/repo", "token", call=github([artifact()], asked=asked), area="backend", commit=SHA)
     assert asked == [f"/repos/owner/repo/actions/artifacts?per_page=100&name={NAME}",
                      f"/repos/owner/repo/commits/{SHA}/pulls?per_page=100",
+                     "/repos/owner/repo/pulls?state=all&per_page=100&head=owner%3Afix/thing",
                      f"/repos/owner/repo/actions/runs/{RUN}",
                      f"/repos/owner/repo/actions/runs/{RUN}/jobs?filter=latest&per_page=100"]
     assert found(artifact(expired=True), artifact(head=2), artifact())
@@ -116,12 +130,24 @@ def test_a_name_alone_proves_nothing():
     assert not found(record, pulls=[pull(base="other")])
     assert not found(record, pulls=[pull(repo="fork/repo")])
     # The merged pull request's head, but not the area's own pull request workflow.
-    for run in ({"event": "push", "head_sha": HEAD, "path": ".github/workflows/ci-backend.yml"},
-                {"event": "workflow_dispatch", "head_sha": HEAD, "path": ".github/workflows/ci-backend.yml"},
-                {"event": "pull_request", "head_sha": HEAD, "path": ".github/workflows/other.yml"},
-                {"event": "pull_request", "head_sha": HEAD, "path": ".github/workflows/ci-fluid.yml"},
-                {"event": "pull_request", "head_sha": "e" * 40, "path": ".github/workflows/ci-backend.yml"}, {}):
+    for run in (the_run(event="push"), the_run(event="workflow_dispatch"), the_run(event="pull_request_target"),
+                the_run(path=".github/workflows/other.yml"), the_run(path=".github/workflows/ci-fluid.yml"),
+                the_run(head_sha="e" * 40), the_run(head_branch="other"),
+                the_run(head_repository={"full_name": "fork/repo"}), {}):
         assert not found(record, run=run), run
+    assert not found(artifact(branch="other"))
+    assert not found(record, pulls=[pull(number=None)])
+    assert not found(record, pulls=[pull(branch="")])
+
+
+def test_a_branch_with_a_second_pull_request_proves_nothing():
+    """A pull request runs its base's workflows: the same head against an unreviewed base could forge a record."""
+    record = artifact()
+    assert found(record, branch_pulls=[{"number": NUMBER}])
+    assert not found(record, branch_pulls=[{"number": NUMBER}, {"number": NUMBER + 1}])
+    assert not found(record, branch_pulls=[{"number": NUMBER + 1}])
+    assert not found(record, branch_pulls=[])
+    assert not found(record, branch_pulls={"message": "error"})
     assert not found(record, area="fluid")
     assert not found(record, area="unknown")
     assert not proven.exists(NAME, "owner/repo", "token", call=github([record]), area="backend", commit="")

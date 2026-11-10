@@ -60,21 +60,38 @@ WORKFLOWS = {
 BAD = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
 
 
-def merged_heads(repository: str, commit: str, token: str, call=request) -> set[str]:
-    """Head commits of this repository's pull requests that were merged to main as ``commit``."""
-    heads = set()
+def merged_pulls(repository: str, commit: str, token: str, call=request) -> dict[str, dict]:
+    """This repository's pull requests merged to main as ``commit``, by head commit: number and branch."""
+    pulls = {}
     for pull in call(f"/repos/{repository}/commits/{commit}/pulls?per_page=100", token) or []:
         head, base = pull.get("head") or {}, pull.get("base") or {}
         if (pull.get("merged_at") and pull.get("merge_commit_sha") == commit and base.get("ref") == "main"
-                and (head.get("repo") or {}).get("full_name") == repository and head.get("sha")):
-            heads.add(head["sha"])
-    return heads
+                and (head.get("repo") or {}).get("full_name") == repository
+                and head.get("sha") and head.get("ref") and pull.get("number")):
+            pulls[head["sha"]] = {"number": pull["number"], "ref": head["ref"]}
+    return pulls
 
 
-def passed(run_id, area: str, heads: set[str], repository: str, token: str, call=request) -> bool:
-    """True when that run is the area's own pull request workflow, on a merged head, with nothing failed."""
+def only_pull(pull: dict, repository: str, token: str, call=request) -> bool:
+    """True when the merged pull request is the only one its branch ever opened.
+
+    A pull request's checks use the workflows of its base. A second pull
+    request from the same branch against another base would run unreviewed
+    workflows on the same head commit, and GitHub's API does not say which
+    pull request started a run. So a branch with any other pull request,
+    open or closed, against any base, proves nothing.
+    """
+    owner = repository.split("/", 1)[0]
+    head = urllib.parse.quote(f"{owner}:{pull['ref']}")
+    found = call(f"/repos/{repository}/pulls?state=all&per_page=100&head={head}", token)
+    return isinstance(found, list) and [item.get("number") for item in found] == [pull["number"]]
+
+
+def passed(run_id, area: str, head: str, pull: dict, repository: str, token: str, call=request) -> bool:
+    """True when that run is the area's own pull request workflow, on the merged head, with nothing failed."""
     run = call(f"/repos/{repository}/actions/runs/{run_id}", token)
-    if (run.get("event") != "pull_request" or run.get("head_sha") not in heads
+    if (run.get("event") != "pull_request" or run.get("head_sha") != head or run.get("head_branch") != pull["ref"]
+            or (run.get("head_repository") or {}).get("full_name") != repository
             or run.get("path") != f".github/workflows/{WORKFLOWS[area]}"):
         return False
     data = call(f"/repos/{repository}/actions/runs/{run_id}/jobs?filter=latest&per_page=100", token)
@@ -90,21 +107,28 @@ def exists(name: str, repository: str, token: str, call=request, *, area: str, c
     A name alone proves nothing: any run in the repository can upload an
     artifact. The record counts only when its run is the area's own workflow,
     started by a pull request of this repository (never a fork) whose head was
-    then merged to main as exactly this commit, and no job of that run failed.
+    then merged to main as exactly this commit, that pull request is the only
+    one its branch ever opened, and no job of that run failed.
     """
     commit = commit or os.environ.get("GITHUB_SHA", "")
     if area not in WORKFLOWS or not commit:
         return False
-    heads = None
+    pulls, sole = None, {}
     data = call(f"/repos/{repository}/actions/artifacts?per_page=100&name={urllib.parse.quote(name)}", token)
     for artifact in data.get("artifacts") or []:
         run = artifact.get("workflow_run") or {}
         own = run.get("repository_id") is not None and run.get("repository_id") == run.get("head_repository_id")
         if artifact.get("name") != name or artifact.get("expired") is not False or not own or not run.get("id"):
             continue
-        if heads is None:
-            heads = merged_heads(repository, commit, token, call)
-        if run.get("head_sha") in heads and passed(run["id"], area, heads, repository, token, call):
+        if pulls is None:
+            pulls = merged_pulls(repository, commit, token, call)
+        head = run.get("head_sha")
+        pull = pulls.get(head)
+        if pull is None or run.get("head_branch") != pull["ref"]:
+            continue
+        if head not in sole:
+            sole[head] = only_pull(pull, repository, token, call)
+        if sole[head] and passed(run["id"], area, head, pull, repository, token, call):
             return True
     return False
 
