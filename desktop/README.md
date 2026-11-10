@@ -116,7 +116,13 @@ hosted public downloads or GitHub download permissions.
 
 - Starts its bundled PostgreSQL, then the worker (`python -m app.main` in
   local mode, listening on 127.0.0.1:8000), and opens the worker's UI once it
-  answers. Every spawn gets a random attach token (`SHUFFLE_DESKTOP_ATTACH_TOKEN`)
+  answers. The worker also listens on all interfaces at port 8003
+  (`SHUFFLE_LAN_PORT`, the local port + 3) for sealed sync with other workers
+  of the account on the same LAN, and refuses every other request there; the
+  owner UI and API stay on loopback. The first time it opens that port,
+  Windows may ask whether to allow the worker's Python through Windows
+  Defender Firewall. Allow it on private networks, or LAN sync with this
+  worker keeps going through its tunnel. Every spawn gets a random attach token (`SHUFFLE_DESKTOP_ATTACH_TOKEN`)
   whose SHA-256 the worker reports in `/health`; the token and pid are kept in
   the private `<userData>/worker/worker-process.json`. A worker already
   answering on the port is adopted only when that hash matches, so another

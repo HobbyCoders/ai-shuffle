@@ -160,6 +160,16 @@ or owner-only `PUT /api/v1/cluster/advertise` API can also set the primary addre
 The separate **Extra LAN addresses** control accepts private literal HTTP LAN
 addresses while LAN-direct is on; use **Advertised addresses** for public aliases.
 
+A worker that listens only on loopback, such as the one the desktop app starts,
+opens one more listener on all interfaces for LAN sync, at its local port + 3
+(8003 by default, `SHUFFLE_LAN_PORT`; `0` or `off` turns it off). That port
+serves only the sealed LAN-sync requests between workers and refuses everything
+else, so the owner UI and API stay on loopback. The worker advertises this
+address while LAN-direct is on, and no LAN address when the listener is off or
+its port is taken; peers then sync with it through its tunnel. On Windows the
+first start may show a Windows Defender Firewall prompt for the worker's Python:
+allow it on private networks for direct LAN sync.
+
 Canonical bases use lowercase HTTP(S) schemes and ASCII hosts, compressed bracketed
 IPv6, omitted default ports (80/443), and no trailing slashes. International hostnames
 must be supplied as ASCII A-labels (punycode) for bound proofs and new owner

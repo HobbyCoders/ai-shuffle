@@ -2393,6 +2393,11 @@
     "reason": "Locate image trust metadata during source handover",
     "base_settings": false
   },
+  "SHUFFLE_LAN_PORT": {
+    "kind": "infra",
+    "reason": "Port of the LAN-sync-only listener a loopback-bound (desktop) worker opens on all interfaces; 0/off disables",
+    "base_settings": false
+  },
   "SHUFFLE_LAUNCHER_VERSION": {
     "kind": "internal",
     "reason": "Identify launcher for restore-point validation and swaps",

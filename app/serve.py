@@ -38,6 +38,46 @@ def _loopback_endpoint(endpoint):
         return False
 
 
+def is_loopback_host(host) -> bool:
+    """Whether a listener bound to ``host`` answers on this machine only."""
+    text = str(host or "").strip().strip("[]")
+    return text.lower() == "localhost" or _loopback_endpoint((text,))
+
+
+# The LAN-sync listener answers on every interface: peers dial its LAN address.
+LAN_HOST = "0.0.0.0"
+
+
+def configured_lan_port(env, host, local_port: int, remote_port: int, preview_port=None):
+    """The LAN-sync listener's port, or None when this worker needs none.
+
+    A worker bound only to loopback (the desktop app's) cannot be reached from
+    the LAN, so workers on the same network could only sync with it through
+    its tunnel. It gets one more listener, on all interfaces, that serves the
+    sealed LAN-sync handshake and calls and nothing else (``app.network.lan``).
+    A worker already listening on the network needs none. ``SHUFFLE_LAN_PORT``
+    names the port; ``0`` or ``off`` disables the listener. The default sits
+    three above the local port (8003 beside 8000/8001/8002).
+    """
+    if not is_loopback_host(host):
+        return None
+    raw = str(env.get("SHUFFLE_LAN_PORT", "")).strip().lower()
+    if raw in ("0", "off", "false", "no"):
+        return None
+    if raw:
+        try:
+            port = int(raw)
+        except ValueError as exc:
+            raise ValueError("SHUFFLE_LAN_PORT must be a port number, 0 or off") from exc
+    else:
+        port = local_port + 3
+        while port in (remote_port, preview_port):
+            port += 1
+    if not 1 <= port <= 65535 or port in (local_port, remote_port, preview_port):
+        raise ValueError("The LAN sync listener needs a valid port of its own")
+    return port
+
+
 def configured_preview_port(env, local_port: int, remote_port: int):
     """The agent-preview listener's port, or None when it is switched off.
 
@@ -62,6 +102,10 @@ def configured_preview_port(env, local_port: int, remote_port: int):
     return port
 
 
+PREVIEW_REFUSAL = b'{"detail":"This port only serves an agent preview opened with its session link."}'
+LAN_REFUSAL = b'{"detail":"This port only serves sealed sync between workers on this LAN."}'
+
+
 class IngressApplication:
     """Marks each request with the listener it arrived on.
 
@@ -70,18 +114,24 @@ class IngressApplication:
     local-owner trust, and nothing passes it without the session's preview
     grant (:mod:`app.core.preview_access`). The agent browser is refused the
     other two ports outright, so this is the only way it sees the running UI.
+    ``lan`` is the LAN-sync listener of a loopback-bound worker
+    (:func:`configured_lan_port`): it passes only the sealed LAN-sync paths,
+    which authenticate the peer themselves, and confers no local trust.
     """
 
     def __init__(self, app, local_port: int, remote_port: int = REMOTE_PORT, preview_port=None,
-                 *, shutdown_event=None):
+                 *, lan_port=None, shutdown_event=None):
         if local_port == remote_port:
             raise ValueError("Local and remote listener ports must be different")
         if preview_port is not None and preview_port in (local_port, remote_port):
             raise ValueError("The preview listener needs a port of its own")
+        if lan_port is not None and lan_port in (local_port, remote_port, preview_port):
+            raise ValueError("The LAN sync listener needs a port of its own")
         self.app = app
         self.local_port = local_port
         self.remote_port = remote_port
         self.preview_port = preview_port
+        self.lan_port = lan_port
         self.shutdown_event = shutdown_event
 
     async def _preview_admitted(self, scope) -> bool:
@@ -100,11 +150,17 @@ class IngressApplication:
             return False
 
     @staticmethod
-    async def _refuse(scope, send):
+    def _lan_admitted(scope) -> bool:
+        """Only the sealed LAN-sync handshake and calls (``app.network.lan``)."""
+        from app.network import lan
+
+        return scope["type"] == "http" and scope.get("method") == "POST" and scope.get("path") in lan.PATHS
+
+    @staticmethod
+    async def _refuse(scope, send, body=PREVIEW_REFUSAL):
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 4403})
             return
-        body = b'{"detail":"This port only serves an agent preview opened with its session link."}'
         await send({"type": "http.response.start", "status": 403,
                     "headers": [(b"content-type", b"application/json"),
                                 (b"content-length", str(len(body)).encode()),
@@ -123,6 +179,14 @@ class IngressApplication:
                 scope["shuffle.forwarded_https"] = False
                 if not await self._preview_admitted(scope):
                     await self._refuse(scope, send)
+                    return
+                await self.app(scope, receive, send)
+                return
+            if self.lan_port is not None and port == self.lan_port:
+                scope["shuffle.ingress"] = "lan"
+                scope["shuffle.forwarded_https"] = False
+                if not self._lan_admitted(scope):
+                    await self._refuse(scope, send, LAN_REFUSAL)
                     return
                 await self.app(scope, receive, send)
                 return
@@ -191,10 +255,25 @@ def run(app, settings) -> None:
         from app.core import preview_access
 
         preview_access.set_listener_port(preview_port, preview_host if preview_port else None)
+        lan_port = None
+        # Optional as well: without it peers on the LAN reach this worker
+        # through its tunnel, and no LAN address is advertised for it.
+        try:
+            wanted = configured_lan_port(os.environ, settings.host, settings.port, remote_port, preview_port)
+            if wanted is not None:
+                lan_listener = stack.enter_context(bind_listener(LAN_HOST, wanted))
+                lan_port = lan_listener.getsockname()[1]
+                sockets.append(lan_listener)
+        except (OSError, ValueError) as exc:
+            logging.getLogger(__name__).warning(
+                "LAN sync listener is off: %s. Workers on this LAN sync with this one through its tunnel.", exc)
+        from app.network import lan
+
+        lan.set_listener_port(lan_port)
         shutdown_event = asyncio.Event()
         config = uvicorn.Config(
             IngressApplication(app, local.getsockname()[1], remote.getsockname()[1], preview_port,
-                               shutdown_event=shutdown_event),
+                               lan_port=lan_port, shutdown_event=shutdown_event),
             host=settings.host,
             port=settings.port,
             proxy_headers=False,
