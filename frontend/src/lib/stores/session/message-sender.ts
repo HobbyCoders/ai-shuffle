@@ -1185,6 +1185,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const contextWindowSnap = contextWindowOverride(_state);
 			const deviceIntentSnap = _state.deviceIntent;
 			const userMsgId = `user-${Date.now()}`;
+			// This send's own command identity. The server stamps it on the first
+			// turn, so the delivered `message.user` reconciles onto the local row by
+			// id: its text names the checkout's copy of each upload, not the staging
+			// path this row shows, so a text match cannot find it (#1351).
+			const clientMessageId = newLocalPendingId();
 
 			claimNewSessionWorker();
 			const creationGen = internal.worktreeCreationGeneration;
@@ -1215,6 +1220,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						role: 'user' as const,
 						content: prompt,
 						profileId: queryProfileId,
+						commandId: clientMessageId,
 						timestamp: new Date().toISOString(),
 						...uploadsMetadata(pendingUploadPaths),
 					}],
@@ -1260,6 +1266,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					profile_id: queryProfileId,
 					create_new_branch: true,
 					prompt,
+					client_message_id: clientMessageId,
 					overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 					pending_upload_paths: !remoteOnly && pendingUploadPaths?.length
 						? pendingUploadPaths
