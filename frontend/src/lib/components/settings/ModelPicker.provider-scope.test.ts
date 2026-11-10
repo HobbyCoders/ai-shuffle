@@ -47,11 +47,20 @@ beforeAll(async () => {
 
 afterEach(() => {
 	cleanup();
+	vi.unstubAllGlobals();
 	localStorage.clear();
 });
 
 describe('ModelPicker provider scope', () => {
-	it('keeps focus on the trigger when the picker opens', async () => {
+	it('keeps focus on the trigger when the picker opens on a touch-first device', async () => {
+		// With a mouse and keyboard opening focuses the search box instead (#1339,
+		// covered in ModelPicker.focus.test.ts); touch keeps the on-screen keyboard shut.
+		vi.stubGlobal('matchMedia', (query: string) => ({
+			matches: query === '(pointer: coarse)',
+			media: query,
+			addEventListener: vi.fn(),
+			removeEventListener: vi.fn()
+		}));
 		const { getByRole } = render(ModelPicker, {
 			props: {
 				value: 'sonnet',
