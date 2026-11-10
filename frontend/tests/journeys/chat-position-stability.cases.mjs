@@ -4,7 +4,7 @@
 // produced by real UI sends through the devloop's fake providers; the long
 // error/Stop case specifically requires the seeded Claude Code CLI project.
 import { writeFileSync } from 'node:fs';
-import { SEEDED, api, composer, expect, gotoApp, openFromSidebar, openPopup, pick, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { ERROR_ROW_PROBE, SEEDED, api, composer, errorRow, expect, gotoApp, openFromSidebar, openPopup, pick, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const mobile = process.argv.includes('--mobile-shell');
@@ -14,7 +14,7 @@ const prefix = (variant) => mobile && variant.viewport === 'phone' ? '/mobile/' 
 /** IO entries are the browser's post-layout geometry, not an rAF read before
  * the app's own scroll callback. Keep chronological order at 4x CPU too. */
 async function watchFrames(page, { deferAssertions = false } = {}) {
-	await page.evaluate(({ deferAssertions, articleDiagnostics }) => {
+	await page.evaluate(({ deferAssertions, articleDiagnostics, errorRowProbe }) => {
 		const viewport = document.querySelector('[role="log"][aria-label="Conversation messages"]');
 		const pickAnchor = () => [...document.querySelectorAll('[data-transcript-key]')].find(el => el.getBoundingClientRect().bottom > (viewport?.getBoundingClientRect().top ?? 0) + 1);
 		let anchor = pickAnchor();
@@ -42,7 +42,7 @@ async function watchFrames(page, { deferAssertions = false } = {}) {
 			const elements = {
 				composer: document.querySelector('.input-slot'), rail: document.querySelector('nav.turn-nav'),
 				send: document.querySelector('.send-cluster'), prose, anchor,
-				banner: document.querySelector('.chat-error-banner'), pending: document.querySelector('.pending-messages .userrow:last-child'),
+				banner: document.querySelector('.chat-error-banner'), errorRow: [...document.querySelectorAll(errorRowProbe.rows)].filter(d => [...d.querySelectorAll(':scope > summary > span')].some(s => s.textContent.trim() === errorRowProbe.title)).at(-1), pending: document.querySelector('.pending-messages .userrow:last-child'),
 				tailControls: document.querySelector('.tail-controls'), pendingList: document.querySelector('.pending-messages'),
 				tailError: document.querySelector('.tail-error'), tailSpacer: document.querySelector('.transcript-tail-spacer'),
 			};
@@ -97,7 +97,7 @@ async function watchFrames(page, { deferAssertions = false } = {}) {
 			requestAnimationFrame(sample);
 		};
 		requestAnimationFrame(sample);
-	}, { deferAssertions, articleDiagnostics: process.env.JOURNEY_TRACE_ARTICLE === '1' });
+	}, { deferAssertions, articleDiagnostics: process.env.JOURNEY_TRACE_ARTICLE === '1', errorRowProbe: ERROR_ROW_PROBE });
 	// Include the resting frame before the action, not just its aftermath.
 	await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
 	return async () => {
@@ -118,7 +118,7 @@ const travel = (frames, key, edge = 'top') => {
 	return positions.length ? Math.max(...positions) - Math.min(...positions) : Infinity;
 };
 const summary = (frames) => ({ frames: frames.length, composer: travel(frames, 'composer'), rail: travel(frames, 'rail'),
-	prose: travel(frames, 'prose'), banner: travel(frames, 'banner'), pending: travel(frames, 'pending'),
+	prose: travel(frames, 'prose'), banner: travel(frames, 'banner'), errorRow: travel(frames, 'errorRow'), pending: travel(frames, 'pending'),
 	heights: [...new Set(frames.map(f => f.height))], tail: [...new Set(frames.map(f => f.tail))] });
 
 async function openClaude(ctx, { history = false } = {}) {
@@ -370,18 +370,31 @@ const cases = [{
 		// for readers, after their deliberate scroll), plus its resting frame.
 		await page.evaluate(() => window.__chatFrames.beginAssertions());
 		await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
-		await page.locator('.chat-error-banner').filter({ hasText: 'claude reported success: API Error: 500' }).waitFor({ timeout: 60_000 });
+		// The failed CLI turn's error shows in its transcript Error row; the banner
+		// steps aside because the row says the same words (#1341).
+		await errorRow(page, 'claude reported success: API Error: 500').first().waitFor({ timeout: 60_000 });
 		await mark('Stop the failed CLI turn with queued messages');
 		await page.evaluate(() => { window.__chatFrames.phase = 'stop-requested'; });
 		await page.getByRole('button', { name: 'Stop generating', exact: true }).click();
 		await waitTurnSettled(page, { hold: 4500 });
 		const frames = await stop();
 		log(`error/Stop geometry ${JSON.stringify(summary(frames))}`);
-		const banners = frames.filter(f => f.banner);
-		expect(banners.length > 4, 'the real CLI error banner appeared and was sampled');
+		// Anchored on the Error row's arrival (#1341: no banner repeats it).
+		const banners = frames.filter(f => f.errorRow);
+		expect(banners.length > 4, 'the real CLI error row appeared and was sampled');
+		// The banner was chrome, so it stayed put while the queue handed off. The
+		// row is transcript: once the first queued message leaves the pending list
+		// a follower rightly scrolls to that new turn. The row holds still until
+		// then; the held slot checks below still run through the handoff (#1341).
+		// Read the painted frame: row membership is sampled in rAF, before the
+		// app's own rAF commit in that frame, so a bubble that left in this paint
+		// is still listed but has no painted rect.
+		const handoff = frames.findIndex(f => f.errorRow && !f.rows.some(row => row.pending && row.rect && row.text.startsWith('waiting-0 ')));
+		const resting = (handoff < 0 ? frames : frames.slice(0, handoff)).filter(f => f.errorRow);
 		if (scrolledUp) expect(travel(frames, 'anchor') <= 2, 'error and Stop leave the older row being read alone');
 		else {
-			expect(travel(banners, 'banner') <= 2, `the error stays still through Stop (${travel(banners, 'banner').toFixed(1)}px)`);
+			log(`error row resting frames before handoff: ${resting.length}`);
+			expect(!resting.length || travel(resting, 'errorRow') <= 2, `the error row stays still until the queue hands off (${travel(resting, 'errorRow').toFixed(1)}px over ${resting.length} frames)`);
 			// Both flex boxes must retain the already-presented queue slot.
 			// Shrinking either during follow-scroll was the pre-Stop 0.082
 			// CLS; separate paints could hide it below 0.05.
@@ -661,9 +674,10 @@ cases.push({
 		let evicted = false;
 		for (let turn = 0; turn < 3; turn++) {
 			const token = `rebase-${uniq()}`;
-			await page.evaluate(token => {
+			await page.evaluate(({ token, probe }) => {
 				const pane = document.querySelector('.msg-scroll');
 				const view = document.querySelector('[data-ui-state="chat"]');
+				const errorRowProbe = probe;
 				const p = window.__errorRebaseProbe = { started: performance.now(), frames: [], shifts: [], tracked: null, errorAt: null, running: true };
 				const ids = new WeakMap(); let nextId = 1;
 				const id = node => { if (!node) return null; if (!ids.has(node)) ids.set(node, nextId++); return ids.get(node); };
@@ -686,7 +700,7 @@ cases.push({
 							key: tracked.row.dataset.transcriptKey ?? tracked.row.closest('[data-transcript-key]')?.dataset.transcriptKey,
 							text: tracked.range.toString(), rect: tracked.range.getBoundingClientRect().toJSON(), rowRect: tracked.row.getBoundingClientRect().toJSON() } : null };
 					p.frames.push(f);
-					if (tracked && document.querySelector('.chat-error-banner') && view.dataset.uiStreaming === 'false' && p.errorAt === null) p.errorAt = t;
+					if (tracked && [...document.querySelectorAll(errorRowProbe.rows)].filter(d => [...d.querySelectorAll(':scope > summary > span')].some(s => s.textContent.trim() === errorRowProbe.title)).some(d => tracked.row.compareDocumentPosition(d) & Node.DOCUMENT_POSITION_FOLLOWING) && view.dataset.uiStreaming === 'false' && p.errorAt === null) p.errorAt = t;
 					return f;
 				};
 				p.observer = new PerformanceObserver(list => {
@@ -697,7 +711,7 @@ cases.push({
 				p.observer.observe({ type: 'layout-shift' });
 				const frame = () => { if (!p.running) return; sample('raf'); p.raf = requestAnimationFrame(frame); };
 				p.raf = requestAnimationFrame(frame);
-			}, token);
+			}, { token, probe: ERROR_ROW_PROBE });
 			await typeAndSend(page, `${token} [script:error-500 latency_ms=4500]`);
 			await waitChat(page, { streaming: 'true' });
 			await page.waitForFunction(() => {
@@ -765,25 +779,29 @@ cases.push({
 				lineHeight: getComputedStyle(row.querySelector('.bubble-text')).lineHeight, bubbleHeight: row.querySelector('.bubble').getBoundingClientRect().height })),
 			height: el.getBoundingClientRect().height
 		})))}`);
-		await page.locator('.chat-error-banner').waitFor({ timeout: 60_000 });
+		// The failure's own Error row is the signal now; whether a banner (and
+		// with it a held error slot) still shows is what the checks below read (#1341).
+		await errorRow(page, 'claude reported success: API Error: 500').first().waitFor({ timeout: 60_000 });
 		await page.waitForFunction(token => document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming === 'true'
 			&& [...document.querySelectorAll('[data-user-turn-id]')].some(row => row.textContent.includes(token)), ctx.firstQueueToken);
 		const held = await page.locator('.tail-controls').evaluate(el => parseFloat(el.style.minHeight));
 		expect(held >= 150, `two confirmed queued bubbles produced a real held slot (${held}px)`);
 	},
 	async act({ page, mark, log, freshQueueToken }) {
-		const readState = () => page.evaluate(token => ({
+		const readState = () => page.evaluate(({ token, probe }) => ({
 			streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming,
 			session: document.querySelector('[data-ui-state="chat"]')?.dataset.uiSession,
 			users: document.querySelectorAll('[data-user-turn-id]').length,
 			freshInTranscript: [...document.querySelectorAll('[data-user-turn-id]')].some(row => row.textContent.includes(token)),
 			freshPending: document.querySelector('.pending-messages')?.textContent.includes(token) ?? false,
 			slot: parseFloat(document.querySelector('.tail-controls')?.style.minHeight),
-			error: !!document.querySelector('.chat-error-banner')
-		}), freshQueueToken);
+			error: !!document.querySelector('.chat-error-banner'),
+			// The failure is presented by its own Error row once the banner steps aside (#1341).
+			errorRow: [...document.querySelectorAll(probe.rows)].some(d => [...d.querySelectorAll(':scope > summary > span')].some(s => s.textContent.trim() === probe.title))
+		}), { token: freshQueueToken, probe: ERROR_ROW_PROBE });
 		await mark('fresh local send during the automatically delivered queued stream');
 		const before = await readState();
-		expect(before.streaming === 'true' && before.slot >= 150 && before.error,
+		expect(before.streaming === 'true' && before.slot >= 150 && (before.error || before.errorRow),
 			'fresh send starts during real queued streaming with the presented error slot, not after completion');
 		await typeAndSend(page, `${freshQueueToken} [script:slow tps=1]`);
 		await page.locator('.pending-messages .bubble-text').filter({ hasText: freshQueueToken }).waitFor();

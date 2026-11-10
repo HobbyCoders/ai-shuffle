@@ -354,6 +354,7 @@ function parseWireEvent(value) {
   }
   return event;
 }
+var STOPPED_BEFORE_REPLY = "Stopped before a reply";
 var TURN_FAILURES_KEPT = 1024;
 var NO_TURN_OUTCOMES = { failures: [], finishes: [], cuts: [] };
 function recordCleanFinish(outcomes, finish2) {
@@ -1094,9 +1095,13 @@ function reduceInternal(state, event, observe) {
         };
         const msgs = next.messages;
         let target = -1;
+        let recorded = false;
         for (let i = msgs.length - 1; i >= 0; i--) {
           const m = msgs[i];
           if (m.role === "user" && !m.metadata?.not_sent) break;
+          if (m.role === "system" && m.systemSubtype === "info" && m.content === STOPPED_BEFORE_REPLY) {
+            recorded = true;
+          }
           if (m.role === "assistant" && m.type === "text" && m.content.trim()) {
             target = i;
             break;
@@ -1109,6 +1114,16 @@ function reduceInternal(state, event, observe) {
             content: marked[target].content + "\n\n[Stopped]"
           };
           next = { ...next, messages: marked };
+        } else if (target === -1 && !recorded) {
+          next = appendMessage(next, {
+            id: event.id,
+            role: "system",
+            type: "system",
+            content: STOPPED_BEFORE_REPLY,
+            systemSubtype: "info",
+            systemData: { content: STOPPED_BEFORE_REPLY },
+            timestamp: createdAt || void 0
+          }, seq);
         }
       } else if (reason === "error") {
         const message = str(event.message);
@@ -2366,7 +2381,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "4a4d1e302687cc9bb1da7c1fb55e2f76c6976a24600edc64e7367b16e536dfd6";
+var REDUCER_FINGERPRINT = "4150405bf63799c2315faa5d5db8f0c26c9125fc25de40cf70fc921dd31c373d";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {
