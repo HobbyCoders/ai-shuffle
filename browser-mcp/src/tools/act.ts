@@ -93,17 +93,18 @@ const TIMEOUT_RE = /^\S+: Timeout \d+ms exceeded\./;
 const GESTURE_DONE_RE = /^\s*-\s*\S+(?: and \S+)? action done$/m;
 
 /**
- * Playwright's failure text without colour codes and without a multi-line
- * value or key it quotes back. That text is the caller's own, and its lines
- * can read like steps Playwright took. A single line cannot: it stays inside
- * the line that quotes it.
+ * The failure text as the step patterns read it: without colour codes and
+ * without the value or key the caller sent. Playwright quotes that text back
+ * (`fill("…")`, `press("…")`, `Unknown key: "…"`), and its lines could read
+ * like steps Playwright took. Each cut ends at the closing quote, which stays,
+ * so a line it touches still holds a quote and matches no pattern.
  */
-function failureText(err: unknown, input: ActInput): string {
-  let text = err instanceof Error ? err.message : String(err);
-  for (const echoed of [input.value, input.key]) {
-    if (echoed && /[\r\n\u2028\u2029]/.test(echoed)) text = text.split(echoed).join("");
+function stepLog(message: string, input: ActInput): string {
+  let text = message.replace(ANSI_RE, "");
+  for (const echoed of [input.value, ...(input.key?.split("+") ?? [])]) {
+    if (echoed) text = text.split(`${echoed}"`).join('"');
   }
-  return text.replace(ANSI_RE, "");
+  return text;
 }
 
 /** The call log of the attempt Playwright was on when it failed. */
@@ -341,10 +342,10 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     session.invalidateScreenshot();
     endRequestWatch(page);
     await session.disposeWatch();
-    const msg = failureText(err, input);
+    const msg = err instanceof Error ? err.message : String(err);
     // Playwright's call log names the step it reached. Once it started to
     // change the page the outcome is no longer not_executed.
-    if (input.ref !== undefined && inputMayHaveGoneOut(msg)) sent = true;
+    if (input.ref !== undefined && inputMayHaveGoneOut(stepLog(msg, input))) sent = true;
     const remedy = invalidInputRemedy(msg);
     if (remedy) return sent
       ? errorResult(outcomeUnknownMessage(input.kind, remedy), { outcome: "unknown" })

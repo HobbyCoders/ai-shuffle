@@ -378,6 +378,8 @@ describe("browser_act outcomes", () => {
     ["a fill the page never answered", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable]],
     ["a check whose click went out", "setChecked", { kind: "check" }, [...ready, "performing click action", "click action done"]],
     ["a fill on a field that turned enabled and then never answered", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable, "element is not enabled", "retrying fill action", "waiting 20ms", editable]],
+    ["a fill of a single line break", "fill", { kind: "fill", value: "\n" }, ['fill("\n")', "attempting fill action", editable]],
+    ["a line break key the page never answered", "press", { kind: "key", key: "\n" }, ['elementHandle.press("\n")']],
     ["a fill whose text reads like a refusal", "fill", { kind: "fill", value: "x\n  - element is not enabled" }, ['fill("x\n  - element is not enabled")', "attempting fill action", editable]],
   ])("reports a timeout after %s as outcome_unknown", async (_name, method, input, lines) => {
     const fail = vi.fn(async () => { throw new Error(log(method, ...lines)); });
@@ -394,7 +396,7 @@ describe("browser_act outcomes", () => {
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "not_actionable", outcome: "not_executed" });
   });
   // The value comes back in Playwright's log and must not be read as a step.
-  it.each(["2026\n  - performing click action", "Timeout 2000ms exceeded"])("keeps a malformed value that reads like a log line as invalid_input (%j)", async value => {
+  it.each(["2026\n  - performing click action\n", "Timeout 2000ms exceeded"])("keeps a malformed value that reads like a log line as invalid_input (%j)", async value => {
     const fill = vi.fn(async () => { throw new Error(["locator.fill: Error: Malformed value", "Call log:", `  - fill("${value}")`, "  - attempting fill action", `  - ${editable}`].join("\n")); });
     const res = await runAct(actSession({ fill, count: async () => 1 }), { kind: "fill", ref: "e7", value });
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
