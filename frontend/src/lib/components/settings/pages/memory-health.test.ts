@@ -25,6 +25,16 @@ describe('memory health', () => {
 		expect(memorySummary({ ...health, state: 'healthy' })).toBe('Healthy');
 	});
 
+	it('reads "Needs attention", never "0 need attention", when no check is listed', () => {
+		const bare: MemoryHealth = { state: 'attention', checked_at: now, signals: [], repairs: [] };
+		expect(memorySummary(bare)).toBe('Needs attention');
+		expect(memoryAlert(bare)).toBe('Memory needs attention.');
+		// Only healthy signals listed: the same.
+		expect(memorySummary({ ...bare, signals: [health.signals[1]] })).toBe('Needs attention');
+		// Missing list from an older worker.
+		expect(memorySummary({ ...bare, signals: undefined as unknown as MemoryHealth['signals'] })).toBe('Needs attention');
+	});
+
 	it('lists what needs attention, then this week\'s repairs', () => {
 		const rows = memoryRows(health, now);
 		expect(rows.map((r) => [r.name, r.tone])).toEqual([

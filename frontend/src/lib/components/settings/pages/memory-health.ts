@@ -49,8 +49,9 @@ export function memorySummary(health: MemoryHealth | null): string {
 		const n = notes(health).length;
 		return n ? `Healthy, ${n === 1 ? '1 note' : `${n} notes`}` : 'Healthy';
 	}
+	// No attention signals listed still means attention, never "0 need attention".
 	const n = (health.signals ?? []).filter((s) => s.state === 'attention').length;
-	return n === 1 ? 'Needs attention' : `${n} need attention`;
+	return n > 1 ? `${n} need attention` : 'Needs attention';
 }
 
 /**

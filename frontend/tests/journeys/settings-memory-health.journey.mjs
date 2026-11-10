@@ -137,6 +137,55 @@ function lateAttention(viewport) {
 	};
 }
 
+/**
+ * The same late answer after arriving by Settings search from a scrolled Logs
+ * page. Chromium's scroll anchoring scrolled the page by the notice's height
+ * when it landed, moving the row the search took the reader to up by 67px.
+ * System turns scroll anchoring off.
+ */
+const searchArrival = {
+	name: 'attention-late-after-search',
+	viewports: ['desktop'],
+	throttles: ['fast'],
+	async setup({ page, status }) {
+		await answerHealth(page, attention(), { held: true });
+		await gotoApp(page, status);
+		await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
+		await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'Logs', exact: true }).filter({ visible: true }).first().click();
+		// The reader scrolls down the log, so the search reveal scrolls up.
+		await page.waitForFunction(
+			() => {
+				const s = document.querySelector('.settings-viewport');
+				if (!s || s.scrollHeight - s.clientHeight < 1200) return false;
+				s.scrollTop = s.scrollHeight;
+				return true;
+			},
+			null,
+			{ timeout: 30_000 }
+		);
+		await page.waitForTimeout(800);
+	},
+	async act({ page, mark }) {
+		await mark('the reader follows the search result to Memory health while it loads');
+		const search = page.locator('input[placeholder="Search settings"]').filter({ visible: true }).first();
+		await search.fill('memory health');
+		await page.waitForTimeout(400);
+		await search.press('Enter');
+		await row(page).waitFor({ timeout: 15_000 });
+		await valueIs(page, 'Loading');
+		await page.waitForTimeout(1500);
+		const before = await positions(page);
+		await mark('the attention answer lands late');
+		page.memoryHealth.release();
+		await notice(page).waitFor({ timeout: 10_000 });
+		await page.waitForTimeout(1500);
+		const after = await positions(page);
+		expect(after.row === before.row, `the row the search took the reader to stayed put (${before.row}→${after.row})`);
+		const box = await notice(page).boundingBox();
+		expect(box && box.y + box.height <= page.viewportSize().height, `the notice is on screen (${box?.y}..${box && box.y + box.height})`);
+	}
+};
+
 const variants = { viewports: ['desktop', 'phone'], throttles: ['fast'] };
 
 await runJourney({
@@ -192,6 +241,7 @@ await runJourney({
 		},
 		lateAttention('desktop'),
 		lateAttention('phone'),
+		searchArrival,
 		{
 			name: 'details-and-back',
 			...variants,

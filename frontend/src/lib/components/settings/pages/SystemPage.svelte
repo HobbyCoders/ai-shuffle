@@ -561,6 +561,15 @@
 	:global(.st-grp:has(+ .mh-notice)) {
 		margin-bottom: 0;
 	}
+	/* No scroll anchoring on this page. After a Settings search reveal from a
+	   scrolled page, Chromium's scroll anchoring followed a late warning
+	   inserted under the Memory card and scrolled the page by its height, so
+	   the row the reader was taken to jumped up (journey
+	   attention-late-after-search). Excluding the content under the card did
+	   not stop it; only the page's scroller does. Other pages keep anchoring. */
+	:global(.settings-viewport:has([data-setting-anchor='system.memoryHealth'])) {
+		overflow-anchor: none;
+	}
 	/* Loading or unreadable: the value button is shown but cannot open. */
 	.mh-value {
 		display: contents;
