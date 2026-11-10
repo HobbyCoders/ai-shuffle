@@ -746,6 +746,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// showing a stale snapshot first caused a visible flash before history.
 			messages: [],
 			error: null,
+			errorBannerHeld: null,
 			// Explicit navigation supersedes any pending boot restore — the user
 			// chose this session; don't leave sendMessage waiting on the old one.
 			isRestoringSession: false,
@@ -1200,6 +1201,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			pendingRestorePrompt: null, pendingRestoreUploadPaths: undefined, pendingRestoreUploadReferences: undefined,
 			...restoredDraftFields({}, pendingQueue.takeWithdrawnRestore(null)),
 			error: null,
+			errorBannerHeld: null,
 			title: 'New Chat',
 			totalTokensIn: 0,
 			totalTokensOut: 0,

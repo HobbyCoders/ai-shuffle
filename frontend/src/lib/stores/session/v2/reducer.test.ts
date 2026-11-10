@@ -489,6 +489,23 @@ describe('turn lifecycle', () => {
 			expect(stoppedRecords(s)).toHaveLength(2);
 		});
 
+		it('records a stop after a steer below the steer, when no text followed it', () => {
+			// The record follows the last delivered message, as the [Stopped]
+			// scan always has: the reply above the steer was complete, and a
+			// marker there would read as a stop before the steer was sent.
+			const s = fold([
+				ev('message.user', { content: 'go' }),
+				ev('turn.started'),
+				ev('assistant.text_delta', { text: 'working on it' }),
+				ev('tool.use', { tool_use_id: 't1', name: 'Bash' }),
+				ev('message.user', { content: 'also this', checkpoint_backed: false }),
+				ev('turn.aborted', { reason: 'interrupt' }),
+			]);
+			expect(s.messages.find((m) => m.role === 'assistant' && m.type === 'text')!.content).toBe('working on it');
+			expect(stoppedRecords(s)).toHaveLength(1);
+			expect(s.messages.map((m) => m.content).slice(-2)).toEqual(['also this', STOPPED_BEFORE_REPLY]);
+		});
+
 		it('still records it when Stop wrote not-sent rows for queued messages', () => {
 			const s = fold([
 				ev('message.user', { content: 'go' }),

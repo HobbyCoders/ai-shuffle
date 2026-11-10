@@ -185,7 +185,8 @@ await runJourney({
 					const bad = shortFrames(frames, before.session, shown);
 					log(`trip ${trip + 1}: ${shown} shown before leaving, ${frames.length} distinct frames, ${bad.length} short`);
 					if (bad.length) short.push({ trip, shown, bad: bad.slice(0, 4).map((f) => ({ t: f.t, messages: f.messages })) });
-					await waitTurnSettled(page, { messagesAtLeast: shown + 1 });
+					// Counted from before the send: a fast reply can already be in `shown`.
+					await waitTurnSettled(page, { messagesAtLeast: before.messages + 2 });
 				}
 				expect(short.length === 0, `the chat switched back to never shows a message fewer (${JSON.stringify(short)})`);
 			}

@@ -215,8 +215,9 @@ export interface V2SessionState {
 	turnOutcomes?: TurnOutcomes;
 }
 
-/** The neutral transcript record a user stop leaves when the turn produced no
- *  reply text to mark with "[Stopped]" (#1340). */
+/** The neutral transcript record a user stop leaves when nothing was said since
+ *  the last delivered message (the turn's own, or one steered into it), so
+ *  there is no reply text below it to mark with "[Stopped]" (#1340). */
 export const STOPPED_BEFORE_REPLY = 'Stopped before a reply';
 
 /** One failed turn, as the log recorded it: a `turn.aborted` with reason

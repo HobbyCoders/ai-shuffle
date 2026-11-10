@@ -1098,6 +1098,11 @@ export const feedController: FeedController = {
 			document.addEventListener('visibilitychange', onVisibilityChange);
 		}
 		resetFeedFlags();
+		// A held banner belongs to the feed that took it. That feed's anchor and
+		// grace timer are gone, so nothing here would ever release the hold: the
+		// banner shows again, and a fold hides it once this feed has published
+		// the failed turn's row (a restart keeps the anchor for that) (#1341).
+		if (deps?.getState().errorBannerHeld) deps.update(s => ({ ...s, errorBannerHeld: null }));
 		hydrationStartedAt = Date.now();
 		hydrationCeiling = hydrationCeilingMs();
 

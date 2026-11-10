@@ -2915,4 +2915,35 @@ describe('turn-error banner held for its turn\'s own row (#1341)', () => {
 		expect(visibleTurnError(deps.state)).toBe(MSG);
 		feedController.stop();
 	});
+
+	it('shows the banner when the feed restarts inside the grace and the replay stalls', () => {
+		const deps = liveTurn();
+		expect(visibleTurnError(deps.state)).toBeNull();
+		// The restart clears the transcript and the grace timer with it.
+		feedController.restart('s1');
+		expect(visibleTurnError(deps.state)).toBe(MSG);
+		vi.advanceTimersByTime(TURN_ERROR_ROW_GRACE_MS * 2);
+		expect(visibleTurnError(deps.state)).toBe(MSG);
+		feedController.stop();
+	});
+
+	it('hides the banner again once the restarted feed has replayed the failed turn\'s row', () => {
+		const deps = liveTurn();
+		hoisted.onEvent!(abortT1());
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		expect(visibleTurnError(deps.state)).toBeNull();
+		feedController.restart('s1');
+		expect(visibleTurnError(deps.state)).toBe(MSG);
+		hoisted.onEvent!({ type: 'turn.started', id: 'ts', session_id: 's1', turn_id: 't1', seq: 1 });
+		hoisted.onEvent!({ type: 'message.user', id: 'mu', session_id: 's1', turn_id: 't1', seq: 2, content: 'hi' });
+		hoisted.onEvent!(abortT1());
+		hoisted.onEvent!(caughtUp(3));
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		expect(deps.state.error).toBe(MSG);
+		expect(visibleTurnError(deps.state)).toBeNull();
+		expect(deps.state.messages.filter(m => m.systemSubtype === 'error' && m.content === MSG)).toHaveLength(1);
+		feedController.stop();
+	});
 });
