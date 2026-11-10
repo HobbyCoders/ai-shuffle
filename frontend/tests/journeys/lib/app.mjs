@@ -566,6 +566,15 @@ export function errorRow(page, text) {
 }
 
 /**
+ * The same Error rows for a per-frame probe inside the page, where locators do
+ * not reach: `ERROR_ROW_PROBE.rows` selects the work log's expandable lines,
+ * and an Error row is one whose summary has a part reading exactly
+ * `ERROR_ROW_PROBE.title`. Pass it into `page.evaluate` and filter there with:
+ *   [...document.querySelectorAll(p.rows)].filter(d => [...d.querySelectorAll(':scope > summary > span')].some(s => s.textContent.trim() === p.title))
+ */
+export const ERROR_ROW_PROBE = { rows: '[role="log"][aria-label="Conversation messages"] section[aria-label="Work log"] details', title: 'Error' };
+
+/**
  * Watch, on every painted frame, how many visible elements of the transcript
  * area show `needle` as their own text (the error banner and the transcript's
  * Error rows both count; a collapsed row's hidden detail does not). Returns a function that

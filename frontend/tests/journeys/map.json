@@ -357,7 +357,7 @@
 				]
 			},
 			{
-				"why": "a failed turn's error banner and what clears it: a rewind past it, a later clean turn",
+				"why": "a failed turn's error shown once (its Error row; the banner steps aside, #1341) and what clears it: a rewind past it, a later clean turn",
 				"journeys": ["turn-error-banner"],
 				"globs": [
 					"frontend/tests/journeys/turn-error-banner.journey.mjs",
