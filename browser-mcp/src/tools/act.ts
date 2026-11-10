@@ -156,10 +156,13 @@ const KEY_RELEASE_WAIT_MS = 250;
 /**
  * Release keys, last pressed first. Playwright counts a key as up as soon as it
  * receives the release, before the page answers, so input sent after this
- * carries none of them even while their keyups wait on a blocked page.
+ * carries none of them even while their keyups wait on a blocked page. It never
+ * throws, so a failed release cannot replace the action's own error.
  */
 async function releaseKeys(page: Page, keys: string[]): Promise<void> {
-  const ups = [...keys].reverse().map(key => page.keyboard.up(key).catch(() => undefined));
+  const ups = [...keys].reverse().map(key => {
+    try { return page.keyboard.up(key).catch(() => undefined); } catch { return undefined; }
+  });
   await raceWithTimeout(Promise.all(ups), KEY_RELEASE_WAIT_MS, "key release timed out").catch(() => undefined);
 }
 

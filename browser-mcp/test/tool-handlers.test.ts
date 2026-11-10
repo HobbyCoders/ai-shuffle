@@ -435,6 +435,22 @@ describe("browser_act outcomes", () => {
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
     expect(String(bodyOf(res).error)).toContain("Unknown key");
   });
+  // A failed key press releases what it may have left down (#1423), and a
+  // release that fails does not replace the press's own error.
+  it.each<[string, Record<string, unknown>, string, string[]]>([
+    ["the modifier before an unknown key", { key: "Foo", modifiers: ["Control"] }, unknownKey("Foo", "Control+Foo"), ["Control"]],
+    ["the key before an unknown key", { key: 'a+a"' }, unknownKey('a"', 'a+a"'), ["a"]],
+    ["nothing for an unknown first key", { key: "Foo+a" }, unknownKey("Foo", "Foo+a"), []],
+    ["every key of a chord that timed out after it began", { key: "a", modifiers: ["Control", "Shift"] }, log("press", 'elementHandle.press("Control+Shift+a")'), ["a", "Shift", "Control"]],
+    ["nothing for a press that timed out before it began", { key: "a", modifiers: ["Control"] }, log("press", "waiting for element to be visible"), []],
+  ])("releases %s", async (_name, input, message, released) => {
+    const press = vi.fn(async () => { throw new Error(message); });
+    const up = vi.fn(async () => { throw new Error("Target closed"); });
+    const session = { ...actSession({ press, count: async () => 1 }), ensurePage: async () => ({ url: () => "http://h/", keyboard: { up } }) } as unknown as Session;
+    const res = await runAct(session, { kind: "key", ref: "e7", ...input } as ActInput);
+    expect(up.mock.calls.map(call => call[0])).toEqual(released);
+    expect(String(bodyOf(res).error)).not.toContain("Target closed");
+  });
   // Words the caller typed are not Playwright's verdict on the input.
   it.each(["Unknown key", "Malformed value", "Element is not a <select> element"])("reports typing %j into a page that never answered as outcome_unknown", async value => {
     const pressSequentially = vi.fn(async () => { throw new Error(["locator.pressSequentially: Timeout 2000ms exceeded.", "Call log:", "  - waiting for locator('aria-ref=e7')", `  - elementHandle.type("${value}")`].join("\n")); });
