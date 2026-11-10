@@ -78,18 +78,56 @@ const ANSI_RE = /\x1b\[[0-9;]*m/g;
 /** Call-log lines that name why an action could not proceed. */
 const BLOCKER_RE = /intercepts pointer events|element is not |element is outside of the viewport|not attached|is disabled/i;
 const MAX_REASON_CHARS = 240;
-/** Call-log line Playwright writes just before it sends the input events. */
-const DISPATCHED_RE = /^\s*-\s*performing \S+(?: and \S+)? action$/m;
+/** Call-log line Playwright writes just before it sends a pointer gesture's events. */
+const PERFORMING_RE = /^\s*-\s*performing \S+(?: and \S+)? action$/m;
+/**
+ * Call-log lines for the actions that have no "about to send" line: a key
+ * press on the resolved element, and fill and select, which check the element
+ * and set its value in one page call. Each marks the call as started, so it
+ * says the input went out only when the call then got no answer.
+ */
+const STARTED_RE = /^\s*-\s*(?:elementHandle\.press\(.*|waiting for element to be visible(?:, enabled and editable| and enabled))$/m;
+/** Call-log line for a fill or select attempt the element refused. */
+const REFUSED_RE = /^\s*-\s*(?:element is not \w+|did not find some options|option being selected is not enabled)$/m;
+/** Playwright's own budget ran out: the call got no answer. */
+const TIMEOUT_RE = /Timeout \d+ms exceeded/i;
+/** Call-log line Playwright writes once the page took a pointer gesture on its target. */
+const GESTURE_DONE_RE = /^\s*-\s*\S+(?: and \S+)? action done$/m;
+
+/** The call log of the attempt Playwright was on when it failed. */
+function lastAttempt(message: string): string {
+  const log = message.replace(ANSI_RE, "");
+  return log.slice(log.lastIndexOf("retrying ") + 1);
+}
 
 /**
- * Did the attempt Playwright was on when it failed get as far as sending the
- * input? Only the last attempt counts: one Playwright retried after "performing"
+ * Could the action have changed the page before it failed? Playwright's call
+ * log names the step it reached.
+ *
+ * For a pointer gesture only the last attempt counts: one Playwright retried
  * was withheld from the page, because something else (an overlay that appeared
  * as the pointer arrived) had become the hit target.
+ *
+ * A key press, fill or select counts once its call started and then got no
+ * answer, unless the element refused an earlier attempt: a field that stays
+ * disabled is polled until the budget ends, and a budget that ends mid-poll
+ * must still read as not actionable. Playwright gives up waiting on a blocked
+ * page, but a call it already sent still runs once the page is free. An answer
+ * that is an error (an unknown key, a malformed date, an element that is not a
+ * select) means nothing was sent.
  */
-function inputWentOut(message: string): boolean {
+function inputMayHaveGoneOut(message: string): boolean {
+  if (PERFORMING_RE.test(lastAttempt(message))) return true;
   const log = message.replace(ANSI_RE, "");
-  return DISPATCHED_RE.test(log.slice(log.lastIndexOf("retrying ") + 1));
+  return TIMEOUT_RE.test(log) && STARTED_RE.test(log) && !REFUSED_RE.test(log);
+}
+
+/**
+ * Did Playwright confirm that a pointer gesture reached its target? It writes
+ * "action done" only after its own check that nothing else took the events.
+ */
+function gestureConfirmed(message: string): boolean {
+  return GESTURE_DONE_RE.test(lastAttempt(message));
 }
 
 /**
@@ -293,9 +331,9 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     endRequestWatch(page);
     await session.disposeWatch();
     const msg = err instanceof Error ? err.message : String(err);
-    // Playwright's call log names the step it reached. Past "performing …
-    // action" the input went out, so the outcome is no longer not_executed.
-    if (input.ref !== undefined && inputWentOut(msg)) sent = true;
+    // Playwright's call log names the step it reached. Once it started to
+    // change the page the outcome is no longer not_executed.
+    if (input.ref !== undefined && inputMayHaveGoneOut(msg)) sent = true;
     const remedy = invalidInputRemedy(msg);
     if (remedy) return sent
       ? errorResult(outcomeUnknownMessage(input.kind, remedy), { outcome: "unknown" })
@@ -440,17 +478,19 @@ async function answerDialog(session: Session, input: ActInput): Promise<McpToolR
  * Run a ref pointer gesture (click, dblclick, hover). REF_ACTION_TIMEOUT_MS is
  * meant for the actionability wait, but Playwright's timeout also covers what
  * it does after sending the input: confirming the hit target and waiting for a
- * navigation the gesture scheduled. A form POST answered slowly, or a page that
- * blocks its main thread right after the click, ran out that budget after the
- * input had gone out. Once the call log shows the input was sent, the gesture
- * happened, as it does for a coordinate gesture; settle reports what it did.
+ * navigation the gesture scheduled. A form POST answered slowly ran out that
+ * budget after the click had landed. Once the call log shows Playwright
+ * confirmed the gesture, it happened, as it does for a coordinate gesture;
+ * settle reports what it did. A gesture that was sent but not confirmed (the
+ * page blocked before Playwright could check) is rethrown and reported as
+ * outcome unknown.
  */
 async function landedGesture(gesture: Promise<void>, markSent: () => void): Promise<void> {
   try {
     await gesture;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (!/Timeout \d+ms exceeded/i.test(msg) || !inputWentOut(msg)) throw err;
+    if (!TIMEOUT_RE.test(msg) || !gestureConfirmed(msg)) throw err;
     markSent();
   }
 }
