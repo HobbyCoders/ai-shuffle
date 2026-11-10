@@ -6,7 +6,6 @@ disconnect it and the one that gained it must connect it, without a restart.
 Only the connector client is a stand-in: each worker gets a fake manager that
 records starts and stops.
 """
-import asyncio
 
 import pytest
 
@@ -36,10 +35,14 @@ class _FakeManager:
     def get_running_instance(self, connector_id):
         return self.running.get(connector_id)
 
-    async def start_connector(self, connector_id):
+    def held_connector_ids(self):
+        return set(self.running)
+
+    def request_run(self, connector_id):
+        """Applied at once here; the real lane does this after the reconcile returns."""
         # The real start re-reads the row and refuses one owned elsewhere.
         if ownership.decide_connector(database.get_connector(connector_id)) != "start":
-            return False
+            return True
         # Like the real start: a live client is kept, a dead one replaced.
         existing = self.running.get(connector_id)
         if existing is None or not existing.live:
@@ -47,7 +50,7 @@ class _FakeManager:
             self.running[connector_id] = _Client()
         return True
 
-    async def stop_connector(self, connector_id):
+    def request_stop(self, connector_id):
         self.events.append(("stop", connector_id))
         self.running.pop(connector_id, None)
 

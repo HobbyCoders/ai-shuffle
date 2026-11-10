@@ -258,15 +258,19 @@ def _on_session_write(session_id: str, collection: str) -> None:
     transport.request_scan([collection], session_ids=[session_id], owned_only=True)
 
 
-# A connector start already past its eligibility check when a fence lands is
-# still CONNECTING: it is not registered yet, and it registers (and runs) once
-# its connect() returns. The fenced reconcile keeps sweeping this long for such
-# late registrations, until the worker is re-admitted.
-FENCE_SETTLE_SECONDS = 30.0
-FENCE_SWEEP_INTERVAL = 0.5
-
+# Reconciles run one at a time, each holding the lock only to decide (row
+# reads, the claim) and to hand each connector RUN or STOP; the connector's
+# lane in the manager does the connect or disconnect, so one that never
+# returns holds up neither the next reconcile nor any other connector.
 _reconcile_lock: Optional[asyncio.Lock] = None
 _reconcile_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+# Scheduled reconciles not finished yet, so ``stop()`` can settle them; each
+# drops itself when done. Touched from any thread, under ``_reconcile_guard``,
+# with ``_reconciles_refused`` (set by ``stop()``, cleared by ``start()``).
+_reconcile_guard = threading.Lock()
+_reconcile_futures: set = set()
+_reconciles_refused = False
+RECONCILE_SETTLE_SECONDS = 5.0
 
 
 def _connector_reconcile_lock() -> asyncio.Lock:
@@ -278,10 +282,12 @@ def _connector_reconcile_lock() -> asyncio.Lock:
     return _reconcile_lock
 
 
-async def _stop_running_connectors(connector_manager) -> None:
-    for connector_id, _instance in list(connector_manager.get_running_connectors()):
+def _stop_running_connectors(connector_manager) -> None:
+    """Ask every connector with a client here to stop: registered, still
+    connecting (its connect is cancelled) or still tearing down."""
+    for connector_id in sorted(connector_manager.held_connector_ids()):
         try:
-            await connector_manager.stop_connector(connector_id)
+            connector_manager.request_stop(connector_id)
         except Exception:  # noqa: BLE001 - one failure must not keep the rest connected
             logger.warning("Stopping fenced connector %s failed", connector_id, exc_info=True)
 
@@ -313,19 +319,19 @@ def _connector_should_run(connector_id: str) -> Optional[bool]:
 
 
 async def _follow_connector_rows(connector_manager, connector_ids) -> None:
-    """Start or stop the named connectors to match their rows' owner and switch."""
+    """Want the named connectors running or stopped to match their rows' owner and switch."""
     ids = set(connector_ids)
     if "" in ids:  # a collection-wide notice (a bootstrap import): every row and every client
         ids.discard("")
         ids.update(row["id"] for row in await run_sync(database.get_all_connectors))
-        ids.update(cid for cid, _instance in connector_manager.get_running_connectors())
+        ids.update(connector_manager.held_connector_ids())
     for connector_id in sorted(ids):
         try:
             run_here = await run_sync(_connector_should_run, connector_id)
-            if run_here:  # keeps a live client; replaces an errored or stuck one
-                await connector_manager.start_connector(connector_id)
-            elif run_here is False and connector_manager.get_running_instance(connector_id) is not None:
-                await connector_manager.stop_connector(connector_id)
+            if run_here:  # keeps a live client; replaces an errored, stuck or outdated one
+                connector_manager.request_run(connector_id)
+            elif run_here is False and connector_id in connector_manager.held_connector_ids():
+                connector_manager.request_stop(connector_id)
         except Exception:  # noqa: BLE001 - one connector must not hold the others back
             logger.warning("Reconciling connector %s failed", connector_id, exc_info=True)
 
@@ -334,45 +340,70 @@ def request_connector_reconcile(connector_ids=None) -> None:
     """Schedule a reconcile on the app loop without waiting for it.
 
     ``None`` is the membership pass; a list of ids follows those connector
-    rows. Safe from the sync thread or the loop: a slow connect or disconnect
-    never holds up the caller.
+    rows. Safe from the sync thread or the loop. Refused once ``stop()`` has
+    begun; the scheduled reconcile is kept until it finishes.
     """
     from app.core.global_events import global_events
     loop = getattr(global_events, "_loop", None)
-    if loop and not loop.is_closed():
-        ids = None if connector_ids is None else list(connector_ids)
-        asyncio.run_coroutine_threadsafe(_reconcile_owned_connectors(ids), loop)
+    if not loop or loop.is_closed():
+        return
+    ids = None if connector_ids is None else list(connector_ids)
+    with _reconcile_guard:
+        if _reconciles_refused:
+            logger.debug("Connector reconcile refused: the worker network is stopping")
+            return
+        future = asyncio.run_coroutine_threadsafe(_reconcile_owned_connectors(ids), loop)
+        if future is None:  # a test scheduler
+            return
+        _reconcile_futures.add(future)
+    future.add_done_callback(_forget_reconcile)
+
+
+def _forget_reconcile(future) -> None:
+    with _reconcile_guard:
+        _reconcile_futures.discard(future)
+    if not future.cancelled() and future.exception() is not None:
+        logger.warning("Connector reconcile failed; the next membership or row change retries it",
+                       exc_info=future.exception())
+
+
+async def _settle_reconciles() -> None:
+    """Refuse new reconciles, then cancel and await those scheduled (``stop()``)."""
+    global _reconciles_refused
+    with _reconcile_guard:
+        _reconciles_refused = True
+        pending = list(_reconcile_futures)
+    for future in pending:
+        future.cancel()
+    if pending:
+        await asyncio.wait([asyncio.wrap_future(f) for f in pending], timeout=RECONCILE_SETTLE_SECONDS)
 
 
 async def _reconcile_owned_connectors(connector_ids=None) -> None:
-    """Close connections when committed membership changes fence this worker,
-    or, given connector ids, start or stop those connectors after their rows
-    changed owner, were switched on or off, or were deleted.
+    """Hand connectors RUN or STOP when committed membership fences or
+    re-admits this worker, or, given connector ids, after their rows changed
+    owner, were switched on or off, or were deleted.
 
-    Serialised: a fence and the re-admission right after it are applied in
-    the order they were scheduled, so the later decision is the one that holds.
+    Serialised, and decides only: a fence and the re-admission right after
+    it are decided in the order they were scheduled, and each connector's lane
+    applies the latest decision. Nothing here awaits a connect or disconnect.
     """
     from app.core.connectors.manager import connector_manager
     from app.network import ownership
     async with _connector_reconcile_lock():
+        if _reconciles_refused:
+            return
         if connector_ids is not None:
             await _follow_connector_rows(connector_manager, connector_ids)
             return
         if ownership.can_execute_local():
-            await connector_manager.start_all()
+            await connector_manager.start_all(wait=False)
             return
-        # Stop the running connectors but keep the lifecycle relay:
-        # ``start_all`` does not restart it when execution is re-admitted.
-        # The manager's registry holds CONNECTING clients too; a start whose
-        # connect() is still in flight registers later, so keep sweeping.
-        await _stop_running_connectors(connector_manager)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + FENCE_SETTLE_SECONDS
-        while loop.time() < deadline:
-            await asyncio.sleep(FENCE_SWEEP_INTERVAL)
-            if ownership.can_execute_local():
-                break  # re-admitted: the reconcile queued behind this one starts them
-            await _stop_running_connectors(connector_manager)
+        # Stop the connectors but keep the lifecycle relay: ``start_all`` does
+        # not restart it when execution is re-admitted. No sweep for late
+        # registrations: a connect in flight is cancelled by the STOP, and
+        # every start re-reads the start rule after registering.
+        _stop_running_connectors(connector_manager)
 
 
 def _adopt_presence_endpoints(device_ids) -> None:
@@ -568,7 +599,9 @@ def _on_applied(touched) -> None:
 async def start() -> List[asyncio.Task]:
     from app.network import transport, enrollment, hub
     from app.core import managed_connection
-    global _unsubscribe_applied
+    global _unsubscribe_applied, _reconciles_refused
+    with _reconcile_guard:
+        _reconciles_refused = False  # a stop() earlier in this process refused them
     # One subscription per lifecycle: stop() (or a failed start) removes it,
     # and a start without a stop replaces it, so applies are never delivered
     # twice (#2097).
@@ -611,6 +644,9 @@ def _drop_applied_subscription() -> None:
 async def stop() -> None:
     from app.network import transport, hub, startup_sync
     _drop_applied_subscription()
+    # Connector clients themselves stop in ``connector_manager.shutdown_all``
+    # (app shutdown); this only ends the reconciles that hand out RUN/STOP.
+    await _settle_reconciles()
     await startup_sync.stop()
     await transport.stop()
     try:

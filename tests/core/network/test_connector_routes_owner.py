@@ -93,6 +93,15 @@ async def _drain(scheduled):
         for worker, coro in batch:
             with worker.active():
                 await coro
+                await _settle_lanes(worker)
+
+
+async def _settle_lanes(worker):
+    """The reconcile only hands out RUN/STOP; wait for the lanes it woke, as
+    that worker (the harness swaps databases only inside ``active()``)."""
+    mgr = manager_mod.connector_manager.managers[worker.name]
+    while mgr._lanes:
+        await asyncio.gather(*[lane.task for lane in list(mgr._lanes.values()) if lane.task is not None])
 
 
 def _sync(src, dst):
@@ -246,6 +255,7 @@ async def test_a_config_edit_synced_during_a_start_reaches_the_new_client(net, m
     await _drain(scheduled)  # nothing left to replace: the next reconcile keeps it
     with b.active():
         await startup._reconcile_owned_connectors([cid])
+        await _settle_lanes(b)
     assert managers[b.name].get_running_instance(cid) is live
 
 

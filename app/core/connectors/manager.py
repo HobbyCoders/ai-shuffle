@@ -90,8 +90,12 @@ class ConnectorManager:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start_all(self) -> None:
+    async def start_all(self, wait: bool = True) -> None:
         """Start the active connectors this install owns.
+
+        With *wait* (app startup) each start is awaited in turn; without it
+        (the network reconcile) each connector is only handed RUN, so a
+        connect that never returns holds up nobody.
 
         Two installs can share one Postgres, so we must not both connect the
         same connector (that would duplicate every inbound reply). Each active
@@ -123,12 +127,12 @@ class ConnectorManager:
                 # and a definition owned elsewhere stays inactive here.
                 network_rule = ownership.decide_connector(conn_row)
                 if network_rule == "start":
-                    await self.start_connector(cid)
+                    await self._start_owned(cid, wait)
                     continue
                 if network_rule == "claim":
                     if await run_sync(ownership.claim, "connectors", cid):
                         logger.info(f"Claimed unowned connector {cid} for device {ownership.my_device_id()}")
-                        await self.start_connector(cid)
+                        await self._start_owned(cid, wait)
                     else:
                         logger.info(f"Connector {cid} claimed by another device — skipping start")
                     continue
@@ -136,7 +140,7 @@ class ConnectorManager:
                     logger.info(f"Connector {cid} is owned by device {conn_row.get('owner_device_id')} — skipping start")
                     continue
                 if runner_id == me:
-                    await self.start_connector(cid)
+                    await self._start_owned(cid, wait)
                 elif runner_id is None:
                     # Race-safe claim: only the install whose UPDATE flips the
                     # NULL owner starts it; losers skip.
@@ -144,7 +148,7 @@ class ConnectorManager:
                     # below runs, so it cannot be batched with anything.
                     if await run_sync(database.claim_connector_runner, cid, me):
                         logger.info(f"Claimed unowned connector {cid} for runner {me}")
-                        await self.start_connector(cid)
+                        await self._start_owned(cid, wait)
                     else:
                         logger.info(
                             f"Connector {cid} claimed by another runner — skipping start"
@@ -156,6 +160,12 @@ class ConnectorManager:
                     )
             except Exception as e:
                 logger.error(f"Failed to start connector {cid}: {e}")
+
+    async def _start_owned(self, connector_id: str, wait: bool) -> None:
+        if wait:
+            await self.start_connector(connector_id)
+        else:
+            self.request_run(connector_id)
 
     def start_event_relay(self) -> None:
         """Listen for lifecycle notifications addressed to this connector owner."""
@@ -229,6 +239,9 @@ class ConnectorManager:
             lane = self._lanes[connector_id] = _Lane()
             lane.task = loop.create_task(self._run_lane(connector_id, lane),
                                          name=f"connector-lane:{connector_id}")
+            # Also settles a lane cancelled before its first step, whose
+            # ``finally`` never runs.
+            lane.task.add_done_callback(lambda _task, cid=connector_id, ln=lane: self._settle_lane(cid, ln))
         lane.want = want
         lane.asked += 1
         if want == STOP and lane.connect is not None:
@@ -249,6 +262,17 @@ class ConnectorManager:
     def request_stop(self, connector_id: str) -> None:
         """Want *connector_id* stopped, without waiting."""
         self._request(connector_id, STOP)
+
+    def held_connector_ids(self) -> set:
+        """Connectors with a client here: registered, connecting or still tearing down.
+
+        A connect in flight or a pending teardown is not registered, so a
+        caller stopping "everything this worker runs" asks these, not
+        ``get_running_connectors``. Ids with neither stay untouched, so a
+        stop never writes "disconnected" over the status another worker's
+        client reports.
+        """
+        return set(self._connectors) | set(self._lanes)
 
     async def _run_lane(self, connector_id: str, lane: _Lane) -> None:
         """Move the connector toward ``lane.want`` until a pass serves the latest request."""
@@ -279,11 +303,16 @@ class ConnectorManager:
                 if lane.asked == asked:
                     return
         finally:
-            if self._lanes.get(connector_id) is lane:
-                del self._lanes[connector_id]
-            for _seq, waiter in lane.waiters:
-                if not waiter.done():
-                    waiter.set_result(False)  # cancelled at shutdown: it is not running
+            self._settle_lane(connector_id, lane)
+
+    def _settle_lane(self, connector_id: str, lane: _Lane) -> None:
+        """Forget an ended lane and answer its waiters. Idempotent."""
+        if self._lanes.get(connector_id) is lane:
+            del self._lanes[connector_id]
+        waiters, lane.waiters = lane.waiters, []
+        for _seq, waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(False)  # cancelled at shutdown: it is not running
 
     async def _teardown(self, connector_id: str, instance: BaseConnector) -> None:
         """Disconnect one unregistered client, in the lane, for as long as it takes.
@@ -521,11 +550,11 @@ class ConnectorManager:
             async with self._lock:
                 self._connectors[connector_id] = instance
                 self._registered_at[connector_id] = time.monotonic()
-            # connect() can outlast the fence sweep in network startup: re-apply
-            # the start rule now that the client is registered, so a fence (or
-            # an ownership move, or a delete) that landed meanwhile stops it
-            # here. Checked after registering, a fence landing later still
-            # finds it in the registry.
+            # Re-apply the start rule now that the client is registered, so a
+            # fence (or an ownership move, or a delete) whose reconcile ran
+            # before this lane existed stops it here; network startup keeps
+            # no sweep for late registrations. Checked after registering, a
+            # fence landing later finds it in ``held_connector_ids``.
             if not await run_sync(self._still_eligible, connector_id):
                 logger.info(f"Connector {connector_id} lost eligibility while connecting; stopping it")
                 async with self._lock:

@@ -338,3 +338,15 @@ async def test_shutdown_disconnects_a_connect_that_finishes_after_closing(mgr, d
     finally:
         gate.set()
         await cleanup(start)
+
+
+async def test_a_lane_cancelled_before_its_first_step_answers_its_waiters(mgr, db):
+    """A task cancelled before it first runs never enters its ``finally``;
+    the lane's done-callback still forgets it and answers the waiting start."""
+    start = asyncio.create_task(mgr.start_connector("c1"))
+    await asyncio.sleep(0)  # the start has asked; its lane has not run yet
+    lane = mgr._lanes["c1"]
+    lane.task.cancel()
+    assert await asyncio.wait_for(start, 1) is False
+    assert "c1" not in mgr._lanes
+    assert clients("c1") == []
