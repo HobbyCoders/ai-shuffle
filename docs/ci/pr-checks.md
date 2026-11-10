@@ -337,7 +337,7 @@ after it succeeds the helper copies the `.deb` files that install downloaded,
 with their package names, into that directory for the cache; a run that
 downloaded nothing records no cache. On a hit it installs those same signed
 files with `apt-get install` given an empty source list (no index refresh, no
-archive traffic) in one 120-second bounded attempt, then checks that every recorded
+archive traffic) in one 25-second bounded attempt (it takes 4–12 seconds), then checks that every recorded
 package is installed. apt refuses before changing anything when a file needs a
 download, a downgrade or a dependency the image lacks; any failure falls back to
 the normal two apt attempts, starting with `dpkg --configure -a`. The miss path
@@ -1162,7 +1162,11 @@ job took about 19.5 minutes. Eighteen shards plan at about 12.8 step minutes
 (about 738 seconds of journeys at most) with about 250 seconds of headroom.
 Runner minutes stay about flat: 16 jobs of about 17.4 minutes before, 18 of
 about 15.2 after, since the journey work is the same and setup is a small share
-of each job.
+of each job. Those two runs' shared runtime differs slightly (one backend module
+and the terminal panel), so the stricter per-file workload rule below would
+accept only one of them from either revision, and neither from later trees. The
+checked-in medians stay as measured and reviewed; the next refresh should use
+runs on one revision.
 
 The earlier 9/10/11-shard changes guarded point estimates but not their allowed
 error. Across eleven main-suite runs on Nov 7–8, the slowest measured steps took
@@ -1175,9 +1179,21 @@ the stronger planning bound address both causes; the frozen historical
 calibration remains unchanged. Continued hosted headroom is tracked in #1197.
 
 Refresh after journey runtime changes, using one or more recent green
-`main-suite.yml` run IDs with authenticated `gh`:
+`main-suite.yml` run IDs with authenticated `gh`, in a checkout of the runs'
+revision (for example a detached checkout of the newest run's commit):
 `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]`
-(`--out` writes elsewhere and leaves the checked-in file alone). This reads
+(`--out` writes elsewhere and leaves the checked-in file alone). A matching
+case count does not show that a timing still describes the code: a journey, or
+the runtime under it, can get slower with the same cases. So each run's
+revision is compared with the checkout (committed, uncommitted and untracked
+changes) over the journey workload: `app`, `fluid`, `frontend`, `browser-mcp`,
+`tools`, `requirements*.txt` and `scripts/devloop`, without documentation, unit
+tests, `ci.py`, the weights file and the journey selection metadata. A changed
+journey file, or a module it reaches by relative import (for example
+`runner.mjs`, `lib/*.mjs` or its `.cases.mjs`), drops that run's samples for
+the journeys that import it. Any other workload change, or a revision this
+checkout cannot compare, drops every sample from that run before its logs are
+downloaded. This reads
 timestamped whole-job logs from the runs' logs archives, measures each
 `[ci] running <file>` through its own completed case-count footer (including
 the last journey, excluding instance teardown), and stores median seconds per

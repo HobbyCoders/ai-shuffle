@@ -628,8 +628,9 @@ Historical rows remain unchanged; feature PRs do not need a pre-merge measuremen
 `python -m scripts.devloop.ci plan --shards N` prints the JSON split, with
 estimated minutes in stderr and `$GITHUB_STEP_SUMMARY`. Refresh the medians
 with `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]`
-using recent green main-suite runs on main; files a run lacks or measured with
-other cases keep their entries ([measurement details](../ci/pr-checks.md#ui-journeys)).
+using recent green main-suite runs on main, from a checkout of their revision;
+files a run lacks, measured with other cases, or measured before their journey
+code or the shared runtime changed keep their entries ([measurement details](../ci/pr-checks.md#ui-journeys)).
 It runs each file of its shard, all of them even after a failure. `--build` builds
 and stamps the UI first when the stamp is missing or stale. It writes
 `devloop.log`, `logs/<journey>.log` and the per-case timelines (and contact

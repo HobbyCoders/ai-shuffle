@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import zipfile
 from datetime import datetime, timedelta, timezone
 
@@ -441,10 +442,16 @@ def refresh_inventory(tmp_path, monkeypatch):
     directory.mkdir()
     for stem in ("a", "b"):
         (directory / f"{stem}.journey.mjs").touch()
+    monkeypatch.setattr(ci, "ROOT", tmp_path)
     monkeypatch.setattr(ci, "JOURNEYS", directory)
     monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: {
         "a.journey.mjs": 3, "b.journey.mjs": 2,
     }[path.name])
+    # These producer tests supply fake hosted logs; the workload comparison has
+    # its own git tests below rather than consulting this checkout.
+    changed = []
+    monkeypatch.setattr(ci, "changed_workload", lambda run_id, revision: list(changed))
+    return changed
 
 
 def _gh(logs, **metadata):
@@ -743,3 +750,120 @@ def test_refresh_refuses_ambiguous_checkout_before_logs_or_writing(
         ci.refresh_weights([10], path)
     assert not any(command[:2] == ["gh", "api"] for command in calls)
     assert path.read_bytes() == original
+
+
+def _git(root, *args):
+    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def workload_repo(tmp_path, monkeypatch):
+    """A real repository with two journeys, a module only one imports, and shared runtime."""
+    root = tmp_path / "repo"
+    journeys = root / "frontend/tests/journeys"
+    (journeys / "lib").mkdir(parents=True)
+    (journeys / "runner.mjs").write_text("export const run = 1;\n")
+    (journeys / "lib/geometry.mjs").write_text("import { run } from '../runner.mjs';\n")
+    (journeys / "shell-geometry.journey.mjs").write_text(
+        "import { run } from './runner.mjs';\nimport './lib/geometry.mjs';\n")
+    (journeys / "other.journey.mjs").write_text("import { run } from './runner.mjs';\n")
+    (root / "app/core").mkdir(parents=True)
+    (root / "app/core/runtime.py").write_text("SPEED = 1\n")
+    (root / "docs").mkdir()
+    (root / "docs/notes.md").write_text("notes\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "old")
+    monkeypatch.setattr(ci, "ROOT", root)
+    monkeypatch.setattr(ci, "JOURNEYS", journeys)
+    monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: 22)
+    path = _weights(tmp_path, {"shell-geometry.journey.mjs": 124.04, "other.journey.mjs": 50},
+                    counts={"shell-geometry.journey.mjs": 22, "other.journey.mjs": 22})
+    return root, _git(root, "rev-parse", "HEAD"), path
+
+
+def test_journey_modules_follow_relative_imports(workload_repo):
+    assert ci.journey_modules() == {
+        "other.journey.mjs": {"frontend/tests/journeys/other.journey.mjs",
+                              "frontend/tests/journeys/runner.mjs"},
+        "shell-geometry.journey.mjs": {"frontend/tests/journeys/shell-geometry.journey.mjs",
+                                       "frontend/tests/journeys/lib/geometry.mjs",
+                                       "frontend/tests/journeys/runner.mjs"},
+    }
+
+
+def test_changed_workload_reads_committed_uncommitted_and_untracked_changes(workload_repo, capsys):
+    root, old, _ = workload_repo
+    assert ci.changed_workload(10, old) == []
+    (root / "docs/notes.md").write_text("only documentation\n")
+    (root / "app/core/runtime.py").write_text("SPEED = 2\n")
+    (root / "app/core/new.py").write_text("")
+    assert ci.changed_workload(10, old) == ["app/core/new.py", "app/core/runtime.py"]
+    assert ci.changed_workload(10, "f" * 40) is None
+    assert "cannot compare its revision" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("change,kept", [
+    # The reviewer's case: an old green run timed shell-geometry at the same 22
+    # cases, but the shared runtime has changed since, so 74.81s must not
+    # replace the current 124.04s.
+    ("app/core/runtime.py", True),
+    ("frontend/tests/journeys/runner.mjs", True),
+    ("frontend/tests/journeys/lib/geometry.mjs", True),
+    # Another journey's own file does not change what shell-geometry runs.
+    ("frontend/tests/journeys/other.journey.mjs", False),
+    ("docs/notes.md", False),
+])
+def test_same_case_count_changed_workload_keeps_the_current_weight(
+        workload_repo, monkeypatch, capsys, change, kept):
+    root, old, path = workload_repo
+    (root / change).write_text((root / change).read_text() + "// slower now\n")
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qam", "new")
+    log = _log("shell-geometry", 74.81, 22) + _log("other", 40, 22)
+    monkeypatch.setattr(ci.subprocess, "check_output", _gh({42664620034: log}, headSha=old))
+    if change.startswith("app/") or change.endswith("runner.mjs"):
+        # Every journey depends on it, so no sample from the run is usable.
+        original = path.read_bytes()
+        with pytest.raises(ValueError, match="No usable UI journey measurements"):
+            ci.refresh_weights([42664620034], path)
+        assert path.read_bytes() == original
+        err = capsys.readouterr().err
+        if change.startswith("app/"):
+            assert f"shared journey runtime changed since the run ({change})" in err
+        else:
+            assert "shell-geometry.journey.mjs or a module it imports changed" in err
+            assert "other.journey.mjs or a module it imports changed" in err
+        return
+    ci.refresh_weights([42664620034], path)
+    seconds = json.loads(path.read_text())["seconds"]
+    assert seconds["shell-geometry.journey.mjs"] == (124.04 if kept else 74.81)
+    assert seconds["other.journey.mjs"] == (50 if change.endswith("other.journey.mjs") else 40)
+    if kept:
+        assert "shell-geometry.journey.mjs or a module it imports changed" in capsys.readouterr().err
+
+
+def test_shared_runtime_change_refuses_before_downloading_logs(
+        tmp_path, monkeypatch, refresh_inventory, capsys):
+    refresh_inventory.append("app/core/runtime.py")
+    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456})
+    original = path.read_bytes()
+    calls = []
+
+    def gh(command, **kwargs):
+        calls.append(command)
+        return _gh({10: _log("a", 30, 3)})(command, **kwargs)
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match="No usable.*no weights were replaced"):
+        ci.refresh_weights([10], path)
+    assert path.read_bytes() == original
+    assert not any(command[:2] == ["gh", "api"] for command in calls)
+    assert "run 10: shared journey runtime changed since the run (app/core/runtime.py)" in capsys.readouterr().err
+
+
+def test_workload_paths_ignore_docs_and_metadata_but_not_runtime():
+    paths = ci.WORKLOAD_PATHS
+    assert {"app", "fluid", "frontend", "browser-mcp", "tools", "scripts/devloop"} <= set(paths)
+    assert ":(exclude)scripts/devloop/ci.py" in paths
+    assert ":(exclude)scripts/devloop/journey_weights.json" in paths
+    assert ":(exclude)frontend/tests/journeys/map.json" in paths

@@ -2,6 +2,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -248,6 +249,7 @@ def test_apt_config_reuses_installed_packages_without_upgrades(tmp_path):
 
 @pytest.mark.parametrize("workflow,job,step_name", [
     ("ci-frontend.yml", "browser-mcp", "Prepare sandboxed Chromium"),
+    ("ci-frontend.yml", "journeys", "Install isolated Chromium"),
     ("ci-fluid.yml", "unit", "Install ripgrep"),
     ("ci-browser-workspace.yml", "workspace", "Install isolated Chromium"),
 ])
@@ -271,6 +273,27 @@ def test_every_apt_install_uses_shared_bounded_supervisor(workflow, job, step_na
         assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in step["run"]
         assert "sudo env" not in step["run"]
         assert "--with-deps" not in step["run"]
+        assert_budgets_fit_the_step(step)
+
+
+def assert_budgets_fit_the_step(step):
+    """A failed cache hit, a hung first attempt and a slow second attempt that then
+    succeeds, then the browser download, must all finish inside the step deadline,
+    or the workflow kills a setup that was about to succeed."""
+    browser = re.search(r"timeout --kill-after=(\d+)s (\d+)s npx --no-install playwright-core "
+                        r"install chromium", step["run"])
+    helper = load_helper()
+    grace = helper.KILL_AFTER_SECONDS
+    worst = ((helper.CACHED_SECONDS + grace) + 2 * (helper.ATTEMPT_SECONDS + grace)
+             + int(browser[2]) + int(browser[1]))
+    # Keep a margin for sudo, interpreter and npx start-up and the cache checks.
+    assert worst + 20 <= int(step["timeout-minutes"]) * 60, worst
+
+
+def test_cached_install_budget_is_short_but_covers_observed_hits():
+    # Hosted hits took 4.0-11.5s; a stuck hit must not eat the apt fallback's time.
+    helper = load_helper()
+    assert 15 <= helper.CACHED_SECONDS <= 30
 
 
 @pytest.fixture

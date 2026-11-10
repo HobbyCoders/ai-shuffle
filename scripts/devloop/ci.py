@@ -414,15 +414,81 @@ def parse_journey_log(log: str) -> list[tuple[str, float, int]]:
 
 
 RETRY_MARKER = re.compile(r"\[ci\] retrying \S+\.journey\.mjs:")
+# What a hosted journey's runtime depends on. Documentation, unit-test
+# implementations and selection metadata are ignored. Never exclude whole test
+# directories: fake_claude/cli.py dynamically loads
+# fluid/tests/fixtures/fake_claude_script.py, which imports fake_guard_ready.
+# Runtime fixtures, helpers, dependencies and fake providers stay protected.
+WORKLOAD_PATHS = ["app", "fluid", "frontend", "browser-mcp", "tools", "requirements*.txt",
+                  "scripts/devloop", ":(exclude)scripts/devloop/ci.py",
+                  ":(exclude)scripts/devloop/journey_weights.json",
+                  ":(exclude,glob)**/README*", ":(exclude,glob)**/docs/**",
+                  ":(exclude,glob)**/*.test.*", ":(exclude,glob)**/*.spec.*",
+                  ":(exclude,glob)**/test_*.py", ":(exclude,glob)**/conftest.py",
+                  ":(exclude)frontend/tests/journeys/map.json",
+                  ":(exclude)frontend/tests/journeys/select.mjs"]
+RELATIVE_IMPORT = re.compile(
+    r"""(?:\bfrom|\bimport|\brequire)\s*\(?\s*['"](\.{1,2}/[^'"]+)['"]""")
 
 
-def _run_samples(run_id: int, repo: str) -> tuple[str, list[tuple[str, float, int]]]:
-    """(revision, first-pass samples) of one clean green main-suite run.
+def journey_modules(directory: Path | None = None) -> dict[str, set[str]]:
+    """Each journey file's own code: itself and every module it reaches by relative import."""
+    directory = JOURNEYS if directory is None else directory
+    def imports(path: Path) -> list[Path]:
+        found = (path.parent / spec for spec in RELATIVE_IMPORT.findall(path.read_text(encoding="utf-8")))
+        return [module.resolve() for module in found if module.suffix == ".mjs" and module.is_file()]
 
-    The run itself must qualify, or nothing is refreshed. A job log with a
-    retry or an unfinished journey is skipped whole: a retry's footer must never
-    pass for the first attempt's runtime.
+    modules = {}
+    for journey in journey_files(directory):
+        seen, pending = set(), [journey.resolve()]
+        while pending:
+            module = pending.pop()
+            if module not in seen:
+                seen.add(module)
+                pending.extend(imports(module))
+        modules[journey.name] = {module.relative_to(ROOT.resolve()).as_posix() for module in seen}
+    return modules
+
+
+def changed_workload(run_id: int, revision: str) -> list[str] | None:
+    """Workload paths that differ between REVISION and this checkout; None if git cannot tell."""
+    changed = []
+    for command in (["git", "diff", "--name-only", revision, "--", *WORKLOAD_PATHS],
+                    ["git", "ls-files", "--others", "--exclude-standard", "--", *WORKLOAD_PATHS]):
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            print(f"[ci] run {run_id}: cannot compare its revision {revision} with this checkout "
+                  "(fetch it to use this run); its samples are not used", file=sys.stderr)
+            return None
+        changed += result.stdout.split()
+    return sorted(set(changed))
+
+
+def stale_journeys(run_id: int, changed: list[str], modules: dict[str, set[str]]) -> set[str] | None:
+    """Journeys whose workload changed since the run; None when shared runtime changed (all of them).
+
+    Timings describe the code that ran, not the case list: a journey or what it
+    runs on can get slower without its case count changing. A journey module
+    only affects the journeys that import it. Any other workload change (app,
+    frontend, fakes, dependencies) affects every journey.
     """
+    stale = set()
+    owned = set().union(*modules.values())
+    journeys = JOURNEYS.resolve().relative_to(ROOT.resolve()).as_posix() + "/"
+    for path in changed:
+        if path in owned:
+            stale.update(name for name, used in modules.items() if path in used)
+        elif path.startswith(journeys) and path.endswith(".mjs") and not (ROOT / path).exists():
+            continue  # Deleted: any journey that still ran it had to change too.
+        else:
+            print(f"[ci] run {run_id}: shared journey runtime changed since the run ({path}); "
+                  "its samples are not used", file=sys.stderr)
+            return None
+    return stale
+
+
+def _run_revision(run_id: int, repo: str) -> str:
+    """The checked-out revision of one clean green main-suite run; refuses any other run."""
     state = json.loads(subprocess.check_output(
         ["gh", "run", "view", str(run_id), "--repo", repo, "--json",
          "status,conclusion,attempt,headSha,event,headBranch,workflowName"],
@@ -443,6 +509,13 @@ def _run_samples(run_id: int, repo: str) -> tuple[str, list[tuple[str, float, in
     revision = state.get("headSha")
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError(f"Run {run_id} has no valid source revision")
+    return revision
+
+
+def _run_samples(run_id: int, repo: str) -> list[tuple[str, float, int]]:
+    """First-pass samples of a run. A job log with a retry or an unfinished
+    journey is skipped whole: a retry's footer must never pass for the first
+    attempt's runtime."""
     logs = subprocess.check_output(
         ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/logs"], cwd=ROOT, timeout=120)
     with zipfile.ZipFile(io.BytesIO(logs)) as archive:
@@ -461,15 +534,17 @@ def _run_samples(run_id: int, repo: str) -> tuple[str, list[tuple[str, float, in
     measured = [name for name, _, _ in samples]
     if len(set(measured)) != len(measured):
         raise ValueError(f"Run {run_id} has duplicate journey measurements")
-    return revision, samples
+    return samples
 
 
 def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path | None = None) -> None:
     """Median hosted seconds per journey file from clean green first-attempt main-suite runs.
 
-    A sample counts only when its case count matches the file's current
-    ``--list`` count. A run that lacks a file, or measured it with other cases,
-    adds nothing for that file. A file with no usable sample keeps its existing
+    A sample counts only when the code it timed is still what this checkout
+    runs: the journey file and the modules it imports are unchanged since the
+    run's revision and so is the shared runtime (see ``WORKLOAD_PATHS``), and
+    its case count matches the file's current ``--list`` count. A run that
+    lacks a file, or measured other code or other cases, adds nothing for it. A file with no usable sample keeps its existing
     entry and the case count it was measured at, so planning still treats a
     changed file as stale. Files no longer in the checkout are dropped. Writes
     ``out`` (default: ``weights_path``) only after every run has been read.
@@ -478,14 +553,22 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path 
     expected_cases = {path.name: case_count(path, strict=True) for path in journey_files(JOURNEYS)}
     repo = subprocess.check_output(["gh", "repo", "view", "--json", "nameWithOwner",
                                     "--jq", ".nameWithOwner"], cwd=ROOT, text=True, timeout=120).strip()
+    modules = journey_modules(JOURNEYS)
     durations = defaultdict(list)
     per_case = []
     revisions = {}
     for run_id in sorted(set(run_ids)):
-        revision, samples = _run_samples(run_id, repo)
-        for name, seconds, cases in samples:
+        revision = _run_revision(run_id, repo)
+        changed = changed_workload(run_id, revision)
+        stale = None if changed is None else stale_journeys(run_id, changed, modules)
+        if stale is None:
+            continue  # Reported above; no sample from this run describes this checkout.
+        for name, seconds, cases in _run_samples(run_id, repo):
             if name not in expected_cases:
                 print(f"[ci] run {run_id}: {name} is no longer a journey file", file=sys.stderr)
+            elif name in stale:
+                print(f"[ci] run {run_id}: {name} or a module it imports changed since the run; "
+                      "sample not used", file=sys.stderr)
             elif cases != expected_cases[name]:
                 print(f"[ci] run {run_id}: {name} ran {cases} cases, the file now has "
                       f"{expected_cases[name]}; sample not used", file=sys.stderr)
@@ -513,8 +596,9 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path 
     data = {
         "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from "
                     "green main-suite push-to-main runs: python -m scripts.devloop.ci refresh-weights "
-                    "RUN_ID [RUN_ID ...] [--out PATH]. Only samples whose case count matches the file "
-                    "count; a file with no such sample keeps its entry. seconds_per_case is the median "
+                    "RUN_ID [RUN_ID ...] [--out PATH] in a checkout of the runs' revision. Only samples whose "
+                    "workload is unchanged and whose case count matches the file count; a file with no "
+                    "such sample keeps its entry. seconds_per_case is the median "
                     "of seconds/cases per sample.",
         "source_runs": sorted(int(run_id) for run_id in sources),
         "source_revisions": dict(sorted(sources.items(), key=lambda item: int(item[0]))),

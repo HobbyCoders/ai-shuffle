@@ -27,8 +27,10 @@ import time
 # index/install margin; this is a bounded download budget, not a test timeout.
 ATTEMPT_SECONDS = 300
 KILL_AFTER_SECONDS = 10
-# A hit installs about 21 MB of local fonts and libraries in well under a minute.
-CACHED_SECONDS = 120
+# A hit installs about 21 MB of local fonts and libraries in 4-12s on hosted
+# runners. Keep this short: it comes on top of both apt attempts and the browser
+# download inside the workflow step's 13-minute deadline (see test_bounded_apt).
+CACHED_SECONDS = 25
 MANIFEST = "packages.txt"
 ARCHIVES = Path("/var/cache/apt/archives")
 APT_OPTIONS = '''
