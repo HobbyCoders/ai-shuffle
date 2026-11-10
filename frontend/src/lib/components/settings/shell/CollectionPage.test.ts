@@ -8,6 +8,7 @@ import {
 	SPLIT_WIDTH_MIN
 } from '$lib/settings/list-width';
 import CollectionPage from './CollectionPage.svelte';
+import NotFoundCollection from './test-fixtures/NotFoundCollection.svelte';
 
 // Observers by element, so a test can say how wide the page or the list is.
 let observers: { el: Element; cb: ResizeObserverCallback }[] = [];
@@ -137,5 +138,42 @@ describe('CollectionPage width', () => {
 		resize(coll, 1200);
 		expect(listWidth()).toBe('420px');
 		expect(localStorage.getItem(LIST_WIDTH_STORAGE_KEY)).toBe('420');
+	});
+});
+
+describe('CollectionPage with an item that is only a state', () => {
+	function setupNotFound() {
+		const view = render(NotFoundCollection);
+		const coll = view.container.querySelector<HTMLElement>('.st-coll')!;
+		return { coll };
+	}
+	const pageBack = (coll: HTMLElement) => coll.querySelector<HTMLElement>('.st-dpane > .st-dback .st-back');
+
+	it('gives a not-found item that replaces the list its own Back to the list', async () => {
+		settingsNav.selectItem('gone');
+		const { coll } = setupNotFound();
+		resize(coll, 460);
+		expect(coll.dataset.replace).toBe('detail');
+		// The rule settings.css shows the page's Back for: a non-idle state
+		// straight in the detail pane while the list is hidden.
+		expect(coll.matches("[data-replace='detail']:has(> .st-dpane > .st-empty-detail:not([data-idle]))")).toBe(true);
+		const back = pageBack(coll)!;
+		expect(back.getAttribute('aria-label')).toBe('Back to Hooks');
+
+		back.focus();
+		back.click();
+		flushSync();
+		expect(settingsNav.selectedItem('hooks')).toBeNull();
+		expect(coll.dataset.replace).toBe('list');
+		expect(pageBack(coll)).toBeNull();
+		await tick();
+		// The item has no row any more, so the list's first row takes focus.
+		expect(document.activeElement?.getAttribute('data-settings-item')).toBe('a');
+	});
+
+	it('adds nothing with no item open', () => {
+		const { coll } = setupNotFound();
+		resize(coll, 460);
+		expect(pageBack(coll)).toBeNull();
 	});
 });

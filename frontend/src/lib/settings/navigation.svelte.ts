@@ -178,6 +178,12 @@ export class SettingsNavigation {
 	view = $state<SettingsView>('page');
 	/** True when the shell shows one pane at a time (phone app or ≤600px wide). */
 	stacked = $state(false);
+	/**
+	 * Collections whose open item replaces the list outside stacked mode
+	 * (`replaceOnSelect`, or a page too narrow for both). CollectionPage keeps
+	 * it current while mounted; `showList` reads it.
+	 */
+	onePane = $state<Partial<Record<CategoryId, boolean>>>({});
 	/** Setting id to scroll to and flash once its row renders. */
 	pendingAnchor = $state<string | null>(null);
 	/** List item to scroll to and flash (search hit on an item with no anchor). */
@@ -297,6 +303,17 @@ export class SettingsNavigation {
 		}
 		this.view = this.view === 'detail' ? 'page' : 'index';
 		this.notePlace();
+	}
+
+	/**
+	 * Show a collection's list after its open item changed what the list
+	 * holds (Logs "Same logger"). Stacked, that is the Back step. Where the
+	 * open item replaces the list (`onePane`), the item closes so the list
+	 * shows; beside the list it stays open.
+	 */
+	showList(category: CategoryId = this.category): void {
+		if (!this.stacked && this.onePane[category]) this.clearSelection(category);
+		this.back();
 	}
 
 	/** Return to the index (stacked mode), e.g. before focusing search. */
@@ -444,6 +461,7 @@ export class SettingsNavigation {
 		this.tabs = {};
 		this.view = 'page';
 		this.stacked = false;
+		this.onePane = {};
 		this.pendingAnchor = null;
 		this.pendingItem = null;
 		this.pendingOpen = null;

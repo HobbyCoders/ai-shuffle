@@ -190,6 +190,17 @@
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-dwrap {
 	width: 100%;
 }
+/* The page's own Back (CollectionPage) for an open item that is only a state
+   ("Not found", "Loading…", no access) with the list hidden: placed where a
+   DetailPane's Back sits, taking no height so the state stays centred. Not
+   displayed anywhere else (CollectionPage hides it by default). */
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail']:has(> .st-dpane > .st-empty-detail:not([data-idle])) > .st-dpane > .st-dback {
+	display: block;
+	position: relative;
+	height: 0;
+	max-width: calc(var(--st-reading-width) + 2 * var(--st-gutter));
+	margin-inline: var(--st-frame-inset) auto;
+}
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-back {
 	display: inline-flex;
 	/* The chevron's stroke, not its 16px box, sits on the column's left edge. */

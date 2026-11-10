@@ -69,7 +69,9 @@
 
 	function sameLogger(logger: string) {
 		model.sameLogger(logger);
-		settingsNav.back();
+		// The filtered list has to be on screen: where it hides behind the open
+		// entry, the entry closes; beside it, the entry stays open.
+		settingsNav.showList(CATEGORY);
 	}
 </script>
 

@@ -93,6 +93,16 @@
 	// replaceOnSelect pages always do. Stacked mode has its own steps.
 	const narrow = $derived(!settingsNav.stacked && showsOnePane(containerWidth));
 	const replace = $derived(replaceOnSelect || narrow);
+	// Tell the detail's list actions (Logs "Same logger") whether the list is
+	// hidden behind an open item, so they can close it to show their result.
+	$effect(() => {
+		if (!category) return;
+		const cat = category;
+		settingsNav.onePane[cat] = replace;
+		return () => {
+			delete settingsNav.onePane[cat];
+		};
+	});
 
 	// The open detail scrolls on its own beside the list, so a newly picked item
 	// starts at its top rather than where the previous item was scrolled to.
@@ -116,11 +126,15 @@
 			const row = [...(el?.querySelectorAll<HTMLElement>('[data-settings-item]') ?? [])].find(
 				(item) => item.dataset.settingsItem === previous
 			);
+			// An item the list no longer has (deleted, not found) has no row:
+			// the list's first row, else its title, takes focus instead.
 			const target = current
 				? el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')
-				: row?.matches('[data-settings-nav-item]')
-					? row
-					: row?.querySelector<HTMLElement>('[data-settings-nav-item]');
+				: (row?.matches('[data-settings-nav-item]')
+						? row
+						: row?.querySelector<HTMLElement>('[data-settings-nav-item]')) ??
+					lcol?.querySelector<HTMLElement>('[data-settings-list] [data-settings-nav-item]') ??
+					lcol?.querySelector<HTMLElement>('[data-settings-heading="page"]');
 			target?.focus({ preventScroll: !current });
 		});
 	});
@@ -211,6 +225,13 @@
 		</div>
 	</div>
 	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane}>
+		<!-- A detail that is only a state ("Not found", "Loading…", no access)
+		     has no Back of its own. Where it replaces the list, this one shows
+		     (settings.css); everywhere else it is not displayed. -->
+		{#if category && openItem}
+			{@const cat = category}
+			<div class="st-dback"><BackRow {label} onclick={() => settingsNav.clearSelection(cat)} /></div>
+		{/if}
 		{@render detail()}
 	</section>
 </div>
@@ -316,6 +337,10 @@
 		overflow-y: auto;
 		padding: 0 8px 56px;
 		min-height: 0;
+	}
+	/* Shown only for a state-only item that replaces the list (settings.css). */
+	.st-dback {
+		display: none;
 	}
 	.st-dpane {
 		/* Rows reflow when the pane is narrow (see settings.css). */
