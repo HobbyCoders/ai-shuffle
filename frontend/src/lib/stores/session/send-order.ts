@@ -7,9 +7,13 @@
  *  - Every send belongs to one lane: the chat it was made in, or, for a new
  *    chat's compose, that compose. A chat created from the compose stays in
  *    the compose's lane while a send of it is still open.
- *  - A send takes its turn in its lane the moment it is made, before any
- *    await. A caller that awaits before it sends (the composer, a generation
- *    choice) reserves the turn at the click (`reserveSend`).
+ *  - A send goes only on its place in line, taken the moment it is made,
+ *    before any await, and used once. A caller that awaits before it sends
+ *    (the composer, a generation choice) reserves it at the click
+ *    (`reserveSend`). A cancelled or used place sends nothing.
+ *  - A send queued in a new chat's compose reads, when its turn comes, how
+ *    the chat creation ahead of it ended: it goes to the chat created, or is
+ *    refused if that creation failed. Never a second create.
  *  - A turn ends only on a known outcome: its frame was written or admitted,
  *    the chat it creates was adopted, it was refused, or it was cancelled or
  *    abandoned. Elapsed time never ends a turn.
@@ -38,8 +42,8 @@ export interface SendTurn {
 
 /** A place in line taken before the send is made (`reserveSend`). */
 export interface SendReservation {
-	/** Gives the place up when nothing will be sent. Idempotent; a no-op
-	 *  once the send was made with it. */
+	/** Gives the place up: the send it was for then sends nothing.
+	 *  Idempotent; a no-op once the send was made with it. */
 	cancel(): void;
 }
 

@@ -6,6 +6,7 @@ import { auth } from '$lib/stores/auth.svelte';
 import { appData } from '$lib/stores/app-data.svelte';
 import { startLiveSync } from '$lib/services/live-sync';
 import type { ChatMessage } from '$lib/stores/types';
+import type { GenerationOption } from '$lib/utils/generation-choice';
 import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
 import '$lib/test-stubs/composer-dom';
@@ -541,5 +542,73 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		await waitFor(() => expect(queries()).toHaveLength(2));
 		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'panel prompt']);
 		await expect(panel).resolves.toBe(true);
+	});
+
+	it('keeps the note draft when the store refuses a send that waited too long behind an earlier one (#1444)', async () => {
+		const view = await compose('held-chat', { isStreaming: true });
+		const earlier = activeSession.reserveSend();
+		vi.useFakeTimers();
+		try {
+			await fireEvent.submit(view.container.querySelector('form')!);
+			await vi.advanceTimersByTimeAsync(16_000);
+			expect(queries()).toEqual([]);
+			expect(view.container.querySelector('.ProseMirror')?.textContent).toContain('read');
+			expect(view.container.querySelector('[data-file-chip]')).toBeTruthy();
+			expect(readDraft('held-chat')).toContain(NOTE_ID);
+		} finally { earlier.cancel(); vi.useRealTimers(); }
+	});
+
+	// Review round 3 (S10): an unmount gives the place up, and the send it
+	// belonged to is then called off rather than sent late, after a later one.
+	it('sends nothing late from a composer unmounted during its cold-cache check (#1444)', async () => {
+		let answerCache = (_: unknown) => {};
+		net.cache = () => new Promise((resolve) => { answerCache = resolve; });
+		const view = await compose('unmount-chat');
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		view.unmount();
+		const panel = activeSession.sendMessage('panel prompt');
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		expect(await panel).toBe(true);
+		answerCache({ cold: false, warn: false, large: false });
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(queries().map((frame) => frame.prompt)).toEqual(['panel prompt']);
+	});
+
+	it('sends nothing late from a generation choice unmounted while its pick saves (#1444)', async () => {
+		const { default: GenerationChoiceCard } = await import('./GenerationChoiceCard.svelte');
+		const { generationChoices } = await import('$lib/stores/generation-choices.svelte');
+		vi.spyOn(generationChoices, 'load').mockResolvedValue(undefined);
+		let finish!: (value: never) => void;
+		const saving = vi.spyOn(generationChoices, 'save').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+		start('choice-unmount-chat', null, {}, false);
+		const option = { source: 'fal', account: 'fal-ai', worker: 'worker-a', model: 'fal-ai/flux/dev', kind: 'image', options: {}, verified: false, schema: { fields: [] }, available: true, reason: null, price: { currency: 'USD', unit: 'item', amount: '0.025', total: '0.025', status: 'estimated' } } as unknown as GenerationOption;
+		const view = render(GenerationChoiceCard, { props: { kind: 'image', options: [option], tool: 'generateImage', prompt: 'a tree', toolId: 'choose-1', answeredBy: null } });
+		await fireEvent.click(view.getByRole('button', { name: 'Use this' }));
+		expect(saving).toHaveBeenCalledOnce();
+		// Same chat: its transcript window unmounts this row while saving.
+		view.unmount();
+		const panel = activeSession.sendMessage('panel prompt');
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		expect(await panel).toBe(true);
+		finish(undefined as never);
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(queries().map((frame) => frame.prompt)).toEqual(['panel prompt']);
+	});
+
+	// Review round 3 (S7): through the real refusal handler.
+	it('keeps a second new-chat send unsent after the first send is refused during reconnect (#1444)', async () => {
+		start(null as unknown as string, null, { worktreeIntent: 'local' }, false);
+		const first = activeSession.sendMessage('first');
+		const second = activeSession.sendMessage('second');
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		expect(await first).toBe(true);
+		expect(queries()).toHaveLength(1);
+		Socket.all[0].onmessage?.({ data: JSON.stringify({ type: 'error', client_message_id: queries()[0].client_message_id, message: 'Missing agent' }) });
+		expect(await second).toBe(false);
+		expect(queries()).toHaveLength(1);
 	});
 });

@@ -94,6 +94,8 @@ describe('mobile composer drawer after send', () => {
 			getActiveSession: () => sender
 		});
 		vi.spyOn(activeSession, 'sendMessage').mockImplementation(sender.sendMessage);
+		// The composer's place in line comes from the same sender, as in the store.
+		vi.spyOn(activeSession, 'reserveSend').mockImplementation(sender.reserveSend);
 		const { container, trigger } = await openComposer(false);
 		await fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 		await waitFor(() => expect(post).toHaveBeenCalledWith('/sessions/with-worktree', expect.any(Object)));

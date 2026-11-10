@@ -336,8 +336,8 @@
 		!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving && !collapsed
 	);
 
-	// The pick's place in line while its save runs (#1444); an unmounted card
-	// gives it up.
+	// The pick's place in line while its save runs (#1444). An unmounted card
+	// gives it up, and its reply is then not sent (the pick stays saved).
 	let openTurn: SendReservation | null = null;
 	onDestroy(() => openTurn?.cancel());
 

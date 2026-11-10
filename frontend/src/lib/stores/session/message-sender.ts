@@ -1509,18 +1509,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	// Every send, whichever caller started it, holds off an update reload
 	// until it settles (see trackSend), and is written after every earlier
-	// send to its chat (send-order.ts, #1444). The turn is taken here, as the
-	// send is made; a send with no earlier one open goes on without an await,
-	// exactly as before.
-
-	/** A new chat being created by a send, whose turn lasts until it ends. */
-	type Creation = { lane: SendLane; ended: () => boolean; done: Promise<void> };
-	const creations = new Set<Creation>();
+	// send to its chat (send-order.ts, #1444). A send with no earlier one open
+	// goes on without an await, exactly as before.
 
 	/** Ends once the new chat this send creates is adopted, or its creation
 	 *  ended another way: refused (its echo withdrawn), replaced, or the user
 	 *  left the compose. Never on time alone. Looked at every 50 ms, and at
-	 *  once whenever another send is made. */
+	 *  once whenever a send is made or reaches its turn in the compose. */
 	function untilCreated(requestId: string, commandId: string): CreationEnd {
 		const navigation = getInitGeneration();
 		const echoed = () => getState().messages.some(m => m.commandId === commandId);
@@ -1541,25 +1536,36 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		return { ended, done };
 	}
 
+	/** A new chat's compose, shared by its sends: the chat creation one of
+	 *  them started (pending), and how many of its creations ended without a
+	 *  chat (failed). A creation that ended with one is the chat now open. */
+	type Compose = { lane: string; creating: CreationEnd | null; failed: number };
+	let compose: Compose | null = null;
+	function settle(c: Compose): number {
+		if (c.creating?.ended()) {
+			if (!getState().sessionId) c.failed++;
+			c.creating = null;
+		}
+		return c.failed;
+	}
+
 	type Taken = {
 		lane: SendLane; chat: string | null | typeof ANY_CHAT; navigation: number; turn: SendTurn;
-		/** Made while a creation in its lane had not ended: it goes to the chat
-		 *  that creates, never as a second create. */
-		behindCreation: boolean;
+		/** The compose this send waits in, and its failed count when made. */
+		compose?: Compose; failed?: number;
 	};
 	function takeTurn(): Taken {
 		const made = getState();
 		const navigation = getInitGeneration();
-		const compose = `compose:${navigation}`;
-		const behind = (lane: SendLane) => [...creations].some(c => !c.ended() && (c.lane === lane || lane === ANY_CHAT));
-		if (made.isRestoringSession) {
-			return { lane: ANY_CHAT, chat: ANY_CHAT, navigation, behindCreation: behind(ANY_CHAT), turn: sendOrder.take(ANY_CHAT) };
-		}
+		if (made.isRestoringSession) return { lane: ANY_CHAT, chat: ANY_CHAT, navigation, turn: sendOrder.take(ANY_CHAT) };
+		const lane = `compose:${navigation}`;
+		if (compose?.lane !== lane) compose = { lane, creating: null, failed: 0 };
 		// A chat adopted from this compose stays in its lane while a send of
 		// the compose is open: a send queued there before the id existed keeps
 		// its place ahead of one made after.
-		const lane = !made.sessionId || sendOrder.isOpen(compose) ? compose : `chat:${made.sessionId}`;
-		return { lane, chat: made.sessionId, navigation, behindCreation: behind(lane), turn: sendOrder.take(lane) };
+		const chat = `chat:${made.sessionId}`;
+		if (made.sessionId && !sendOrder.isOpen(lane)) return { lane: chat, chat: made.sessionId, navigation, turn: sendOrder.take(chat) };
+		return { lane, chat: made.sessionId, navigation, compose, failed: settle(compose), turn: sendOrder.take(lane) };
 	}
 
 	/** Was the chat the send was made in left while it waited? Then nothing
@@ -1580,78 +1586,69 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		});
 	}
 
-	const reserved = new WeakMap<SendReservation, Taken & { spent: boolean }>();
+	const reserved = new WeakMap<SendReservation, Taken>();
+	/** Take a send's place in line now, for a caller that awaits before it
+	 *  sends (the composer, a generation choice). Pass it as `options.turn`;
+	 *  cancel it on every path that sends nothing. It never lapses: a send made
+	 *  later waits for it, at most SEND_ORDER_WAIT_MS. */
+	function reserveSend(): SendReservation {
+		const taken = takeTurn();
+		const reservation: SendReservation = { cancel() { if (reserved.delete(reservation)) taken.turn.release(); } };
+		reserved.set(reservation, taken);
+		return reservation;
+	}
+
 	const send = sender.sendMessage;
-	const ordered = {
-		sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
-			// A worktree create's own first send: part of the creating send,
-			// inside its turn, which lasts while this one's chat is created.
-			if (options?.skipWorktreeSetup && creationTurn) {
-				const creation = creationTurn;
-				return trackSend(() => send(prompt, options, (after) => { if (after) creation.holdUntil(after); }));
-			}
-			const held = options?.turn ? reserved.get(options.turn) : undefined;
-			let taken: Taken;
-			if (held && !held.spent) {
-				held.spent = true;
-				taken = held;
-			} else {
-				taken = takeTurn();
-			}
-			const { turn } = taken;
-			// What this send's turn still waits for once it returns (a new
-			// chat's creation). Written with nothing to wait for, it ends now.
-			const holds: Promise<unknown>[] = [];
-			const letNextGo = (after?: CreationEnd) => {
-				if (after) {
-					const creation: Creation = { lane: taken.lane, ...after };
-					creations.add(creation);
-					holds.push(after.done.finally(() => creations.delete(creation)));
-				} else if (!holds.length) turn.release();
-			};
-			return trackSend(async () => {
-				try {
-					if (turn.ready) {
-						if (!(await inTime(turn.ready))) {
-							// An earlier send to this chat has not ended: this one never
-							// goes ahead of it. Refused, the caller keeps the words.
-							if (!left(taken)) {
-								update(s => ({ ...s, error: taken.chat === null
-									? 'This session is still being created — try again in a moment.'
-									: 'An earlier message to this chat is still being sent. This one was not sent; try again in a moment.' }));
-							}
-							return false;
+	sender.sendMessage = (prompt: string, options?: SendMessageOptions): Promise<boolean> => {
+		// A worktree create's own first send: part of the creating send,
+		// inside its turn, which lasts while this one's chat is created.
+		if (options?.skipWorktreeSetup && creationTurn) {
+			const creation = creationTurn;
+			return trackSend(() => send(prompt, options, (after) => { if (after) creation.holdUntil(after); }));
+		}
+		// A send goes only on a place in line, used once. A caller with no
+		// await before it takes one now. A cancelled or used one sends
+		// nothing: that submission was called off, and its caller keeps the
+		// words as on any refusal.
+		const reservation = options?.turn ?? reserveSend();
+		const taken = reserved.get(reservation);
+		if (!taken) return Promise.resolve(false);
+		reserved.delete(reservation);
+		const { turn } = taken;
+		// What this send's turn still waits for once it returns (a new
+		// chat's creation). Written with nothing to wait for, it ends now.
+		const holds: Promise<void>[] = [];
+		const letNextGo = (after?: CreationEnd) => {
+			if (after) {
+				if (taken.compose) taken.compose.creating = after;
+				holds.push(after.done);
+			} else if (!holds.length) turn.release();
+		};
+		return trackSend(async () => {
+			try {
+				if (turn.ready) {
+					if (!(await inTime(turn.ready))) {
+						// An earlier send to this chat has not ended: this one never
+						// goes ahead of it. Refused, the caller keeps the words.
+						if (!left(taken)) {
+							update(s => ({ ...s, error: taken.chat === null
+								? 'This session is still being created — try again in a moment.'
+								: 'An earlier message to this chat is still being sent. This one was not sent; try again in a moment.' }));
 						}
-						if (left(taken)) return false;
-						// Queued behind a creation that ended without a chat: sent now
-						// it would start a second create the user did not ask for.
-						if (taken.behindCreation && taken.chat === null && !getState().sessionId) return false;
+						return false;
 					}
-					return await send(prompt, options, letNextGo);
-				} finally {
-					if (holds.length) void Promise.allSettled(holds).then(turn.release);
-					else turn.release();
+					if (left(taken)) return false;
+					// The chat this compose was creating, read now: sent to it once
+					// it exists; refused if that creation failed after this send
+					// was made, never sent as a second create.
+					if (taken.compose && settle(taken.compose) > taken.failed!) return false;
 				}
-			});
-		},
-		/** Take this send's place in line now, for a caller that awaits before
-		 *  it sends (the composer, a generation choice). Pass it as
-		 *  `options.turn`; cancel it on every path that sends nothing. It never
-		 *  lapses: a send made later waits for it, at most SEND_ORDER_WAIT_MS. */
-		reserveSend(): SendReservation {
-			const taken = takeTurn();
-			const reservation: SendReservation = {
-				cancel() {
-					const held = reserved.get(reservation);
-					if (!held || held.spent) return;
-					held.spent = true;
-					held.turn.release();
-				},
-			};
-			reserved.set(reservation, { ...taken, spent: false });
-			return reservation;
-		},
+				return await send(prompt, options, letNextGo);
+			} finally {
+				if (holds.length) void Promise.allSettled(holds).then(turn.release);
+				else turn.release();
+			}
+		});
 	};
-	sender.sendMessage = ordered.sendMessage;
-	return Object.assign(sender, { reserveSend: ordered.reserveSend });
+	return Object.assign(sender, { reserveSend });
 }

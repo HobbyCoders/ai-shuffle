@@ -502,4 +502,88 @@ describe('a second send while the first send creates the worktree (#1444)', () =
 		expect(post).toHaveBeenCalledTimes(1);
 		expect(wsConn.send.mock.calls.filter(([frame]) => frame.type === 'query')).toEqual([]);
 	});
+
+	// Review round 3: the outcome is read when the queued send's turn comes,
+	// so a creation that starts after the send was queued still counts.
+	it('keeps a send queued before the first send started its create unsent when that create fails', async () => {
+		post.mockRejectedValue({ status: 500, detail: 'worktree add failed' });
+		const { sender } = setup(staged, { realActiveSession: true });
+		// The composer accepted the first send but is still doing its own waits.
+		const turn = sender.reserveSend();
+		const second = sender.sendMessage('second');
+		const first = sender.sendMessage('first', { turn });
+		expect(await first).toBe(false);
+		expect(await second).toBe(false);
+		expect(post.mock.calls.filter(([path]) => path === '/sessions/with-worktree')).toHaveLength(1);
+	});
+});
+
+describe('a place in line is the only way to send (#1444)', () => {
+	const prompts = (wsConn: ReturnType<typeof setup>['wsConn']) =>
+		wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query').map(frame => frame.prompt);
+
+	it('sends nothing on a cancelled place, and frees the line for the next send', async () => {
+		const { sender, wsConn } = setup({ sessionId: 'old-chat', worktreeIntent: 'local' }, { realActiveSession: true });
+		const turn = sender.reserveSend();
+		const later = sender.sendMessage('later');
+		turn.cancel();
+		turn.cancel();
+		expect(await later).toBe(true);
+		// The cancelled submission's continuation reaches the store after all.
+		expect(await sender.sendMessage('called off', { turn })).toBe(false);
+		expect(prompts(wsConn)).toEqual(['later']);
+	});
+
+	it('sends nothing on a place already used', async () => {
+		const { sender, wsConn } = setup({ sessionId: 'old-chat', worktreeIntent: 'local' }, { realActiveSession: true });
+		const turn = sender.reserveSend();
+		expect(await sender.sendMessage('first', { turn })).toBe(true);
+		expect(await sender.sendMessage('again', { turn })).toBe(false);
+		expect(prompts(wsConn)).toEqual(['first']);
+	});
+
+	it('frees the line when a used place throws before its frame', async () => {
+		const { sender, wsConn } = setup({ sessionId: 'old-chat', worktreeIntent: 'local' }, { realActiveSession: true });
+		const turn = sender.reserveSend();
+		const first = sender.sendMessage('first', { turn, notesForm: { pathPrompt: 'path first', runsHere: async () => { throw new Error('ownership check failed'); } } });
+		const rejected = expect(first).rejects.toThrow('ownership check failed');
+		const later = sender.sendMessage('later');
+		await rejected;
+		expect(await later).toBe(true);
+		expect(prompts(wsConn)).toEqual(['later']);
+	});
+
+	it('writes an ordinary single send synchronously', async () => {
+		const { sender, wsConn } = setup({ sessionId: 'old-chat', worktreeIntent: 'local' }, { realActiveSession: true });
+		const sent = sender.sendMessage('plain');
+		expect(prompts(wsConn)).toEqual(['plain']);
+		expect(await sent).toBe(true);
+	});
+
+	it('keeps a new-chat send queued during reconnect unsent when the first send is refused', async () => {
+		vi.useFakeTimers();
+		try {
+			const { sender, deps, wsConn } = setup({ worktreeIntent: 'local' }, { realActiveSession: true });
+			wsConn.isConnected.mockReturnValue(false);
+			const first = sender.sendMessage('first');
+			const second = sender.sendMessage('second');
+			wsConn.isConnected.mockReturnValue(true);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(await first).toBe(true);
+			expect(prompts(wsConn)).toEqual(['first']);
+			// The correlated refusal withdraws the first send's echo.
+			deps.update(s => ({ ...s, messages: [] }));
+			await vi.advanceTimersByTimeAsync(100);
+			expect(await second).toBe(false);
+			expect(prompts(wsConn)).toEqual(['first']);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
+	});
+
+	it('still sends a retry made after the first new-chat send was refused', async () => {
+		const { sender, deps, wsConn } = setup({ worktreeIntent: 'local' }, { realActiveSession: true });
+		expect(await sender.sendMessage('first')).toBe(true);
+		deps.update(s => ({ ...s, messages: [] }));
+		expect(await sender.sendMessage('retry')).toBe(true);
+		expect(prompts(wsConn)).toEqual(['first', 'retry']);
+	});
 });

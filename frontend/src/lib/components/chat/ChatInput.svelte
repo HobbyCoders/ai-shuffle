@@ -1108,8 +1108,8 @@
 	// (#1344). Held until the check has answered.
 	let pendingSubmit: { cleared: boolean; done: Promise<void> } | null = null;
 	// Places in line taken by submissions still on their way to the store
-	// (#1444). An unmounted composer gives them up: a send it still makes
-	// then goes behind every send made since.
+	// (#1444). An unmounted composer gives them up: such a submission then
+	// sends nothing, and keeps its draft as on any refusal.
 	const openTurns = new Set<SendReservation>();
 	onDestroy(() => {
 		for (const turn of openTurns) turn.cancel();
