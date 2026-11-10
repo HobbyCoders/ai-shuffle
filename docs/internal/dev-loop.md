@@ -64,16 +64,17 @@ shutdown measured 0.282 seconds and the delayed real-query check settled/exited
 in 6.856 seconds. On the ten-second budget, a controlled two-second
 memory-publication tail exceeds the 1.5-second reserve: terminal history is
 persisted and lifespan reached, but the HTTP request fails and replication is
-unpublished. Already-written local legacy memory files remain durable. The next
-qualifying native/project turn preserves local-only/newer files in reconcile
-and uploads them in its end-of-turn push; app startup alone does not retry it.
-This requires sync to be enabled and the original files still present. The
-separate durable `Remember` fact store is not this legacy replication tail;
-already-issued `run_sync` writes may finish after awaiter cancellation. Docker's
-larger reserve lets the controlled two-second tail finish within its 30 seconds.
-Coordinator and launcher-budget work is tracked in
-[#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305), not implemented
-here. Forced disposable dev-loop teardown still has its separate
+unpublished. Already-written local legacy memory files remain durable, and the
+interrupted push stays queued on local disk: the next start publishes it
+(last-write-wins; local files are never overwritten), as does the next
+qualifying native/project turn. This requires sync to be enabled and the
+original files still present. The separate durable `Remember` fact store is not
+this legacy replication tail; already-issued `run_sync` writes may finish after
+awaiter cancellation. Docker's larger reserve lets the controlled two-second
+tail finish within its 30 seconds. Session stops share the same absolute stop
+deadline and report unfinished saving instead of a clean stop
+([#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305)); launcher
+budgets are unchanged. Forced disposable dev-loop teardown still has its separate
 four-second budget; it is not the normal app's graceful-stop guarantee.
 
 It tracks unknown

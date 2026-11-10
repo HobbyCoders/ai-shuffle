@@ -211,26 +211,34 @@ async def stop_session_work(sid: str, *, shutdown: bool = False, source: Optiona
                                 source=source or (SERVER_SHUTDOWN_REASON if shutdown else "app_stop"))
 
 
-async def stop_running_sessions() -> None:
+async def stop_running_sessions(*, deadline: Optional[float] = None) -> bool:
     """Quiesce local work while the database and session clients are still alive.
 
     Do not sweep shared database rows: another desktop may own those sessions.
     Allow at most 25 seconds for stops, settlement/lease release and persistence
-    together. Process exit ends work still unwinding; boot reconcile aborts a
-    turn left behind with a dead lease.
+    together, and never past ``deadline``: shutdown passes the one absolute stop
+    deadline captured at the first stop signal (query_shutdown.begin_shutdown).
+    Process exit ends work still unwinding; boot reconcile aborts a turn left
+    behind with a dead lease. Returns False when a stop, a turn or the flush
+    was still unfinished at the deadline, so the caller must not report a
+    clean stop.
     """
-    deadline = asyncio.get_running_loop().time() + SHUTDOWN_SETTLE_SECONDS
+    now = asyncio.get_running_loop().time()
+    deadline = now + SHUTDOWN_SETTLE_SECONDS if deadline is None else min(
+        deadline, now + SHUTDOWN_SETTLE_SECONDS)
     from app.core import session_runtime, startup, task_persistence
 
     startup.is_shutting_down = True
     executions = session_runtime.active_executions()
     session_ids = active_session_ids()
 
+    settled = True
     stops = {asyncio.create_task(stop_session_work(sid, shutdown=True)) for sid in session_ids}
     for stop in stops:
         stop.add_done_callback(_log_stop_failure)
     if stops:
-        done, _ = await asyncio.wait(stops, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+        done, unfinished = await asyncio.wait(stops, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+        settled = not unfinished
         for stop in done:
             stop.result()
     # Ordinary shutdown leaves execute() alive to persist and release its lease.
@@ -238,11 +246,36 @@ async def stop_running_sessions() -> None:
     # Either way, never extend the shutdown budget for a wedged turn or stop.
     if executions:
         _, stuck = await asyncio.wait(set(executions), timeout=max(0, deadline - asyncio.get_running_loop().time()))
+        settled = settled and not stuck
         for task in stuck:
-            logger.warning("Shutdown: the turn in %s did not settle within %.0fs; the exit ends it",
-                           executions.get(task), SHUTDOWN_SETTLE_SECONDS)
+            logger.warning("Shutdown: the turn in %s did not settle by the stop deadline; the exit ends it",
+                           executions.get(task))
     flush = asyncio.create_task(task_persistence.flush())
     flush.add_done_callback(_log_stop_failure)
     await asyncio.wait({flush}, timeout=max(0, deadline - asyncio.get_running_loop().time()))
     if flush.done():
         flush.result()
+    else:
+        settled = False
+        logger.warning("Shutdown: background task persistence did not finish by the stop deadline")
+    return settled
+
+
+def unfinished_saving(*, sessions: bool, queries: bool) -> list[str]:
+    """What was still saving at the stop deadline; empty means a clean stop.
+
+    The one rule for both shutdown hooks: the pre-stop route (the only hook on
+    Windows) and the lifespan's exit banner. Unfinished work is left for
+    startup: boot reconcile and request-query receipts for turns, the durable
+    queue in memory_sync for memory-folder publication.
+    """
+    from app.core.memory_sync import pending_publications
+
+    parts = []
+    if not sessions:
+        parts.append("session turns")
+    if not queries:
+        parts.append("request queries")
+    if pending_publications():
+        parts.append("memory publication")
+    return parts

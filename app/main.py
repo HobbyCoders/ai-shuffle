@@ -394,13 +394,14 @@ async def lifespan(app: FastAPI):
         transcript_producer = ProjectionProducer()
         transcript_producer.start()
 
+    queries_settled = sessions_settled = True
     try:
         yield
     finally:
         # A retired query's HTTP owner may already be gone. Let its isolated
         # finalizer use the remaining absolute drain deadline before DB teardown.
         from app.core import query_shutdown
-        await query_shutdown.finish()
+        queries_settled = await query_shutdown.finish()
         try:
             if transcript_producer is not None:
                 await transcript_producer.stop()
@@ -469,7 +470,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("sync_engine.shutdown failed")
     if runner_approved:
-        await shutdown_services()
+        sessions_settled = await shutdown_services()
     # Journal losses buffered since the last rate-limited warning would die
     # with the process; write them to each store's journal_loss.json.
     try:
@@ -488,8 +489,11 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     logger.info("Shutting down AI Shuffle...")
+    from app.core.desktop_lifecycle import unfinished_saving
     from app.core.file_logging import log_shutdown_banner
-    await run_sync(log_shutdown_banner)
+    # Not a clean stop while saving is unfinished at the deadline (#1305).
+    await run_sync(log_shutdown_banner, unfinished_saving(
+        sessions=bool(sessions_settled), queries=queries_settled))
 
 
 # Create FastAPI application

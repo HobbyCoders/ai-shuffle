@@ -447,6 +447,9 @@ async def push_memory(project_id: Optional[str], working_dir: Optional[str],
         else:
             await run_sync(_publish, project_id, working_dir, leg, token)
     except Exception:  # noqa: BLE001
+        if token is not None:
+            # Ended (or never dispatched); its marker stays for the next start.
+            _finish_publication(project_id, token, False)
         logger.debug("memory_sync: push failed", exc_info=True)
 
 

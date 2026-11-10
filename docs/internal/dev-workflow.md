@@ -78,23 +78,22 @@ event, fresh unread/settle marker, usage booking, or session-activity timestamp.
 Work-time backfill also skips the unknown interval. Both terminal/receipt
 atomicity and normal-completion accounting remain unchanged.
 
-**Remaining limit:** the shortest normal stop budget is 10 seconds, lifespan
-`stop_running_sessions` can take 25 seconds and adapter disconnect can take
-5 seconds. Thus full lifecycle cleanup can still exceed an outer kill budget;
-terminal durability is not a guarantee that every shutdown write completes.
-An idle full-app shutdown measured 0.282 seconds. The retained controlled
-two-second memory-publication case now finishes on both 10- and 30-second
-budgets despite HTTP-owner cancellation. A legacy memory-mirror push stalled
-past the absolute deadline can still be unpublished, but the already-written
-local file is durable. `push_memory` is native per-project file replication,
-not the durable `Remember` fact store: the next qualifying native/project turn
-reconciles without overwriting local-only/newer files, then uploads them.
-Startup terminal recovery does not retry that mirror push; sync must remain
-enabled and the original files present (normal last-write-wins rules apply).
-Real stalled PostgreSQL/adapter teardown and real-provider or cross-worker
-shutdown have not been verified. Remaining lifecycle-budget and legacy mirror
-work is tracked in [#1305](https://github.com/HobbyCoders/ai-shuffle/issues/1305);
-launcher budgets are unchanged here.
+**Shutdown deadline and outcome (#1305):** `stop_running_sessions` (from the
+pre-stop route and the lifespan) waits on the same absolute deadline that
+`query_shutdown.begin_shutdown` captures at the first stop signal, capped by its
+own 25 seconds; a later stop signal never renews it. When session turns, the
+task-persistence flush, request queries or a memory-folder publication are
+still unfinished at that deadline, `/desktop/stop-sessions` fails instead of
+answering `{"stopped": true}` and the lifespan's exit banner says saving was
+unfinished. Startup completes that work: boot reconcile and request-query
+receipts for turns, and the durable publication queue for memory folders.
+`push_memory` (native per-project file replication, not the durable `Remember`
+store) writes one local marker per project before dispatching and clears it
+once the push has run; startup re-runs the ordinary push for each marker
+(last-write-wins, never writes local files, never tombstones). Adapter
+disconnect (5 seconds) is not bounded by the shared deadline. Real stalled
+PostgreSQL/adapter teardown and real-provider or cross-worker shutdown have not
+been verified. Launcher budgets are unchanged.
 
 ## The loop
 

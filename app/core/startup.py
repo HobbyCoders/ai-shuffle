@@ -804,7 +804,7 @@ is_shutting_down: bool = False
 _SHUTDOWN_EVENT_WRITE_DRAIN_SECONDS = 5.0
 
 
-async def shutdown_services() -> None:
+async def shutdown_services() -> bool:
     """Shutdown async services in correct dependency order.
 
     ORDER MATTERS (lifecycle-notification batch, item 1). The old order closed
@@ -817,6 +817,8 @@ async def shutdown_services() -> None:
         3. in-memory reset_all()s    (live store / permissions / task registry)
         4. remaining services        (http client, automations, connectors)
         5. close_pool — VERY LAST    (every step above may still need the DB)
+
+    Returns whether the session stop settled by the shared stop deadline.
     """
     global is_shutting_down
     is_shutting_down = True
@@ -863,12 +865,18 @@ async def shutdown_services() -> None:
     except Exception:
         pass
 
-    # Settle turns and release their leases before disconnecting clients or DB.
+    # Settle turns and release their leases before disconnecting clients or DB,
+    # within the one absolute stop deadline of the first stop signal (#1305).
+    sessions_settled = False
     try:
+        from app.core import query_shutdown
         from app.core.desktop_lifecycle import stop_running_sessions
-        await stop_running_sessions()
+        sessions_settled = await stop_running_sessions(deadline=query_shutdown.begin_shutdown())
     except Exception:
         logger.exception("Failed to stop sessions during shutdown")
+    if not sessions_settled:
+        logger.warning("Shutdown: sessions were still saving at the stop deadline; "
+                       "startup recovery completes them")
 
     # Shutdown the session pool (disconnect all live adapters)
     try:
@@ -933,3 +941,4 @@ async def shutdown_services() -> None:
             await drain
     finally:
         executor.shutdown(wait=False)
+    return sessions_settled
