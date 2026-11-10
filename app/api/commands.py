@@ -455,11 +455,40 @@ def _is_prompt_event(row: dict) -> bool:
     return True
 
 
+def _agent_text(row: dict) -> str:
+    """The prompt text the agent got for a ``message.user`` event, trimmed.
+
+    The typed text, unless the turn recorded a different one at send time
+    (``agent_content``: a note reference the worker expanded, #1401). Matched
+    against the transcript instead of the shown text; the note is never read
+    again here, since it may have changed since.
+    """
+    payload = row.get("payload") or {}
+    return (payload.get("agent_content") or payload.get("content") or "").strip()
+
+
+def _recorded_agent_target(session_id: str, shown: str, occurrence: int) -> Optional[tuple[str, int]]:
+    """Map a shown prompt and its occurrence to the text the agent got and its
+    occurrence among the transcript's prompts, for a prompt whose turn recorded
+    a different text. None for every other prompt (the exact match applies)."""
+    prompts = [row for row in _load_message_events(session_id) if _is_prompt_event(row)]
+    shown_rows = [i for i, row in enumerate(prompts)
+                  if ((row.get("payload") or {}).get("content") or "").strip() == shown]
+    if occurrence < 0 or occurrence >= len(shown_rows):
+        return None
+    index = shown_rows[occurrence]
+    agent = _agent_text(prompts[index])
+    if agent == shown:
+        return None
+    return agent, sum(1 for row in prompts[:index] if _agent_text(row) == agent)
+
+
 def _resolve_checkpoint_uuid_from_content(
     sdk_session_id: str,
     working_dir: str,
     target_content: Optional[str],
     target_occurrence: int,
+    session_id: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Resolve a checkpoint uuid from the target prompt's content.
 
@@ -471,6 +500,9 @@ def _resolve_checkpoint_uuid_from_content(
     prompts retained after an empty-turn discard), so global positions skew
     in any session that has seen an interrupt — but those lines never equal
     a real prompt's text. FAILS CLOSED when nothing matches (content guard).
+
+    With ``session_id``, a prompt whose turn recorded the text the agent got
+    (``_agent_text``) is matched on that text instead of the shown one.
     """
     want = (target_content or "").strip()
     if not want:
@@ -478,6 +510,9 @@ def _resolve_checkpoint_uuid_from_content(
             "Rewind refused: no target content supplied to resolve against "
             "(content guard)"
         )
+    recorded = _recorded_agent_target(session_id, want, target_occurrence) if session_id else None
+    if recorded is not None:
+        want, target_occurrence = recorded
     checkpoints = _get_checkpoints(sdk_session_id, working_dir)
     matches = [
         cp for cp in checkpoints
@@ -562,8 +597,7 @@ def _resolve_rewind_from_seq(
         )
         prompts = [
             (i, row) for i, row in enumerate(events)
-            if _is_prompt_event(row)
-            and ((row.get("payload") or {}).get("content") or "").strip() == want
+            if _is_prompt_event(row) and _agent_text(row) == want
         ]
         if occurrence >= len(prompts):
             return None, (
@@ -795,6 +829,7 @@ async def _execute_rewind(
                 _resolve_checkpoint_uuid_from_content,
                 sdk_session_id, working_dir,
                 request.target_content, request.target_occurrence,
+                session_id,
             )
             if resolved_uuid is None:
                 return RewindResponseV2(

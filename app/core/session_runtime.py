@@ -1576,11 +1576,12 @@ class SessionRuntime:
             from app.core.upload_transfer import rewrite_prompt
             recorded_prompt = rewrite_prompt(upload_prompt, mapping)
             paths = [mapping.get(path, path) for path in turn_payload.get("upload_paths") or []]
+            agent_content = await self._note_expanded(recorded_prompt)
             await recorder.record_user_message(
                 recorded_prompt, profile_id=self.turn.get("profile_id"),
                 source=fluid_turn_source(app_source), upload_paths=paths or None,
                 accepted_input_id=turn_payload.get("accepted_input_id"),
-                extra_payload=owner_receipt,
+                extra_payload={**owner_receipt, **({"agent_content": agent_content} if agent_content else {})},
             )
             if self._abort_reason == "recording_failed":
                 raise RuntimeError("Could not record the message's prepared attachments")
@@ -1607,10 +1608,12 @@ class SessionRuntime:
                 turn_payload = await asyncio.to_thread(upload_transfer.resolve_upload_references, turn_payload, session)
                 await asyncio.to_thread(upload_transfer.validate_turn_uploads, turn_payload, session)
                 self.turn["payload"] = turn_payload
+            record_user = not resume and not already_recorded and not awaiting_uploads
             await recorder.start(
                 prompt,
                 profile_id=self.turn.get("profile_id"),
-                record_user=not resume and not already_recorded and not awaiting_uploads,
+                record_user=record_user,
+                agent_content=await self._note_expanded(prompt) if record_user else None,
                 source=fluid_turn_source(app_source),
                 owner_receipt=owner_receipt,
                 upload_paths=turn_payload.get("upload_paths") or None,
@@ -2374,6 +2377,22 @@ class SessionRuntime:
                 self.session_id, exc_info=True,
             )
             return None
+
+    async def _note_expanded(self, prompt: str) -> Optional[str]:
+        """The text the engine gives the agent for ``prompt``, when a note
+        reference changes it; else None.
+
+        The engine expands ``@Notes/<id>`` at turn setup with this turn's
+        principal (``query_engine._resolve_note_references_for``). The message
+        event records the result next to the typed text, so a rewind can find
+        the transcript prompt without reading the note again (#1401).
+        """
+        from app.core.query_engine import NOTE_REFERENCE, _resolve_note_references_for
+
+        if not prompt or not NOTE_REFERENCE.search(prompt):
+            return None
+        expanded = await asyncio.to_thread(_resolve_note_references_for, prompt, self.api_user_id)
+        return expanded if expanded != prompt else None
 
     def _steer_refusal(
         self, row: Dict[str, Any], *, stored_workspace_ids: Any = _UNREAD,
