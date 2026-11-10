@@ -15,6 +15,8 @@
 //   header   open the panel, open one terminal, then two more, switch tabs,
 //            search, copy, clear, run and stop a command, close a terminal
 //            from its tab, Watch command and back, close the panel
+//   resize   seven terminals, the last selected, then 390 -> 360 -> 500 -> 390:
+//            the selected tab and its close button stay in the strip (#1394)
 import { DEFAULT_VIEWPORTS, runJourney } from './runner.mjs';
 import { composerControl, expect, gotoApp, seededChatId, waitChatOpen } from './lib/app.mjs';
 import { fakeTerminals } from './lib/fake-terminals.mjs';
@@ -77,6 +79,16 @@ async function expectUsableHeader(page, variant, what) {
 	} else {
 		expect(g.tabs.top < g.tools.bottom && g.tools.top < g.tabs.bottom, `${where}: the default-width panel keeps tabs and tools on one row (tabs ${JSON.stringify(g.tabs)}, tools ${JSON.stringify(g.tools)})`);
 	}
+	return g;
+}
+
+/** The selected tab's name and close button sit inside the strip (#1394), whatever the header's layout. */
+async function expectSelectedInView(page, what) {
+	const g = await headerGeometry(page);
+	const inside = (inner, outer) => inner && outer && inner.left >= outer.left - 1 && inner.right <= outer.right + 1;
+	expect(g.panelOverflow <= 1 && g.barOverflow <= 1, `${what}: nothing is wider than the panel (panel ${g.panelOverflow}px, header ${g.barOverflow}px)`);
+	expect(inside(g.currentName, g.tabs), `${what}: the selected tab's name is in view (${JSON.stringify(g.currentName)}, strip ${JSON.stringify(g.tabs)})`);
+	expect(inside(g.currentClose, g.tabs) && inside(g.currentClose, g.panel), `${what}: the selected tab's close button is in view (${JSON.stringify(g.currentClose)}, strip ${JSON.stringify(g.tabs)})`);
 	return g;
 }
 
@@ -175,6 +187,45 @@ await runJourney({
 				await mark('close the panel');
 				await press(side.getByRole('button', { name: 'Close side panel' }));
 				await side.waitFor({ state: 'detached', timeout: 5000 });
+			}
+		},
+		{
+			// #1394: the strip scrolled the selected tab into view only when the
+			// selection changed, so a narrower strip (a phone rotating, the header
+			// going from two rows to one) left the tab cut off or out of view.
+			name: 'resize',
+			viewports: ['phone'],
+			async setup(ctx) {
+				const { page, status } = ctx;
+				await page.addInitScript(fakeTerminals);
+				await gotoApp(page, status, `/?session=${encodeURIComponent(seededChatId(status, 'worktree'))}`);
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 1000 });
+			},
+			async act({ page, mark, log }) {
+				const side = page.getByRole('complementary', { name: 'Session side panel' });
+				const panel = side.getByRole('region', { name: 'Terminal' });
+
+				await mark('open seven terminals');
+				await (await composerControl(page, 'Toggle terminal')).click();
+				await panel.waitFor({ timeout: 15_000 });
+				await panel.getByRole('button', { name: 'Open terminal', exact: true }).tap();
+				await tabCount(page, 1);
+				for (let count = 2; count <= 7; count++) {
+					await panel.getByRole('button', { name: 'New terminal', exact: true }).tap();
+					await panel.locator('.popover').getByRole('button', { name: 'Open terminal', exact: true }).tap();
+					await tabCount(page, count);
+				}
+				await page.waitForFunction(() => document.querySelector('aside[aria-label="Session side panel"] .tab:last-child [role="tab"]')?.getAttribute('aria-selected') === 'true', null, { timeout: 5000 });
+				await page.waitForTimeout(400);
+				log(`390: ${JSON.stringify((await expectSelectedInView(page, 'seven terminals at 390')).currentClose)}`);
+
+				for (const width of [360, 500, 390]) {
+					await mark(`resize to ${width}`);
+					await page.setViewportSize({ width, height: 844 });
+					await page.waitForTimeout(500);
+					const g = await expectSelectedInView(page, `seven terminals, last selected, resized to ${width}`);
+					log(`${width}: strip ${JSON.stringify(g.tabs)}, close ${JSON.stringify(g.currentClose)}`);
+				}
 			}
 		}
 	],

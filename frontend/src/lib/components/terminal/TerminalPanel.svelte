@@ -67,18 +67,37 @@
 
 	// A narrow strip scrolls sideways with its scrollbar hidden, so bring the
 	// current tab into view when it changes (a new tab lands off the edge).
+	function revealTab(strip: HTMLElement, id: string) {
+		const tab = Array.from(strip.querySelectorAll('[role="tab"]')).find((el) => el.id === `terminal-tab-${id}`)?.closest('.tab');
+		if (!tab) return;
+		const box = strip.getBoundingClientRect();
+		const at = tab.getBoundingClientRect();
+		if (at.left < box.left) strip.scrollLeft -= box.left - at.left;
+		else if (at.right > box.right) strip.scrollLeft += at.right - box.right;
+	}
 	$effect(() => {
 		const id = activeId;
 		const strip = tabsEl;
 		if (!id || !strip) return;
-		void tick().then(() => {
-			const tab = Array.from(strip.querySelectorAll('[role="tab"]')).find((el) => el.id === `terminal-tab-${id}`)?.closest('.tab');
-			if (!tab) return;
-			const box = strip.getBoundingClientRect();
-			const at = tab.getBoundingClientRect();
-			if (at.left < box.left) strip.scrollLeft -= box.left - at.left;
-			else if (at.right > box.right) strip.scrollLeft += at.right - box.right;
+		void tick().then(() => revealTab(strip, id));
+	});
+	// And when the strip gets narrower or wider (#1394): a phone rotating, the
+	// panel dragged, the header moving between one and two rows. Width only, so
+	// a swipe through the tabs is left alone; a hidden panel reports 0 and is
+	// put right when it shows again. Disconnected when the strip goes away.
+	$effect(() => {
+		const strip = tabsEl;
+		if (!strip || typeof ResizeObserver === 'undefined') return;
+		let width = -1;
+		const observer = new ResizeObserver((entries) => {
+			const next = entries[entries.length - 1]?.contentRect.width ?? 0;
+			if (next === width) return;
+			width = next;
+			const id = untrack(() => activeId);
+			if (id && next > 0) revealTab(strip, id);
 		});
+		observer.observe(strip);
+		return () => observer.disconnect();
 	});
 	/** The button behind the request being handled, while it is handled. */
 	let requestOrigin: Element | null = null;

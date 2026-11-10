@@ -410,6 +410,47 @@ describe('tab strip', () => {
 		await waitFor(() => expect(scrollLeft).toBe(110));
 		vi.restoreAllMocks();
 	});
+
+	it('keeps the current tab in view when the strip gets narrower, and stops watching on unmount (#1394)', async () => {
+		const observers: { target?: Element; fire: (width: number) => void; disconnected: boolean }[] = [];
+		vi.stubGlobal('ResizeObserver', class {
+			entry: (typeof observers)[number];
+			constructor(cb: (entries: { contentRect: { width: number } }[]) => void) {
+				this.entry = { fire: (width) => cb([{ contentRect: { width } }]), disconnected: false };
+				observers.push(this.entry);
+			}
+			observe(el: Element) { this.entry.target = el; }
+			disconnect() { this.entry.disconnected = true; }
+		});
+		const view = await mount([info('t1'), info('t2')]);
+		const strip = await waitFor(() => view.getByRole('tablist'));
+		await waitFor(() => expect(view.getByRole('tab', { selected: true }).id).toBe('terminal-tab-t2'));
+		const watcher = observers.find((o) => o.target === strip);
+		expect(watcher).toBeDefined();
+		let scrollLeft = 0;
+		Object.defineProperty(strip, 'scrollLeft', { get: () => scrollLeft, set: (v: number) => { scrollLeft = v; } });
+		let stripRight = 332;
+		const rect = (left: number, right: number) => ({ left, right, top: 0, bottom: 30, width: right - left, height: 30, x: left, y: 0, toJSON() {} }) as DOMRect;
+		vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+			if (this === strip) return rect(6, stripRight);
+			if (this.classList?.contains('tab') && this.querySelector('[role="tab"]')?.id === 'terminal-tab-t2') return rect(262 - scrollLeft, 338 - scrollLeft);
+			return rect(0, 60);
+		});
+		// The strip narrows from 332 to 302 px: the current tab's right edge is cut off.
+		stripRight = 308;
+		watcher!.fire(302);
+		expect(scrollLeft).toBe(30);
+		// A height-only change (same width) leaves a swipe through the tabs alone.
+		scrollLeft = 0;
+		watcher!.fire(302);
+		expect(scrollLeft).toBe(0);
+		// A hidden panel reports 0 wide: nothing to measure, nothing scrolls.
+		watcher!.fire(0);
+		expect(scrollLeft).toBe(0);
+		view.unmount();
+		expect(watcher!.disconnected).toBe(true);
+		vi.restoreAllMocks();
+	});
 });
 
 describe('emulator options', () => {
