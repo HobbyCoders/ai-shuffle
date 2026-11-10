@@ -21,7 +21,8 @@ vi.mock('$lib/api/owner', () => owner);
 vi.mock('$lib/stores/owner-access.svelte', () => ({ ownerAccess: { refresh } }));
 vi.mock('$lib/api/client', () => ({
 	api: transport,
-	getErrorMessage: (e: { detail?: string }, fallback: string) => e?.detail ?? fallback
+	getErrorMessage: (e: { detail?: string }, fallback: string) => e?.detail ?? fallback,
+	isApiError: (e: unknown) => typeof e === 'object' && e !== null && 'status' in e && 'detail' in e
 }));
 vi.mock('$lib/stores/layout.svelte', () => ({ layout }));
 vi.mock('$lib/services/desktop', () => ({
@@ -148,7 +149,7 @@ describe('while loading', () => {
 		const password = await screen.findByRole('button', { name: 'Owner password Unavailable' });
 		expect((password as HTMLButtonElement).disabled).toBe(true);
 		expect(password.hasAttribute('aria-busy')).toBe(false);
-		expect(password.closest('.st-row')?.querySelector('.st-rh')?.textContent).toBe('Could not load');
+		expect(password.closest('.st-row')?.querySelector('.st-rh')?.textContent).toBe('Could not load (no answer)');
 		expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
 		const chat = await screen.findByRole('button', { name: 'Chat instructions Unavailable' });
 		expect((chat as HTMLButtonElement).disabled).toBe(true);
@@ -228,10 +229,103 @@ describe('owner status load failures', () => {
 
 	it('explains that an older worker has no owner passwords', async () => {
 		owner.fetchOwnerStatus.mockResolvedValueOnce({ ok: false, reason: 'unsupported' });
-		render(SecurityPage);
-		expect(await screen.findByText('Not supported')).toBeTruthy();
-		expect(screen.getByText(/does not support owner passwords/)).toBeTruthy();
+		const { container } = render(SecurityPage);
+		const value = await screen.findByRole('button', { name: 'Owner password Not supported' });
+		expect(value.closest('.st-row')?.querySelector('.st-rh')?.textContent).toBe('Needs a newer worker');
+		// The full sentence is for a screen reader; the row says it on screen (#1403).
+		expect(screen.getByRole('status', { name: '' }).textContent).toMatch(/does not support owner passwords/);
+		expect(screen.getByText(/does not support owner passwords/).classList.contains('st-vh')).toBe(true);
+		expect(container.querySelector('p.st-msg')).toBeNull();
 		expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+	});
+});
+
+describe('a failed load inserts nothing between the groups (#1403)', () => {
+	it('says why in the rows\' hints, keeps Try again, and tells a screen reader in full', async () => {
+		owner.fetchOwnerStatus.mockResolvedValueOnce({ ok: false, reason: 'error', code: 500 });
+		transport.get.mockImplementation(async (path: string) => {
+			if (path === '/settings/security-instructions') throw { status: 500, detail: 'Database unavailable' };
+			return {};
+		});
+		const { container } = render(SecurityPage);
+		const password = await screen.findByRole('button', { name: 'Owner password Unavailable' });
+		const hint = (button: HTMLElement) => button.closest('.st-row')?.querySelector('.st-rh')?.textContent;
+		expect(hint(password)).toBe('Could not load (error 500)');
+		const chat = await screen.findByRole('button', { name: 'Chat instructions Unavailable' });
+		await waitFor(() => expect(hint(chat)).toBe('Could not load (error 500)'));
+		// The value buttons are described by those hints.
+		expect(document.getElementById(chat.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Could not load (error 500)');
+
+		// No visible notice between the groups; the alerts take no space.
+		expect(container.querySelector('p.st-msg')).toBeNull();
+		const alerts = screen.getAllByRole('alert');
+		expect(alerts.map((a) => a.textContent?.trim())).toEqual([
+			'Could not load owner access status. The worker answered with an error (status 500).',
+			'Database unavailable'
+		]);
+		for (const alert of alerts) expect(alert.classList.contains('st-vh')).toBe(true);
+
+		// Try again stays a focusable button in the row, described by the full error.
+		const retry = screen.getByRole('button', { name: 'Try again' });
+		expect(password.closest('.st-row')?.contains(retry)).toBe(true);
+		expect(document.getElementById(retry.getAttribute('aria-describedby') ?? '')?.textContent).toContain('status 500');
+		retry.focus();
+		expect(document.activeElement).toBe(retry);
+		await fireEvent.click(retry);
+		expect(await loadedButton(/^Owner password/)).toBeTruthy();
+		expect(hint(screen.getByRole('button', { name: 'Owner password Set' }))).toBe('Asked once per browser');
+		expect(screen.getAllByRole('alert').map((a) => a.textContent)).toEqual(['Database unavailable']);
+	});
+
+	it('announces a second failure after Try again', async () => {
+		let answer!: (value: unknown) => void;
+		owner.fetchOwnerStatus
+			.mockResolvedValueOnce({ ok: false, reason: 'unreachable' })
+			.mockReturnValueOnce(new Promise((done) => (answer = done)));
+		render(SecurityPage);
+		await screen.findByRole('alert');
+		await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+		// While it retries the alert leaves, so the next failure is inserted (and read) again.
+		expect(screen.getByRole('button', { name: 'Retrying…' })).toBeTruthy();
+		expect(screen.queryByRole('alert')).toBeNull();
+		answer({ ok: false, reason: 'unreachable' });
+		expect((await screen.findByRole('alert')).textContent?.trim()).toBe('Could not load owner access status. The worker did not answer.');
+	});
+
+	it('shows a non-owner "Owner only" with no alert and no retry', async () => {
+		owner.fetchOwnerStatus.mockResolvedValueOnce({ ok: false, reason: 'error', code: 403 });
+		transport.get.mockImplementation(async (path: string) => {
+			if (path === '/settings/security-instructions') throw { status: 403, detail: 'Forbidden' };
+			return {};
+		});
+		const { container } = render(SecurityPage);
+		const password = await screen.findByRole('button', { name: /^Owner password / });
+		await waitFor(() => expect(password.closest('.st-row')?.querySelector('.st-rh')?.textContent).toBe('Owner only'));
+		expect(screen.queryByRole('alert')).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+		expect(container.querySelector('p.st-msg')).toBeNull();
+		// Chat instructions keeps its normal hint.
+		const chat = await screen.findByRole('button', { name: /^Chat instructions / });
+		expect(chat.closest('.st-row')?.querySelector('.st-rh')?.textContent).toBe('Sent to every agent');
+	});
+
+	it('clears the load error once a later read of the instructions succeeds', async () => {
+		let fail = true;
+		transport.get.mockImplementation(async (path: string) => {
+			if (path === '/settings/security-instructions') {
+				if (fail) throw new Error('offline');
+				return { ...instructions };
+			}
+			return {};
+		});
+		const { container } = render(SecurityPage);
+		const chat = await screen.findByRole('button', { name: 'Chat instructions Unavailable' });
+		expect(chat.closest('.st-row')?.querySelector('.st-rh')?.textContent).toBe('Could not load (no answer)');
+		fail = false;
+		resourceSync.invalidate(['settings']);
+		await loadedButton(/^Chat instructions/);
+		expect(screen.queryByRole('alert')).toBeNull();
+		expect(container.querySelector('p.st-msg')).toBeNull();
 	});
 });
 

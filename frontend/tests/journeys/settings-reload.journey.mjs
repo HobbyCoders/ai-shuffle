@@ -41,4 +41,35 @@ const reloadCase = (label) => ({
 	}
 });
 
-await runJourney({ name: 'settings-reload', allow: DEV_INSTANCE_NOISE, cases: pages.map(reloadCase) });
+// Security when its data cannot be read (#1403): the two requests answer 500
+// after the first paint, as a worker that errors would. The rows say so in
+// their own hints; no notice is inserted between the groups to push them down.
+const FAILING = /\/api\/v1\/(owner\/status|settings\/security-instructions)(\?|$)/;
+const failedLoadCase = {
+	...reloadCase('Security'),
+	name: 'reload-on-security-when-loading-fails',
+	allow: [
+		...reloadCase('Security').allow,
+		{ kind: 'failed_requests', status: 500, url: FAILING, reason: 'this case answers these two requests with 500 on purpose' }
+	],
+	async setup(ctx) {
+		await reloadCase('Security').setup(ctx);
+		// The context's route also catches what the service worker fetches.
+		await ctx.page.context().route(FAILING, async (route) => {
+			if (route.request().method() !== 'GET') return route.continue();
+			await new Promise((done) => setTimeout(done, 1500));
+			await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Synthetic failure' }) }).catch(() => {});
+		});
+	},
+	async act(ctx) {
+		await reloadCase('Security').act(ctx);
+		const { page } = ctx;
+		const row = (id) => page.locator(`[data-setting-anchor="${id}"]`).filter({ visible: true }).first();
+		expect((await row('security.ownerPassword').locator('.st-rh').textContent()) === 'Could not load (error 500)', 'Owner password says why in its hint');
+		expect((await row('security.secInstr').locator('.st-rh').textContent()) === 'Could not load (error 500)', 'Chat instructions says why in its hint');
+		expect(await row('security.ownerPassword').getByRole('button', { name: 'Try again' }).isEnabled(), 'Try again is offered in the row');
+		expect((await page.locator('.settings-shell p.st-msg.err').filter({ visible: true }).count()) === 0, 'no notice is inserted between the groups');
+	}
+};
+
+await runJourney({ name: 'settings-reload', allow: DEV_INSTANCE_NOISE, cases: [...pages.map(reloadCase), failedLoadCase] });

@@ -9,7 +9,7 @@
 	 * store, polled only while this page is mounted.
 	 */
 	import { onMount } from 'svelte';
-	import { api, getErrorMessage } from '$lib/api/client';
+	import { api, getErrorMessage, isApiError } from '$lib/api/client';
 	import { terminalsApi } from '$lib/api/terminals';
 	import { fetchOwnerStatus, setTrustedLan, type OwnerStatus, type OwnerStatusFailure } from '$lib/api/owner';
 	import { ownerAccess } from '$lib/stores/owner-access.svelte';
@@ -30,6 +30,11 @@
 	import SecurityInstructionsEditor from './editors/SecurityInstructionsEditor.svelte';
 	import './editors/editors.css';
 
+	/** A failed load's one-line hint: the HTTP status, or that the worker did not answer. */
+	function couldNotLoad(code: number | null | undefined): string {
+		return code ? `Could not load (error ${code})` : 'Could not load (no answer)';
+	}
+
 	/* ---------- owner access ---------- */
 
 	let owner = $state<OwnerStatus | null>(null);
@@ -40,11 +45,19 @@
 	let ownerOutcome = $state<'changed' | 'set' | null>(null);
 	let lanBusy = $state(false);
 	let signInError = $state('');
+	const uid = $props.id();
+	const ownerErrorId = `${uid}-owner-error`;
 
 	/* Loading, loaded or failed, the row keeps one shape: a hint line and the
 	   value button (which a narrow page drops under the label), so the rows
-	   under it are not pushed around when the status lands (#1301). */
+	   under it are not pushed around when the status lands (#1301). A failed
+	   load says so in that hint, not in a notice inserted under the group,
+	   which would push the groups below down (#1403). */
 	const ownerPending = $derived(!owner && !ownerFailure);
+	/** The load failed for a reason Try again can fix (not 403, not an older worker). */
+	const ownerRetryable = $derived(
+		!owner && !!ownerFailure && ownerFailure.reason !== 'unsupported' && !(ownerFailure.reason === 'error' && ownerFailure.code === 403)
+	);
 	const ownerHint = $derived(
 		ownerOutcome === 'changed'
 			? 'Other browsers signed out'
@@ -60,7 +73,7 @@
 							? 'Needs a newer worker'
 							: ownerFailure?.reason === 'error' && ownerFailure.code === 403
 								? 'Owner only'
-								: 'Could not load'
+								: couldNotLoad(ownerFailure?.reason === 'error' ? ownerFailure.code : null)
 	);
 
 	async function loadOwner() {
@@ -212,6 +225,8 @@
 	let instrDefault = $state('');
 	let instrCustomized = $state(false);
 	let instrLoad = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
+	/** The failed first load's HTTP status (null: no answer), for the row's hint. */
+	let instrLoadCode = $state<number | null>(null);
 	let instrBusy = $state(false);
 	let instrError = $state('');
 	let instrOpen = $state(false);
@@ -230,6 +245,8 @@
 		const clean = !instrBusy && instrText === instrSaved;
 		try {
 			const value = await api.get<Instructions>('/settings/security-instructions');
+			// A later read recovered from a failed first load: its message is stale.
+			if (instrLoad === 'error') instrError = '';
 			instrLoad = 'ok';
 			if (quiet && (!clean || instrBusy || instrText !== instrSaved)) {
 				if (value.current !== instrSaved) instrRemote = value;
@@ -240,6 +257,7 @@
 			if (isForbidden(e)) instrLoad = 'forbidden';
 			else if (!quiet) {
 				instrLoad = 'error';
+				instrLoadCode = isApiError(e) ? e.status : null;
 				instrError = getErrorMessage(e, 'Could not load the chat instructions.');
 			}
 		}
@@ -355,7 +373,7 @@
 				<ExpandToggle value={FORBIDDEN_TEXT} open={false} disabled />
 			{:else if ownerFailure}
 				<ExpandToggle value="Unavailable" open={false} disabled />
-				<button type="button" class="st-btn sm" disabled={ownerLoading} onclick={() => void loadOwner()}>
+				<button type="button" class="st-btn sm" disabled={ownerLoading} aria-describedby={ownerRetryable && !ownerLoading ? ownerErrorId : undefined} onclick={() => void loadOwner()}>
 					{ownerLoading ? 'Retrying…' : 'Try again'}
 				</button>
 			{:else}
@@ -387,14 +405,17 @@
 			</InlineConfirm>
 		</SettingRow>
 	</RowGroup>
-	{#if ownerFailure && !owner && ownerFailure.reason !== 'unsupported' && !(ownerFailure.reason === 'error' && ownerFailure.code === 403)}
-		<p class="st-msg err" role="alert">
+	<!-- The row's hint shows a failed load; these say it in full to a screen
+	     reader without taking space between the groups (#1403). The alert
+	     leaves while Try again runs, so a second failure is announced too. -->
+	{#if ownerRetryable && !ownerLoading && ownerFailure}
+		<p class="st-vh" role="alert" id={ownerErrorId}>
 			Could not load owner access status. {ownerFailure.reason === 'error'
 				? `The worker answered with an error (status ${ownerFailure.code}).`
 				: 'The worker did not answer.'}
 		</p>
 	{:else if ownerFailure?.reason === 'unsupported' && !owner}
-		<p class="st-msg" role="status">This worker does not support owner passwords. Update the worker to manage them here.</p>
+		<p class="st-vh" role="status">This worker does not support owner passwords. Update the worker to manage them here.</p>
 	{/if}
 	{#if signInError}<p class="st-msg err" role="alert">{signInError}</p>{/if}
 	{#if ownerOutcome}
@@ -436,7 +457,11 @@
 				onchange={(on) => void setDedicatedDesktop(on)}
 			/>
 		</SettingRow>
-		<SettingRow id="security.secInstr" expanded={instrOpen && instrLoad === 'ok' ? instrEditor : undefined}>
+		<SettingRow
+			id="security.secInstr"
+			hint={instrLoad === 'error' ? couldNotLoad(instrLoadCode) : undefined}
+			expanded={instrOpen && instrLoad === 'ok' ? instrEditor : undefined}
+		>
 			{#if instrLoad === 'ok'}
 				<ExpandToggle value={instrValue} bind:open={instrOpen} />
 			{:else}
@@ -445,7 +470,13 @@
 			{/if}
 		</SettingRow>
 	</RowGroup>
-	{#if instrError && !instrOpen}<p class="st-msg err" role="alert">{instrError}</p>{/if}
+	<!-- A failed load is the row's hint (#1403); a failed save or revert, after
+	     the reader acted, keeps its visible line. -->
+	{#if instrLoad === 'error'}
+		<p class="st-vh" role="alert">{instrError}</p>
+	{:else if instrError && !instrOpen}
+		<p class="st-msg err" role="alert">{instrError}</p>
+	{/if}
 
 	<RowGroup title="Terminals on other workers">
 		<SettingRow id="security.peerTerminals" dim={peerTerminalsOn === null} value={peerTerminalsOn ?? undefined} onReset={() => void setPeerTerminals(false)}
