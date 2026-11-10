@@ -2474,6 +2474,11 @@ async def deliver_started_report(home, frame, *, hops=0, steer=False, event_id=N
     # retry after an unclear commit or a restart finds its receipt.
     receipt = event_id or report_event_id(home, frame)
     outcome = await _admit_here(home, frame, receipt, steer=steer)
+    if outcome == "gone" and not hops:
+        # A deleted starter keeps the report on its child, as before #1443:
+        # a deleted chat runs on no worker, so nothing guards its ownership.
+        from app.core import turn_scheduler
+        return await turn_scheduler.on_started_session_terminal(home, frame)
     if outcome in _DELIVERED or outcome in _FINAL:
         return outcome
     if outcome != "moved" and hops:
