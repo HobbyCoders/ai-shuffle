@@ -2213,7 +2213,7 @@
 		// read as a shift, so hold the painted slot for that paint only and give
 		// it back on the next frame, where it shrinks on its own.
 		const mark = { sessionId: s.sessionId, messages: s.messages.length, queued: s.queuedMessages.length };
-		const handoff = landedFromQueue(handoffMark, mark) && !presentedTailError;
+		const handoff = landedFromQueue(handoffMark, mark) && s.isStreaming && !s.stopRequestedTurnId && !presentedTailError;
 		handoffMark = mark;
 		if (handoff) {
 			const pendingHeight = tailControlsRef?.getBoundingClientRect().height ?? 0;
