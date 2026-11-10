@@ -272,6 +272,31 @@ function _isServerError(e: unknown): boolean {
 	return isApiError(e) && e.status !== undefined && e.status >= 500;
 }
 
+/** How soon to look again while a session's checkout is still being created. */
+export const CHECKOUT_PREPARING_RETRY_MS = 1000;
+let _preparingRetry: ReturnType<typeof setTimeout> | null = null;
+
+/** The owning worker's 409 for a session checkout it is still creating (#1342):
+ *  `{error_code: 'checkout_preparing'}`. A plain 409 (a real failure, or a
+ *  worker from before this code) is not this. */
+function _isCheckoutPreparing(e: unknown): boolean {
+	if (!isApiError(e) || e.status !== 409) return false;
+	const detail = (e.body as { detail?: unknown } | null | undefined)?.detail;
+	return !!detail && typeof detail === 'object' && (detail as { error_code?: unknown }).error_code === 'checkout_preparing';
+}
+
+/** Show the neutral not-loaded state, never "Git unavailable" or another
+ *  checkout's status, and look again shortly for the same context. */
+function _awaitPreparingCheckout(): void {
+	_update((s) => ({ ...s, status: null, loading: false, hydrated: false, stale: true, error: null }));
+	if (_preparingRetry !== null) clearTimeout(_preparingRetry);
+	const key = _loadedKey;
+	_preparingRetry = setTimeout(() => {
+		_preparingRetry = null;
+		if (_loadedKey === key) void git.retryLoad();
+	}, CHECKOUT_PREPARING_RETRY_MS);
+}
+
 // ============================================================================
 // Checkout identity + cache
 // ============================================================================
@@ -643,6 +668,10 @@ async function _loadCore(
 		// / reused worktree session). _checkWorktreeGone clears state to a definitive
 		// no-repo status so the header hides Ship It rather than showing stale controls.
 		if (_checkWorktreeGone(e)) {
+			return;
+		}
+		if (_isCheckoutPreparing(e)) {
+			_awaitPreparingCheckout();
 			return;
 		}
 		const errObj = e as { detail?: string; message?: string; status?: number };
@@ -1118,6 +1147,7 @@ export const git = {
 			if (_loadedKey !== key) return;
 			if (_checkWorktreeGone(e)) return; // Worktree deleted — stop polling
 			if (_isServerError(e)) { _recordServerError(); return; }
+			if (_isCheckoutPreparing(e)) { _awaitPreparingCheckout(); return; }
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to refresh status' }));
 		} finally {

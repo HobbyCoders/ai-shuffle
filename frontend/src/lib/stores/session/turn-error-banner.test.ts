@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+	bannerRepeatsRow,
 	followTurnError,
 	raiseTurnError,
 	unplaceTurnError,
 	type TurnErrorAnchor,
+	visibleTurnError,
 } from './turn-error-banner';
 import { reduce, reduceAll, TURN_FAILURES_KEPT, type V2SessionState, type WireEvent } from './v2/reducer';
 
@@ -287,5 +289,59 @@ describe('turn-error banner from a late frame past many failures (review round 4
 		expect(failures).toHaveLength(41);
 		expect(failures[0]).toEqual({ turnId: 't0', seq: 3 });
 		expect(TURN_FAILURES_KEPT).toBeGreaterThanOrEqual(1024);
+	});
+});
+
+describe('turn-error banner, shown once with its turn\'s row (#1341)', () => {
+	/** What the chat shows for one failed turn: the banner text and the transcript rows saying it. */
+	function shown(chat: Chat): { banner: string | null; rows: number } {
+		const held = chat.anchor && chat.error === chat.anchor.message && bannerRepeatsRow(chat.anchor, chat.state)
+			? chat.anchor.message : null;
+		const banner = visibleTurnError({ error: chat.error, errorBannerHeld: held });
+		const rows = chat.state.messages.filter(m => m.role === 'system' && m.systemSubtype === 'error'
+			&& m.content === chat.error).length;
+		return { banner, rows };
+	}
+
+	it('a failed turn whose error row says the same shows it once, in the transcript', () => {
+		const chat = new Chat(prompt('t1', 1));
+		chat.raise('t1');
+		chat.fold([abort('t1', 3)]);
+		expect(shown(chat)).toEqual({ banner: null, rows: 1 });
+	});
+
+	it('a late frame for an already-logged failure shows it once too', () => {
+		const chat = new Chat(failed('t1', 1));
+		chat.raise('t1');
+		expect(shown(chat)).toEqual({ banner: null, rows: 1 });
+	});
+
+	it('keeps the banner when the logged failure says something else', () => {
+		const chat = new Chat(prompt('t1', 1));
+		chat.raise('t1', 'Fork here to continue: the context is full');
+		chat.fold([abort('t1', 3, 'context limit reached')]);
+		expect(shown(chat).banner).toBe('Fork here to continue: the context is full');
+	});
+
+	it('keeps the banner for a frame naming no turn, and before the failure is logged', () => {
+		const untied = new Chat(prompt('t1', 1));
+		untied.raise(null);
+		expect(shown(untied).banner).toBe(FAILED);
+		const early = new Chat(prompt('t1', 1));
+		early.raise('t1');
+		expect(bannerRepeatsRow(early.anchor!, early.state)).toBe(false);
+	});
+
+	it('does not match an older turn\'s identical error row', () => {
+		const chat = new Chat([...failed('t0', 1), ...prompt('t1', 4)]);
+		chat.raise('t1');
+		expect(bannerRepeatsRow(chat.anchor!, chat.state)).toBe(false);
+	});
+
+	it('a held banner that offers Fork here still shows', () => {
+		expect(visibleTurnError({ error: FAILED, errorBannerHeld: FAILED, forkOfferSessionId: 's2' })).toBe(FAILED);
+		expect(visibleTurnError({ error: FAILED, errorBannerHeld: FAILED })).toBeNull();
+		expect(visibleTurnError({ error: FAILED, errorBannerHeld: 'older' })).toBe(FAILED);
+		expect(visibleTurnError({ error: null, errorBannerHeld: FAILED })).toBeNull();
 	});
 });

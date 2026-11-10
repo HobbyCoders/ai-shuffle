@@ -653,3 +653,33 @@ describe('SystemMessage — agent compaction', () => {
 		expect(text).not.toContain('Context Compacted');
 	});
 });
+
+describe('SystemMessage — readable labels (#1346)', () => {
+	it('shows an Away decision with readable text, never the raw away_decision name', () => {
+		const content = 'Deploy target → staging (recommended)';
+		const { container } = render(SystemMessage, { message: makeMessage({
+			systemSubtype: 'away_decision', content,
+			systemData: { kind: 'answered', content, decisions: [{ question: 'Where?', header: 'Deploy target', choice: 'staging' }] },
+		}) });
+		expect(screen.getByText('Away Decision')).toBeTruthy();
+		expect(screen.getByText('answered')).toBeTruthy();
+		expect(container.textContent).toContain(content);
+		expect(container.textContent).not.toContain('away_decision');
+	});
+
+	it('marks a deferred Away decision as deferred', () => {
+		const content = 'Deferred until you are back: run rm -rf build';
+		render(SystemMessage, { message: makeMessage({
+			systemSubtype: 'away_decision', content, systemData: { kind: 'deferred', action: 'run rm -rf build', content },
+		}) });
+		expect(screen.getByText('deferred')).toBeTruthy();
+	});
+
+	it('never shows an unknown subtype by its raw name', () => {
+		const { container } = render(SystemMessage, { message: makeMessage({
+			systemSubtype: 'some_new_note', systemData: { content: 'Something happened.' },
+		}) });
+		expect(container.textContent).toContain('Something happened.');
+		expect(container.textContent).not.toContain('some_new_note');
+	});
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { reduceAll, withLogEpoch, type WireEvent } from './reducer';
+import { reduceAll, STOPPED_BEFORE_REPLY, withLogEpoch, type WireEvent } from './reducer';
 import type { ShuffleMobileRuntime } from '$lib/api/runtime';
 import {
 	foldProjection, materializeProjection, projectionReferences, ProjectionUnsupported,
@@ -89,7 +89,11 @@ describe('dark transcript projection protocol', () => {
 		ingest(store, Array.from({ length: 120 }, () => event('system.note', { subtype: 'info', content: 'notice' })));
 		store.append([event('turn.started', { turn_id: 'next', source: 'agent_message' }),
 			event('turn.aborted', { turn_id: 'next', reason: 'interrupt' })]);
-		store.assertFullParity();
+		// No reply text after the barrier: the stop leaves its own record (#1340).
+		const stopped = store.assertFullParity().messages.filter(message => message.content === STOPPED_BEFORE_REPLY);
+		expect(stopped).toHaveLength(1);
+		expect(store.assertFullParity().messages.find(message => message.role === 'assistant' && message.type === 'text')?.content)
+			.toBe('Answer\n\n[Stopped]');
 	});
 
 	it('finds implicit interrupt prose past a not-sent row beyond the visible margin', () => {

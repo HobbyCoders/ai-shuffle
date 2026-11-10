@@ -221,6 +221,11 @@ export interface ActiveSessionState {
 	 *  `offer_fork` means the worker that owns the session is unreachable.
 	 *  Cleared together with `error`. */
 	forkOfferSessionId?: string | null;
+	/** The `error` text whose banner is held back because its failed turn's
+	 *  own transcript error row shows the same words, or is about to (#1341).
+	 *  While it equals `error`, the banner steps aside unless it offers an
+	 *  action (Fork here). Set only by the feed controller. */
+	errorBannerHeld?: string | null;
 	profile: string;
 	sessionProfileId: string | null;
 	currentQueryProfileId: string | null;
@@ -441,6 +446,7 @@ function defaultState(): ActiveSessionState {
 		wsManualReconnect: 'idle',
 		error: null,
 		forkOfferSessionId: null,
+		errorBannerHeld: null,
 		profile: getPersistedProfile(),
 		sessionProfileId: null,
 		currentQueryProfileId: null,
