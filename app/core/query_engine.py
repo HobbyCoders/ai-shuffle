@@ -3348,6 +3348,13 @@ async def _stream_to_websocket_turn(
                     if init_model:
                         last_model_info = init_model
                         yield _model_info_frame(init_model)
+                    # Internal, never rendered or recorded: the user node this
+                    # turn writes, for SessionRuntime alone (a streamed call
+                    # request's checkpoint binding). Only the native adapter's
+                    # TurnStarted names one.
+                    init_node = message.data.get("node_id")
+                    if isinstance(init_node, str) and init_node:
+                        yield {"type": "turn_node", "node_id": init_node}
 
                 elif message.subtype == "model_served":
                     # The model the provider says answered this call (fluid

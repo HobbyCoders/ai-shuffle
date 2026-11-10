@@ -352,6 +352,20 @@ class TranscriptRewound(EventBase):
     from_seq: int
 
 
+class CallCheckpointBound(EventBase):
+    """The turn that ran a streamed call's request wrote checkpoint ``node_id``.
+
+    Host-written only, from the running turn's own payload; never rendered.
+    ``call_request_id`` is the identity recorded on that request's caller
+    message, so a rewind of the message resolves its checkpoint by identity
+    (#1265). A consumer that does not know this type ignores it.
+    """
+
+    type: Literal["call.checkpoint_bound"] = "call.checkpoint_bound"
+    call_request_id: str
+    node_id: str
+
+
 class ArtifactCreated(EventBase):
     type: Literal["artifact.created"] = "artifact.created"
     hash: str
@@ -394,6 +408,7 @@ SessionEvent = Annotated[
         ArtifactCreated,
         TurnProviderAlive,
         QueuedMessageWithdrawn,
+        CallCheckpointBound,
     ],
     Field(discriminator="type"),
 ]
@@ -431,4 +446,5 @@ EVENT_TYPES: tuple[str, ...] = (
     "artifact.created",
     "turn.provider_alive",
     "queued_message.withdrawn",
+    "call.checkpoint_bound",
 )

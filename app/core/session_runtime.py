@@ -520,6 +520,46 @@ def _with_voice_note(prompt: str, payload: Optional[Dict[str, Any]]) -> str:
     return f"{prompt}\n\n{voice_turn_note(instructions)}"
 
 
+# Turn-payload keys that mean the prompt the engine gets is not this row's
+# request alone (a redelivered or requeued steer, folded task completions,
+# cross-install uploads rewritten into it, a request another worker forwarded,
+# a continuation): such a turn never binds a call request's checkpoint.
+_CALL_BINDING_EXCLUSIONS = (
+    "steer_already_delivered", "requeued_from_turn_id", "pending_frames",
+    "upload_blob_ids", "forwarded_by_device", "continued_turn",
+)
+
+
+def _call_binding_request(
+    turn: Dict[str, Any], source: Optional[str], *, resume: bool, held_peer: str,
+) -> Optional[str]:
+    """The streamed call request whose checkpoint this turn may bind, or None.
+
+    Only a turn the server's streamed call path queued carries
+    ``call_request_id`` (``voice_stream.delegate_to_selected_model``); nothing
+    a client, a prompt or a peer sends sets turn-payload keys (a forwarded
+    request is excluded by ``forwarded_by_device``). The turn binds only when
+    the node its prompt becomes holds that request and nothing else the app
+    folded in: a fresh user turn, the caller's words already recorded by the
+    call, no held peer messages, no approval note (#1265).
+    """
+    from app.core.owner_confirm import engine_note
+    from app.core.turn_manager import VOICE_DELEGATION
+    from app.core.voice_prompts import CALL_REQUEST_FIELD, is_call_request_id
+
+    payload = turn.get("payload") or {}
+    request_id = payload.get(CALL_REQUEST_FIELD)
+    if not is_call_request_id(request_id):
+        return None
+    if (source != "user" or resume or held_peer
+            or payload.get("user_message_already_recorded") is not True
+            or payload.get(VOICE_DELEGATION) is not True
+            or any(payload.get(key) for key in _CALL_BINDING_EXCLUSIONS)
+            or engine_note(payload)):
+        return None
+    return request_id
+
+
 def _cap_ws_tool_input(event: Dict[str, Any]) -> Dict[str, Any]:
     """Return ``event`` with an oversized tool ``input`` replaced by a marker.
 
@@ -1731,6 +1771,10 @@ class SessionRuntime:
             from app.core import owner_confirm as _confirm
 
             _confirm.arm_pass(self.session_id, self.turn.get("payload"), self.turn_id)
+            call_bind_id = _call_binding_request(
+                self.turn, self.source, resume=resume, held_peer=held_peer,
+            )
+            bound_nodes: set = set()
             turn_events = _stream_to_websocket_impl(
                 prompt=engine_prompt,
                 resume=resume,
@@ -1766,6 +1810,19 @@ class SessionRuntime:
                 ),
             )
             async for event in turn_events:
+                if isinstance(event, dict) and event.get("type") == "turn_node":
+                    # Internal (query_engine): the user node the engine's
+                    # TurnStarted named. Never recorded or rendered as itself;
+                    # a call request's turn records it as that request's
+                    # checkpoint binding. Every distinct node is recorded, so
+                    # a turn that wrote two (a failover retry) binds none.
+                    node_id = event.get("node_id")
+                    if call_bind_id and isinstance(node_id, str) and node_id and node_id not in bound_nodes:
+                        bound_nodes.add(node_id)
+                        await recorder.record_call_binding(call_bind_id, node_id)
+                        if self._abort_reason == "recording_failed":
+                            return
+                    continue
                 if held_peer and not engine_started:
                     # Same point the store counts them delivered (see the
                     # restore in ``finally``), so a turn that never starts

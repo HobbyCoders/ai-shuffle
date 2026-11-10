@@ -4422,7 +4422,10 @@ class HarnessAdapter(ProviderAdapter):
         if cls == "TurnStarted":
             # Parallels the SDK's system-init message: the loops read
             # data["session_id"] (session link) and data.get("model")
-            # (model_info seeding).
+            # (model_info seeding). ``node_id`` is the user node this turn
+            # writes ("" when it writes none): the only place the app learns
+            # which checkpoint a turn's prompt became (a call request's
+            # binding, see SessionRuntime._record_call_binding).
             self._sdk_session_id = event.session_id
             self._current_model = event.model
             self._block_types.clear()
@@ -4434,6 +4437,7 @@ class HarnessAdapter(ProviderAdapter):
                         "session_id": event.session_id,
                         "model": event.model,
                         "provider": event.provider,
+                        "node_id": getattr(event, "node_id", "") or "",
                     },
                 )
             ]
