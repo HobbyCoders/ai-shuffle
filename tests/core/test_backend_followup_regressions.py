@@ -65,6 +65,50 @@ async def test_checkout_mismatch_refuses_message_before_enqueue_and_preserves_wo
     assert git(checkout.path, "branch", "--show-current") == "owner-work"
 
 
+def _detach_worker_behind_its_work(checkout):
+    """The worker commits on its task branch, then detaches onto the base (#1437)."""
+    (Path(checkout.path) / "work.txt").write_text("worker commit")
+    git(checkout.path, "add", "work.txt")
+    git(checkout.path, "commit", "-m", "worker work")
+    tip = git(checkout.path, "rev-parse", "HEAD")
+    git(checkout.path, "switch", "--detach", "HEAD~1")
+    return tip
+
+
+@pytest.mark.asyncio
+async def test_follow_up_puts_an_idle_workers_clean_detached_checkout_back_on_its_branch(repo, monkeypatch):
+    checkout = bind_worker(repo)
+    tip = _detach_worker_behind_its_work(checkout)
+
+    async def enqueue(*args, **kwargs):
+        assert git(checkout.path, "branch", "--show-current") == checkout.branch
+        assert git(checkout.path, "rev-parse", "HEAD") == tip
+        return {}
+
+    enqueue_mock = AsyncMock(side_effect=enqueue)
+    monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", enqueue_mock)
+    monkeypatch.setattr("app.core.agent_messaging.message_provenance_async", AsyncMock(return_value="parent"))
+    await turn_scheduler.on_agent_message("followup", "parent", "continue")
+    enqueue_mock.assert_awaited_once()
+    assert (Path(checkout.path) / "work.txt").read_text() == "worker commit"
+
+
+@pytest.mark.asyncio
+async def test_follow_up_still_refuses_a_detached_worker_checkout_with_a_tracked_change(repo, monkeypatch):
+    checkout = bind_worker(repo)
+    _detach_worker_behind_its_work(checkout)
+    tracked = next(p for p in Path(checkout.path).iterdir() if p.is_file() and p.name != ".git")
+    tracked.write_text("unsaved edit")
+    enqueue = AsyncMock(return_value={})
+    monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", enqueue)
+    monkeypatch.setattr("app.core.agent_messaging.message_provenance_async", AsyncMock(return_value="parent"))
+    with pytest.raises(worker_checkout.WorkerCheckoutError):
+        await turn_scheduler.on_agent_message("followup", "parent", "continue")
+    enqueue.assert_not_awaited()
+    assert tracked.read_text() == "unsaved edit"
+    assert git(checkout.path, "branch", "--show-current") == ""
+
+
 @pytest.mark.asyncio
 async def test_unavailable_checkout_pr_discovery_uses_base_not_refused_folder(repo, monkeypatch, caplog):
     from app.api import git_helpers
