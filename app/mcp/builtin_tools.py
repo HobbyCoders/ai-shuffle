@@ -2938,14 +2938,16 @@ def create_builtin_tools_server(
     @tool(
         "HandOffSession",
         "Queue moving THIS session to another of the owner's workers so they "
-        "can continue there (e.g. 'wrap up and hand off to DesktopWorker'). When "
-        "this turn and its background work end, the app commits and pushes the "
-        "branch, syncs the target's checkout and context, and moves the session; "
-        "the outcome is posted in the chat, and the chat then resumes on the new "
-        "worker by itself with your note as its prompt. Call it once, then finish "
-        "the turn with a short summary of where the work stands. Pass the "
-        "worker's name as shown in the app (or its device id) and an optional "
-        "one-line note saying what to continue there; use absolute dates, not relative ones.",
+        "can continue there (e.g. 'wrap up and hand off to DesktopWorker'). The "
+        "move waits for this turn, queued messages and every running subagent and "
+        "background task (Monitors, CI watches, shells); still busy after 10 "
+        "minutes, it is cancelled. So first reach a stop point, commit and push, "
+        "stop or wait out subagents and background tasks, then call this once and "
+        "end the turn with a short summary; restart that work on the target. The "
+        "app pushes the branch, syncs the target and moves the session; the chat "
+        "resumes there with your note as its prompt, and a failed move is reported "
+        "back to you. Pass the worker's name as shown in the app (or its device "
+        "id) and an optional one-line note on what to continue; use absolute dates.",
         {
             "type": "object",
             "properties": {
