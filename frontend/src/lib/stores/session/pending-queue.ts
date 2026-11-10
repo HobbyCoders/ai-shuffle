@@ -153,11 +153,14 @@ const MAX_PARKED_SESSIONS = 50;
 /** Session id → the pending bubbles it showed when the user left it. */
 const parked = new Map<string, PendingEntry[]>();
 /**
- * Session id → the bubbles `unpark` put back on screen, until the first
- * authoritative snapshot after the return speaks for them. That snapshot is the
- * server's whole answer about a queue this page was not watching: a bubble it
- * no longer lists ran or was cancelled while the chat was closed, so it is not
- * held for a delivery (#524, #1052).
+ * Session id → the bubbles a return to that chat put back on screen (the
+ * parked ones, and any still held for a delivery when the chat was left),
+ * until the first authoritative snapshot after the return speaks for them.
+ * That snapshot is the server's whole answer about a queue this page was not
+ * watching: a bubble it no longer lists ran or was cancelled while the chat was
+ * closed, so it is neither held nor kept held for a delivery (#524, #1052).
+ * The mark outlives a re-open of the same chat and a later departure; only its
+ * snapshot, the next return, a deleted chat or a full reset ends it.
  */
 const returned = new Map<string, Set<string>>();
 /** The returned bubbles the snapshot being recorded right now answers for. */
@@ -326,7 +329,6 @@ export const pendingQueue = {
 	park(id: string | null, entries: PendingEntry[]): void {
 		if (!id) return;
 		parked.delete(id);
-		returned.delete(id);
 		if (entries.length === 0) return;
 		parked.set(id, entries.map(e => ({ ...e })));
 		while (parked.size > MAX_PARKED_SESSIONS) {
@@ -347,10 +349,13 @@ export const pendingQueue = {
 		if (!id) return [];
 		const entries = parked.get(id);
 		parked.delete(id);
-		if (!entries) return [];
-		const { withdrawn } = cancellationState(id);
-		const back = entries.filter(e => !withdrawn.has(removalKey(e)) && !withdrawn.has(e.id));
-		if (away && back.length) returned.set(id, new Set(back.map(removalKey)));
+		const { withdrawn, delivering } = cancellationState(id);
+		const back = (entries ?? []).filter(e => !withdrawn.has(removalKey(e)) && !withdrawn.has(e.id));
+		if (away) {
+			const keys = new Set([...back.map(removalKey), ...delivering.keys()]);
+			if (keys.size) returned.set(id, keys);
+			else returned.delete(id);
+		}
 		return back;
 	},
 
@@ -470,6 +475,12 @@ export const pendingQueue = {
 		if (id) returned.delete(id);
 		returnSnapshot = back ? { id, keys: back } : null;
 		const state = cancellations.get(id);
+		if (back) {
+			// The return snapshot also ends a hold that began before the chat was
+			// left: reconcile would otherwise put that bubble back.
+			const listed = new Set(rows.map(removalKey));
+			for (const key of back) if (!listed.has(key)) this.releaseHeld(id, key);
+		}
 		for (const row of rows) {
 			stamp(row.id);
 			// Listed again: the server says it exists, so it is neither held nor released.

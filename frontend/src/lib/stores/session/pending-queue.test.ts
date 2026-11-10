@@ -725,6 +725,30 @@ describe('pendingQueue — a delivered row keeps its bubble until it renders (#1
 		expect(pendingQueue.isHeld(SID, b)).toBe(true);
 	});
 
+	it('ends a hold that began before the chat was left when the return snapshot no longer lists the row', () => {
+		vi.useFakeTimers();
+		const onRelease = vi.fn();
+		const a = queued('turn-a', 'queued a', 'client-a');
+		const shown = snapshot(snapshot([], [a]), [], onRelease);
+		expect(pendingQueue.isHeld(SID, a)).toBe(true);
+		pendingQueue.park(SID, shown);
+		expect(snapshot(pendingQueue.unpark(SID), [], onRelease)).toEqual([]);
+		expect(pendingQueue.isHeld(SID, a)).toBe(false);
+		vi.advanceTimersByTime(DELIVERY_HOLD_MS);
+		expect(onRelease).not.toHaveBeenCalled();
+	});
+
+	it('keeps the return mark through a re-open of the same chat before its snapshot lands', () => {
+		const a = queued('turn-a', 'queued a', 'client-a');
+		snapshot([], [a]);
+		pendingQueue.park(SID, [a]);
+		const back = pendingQueue.unpark(SID);
+		// The chat is opened again before its queue answered.
+		pendingQueue.park(SID, back);
+		expect(snapshot(pendingQueue.unpark(SID, false), [])).toEqual([]);
+		expect(pendingQueue.isHeld(SID, a)).toBe(false);
+	});
+
 	it('still holds a delivery after a re-open of the chat that never left the screen', () => {
 		const a = queued('turn-a', 'queued a', 'client-a');
 		snapshot([], [a]);
