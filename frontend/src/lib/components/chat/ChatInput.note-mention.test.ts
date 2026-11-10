@@ -456,4 +456,41 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		expect(queries()).toEqual([]);
 		expect(readDraft('open-chat')).toContain(NOTE_ID);
 	});
+
+	// #1444: the order lives in the store, so it holds whichever component sent.
+	it('writes a plain send that waited for the socket before a note send made as the socket opens (#1444 case 1)', async () => {
+		start('reconnect-chat', NOTE_ID, { isRemote: false }, false);
+		const view = render(ChatInput);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toContain('read the plan'));
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		// The socket is down: the store opens one and waits for it.
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		const editor = (view.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(content: unknown): void } } }).editor;
+		editor.commands.setContent(JSON.parse(draftWith(NOTE_ID)));
+		// It opens, and the note send goes before the store's poll has seen it.
+		Socket.all[0].open();
+		await fireEvent.submit(form);
+		await waitFor(() => expect(queries()).toHaveLength(2));
+		expect(queries().map((frame) => frame.prompt)).toEqual(['read the plan', BY_PATH]);
+	});
+
+	it('writes a Browser panel prompt sent while a note send waits for its ownership answer after the note (#1444 case 3)', async () => {
+		let answer = (_: unknown) => {};
+		net.live = () => new Promise((resolve) => { answer = resolve; });
+		const view = await compose('panel-chat', { isStreaming: true });
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		await waitFor(() => expect(net.liveCalls).toHaveLength(1));
+		// What BrowserPanel's sendElementPrompt does: straight to the store.
+		const panel = activeSession.sendMessage('panel prompt');
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(queries()).toEqual([]);
+		answer({ session_meta: { is_remote: false } });
+		await waitFor(() => expect(queries()).toHaveLength(2));
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'panel prompt']);
+		await expect(panel).resolves.toBe(true);
+	});
 });

@@ -29,6 +29,7 @@ import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { claimBootSend, releaseBootSend } from './session-init';
 import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
+import { ANY_CHAT, createSendOrder } from './send-order';
 
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
@@ -426,8 +427,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		}
 	}
 
+	// Sends to one chat keep their order (#1444); see the wrapper at the end.
+	const sendOrder = createSendOrder();
+
 	const sender = {
-		async sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
+		/** `letNextGo` is the wrapper's: called where this send's frame is
+		 *  written, so the next send to its chat may go. */
+		async sendMessage(prompt: string, options?: SendMessageOptions, letNextGo?: () => void): Promise<boolean> {
 			prompt = prompt.trim();
 
 			// Restore-race guard: right after a page load, init() may have adopted
@@ -489,6 +495,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// The text frame is written inside this call; only its
 					// acknowledgement is awaited below.
 					const pending = uploads ? sendVoiceText(_state.sessionId, prompt, uploads) : sendVoiceText(_state.sessionId, prompt);
+					letNextGo?.();
 					if (pending !== false) options?.onDispatched?.();
 					const sent = await pending;
 					if (!sent) update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Voice call is not ready. Keep your message and try again when connected.' } : s);
@@ -522,6 +529,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			// Worktree setup on first message
 			if (!options?.skipWorktreeSetup && _state.worktreeIntent === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
+				// A send made during the create is refused by the backstop below,
+				// as before; the create's own first send takes its own turn.
+				letNextGo?.();
 				if (_state.worktreeMode === 'existing' && !_state.worktreeId) {
 					update(s => ({...s, worktreeError:'Please select an available existing worktree before sending.'}));
 					return false;
@@ -785,7 +795,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// Whether the worker answered that it did not queue this send.
 					let refused = false;
 					try {
-						const result = await compactSession(_state.sessionId!, query);
+						const compacting = compactSession(_state.sessionId!, query);
+						// The request is out: a later send does not wait for its answer.
+						letNextGo?.();
+						const result = await compacting;
 						if (!result.queued_turn_id) {
 							refused = true;
 							throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
@@ -823,6 +836,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					return true;
 				}
 				querySent = wsConn.send(query);
+				letNextGo?.();
 				if (!querySent) {
 					pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
 					pendingQueue.forgetSendUploads(clientMessageId);
@@ -1462,8 +1476,28 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	};
 
 	// Every send, whichever caller started it, holds off an update reload
-	// until it settles (see trackSend).
+	// until it settles (see trackSend), and is written after every earlier
+	// send to its chat (send-order.ts, #1444). The turn is taken here, as the
+	// send is made; a send with no earlier one waiting goes on without an
+	// await, exactly as before.
 	const send = sender.sendMessage;
-	sender.sendMessage = (prompt: string, options?: SendMessageOptions) => trackSend(() => send(prompt, options));
+	sender.sendMessage = (prompt: string, options?: SendMessageOptions) => {
+		const made = getState();
+		const chat = made.isRestoringSession ? ANY_CHAT : made.sessionId;
+		const turn = sendOrder.take(chat);
+		return trackSend(async () => {
+			try {
+				if (turn.ready) {
+					await turn.ready;
+					// The chat it was made in was left while it waited: nothing goes,
+					// and no error lands in the chat open now. The caller keeps the words.
+					if (chat !== ANY_CHAT && getState().sessionId !== chat) return false;
+				}
+				return await send(prompt, options, turn.release);
+			} finally {
+				turn.release();
+			}
+		});
+	};
 	return sender;
 }

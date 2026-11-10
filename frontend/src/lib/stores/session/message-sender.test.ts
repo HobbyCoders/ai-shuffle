@@ -23,7 +23,10 @@ vi.mock('./v2/sse-feed', () => ({
 }));
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
 import { composerPreferences } from '../composer-preferences';
-const voice = vi.hoisted(() => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn(() => true) }));
+const voice = vi.hoisted(() => ({
+	isCallActiveFor: vi.fn((_sessionId: string) => false),
+	sendVoiceText: vi.fn((_owner: string, _text: string, _uploads?: unknown): boolean | Promise<boolean> => true),
+}));
 vi.mock('$lib/services/voiceCall', () => voice);
 const context = vi.hoisted(() => ({ persistVoiceContext: vi.fn(async () => {}), voiceContextFor: vi.fn(() => ({})) }));
 vi.mock('$lib/services/voiceExecutionContext', () => context);
@@ -2589,5 +2592,115 @@ describe('message-sender pending-bubble edges', () => {
 		expect(sender.removeQueuedMessage('turn-gone')).toBeNull();
 
 		expect(wsConn.send).not.toHaveBeenCalled();
+	});
+});
+
+describe('sends to one chat are written in the order they were sent (#1444)', () => {
+	const prompts = (wsConn: { send: { mock: { calls: [Record<string, unknown>][] } } }) =>
+		wsConn.send.mock.calls.map(([frame]) => frame).filter((frame) => frame.type === 'query').map((frame) => frame.prompt);
+
+	it('writes a send made just as a reload\'s restore settles after the send that waited for it', async () => {
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat', isRestoringSession: true }));
+		const sender = createMessageSender(deps);
+		const first = sender.sendMessage('first');
+		deps.update((s) => ({ ...s, isRestoringSession: false }));
+		// Before the first send's restore poll resumes.
+		const second = sender.sendMessage('second');
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(prompts(wsConn)).toEqual(['first', 'second']);
+	});
+
+	it('writes a send made while a voice call saves its settings after the send that is saving them', async () => {
+		let saved!: () => void;
+		voice.isCallActiveFor.mockImplementation((id: string) => id === 's1');
+		context.persistVoiceContext.mockImplementationOnce(() => new Promise<void>((resolve) => { saved = resolve; }));
+		voice.sendVoiceText.mockClear();
+		try {
+			const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+			const sender = createMessageSender(deps);
+			const first = sender.sendMessage('first');
+			const second = sender.sendMessage('second');
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(voice.sendVoiceText).not.toHaveBeenCalled();
+			saved();
+			expect(await first).toBe(true);
+			expect(await second).toBe(true);
+			expect(voice.sendVoiceText.mock.calls.map((call) => call[1])).toEqual(['first', 'second']);
+		} finally {
+			voice.isCallActiveFor.mockImplementation(() => false);
+		}
+	});
+
+	it('does not hold a send to another chat behind a waiting one', async () => {
+		let saved!: () => void;
+		voice.isCallActiveFor.mockImplementation((id: string) => id === 's1');
+		context.persistVoiceContext.mockImplementationOnce(() => new Promise<void>((resolve) => { saved = resolve; }));
+		try {
+			const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+			const sender = createMessageSender(deps);
+			const first = sender.sendMessage('to s1');
+			deps.update((s) => ({ ...s, sessionId: 's2', title: 'Other chat' }));
+			expect(await sender.sendMessage('to s2')).toBe(true);
+			expect(prompts(wsConn)).toEqual(['to s2']);
+			saved();
+			expect(await first).toBe(true);
+		} finally {
+			voice.isCallActiveFor.mockImplementation(() => false);
+		}
+	});
+
+	it('sends nothing, into either chat, when the chat a waiting send was made in is left', async () => {
+		let saved!: () => void;
+		voice.isCallActiveFor.mockImplementation((id: string) => id === 's1');
+		context.persistVoiceContext.mockImplementationOnce(() => new Promise<void>((resolve) => { saved = resolve; }));
+		voice.sendVoiceText.mockClear();
+		try {
+			const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+			const sender = createMessageSender(deps);
+			const first = sender.sendMessage('first');
+			// A component that sends straight to the store, with no destination check.
+			const second = sender.sendMessage('panel prompt');
+			deps.update((s) => ({ ...s, sessionId: 's2', title: 'Other chat' }));
+			saved();
+			expect(await first).toBe(true);
+			expect(await second).toBe(false);
+			expect(voice.sendVoiceText.mock.calls.map((call) => call[1])).toEqual(['first']);
+			expect(prompts(wsConn)).toEqual([]);
+		} finally {
+			voice.isCallActiveFor.mockImplementation(() => false);
+		}
+	});
+
+	it('lets the next send go once a compact-first request is out, without waiting for its answer', async () => {
+		let answer!: (value: unknown) => void;
+		apiMocks.post.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		const sender = createMessageSender(deps);
+		const first = sender.sendMessage('compact then this', { compactFirst: true });
+		expect(await sender.sendMessage('second')).toBe(true);
+		expect(prompts(wsConn)).toEqual(['second']);
+		answer({ turn_id: 'c', queued_turn_id: 'q', session_id: 's1' });
+		expect(await first).toBe(true);
+	});
+
+	it('lets the next send go once a voice call\'s text frame is written, before its acknowledgement', async () => {
+		let acknowledge!: (ok: boolean) => void;
+		voice.isCallActiveFor.mockImplementation((id: string) => id === 's1');
+		voice.sendVoiceText.mockClear();
+		voice.sendVoiceText.mockImplementationOnce(() => new Promise<boolean>((resolve) => { acknowledge = resolve; }));
+		try {
+			const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+			const sender = createMessageSender(deps);
+			const first = sender.sendMessage('first');
+			expect(await sender.sendMessage('second')).toBe(true);
+			expect(voice.sendVoiceText.mock.calls.map((call) => call[1])).toEqual(['first', 'second']);
+			// Lost: the first send reports false, so its words go back, and it is never written again.
+			acknowledge(false);
+			expect(await first).toBe(false);
+			expect(voice.sendVoiceText).toHaveBeenCalledTimes(2);
+		} finally {
+			voice.isCallActiveFor.mockImplementation(() => false);
+		}
 	});
 });
