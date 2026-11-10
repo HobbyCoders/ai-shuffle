@@ -219,6 +219,8 @@ def test_maintenance_pass_prunes_and_reports(mock_db, monkeypatch):
     results = database.run_database_maintenance(skip_vacuum=True)
 
     assert results["cleaned_fluid_delta_events"] == 4
+    # The Usage snapshot step is PostgreSQL-only: a no-op on the shim.
+    assert results["compacted_fluid_usage_snapshots"] == 0
     assert "ToolArgsDelta" not in _remaining("sdk-maint")
     assert "Usage" in _remaining("sdk-maint")
 
@@ -234,6 +236,7 @@ def test_maintenance_pass_reports_disabled_when_set_to_zero(mock_db, monkeypatch
     results = database.run_database_maintenance(skip_vacuum=True)
 
     assert results["cleaned_fluid_delta_events"] == "disabled"
+    assert results["compacted_fluid_usage_snapshots"] == "disabled"
     assert _remaining("sdk-maint-off") == _MIXED
 
 
