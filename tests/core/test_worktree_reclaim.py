@@ -147,24 +147,20 @@ def _merged_checkout(repository):
 def test_open_chat_in_the_main_folder_does_not_keep_every_checkout(repository, monkeypatch, session):
     """One open chat that records no branch and no folder (it runs in the
     project's main folder) used to stop all cleanup in the project."""
-    from app.core import project_resolver
-
     repo, path = _merged_checkout(repository)
     monkeypatch.setattr(rc, "_project_sessions", lambda source: [dict(session)])
-    monkeypatch.setattr(project_resolver, "resolve_session_cwd", lambda row, **kwargs: str(repo))
+    monkeypatch.setattr(rc, "_base_folder", lambda row: str(repo))
     result = reclaim(dry_run=False)
     assert result["reclaimed"] == 1 and not path.exists()
 
 
 @pytest.mark.parametrize("where", ["unknown", "missing", "raises", "checkout", "inside", "no-id"])
 def test_open_session_with_no_established_folder_still_keeps_the_checkout(repository, monkeypatch, where):
-    from app.core import project_resolver
-
     repo, path = _merged_checkout(repository)
     (path / "sub").mkdir()
     age_directory(path)
 
-    def resolve(row, **kwargs):
+    def resolve(row):
         if where == "raises":
             raise RuntimeError("database unavailable")
         return {"unknown": None, "missing": str(repo / "gone"), "checkout": str(path),
@@ -172,40 +168,68 @@ def test_open_session_with_no_established_folder_still_keeps_the_checkout(reposi
 
     session = {"is_active": True} if where == "no-id" else {"id": "chat", "is_active": True}
     monkeypatch.setattr(rc, "_project_sessions", lambda source: [session])
-    monkeypatch.setattr(project_resolver, "resolve_session_cwd", resolve)
+    monkeypatch.setattr(rc, "_base_folder", resolve)
     result = reclaim(dry_run=False)
     assert result["reclaimed"] == 0 and path.exists()
     assert result["items"][0]["reason"] == "bound to an active or running session"
 
 
 def test_settled_session_with_no_folder_never_bound_a_checkout(repository, monkeypatch):
-    from app.core import project_resolver
-
     _, path = _merged_checkout(repository)
     old = datetime.fromtimestamp(time.time() - 2 * rc.GRACE_SECONDS, timezone.utc).isoformat()
     monkeypatch.setattr(rc, "_project_sessions", lambda source: [
         {"id": "done", "is_active": False, "updated_at": old, "finished_at": old}])
-    monkeypatch.setattr(project_resolver, "resolve_session_cwd",
-                        lambda row, **kwargs: pytest.fail("a settled session's folder is not looked up"))
+    monkeypatch.setattr(rc, "_base_folder", lambda row: pytest.fail("a settled session's folder is not looked up"))
     assert reclaim(dry_run=False)["reclaimed"] == 1 and not path.exists()
 
 
 def test_unrecorded_session_binds_the_branch_its_folder_is_on(repository, monkeypatch):
     """The branch-only sweep: the session's folder is on that very branch."""
-    from app.core import project_resolver
-
     repo, _ = repository
     folder = repo.parent / "elsewhere"
     git(repo, "worktree", "add", "-q", "-b", "fluid/topic", str(folder))
     context = {"sessions": [{"id": "chat", "is_active": True}]}
-    monkeypatch.setattr(project_resolver, "resolve_session_cwd", lambda row, **kwargs: str(folder))
+    monkeypatch.setattr(rc, "_base_folder", lambda row: str(folder))
     assert [s["id"] for s in rc._branch_sessions(context, "fluid/topic")] == ["chat"]
     assert rc._branch_sessions(context, "fluid/other") == []
     # Resolved once per pass, however many checkouts and branches are planned.
-    monkeypatch.setattr(project_resolver, "resolve_session_cwd", lambda row, **kwargs: pytest.fail("cached"))
+    monkeypatch.setattr(rc, "_base_folder", lambda row: pytest.fail("cached"))
     assert rc._branch_sessions(context, "fluid/third") == []
-    monkeypatch.setattr(project_resolver, "resolve_session_cwd", lambda row, **kwargs: None)
+    monkeypatch.setattr(rc, "_base_folder", lambda row: None)
     assert [s["id"] for s in rc._branch_sessions({"sessions": context["sessions"]}, "fluid/other")] == ["chat"]
+
+
+def test_folder_lookup_reads_the_bound_base_folder_and_heals_no_legacy_binding(mock_db, tmp_path):
+    """The session resolver binds a legacy session to its project as it reads;
+    a cleanup pass or a report that looks a folder up must leave every row alone."""
+    from app.core.config import settings
+    from app.db import checkouts, database, projects_v2
+    from app.db.base import get_db
+
+    def rows():
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) AS n FROM projects_v2")
+            projects = cursor.fetchone()["n"]
+            cursor.execute("SELECT COUNT(*) AS n FROM checkouts")
+            return projects, cursor.fetchone()["n"]
+
+    base = tmp_path / "base"
+    base.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(base)], check=True)
+    project = projects_v2.upsert_project("local:lookup", name="Lookup")
+    checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(base))
+    database.create_project("legacy", "Legacy", None, str(tmp_path / "legacy"))
+    database.create_session("bound", None, project_v2_id=project["id"], derive_provider_from_profile=False)
+    database.create_session("legacy-chat", None, project_id="legacy", derive_provider_from_profile=False)
+    with get_db() as conn:  # a session from before projects had a bound id
+        conn.cursor().execute("UPDATE sessions SET project_v2_id = NULL WHERE id = 'legacy-chat'")
+    before = rows()
+
+    assert rc._unrecorded_folder({}, database.get_session("bound")) == (os.path.normcase(str(base.resolve())), "main")
+    assert rc._unrecorded_folder({}, database.get_session("legacy-chat")) is None  # unknown: keeps everything
+    assert database.get_session("legacy-chat")["project_v2_id"] is None
+    assert rows() == before
 
 
 @pytest.mark.parametrize("state,exact,expected", [("OPEN", True, 0), ("CLOSED", True, 0),
