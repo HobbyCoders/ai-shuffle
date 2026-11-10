@@ -62,7 +62,7 @@
 	import RunningTasksList from '$lib/components/chat/RunningTasksList.svelte';
 	import ChatExportActions from '$lib/components/layout/ChatExportActions.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
-	import { focusModelSearch } from '$lib/components/settings/model-picker-focus';
+	import { focusModelSearch, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
 	import { wrapTabWithin } from '$lib/components/ui/focus-trap';
 	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
@@ -425,6 +425,9 @@
 		return () => observer.disconnect();
 	});
 
+	/** Set by an Escape that closes the panel while focus is on the page, not a control. */
+	let escapeLostFocus = false;
+
 	let historyEntry = false;
 	/** A page has its own history entry over the panel's, so Android Back returns to the list. */
 	let pageEntry = false;
@@ -445,6 +448,7 @@
 			clearTimeout(renderTimer);
 			if (isOpen) {
 				closingPanel = false;
+				escapeLostFocus = false;
 				clearGhosts();
 				rendered = true;
 				picker = null;
@@ -470,7 +474,10 @@
 					direct = false;
 					opener = null;
 				}, 400);
-				if (panelRef?.contains(document.activeElement)) {
+				// Focus on another control is never taken back.
+				const holds = escapeLostFocus ? pickerHoldsFocus(panelRef) : panelRef?.contains(document.activeElement);
+				escapeLostFocus = false;
+				if (holds) {
 					// A page opened straight from its bar cell hands focus back to
 					// that cell (Escape on the model page, #1339); else the controls cell.
 					const cell = direct ? barRef?.querySelector<HTMLElement>(`[data-cell="${pageName}"]`) : null;
@@ -520,6 +527,9 @@
 		if (!open) return;
 		event.preventDefault();
 		event.stopPropagation();
+		// A touch tap on plain panel text drops focus to the page; Escape from
+		// a keyboard still hands it back to the opener when this closes the panel.
+		escapeLostFocus = (direct || pageName === 'main') && pickerHoldsFocus();
 		back();
 	}
 
