@@ -31,13 +31,19 @@ def manager(monkeypatch):
 
     monkeypatch.setattr(connector_permissions, "answer_from_chat", not_an_answer)
     received = []
+    held = {}
     instance = ConnectorManager()
 
     async def record(message):
+        # Runs under the chat's lock, so this is the order turns start in. A
+        # text in ``held`` keeps its turn running until that event is set.
         received.append((message.platform_chat_id, message.text, message.platform_user_name))
+        if message.text in held:
+            await held[message.text].wait()
 
     monkeypatch.setattr(instance, "_handle_incoming_message", record)
     instance.received = received
+    instance.held = held
     return instance
 
 
@@ -141,12 +147,14 @@ async def test_slack_filtered_message_gives_up_its_place(slack, manager):
 
 # ---------------------------------------------------------------------- LINE
 
-async def test_line_slow_profile_lookup_does_not_let_a_later_webhook_overtake(monkeypatch, manager):
+@pytest.fixture
+def line_connector(monkeypatch, manager):
+    """A LINE connector whose first profile lookup waits for ``first_gate``."""
     from app.core.connectors import line
     connector = line.LINEConnector("line-id", "line", {"channel_access_token": "test-token"},
                                    manager.handle_incoming_message, AsyncMock())
-    first_gate = asyncio.Event()
-    calls = []
+    connector.first_gate = first_gate = asyncio.Event()
+    connector.calls = calls = []
 
     class Client:
         def __init__(self, **_kwargs):
@@ -165,21 +173,152 @@ async def test_line_slow_profile_lookup_does_not_let_a_later_webhook_overtake(mo
             return SimpleNamespace(status_code=200, json=lambda: {"displayName": f"name-{len(calls)}"})
 
     monkeypatch.setattr(line.httpx, "AsyncClient", Client)
+    return connector
 
-    def webhook(text, message_id):
-        return {"events": [{"type": "message", "replyToken": f"reply-{message_id}",
-                            "source": {"type": "user", "userId": "U1"},
-                            "message": {"type": "text", "id": message_id, "text": text}}]}
 
+def line_message(text, chat="U1"):
+    return {"type": "message", "replyToken": f"reply-{text}", "source": {"type": "user", "userId": chat},
+            "message": {"type": "text", "id": f"id-{text}", "text": text}}
+
+
+def line_webhook(*events):
+    return {"events": list(events)}
+
+
+def texts(manager):
+    return [text for _chat, text, _name in manager.received]
+
+
+async def test_line_slow_profile_lookup_does_not_let_a_later_webhook_overtake(line_connector, manager):
+    connector = line_connector
     # Two webhook deliveries overlap; each is its own request task.
-    tasks = [asyncio.ensure_future(connector.handle_webhook_payload(webhook("first", "m1"))),
-             asyncio.ensure_future(connector.handle_webhook_payload(webhook("second", "m2")))]
-    await settle(lambda: len(calls) == 2)
+    tasks = [asyncio.ensure_future(connector.handle_webhook_payload(line_webhook(line_message("first")))),
+             asyncio.ensure_future(connector.handle_webhook_payload(line_webhook(line_message("second"))))]
+    await settle(lambda: len(connector.calls) == 2)
     await asyncio.sleep(0.05)
     assert manager.received == []
-    first_gate.set()
+    connector.first_gate.set()
     await asyncio.gather(*tasks)
-    assert [text for _chat, text, _name in manager.received] == ["first", "second"]
+    assert texts(manager) == ["first", "second"]
+
+
+async def test_line_later_webhook_does_not_slip_between_two_messages_of_one_payload(line_connector, manager):
+    connector = line_connector
+    manager.held["A"] = asyncio.Event()  # A's turn is still running when C arrives
+    first = asyncio.ensure_future(connector.handle_webhook_payload(
+        line_webhook(line_message("A"), line_message("B"))))
+    await settle(lambda: connector.calls)
+    second = asyncio.ensure_future(connector.handle_webhook_payload(line_webhook(line_message("C"))))
+    await asyncio.sleep(0.05)
+    connector.first_gate.set()
+    await settle(lambda: manager.received)
+    await asyncio.sleep(0.05)
+    manager.held["A"].set()
+    await asyncio.wait_for(asyncio.gather(first, second), 5)
+    assert texts(manager) == ["A", "B", "C"]
+    assert connector._arrival_tails == {}
+
+
+async def test_line_answer_in_a_payload_reaches_the_turn_waiting_for_it(line_connector, manager):
+    connector = line_connector
+    connector.first_gate.set()
+    manager.held["waiting"] = asyncio.Event()  # a turn waiting for the owner's answer
+    waiting = asyncio.ensure_future(connector.handle_webhook_payload(line_webhook(line_message("waiting"))))
+    await settle(lambda: manager.received)
+
+    async def answered(*_args):
+        manager.held["waiting"].set()
+
+    connector._on_permission_response = answered
+    # A new message for the same chat comes first, then the answer, in one payload.
+    both = asyncio.ensure_future(connector.handle_webhook_payload(line_webhook(
+        line_message("next"), {"type": "postback", "postback": {"data": "perm:req-1:approve"}})))
+    await asyncio.wait_for(asyncio.gather(waiting, both), 5)
+    assert texts(manager) == ["waiting", "next"]
+
+
+# ------------------------------------------------------------------ WhatsApp
+
+@pytest.fixture
+def whatsapp(manager):
+    from app.core.connectors.whatsapp import WhatsAppConnector
+    return WhatsAppConnector("wa-id", "whatsapp", {"phone_number_id": "1", "access_token": "test-token"},
+                             manager.handle_incoming_message, AsyncMock())
+
+
+def whatsapp_text(text, sender="15550100"):
+    return {"type": "text", "from": sender, "id": f"wamid.{text}", "text": {"body": text}}
+
+
+def whatsapp_webhook(*messages):
+    return {"entry": [{"changes": [{"value": {"messages": list(messages)}}]}]}
+
+
+async def test_whatsapp_later_webhook_does_not_slip_between_two_messages_of_one_payload(whatsapp, manager):
+    manager.held["A"] = asyncio.Event()  # A's turn is still running when C arrives
+    first = asyncio.ensure_future(whatsapp.handle_webhook_payload(
+        whatsapp_webhook(whatsapp_text("A"), whatsapp_text("B"))))
+    await settle(lambda: manager.received)
+    second = asyncio.ensure_future(whatsapp.handle_webhook_payload(whatsapp_webhook(whatsapp_text("C"))))
+    await asyncio.sleep(0.05)
+    manager.held["A"].set()
+    await asyncio.wait_for(asyncio.gather(first, second), 5)
+    assert texts(manager) == ["A", "B", "C"]
+    assert whatsapp._arrival_tails == {}
+
+
+async def test_whatsapp_answer_in_a_payload_reaches_the_turn_waiting_for_it(whatsapp, manager):
+    manager.held["waiting"] = asyncio.Event()  # a turn waiting for the owner's answer
+    waiting = asyncio.ensure_future(whatsapp.handle_webhook_payload(whatsapp_webhook(whatsapp_text("waiting"))))
+    await settle(lambda: manager.received)
+
+    async def answered(*_args):
+        manager.held["waiting"].set()
+
+    whatsapp._on_permission_response = answered
+    answer = {"type": "interactive", "from": "15550100",
+              "interactive": {"button_reply": {"id": "perm:req-1:approve"}}}
+    # A new message for the same chat comes first, then the answer, in one payload.
+    both = asyncio.ensure_future(whatsapp.handle_webhook_payload(whatsapp_webhook(whatsapp_text("next"), answer)))
+    await asyncio.wait_for(asyncio.gather(waiting, both), 5)
+    assert texts(manager) == ["waiting", "next"]
+
+
+async def test_whatsapp_failed_message_does_not_stop_the_rest_or_keep_its_place(whatsapp, manager):
+    real_find_contact = whatsapp._find_contact
+
+    def find_contact(value, phone):
+        if phone == "broken":
+            raise RuntimeError("bad contact entry")
+        return real_find_contact(value, phone)
+
+    whatsapp._find_contact = find_contact
+    await asyncio.wait_for(whatsapp.handle_webhook_payload(whatsapp_webhook(
+        whatsapp_text("lost", sender="broken"), whatsapp_text("kept"),
+        whatsapp_text("after", sender="broken"))), 5)
+    assert texts(manager) == ["kept"]
+    assert whatsapp._arrival_tails == {}
+
+
+@pytest.mark.parametrize("hold_first_turn", [False, True])
+async def test_cancelled_delivery_gives_up_every_place(whatsapp, manager, hold_first_turn):
+    if hold_first_turn:
+        manager.held["A"] = asyncio.Event()
+    first = asyncio.ensure_future(whatsapp.handle_webhook_payload(whatsapp_webhook(
+        whatsapp_text("A"), whatsapp_text("B", sender="other"))))
+    if hold_first_turn:
+        await settle(lambda: len(manager.received) == 2)  # cancelled mid-turn
+    else:
+        # Cancelled after the places are taken but before any handler has run.
+        await asyncio.sleep(0)
+        assert whatsapp._arrival_tails
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+    assert whatsapp._arrival_tails == {}
+    # Neither chat is blocked: new messages still reach the manager.
+    await asyncio.wait_for(whatsapp.handle_webhook_payload(whatsapp_webhook(
+        whatsapp_text("D", sender="other"), whatsapp_text("E"))), 5)
+    assert texts(manager)[-2:] == ["D", "E"]
 
 
 # --------------------------------------------------------------------- Teams

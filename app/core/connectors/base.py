@@ -6,6 +6,7 @@ inherit from BaseConnector and implement the abstract methods.
 """
 
 import asyncio
+import contextlib
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -248,6 +249,14 @@ class ArrivalPlace:
             del self._tails[self._key]
 
 
+async def _handle_in_place(place: Optional[ArrivalPlace], handle: Callable[[Optional[ArrivalPlace]], Coroutine[Any, Any, None]]) -> None:
+    if place is None:
+        await handle(None)
+        return
+    with place:
+        await handle(place)
+
+
 class BaseConnector(ABC):
     """
     Abstract base class for all connectors.
@@ -292,6 +301,33 @@ class BaseConnector(ABC):
     def arrival_place(self, platform_chat_id: str) -> ArrivalPlace:
         """Reserve a message's turn in its chat now; see ``ArrivalPlace``."""
         return ArrivalPlace(self._arrival_tails, str(platform_chat_id), self._on_incoming_message)
+
+    async def handle_delivery(
+        self,
+        events: List[Tuple[Optional[str], Callable[[Optional[ArrivalPlace]], Coroutine[Any, Any, None]]]],
+    ) -> None:
+        """Handle the events of one platform delivery, each message in its chat's order.
+
+        ``events`` lists ``(chat_id, handle)`` in delivery order. Every message
+        with a chat id takes its place before anything is awaited, so a later
+        delivery cannot slip between two messages of this one (#1324). Then each
+        ``handle(place)`` runs side by side: one message's turn never holds up the
+        next, and an answer (``chat_id`` None, no place) reaches the turn waiting
+        for it. A failed message does not stop the rest, and every place is
+        given up when its handler ends, or with the delivery if it never ran.
+        """
+        with contextlib.ExitStack() as places:
+            handlers = [
+                _handle_in_place(
+                    places.enter_context(self.arrival_place(chat_id)) if chat_id is not None else None,
+                    handle,
+                )
+                for chat_id, handle in events
+            ]
+            results = await asyncio.gather(*handlers, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("Error handling a %s event", self.connector_type, exc_info=result)
 
     @property
     def status(self) -> ConnectorStatus:

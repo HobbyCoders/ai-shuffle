@@ -13,6 +13,7 @@ import httpx
 from app.core.connectors import line_actions
 from app.core.connectors.base import (
     ActionDef,
+    ArrivalPlace,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
@@ -31,6 +32,16 @@ logger = logging.getLogger(__name__)
 LINE_API_BASE = "https://api.line.me/v2"
 LINE_API_DATA = "https://api-data.line.me/v2"
 LINE_API_MESSAGING = f"{LINE_API_BASE}/bot/message"
+
+
+def _chat_id(source: Dict[str, Any]) -> str:
+    """The chat a webhook event belongs to: its group, room or user."""
+    source_type = source.get("type", "")
+    if source_type == "group":
+        return source.get("groupId", "")
+    if source_type == "room":
+        return source.get("roomId", "")
+    return source.get("userId", "")
 
 
 class LINEConnector(BaseConnector):
@@ -355,31 +366,26 @@ class LINEConnector(BaseConnector):
             reply_token_map: Optional mapping of event types to reply tokens.
         """
         try:
-            events = payload.get("events", [])
-            for event in events:
+            delivery = []
+            for event in payload.get("events", []):
                 event_type = event.get("type", "")
 
                 if event_type == "message":
-                    await self._process_message_event(event)
+                    delivery.append((_chat_id(event.get("source", {})),
+                                     lambda place, event=event: self._process_message_event(event, place)))
                 elif event_type == "postback":
-                    await self._process_postback_event(event)
+                    delivery.append((None, lambda _place, event=event: self._process_postback_event(event)))
+            await self.handle_delivery(delivery)
 
         except Exception as exc:
             logger.exception("Error processing LINE webhook payload: %s", exc)
 
-    async def _process_message_event(self, event: Dict[str, Any]) -> None:
-        """Process a message event from the LINE webhook."""
+    async def _process_message_event(self, event: Dict[str, Any], place: ArrivalPlace) -> None:
+        """Process a message event from the LINE webhook; ``place`` is its chat order."""
         source = event.get("source", {})
         source_type = source.get("type", "")
         user_id = source.get("userId", "")
-
-        # Determine chat ID based on source type
-        if source_type == "group":
-            chat_id = source.get("groupId", "")
-        elif source_type == "room":
-            chat_id = source.get("roomId", "")
-        else:
-            chat_id = user_id
+        chat_id = _chat_id(source)
 
         # Filter by allowed user/group IDs
         allowed_users = self.config.get("allowed_user_ids")
@@ -413,37 +419,34 @@ class LINEConnector(BaseConnector):
         else:
             text = f"[{msg_type}]"
 
-        # Take the chat's place before the name lookup, so a slow lookup cannot
-        # let a later message from an overlapping webhook overtake this one (#1324).
-        with self.arrival_place(chat_id) as place:
-            # Try to get user display name
-            user_name = user_id
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    if source_type == "group":
-                        url = f"{LINE_API_BASE}/bot/group/{source.get('groupId')}/member/{user_id}"
-                    else:
-                        url = f"{LINE_API_BASE}/bot/profile/{user_id}"
-                    resp = await client.get(url, headers=self._headers())
-                    if resp.status_code == 200:
-                        user_name = resp.json().get("displayName", user_id)
-            except Exception:
-                logger.debug("Failed to resolve LINE user name for %s", user_id, exc_info=True)
+        # Try to get user display name
+        user_name = user_id
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                if source_type == "group":
+                    url = f"{LINE_API_BASE}/bot/group/{source.get('groupId')}/member/{user_id}"
+                else:
+                    url = f"{LINE_API_BASE}/bot/profile/{user_id}"
+                resp = await client.get(url, headers=self._headers())
+                if resp.status_code == 200:
+                    user_name = resp.json().get("displayName", user_id)
+        except Exception:
+            logger.debug("Failed to resolve LINE user name for %s", user_id, exc_info=True)
 
-            msg = IncomingMessage(
-                connector_id=self.connector_id,
-                platform_chat_id=chat_id,
-                platform_user_id=user_id,
-                platform_user_name=user_name,
-                text=text,
-                platform_message_id=message.get("id"),
-                metadata={
-                    "source_type": source_type,
-                    "message_type": msg_type,
-                    "reply_token": event.get("replyToken"),
-                },
-            )
-            await place.hand_off(msg)
+        msg = IncomingMessage(
+            connector_id=self.connector_id,
+            platform_chat_id=chat_id,
+            platform_user_id=user_id,
+            platform_user_name=user_name,
+            text=text,
+            platform_message_id=message.get("id"),
+            metadata={
+                "source_type": source_type,
+                "message_type": msg_type,
+                "reply_token": event.get("replyToken"),
+            },
+        )
+        await place.hand_off(msg)
 
     async def _process_postback_event(self, event: Dict[str, Any]) -> None:
         """Process a postback event (button clicks) from LINE."""

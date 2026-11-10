@@ -23,7 +23,7 @@
       "module": "whatsapp",
       "class": "WhatsAppConnector",
       "files": {
-        "whatsapp.py": "0892c0344df8d18a4cdaaffe3f1b39f01850223491716d21ededf4b9644ce436",
+        "whatsapp.py": "cafa15fbd4644868190cb8f85b7f78682653ae1c5a867308e3f14adeed8233f4",
         "whatsapp_actions.py": "172afe2188cf34fb5d9dd44c71d57801f73b764fd11e0f438e955aa52c78abd2"
       }
     },
@@ -47,7 +47,7 @@
       "module": "line",
       "class": "LINEConnector",
       "files": {
-        "line.py": "50cd51ae59d6184dab73dc85e99b56b33d9635e1b46feb3f10d66f861e1029db",
+        "line.py": "bad87d5178ec8c4c887028676d7bf91c69ff0b9b05b7049a6bf9d136d838727a",
         "line_actions.py": "0f309fffdaf75c954976285c6b03fe6833728319fc57f4ed2bb6d7966ca28078"
       }
     },
@@ -145,5 +145,5 @@
     ]
   },
   "sdk": 1,
-  "release": "813b063e17221a84"
+  "release": "8b2cb90e2bc3e55a"
 }

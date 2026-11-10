@@ -1336,8 +1336,8 @@ def _adapter(platform):
         sent = None
 
         def feed(text):
-            return adapter._process_webhook_message(
-                {"type": "text", "from": "15550100", "id": "wamid.1", "text": {"body": text}}, {})
+            return adapter.handle_webhook_payload({"entry": [{"changes": [{"value": {"messages": [
+                {"type": "text", "from": "15550100", "id": "wamid.1", "text": {"body": text}}]}}]}]})
     elif platform == "line":
         from app.core.connectors.line import LINEConnector
 
@@ -1345,9 +1345,9 @@ def _adapter(platform):
         sent = None
 
         def feed(text):
-            return adapter._process_message_event({
-                "source": {"type": "user", "userId": "U7"}, "replyToken": "t",
-                "message": {"type": "text", "id": "m1", "text": text}})
+            return adapter.handle_webhook_payload({"events": [{
+                "type": "message", "source": {"type": "user", "userId": "U7"}, "replyToken": "t",
+                "message": {"type": "text", "id": "m1", "text": text}}]})
     elif platform == "msteams":
         from app.core.connectors.msteams import MSTeamsConnector
 
