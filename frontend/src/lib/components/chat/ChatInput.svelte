@@ -1461,12 +1461,14 @@
 		};
 
 		// Once, when the store has the note form's answer or the send ended
-		// without asking (refused, held, thrown).
+		// without asking (refused, held, thrown). The next send stays held until
+		// the store send returns (finally below): the answer lands a few
+		// microtasks before the frame is written, and a send waiting on the hold
+		// would wake in that gap and overtake this one.
 		let notesFormSettled = !notesForm;
 		const settleNotesForm = () => {
 			if (notesFormSettled) return;
 			notesFormSettled = true;
-			released?.();
 			dropPendingSend(pendingNote);
 		};
 
@@ -1477,8 +1479,9 @@
 				// send: an update reload waits for it as it waits for the request.
 				mayGoNow = mayGo ? await trackSend(mayGo) : true;
 			} finally {
-				// A note's form is asked inside the store send: the next send and
-				// the pending note wait for that answer, so sends keep their order.
+				// A note's form is asked inside the store send: the pending note
+				// waits for that answer and the next send for the store send to
+				// return, so sends keep their order.
 				if (!notesForm) {
 					released?.();
 					// Handed over or about to be put back: either way the note is done,
@@ -1514,6 +1517,8 @@
 			restoreOnFailure();
 		} finally {
 			settleNotesForm();
+			// The frame is written (or the send ended): the next send may go.
+			if (notesForm) released?.();
 			stopWatchingReason();
 		}
 	}

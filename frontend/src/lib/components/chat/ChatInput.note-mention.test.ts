@@ -209,8 +209,7 @@ describe('a note chip in an open chat asks the server at send time', () => {
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(sent).toEqual([]);
 		answer({ session_meta: { is_remote: false } });
-		await waitFor(() => expect(sent).toEqual([BY_PATH]));
-		await fireEvent.submit(form);
+		// The second waited for the first (#1344) and goes right after it.
 		await waitFor(() => expect(sent).toEqual([BY_PATH, 'second']));
 	});
 
@@ -381,6 +380,25 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		Socket.all[0].open();
 		await waitFor(() => expect(queries()).toHaveLength(1));
 		expect(queries()[0]).toMatchObject({ session_id: 'local-chat', prompt: BY_PATH });
+	});
+
+	it('writes a second quick send after the first one\'s frame, not in the gap after its note answer', async () => {
+		let answer = (_: unknown) => {};
+		net.live = () => new Promise((resolve) => { answer = resolve; });
+		const view = await compose('order-chat', { isStreaming: true });
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		await waitFor(() => expect(net.liveCalls).toHaveLength(1));
+		const editor = (view.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(text: string): void } } }).editor;
+		editor.commands.setContent('second');
+		await fireEvent.submit(form);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(queries()).toEqual([]);
+		answer({ session_meta: { is_remote: false } });
+		await waitFor(() => expect(queries()).toHaveLength(2));
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'second']);
 	});
 
 	it('sends nothing into another chat opened while the server was asked, and keeps the draft with its chat', async () => {
