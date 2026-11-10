@@ -50,8 +50,11 @@ export function openSession(sessionId: string, openedSession?: Session, { reopen
 	// A subagent's chat opens without Git or private access controls.
 	if (session?.is_worker !== undefined) subagentChats.mark(sessionId, session.is_worker);
 	const select = () => {
-		activeSession.switchSession(sessionId, session?.project_id, worktreeInfo,
-			session?.title || null, session?.project_v2_id ?? null, { reopen });
+		// Only a reopen says so; every other open calls the store as before.
+		const place = [sessionId, session?.project_id, worktreeInfo,
+			session?.title || null, session?.project_v2_id ?? null] as const;
+		if (reopen) activeSession.switchSession(...place, { reopen: true });
+		else activeSession.switchSession(...place);
 		layout.openChat(sessionId);
 	};
 	if (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed) {

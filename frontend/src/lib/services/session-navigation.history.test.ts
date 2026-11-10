@@ -107,9 +107,11 @@ describe('reopening the chat already open (#1350)', () => {
 		active.switches = [];
 		openSession('chat-a', undefined, { reopen: true });
 		openSession('chat-b');
-		expect(active.switches.map(call => [call[0], call.at(-1)])).toEqual([
+		expect(active.switches.map(call => [call[0], call[5]])).toEqual([
 			['chat-a', { reopen: true }],
-			['chat-b', { reopen: false }],
+			['chat-b', undefined],
 		]);
+		// An ordinary open calls the store with the five arguments it always had.
+		expect(active.switches[1]).toHaveLength(5);
 	});
 });
