@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),hydrate:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadProjectCatalog:vi.fn(),loadSessions:vi.fn(),
- feed:{invalidate:vi.fn(),invalidateUnverified:vi.fn(),isFeeding:vi.fn(()=>false),hasLogEpoch:vi.fn(()=>false),restart:vi.fn(),revive:vi.fn()} }));
+ feed:{invalidate:vi.fn(),invalidateUnverified:vi.fn(),isFeeding:vi.fn(()=>false),hasLogEpoch:vi.fn(()=>false),restart:vi.fn(),revive:vi.fn(),resyncPending:vi.fn()} }));
 vi.mock('$lib/stores/auth.svelte',()=>({auth:{current:{status:{preview_access:false}},subscribe:(fn:(s:any)=>void)=>{m.listener=fn;return m.unsubscribe;},checkAuth:m.check}}));
 vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,hydrate:m.hydrate,refresh:m.refresh,register:(key:string)=>m.bindings.add(key),registerPrefix:vi.fn()}}));
 vi.mock('./resource-sync', async (importOriginal) => {
@@ -126,6 +126,15 @@ describe('root authenticated live-sync lifecycle',()=>{
   expect(m.hydrate).toHaveBeenCalledTimes(1);expect(m.reconnect).toHaveBeenCalledTimes(2);expect(m.invalidate).toHaveBeenCalledTimes(2);
   socket.emit({type:'preferences_changed',keys:['theme','theme',17]});expect(m.refresh).toHaveBeenCalledTimes(1);
   socket.emit({type:'resources_changed',resources:['notes',null]});expect(m.invalidate).toHaveBeenLastCalledWith(['notes']);
+ });
+ it('tells the open chat to re-read its prompts when the worker reports prompt rows changed',()=>{
+  stop=startLiveSync();account('alice');const socket=Socket.all[0];
+  m.feed.resyncPending.mockClear();
+  socket.emit({type:'resources_changed',resources:['sessions']});
+  expect(m.feed.resyncPending).not.toHaveBeenCalled();
+  socket.emit({type:'resources_changed',resources:['sessions','session_prompts']});
+  expect(m.feed.resyncPending).toHaveBeenCalledTimes(1);
+  expect(m.invalidate).toHaveBeenLastCalledWith(['sessions','session_prompts']);
  });
  it('leaves the open transcript alone on the first sync_ready and resumes it at the cursor after a reconnect',async()=>{
   (activeSession.current as {sessionId:string|null}).sessionId='s1';
