@@ -2138,12 +2138,18 @@ async def record_started_report(starter_id, frame):
     await asyncio.to_thread(record_report, starter_id, frame)
 
 
-async def defer_started_report(starter_id, frame):
+async def defer_started_report(starter_id, frame, admit=None):
     """A settled starter retains the report on its child, never receives a wake.
 
     Called under the scheduler's delivery lock, for both local and remote reports.
     The stable event also deduplicates repeated settlement/transport deliveries.
+    Answers False when the starter takes a wake, else ``deferred``, or
+    ``moved`` when ``admit`` (``admit_report``) finds another worker runs the
+    starter now: the deferral is written in admit's transaction, with the
+    report's receipt, so it is never kept on a worker that does not run the
+    starter (#1443).
     """
+    from contextlib import nullcontext
     from app.db import sessions, session_events
     from app.core.task_registry import user_stop_holds
     row = await asyncio.to_thread(sessions.get_session, starter_id)
@@ -2151,9 +2157,9 @@ async def defer_started_report(starter_id, frame):
         return False
     event_id = "deferred-report:" + hashlib.sha256(
         f"{starter_id}:{frame.get('task_id')}:{frame.get('agent_message_turn_id')}".encode()).hexdigest()
-    def record():
+    def record(given=None):
         from app.db.base import transaction
-        with transaction() as conn:
+        with (nullcontext(given) if given is not None else transaction()) as conn:
             cursor = conn.cursor()
             # Keep the durable receipt on the child, including if the starter
             # disappeared between settlement and delivery. Never recreate it.
@@ -2170,12 +2176,23 @@ async def defer_started_report(starter_id, frame):
                 "payload": {"starter_session_id": starter_id, "child_session_id": frame.get("task_id"),
                             "child_turn_id": frame.get("agent_message_turn_id")}}], _conn=conn)
             return True
-    if await asyncio.to_thread(record):
+    if admit is not None:
+        noted = []
+        def write(conn):
+            noted.append(record(conn))
+            return {"id": event_id}
+        verdict, _row = await asyncio.to_thread(admit, write)
+        if verdict == "moved":
+            return "moved"
+        recorded = verdict == "written" and noted and noted[0]
+    else:
+        recorded = await asyncio.to_thread(record)
+    if recorded:
         from app.services.notification_service import emit_notification
         await emit_notification("admin", title="Session work finished",
             message=f"{frame.get('title') or 'Started session'}: {frame.get('status') or 'finished'}. Open the child session for its report.",
             category="session_report:" + str(frame.get("task_id")), session_id=frame.get("task_id"), push=True)
-    return True
+    return "deferred"
 
 
 async def report_settled_start(session_id, settled, outcome):
@@ -2264,25 +2281,27 @@ async def handle_remote_report(body, from_device):
 # turn queued here for a chat that moved away would never run. A report the
 # chat here cannot take now is kept in this worker's outbox (settled rows under
 # REPORT_OUTBOX, never runnable work) and sent to the worker that runs the chat
-# until that worker takes it or passes it on. Only the worker that runs the
-# chat admits the report: in one transaction it rechecks ownership under the
-# session row lock the hand-off flips it under, queues the wake, and records
-# the report's stable id in its inbox (REPORT_INBOX). A retry after a lost
-# reply finds that id and wakes nobody twice; a worker that only passes the
-# report on keeps no receipt, so a report that comes back is still admitted.
+# until that worker takes it or passes it on. Every admission, first local,
+# forwarded or deferred, goes through admit_report: in one transaction it
+# rechecks ownership under the session row lock the hand-off flips it under,
+# writes the wake (or the deferral) and records the report's stable id as a
+# receipt on the chat itself (a pending_interactions row of kind
+# REPORT_RECEIPT_KIND). The hand-off carries those receipts with the chat, so
+# a retry after a lost reply or a restart wakes nobody twice on any worker.
+# A worker that only passes the report on keeps no receipt.
 # ---------------------------------------------------------------------------
 
 FORWARD_REPORT_ACTION = "orchestration-report-forward"
 REPORT_OUTBOX = "orchestration-report-outbox"
-REPORT_INBOX = "orchestration-report-inbox"
+REPORT_RECEIPT_KIND = "orchestration_report"
 _FORWARD_PENDING = "report_forward_pending"
 _FORWARD_REFUSED = "report_forward_refused"
-_RECEIVED = "report_received"
 # Outcomes of a local admission: the report is taken (woken now or kept on
 # the started chat for a parent at rest), or refused by policy for good.
 _DELIVERED = ("admitted", "steered", "deferred")
 _FINAL = ("suppressed", "refused", "gone")
-# A chat that keeps moving is followed this many workers, then refused.
+# One forwarding pass follows a chat that keeps moving this many workers; the
+# last holder keeps the report and retries it later.
 MAX_FORWARD_HOPS = 4
 _FORWARD_RETRY_SECONDS = (5, 15, 30, 60, 120, 300)
 _delivery_tasks: set = set()
@@ -2373,14 +2392,18 @@ def admit_report(home, event_id, write):
     """Admit a report for ``home`` here, once: ``write(conn)`` queues its wake.
 
     One transaction: the session row lock (the hand-off flips ownership under
-    it), the ownership recheck, the inbox lookup, the write and the receipt.
-    Answers ``(verdict, row)``: ``written``, ``duplicate`` (admitted before),
-    ``moved`` (another worker runs ``home`` now), ``gone`` or ``unwritten``.
-    Without ``event_id`` (a report made here, never retried) no receipt is kept.
+    it), the ownership recheck, the receipt lookup, the write and the receipt.
+    The receipt is a row of ``home`` keyed by ``event_id``, so it moves with
+    the chat (``app.network.handoff``). Answers ``(verdict, row)``:
+    ``written``, ``duplicate`` (admitted before, here or on a worker the chat
+    came from), ``moved`` (another worker runs ``home`` now), ``gone`` or
+    ``unwritten`` (nothing written: ``write`` answered no row). A ``write``
+    that answers None changes nothing and only probes the verdict.
     """
-    from app.db import turns
     from app.db.base import transaction
     from app.network import control
+    if not event_id:
+        raise ValueError("A report is admitted only with its report id")
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (home,))
@@ -2389,19 +2412,17 @@ def admit_report(home, event_id, write):
             return "gone", None
         if control.owner_of(dict(row)) is not None:
             return "moved", None
-        if event_id:
-            cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s", (REPORT_INBOX, event_id))
-            if cursor.fetchone():
-                return "duplicate", None
+        cursor.execute("SELECT session_id FROM pending_interactions WHERE id=%s AND kind=%s",
+                       (event_id, REPORT_RECEIPT_KIND))
+        if cursor.fetchone():
+            return "duplicate", None
         written = write(conn)
         if not written or not written.get("id") or written.get("state") not in (None, "queued"):
             return "unwritten", written
-        if not event_id:
-            return "written", written
-        receipt = turns.enqueue_turn(REPORT_INBOX, "agent_message", command_id=event_id,
-                                     payload={"home": home, "turn_id": written["id"]}, _conn=conn)
-        cursor.execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW(), "
-                       "stop_reason=%s WHERE id=%s", (_RECEIVED, receipt["id"]))
+        cursor.execute(
+            "INSERT INTO pending_interactions (id, session_id, kind, payload, state, answered_at) "
+            "VALUES (%s, %s, %s, %s, 'answered', NOW())",
+            (event_id, home, REPORT_RECEIPT_KIND, json.dumps({"turn_id": str(written["id"])})))
         return "written", written
 
 
@@ -2428,22 +2449,22 @@ async def deliver_started_report(home, frame, *, hops=0, steer=True, event_id=No
     queued on a worker that does not run the chat (#1443). Also the path of
     the mirror case: a started chat that moved away reports from its new
     worker to the one that still runs ``home``. Answers the local outcome, or
-    ``forwarded`` once the outbox holds it; at the hop limit a report for a
-    chat that moved on is ``refused``. A report another worker sent here
-    (``hops``) goes to the outbox only when the chat moved on: otherwise the
-    sender keeps it and retries.
+    ``forwarded`` once the outbox holds it. A report another worker sent here
+    (``hops``) goes to the outbox only when the chat moved on, and not past
+    the hop limit: otherwise the sender keeps it and retries later.
     """
-    # A report that came from another worker may be sent again: keep its id.
-    receipt = event_id or (report_event_id(home, frame) if hops else None)
+    # Every admission carries the report's id, the first local one too, so a
+    # retry after an unclear commit or a restart finds its receipt.
+    receipt = event_id or report_event_id(home, frame)
     outcome = await _admit_here(home, frame, receipt, steer=steer)
     if outcome in _DELIVERED or outcome in _FINAL:
         return outcome
     if outcome != "moved" and hops:
         return outcome  # this worker runs the chat but cannot take it now: the sender retries
     if outcome == "moved" and hops >= MAX_FORWARD_HOPS:
-        log.warning("Report of started chat %s for %s not delivered: the chat keeps moving between workers",
-                    frame.get("task_id"), home)
-        return "refused"
+        log.info("Report of started chat %s for %s left with the sender: the chat keeps moving between workers",
+                 frame.get("task_id"), home)
+        return "retry"
     owner = await asyncio.to_thread(_report_owner, home)
     await asyncio.to_thread(_owe_forward, home, owner, frame, hops)
     log.info("Report from started chat %s for %s (%s) kept to send to %s",

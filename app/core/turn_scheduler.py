@@ -2524,16 +2524,18 @@ async def on_started_session_terminal(
     ones Task completions use.
 
     Returns the outcome (see ``_on_task_terminal_locked``), or ``deferred``
-    when the starter is at rest and keeps the report on the child. A report
-    with a durable id passes ``steer=False`` and an ``admit`` guard, so it is
-    always a queued wake admitted once (#1443).
+    when the starter is at rest and keeps the report on the child. Every
+    report passes an ``admit`` guard (``session_orchestration.admit_report``)
+    with its durable id: the wake, the steer receipt and the deferral are all
+    admitted once, on the worker that runs the starter, else ``moved`` (#1443).
     """
     async with _terminal_delivery_lock(session_id):
         from app.core.session_orchestration import defer_started_report, record_started_report
         try:
             await record_started_report(session_id, frame)
-            if await defer_started_report(session_id, frame):
-                return "deferred"
+            deferred = await defer_started_report(session_id, frame, admit=admit)
+            if deferred:
+                return "moved" if deferred == "moved" else "deferred"
         except Exception:  # noqa: BLE001 — retried by a durable caller
             logger.warning("turn_scheduler: started report for %s not admitted", session_id, exc_info=True)
             return "failed"
@@ -2810,11 +2812,19 @@ async def _on_task_terminal_locked(
             # session is genuinely at rest (or unsteerable), which falls through
             # to the queued wake below. Latch only after acceptance; the
             # session delivery lock prevents concurrent duplicate submissions.
+            if steer and admit is not None:
+                # A report with an id steers only if it was never admitted
+                # and this worker still runs the chat; the receipt follows.
+                verdict, _row = await asyncio.to_thread(admit, lambda conn: None)
+                if verdict in ("moved", "duplicate", "gone"):
+                    return {"moved": "moved", "duplicate": "admitted"}.get(verdict, "refused")
             if steer and await _try_steer_terminal_notification(
                 session_id, prompt, [frame], wake_task_ids, carry_held=True,
             ):
                 task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"),
                                                  incarnation=frame.get("task_incarnation"))
+                if admit is not None:
+                    await _admit_latched(admit, "steered")
                 logger.info(
                     "turn_scheduler: unpark for %s — task %s terminal (%s) "
                     "steered into the live turn",

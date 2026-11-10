@@ -410,22 +410,25 @@ class _Crash(Exception):
 
 @pytest.mark.asyncio
 async def test_a_crash_while_admitting_never_runs_the_report_twice(pair, monkeypatch):
-    """S4: the receiver stops between queuing the wake and recording the
-    report id, restarts (its in-memory latches gone) and gets the retry."""
+    """S4: the receiver stops right after queuing the wake, before its report
+    receipt is written, restarts (its in-memory latches gone) and gets the
+    retry. Wake and receipt share one transaction, so neither is kept."""
+    from app.core import turn_scheduler
     from app.core.task_registry import task_registry
     a, b, _, _ = pair
     with a.active():
         start = _start_child()
     await _move_parent(a, b, monkeypatch)
-    real = turns.enqueue_turn
+    real = turn_scheduler._enqueue
     crashes = []
 
     def enqueue(session_id, *args, **kwargs):
-        if session_id == orch.REPORT_INBOX and not crashes:
+        row = real(session_id, *args, **kwargs)
+        if session_id == PARENT and not crashes:
             crashes.append(session_id)
             raise _Crash()
-        return real(session_id, *args, **kwargs)
-    monkeypatch.setattr(turns, "enqueue_turn", enqueue)
+        return row
+    monkeypatch.setattr(turn_scheduler, "_enqueue", enqueue)
     with a.active():
         await orch.report_settled_start(CHILD, _settle(start), "completed")
         await orch.deliver_forwarded_reports(force=True)
@@ -486,3 +489,219 @@ async def test_a_report_queued_after_the_idle_check_refuses_the_commit(pair, mon
         turns.settle_turn(report["id"], "completed")
     monkeypatch.setattr(handoff, "_idle", real_idle)
     await _move_parent(a, b, monkeypatch)
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: one guarded admission for every report, receipts that move
+# with the parent, no report given up at the hop limit
+# ---------------------------------------------------------------------------
+
+def _receipts(home=PARENT):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM pending_interactions WHERE session_id=%s AND kind='orchestration_report'",
+                       (home,))
+        return [row["id"] for row in cursor.fetchall()]
+
+
+def _deferred_events(starter=PARENT):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT payload FROM session_events WHERE event_type='orchestration.report_deferred'")
+        rows = [row["payload"] for row in cursor.fetchall()]
+    import json
+    rows = [json.loads(row) if isinstance(row, str) else row for row in rows]
+    return [row for row in rows if row.get("starter_session_id") == starter]
+
+
+def _at_rest(session_id):
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET is_active=0 WHERE id=%s", (session_id,))
+
+
+def _run(wake):
+    assert turns.start_turn(wake["id"])
+    turns.settle_turn(wake["id"], "completed")
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_report_for_a_parent_that_moved_meanwhile_goes_to_its_owner(pair, monkeypatch):
+    """S2, deferral: the parent at rest is on A at the check, then moves to B
+    before the deferral is written. The deferral is kept by B, not by A."""
+    a, b, _, _ = pair
+    monkeypatch.setattr(control, "call", _route([a, b]))
+    _, settled = _settled_report_on(a)
+    with a.active():
+        _at_rest(PARENT)
+    with b.active():
+        _owned_by(b, None)
+    calls = _flip_after_check(monkeypatch, a, b.device_id)
+    with a.active():
+        await orch.report_settled_start(CHILD, settled, "completed")
+        assert calls == [PARENT]
+        assert _deferred_events() == [] and _receipts() == []
+        assert len(orch.pending_forwarded_reports()) == 1
+        monkeypatch.setattr(orch, "_report_owner", _real_owner)
+        await orch.deliver_forwarded_reports(force=True)
+        assert orch.pending_forwarded_reports() == []
+    with b.active():
+        assert len(_deferred_events()) == 1 and len(_receipts()) == 1
+        assert _all_reports(PARENT) == []
+
+
+@pytest.mark.asyncio
+async def test_the_first_local_admission_keeps_a_receipt_a_retry_finds(pair, tmp_path, monkeypatch):
+    """S4, first admission: C reports to A, which runs the parent. A admits it,
+    the reply is lost, the wake runs, A restarts, and C sends it again."""
+    from app.core.task_registry import task_registry
+    a, b, _, _ = pair
+    c = Worker("c", tmp_path)
+    join(a, c)
+    converge([a, b, c])
+    try:
+        with a.active():
+            receipt = turns.enqueue_turn(orch.REMOTE_RECEIPT_PREFIX + CHILD, "agent_message",
+                                         profile_id="default", command_id="orchestration:start:" + "d" * 64,
+                                         parent_turn_id="root-turn",
+                                         payload={"remote_device_id": c.device_id, "report_to": PARENT,
+                                                  "orchestration_depth": 1})
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (receipt["id"],))
+            _working(PARENT)
+        lost = [orch.REPORT_ACTION]
+        monkeypatch.setattr(control, "call", _route([a, b, c], lost_replies=lost))
+        report = {"task_id": CHILD, "status": "completed", "summary": "Done on C",
+                  "agent_message_turn_id": "child-turn-1", "kind": "session", "title": "Started work"}
+        with c.active():
+            with pytest.raises(control.MaybeApplied):
+                await control.call(a.device_id, orch.REPORT_ACTION, {"session_id": CHILD, "report": report})
+        with a.active():
+            [wake] = _reports(PARENT)
+            assert len(_receipts()) == 1
+            _run(wake)
+        task_registry._woken.clear()
+        with c.active():
+            answer = await control.call(a.device_id, orch.REPORT_ACTION, {"session_id": CHILD, "report": report})
+            assert answer["delivered"] is True
+        with a.active():
+            assert len(_all_reports(PARENT)) == 1 and _reports(PARENT) == []
+    finally:
+        c.close()
+
+
+@pytest.mark.asyncio
+async def test_receipts_move_with_the_parent_so_it_never_runs_a_report_twice(pair, monkeypatch):
+    """S5: B admits a report from A, the reply is lost, the wake runs on B and
+    the parent moves back B -> A. A's retry finds the receipt that came along."""
+    from app.core.task_registry import task_registry
+    a, b, _, _ = pair
+    for worker in (a, b):  # a chat without a checkout can move back and forth
+        with worker.active(), get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL, branch=NULL WHERE id=%s", (PARENT,))
+    with a.active():
+        start = _start_child()
+    await _move_parent(a, b, monkeypatch)
+    monkeypatch.setattr(control, "call", _route([a, b], lost_replies=[orch.FORWARD_REPORT_ACTION]))
+    with a.active():
+        await orch.report_settled_start(CHILD, _settle(start), "completed")
+        await orch.deliver_forwarded_reports(force=True)
+        assert len(orch.pending_forwarded_reports()) == 1
+    with b.active():
+        [wake] = _reports(PARENT)
+        _run(wake)
+        assert len(_receipts()) == 1
+    with a.active():
+        await handoff.receive(database.get_session(PARENT))
+        assert control.owner_of(database.get_session(PARENT)) is None
+        _working(PARENT)
+        assert len(_receipts()) == 1
+        task_registry._woken.clear()
+        await orch.deliver_forwarded_reports(force=True)
+        assert orch.pending_forwarded_reports() == []
+        assert _all_reports(PARENT) == []
+
+
+@pytest.mark.asyncio
+async def test_a_receipt_written_during_the_move_refuses_the_commit(pair, monkeypatch):
+    """S5, commit check: a report is admitted on A (deferred: the parent is at
+    rest) after begin's export and before the flip. The receipt would stay
+    behind, so the flip is refused; the next move carries it."""
+    import asyncio
+
+    a, b, _, _ = pair
+    with a.active():
+        start = _start_child()
+        settled = _settle(start)
+        _at_rest(PARENT)
+    monkeypatch.setattr(control, "call", _route([a, b]))
+    real_lease, real_idle = handoff._lease, handoff._idle
+    committing = []
+
+    def lease(*args, **kwargs):
+        committing.append(True)
+        return real_lease(*args, **kwargs)
+
+    def idle(cursor, sid):
+        real_idle(cursor, sid)
+        if committing and sid == PARENT:
+            committing.clear()
+            asyncio.run(orch.report_settled_start(CHILD, settled, "completed"))
+    monkeypatch.setattr(handoff, "_lease", lease)
+    monkeypatch.setattr(handoff, "_idle", idle)
+    with b.active():
+        with pytest.raises(Exception, match="A report reached this chat during the move"):
+            await handoff.receive(database.get_session(PARENT))
+        assert control.owner_of(database.get_session(PARENT)) == a.device_id
+    with a.active():
+        assert control.owner_of(database.get_session(PARENT)) is None
+        assert len(_receipts()) == 1 and len(_deferred_events()) == 1
+    monkeypatch.setattr(handoff, "_idle", real_idle)
+    with b.active():
+        await handoff.receive(database.get_session(PARENT))
+        assert control.owner_of(database.get_session(PARENT)) is None
+        assert len(_receipts()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_report_at_the_hop_limit_is_kept_and_delivered_later(pair, tmp_path, monkeypatch):
+    """S6: A -> B -> C with a limit of two hops, while C has the owner wrong.
+    B keeps the report pending with backoff, never refused, and delivers it
+    once it learns D runs the parent."""
+    a, b, _, _ = pair
+    c, d = Worker("c", tmp_path), Worker("d", tmp_path)
+    join(a, c)
+    join(a, d)
+    converge([a, b, c, d])
+    monkeypatch.setattr(orch, "MAX_FORWARD_HOPS", 2)
+    try:
+        for worker in (b, c, d):
+            with worker.active():
+                _working(PARENT)
+        _owned_by(a, b.device_id)
+        _owned_by(b, c.device_id)
+        _owned_by(c, b.device_id)
+        _owned_by(d, None)
+        monkeypatch.setattr(control, "call", _route([a, b, c, d]))
+        _, settled = _settled_report_on(a)
+        with a.active():
+            await orch.report_settled_start(CHILD, settled, "completed")
+            await orch.deliver_forwarded_reports(force=True)
+            assert orch.pending_forwarded_reports() == []
+        with b.active():
+            await orch.deliver_forwarded_reports(force=True)
+            [held] = orch.pending_forwarded_reports()
+            assert held["payload"]["attempts"] == 1 and held["payload"]["next_attempt_at"] > 0
+        with c.active():
+            assert orch.pending_forwarded_reports() == []
+        _owned_by(b, d.device_id)
+        with b.active():
+            await orch.deliver_forwarded_reports(force=True)
+            assert orch.pending_forwarded_reports() == []
+        with d.active():
+            assert len(_reports(PARENT)) == 1
+        for worker in (a, b, c):
+            with worker.active():
+                assert _all_reports(PARENT) == []
+    finally:
+        c.close()
+        d.close()
