@@ -1312,6 +1312,45 @@ describe('feedController cross-device interaction settle (#606 item 4)', () => {
 		const perms = deps.state.pendingPermissions as Array<{ request_id: string }>;
 		expect(perms.map((p) => p.request_id)).toEqual(['perm-1']);
 	});
+
+	it('re-reads both kinds when the worker reports its prompt rows changed', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		// Nothing is fed: there is no open chat to re-read for.
+		feedController.resyncPending();
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingQuestions).not.toHaveBeenCalled();
+
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		// The requested event's own read ran before the row had synced here.
+		hoisted.onEvent!({
+			type: 'interaction.requested', id: 'evt-early', seq: 1, session_id: 's1',
+			kind: 'question', request_id: 'question-1',
+		});
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingQuestions).toHaveBeenCalledTimes(1);
+
+		// The row lands: a burst of signals is one more read per kind.
+		feedController.resyncPending();
+		feedController.resyncPending();
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingQuestions).toHaveBeenCalledTimes(2);
+		expect(deps.requestPendingPermissions).toHaveBeenCalledTimes(1);
+	});
+
+	it('holds a prompt-row signal during hydration until caught_up', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		feedController.resyncPending();
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingQuestions).not.toHaveBeenCalled();
+		hoisted.onEvent!(caughtUp(0));
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingQuestions).toHaveBeenCalledTimes(1);
+		expect(deps.requestPendingPermissions).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe('feedController late optimistic echoes', () => {

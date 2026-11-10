@@ -637,6 +637,31 @@ def remove_tree(path: Path) -> None:
 
 
 # What a hand-over runs from the update's source (docker/container_runtime.py).
+# Compile the app, Fluid, the dependencies and the standard library into this
+# update's own bytecode directory while the old version is still running. The
+# app runs with PYTHONDONTWRITEBYTECODE=1 and with sys.pycache_prefix pointing
+# at that directory (dependencies.pth), so without this step nothing there is
+# ever written and EVERY start compiles every module it imports from source
+# (measured: 3.4 s against 1.65 s to import app.main). Reads verified sources
+# only, and writes nowhere but the prefix: it stops when the prefix is not the
+# one this update owns, so shared installations stay untouched.
+BYTECODE_SCRIPT = """
+import compileall, os, re, sys, sysconfig
+source, workers, prefix = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+if sys.pycache_prefix != prefix:
+    sys.exit(3)
+skip = re.compile(r"[/\\\\](site-packages|test|tests|idlelib|lib2to3|turtledemo|tkinter|ensurepip)[/\\\\]")
+folders = [(source, None), (sysconfig.get_path("stdlib"), skip)]
+folders += [(entry, None) for entry in sys.path if entry.endswith("site-packages") and os.path.isdir(entry)]
+for folder, rx in folders:
+    try:
+        compileall.compile_dir(folder, quiet=2, workers=workers, rx=rx)
+    except Exception:
+        pass
+"""
+BYTECODE_WORKERS = 8
+
+
 HANDOVER_FILES = ("docker/container_runtime.py", "docker/application_updates.py",
                   "docker/chrome-supervisor.sh", "docker/start-chrome.sh")
 
@@ -1678,9 +1703,12 @@ class ContainerUpdates:
                 self.install_python_dependencies(directory, source, env, runtime_python)
             else:
                 references.append(str(cached.relative_to(self.root / "dependencies")))
+        own_bytecode = cached is not None  # dependencies.pth names this update's pycache
         pip = [str(python), "-m", "pip", "install", "--prefer-binary", "--timeout", "120", "--retries", "10"]
         with self.stage("fluid"):
             self.run_build(pip + ["--no-deps", "--no-build-isolation", "./fluid"], source, env)
+        with self.stage("bytecode") as result:
+            result["outcome"] = self.precompile(directory, source, env, python) if own_bytecode else "disabled"
         with self.stage("prebuilt_ui") as result:
             ui = self.prebuilt_ui(directory, manifest)
             disabled = os.environ.get("AI_SHUFFLE_PERF_PREBUILT_UI", "").strip().lower() in ("0", "false", "off")
@@ -1696,6 +1724,25 @@ class ContainerUpdates:
         atomic_json(directory / "dependency-cache.json", references)
         shutil.copytree(ui or source / "frontend/build", source / "app/static")
         atomic_json(directory / "complete", revision)
+
+    def precompile(self, directory, source, env, python):
+        """Compile this update's bytecode before it is ever started; see
+        BYTECODE_SCRIPT. Never fails an update: without it the app compiles
+        on every start, as before."""
+        if os.environ.get("AI_SHUFFLE_PERF_UPDATE_BYTECODE", "").strip().lower() in ("0", "false", "off"):
+            return "disabled"
+        workers = max(1, min(BYTECODE_WORKERS, os.cpu_count() or 1))
+        try:
+            # -I: no ambient module paths or PYTHON* settings; site still runs,
+            # so dependencies.pth sets the prefix exactly as it does for the app.
+            self.run_build([str(python), "-I", "-c", BYTECODE_SCRIPT, str(source / "app"), str(workers),
+                            str(directory / "pycache")], source, env)
+        except (UpdateError, OSError):
+            if self.stop.is_set():
+                raise UpdateError("Application build interrupted") from None
+            _log("Bytecode was not compiled ahead of the first start; the app compiles as it starts")
+            return "failed"
+        return "completed"
 
     def drop_superseded(self, revision):
         """Remove a staged build that a newer download replaced. Never one that

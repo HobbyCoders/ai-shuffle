@@ -691,3 +691,26 @@ def test_mirrored_events_alone_coalesce_session_list_invalidations(monkeypatch):
     assert 0 < delay <= startup.EVENTS_ONLY_INVALIDATION_SECONDS
     callback()
     assert sessions_emits() == 12
+
+
+def test_applied_prompt_rows_tell_open_chats_to_reread(monkeypatch):
+    """A peer's question row can land after the event that announces it."""
+    from app.core.global_events import global_events
+
+    changed = Mock()
+    monkeypatch.setattr(global_events, "resources_changed", changed)
+
+    def emits(resource):
+        return sorted(call.kwargs["user_type"] for call in changed.call_args_list
+                      if call.args[0] == resource)
+
+    everyone = ["account", "admin", "api_user", "paired"]
+    startup._on_applied([("session_runtime", "s1", "upsert")])
+    assert emits(startup.PROMPTS_RESOURCE) == []
+    # The row arriving, an answer changing it and its removal all re-read.
+    for op in ("upsert", "upsert", "delete"):
+        changed.reset_mock()
+        startup._on_applied([("pending_interactions", "i1", op)])
+        assert emits(startup.PROMPTS_RESOURCE) == everyone
+        assert emits("sessions") == everyone
+

@@ -1165,7 +1165,7 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
             known = store.records_for_collection(cursor, collection)
         else:
             known = store.records_for_ids(cursor, collection, ids)
-        query = f"SELECT * FROM {coll.table}"
+        query = f"SELECT {_scan_columns(cursor, coll)} FROM {coll.table}"
         params: tuple[Any, ...] = ()
         where: List[str] = []
         if owner_only:
@@ -1242,6 +1242,19 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
 
 
 SCAN_PUBLISH_BATCH = 200
+
+
+def _scan_columns(cursor, coll: policy.Collection) -> str:
+    """The select list for a collection scan: every column but ``scan_skip``.
+
+    Read from the live table rather than the policy, so a column a migration
+    added still reaches ``shared_row`` and the serializer.
+    """
+    if not coll.scan_skip:
+        return "*"
+    cursor.execute(f"SELECT * FROM {coll.table} LIMIT 0")
+    names = [column[0] for column in cursor.description or () if column[0] not in coll.scan_skip]
+    return ", ".join('"' + name.replace('"', '""') + '"' for name in names) if names else "*"
 
 
 def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True,
