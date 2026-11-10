@@ -962,7 +962,10 @@ async def test_keep_response_skips_steers_but_retains_real_legacy_boundaries(
         # checkpoint candidates. Preserve the existing command behavior.
         following["payload"]["checkpoint_backed"] = False
     se.append_events(SID, [first, interjection, _asst_ev("reply"), following])
-    _patch_checkpoints(monkeypatch, [_cp("u-1", "again"), _cp("u-2", "again")])
+    # A command is not a transcript checkpoint (checkpoints_from_entries), and
+    # the event log and transcript must count the same prompts with a text.
+    _patch_checkpoints(monkeypatch, [_cp("u-1", "again")]
+                       + ([] if boundary_kind == "command" else [_cp("u-2", "again")]))
     assert _resolve_rewind_from_seq(SID, SDK, WD, "u-1", True, "user") == (4, None)
     assert _resolve_rewind_from_seq(SID, SDK, WD, "u-1", False, "user") == (1, None)
 

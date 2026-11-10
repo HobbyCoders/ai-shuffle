@@ -467,20 +467,31 @@ def _agent_text(row: dict) -> str:
     return (payload.get("agent_content") or payload.get("content") or "").strip()
 
 
-def _recorded_agent_target(session_id: str, shown: str, occurrence: int) -> Optional[tuple[str, int]]:
-    """Map a shown prompt and its occurrence to the text the agent got and its
-    occurrence among the transcript's prompts, for a prompt whose turn recorded
-    a different text. None for every other prompt (the exact match applies)."""
+def _recorded_agent_target(
+    session_id: str, shown: str, occurrence: int,
+) -> tuple[tuple[str, int, int] | None, str | None]:
+    """Translate the client's occurrence into the transcript's terms.
+
+    The client counts bubbles by the text they SHOW; the transcript holds the
+    text the agent GOT. A reference and its expanded text typed literally show
+    differently and match the same transcript text, so every prompt is
+    translated, not only one that recorded ``agent_content``. Returns
+    ``((agent_text, occurrence, count), None)``: its occurrence among the
+    event-log prompts the agent got that text for, and how many there are.
+    FAILS CLOSED when the event log has no such shown occurrence.
+    """
     prompts = [row for row in _load_message_events(session_id) if _is_prompt_event(row)]
     shown_rows = [i for i, row in enumerate(prompts)
                   if ((row.get("payload") or {}).get("content") or "").strip() == shown]
     if occurrence < 0 or occurrence >= len(shown_rows):
-        return None
+        return None, (
+            f"Rewind refused: event log has {len(shown_rows)} user prompt(s) showing "
+            f"the target content, occurrence {occurrence} requested (content guard)"
+        )
     index = shown_rows[occurrence]
     agent = _agent_text(prompts[index])
-    if agent == shown:
-        return None
-    return agent, sum(1 for row in prompts[:index] if _agent_text(row) == agent)
+    same = [i for i, row in enumerate(prompts) if _agent_text(row) == agent]
+    return (agent, same.index(index), len(same)), None
 
 
 def _resolve_checkpoint_uuid_from_content(
@@ -501,8 +512,10 @@ def _resolve_checkpoint_uuid_from_content(
     in any session that has seen an interrupt — but those lines never equal
     a real prompt's text. FAILS CLOSED when nothing matches (content guard).
 
-    With ``session_id``, a prompt whose turn recorded the text the agent got
-    (``_agent_text``) is matched on that text instead of the shown one.
+    With ``session_id``, the shown text and occurrence are first translated to
+    the text the agent got (``_recorded_agent_target``), and the event log and
+    the transcript must hold the same number of prompts with that text: when
+    they differ, the n-th of one need not be the n-th of the other.
     """
     want = (target_content or "").strip()
     if not want:
@@ -510,14 +523,22 @@ def _resolve_checkpoint_uuid_from_content(
             "Rewind refused: no target content supplied to resolve against "
             "(content guard)"
         )
-    recorded = _recorded_agent_target(session_id, want, target_occurrence) if session_id else None
-    if recorded is not None:
-        want, target_occurrence = recorded
+    expected = None
+    if session_id:
+        recorded, error = _recorded_agent_target(session_id, want, target_occurrence)
+        if error:
+            return None, error
+        want, target_occurrence, expected = recorded
     checkpoints = _get_checkpoints(sdk_session_id, working_dir)
     matches = [
         cp for cp in checkpoints
         if cp.role == "user" and (cp.full_message or "").strip() == want
     ]
+    if expected is not None and expected != len(matches):
+        return None, (
+            f"Rewind refused: transcript has {len(matches)} user prompt(s) with the "
+            f"target's text but the event log has {expected} (content guard)"
+        )
     if target_occurrence < 0 or target_occurrence >= len(matches):
         return None, (
             f"Rewind refused: transcript has {len(matches)} user prompt(s) "
@@ -599,6 +620,16 @@ def _resolve_rewind_from_seq(
             (i, row) for i, row in enumerate(events)
             if _is_prompt_event(row) and _agent_text(row) == want
         ]
+        matching_cps = sum(1 for cp in user_cps if (cp.full_message or "").strip() == want)
+        if len(prompts) != matching_cps:
+            # Same rule as the content lookup: unequal counts (a prompt the
+            # transcript never got, or one recorded before agent_content was
+            # kept) mean the n-th of one need not be the n-th of the other.
+            return None, (
+                f"Rewind refused: event log has {len(prompts)} user prompt(s) "
+                f"matching the target's text but the transcript has "
+                f"{matching_cps} (content guard)"
+            )
         if occurrence >= len(prompts):
             return None, (
                 f"Rewind refused: event log has {len(prompts)} user prompt(s) "

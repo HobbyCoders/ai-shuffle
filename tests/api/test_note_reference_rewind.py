@@ -116,3 +116,72 @@ async def test_a_message_without_a_note_reference_records_no_second_text(chat, r
         target_uuid="", target_content=sent, target_occurrence=0, include_response=False,
     ))
     assert result.success, result.error
+
+
+# A reference the worker expanded and the expanded text typed literally show
+# different bubbles but give the agent the same text. The client counts bubbles
+# by what they show; the transcript holds what the agent got. Each restore must
+# cut at its own bubble's checkpoint and event, never at the other one's.
+EXPANDED = "read @/running/data/notes/plan.md"
+REF = ("ref", SHOWN, EXPANDED)
+LIT = ("lit", EXPANDED, None)
+
+
+def _seed(sequence, *, recorded=True):
+    """One event and one transcript checkpoint per prompt, in order; return
+    the checkpoint uuids, the prompts' event seqs and each prompt's shown
+    occurrence (what the client sends)."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session(SID)
+    events, cps, shown_counts, occurrences = [], [], {}, []
+    for i, (_, shown, agent) in enumerate(sequence):
+        payload = {"content": shown}
+        if agent and recorded:
+            payload["agent_content"] = agent
+        events += [{"type": "message.user", "turn_id": f"t{i}", "payload": payload},
+                   {"type": "message.assistant", "turn_id": f"t{i}", "payload": {"content": f"a{i}", "kind": "text"}}]
+        cps += [_cp(f"cp{i}", agent or shown, index=2 * i), _cp(f"cp{i}-a", f"a{i}", role="assistant", index=2 * i + 1)]
+        occurrences.append(shown_counts.get(shown, 0))
+        shown_counts[shown] = occurrences[-1] + 1
+    session_events.append_events(SID, events)
+    seqs = [row["seq"] for row in session_events.get_events(SID) if row["event_type"] == "message.user"]
+    return cps, seqs, occurrences
+
+
+@pytest.mark.parametrize("include_response", [False, True])
+@pytest.mark.parametrize("sequence,target", [
+    ((REF, LIT), 0), ((REF, LIT), 1),
+    ((LIT, REF), 0), ((LIT, REF), 1),
+    ((REF, LIT, REF, LIT), 0), ((REF, LIT, REF, LIT), 1),
+    ((REF, LIT, REF, LIT), 2), ((REF, LIT, REF, LIT), 3),
+    ((LIT, LIT, REF, REF), 1), ((LIT, LIT, REF, REF), 2),
+])
+async def test_a_reference_and_its_expanded_text_typed_literally_rewind_to_their_own_turns(
+    rewind_env, monkeypatch, sequence, target, include_response,  # noqa: F811
+):
+    cps, seqs, occurrences = _seed(sequence)
+    _patch_checkpoints(monkeypatch, cps)
+    result = await execute_rewind_and_wait(SID, commands.RewindRequestV2(
+        target_uuid="", target_content=sequence[target][1], target_occurrence=occurrences[target],
+        include_response=include_response,
+    ))
+    assert result.success, result.error
+    assert rewind_env.truncate_calls == [f"cp{target}"]
+    cut = [row for row in session_events.get_events(SID) if row["event_type"] == "transcript.rewound"]
+    if include_response and target == len(sequence) - 1:
+        assert cut == []  # already the tail
+    else:
+        assert [row["payload"]["from_seq"] for row in cut] == [seqs[target + include_response]]
+
+
+async def test_a_collision_recorded_before_agent_text_was_kept_is_refused(rewind_env, monkeypatch):  # noqa: F811
+    # No event says what the agent got, so the event log has one prompt with
+    # the expanded text and the transcript two: the turn cannot be told apart.
+    cps, _, _ = _seed((REF, LIT), recorded=False)
+    _patch_checkpoints(monkeypatch, cps)
+    result = await execute_rewind_and_wait(SID, commands.RewindRequestV2(
+        target_uuid="", target_content=EXPANDED, target_occurrence=0, include_response=False,
+    ))
+    assert not result.success and "content guard" in result.error
+    assert rewind_env.truncate_calls == []
