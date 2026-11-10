@@ -1257,15 +1257,59 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(await state(page)).toBe(0);
       // Playwright pressed Control before it reached the key it does not know.
       const result = await runAct(session, { kind: "key", ref: entry, key: "NoSuchKey", modifiers: ["Control"] });
-      try {
-        expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
-        expect(firstText(result)).toContain("Unknown key");
-        expect(await state(page)).toBe("Control ");
-      } finally {
-        // Playwright leaves Control down (issue #1423); release it for the tests that follow.
-        await page.keyboard.up("Control");
-      }
+      expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+      expect(firstText(result)).toContain("Unknown key");
+      expect(await state(page)).toBe("Control ");
     });
+    // A key press that fails part way must not leave its keys down for the
+    // actions after it (#1423). The field logs every key event it receives.
+    const keyLog = `onkeydown="(window.keys=window.keys||[]).push('down '+event.key+(event.ctrlKey?' ctrl':'')+(event.repeat?' repeat':''))" onkeyup="(window.keys=window.keys||[]).push('up '+event.key+(event.ctrlKey?' ctrl':''))"`;
+    const keyEvents = (page: Page, key: string) => page.evaluate(k => ((window as unknown as { keys?: string[] }).keys ?? []).filter(e => e.split(" ")[1] === k), key);
+    it.each<[string, Partial<ActInput>, string[], boolean]>([
+      ["Control+Foo", { key: "Foo", modifiers: ["Control"] }, ["Control"], true],
+      ["a+Foo", { key: "a+Foo" }, ["a"], true],
+      ["Control+Foo without a ref", { key: "Foo", modifiers: ["Control"] }, ["Control"], false],
+    ])("releases the keys %s pressed before its unknown key", async (_name, chord, pressed, byRef) => {
+      const page = await load(`<input aria-label="Entry" ${keyLog}>`);
+      if (!byRef) await page.focus("input");
+      const target = async () => byRef ? { ref: await ref("Entry") } : {};
+      expect(body(await runAct(session, { kind: "key", ...await target(), ...chord } as ActInput))).toMatchObject({ code: "outcome_unknown", outcome: "unknown" });
+      for (const key of pressed) expect((await keyEvents(page, key)).at(-1)).toBe(`up ${key}`);
+      expect(body(await runAct(session, { kind: "key", ...await target(), key: "c" }))).toMatchObject({ ok: true });
+      expect(await keyEvents(page, "c")).toEqual(["down c", "up c"]);
+      expect(await page.inputValue("input")).toMatch(/c$/);
+    });
+    // The first key or click the page gets blocks it for 5s, past the 2s ref
+    // budget. The release must not wait for it: the action reaches its
+    // cleanup while the page is still blocked, and the keyups land once it is
+    // free, ahead of the next action's keys.
+    const blockOnce = "if(!window.blocked){window.blocked=1;const t=Date.now();while(Date.now()-t<5000);}";
+    const blockingField = `<input aria-label="Entry" ${keyLog}><script>document.querySelector("input").addEventListener("keydown",()=>{${blockOnce}})</script>`;
+    it.each<[string, string, Partial<ActInput> & { target: string }, string, string[]]>([
+      ["Control+a key press", blockingField, { kind: "key", target: "Entry", key: "a", modifiers: ["Control"] }, "c", ["down c", "up c"]],
+      ["single key press", blockingField, { kind: "key", target: "Entry", key: "a" }, "a", ["down a", "up a", "down a", "up a"]],
+      ["Control-click", `<button onclick="${blockOnce}">Busy</button><input aria-label="Entry" ${keyLog}>`, { kind: "click", target: "Busy", modifiers: ["Control"] }, "c", ["down c", "up c"]],
+    ])("releases the keys of a %s that a blocked page timed out, without waiting for the page", async (_name, html, { target, ...action }, next, events) => {
+      const page = await load(html);
+      const disposeWatch = session.disposeWatch.bind(session);
+      let reached = Infinity;
+      const started = performance.now();
+      const cleanup = vi.spyOn(session, "disposeWatch").mockImplementation(() => {
+        reached = Math.min(reached, performance.now() - started);
+        return disposeWatch();
+      });
+      try {
+        expect(body(await runAct(session, { ...action, ref: await ref(target) } as ActInput))).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+      } finally {
+        cleanup.mockRestore();
+      }
+      expect(reached).toBeLessThan(4000);
+      await page.evaluate(() => 0); // answers once the page is free again
+      expect(body(await runAct(session, { kind: "key", ref: await ref("Entry"), key: next }))).toMatchObject({ ok: true });
+      expect(await keyEvents(page, next)).toEqual(events);
+      expect((await keyEvents(page, "Control")).at(-1) ?? "up Control").toBe("up Control");
+      expect(await page.inputValue("input")).toBe(next === "a" ? "aa" : "c");
+    }, 15000);
     it("does not count a click as done when the page blocked before Playwright could check it", async () => {
       // The cover appears as the pointer arrives and the page then blocks, so
       // Playwright sent the click but never learned that the cover took it.

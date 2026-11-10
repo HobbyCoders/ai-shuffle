@@ -135,6 +135,35 @@ function chordPartlyPressed(message: string, chord: string): boolean {
 }
 
 /**
+ * The keys of a chord a failed press may have left down. Playwright presses
+ * them in order and stops at the first key it does not know, with the keys
+ * before it down; the last key the failure could be naming is used, so an
+ * ambiguous name releases more rather than less. Any other failure once the
+ * press began may have stopped at any key.
+ */
+function keysLeftDown(message: string, chord: string, started: boolean): string[] {
+  const keys = chordKeys(chord);
+  for (let at = keys.length - 1; at >= 0; at--) if (refusesKey(message, keys[at])) return keys.slice(0, at);
+  return started ? keys : [];
+}
+
+/**
+ * How long a call waits for its keys to be released. A page that is still
+ * blocked gets the keyups once it is free; the call does not wait for that.
+ */
+const KEY_RELEASE_WAIT_MS = 250;
+
+/**
+ * Release keys, last pressed first. Playwright counts a key as up as soon as it
+ * receives the release, before the page answers, so input sent after this
+ * carries none of them even while their keyups wait on a blocked page.
+ */
+async function releaseKeys(page: Page, keys: string[]): Promise<void> {
+  const ups = [...keys].reverse().map(key => page.keyboard.up(key).catch(() => undefined));
+  await raceWithTimeout(Promise.all(ups), KEY_RELEASE_WAIT_MS, "key release timed out").catch(() => undefined);
+}
+
+/**
  * Where Playwright quotes this action's text back in a failure: the value of a
  * type or a fill, the chord of a key press, and the key of that chord it does
  * not know. Only the field the action sent is listed. The other kinds send
@@ -603,7 +632,7 @@ async function performAction(
       for (const modifier of input.modifiers) { await page.keyboard.down(modifier); held.push(modifier); }
       await performAction(session, page, { ...input, modifiers: [] }, locator, markSent, evidence);
     } finally {
-      for (const modifier of held.reverse()) await page.keyboard.up(modifier);
+      await releaseKeys(page, held);
     }
     return;
   }
@@ -666,8 +695,16 @@ async function performAction(
     case "key": {
       if (!input.key) throw new Error("invalid_input: `key` requires `key`");
       const combo = keyChord(input);
-      if (locator) await locator.press(combo, refTimeout);
-      else { markSent(); await page.keyboard.press(combo); }
+      try {
+        if (locator) await locator.press(combo, refTimeout);
+        else { markSent(); await page.keyboard.press(combo); }
+      } catch (err) {
+        // Playwright releases a chord only when the whole press succeeds.
+        const msg = err instanceof Error ? err.message : String(err);
+        const started = !locator || inputMayHaveGoneOut(failureLines(msg, echoedText(input)));
+        await releaseKeys(page, keysLeftDown(msg, combo, started));
+        throw err;
+      }
       return;
     }
 
