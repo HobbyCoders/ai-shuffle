@@ -178,7 +178,7 @@ what an area depends on, so a record can never stand for different code.
   a pull request, and `android-and-docs`, `supply-chain` and `update-reach`
   have no pull-request twin: they always run.
 - Only a live artifact uploaded by this repository's own run counts, never a
-  fork's. Records expire after 14 days. A failed lookup, a missing token or any
+  fork's. Records expire after 7 days. A failed lookup, a missing token or any
   error answers "not proven": the area runs. Losing a record only loses the
   shortcut, so the record steps never fail a pull request.
 - Dependency audits depend on advisory lists, which change without any file

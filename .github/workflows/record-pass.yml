@@ -45,5 +45,5 @@ jobs:
         with:
           name: ${{ steps.name.outputs.name }}
           path: proven.txt
-          retention-days: 14
+          retention-days: 7
           overwrite: true
