@@ -3992,13 +3992,19 @@ def run_database_maintenance(
 
     try:
         from app.core.config import settings as _settings
-        from app.db.fluid_events import prune_fluid_delta_events
+        from app.db.fluid_events import maintain_fluid_event_log
         retention_days = int(getattr(_settings, "fluid_event_retention_days", 7) or 0)
-        results["cleaned_fluid_delta_events"] = (
-            prune_fluid_delta_events(retention_days, stop=stop) if retention_days > 0 else "disabled"
-        )
+        if retention_days > 0:
+            # One walk: prunes deltas and compacts Usage snapshots of idle sessions.
+            fluid = maintain_fluid_event_log(retention_days, stop=stop)
+            results["cleaned_fluid_delta_events"] = fluid["pruned"]
+            results["compacted_fluid_usage_snapshots"] = fluid["compacted"]
+        else:
+            results["cleaned_fluid_delta_events"] = "disabled"
+            results["compacted_fluid_usage_snapshots"] = "disabled"
     except Exception as e:
         results["cleaned_fluid_delta_events"] = f"error: {e}"
+        results["compacted_fluid_usage_snapshots"] = f"error: {e}"
 
     # Compaction is already row/run capped; do not share the log transaction.
     try:

@@ -254,7 +254,8 @@ def test_plain_vacuum_during_streaming_restores_connection(pg, monkeypatch, stre
     monkeypatch.setattr(base, "_close_connection", close)
     monkeypatch.setattr(retention, "mutate_batches", lambda *a, **k: 0)
     monkeypatch.setattr(database, "_prune_notifications_cap", lambda *a, **k: 0)
-    monkeypatch.setattr(fluid_events, "prune_fluid_delta_events", lambda *a, **k: 0)
+    monkeypatch.setattr(fluid_events, "maintain_fluid_event_log",
+                        lambda *a, **k: {"pruned": 0, "compacted": 0})
     monkeypatch.setattr(session_events, "compact_idle_session_deltas", lambda **k: {"rows": 0})
     writer = open_connection()
     try:
@@ -340,7 +341,8 @@ def test_vacuum_failure_never_uses_released_analyze_cursor(pg, cluster, monkeypa
     monkeypatch.setattr(database, "exempt_from_start_pressure", lambda conn: None)
     monkeypatch.setattr(retention, "mutate_batches", lambda *a, **k: 0)
     monkeypatch.setattr(database, "_prune_notifications_cap", lambda *a, **k: 0)
-    monkeypatch.setattr(fluid_events, "prune_fluid_delta_events", lambda *a, **k: 0)
+    monkeypatch.setattr(fluid_events, "maintain_fluid_event_log",
+                        lambda *a, **k: {"pruned": 0, "compacted": 0})
     monkeypatch.setattr(session_events, "compact_idle_session_deltas", lambda **k: {"rows": 0})
     try:
         result = database.run_database_maintenance(skip_vacuum=True)

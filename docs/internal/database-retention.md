@@ -23,6 +23,27 @@ explicit error with the committed row count; the next pass retries it. A supplie
 cursor retains the caller's transaction and error/rollback ownership. Stop requests
 are checked between ranges. Orphaned sessions and all other event classes remain.
 
+The same walk also compacts the `context_usage` snapshot of those idle
+sessions' `Usage` rows to the usage-bar form, exactly
+`compact_context_usage(snapshot)` from `app/core/transcript_replay.py` (the form
+the app log's `turn.usage` already stores): the totals, `model`, `measured`,
+`isAutoCompactEnabled` and the category rows' `name`/`tokens`/`color`/`isDeferred`.
+The breakdown detail (`gridRows`, `mcpTools`, `skills`, `messageBreakdown`,
+`systemTools`, ...) that made up most of each row is dropped. Token counters,
+`raw`, ids, `ts`, `seq` and every other key are kept byte-for-byte, so the
+accounting backfill is unaffected; no `Usage` row is deleted. One `UPDATE` per
+range runs in the range's transaction after its delete, with the same idle
+recheck, so a failed range rolls back whole and is retried next pass. It matches
+only snapshots that compaction would change (an object with a key outside the
+compact keys, or a category object with a key outside the category keys);
+compacted, null or missing snapshots are never rewritten again. Readers of an
+idle session's old `Usage` rows need only `model` (native resume) and the
+counters/`raw`; the context panel builds its breakdown live, and a resumed
+session's subscriber starts at the log head instead of replaying old rows.
+Maintenance reports the rewritten row count as `compacted_fluid_usage_snapshots`
+beside `cleaned_fluid_delta_events`. The dropped detail is not recoverable from
+the database afterwards; restore an offline backup if it is ever needed.
+
 Normal maintenance uses plain `VACUUM (SKIP_LOCKED, TRUNCATE FALSE, PARALLEL 0)`;
 non-streaming passes also request `ANALYZE`. The legacy `skip_vacuum=True`
 streaming hint now selects the lighter mode instead of disabling reclamation.
@@ -98,8 +119,10 @@ progress, but doing the same on disk requires sync/cursor/rollback handling.
 Follow-ups with measurements and parity requirements:
 [#1327](https://github.com/HobbyCoders/ai-shuffle/issues/1327) (usage/input/progress)
 and [#1328](https://github.com/HobbyCoders/ai-shuffle/issues/1328) (proven compacted
-sync fragments). No existing usage payload, sync version/hash, or visible chat row
-is rewritten by this change; there is no destructive data migration to roll back.
+sync fragments). The idle Fluid `Usage` snapshot compaction described under
+"Online maintenance" is the first #1327 step: it touches only the worker-local
+`fluid_session_events` table, never an app usage payload, sync version/hash, or
+visible chat row.
 Existing delta pruning is unchanged in scope; restore an offline backup to recover
 transient fragments if operational rollback requires those too.
 
