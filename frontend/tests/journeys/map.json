@@ -136,6 +136,11 @@
 			"globs": ["frontend/tests/journeys/settings-memory.journey.mjs", "frontend/src/lib/components/settings/memory/**", "frontend/src/lib/settings/entries/memory.ts"]
 		},
 		{
+			"why": "Settings pages keep their loaded row shapes while a reload waits for the worker",
+			"journeys": ["settings-reload"],
+			"globs": ["frontend/tests/journeys/settings-reload.journey.mjs", "frontend/src/lib/components/settings/pages/SecurityPage.svelte", "frontend/src/lib/components/settings/pages/editors/SecurityInstructionsEditor.svelte", "frontend/src/lib/components/settings/pages/SpendingRows.svelte", "frontend/src/lib/components/settings/pages/UsagePage.svelte", "frontend/src/lib/components/settings/rows/ExpandToggle.svelte"]
+		},
+		{
 			"why": "Settings > System > Memory health: healthy stays quiet, a warning reads without opening the row, a late answer keeps the row in place",
 			"journeys": ["settings-memory-health"],
 			"globs": ["frontend/tests/journeys/settings-memory-health.journey.mjs", "frontend/src/lib/components/settings/pages/SystemPage.svelte", "frontend/src/lib/components/settings/pages/memory-health.ts", "frontend/src/lib/components/settings/pages/editors/MemoryHealthList.svelte"]
@@ -144,6 +149,20 @@
 			"why": "Settings deep links show the requested phone detail and preserve both Back steps",
 			"journeys": ["settings-detail-link"],
 			"globs": ["frontend/tests/journeys/settings-detail-link.journey.mjs", "frontend/src/lib/components/settings/shell/SettingsShell.svelte", "frontend/src/lib/components/settings/shell/BackRow.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte"]
+		},
+		{
+			"why": "the model picker panel: rows inside the pane it opens in, keyboard focus on open and Escape, closing when Settings is hidden",
+			"journeys": ["model-picker"],
+			"globs": [
+				"frontend/tests/journeys/model-picker.journey.mjs",
+				"frontend/src/lib/components/settings/ModelPicker.svelte",
+				"frontend/src/lib/components/settings/ModelPickerPanel.svelte",
+				"frontend/src/lib/components/settings/model-picker-focus.ts",
+				"frontend/src/lib/components/settings/shell/settings.css",
+				"frontend/src/lib/components/settings/integrations/ApiUserDetail.svelte",
+				"frontend/src/lib/components/chat/ControlsDock.svelte",
+				"frontend/src/lib/components/chat/phone/MobileComposerControlsSheet.svelte"
+			]
 		},
 		{
 			"why": "content-first data destinations keep their shared phone header, ranges, states and filters reachable",
@@ -510,6 +529,17 @@
 				"frontend/src/lib/components/layout/SessionBreadcrumbs*",
 				"frontend/src/lib/components/chat/scroll-*",
 				"frontend/src/lib/stores/device-id*"
+			]
+		},
+		{
+			"why": "the chat's Terminal side panel: its header, tabs and actions at desktop and phone widths",
+			"journeys": ["terminal-tabs"],
+			"globs": [
+				"frontend/tests/journeys/terminal-tabs.journey.mjs",
+				"frontend/src/lib/components/terminal/**",
+				"frontend/src/lib/stores/terminals*",
+				"frontend/src/lib/terminal/**",
+				"frontend/src/lib/api/terminals.ts"
 			]
 		},
 		{

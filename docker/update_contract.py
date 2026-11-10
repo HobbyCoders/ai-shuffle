@@ -57,9 +57,12 @@ CAPABILITIES = {
     "database-clone-v1": "the image's own supervisor can put back a database copy an update took as "
                          "a copy-on-write clone of the cluster directory (a first start that fails "
                          "across a container restart is put right by the image's supervisor)",
+    "database-level-v1": "the image's own supervisor starts the previous version again, without a "
+                         "database copy, when an update at the same database level "
+                         "(app/db/compatibility.json) fails its first start across a container restart",
 }
 # What an image built from this source provides.
-PROVIDES = ("base-1", "source-supervisor", "runtime-overlays-v1", "database-clone-v1")
+PROVIDES = ("base-1", "source-supervisor", "runtime-overlays-v1", "database-clone-v1", "database-level-v1")
 # What this source needs from the image it runs on.
 REQUIRES = ("base-1",)
 # What a coming release will require. Images without it say so in advance.

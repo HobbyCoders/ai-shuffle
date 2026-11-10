@@ -55,7 +55,45 @@ STACK_DUMP_SETTLE = 1.0
 APP_USER = "ai_shuffle"
 APP_DB = "ai_shuffle"
 ADMIN = "shuffle_admin"
-STOP = threading.Event()
+
+
+class StopFlag:
+    """A stop request that a signal handler can set without taking a lock (#1317).
+
+    Python runs a signal handler in the main thread between two bytecodes. A
+    threading.Event takes its internal lock in both wait() and set(), and that
+    lock is not reentrant. When SIGTERM lands while the main thread is inside
+    STOP.wait() holding it, a handler calling Event.set() waits forever on its
+    own thread: the supervisor never stops the app, and docker kills the whole
+    container (exit 137) when the stop timeout runs out. set() here is a single
+    attribute store; wait() polls in short sleeps, which a signal interrupts.
+    """
+
+    POLL_SECONDS = 0.05
+
+    def __init__(self):
+        self._stopped = False
+
+    def set(self):
+        self._stopped = True
+
+    def clear(self):
+        self._stopped = False
+
+    def is_set(self):
+        return self._stopped
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self._stopped:
+            remaining = self.POLL_SECONDS if deadline is None else deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self.POLL_SECONDS, remaining))
+        return self._stopped
+
+
+STOP = StopFlag()
 APP_STOP_SECONDS = 30
 # Hand-over (#1821). An image that provides "source-supervisor" starts the
 # active update's own copy of this file, passing SHUFFLE_HANDED_OVER (the
@@ -2062,7 +2100,7 @@ def restart_into_update(current, updates, env, before_start=None):
     if updates.lifecycle("stop-sessions").get("stopped") is not True:
         raise RuntimeFailure("Could not quiesce the worker")
     stop_group(current, APP_STOP_SECONDS)
-    updates.activating()  # copies the database, then records the first start
+    updates.activating()  # copies the database when the update needs it, then records the first start
     if before_start is not None:
         before_start(child_env)
     return start_app(command, cwd, child_env, updates.root)
@@ -2165,7 +2203,8 @@ def run(settings, action, filename=None):
                 try:
                     updates = ContainerUpdates(root, image, (image_dir() / "application-update-key.pem").read_bytes(),
                                                lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle,
-                                               channel=channel, database=db, refresh_mode=updater_refresh_mode(image))
+                                               channel=channel, database=db, refresh_mode=updater_refresh_mode(image),
+                                               image_root=image_dir().parent)
                 except UpdateError as exc:
                     raise RuntimeFailure(str(exc)) from exc
         chrome_selection = None
@@ -2233,6 +2272,17 @@ def run(settings, action, filename=None):
                     shutil.rmtree(chrome_scripts, ignore_errors=True)
 
 
+def request_stop(signum, frame):
+    # Signal context: no locks, no logging (see StopFlag).
+    STOP.set()
+
+
+def install_stop_handlers():
+    STOP.clear()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, request_stop)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action")
@@ -2246,9 +2296,7 @@ def main(argv=None):
     for action in ("dump", "restore"):
         sub.add_parser(action).add_argument("--file", required=True)
     args = parser.parse_args(argv)
-    STOP.clear()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: STOP.set())
+    install_stop_handlers()
     try:
         if args.action in {"validate-isolation", "remap-home"}:
             validate_isolation_startup(args.new_uid, args.new_gid)

@@ -119,7 +119,7 @@ describe('a shell on a peer worker', () => {
 		api.close.mockResolvedValue({ closed: true });
 		const peerShell = { target: { kind: 'worker', worker_id: 'dev_b' }, cwd: '/home/owner' };
 		const view = await mount(withPeer(), [info('t1', peerShell), info('t2', { ...peerShell, state: 'exited', exit_code: 0 })]);
-		expect(view.getAllByRole('tab').map((tab) => tab.getAttribute('title'))).toEqual(['Desk: /home/owner', 'Desk: /home/owner']);
+		expect(view.getAllByRole('tab').map((tab) => tab.getAttribute('title'))).toEqual(['bash · Desk: /home/owner', 'bash · Desk: /home/owner']);
 		await fireEvent.click(view.getByRole('button', { name: 'Close terminal 1' }));
 		await waitFor(() => expect(api.close).toHaveBeenCalledWith('t1'));
 		await waitFor(() => expect(view.getAllByRole('tab')).toHaveLength(1));

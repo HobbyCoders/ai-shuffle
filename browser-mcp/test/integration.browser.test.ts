@@ -22,7 +22,7 @@ import { compilePolicy } from "../src/ssrf.js";
 import { Session, raceWithTimeout } from "../src/session.js";
 import { runNavigate } from "../src/tools/navigate.js";
 import { runSnapshot } from "../src/tools/snapshot.js";
-import { runAct } from "../src/tools/act.js";
+import { runAct, type ActInput } from "../src/tools/act.js";
 import { runScreenshot, MAX_EDGE } from "../src/tools/screenshot.js";
 import { runFind } from "../src/tools/find.js";
 import { runReadText } from "../src/tools/read_text.js";
@@ -88,6 +88,7 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
         "/review/jsredir": '<title>Redirect</title><p>Redirecting</p><script>setTimeout(()=>location.href="/review/single",5)</script>',
         "/review/reload": '<title>Reload</title><form method="post" action="/review/reload"><button>Save</button></form>',
         "/review/slowreload": '<title>Reload</title><form method="post" action="/review/slowreload"><button>Save</button></form>',
+        "/review/stalledreload": '<title>Reload</title><form method="post" action="/review/stalledreload"><button>Save</button></form>',
         "/review/latereload": '<title>Reload</title><button onclick="setTimeout(()=>location.reload(),400)">Later</button>',
       };
       let html = pages[url.pathname];
@@ -104,6 +105,8 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
       }
       const send = () => { res.writeHead(200, { "content-type": "text/html" }); res.end(html ?? "not found"); };
       if (url.pathname === "/review/slowreload" && req.method === "POST") setTimeout(send, 400);
+      // Answered after the 2s ref-action budget: the click lands long before the reload.
+      else if (url.pathname === "/review/stalledreload" && req.method === "POST") setTimeout(send, 2500);
       else send();
       return;
     }
@@ -1187,7 +1190,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(result.timings.settle_ms).toBeLessThan(600);
       expect(await page.locator("p").innerText()).toContain("Rendered article");
     });
-    it.each(["reload", "slowreload", "latereload"])("refreshes refs after a same-URL %s", async path => {
+    it.each(["reload", "slowreload", "stalledreload", "latereload"])("refreshes refs after a same-URL %s", async path => {
       await runNavigate(session, { url: httpUrl + "review/" + path });
       const page = await session.ensurePage();
       const before = await page.evaluate(() => performance.timeOrigin);
@@ -1197,12 +1200,88 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(result.content[1]).toMatchObject({ text: expect.stringContaining(path === "latereload" ? "Later" : "Save") });
       expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(before);
     });
+    // The block starts 300ms after the click: Playwright has confirmed the
+    // click by then, and settle is still watching that timer when it fires.
     it("does not claim none when a 3s blocked main thread prevents observation", async () => {
-      const page = await load(`<button onclick="setTimeout(()=>{const t=Date.now();while(Date.now()-t<3000);out.innerHTML='<button>Busy result</button>'.repeat(20)},0)">Busy</button><div id="out"></div>`);
+      const page = await load(`<button onclick="setTimeout(()=>{const t=Date.now();while(Date.now()-t<3000);out.innerHTML='<button>Busy result</button>'.repeat(20)},300)">Busy</button><div id="out"></div>`);
       const result = await runAct(session, { kind: "click", ref: await ref("Busy") });
       expect(body(result)).toMatchObject({ ok: true, dom_mutated: "major", snapshot_stale: true });
       expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Busy result") });
       expect(await page.locator("#out button").count()).toBe(20);
+    }, 10000);
+    // Each page blocks for longer than the 2s ref budget once the input reaches
+    // it, so Playwright gives up before it can confirm what the input did.
+    const stall = "const t=Date.now();while(Date.now()-t<2500);";
+    const state = (page: Page) => page.evaluate(() => (window as unknown as { state?: unknown }).state ?? 0);
+    it.each<[string, string, string, Partial<ActInput>, unknown]>([
+      ["click", "Busy", `<button onclick="${stall}window.state=(window.state||0)+1">Busy</button>`, { kind: "click" }, 1],
+      ["fill", "Slow", `<input aria-label="Slow" oninput="${stall}window.state=this.value">`, { kind: "fill", value: "abc" }, "abc"],
+      ["select", "Pick", `<select aria-label="Pick" onchange="${stall}window.state=this.value"><option>a</option><option>b</option></select>`, { kind: "select", value: "b" }, "b"],
+    ])("reports a %s the page blocked on before it was confirmed as outcome_unknown", async (_kind, name, html, input, expected) => {
+      const page = await load(html);
+      const result = await runAct(session, { ...input, ref: await ref(name) } as ActInput);
+      expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+      // The input did reach the page, once.
+      await expect.poll(() => state(page), { timeout: 5000 }).toBe(expected);
+    }, 10000);
+    it("reports a select that turned enabled, then blocked, as outcome_unknown", async () => {
+      // Playwright is refused while the select is disabled and retries. The
+      // attempt that gets through changes the value and never hears back.
+      const page = await load(`<select aria-label="Late" disabled onchange="${stall}window.state=(window.state||'')+this.value"><option>a</option><option>b</option></select>`);
+      const target = await ref("Late");
+      await page.evaluate(() => { setTimeout(() => { document.querySelector("select")!.disabled = false; }, 400); });
+      const result = await runAct(session, { kind: "select", ref: target, value: "b" });
+      expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+      // The change handler ran once.
+      await expect.poll(() => state(page), { timeout: 5000 }).toBe("b");
+    }, 10000);
+    it("reports Enter that submitted a slowly answered form as outcome_unknown", async () => {
+      const page = await load(`<form method="post" action="/review/stalledreload"><input aria-label="Query" name="q"></form>`);
+      const result = await runAct(session, { kind: "key", key: "Enter", ref: await ref("Query") });
+      expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+      await page.waitForURL(/\/review\/stalledreload$/, { timeout: 5000 });
+    }, 10000);
+    it("reports typing the words of an input error into a page that blocked as outcome_unknown", async () => {
+      // Playwright quotes the typed text back in its failure. Those words are
+      // the caller's, and the first character did reach the field.
+      const page = await load(`<input aria-label="Slow" oninput="${stall}window.state=this.value">`);
+      const result = await runAct(session, { kind: "type", value: "Unknown key", ref: await ref("Slow") });
+      expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+      await expect.poll(() => state(page), { timeout: 5000 }).toMatch(/^U/);
+    }, 10000);
+    it("reports an unknown key pressed after a modifier as outcome_unknown, and one pressed first as not executed", async () => {
+      const page = await load(`<input aria-label="Entry" onkeydown="window.state=(window.state||'')+event.key+' '">`);
+      const entry = await ref("Entry");
+      // Nothing is down when the first key of the chord is the unknown one.
+      expect(body(await runAct(session, { kind: "key", ref: entry, key: "NoSuchKey+a" }))).toMatchObject({ code: "invalid_input", outcome: "not_executed" });
+      expect(await state(page)).toBe(0);
+      // Playwright pressed Control before it reached the key it does not know.
+      const result = await runAct(session, { kind: "key", ref: entry, key: "NoSuchKey", modifiers: ["Control"] });
+      try {
+        expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+        expect(firstText(result)).toContain("Unknown key");
+        expect(await state(page)).toBe("Control ");
+      } finally {
+        // Playwright leaves Control down (issue #1423); release it for the tests that follow.
+        await page.keyboard.up("Control");
+      }
+    });
+    it("does not count a click as done when the page blocked before Playwright could check it", async () => {
+      // The cover appears as the pointer arrives and the page then blocks, so
+      // Playwright sent the click but never learned that the cover took it.
+      const page = await load(`<button style="position:fixed;left:333px;top:277px" onmouseenter="cover.style.display='block';${stall}" onclick="window.state=(window.state||0)+1">Guarded</button><div id="cover" style="display:none;position:fixed;inset:0"></div>`);
+      const result = await runAct(session, { kind: "click", ref: await ref("Guarded") });
+      expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+      expect(await state(page)).toBe(0);
+    }, 10000);
+    it("does not count a click Playwright blocked and retried as done", async () => {
+      // The cover appears as the pointer arrives, so Playwright withholds the
+      // click, retries against the covered button and runs out its budget.
+      const page = await load(`<button style="position:fixed;left:333px;top:277px" onmouseenter="cover.style.display='block'" onclick="window.clicks=(window.clicks||0)+1">Guarded</button><div id="cover" style="display:none;position:fixed;inset:0"></div>`);
+      const result = await runAct(session, { kind: "click", ref: await ref("Guarded") });
+      expect(body(result)).toMatchObject({ code: "not_actionable", outcome: "not_executed" });
+      expect(firstText(result)).toContain("intercepts pointer events");
+      expect(await page.evaluate(() => (window as unknown as { clicks?: number }).clicks ?? 0)).toBe(0);
     }, 10000);
     it("ignores a 5s toast dismissal without skipping a short 700ms render", async () => {
       await load(`<button onclick="out.textContent='Saved';setTimeout(()=>out.textContent='',5000)">Toast</button><div id="out"></div>`);

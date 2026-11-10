@@ -922,10 +922,18 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _unique_name(name: str) -> str:
+    """A name no project here has, within the project-name limit (100).
+
+    The number that makes it unique takes room from the name, as in
+    ``_unique_id``: a name over the limit is refused at registration, which
+    happens after the folder has been created or cloned.
+    """
+    name = name[:100]
     taken = {str(row.get("name") or "").strip().casefold() for row in _own_project_rows()}
     candidate, n = name, 2
     while candidate.strip().casefold() in taken:
-        candidate = f"{name} {n}"
+        suffix = f" {n}"
+        candidate = name[:100 - len(suffix)] + suffix
         n += 1
     return candidate
 

@@ -4,7 +4,7 @@
  * through a real Session (auto marks, throttling, keyframes, expiry).
  * Skipped when no Chromium is discoverable, like the other *.browser tests.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server } from "node:http";
@@ -552,6 +552,10 @@ describe.skipIf(!browserPath)("flight recorder in a real browser", () => {
       expect(bodyOf(await run(session, "browser_navigate", { url: `${base}/app` })).ok).toBe(true);
     });
     afterEach(async () => {
+      // A failed spied test must not leave a release parked on a held clear.
+      cdpSpy?.letClear();
+      cdpSpy = undefined;
+      vi.restoreAllMocks();
       if (activeRecording(session)) await run(session, "browser_record", { action: "stop" });
       await manager.cleanup();
     });
@@ -593,21 +597,107 @@ describe.skipIf(!browserPath)("flight recorder in a real browser", () => {
       expect(JSON.stringify(stopped)).not.toContain("s3cret");
     });
 
+    // slow-3g makes Chromium hold every request for at least 2000 ms, so a
+    // throttled fetch cannot finish sooner than that on any machine: a slow
+    // runner only adds time. One fetch under that floor therefore proves
+    // throttling is off, and no reading of a throttled fetch can pass for a
+    // released one. The 50 ms margin covers timer granularity, and the same
+    // line is used both ways. A fixed 400 ms bound failed on a busy runner with
+    // throttling correctly released (#1325).
+    const SLOW_3G_FLOOR_MS = 2000 - 50;
+    const expectThrottled = (ms: number) => expect(ms).toBeGreaterThanOrEqual(SLOW_3G_FLOOR_MS);
+    const expectReleased = async () => {
+      // A loaded runner can stall one fetch past the floor; take the fastest
+      // of up to three.
+      let fastest = Infinity;
+      for (let i = 0; i < 3 && fastest >= SLOW_3G_FLOOR_MS; i++) fastest = Math.min(fastest, await fetchMs());
+      expect(fastest).toBeLessThan(SLOW_3G_FLOOR_MS);
+    };
+    /** What release must send on the recorder's own CDP session, in order. */
+    const RELEASE_SEQUENCE = ["clear network", "Network.disable", "detach"];
+
+    /**
+     * Wraps the CDP session browser_record opens, logging what it sends, and
+     * can hold the network-throttle clear until the test lets it through. That
+     * makes "release ran to completion" observable without timing anything.
+     */
+    let cdpSpy: { log: string[]; holdClear(): void; letClear(): void } | undefined;
+    const spyRecorderCdp = async () => {
+      const context = (await session.ensurePage()).context();
+      const newSession = context.newCDPSession.bind(context);
+      const log: string[] = [];
+      let held = false;
+      let letClear!: () => void;
+      const gate = new Promise<void>((resolve) => { letClear = resolve; });
+      vi.spyOn(context, "newCDPSession").mockImplementation(async (target) => {
+        const cdp = await newSession(target);
+        const send = cdp.send.bind(cdp);
+        const detach = cdp.detach.bind(cdp);
+        Object.assign(cdp, {
+          send: async (method: string, params?: Record<string, unknown>) => {
+            const clearing = method === "Network.emulateNetworkConditions" && params?.latency === 0;
+            log.push(clearing ? "clear network" : method);
+            if (clearing && held) await gate;
+            return send(method as never, params as never);
+          },
+          detach: async () => { log.push("detach"); return detach(); },
+        });
+        return cdp;
+      });
+      cdpSpy = { log, holdClear: () => { held = true; }, letClear };
+      return cdpSpy;
+    };
+    const releaseSent = (log: string[]) => log.slice(log.indexOf("clear network"));
+
     it("throttles the network until stop", async () => {
-      await run(session, "browser_record", { action: "start", network: "fast-3g" });
-      expect(await fetchMs()).toBeGreaterThanOrEqual(400);
+      const { log } = await spyRecorderCdp();
+      await run(session, "browser_record", { action: "start", network: "slow-3g" });
+      expectThrottled(await fetchMs());
       await run(session, "browser_record", { action: "stop" });
-      expect(await fetchMs()).toBeLessThan(400);
+      expect(releaseSent(log)).toEqual(RELEASE_SEQUENCE);
+      await expectReleased();
     });
 
     it("releases throttling when max_duration_ms runs out and still returns the timeline", async () => {
-      await run(session, "browser_record", { action: "start", network: "fast-3g", max_duration_ms: 1000 });
-      await new Promise((r) => setTimeout(r, 3500));
+      // The clear is held until the throttled fetch is done, so the release
+      // timer (max_duration_ms + 2 s) cannot race the fetch.
+      const spy = await spyRecorderCdp();
+      spy.holdClear();
+      await run(session, "browser_record", { action: "start", network: "slow-3g", max_duration_ms: 1000 });
+      expectThrottled(await fetchMs());
+      spy.letClear();
+      await expect.poll(() => activeRecording(session)?.released, { timeout: 10_000, interval: 100 }).toBe(true);
       expect(activeRecording(session)?.expired).toBe(true);
-      expect(await fetchMs()).toBeLessThan(400);
+      expect(releaseSent(spy.log)).toEqual(RELEASE_SEQUENCE);
+      await expectReleased();
       const body = bodyOf(await run(session, "browser_record", { action: "stop" }));
       expect(body.ok).toBe(true);
       expect(body.note).toContain("max_duration_ms (1000) ran out");
+    });
+
+    it("makes a stop during the max_duration_ms release wait for that release", async () => {
+      const spy = await spyRecorderCdp();
+      spy.holdClear();
+      await run(session, "browser_record", { action: "start", network: "slow-3g", max_duration_ms: 1000 });
+      // The timer has fired and its release is parked on the held clear.
+      await expect.poll(() => spy.log.includes("clear network"), { timeout: 10_000, interval: 50 }).toBe(true);
+      expect(activeRecording(session)).toMatchObject({ expired: true, released: false });
+      let stopped = false;
+      const stopping = run(session, "browser_record", { action: "stop" }).then((result) => {
+        stopped = true;
+        spy.log.push("stop returned");
+        return result;
+      });
+      // stop cannot return while the clear is held; the wait only gives a
+      // broken stop time to return early.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(stopped).toBe(false);
+      spy.letClear();
+      const body = bodyOf(await stopping);
+      expect(body.ok).toBe(true);
+      expect(body.note).toContain("max_duration_ms (1000) ran out");
+      expect(releaseSent(spy.log)).toEqual([...RELEASE_SEQUENCE, "stop returned"]);
+      await expectReleased();
     });
 
     it("marks only steps on the recorded tab and reports the others as tab_changed", async () => {

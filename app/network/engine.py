@@ -44,7 +44,7 @@ from uuid import uuid4
 
 from app.core import encryption, native_providers
 from app.db import network as store
-from app.db.base import get_db
+from app.db.base import background_database_work, get_db
 from app.db.profiles import RETIRED_BUILTIN_IDS
 from app.network import crypto, envelope as envelope_mod, identity as identity_mod, membership, policy, nested_secret_sync
 from app.network.envelope import Envelope, OP_DELETE, OP_UPSERT
@@ -729,6 +729,11 @@ def materialize(
             from app.db.session_locks import lock_handoff_creation, lock_handoff_history
             lock_handoff_creation(cursor, [record_id])
             lock_handoff_history(cursor, record_id)
+        if coll.name == "connectors":
+            # The local delete's own path: its journal data goes too (#1399).
+            from app.db.connectors import delete_connector_row
+            delete_connector_row(cursor, *keys)
+            return None
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
     record = dict(record)
@@ -1257,6 +1262,7 @@ def _scan_columns(cursor, coll: policy.Collection) -> str:
     return ", ".join('"' + name.replace('"', '""') + '"' for name in names) if names else "*"
 
 
+@background_database_work
 def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True,
              strict: bool = False, collections: Optional[Iterable[str]] = None,
              session_ids: Optional[Iterable[str]] = None) -> int:
@@ -1581,6 +1587,22 @@ def _lock_deleted_session_handoffs(cursor, items: Iterable[Mapping[str, Any]]) -
     lock_handoff_creation(cursor, deleted)
     for sid in deleted:
         lock_handoff_history(cursor, sid)
+
+
+def _lock_deleted_connectors(cursor, items: Iterable[Mapping[str, Any]]) -> None:
+    """Take the journal lock of every connector this batch deletes, sorted.
+
+    Before any envelope: the delete takes it before the row (#1399), and an
+    earlier write of the same row in this transaction would hold the row while
+    import_watch holds the lock and waits for the row. Upserts never take it.
+    """
+    from app.db.watches import lock_connector
+
+    for cid in sorted({item.get("record_id") for item in items
+                       if isinstance(item, Mapping) and item.get("collection") == "connectors"
+                       and (item.get("op") == OP_DELETE or bool(item.get("deleted")))
+                       and isinstance(item.get("record_id"), str)}):
+        lock_connector(cursor, cid)
 
 
 def _lock_mirror_event_counters(cursor, record_ids: Iterable[str], *,
@@ -2219,6 +2241,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
             window = store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
             _lock_deleted_session_handoffs(cursor, window)
+            _lock_deleted_connectors(cursor, window)
             _lock_mirror_event_counters(cursor, (data.get("record_id") for data in window
                                                 if isinstance(data, Mapping)
                                                 and data.get("collection") == "session_events"))
@@ -2564,6 +2587,7 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                 appended = _apply_event_append(cursor, chunk, ctx, part, _stream=stream)
                 if not appended:
                     _lock_deleted_session_handoffs(cursor, chunk)
+                    _lock_deleted_connectors(cursor, chunk)
                     _lock_mirror_event_counters(cursor, (data.get("record_id") for data in chunk
                                                         if isinstance(data, Mapping)
                                                         and data.get("collection") == "session_events"))
@@ -2982,6 +3006,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
     ids = [item["record_id"] for item in items]
     if coll.name == "sessions":
         _lock_deleted_session_handoffs(cursor, ({**item, "collection": coll.name} for item in items))
+    if coll.name == "connectors":
+        _lock_deleted_connectors(cursor, ({**item, "collection": coll.name} for item in items))
     if coll.name == "session_events":
         deleted = _lock_mirror_event_counters(cursor, ids, existed=existed)
         if deleted:
@@ -3331,6 +3357,16 @@ def _own_endpoints() -> List[str]:
         extra = lan.owner_addresses() if enabled else []
     except Exception:  # noqa: BLE001
         enabled, extra = False, []
+    from app.serve import is_loopback_host
+    listener = None
+    if is_loopback_host(settings.host):
+        # Bound only to loopback (the desktop app's worker): nothing answers on
+        # the guessed address. Peers on the LAN reach the LAN-sync listener
+        # instead, when there is one (``app.serve.configured_lan_port``).
+        if source == "guess":
+            url, source = None, "none"
+        listener = lan.listener_endpoint() if enabled else None
+    tunnels = len(endpoints)
     for address in lan.advertised_addresses(tunnel=bool(endpoints), advertise=url, source=source,
                                             docker=not settings.is_local_mode(), enabled=enabled, extra=extra):
         if address not in endpoints:
@@ -3339,6 +3375,11 @@ def _own_endpoints() -> List[str]:
     for address in advertisements.owner_urls():
         if address not in endpoints:
             endpoints.append(address)
+    # The listener is dialed first on the LAN, but only takes a free slot of
+    # the wire limit: an owner-configured address is never dropped for it.
+    from app.network.endpoints import MAX_ENDPOINTS
+    if listener and listener not in endpoints and len(endpoints) < MAX_ENDPOINTS:
+        endpoints.insert(tunnels, listener)
     return endpoints
 
 

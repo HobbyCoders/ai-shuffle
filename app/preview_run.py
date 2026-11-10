@@ -83,6 +83,8 @@ def preview_environment(
                LOCAL_MODE="true", AI_SHUFFLE_PREVIEW="1", AI_SHUFFLE_ENV_FILE=str(empty),
                HOST="127.0.0.1", PORT=str(free_port(exclude=(port, protected_port))),
                START_CHROME="0", SHUFFLE_DESKTOP_ISOLATED="1",
+               # A private copy opens no LAN-sync listener on every interface.
+               SHUFFLE_LAN_PORT="off",
                SHUFFLE_PROTECTED_PORT=str(protected_port), SHUFFLE_PREVIEW_PORT=str(port),
                SHUFFLE_PREVIEW_HOST=host, SHUFFLE_PREVIEW_ACCESS_HOST=browser_host or host,
                SHUFFLE_PREVIEW_ACCESS_TTL=str(ttl_seconds),
@@ -325,7 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Use distinct isolated ports and a positive TTL of at most four hours")
     from docker import container_runtime as runtime
 
-    stopped = threading.Event()
+    # Set from a signal handler: a lock-free flag, not threading.Event (#1317).
+    stopped = runtime.StopFlag()
     def stop(signum: int, frame: FrameType | None) -> None:
         stopped.set()
         runtime.STOP.set()

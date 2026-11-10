@@ -37,7 +37,9 @@
 	 *   Running tasks   RunningTasksList as a page;
 	 *   Export chat     ChatExportActions as a page with a pinned button.
 	 * There is no visible close button; a visually hidden one stays for
-	 * keyboard and screen-reader users. Prompts never render here: they dock
+	 * keyboard and screen-reader users. While open the panel is modal: Tab and
+	 * Shift+Tab wrap inside it instead of reaching the page behind (#1407).
+	 * Prompts never render here: they dock
 	 * above the composer (MobilePromptDock).
 	 *
 	 * ControlsDock (shared $lib) computes every value and owns the open state;
@@ -60,6 +62,8 @@
 	import RunningTasksList from '$lib/components/chat/RunningTasksList.svelte';
 	import ChatExportActions from '$lib/components/layout/ChatExportActions.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
+	import { focusModelSearch, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
+	import { wrapTabWithin } from '$lib/components/ui/focus-trap';
 	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
@@ -285,9 +289,14 @@
 		requestOpen(false);
 	}
 
+	const focusModelPage = () => focusModelSearch(panelRef?.querySelector('[data-page="model"]'));
+
 	async function focusPanel() {
 		await tick();
 		if (pageName === 'main') panelRef?.focus({ preventScroll: true });
+		// The model page with a mouse and keyboard: its search box, so the
+		// arrow keys move the highlight at once (#1339). Never on touch.
+		else if (pageName === 'model' && focusModelPage()) return;
 		// A page opened straight from the bar has no way back, only out.
 		else (direct ? closeRef : backRef)?.focus({ preventScroll: true });
 	}
@@ -311,6 +320,7 @@
 		pushPageEntry(target);
 		void tick().then(() => {
 			panelRef?.querySelector<HTMLElement>(`[data-page="${target}"] .mcp-scroll`)?.scrollTo?.({ top: 0 });
+			if (target === 'model' && focusModelPage()) return;
 			backRef?.focus({ preventScroll: true });
 		});
 	}
@@ -415,6 +425,9 @@
 		return () => observer.disconnect();
 	});
 
+	/** Set by an Escape that closes the panel while focus is on the page, not a control. */
+	let escapeLostFocus = false;
+
 	let historyEntry = false;
 	/** A page has its own history entry over the panel's, so Android Back returns to the list. */
 	let pageEntry = false;
@@ -435,6 +448,7 @@
 			clearTimeout(renderTimer);
 			if (isOpen) {
 				closingPanel = false;
+				escapeLostFocus = false;
 				clearGhosts();
 				rendered = true;
 				picker = null;
@@ -460,7 +474,15 @@
 					direct = false;
 					opener = null;
 				}, 400);
-				if (panelRef?.contains(document.activeElement)) controlsCellRef?.focus({ preventScroll: true });
+				// Focus on another control is never taken back.
+				const holds = escapeLostFocus ? pickerHoldsFocus(panelRef) : panelRef?.contains(document.activeElement);
+				escapeLostFocus = false;
+				if (holds) {
+					// A page opened straight from its bar cell hands focus back to
+					// that cell (Escape on the model page, #1339); else the controls cell.
+					const cell = direct ? barRef?.querySelector<HTMLElement>(`[data-cell="${pageName}"]`) : null;
+					(cell ?? controlsCellRef)?.focus({ preventScroll: true });
+				}
 				if (historyEntry) {
 					historyEntry = false;
 					// Pop the page's entry too, so no dead Back press is left behind.
@@ -505,6 +527,9 @@
 		if (!open) return;
 		event.preventDefault();
 		event.stopPropagation();
+		// A touch tap on plain panel text drops focus to the page; Escape from
+		// a keyboard still hands it back to the opener when this closes the panel.
+		escapeLostFocus = (direct || pageName === 'main') && pickerHoldsFocus();
 		back();
 	}
 
@@ -888,6 +913,7 @@
 		aria-hidden={!panelVisible}
 		inert={!open}
 		tabindex="-1"
+		onkeydown={(e) => { if (open && panelRef) wrapTabWithin(panelRef, e); }}
 		style:transform={`translateY(${panelShift})`}
 	>
 		<!-- Grip and title: dragging either down closes the sheet from any page. -->

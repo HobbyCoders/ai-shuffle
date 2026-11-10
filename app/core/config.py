@@ -272,6 +272,9 @@ class Settings(BaseSettings):
     # Database endpoints come only from the private managed supervisor descriptor.
     db_pool_min: ClassVar[int] = 2  # Internal managed defaults, not environment knobs
     db_pool_max: ClassVar[int] = 32  # Includes two slots reserved for lease maintenance
+    # Most connections background work (sync scans, cleanup, maintenance) may hold at
+    # once. The rest stay free for turns: see base.background_database_work.
+    db_pool_background: ClassVar[int] = 8
     # New-turn admission only: existing pumps and reserved lease slots never wait here.
     db_start_utilization: float = Field(default=0.85, gt=0, le=1)
     db_start_latency_seconds: float = Field(default=0.5, gt=0)

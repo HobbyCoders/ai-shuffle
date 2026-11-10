@@ -17,7 +17,8 @@ const FOCUSABLE = [
 	'select:not([disabled])',
 	'textarea:not([disabled])',
 	'[contenteditable="true"]',
-	'[tabindex]:not([tabindex="-1"])'
+	'[tabindex]:not([tabindex="-1"])',
+	'summary'
 ].join(',');
 
 export interface FocusTrapOptions {
@@ -25,10 +26,54 @@ export interface FocusTrapOptions {
 	initial?: string;
 }
 
+/** The summary that opens and closes `details`: its first `summary` child. */
+function summaryOf(details: HTMLDetailsElement): HTMLElement | null {
+	return (Array.from(details.children).find((child) => child.tagName === 'SUMMARY') as HTMLElement | undefined) ?? null;
+}
+
+/**
+ * The elements Tab stops on inside `node`, in document order. Like the
+ * browser: a `<details>` element's summary is a stop, and the content of a
+ * closed `<details>` (its summary aside) is not.
+ */
 export function focusableWithin(node: HTMLElement): HTMLElement[] {
-	return Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-		(el) => el.getAttribute('tabindex') !== '-1' && !el.closest('[hidden], [inert]')
-	);
+	return Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => {
+		if (el.getAttribute('tabindex') === '-1' || el.closest('[hidden], [inert]')) return false;
+		if (el.tagName === 'SUMMARY') {
+			const details = el.parentElement;
+			if (!(details instanceof HTMLDetailsElement) || summaryOf(details) !== el) return false;
+		}
+		for (let d = el.parentElement?.closest('details'); d && node.contains(d); d = d.parentElement?.closest('details')) {
+			if (!d.open && !summaryOf(d)?.contains(el)) return false;
+		}
+		return true;
+	});
+}
+
+/**
+ * Keep a Tab or Shift+Tab press inside `node`: from its last (or first)
+ * focusable element focus wraps to the other end. Other keys are ignored. For
+ * a modal that stays mounted while closed and so cannot use `focusTrap`.
+ */
+export function wrapTabWithin(node: HTMLElement, event: KeyboardEvent) {
+	if (event.key !== 'Tab') return;
+	const focusable = focusableWithin(node);
+	if (focusable.length === 0) {
+		event.preventDefault();
+		node.focus();
+		return;
+	}
+	const first = focusable[0];
+	const last = focusable[focusable.length - 1];
+	const active = document.activeElement;
+	const outside = !node.contains(active);
+	if (event.shiftKey && (active === first || active === node || outside)) {
+		event.preventDefault();
+		last.focus();
+	} else if (!event.shiftKey && (active === last || active === node || outside)) {
+		event.preventDefault();
+		first.focus();
+	}
 }
 
 export function focusTrap(node: HTMLElement, options: FocusTrapOptions = {}) {
@@ -43,24 +88,7 @@ export function focusTrap(node: HTMLElement, options: FocusTrapOptions = {}) {
 	}
 
 	function onKeydown(event: KeyboardEvent) {
-		if (event.key !== 'Tab') return;
-		const focusable = focusableWithin(node);
-		if (focusable.length === 0) {
-			event.preventDefault();
-			node.focus();
-			return;
-		}
-		const first = focusable[0];
-		const last = focusable[focusable.length - 1];
-		const active = document.activeElement;
-		const outside = !node.contains(active);
-		if (event.shiftKey && (active === first || active === node || outside)) {
-			event.preventDefault();
-			last.focus();
-		} else if (!event.shiftKey && (active === last || active === node || outside)) {
-			event.preventDefault();
-			first.focus();
-		}
+		wrapTabWithin(node, event);
 	}
 
 	node.addEventListener('keydown', onKeydown);

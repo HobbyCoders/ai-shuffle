@@ -180,6 +180,10 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	for (const key of Object.keys(base)) {
 		if (/^(POSTGRES_|DATABASE_|PG|APP_VERSION$|VERSION$|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$|SHUFFLE_DESKTOP_ISOLATED$|SHUFFLE_PROTECTED_PORT$|SHUFFLE_DESKTOP_PROTECTED_PORT$|SHUFFLE_DESKTOP_ATTACH_TOKEN$|SHUFFLE_DESKTOP_LISTENER_TOKEN$)/i.test(key)) delete base[key];
 	}
+	// An explicitly inherited LAN port (a number, 0 or off) wins over the default.
+	const lanPortKey = Object.keys(base).find((k) => k.toUpperCase() === 'SHUFFLE_LAN_PORT');
+	const lanPort = lanPortKey ? String(base[lanPortKey] ?? '').trim() : '';
+	if (lanPortKey) delete base[lanPortKey];
 	let profile: NodeJS.ProcessEnv = {};
 	if (opts.profileDir) {
 		// The Claude CLI is the user's own install and runs on the user's own
@@ -214,6 +218,9 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 		SHUFFLE_DESKTOP_ISOLATED: opts.isolated ? '1' : '0',
 		SHUFFLE_PROTECTED_PORT: String(opts.protectedPort ?? PROTECTED_PORT),
 		SHUFFLE_DESKTOP_PROTECTED_PORT: String(opts.protectedPort ?? PROTECTED_PORT),
+		// The worker stays on loopback; this second listener answers on the LAN
+		// for sealed worker-to-worker sync only (app/serve.py configured_lan_port).
+		SHUFFLE_LAN_PORT: lanPort || String(opts.port + 3),
 		DATA_DIR: opts.dataDir,
 		...(opts.workspaceDir ? { WORKSPACE_DIR: opts.workspaceDir } : {}),
 		AI_SHUFFLE_ENV_FILE: opts.envFile,

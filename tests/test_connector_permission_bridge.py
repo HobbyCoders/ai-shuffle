@@ -408,8 +408,25 @@ class TestAnswerFromChat:
         from app.core.connector_permissions import answer_from_chat
 
         _open_request()
+        settle = channel["respond"].side_effect
+        all_arrived = asyncio.Event()
+        arrived = []
+
+        async def respond_together(*args):
+            # Each call reads the request in a worker thread before it answers.
+            # No answer lands until all 8 have read it open, or a late read
+            # finds it closed and that call never tries.
+            arrived.append(args)
+            if len(arrived) == 8:
+                all_arrived.set()
+            await all_arrived.wait()
+            return await settle(*args)
+
+        channel["respond"].side_effect = respond_together
         with patch("app.db.connectors.claim_answer_message", return_value=True):
-            assert await asyncio.gather(*(answer_from_chat(_chat_message("yes 4821")) for _ in range(8))) == [True] * 8
+            answers = asyncio.gather(*(answer_from_chat(_chat_message("yes 4821")) for _ in range(8)))
+            # A hang guard, not a latency budget: fewer than 8 tries would wait forever.
+            assert await asyncio.wait_for(answers, 30) == [True] * 8
         assert sum(call.args[2] == "allow" for call in channel["respond"].await_args_list) == 8  # all tried
         told = [call.args[0].text for call in channel["instance"].send_message.await_args_list]
         assert sum(text.startswith("Approved") for text in told) == 1
@@ -1336,8 +1353,8 @@ def _adapter(platform):
         sent = None
 
         def feed(text):
-            return adapter._process_webhook_message(
-                {"type": "text", "from": "15550100", "id": "wamid.1", "text": {"body": text}}, {})
+            return adapter.handle_webhook_payload({"entry": [{"changes": [{"value": {"messages": [
+                {"type": "text", "from": "15550100", "id": "wamid.1", "text": {"body": text}}]}}]}]})
     elif platform == "line":
         from app.core.connectors.line import LINEConnector
 
@@ -1345,9 +1362,9 @@ def _adapter(platform):
         sent = None
 
         def feed(text):
-            return adapter._process_message_event({
-                "source": {"type": "user", "userId": "U7"}, "replyToken": "t",
-                "message": {"type": "text", "id": "m1", "text": text}})
+            return adapter.handle_webhook_payload({"events": [{
+                "type": "message", "source": {"type": "user", "userId": "U7"}, "replyToken": "t",
+                "message": {"type": "text", "id": "m1", "text": text}}]})
     elif platform == "msteams":
         from app.core.connectors.msteams import MSTeamsConnector
 

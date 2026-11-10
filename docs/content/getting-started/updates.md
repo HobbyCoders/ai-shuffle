@@ -65,7 +65,13 @@ A Docker update that reuses the shared Python dependencies also compiles its Pyt
 
 ### The database copy before a Docker update
 
-**Update and restart** stops the app, copies the database, then starts the new version. If that first start fails, the copy is put back and the previous version runs again. The time the copy takes is downtime.
+Most updates take no copy of the database. Every release declares a database level, and a release raises it only when it removes, renames or retypes something the previous version reads. When an update and the version it replaces declare the same level, **Update and restart** stops the app and starts the new version straight away. If that first start fails, the previous version starts again over the same database, which it can read because the update only added to it.
+
+An update that changes the level, and an update from or to a version that declares none, copies the database after the app stops and before the new version starts. If that first start fails, the copy is put back and the previous version runs again. The time the copy takes is downtime. Set `AI_SHUFFLE_UPDATE_RESTORE_POINT=always` on the container to take the copy before every update.
+
+The copy is skipped only when the **Docker image** itself is new enough to go back without one (image capability `database-level-v1`). If the container restarts while an update's first start is still unconfirmed, the image's own startup code does the recovery, so an older image keeps the copy for every update. An in-app update alone does not change this: [update the Docker image](#updating-the-docker-image) once.
+
+Without a copy there is nothing to put back if both the update and the previous version fail to start. See [If AI Shuffle will not start after an update](#if-ai-shuffle-will-not-start-after-an-update).
 
 On a data volume that can share file blocks between files (btrfs, XFS with reflink, ZFS with block cloning) the copy is a copy-on-write clone of the stopped database directory. It takes seconds whatever the size of the database and needs no free space for a second copy; PostgreSQL is stopped and started once around it. On any other volume, and whenever the clone cannot be taken, the database is copied in full as before, which needs free space for a second copy and takes time in proportion to its size.
 
@@ -121,6 +127,18 @@ On Windows under audited launchers 4–7, the app copies the whole database for 
 If restoration fails, no older worker starts on the changed database. The recovery dialog offers **Go back to <previous version>** to retry the restoration, or **Quit**. Keep the restore point and logs. Older launchers and earlier failures without a verified restore point retain their migration fence: retry the affected build or install a verified newer release; never delete the fence or point older code at the database.
 
 Recovery also checks the operating-system start identity and executable of any leftover worker or database process before stopping it. A matching network response alone is not enough. If an older installation has no process-identity record, or the record does not match, recovery stops with a notice: close the original application/server normally and retry. Do not kill an unrelated process or delete identity records to force recovery.
+
+## If AI Shuffle will not start after an update
+
+Your data is still on disk: an update that fails does not delete the database or the worker's data. Do not remove the data volume or the app's folders to start clean.
+
+The quickest way back is to let a coding agent repair it on the machine that runs AI Shuffle. Open Claude Code or Codex there and paste:
+
+> Fetch https://raw.githubusercontent.com/HobbyCoders/ai-shuffle/main/docs/recovery/PLAYBOOK.md and follow it to get my AI Shuffle worker running again.
+
+The playbook has the agent read the logs and the update state, back up before any risky step, bring the worker back, and write up the defect. In a checkout of the AI Shuffle source the same playbook is available as the `fix-ai-shuffle` skill.
+
+Without an agent: on Docker, [update the Docker image](#updating-the-docker-image), which replaces a failed update with the image's newer code. On the desktop, install the latest installer from the [downloads page](https://hobbycoders.com/ai-shuffle/downloads) over the existing install; your data is kept.
 
 ## The Claude Code CLI
 

@@ -18,8 +18,9 @@ import urllib.request
 API = "https://api.github.com"
 FAILED = ("failure", "timed_out")
 # Jobs whose failure does not fail the run: the optional UI bundle cache, the
-# recovered-journey reporter and this watcher.
-ADVISORY = ("source-ui /", "Report recovered UI journeys", "Stop on first failure")
+# recovered-journey reporter, the pass-record lookup and this watcher.
+ADVISORY = ("source-ui /", "Report recovered UI journeys", "Stop on first failure",
+            "Find what a pull request already proved")
 GATE = "Main suite"
 POLL_SECONDS = 30
 MAX_FAILED_READS = 5

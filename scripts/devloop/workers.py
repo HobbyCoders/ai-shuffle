@@ -185,7 +185,8 @@ def up_workers(args: argparse.Namespace) -> int:
 
     if not args.no_vite:
         devloop._ensure_frontend()
-    stopped = threading.Event()
+    # Set from a signal handler: lock-free, not threading.Event (#1317).
+    stopped = runtime.StopFlag()
 
     def stop(signum: int, frame: Any) -> None:
         stopped.set()

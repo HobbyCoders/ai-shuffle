@@ -337,7 +337,20 @@ await runJourney({
 			},
 			async act({ page, mark }) {
 				const sheet = page.locator('.mcp[role="dialog"]');
-				const settle = () => page.waitForTimeout(500);
+				// The sheet and its pages move on CSS transitions (0.32 to 0.36 s). On
+				// a throttled CPU a slide can start late and still be 3px short after
+				// a fixed pause, so after the pause wait for the slide itself: no
+				// transition still running under the sheet (asking for them flushes
+				// a pending class change into its transition), then one painted frame.
+				const settle = async () => {
+					await page.waitForTimeout(500);
+					await page.waitForFunction(() => {
+						const el = document.querySelector('.mcp[role="dialog"]');
+						return !!el && el.getAnimations({ subtree: true })
+							.every((a) => !(a instanceof CSSTransition) || a.playState === 'finished' || a.playState === 'idle');
+					}, null, { timeout: 5000 });
+					await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+				};
 				const onPage = (name) =>
 					page.waitForFunction((n) => document.querySelector('.mcp-page.active')?.dataset.page === n, name, { timeout: 5000 });
 				const openPage = async (name, trigger) => {

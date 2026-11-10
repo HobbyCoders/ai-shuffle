@@ -676,12 +676,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenarios", type=Path, default=SCENARIOS_DIR)
     parser.add_argument("--log", type=Path)
     args = parser.parse_args(argv)
-    done = threading.Event()
+    # The handler only appends: an Event's set() could wait on the lock its own
+    # thread holds inside wait() (#1317).
+    done: list[int] = []
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: done.set())
+        signal.signal(sig, lambda signum, _frame: done.append(signum))
     with FakeVoice(args.scenarios, log_path=args.log, host=args.host, port=args.port) as fake:
         print(f"fake voice provider at {fake.url} (control {fake.control_url})", flush=True)
-        done.wait()
+        while not done:
+            time.sleep(0.2)
     return 0
 
 

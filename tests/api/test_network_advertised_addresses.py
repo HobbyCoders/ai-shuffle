@@ -100,6 +100,30 @@ def test_bound_count_and_canonicalization_keep_previous_wire_limit(setup, monkey
         assert advertisements.owner_urls() == []
 
 
+def test_lan_listener_never_pushes_a_full_advertisement_past_the_wire_limit(setup, monkeypatch):
+    from app.core import cluster
+    server, _, client = setup
+    with server.active():
+        advertisements.set_owner_urls(["https://alias0.example", "https://alias1.example"])
+        monkeypatch.setattr(lan, "owner_addresses", lambda: [f"http://192.168.50.{i}:8000" for i in range(30, 34)])
+        monkeypatch.setattr(lan, "_listener_port", None)
+        before = engine._own_endpoints()
+        assert len(before) == 8
+        # The same configuration on a loopback-bound worker with a LAN listener.
+        monkeypatch.setattr(settings, "host", "127.0.0.1")
+        monkeypatch.setattr(cluster, "_primary_lan_ip", lambda: "192.168.50.20")
+        lan.set_listener_port(8003)
+        after = engine._own_endpoints()
+        assert after == before
+        assert api.TokenRequest(device_id=server.device_id, challenge="x" * 32,
+                                signature="x" * 86, endpoints=after).endpoints == after
+        assert api.ExchangeRequest(endpoints=after).endpoints == after
+        # A free slot takes the listener, first among the LAN addresses.
+        advertisements.set_owner_urls(["https://alias0.example"])
+        assert engine._own_endpoints()[:2] == ["https://tunnel.example", "http://192.168.50.20:8003"]
+        assert len(engine._own_endpoints()) == 8
+
+
 def test_preview_cookie_can_read_but_cannot_put_advertised_addresses(setup, monkeypatch):
     from app.core import preview_access
     server, _, client = setup

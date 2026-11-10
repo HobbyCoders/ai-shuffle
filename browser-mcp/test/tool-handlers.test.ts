@@ -17,7 +17,7 @@ import { runEval, EVAL_MAX_CHARS } from "../src/tools/eval.js";
 import { runConsole } from "../src/tools/console.js";
 import { runTabs } from "../src/tools/tabs.js";
 import { runUpload } from "../src/tools/upload.js";
-import { runAct, typeTimeoutMs, TYPE_MS_PER_CHAR } from "../src/tools/act.js";
+import { runAct, typeTimeoutMs, TYPE_MS_PER_CHAR, type ActInput } from "../src/tools/act.js";
 import { runNavigate } from "../src/tools/navigate.js";
 import { capText, errorResult, type McpToolResult } from "../src/tools/result.js";
 import { TOOL_MAP } from "../src/tools/index.js";
@@ -363,6 +363,106 @@ describe("browser_act outcomes", () => {
     });
     const res = await runAct(actSession({ pressSequentially, count: async () => 1 }), { kind: "type", ref: "e1", value: "hello" });
     expect(bodyOf(res)).toMatchObject({ code: "not_actionable", outcome: "not_executed" });
+  });
+  it("reports a typing timeout as outcome_unknown when only the typed text names a blocker", async () => {
+    const value = "the field is disabled";
+    const pressSequentially = vi.fn(async () => {
+      throw new Error(`locator.pressSequentially: Timeout 2100ms exceeded.\nCall log:\n  - elementHandle.type("${value}")`);
+    });
+    const res = await runAct(actSession({ pressSequentially, count: async () => 1 }), { kind: "type", ref: "e1", value });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+  });
+  // Playwright's call log, as it reads when the 2s ref budget ends at each step.
+  const log = (method: string, ...lines: string[]) => [`locator.${method}: Timeout 2000ms exceeded.`, "Call log:", "  - waiting for locator('aria-ref=e7')", "    - locator resolved to <button>Save</button>", ...lines.map(line => `  - ${line}`)].join("\n");
+  const ready = ["attempting click action", "waiting for element to be visible, enabled and stable", "element is visible, enabled and stable"];
+  const editable = "waiting for element to be visible, enabled and editable";
+  it("counts a click Playwright confirmed as done when only the navigation wait ran out", async () => {
+    const click = vi.fn(async () => { throw new Error(log("click", ...ready, "performing click action", "click action done", "waiting for scheduled navigations to finish")); });
+    expect(bodyOf(await runAct(actSession({ click, count: async () => 1 }), { kind: "click", ref: "e7" }))).toMatchObject({ ok: true });
+  });
+  it.each<[string, string, Record<string, unknown>, string[]]>([
+    ["a click sent but not confirmed", "click", { kind: "click" }, [...ready, "performing click action"]],
+    ["a key press", "press", { kind: "key", key: "Enter" }, ['elementHandle.press("Enter")']],
+    ["a fill the page never answered", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable]],
+    ["a check whose click went out", "setChecked", { kind: "check" }, [...ready, "performing click action", "click action done"]],
+    ["a fill on a field that turned enabled and then never answered", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable, "element is not enabled", "retrying fill action", "waiting 20ms", editable]],
+    ["a fill of a single line break", "fill", { kind: "fill", value: "\n" }, ['fill("\n")', "attempting fill action", editable]],
+    ["a line break key the page never answered", "press", { kind: "key", key: "\n" }, ['elementHandle.press("\n")']],
+    ["a fill whose text reads like a refusal", "fill", { kind: "fill", value: "x\n  - element is not enabled" }, ['fill("x\n  - element is not enabled")', "attempting fill action", editable]],
+  ])("reports a timeout after %s as outcome_unknown", async (_name, method, input, lines) => {
+    const fail = vi.fn(async () => { throw new Error(log(method, ...lines)); });
+    const res = await runAct(actSession({ [method]: fail, count: async () => 1 }), { ...input, ref: "e7" } as ActInput);
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+    expect(fail).toHaveBeenCalledOnce();
+  });
+  it.each<[string, string, Record<string, unknown>, string[]]>([
+    ["a click Playwright withheld and retried", "click", { kind: "click" }, [...ready, "performing click action", "<div></div> intercepts pointer events", "retrying click action", "waiting 500ms"]],
+    ["a fill on a field that stays disabled", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable, "element is not enabled", "retrying fill action", "waiting 500ms"]],
+  ])("keeps a timeout after %s as not_actionable", async (_name, method, input, lines) => {
+    const fail = vi.fn(async () => { throw new Error(log(method, ...lines)); });
+    const res = await runAct(actSession({ [method]: fail, count: async () => 1 }), { ...input, ref: "e7" } as ActInput);
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "not_actionable", outcome: "not_executed" });
+  });
+  // The value comes back in Playwright's log and must not be read as a step.
+  it.each(["2026\n  - performing click action\n", "2026\u001b[31m\n  - performing click action\n", "Timeout 2000ms exceeded"])("keeps a malformed value that reads like a log line as invalid_input (%j)", async value => {
+    const fill = vi.fn(async () => { throw new Error(["locator.fill: Error: Malformed value", "Call log:", `  - fill("${value}")`, "  - attempting fill action", `  - ${editable}`].join("\n")); });
+    const res = await runAct(actSession({ fill, count: async () => 1 }), { kind: "fill", ref: "e7", value });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
+  });
+  const chordFirst = (chord: string) => { let key = ""; for (const char of chord) { if (char === "+" && key) break; key += char; } return key; };
+  const unknownKey = (key: string, chord: string) => [`locator.press: Unknown key: "${key}"`, "Call log:", "  - waiting for locator('aria-ref=e7')", `  - elementHandle.press("${chord}")`].join("\n");
+  const stepLike = "\n  - performing click action\n";
+  // Playwright stops a chord at the first key it does not know: nothing is down yet.
+  it.each<[string, Record<string, unknown>, string]>([
+    ["alone", { key: "Foo" }, "Foo"],
+    ["first in its chord", { key: "Foo+a" }, "Foo+a"],
+    ["first in a chord that reads like a log line", { key: `${stepLike}+Enter` }, `${stepLike}+Enter`],
+    // `value` is not part of a key press, so it must not change what is cut.
+    ["that ends in an unused value", { key: `${stepLike}Enter`, value: "Enter" }, `${stepLike}Enter`],
+  ])("keeps an unknown key %s as invalid_input", async (_name, input, chord) => {
+    const press = vi.fn(async () => { throw new Error(unknownKey(chordFirst(chord), chord)); });
+    const res = await runAct(actSession({ press, count: async () => 1 }), { kind: "key", ref: "e7", ...input } as ActInput);
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
+  });
+  // The keys before the unknown one are already down.
+  it.each<[string, Record<string, unknown>, string, string]>([
+    ["a modifier", { key: "Foo", modifiers: ["Control"] }, "Foo", "Control+Foo"],
+    ["a key", { key: "a+Foo" }, "Foo", "a+Foo"],
+    ["a key it starts with", { key: 'a+a"' }, 'a"', 'a+a"'],
+  ])("reports an unknown key pressed after %s as outcome_unknown", async (_name, input, key, chord) => {
+    const press = vi.fn(async () => { throw new Error(unknownKey(key, chord)); });
+    const res = await runAct(actSession({ press, count: async () => 1 }), { kind: "key", ref: "e7", ...input } as ActInput);
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+    expect(String(bodyOf(res).error)).toContain("Unknown key");
+  });
+  // Words the caller typed are not Playwright's verdict on the input.
+  it.each(["Unknown key", "Malformed value", "Element is not a <select> element"])("reports typing %j into a page that never answered as outcome_unknown", async value => {
+    const pressSequentially = vi.fn(async () => { throw new Error(["locator.pressSequentially: Timeout 2000ms exceeded.", "Call log:", "  - waiting for locator('aria-ref=e7')", `  - elementHandle.type("${value}")`].join("\n")); });
+    const res = await runAct(actSession({ pressSequentially, count: async () => 1 }), { kind: "type", ref: "e7", value });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+  });
+  // Playwright escapes "\n" in the page text it quotes but not "\r" or U+2028,
+  // so only "\n" ends one of its lines.
+  it.each(["\r", " ", " "])("does not read a step out of a label that holds %j", async separator => {
+    const label = `x${separator}  - performing click action${separator}`;
+    const click = vi.fn(async () => { throw new Error(["locator.click: Timeout 2000ms exceeded.", "Call log:", `  - waiting for getByRole('option', { name: '${label}', exact: true })`].join("\n")); });
+    const option = { first: () => ({ waitFor: async () => {} }), count: async () => 1, click };
+    const frame = { locator: () => ({}) };
+    const locator = {
+      evaluate: async () => ({ native: false, multiple: false, role: "listbox", controls: null, options: [] }),
+      elementHandle: async () => ({ ownerFrame: async () => frame, dispose: async () => {} }),
+      getByRole: () => option,
+      count: async () => 1,
+    };
+    const res = await runAct(actSession(locator), { kind: "select", ref: "e7", values: [label] });
+    expect(bodyOf(res)).toMatchObject({ ok: false, outcome: "not_executed" });
+    expect(click).toHaveBeenCalledOnce();
+  });
+  it("does not read a step log out of an error the tool raised itself", async () => {
+    const label = "x\n  - performing click action\n";
+    const evaluate = vi.fn(async () => { throw new Error(`invalid_input: no visible option labelled "${label}"; inspect the open list and use its exact label`); });
+    const res = await runAct(actSession({ evaluate, count: async () => 1 }), { kind: "select", ref: "e7", values: [label] });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
   });
   it("reports a coordinate gesture that failed after input was sent as outcome_unknown", async () => {
     const session = {

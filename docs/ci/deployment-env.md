@@ -224,6 +224,7 @@ host semantics and do not imply a credential import.
 | `SHUFFLE_DESKTOP_REPO_DIR` | Development-only worker source checkout override |
 | `SHUFFLE_DESKTOP_USER_DATA` | Development-only isolated Electron profile directory |
 | `SHUFFLE_DESKTOP_WORKER_DIR` | Development-only assembled worker bundle root |
+| `SHUFFLE_LAN_PORT` | Port of the LAN-sync-only listener a loopback-bound worker opens on all interfaces. Off unless set (unset, `0` or `off`); the desktop app sets it to its local port + 3 |
 | `SHUFFLE_LOCAL_ACCESS` | Allow owner access from the configured local transport |
 | `SHUFFLE_LOCAL_HOSTNAMES` | Hostnames accepted by local-owner access policy |
 | `SHUFFLE_PREVIEW_HOST` | Bind address of the token-only preview listener; defaults to the local listener address, independent of owner/protected binds |

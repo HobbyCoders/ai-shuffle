@@ -249,8 +249,29 @@ await runJourney({
 				await notice.waitFor({ timeout: 5_000 });
 				const polls = await syncPolls(page);
 				expect(polls >= 3 && polls <= 4, `the chat opened after a bounded number of failed checks (${polls} polls)`);
-				await page.evaluate(() => { window.__mirrorSyncHealthy = true; });
+				// The owner answers from the Retry press on. The chat keeps re-checking
+				// in the background (4s, then 8s, ...); those checks still fail until
+				// the press, so a background check cannot clear the notice from under
+				// the click. The checks are counted inside the press's own dispatch
+				// (before the product's handler, then on window, last on the bubble
+				// path), where no background timer can run: a Retry that did nothing
+				// would leave the count as it was, whatever a later check does.
+				await page.evaluate(() => {
+					let press = null;
+					document.addEventListener('click', (event) => {
+						if (!(event.target instanceof Element) || !event.target.closest('.mirror-pill.offline .mirror-retry')) return;
+						press = event;
+						window.__mirrorSyncHealthy = true;
+						window.__mirrorRetryPolls = { before: window.__mirrorSyncPolls };
+					}, { capture: true });
+					window.addEventListener('click', (event) => {
+						if (event === press) window.__mirrorRetryPolls.after = window.__mirrorSyncPolls;
+					});
+				});
 				await notice.getByRole('button', { name: 'Retry' }).click();
+				const retry = await page.evaluate(() => window.__mirrorRetryPolls ?? null);
+				expect(retry && retry.after === retry.before + 1,
+					`the Retry press itself checked the owner once (${retry ? `${retry.before} polls before the press, ${retry.after} after it` : 'the press was not seen'})`);
 				await notice.waitFor({ state: 'detached', timeout: 5_000 });
 			},
 			verify({ recording }) {

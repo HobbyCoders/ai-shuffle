@@ -161,7 +161,15 @@ test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settin
 		assert.equal(env.SHUFFLE_DESKTOP_PROTECTED_PORT, '8001');
 		assert.equal(env.SHUFFLE_DESKTOP_ISOLATED, '0');
 		assert.equal(env.SHUFFLE_PROTECTED_PORT, '8001');
+		assert.equal(env.SHUFFLE_LAN_PORT, '8003');
 		const isolated = buildWorkerEnv({ runtime, port: 18080, protectedPort: 18081, isolated: true, baseEnv: { shuffle_desktop_isolated: '0', shuffle_protected_port: '8001' } });
+		assert.equal(isolated.SHUFFLE_LAN_PORT, '18083');
+		// An inherited value (off, 0 or a port) wins; an empty one means the default.
+		for (const [value, expected] of [['off', 'off'], ['0', '0'], [' 9100 ', '9100'], ['', '8003'], ['  ', '8003']]) {
+			const lanEnv = buildWorkerEnv({ runtime, port: 8000, baseEnv: { shuffle_lan_port: value } });
+			assert.equal(lanEnv.SHUFFLE_LAN_PORT, expected);
+			assert.equal(lanEnv.shuffle_lan_port, undefined);
+		}
 		assert.equal(isolated.SHUFFLE_DESKTOP_ISOLATED, '1');
 		assert.equal(isolated.SHUFFLE_PROTECTED_PORT, '18081');
 		assert.equal(isolated.shuffle_desktop_isolated, undefined);

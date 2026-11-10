@@ -25,6 +25,12 @@ log = logging.getLogger(__name__)
 QUIET_SECONDS = 3600
 ORPHAN_SECONDS = 7 * 86400
 PASS_SECONDS = 2
+# The process-table check before each deletion tranche gets at least this long
+# of its own. On the pass budget alone it started with whatever the tree walk
+# had left, ran out, and the finished walk was thrown away: a large folder was
+# rescanned every rotation and never deleted. A pass still ends within
+# PASS_SECONDS plus one check.
+PROCESS_SCAN_SECONDS = 2
 INTERVAL_SECONDS = 300
 SLICE_PAUSE_SECONDS = 30
 MAX_SLICE_FILES = 512
@@ -301,7 +307,8 @@ class ScratchSweep:
         if _idle(path.name) is None:
             return self._retain("active_or_open_turn")
         notes = []
-        refs = _process_references(deadline, diagnostics=notes)
+        refs = _process_references(max(deadline, time.monotonic() + PROCESS_SCAN_SECONDS),
+                                   diagnostics=notes)
         self.process_notes.update(notes)
         self.preview_exemptions += max(getattr(refs, "preview_exemptions", 0),
                                        sum(note.startswith("preview_exempt ") for note in notes))
