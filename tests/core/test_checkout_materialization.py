@@ -17,7 +17,7 @@ import pytest
 from app.core import checkout_manager
 from app.db import checkouts as checkouts_db
 from app.db import projects_v2
-from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
+from tests.shared_fixtures import clean_task_registry, foreign_keys_off  # noqa: F401  (fixtures)
 
 RUNNER = "runnerA"
 
@@ -1841,6 +1841,22 @@ def test_turn_start_keeps_refusing_while_background_work_runs(turn_start, monkey
     _git(path, "checkout", "--detach", main_sha)
     monkeypatch.setattr(task_registry, "get_parking_background_work",
                         lambda sid: [{"id": "bg-1"}] if sid == "sess-1437" else [])
+
+    assert resolve.refused() is None
+    _assert_still_detached(path)
+    assert _out(path, "rev-parse", "HEAD") == main_sha
+
+
+def test_turn_start_keeps_refusing_while_a_serving_monitor_runs(turn_start, clean_task_registry):
+    """A dev server or watcher left running (Monitor serves=True) never parks
+    the session, but it still runs in the detached tree."""
+    from app.core.task_registry import task_registry
+
+    path, branch, tip, main_sha, resolve = turn_start
+    _git(path, "checkout", "--detach", main_sha)
+    task_registry.start_task("sess-1437", "server", "shell", "dev server")
+    task_registry.mark_monitor_shell_task("sess-1437", "server", serves=True)
+    assert task_registry.get_parking_background_work("sess-1437") == []
 
     assert resolve.refused() is None
     _assert_still_detached(path)

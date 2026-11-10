@@ -422,9 +422,10 @@ def reattach_own_detached_checkout(session_row: Dict[str, Any]) -> bool:
     An agent that ran ``git checkout origin/main`` in its own checkout for a
     baseline run, then parked, could never start another turn: every wake
     was refused before the model ran, and the checkout guard stops other
-    sessions from switching the folder. Only the turn-start path calls this,
-    never a mid-turn tool resolve, so a deliberate detach is never undone
-    under a running agent. It also leaves the folder alone while this
+    sessions from switching the folder. Only the turn-start path and an idle
+    Task worker's follow-up admission call this, never a mid-turn tool
+    resolve, so a deliberate detach is never undone under a running agent.
+    It also leaves the folder alone while this
     session still has background work running (it may be running in the
     detached tree) or another live session is bound to the same checkout.
     The git-level rules (clean, nothing unreachable, nothing forced) are
@@ -447,7 +448,10 @@ def reattach_own_detached_checkout(session_row: Dict[str, Any]) -> bool:
         from app.core.task_registry import task_registry
         from app.db import database
 
+        # Serving Monitors (a dev server, a watcher) never park a turn, so the
+        # parking view skips them; they still run in this tree.
         if (task_registry.get_parking_background_work(session_id)
+                or task_registry.has_running_monitor_shell(session_id)
                 or task_registry.has_unresolved_background_launches(session_id)):
             logger.info(
                 "project_resolver: not switching detached checkout %s of %s back to %r — "
@@ -473,7 +477,7 @@ def reattach_own_detached_checkout(session_row: Dict[str, Any]) -> bool:
     if not old_head:
         return False
     logger.info(
-        "project_resolver: session %s turn start switched its checkout %s from detached "
+        "project_resolver: session %s switched its checkout %s from detached "
         "%s back to its branch %r", session_id, path, old_head[:12], branch,
     )
     return True
