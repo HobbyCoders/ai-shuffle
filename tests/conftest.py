@@ -849,6 +849,11 @@ def reset_shutdown_flag():
         _startup.is_shutting_down = False
     except Exception:
         pass
+    try:
+        from app.core import restart_fence as _restart_fence
+        _restart_fence._reset_for_tests()
+    except Exception:
+        pass
     yield
 
 
