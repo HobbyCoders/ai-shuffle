@@ -982,6 +982,10 @@
 		font: inherit;
 		font-size: 13px;
 	}
+	/* The underline above marks focus; keep a host's focus ring (Settings) off it. */
+	.mpp-search-inp:focus-visible {
+		outline: none;
+	}
 	.mpp-search-inp::placeholder {
 		color: var(--muted-foreground);
 	}

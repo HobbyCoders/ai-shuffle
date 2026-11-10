@@ -5,6 +5,7 @@
  * ancestor that clips its overflow, such as the Settings detail pane (#1338).
  */
 import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ get: vi.fn() }));
@@ -127,5 +128,17 @@ describe('ModelPicker panel sideways bounds (#1338)', () => {
 		const { startAligned, width } = await openInPane({ viewport: 390, paneLeft: 0, paneRight: 390, triggerLeft: 100, triggerRight: 300 });
 		expect(startAligned).toBe(false);
 		expect(width).toBe(292);
+	});
+
+	it('places the panel again when the window resizes while it is open', async () => {
+		// Opens right-anchored with room to the left, then the window narrows and
+		// the pane edge moves to 714: growing leftward would now be cut off.
+		const { panel, startAligned } = await openInPane({ viewport: 1440, paneLeft: 300, paneRight: 1430, triggerLeft: 880, triggerRight: 1060 });
+		expect(startAligned).toBe(false);
+		vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(1280);
+		(panel.closest('.mpk')?.parentElement as HTMLElement).getBoundingClientRect = () => rect(714, 1270);
+		window.dispatchEvent(new Event('resize'));
+		await tick();
+		expect(panel.classList.contains('mpk-panel-start')).toBe(true);
 	});
 });

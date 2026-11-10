@@ -215,9 +215,12 @@
 		if (!open) return;
 		document.addEventListener('mousedown', onDocClick);
 		document.addEventListener('keydown', onKeydown);
+		// A resize or a phone rotation moves the pane edges: place it again.
+		window.addEventListener('resize', positionPanel);
 		return () => {
 			document.removeEventListener('mousedown', onDocClick);
 			document.removeEventListener('keydown', onKeydown);
+			window.removeEventListener('resize', positionPanel);
 		};
 	});
 
