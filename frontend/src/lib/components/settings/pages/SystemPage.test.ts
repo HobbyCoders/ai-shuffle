@@ -673,7 +673,34 @@ describe('memory health', () => {
 		render(SystemPage);
 		const row = await screen.findByTestId('memory-health');
 		await waitFor(() => expect(row.textContent).toContain('Available after approval'));
-		expect(within(row).queryByRole('button')).toBeNull();
+		expect(within(row).getByRole('button').matches(':disabled')).toBe(true);
+		expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+	});
+
+	it('keeps one value button from Loading to the answer, so a late answer does not move the row', async () => {
+		let answer!: (health: unknown) => void;
+		memoryHealth = new Promise((done) => (answer = done));
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		const button = within(row).getByRole('button');
+		expect(button.textContent).toContain('Loading');
+		expect(button.matches(':disabled')).toBe(true);
+		expect(row.querySelector('.st-dot.busy')).toBeTruthy();
+		answer({ state: 'healthy', checked_at: Date.now() / 1000 - 60, signals: [], repairs: [] });
+		await waitFor(() => expect(button.textContent).toContain('Healthy'));
+		expect(within(row).getByRole('button')).toBe(button);
+		expect(button.matches(':disabled')).toBe(false);
+		expect(row.querySelector('.st-dot.ok')).toBeTruthy();
+	});
+
+	it('leaves the value button shut when the check cannot be read', async () => {
+		memoryHealth = Object.assign(new Error('Server error'), { status: 500 });
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		await waitFor(() => expect(row.textContent).toContain('Unavailable'));
+		expect(within(row).getByRole('button').matches(':disabled')).toBe(true);
+		expect(row.querySelector('.st-dot.off')).toBeTruthy();
+		expect(document.querySelector('.st-banner.warn')).toBeNull();
 	});
 });
 

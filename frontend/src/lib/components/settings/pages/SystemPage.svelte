@@ -46,6 +46,7 @@
 		type MemoryHealth
 	} from './memory-health';
 	import ReportProblemForm, { type ReportFormResult } from './editors/ReportProblemForm.svelte';
+	import type { StatusTone } from '$lib/settings/types';
 	import type { ReportKind } from '$lib/api/support';
 	import {
 		aiContentPrefill,
@@ -225,6 +226,10 @@
 
 	const memoryValue = $derived(
 		memoryLoad === 'error' ? 'Unavailable' : memoryLoad === 'forbidden' ? FORBIDDEN_TEXT : memorySummary(memory)
+	);
+	const memoryReady = $derived(memoryLoad === 'ok' && !!memory);
+	const memoryDot = $derived<StatusTone>(
+		memoryLoad === 'loading' ? 'busy' : !memoryReady ? 'off' : memory?.state === 'healthy' ? 'ok' : 'warn'
 	);
 	/* "Checked 12m ago" replaces the entry's "Checks itself every hour" once the
 	   answer lands, so a warning can be told fresh or old (#1042); a minute
@@ -463,11 +468,11 @@
 	<RowGroup title="Memory">
 		<SettingRow id="system.memoryHealth" hint={memoryHint} expanded={memoryOpen && memory ? memoryList : undefined}>
 			<span class="st-status" data-testid="memory-health">
-				{#if memoryLoad === 'ok' && memory}
-					<StatusDot tone={memory.state === 'healthy' ? 'ok' : 'warn'} /><ExpandToggle value={memoryValue} bind:open={memoryOpen} />
-				{:else}
-					<ValueText value={memoryValue} />
-				{/if}
+				<!-- One dot and one button from "Loading" to the answer, so a narrow page does
+				     not drop the value under the label when it lands; it opens once loaded. -->
+				<StatusDot tone={memoryDot} /><fieldset class="mh-value" role="presentation" disabled={!memoryReady}>
+					<ExpandToggle value={memoryValue} bind:open={memoryOpen} />
+				</fieldset>
 			</span>
 		</SettingRow>
 	</RowGroup>
@@ -555,6 +560,17 @@
 	   section gap after it rather than halfway to the Help heading. */
 	:global(.st-grp:has(+ .mh-notice)) {
 		margin-bottom: 0;
+	}
+	/* Loading or unreadable: the value button is shown but cannot open. */
+	.mh-value {
+		display: contents;
+	}
+	.mh-value:disabled :global(.st-vbtn) {
+		color: var(--st-mfg);
+		cursor: default;
+	}
+	.mh-value:disabled :global(.st-vbtn svg) {
+		opacity: 0.4;
 	}
 	.mh-notice {
 		margin: 10px 0 40px;

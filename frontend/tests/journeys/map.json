@@ -136,6 +136,11 @@
 			"globs": ["frontend/tests/journeys/settings-memory.journey.mjs", "frontend/src/lib/components/settings/memory/**", "frontend/src/lib/settings/entries/memory.ts"]
 		},
 		{
+			"why": "Settings > System > Memory health: healthy stays quiet, a warning reads without opening the row, a late answer keeps the row in place",
+			"journeys": ["settings-memory-health"],
+			"globs": ["frontend/tests/journeys/settings-memory-health.journey.mjs", "frontend/src/lib/components/settings/pages/SystemPage.svelte", "frontend/src/lib/components/settings/pages/memory-health.ts", "frontend/src/lib/components/settings/pages/editors/MemoryHealthList.svelte"]
+		},
+		{
 			"why": "Settings deep links show the requested phone detail and preserve both Back steps",
 			"journeys": ["settings-detail-link"],
 			"globs": ["frontend/tests/journeys/settings-detail-link.journey.mjs", "frontend/src/lib/components/settings/shell/SettingsShell.svelte", "frontend/src/lib/components/settings/shell/BackRow.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte"]
