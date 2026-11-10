@@ -57,6 +57,8 @@ CONFIRM_SECONDS = 5
 STALL_SECONDS = 300
 # Consecutive unreadable polls before the gate gives up (about ten minutes).
 MAX_FAILED_READS = 30
+# After cancelling, how long to wait for the cancelled jobs to stop.
+SETTLE_SECONDS = 600
 EXPRESSION = re.compile(r"\$\{\{.*?\}\}")
 
 
@@ -103,12 +105,65 @@ def _name_pattern(template, matrix):
 class Slot:
     """One job definition of the run, and the listed jobs GitHub made of it."""
 
-    def __init__(self, area, key, template, matrix=False, nested=False):
+    def __init__(self, area, key, template, matrix=None, nested=False, values=None):
         self.area, self.key, self.template = area, key, template
         prefix = "" if key is None else re.escape(area) + " / "
         self.regex = re.compile(prefix + _name_pattern(template, matrix) + (r"(?: / .+)?" if nested else ""))
         self.full = template if key is None else f"{area} / {template}"
         self.weight = len(EXPRESSION.sub("", template))
+        self.matrix = bool(matrix)
+        # Every member a matrix job must list; None when an earlier job chooses them.
+        self.members = None if values is None else [self.member(value) for value in values]
+
+    def member(self, value):
+        """The name GitHub gives this matrix job's run for one value."""
+        if "${{" in self.template:
+            name = EXPRESSION.sub(str(value), self.template)
+        else:
+            name = f"{self.template} ({value})"
+        return name if self.key is None else f"{self.area} / {name}"
+
+
+def _matrix_values(area, key, job, inputs):
+    """The values of a one-key matrix, or None when a job of this run chooses them.
+
+    A shape this cannot read fails here, so the gate is never left to guess
+    which members exist.
+    """
+    matrix = _matrix(job)
+    if not matrix:
+        return None
+    if not isinstance(matrix, dict) or len(matrix) != 1:
+        raise ValueError(f"{area} / {key}: only a one-key matrix without include or exclude is understood")
+    (values,) = matrix.values()
+    if isinstance(values, list):
+        return values
+    if (area, key) in RESOLVED:
+        expression, resolve = RESOLVED[(area, key)]
+        if values != expression:
+            raise ValueError(f"{area} / {key}: matrix changed; update RESOLVED in main_gate.py")
+        return resolve(inputs)
+    if (area, key) in SELECTED:
+        if values != SELECTED[(area, key)][0]:
+            raise ValueError(f"{area} / {key}: matrix changed; update SELECTED in main_gate.py")
+        return None
+    raise ValueError(f"{area} / {key}: a computed matrix main_gate.py does not know")
+
+
+# Computed matrices whose members follow from main-suite's inputs alone.
+RESOLVED = {
+    ("identity", "identity"): (
+        "${{ fromJSON((github.event_name == 'pull_request' || inputs.main_suite == true) && "
+        "'[\"windows-latest\"]' || '[\"windows-latest\", \"macos-latest\"]') }}",
+        lambda inputs: ["windows-latest"] if inputs.get("main_suite") is True else ["windows-latest", "macos-latest"],
+    ),
+}
+# Matrices an earlier job of the run chooses: (matrix, choosing job, step-name prefix).
+# The choosing job names a step after its choice, so the run's job list holds it.
+SELECTED = {
+    ("javascript", "journeys"): (
+        "${{ fromJSON(needs.journey-plan.outputs.shards) }}", "journey-plan", "Selected UI journey shards: "),
+}
 
 
 class Plan:
@@ -127,16 +182,18 @@ class Plan:
                                           nested=bool(uses)))
                 continue
             if not uses:
-                self.slots.append(Slot(area, None, job.get("name") or area, bool(_matrix(job))))
+                self.slots.append(Slot(area, None, job.get("name") or area, _matrix(job),
+                                       values=_matrix_values(area, None, job, {})))
                 continue
             if not uses.startswith("./.github/workflows/"):
                 raise ValueError(f"{area} calls a workflow outside this repository")
             self.reusable.add(area)
             called = _load(workflows / uses.rsplit("/", 1)[1])["jobs"]
             self.called[area] = called
+            inputs = job.get("with") or {}
             for key, inner in called.items():
-                self.slots.append(Slot(area, key, inner.get("name") or key, bool(_matrix(inner)),
-                                       nested="uses" in inner))
+                self.slots.append(Slot(area, key, inner.get("name") or key, _matrix(inner),
+                                       nested="uses" in inner, values=_matrix_values(area, key, inner, inputs)))
         self.areas = [area for area in main if area != GATE_KEY and area not in ADVISORY]
 
     def is_advisory(self, name):
@@ -176,10 +233,55 @@ def layout(plan, jobs):
     return skipped, placed
 
 
+def selected_members(plan, slot, placed):
+    """The members an earlier job chose for this matrix, or None while unknown.
+
+    The choosing job must have finished and succeeded, and name exactly one
+    step after its choice: a JSON list of the values.
+    """
+    _, chooser, prefix = SELECTED[(slot.area, slot.key)]
+    runs = [job for other, found in placed.items()
+            if other.area == slot.area and other.key == chooser for job in found]
+    if len(runs) != 1 or runs[0].get("status") != "completed" or runs[0].get("conclusion") != "success":
+        return None
+    names = [step.get("name", "") for step in runs[0].get("steps") or []
+             if step.get("name", "").startswith(prefix)]
+    if len(names) != 1:
+        return None
+    try:
+        values = json.loads(names[0][len(prefix):])
+    except ValueError:
+        return None
+    if not isinstance(values, list) or not all(isinstance(value, (int, str)) for value in values):
+        return None
+    return [slot.member(value) for value in values]
+
+
 def missing(plan, jobs):
-    """Expected job definitions that have no listed job yet."""
+    """Expected jobs that are not listed yet, each matrix member on its own.
+
+    A matrix job skipped as a whole is listed once under its literal template
+    name. A matrix an earlier job chooses counts as missing until that job's
+    choice can be read, so a run whose choice cannot be read is never complete.
+    """
     skipped, placed = layout(plan, jobs)
-    return [slot.full for slot in plan.slots if slot.area not in skipped and slot not in placed]
+    absent = []
+    for slot in plan.slots:
+        if slot.area in skipped:
+            continue
+        listed = {job.get("name") for job in placed.get(slot, [])}
+        if not slot.matrix:
+            if not listed:
+                absent.append(slot.full)
+            continue
+        if slot.full in listed:
+            continue  # the whole matrix was skipped
+        members = slot.members if slot.members is not None else selected_members(plan, slot, placed)
+        if members is None:
+            absent.append(f"{slot.full} (its selection is not readable yet)")
+            continue
+        absent.extend(name for name in members if name not in listed)
+    return absent
 
 
 def result_of(listed):
@@ -247,6 +349,10 @@ def verdict(plan, jobs, lookup):
     bad = failed(jobs)
     if bad:
         raise ValueError("failed: " + ", ".join(job["name"] for job in bad))
+    unfinished = [job["name"] for job in jobs if job.get("status") != "completed"]
+    absent = missing(plan, jobs)
+    if unfinished or absent:
+        raise ValueError("not finished: " + ", ".join(unfinished + absent))
     results = area_results(plan, jobs, lookup)
     aggregate(results)
     proven = (lookup.get("outputs") or {}).get("javascript-checks") == "true"
@@ -278,9 +384,40 @@ def report(bad, out=sys.stdout, summary_path=None):
             handle.write("\n".join(lines) + "\n")
 
 
+def settle(plan, repository, run, attempt, token, call, sleep, clock, out):
+    """Wait (bounded) for every judged job to stop. Its own step, after the verdict.
+
+    Cancelled jobs still run their `always()` steps: a journey shard uploads
+    the receipt of a case it recovered. The reporting step reads those
+    artifacts once, so it must not start while a shard is still uploading. The
+    cancel also stops the verdict step itself, which is why this is a separate
+    `always()` step. After a verdict every job has finished: it returns at once.
+    """
+    started = clock()
+    while clock() - started < SETTLE_SECONDS:
+        try:
+            jobs = judged(plan, jobs_of(repository, run, attempt, token, call))
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as error:
+            print(f"could not read the run's jobs ({error})", file=out, flush=True)
+        else:
+            if all(job.get("status") == "completed" for job in jobs):
+                return True
+        sleep(POLL_SECONDS)
+    print("::warning title=Main suite::Some cancelled jobs had not stopped; journey reporting may miss them.",
+          file=out, flush=True)
+    return False
+
+
 def watch(plan, repository, run, attempt, token, call=request, sleep=time.sleep, clock=time.monotonic,
           out=sys.stdout, summary_path=None):
-    """Poll until the run is decided. Return the judged jobs, or raise SystemExit(1)."""
+    """Poll until the run is decided. Return the judged jobs, or raise SystemExit(1).
+
+    Only the current attempt is read. "Re-run failed jobs" or "Re-run job"
+    lists every job it does not run again in the new attempt, as a completed
+    copy (checked on real runs), so the attempt is the whole run. Reading an
+    older attempt instead could let an old success stand for a job the new
+    attempt has not created yet; a job that never appears fails the gate.
+    """
     unreadable, stalled_since, confirming = 0, None, None
     while True:
         try:
@@ -324,8 +461,16 @@ def watch(plan, repository, run, attempt, token, call=request, sleep=time.sleep,
         sleep(POLL_SECONDS)
 
 
-def main(environ=os.environ, call=request, sleep=time.sleep, out=sys.stdout):
+def main(environ=os.environ, call=request, sleep=time.sleep, out=sys.stdout, argv=None, clock=time.monotonic):
     plan = Plan()
+    argv = argv or []
+    if argv == ["settle"]:
+        settle(plan, environ["GITHUB_REPOSITORY"], environ["GITHUB_RUN_ID"], environ.get("GITHUB_RUN_ATTEMPT", "1"),
+               environ["GH_TOKEN"], call, sleep, clock, out)
+        return 0
+    if argv:
+        print("usage: main_gate.py [settle]", file=out)
+        return 2
     lookup = json.loads(environ["RESULTS"]).get(LOOKUP) or {}
     jobs = watch(plan, environ["GITHUB_REPOSITORY"], environ["GITHUB_RUN_ID"],
                  environ.get("GITHUB_RUN_ATTEMPT", "1"), environ["GH_TOKEN"], call=call, sleep=sleep, out=out,
@@ -344,4 +489,4 @@ def main(environ=os.environ, call=request, sleep=time.sleep, out=sys.stdout):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(argv=sys.argv[1:]))

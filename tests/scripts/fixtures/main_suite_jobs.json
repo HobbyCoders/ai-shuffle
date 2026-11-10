@@ -1,5 +1,5 @@
 {
- "_source": "Job names of a green push run of main-suite (run 42795525982), reshaped to this gate: the called workflows' own verdict jobs skipped, the old watcher and reporter jobs gone.",
+ "_source": "Job names of a green push run of main-suite (run 42795525982), reshaped to this gate: the called workflows' own verdict jobs skipped, the old watcher and reporter jobs gone. The selection job's step that names its shards is added, as ci-frontend.yml now names it.",
  "jobs": [
   {
    "id": 1,
@@ -257,7 +257,19 @@
    "id": 46,
    "name": "javascript / Select UI journeys",
    "status": "completed",
-   "conclusion": "success"
+   "conclusion": "success",
+   "steps": [
+    {
+     "name": "Select the journeys and their shards",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Selected UI journey shards: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
   },
   {
    "id": 47,

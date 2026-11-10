@@ -297,6 +297,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -m scripts.devloop.ci matrix --shards 16 >> "$GITHUB_OUTPUT"
+      # The selection in a step name, where main-suite's gate reads it from the
+      # run's job list (scripts/ci/main_gate.py) to wait for every chosen shard.
+      - name: 'Selected UI journey shards: ${{ steps.select.outputs.shards }}'
+        run: 'true'
 
   journeys:
     name: UI journeys (${{ matrix.shard }}/16)

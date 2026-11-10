@@ -272,6 +272,16 @@ jobs:
         run: |
           python scripts/ci/shard_evidence.py --prefix windows-desktop --count 3 --source "$SOURCE" --destination "$EVIDENCE"
           python tests/scripts/test_ci_parallel_gates.py --desktop-evidence "$EVIDENCE"
+      # Cancelled journey shards still upload their receipts; the cancel stops
+      # the verdict step too, so this waits in its own step (at once when the
+      # verdict was reached: every job has finished then).
+      - name: Wait for cancelled jobs to stop
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        timeout-minutes: 12
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/main_gate.py settle
       # Best effort and never fatal: a red shard must not hide a recovered case
       # of another shard, and a reporting failure changes no result.
       - name: Open or update flaky journey issues

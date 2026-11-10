@@ -144,7 +144,10 @@ class CostPolicyTests(unittest.TestCase):
                                            "key": "${{ steps.select.outputs.key }}"})
         # Reads earlier main-suite runs, pass records and the merged pull request; never writes.
         self.assertEqual(plan["permissions"], {"contents": "read", "actions": "read", "pull-requests": "read"})
-        checkout, select = plan["steps"]
+        # The third step only names the selection for main-suite's gate (main_gate.py).
+        checkout, select, shown = plan["steps"]
+        self.assertEqual(shown, {"name": "Selected UI journey shards: ${{ steps.select.outputs.shards }}",
+                                 "run": "true"})
         # A pull request needs the merge commit's parents; a push the history
         # back to the last commit main-suite passed on.
         self.assertEqual(checkout["with"], {"fetch-depth": "${{ github.event_name == 'pull_request' && 2 || 0 }}"})

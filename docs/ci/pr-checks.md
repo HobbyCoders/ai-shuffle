@@ -222,7 +222,14 @@ starts with the run (it needs only `proven`) and keeps its runner:
 seconds and gives the verdict as soon as the last job finishes. It knows which
 jobs to expect from `main-suite.yml` and the workflows it calls, so a matrix
 or a call that GitHub has not created yet is waited for, never mistaken for
-done; a final listing taken a few seconds later must be identical. The called
+done; a final listing taken a few seconds later must be identical. Every
+matrix member counts on its own. The UI journey shards are chosen during the
+run, so the selection job names a step after its choice
+(`Selected UI journey shards: [...]`) and the gate waits for exactly those
+shards; a choice it cannot read never completes the run. A matrix shape the
+gate cannot expand fails its tests. A re-run attempt ("Re-run failed jobs" or
+one job) lists the jobs it does not run again as completed copies, so the gate
+reads only the current attempt. The called
 workflows (`ci-backend.yml`, `ci-frontend.yml`, `windows-suite.yml`,
 `ci-browser-workspace.yml`) skip their own verdict jobs when main-suite passes
 `gated_by_caller: true`, and the gate applies their rules instead: every inner
@@ -1262,7 +1269,9 @@ outcomes, the run link and commit, **never raw logs, errors or evidence paths**.
 The full evidence still expires after 3 days.
 
 The reporting step uses `always()`, so a recovered case is still reported when
-another shard/job is red. It is non-blocking (`continue-on-error`): an
+another shard/job is red. On a cancelled run the step before it waits (up to
+ten minutes, non-blocking) for the cancelled jobs to stop, because a cancelled
+shard still uploads its receipts. It is non-blocking (`continue-on-error`): an
 API/reporting failure emits a warning and cannot change the verdict or prevent
 nightly publication. Only the `Main suite` job has `issues: write` (beside
 `actions: write` for the verdict); workflow defaults and all PR jobs remain
