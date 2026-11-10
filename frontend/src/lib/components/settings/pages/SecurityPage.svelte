@@ -353,48 +353,36 @@
 	let retrying = $state(false);
 
 	/** Try again, in either failed row, reloads every load that failed. */
-	async function retryFailed(event: MouseEvent) {
+	async function retryFailed() {
 		if (retrying) return;
-		const button = event.currentTarget as HTMLElement;
-		const page = button.closest('.st-page');
-		// The button stays focused (aria-disabled, not disabled) while it runs.
-		// A Try again goes away when its row loads or is refused, maybe before
-		// the other load ends: follow focus on it (and its row) to the end, so it
-		// lands on that row's value, else on the Try again that is left.
-		let held: HTMLElement | null = document.activeElement === button ? button : null;
-		let row = button.closest('.st-row');
-		const keepFocus = async () => {
-			await tick();
-			const active = document.activeElement;
-			if (active instanceof HTMLElement && active.matches('[data-retry-load]')) {
-				held = active;
-				row = active.closest('.st-row');
-				return;
-			}
-			// Only when focus went with the button, not if the reader moved on.
-			if (!held || held.isConnected || (active && active !== document.body)) {
-				held = null;
-				return;
-			}
-			held =
-				row?.querySelector<HTMLElement>('.st-vbtn:not(:disabled)') ??
-				row?.querySelector<HTMLElement>('button:not(:disabled)') ??
-				page?.querySelector<HTMLElement>('[data-retry-load]') ??
-				null;
-			row = held?.closest('.st-row') ?? null;
-			held?.focus();
-		};
 		retrying = true;
 		try {
-			await Promise.all([
-				ownerRetryable ? loadOwner().then(keepFocus) : null,
-				instrLoad === 'error' ? loadInstructions().then(keepFocus) : null
-			]);
+			await Promise.all([ownerRetryable ? loadOwner() : null, instrLoad === 'error' ? loadInstructions() : null]);
 		} finally {
 			retrying = false;
 		}
-		await keepFocus();
 	}
+
+	// A Try again goes away when its row loads or is refused. If it has focus
+	// then, focus would fall to the page body: move it to that row's value,
+	// else another button in the row, else a Try again still on the page.
+	// Runs before the rows update; focus anywhere else is never moved.
+	$effect.pre(() => {
+		void ownerRetryable;
+		void instrLoad;
+		const button = document.activeElement;
+		if (!(button instanceof HTMLElement) || !button.matches('[data-retry-load]')) return;
+		const row = button.closest('.st-row');
+		const page = button.closest('.st-page');
+		void tick().then(() => {
+			if (button.isConnected || (document.activeElement && document.activeElement !== document.body)) return;
+			(
+				row?.querySelector<HTMLElement>('.st-vbtn:not(:disabled)') ??
+				row?.querySelector<HTMLElement>('button:not(:disabled)') ??
+				page?.querySelector<HTMLElement>('[data-retry-load]')
+			)?.focus();
+		});
+	});
 
 	/* ---------- lifecycle ---------- */
 

@@ -501,6 +501,29 @@ describe('Try again after a failed load', () => {
 		await waitFor(() => expect(document.activeElement).toBe(value));
 	});
 
+	it('follows the reader who Tabs onto the other Try again before it goes away', async () => {
+		const run = await retryBothFrom('owner');
+		run.ownerAnswer(loaded());
+		const ownerValue = await loadedButton(/^Owner password Set/);
+		await waitFor(() => expect(document.activeElement).toBe(ownerValue));
+		run.other.focus();
+		run.instrAnswer({ ...instructions });
+		const value = await loadedButton(/^Chat instructions Customized/);
+		await waitFor(() => expect(document.activeElement).toBe(value));
+	});
+
+	it('moves focus off a Try again that a background read removes, though it was not pressed', async () => {
+		const state = { fail: true };
+		failInstructions(state);
+		render(SecurityPage);
+		const chat = await screen.findByRole('button', { name: 'Chat instructions Unavailable' });
+		within(rowOf(chat)).getByRole('button', { name: 'Try again' }).focus();
+		state.fail = false;
+		resourceSync.invalidate(['settings']);
+		const value = await loadedButton(/^Chat instructions Customized/);
+		await waitFor(() => expect(document.activeElement).toBe(value));
+	});
+
 	it('stays on the other Try again when that load fails again, and says so again', async () => {
 		const run = await retryBothFrom('owner');
 		run.ownerAnswer({ ok: false, reason: 'unsupported' });
