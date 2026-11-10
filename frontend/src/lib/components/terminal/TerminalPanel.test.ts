@@ -81,6 +81,7 @@ vi.mock('$lib/terminal/connection', () => ({
 
 import TerminalPanel from './TerminalPanel.svelte';
 import { get } from 'svelte/store';
+import { tick } from 'svelte';
 import { composerInsert } from '$lib/stores/composer-insert';
 import TerminalPage from './TerminalPage.svelte';
 import { TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
@@ -449,6 +450,42 @@ describe('tab strip', () => {
 		expect(scrollLeft).toBe(0);
 		view.unmount();
 		expect(watcher!.disconnected).toBe(true);
+		vi.restoreAllMocks();
+	});
+
+	it('keeps the current tab in view when tabs before it close, without undoing a swipe on a refresh', async () => {
+		const view = await mount([info('t1'), info('t2'), info('t3'), info('t4')]);
+		const strip = await waitFor(() => view.getByRole('tablist'));
+		let scrollLeft = 58;
+		Object.defineProperty(strip, 'scrollLeft', { get: () => scrollLeft, set: (v: number) => { scrollLeft = v; } });
+		const rect = (left: number, right: number) => ({ left, right, top: 0, bottom: 30, width: right - left, height: 30, x: left, y: 0, toJSON() {} }) as DOMRect;
+		// 120 px tabs in a 6-308 strip, laid out in their current order.
+		vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+			if (this === strip) return rect(6, 308);
+			if (this.classList?.contains('tab')) {
+				const at = Array.from(strip.querySelectorAll('.tab')).indexOf(this as HTMLElement);
+				return rect(6 + at * 120 - scrollLeft, 126 + at * 120 - scrollLeft);
+			}
+			return rect(0, 60);
+		});
+		terminals.select('s1', 't3'); // at the strip's right edge: 188-308
+		await waitFor(() => expect(view.getByRole('tab', { selected: true }).id).toBe('terminal-tab-t3'));
+		await tick();
+		expect(scrollLeft).toBe(58);
+		terminals.drop('t2'); // t3 slides to 68-188, still in view: no scroll
+		await tick(); await tick();
+		expect(scrollLeft).toBe(58);
+		terminals.drop('t1'); // t3 would sit at -52-68, past the left edge
+		await waitFor(() => expect(scrollLeft).toBe(0));
+		expect(view.getByRole('tab', { selected: true }).id).toBe('terminal-tab-t3');
+		// The tab's title names its shell too (a squeezed tab shows "po…").
+		expect(view.getByRole('tab', { selected: true }).title).toBe('bash · /workspace/app');
+		// A swipe, then a list refresh with the same tabs: the swipe stands.
+		scrollLeft = 100;
+		api.list.mockResolvedValue({ terminals: [info('t3'), info('t4')], open: 2, running: 0, limit: 8, worker: targets.worker });
+		await terminals.load('s1');
+		await tick(); await tick();
+		expect(scrollLeft).toBe(100);
 		vi.restoreAllMocks();
 	});
 });

@@ -75,9 +75,12 @@
 		if (at.left < box.left) strip.scrollLeft -= box.left - at.left;
 		else if (at.right > box.right) strip.scrollLeft += at.right - box.right;
 	}
+	// Also when a tab opens or closes beside it (tabOrder): closing the tabs
+	// before it slid the current tab off the left edge at the same scroll.
 	$effect(() => {
 		const id = activeId;
 		const strip = tabsEl;
+		void tabOrder;
 		if (!id || !strip) return;
 		void tick().then(() => revealTab(strip, id));
 	});
@@ -109,6 +112,8 @@
 	const ready = $derived(probe.status === 'ready' && access.kind === 'ready' ? probe : null);
 	const tabState = $derived(terminals.tabsFor(sessionId));
 	const activeId = $derived(tabState.active);
+	/** Changes only when a tab opens, closes or moves, not on every list refresh. */
+	const tabOrder = $derived(tabState.ids.join(' '));
 	const activeInfo = $derived(activeId ? terminals.terminal(activeId) : null);
 	const activeLink = $derived(activeId ? terminals.connection(activeId) : null);
 	const notice = $derived(terminals.notice(sessionId));
@@ -431,7 +436,7 @@
 					{@const link = terminals.connection(id)}
 					<div class="tab" class:current={id === activeId}>
 						<button id={`terminal-tab-${id}`} class="tab-select" role="tab" aria-selected={id === activeId}
-							tabindex={id === activeId ? 0 : -1} title={hostName(info) !== ready.worker ? `${hostName(info)}: ${info?.cwd ?? ''}` : info?.cwd}
+							tabindex={id === activeId ? 0 : -1} title={`${info?.shell ?? 'shell'} · ${hostName(info) !== ready.worker ? `${hostName(info)}: ${info?.cwd ?? ''}` : (info?.cwd ?? '')}`}
 							onclick={() => terminals.select(sessionId, id)} onkeydown={(e) => tabKeydown(e, index)}>
 							<span class="dot" data-tone={info?.state === 'exited' ? 'bad' : link.status === 'live' ? (info?.busy ? 'run' : 'ok') : link.status === 'reconnecting' ? 'warn' : 'wait'} aria-hidden="true"></span>
 							<span class="tab-shell">{info?.shell ?? 'shell'}</span>

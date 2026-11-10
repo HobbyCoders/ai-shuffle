@@ -17,7 +17,10 @@
 //            from its tab, Watch command and back, close the panel
 //   resize   seven terminals, the last selected, then 390 -> 360 -> 500 -> 390:
 //            the selected tab and its close button stay in the strip (#1394)
-// In both, the selected tab's name never runs under its close button.
+//   close-before  (360, powershell) seven terminals, the fourth selected at the
+//            strip's right edge, then close the two tabs before it and the two
+//            after it: the selected tab stays in the strip
+// In all, the selected tab's name never runs under its close button.
 import { DEFAULT_VIEWPORTS, runJourney } from './runner.mjs';
 import { composerControl, expect, gotoApp, seededChatId, waitChatOpen } from './lib/app.mjs';
 import { fakeTerminals } from './lib/fake-terminals.mjs';
@@ -237,6 +240,62 @@ await runJourney({
 					await page.waitForTimeout(500);
 					const g = await expectSelectedInView(page, `seven terminals, last selected, resized to ${width}`);
 					log(`${width}: strip ${JSON.stringify(g.tabs)}, close ${JSON.stringify(g.currentClose)}`);
+				}
+			}
+		},
+		{
+			// Closing tabs before the selected one slid it off the strip's left
+			// edge: same selection, same width, same scroll position.
+			name: 'close-before',
+			viewports: ['fold-cover'],
+			async setup(ctx) {
+				const { page, status } = ctx;
+				await page.addInitScript(fakeTerminals, { defaultShell: 'powershell' });
+				await gotoApp(page, status, `/?session=${encodeURIComponent(seededChatId(status, 'worktree'))}`);
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 1000 });
+			},
+			async act({ page, mark, log }) {
+				const side = page.getByRole('complementary', { name: 'Session side panel' });
+				const panel = side.getByRole('region', { name: 'Terminal' });
+
+				await mark('open seven terminals');
+				await (await composerControl(page, 'Toggle terminal')).click();
+				await panel.waitFor({ timeout: 15_000 });
+				await panel.getByRole('button', { name: 'Open terminal', exact: true }).tap();
+				await tabCount(page, 1);
+				for (let count = 2; count <= 7; count++) {
+					await panel.getByRole('button', { name: 'New terminal', exact: true }).tap();
+					await panel.locator('.popover').getByRole('button', { name: 'Open terminal', exact: true }).tap();
+					await tabCount(page, count);
+				}
+
+				await mark('scroll the fourth tab to the right edge and select it');
+				await page.evaluate(() => {
+					const strip = document.querySelector('aside[aria-label="Session side panel"] .tabs');
+					const fourth = strip.querySelectorAll('.tab')[3];
+					strip.scrollLeft += fourth.getBoundingClientRect().right - strip.getBoundingClientRect().right;
+				});
+				await page.waitForTimeout(200);
+				await panel.getByRole('tab').nth(3).tap();
+				await page.waitForFunction(() => document.querySelectorAll('aside[aria-label="Session side panel"] [role="tab"]')[3]?.getAttribute('aria-selected') === 'true', null, { timeout: 5000 });
+				await page.waitForTimeout(300);
+				await expectSelectedInView(page, 'the fourth of seven tabs selected at the right edge');
+
+				for (const [label, left] of [['Close terminal 3', 6], ['Close terminal 2', 5]]) {
+					await mark(`close an earlier tab (${label})`);
+					await panel.getByRole('button', { name: label, exact: true }).tap();
+					await tabCount(page, left);
+					await page.waitForTimeout(400);
+					const g = await expectSelectedInView(page, `after ${label}, before the selected tab`);
+					log(`${label}: strip ${JSON.stringify(g.tabs)}, selected ${JSON.stringify(g.current)}`);
+				}
+				// The mirror case: tabs after the selected one close.
+				for (const [label, left] of [['Close terminal 5', 4], ['Close terminal 4', 3]]) {
+					await mark(`close a later tab (${label})`);
+					await panel.getByRole('button', { name: label, exact: true }).tap();
+					await tabCount(page, left);
+					await page.waitForTimeout(400);
+					await expectSelectedInView(page, `after ${label}, after the selected tab`);
 				}
 			}
 		}
