@@ -627,7 +627,8 @@ async def ensure_pending_checkout(
     # A worker that switched its own checkout to another branch is bound to
     # that branch; its missing folder still needs restoring (#944). The
     # restore helper itself decides whether a missing folder is a Task's own.
-    if path and (is_worker_branch(branch, session_row.get("id") or "") or not Path(path).is_dir()):
+    if isinstance(path, str) and path and (
+            is_worker_branch(branch, session_row.get("id") or "") or not Path(path).is_dir()):
         from app.core.turn_scheduler import message_resume_lock
 
         # An old finisher may already be deleting the initially existing cwd.
