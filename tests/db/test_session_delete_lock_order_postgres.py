@@ -2154,3 +2154,43 @@ def test_a_delete_waiting_on_its_chat_holds_no_network_state_lock(private_pool, 
             holder.rollback()
         assert deleting.result(timeout=10) is True
     assert _session_row(sid) is None
+
+
+def test_a_networked_worker_that_cannot_read_its_identity_still_deletes(private_pool, monkeypatch, caplog):
+    """The deletion fact never fails a delete: no identity means main's delete, a warning, no fact."""
+    from app.network import engine, identity
+
+    ctx, remote = _remote_network("no-identity-")
+    sid = _owned_chat(ctx, remote, "no-identity-")
+    monkeypatch.setattr(engine, "_context", None)  # nothing cached: the engine never loaded
+
+    def missing(*, create=True):
+        raise identity.IdentityError("Device identity is missing.")
+
+    monkeypatch.setattr(identity, "load", missing)
+    with caplog.at_level("WARNING", logger=sessions.logger.name):
+        assert sessions.delete_session(sid) is True
+    assert _session_row(sid) is None
+    with base.get_db() as conn:
+        assert engine.store.session_deletion(conn.cursor(), sid) is None
+    assert "identity could not be read" in caplog.text
+
+
+def test_a_failed_fact_statement_leaves_the_delete_committable(private_pool, monkeypatch, caplog):
+    """A failing statement while remembering the deletion is rolled back to its savepoint."""
+    from app.db import network as store
+    from app.network import engine
+
+    ctx, remote = _remote_network("bad-fact-")
+    monkeypatch.setattr(engine, "_context", ctx)
+    sid = _owned_chat(ctx, remote, "bad-fact-")
+
+    def broken(cursor, session_id, *, pending):
+        cursor.execute("INSERT INTO no_such_table_1308 VALUES (1)")
+
+    monkeypatch.setattr(store, "remember_session_deletion", broken)
+    with caplog.at_level("WARNING", logger=sessions.logger.name):
+        assert sessions.delete_session(sid) is True
+    assert _session_row(sid) is None
+    _assert_deleted(sid)
+    assert "Could not remember the deletion" in caplog.text
