@@ -2199,7 +2199,10 @@
 			tailErrorOffsetPx = 0;
 			tailQueueSlotPx = 0;
 		}
-		if (bannerError && !presentedTailError) {
+		// The slot belongs to the failure, not to its banner: when the banner
+		// steps aside for the turn's own Error row (#1341), dequeue must still
+		// leave the queue slot's geometry alone.
+		if (s.error && !presentedTailError) {
 			const pendingHeight = tailControlsRef?.getBoundingClientRect().height ?? 0;
 			const gap = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0 : 0;
 			// Queue auto-handoff may clear/enrich the same failure before Stop.
@@ -2210,7 +2213,7 @@
 			// geometry too: dequeue can coincide with transcript growth/follow,
 			// otherwise the bottom-docked wrapper shrinks in that same paint.
 			tailQueueSlotPx = pendingHeight;
-			presentedTailError = bannerError;
+			presentedTailError = s.error;
 		}
 		// A queued prompt's row can land in the same commit its bubble leaves
 		// (#1052). The row's follow scroll and the slot's shrink in one paint
