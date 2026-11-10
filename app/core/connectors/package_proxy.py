@@ -8,6 +8,15 @@ from pathlib import Path
 
 from app.core.connectors.base import BaseConnector, ConnectorStatus, IncomingMessage
 
+#: How long the host waits for an ordinary request to the connector worker.
+HOST_CALL_TIMEOUT = 180
+#: These return only once the agent's turn for the delivered message has settled
+#: (#1388). The manager waits up to an hour for a turn; this leaves room for the
+#: reply and one turn queued before it, and still frees the request if the
+#: worker hangs. A worker that exits fails them at once ("Connector worker stopped").
+TURN_CALL_TIMEOUT = 2 * 3600
+TURN_METHODS = frozenset({"handle_webhook_payload", "handle_webhook_activity"})
+
 
 def worker_environment():
     # Do not inherit database URLs, provider keys, or other connectors' secrets.
@@ -46,7 +55,8 @@ class PackageConnector(BaseConnector):
         self._pending[key] = future
         try:
             await self._send({"id": key, "method": method, "args": args, "kwargs": kwargs})
-            return await asyncio.wait_for(future, 180)
+            limit = TURN_CALL_TIMEOUT if method in TURN_METHODS else HOST_CALL_TIMEOUT
+            return await asyncio.wait_for(future, limit)
         finally:
             self._pending.pop(key, None)
 
