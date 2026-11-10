@@ -636,12 +636,71 @@ describe('memory health', () => {
 		expect(screen.queryByText('Saves are writing normally.')).toBeNull();
 	});
 
+	it('says when it last checked, and warns under the collapsed row until it is opened (#1042)', async () => {
+		memoryHealth = {
+			state: 'attention',
+			checked_at: Date.now() / 1000 - 12 * 60,
+			signals: [
+				{ id: 'capacity', label: 'Capacity', state: 'attention', reason: 'Automatic cleanup has recorded 3 permanent deletions of older facts. Recall cannot recover a deleted copy.' }
+			],
+			repairs: []
+		};
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		await waitFor(() => expect(row.textContent).toContain('Needs attention'));
+		const setting = row.closest('.st-row') as HTMLElement;
+		expect(setting.querySelector('.st-rh')?.textContent).toBe('Checked 12m ago');
+		const banner = screen.getByText(/^Capacity: Automatic cleanup has recorded 3 permanent deletions of older facts\.$/).closest('.st-banner');
+		expect(banner?.classList.contains('warn')).toBe(true);
+		await fireEvent.click(within(banner as HTMLElement).getByRole('button', { name: 'Details' }));
+		expect(await screen.findByText(/Recall cannot recover a deleted copy\./)).toBeTruthy();
+		expect(screen.getByText(/^Last checked /)).toBeTruthy();
+		expect(document.querySelector('.st-banner.warn')).toBeNull();
+		await waitFor(() => expect(document.activeElement).toBe(within(row).getByRole('button', { name: /Needs attention/ })));
+	});
+
+	it('stays quiet when healthy, and says when it has not checked yet', async () => {
+		memoryHealth = { state: 'healthy', checked_at: null, signals: [], repairs: [] };
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		await waitFor(() => expect(row.textContent).toContain('Healthy'));
+		expect((row.closest('.st-row') as HTMLElement).querySelector('.st-rh')?.textContent).toBe('Not checked yet');
+		expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+	});
+
 	it('is owner only', async () => {
 		memoryHealth = Object.assign(new Error('Owner access required'), { status: 403 });
 		render(SystemPage);
 		const row = await screen.findByTestId('memory-health');
 		await waitFor(() => expect(row.textContent).toContain('Available after approval'));
-		expect(within(row).queryByRole('button')).toBeNull();
+		expect(within(row).getByRole('button').matches(':disabled')).toBe(true);
+		expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+	});
+
+	it('keeps one value button from Loading to the answer, so a late answer does not move the row', async () => {
+		let answer!: (health: unknown) => void;
+		memoryHealth = new Promise((done) => (answer = done));
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		const button = within(row).getByRole('button');
+		expect(button.textContent).toContain('Loading');
+		expect(button.matches(':disabled')).toBe(true);
+		expect(row.querySelector('.st-dot.busy')).toBeTruthy();
+		answer({ state: 'healthy', checked_at: Date.now() / 1000 - 60, signals: [], repairs: [] });
+		await waitFor(() => expect(button.textContent).toContain('Healthy'));
+		expect(within(row).getByRole('button')).toBe(button);
+		expect(button.matches(':disabled')).toBe(false);
+		expect(row.querySelector('.st-dot.ok')).toBeTruthy();
+	});
+
+	it('leaves the value button shut when the check cannot be read', async () => {
+		memoryHealth = Object.assign(new Error('Server error'), { status: 500 });
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		await waitFor(() => expect(row.textContent).toContain('Unavailable'));
+		expect(within(row).getByRole('button').matches(':disabled')).toBe(true);
+		expect(row.querySelector('.st-dot.off')).toBeTruthy();
+		expect(document.querySelector('.st-banner.warn')).toBeNull();
 	});
 });
 

@@ -10,9 +10,11 @@
 
 	interface Props {
 		rows: UpdateResultRow[];
+		/** When the check ran, in full ("Last checked Nov 9, 2026, 8:40 PM"). */
+		checked?: string;
 	}
 
-	let { rows }: Props = $props();
+	let { rows, checked = '' }: Props = $props();
 </script>
 
 <ul class="st-xlist mh-list">
@@ -22,6 +24,7 @@
 			<span class="mh-text">{row.text}</span>
 		</li>
 	{/each}
+	{#if checked}<li class="st-xitem mh-item mh-when">{checked}</li>{/if}
 </ul>
 
 <style>
@@ -42,6 +45,10 @@
 		gap: 7px;
 		font-size: 13.5px;
 		color: var(--st-fg);
+	}
+	.mh-when {
+		font-size: 12.5px;
+		color: var(--st-mfg);
 	}
 	.mh-text {
 		font-size: 13px;
