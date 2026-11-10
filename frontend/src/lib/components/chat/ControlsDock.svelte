@@ -449,7 +449,9 @@
 		permissionUpdating = true;
 		try {
 			await activeSession.setPermissionModeOverride(mode);
-			closePopover();
+			// A pick closes the menu as Escape does: focus goes back to the chip, not
+			// to the page (#1415). The phone sheet's picks leave no dock menu open.
+			if (openPopover === 'permission') dismissPopover();
 		} catch (error) {
 			notify(error instanceof Error ? error.message : 'Could not change permissions', {
 				severity: 'error', title: 'Permission change failed'
