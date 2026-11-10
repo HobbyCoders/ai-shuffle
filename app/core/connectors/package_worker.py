@@ -18,6 +18,9 @@ _WRITE_LOCK = threading.Lock()
 _REPLIES = {}
 _REPLY_LOCK = threading.Lock()
 MAX_FRAME = 2_000_000
+HOST_CALL_TIMEOUT = 180
+# "incoming" returns once the agent's turn has settled, however long that takes (#1388).
+UNBOUNDED_CALLBACKS = {"incoming"}
 METHODS = {"poll_watch", "connect", "disconnect", "send_message",
            "send_permission_prompt", "send_notification",
            "send_typing_indicator", "send_ack_reaction", "mark_as_read", "execute_action", "execute_tool",
@@ -37,11 +40,12 @@ def host_call(method, args):
     return host_reply(host_request(method, args))
 
 
-def host_request(method, args):
+def host_request(method, args, pending=None):
+    """Write one callback; ``pending`` is the future an event-loop caller waits on."""
     key = str(uuid.uuid4())
     event, result = threading.Event(), []
     with _REPLY_LOCK:
-        _REPLIES[key] = (event, result)
+        _REPLIES[key] = pending if pending is not None else (event, result)
     try:
         emit({"host_id": key, "method": method, "args": args})
     except BaseException:
@@ -54,7 +58,7 @@ def host_request(method, args):
 def host_reply(request):
     key, event, result = request
     try:
-        if not event.wait(180):
+        if not event.wait(HOST_CALL_TIMEOUT):
             raise TimeoutError("Host callback timed out")
         if result[0].get("error"):
             raise RuntimeError("Host rejected connector callback")
@@ -112,9 +116,27 @@ async def serve(cls, base):
     tasks = set()
     async def callback(method, *args):
         # Write on the loop thread, in call order: two threads racing to write
-        # could hand the host a chat's messages out of order (#1324).
-        request = host_request(method, args)
-        return await asyncio.to_thread(host_reply, request)
+        # could hand the host a chat's messages out of order (#1324). The reply
+        # resolves a future, so no thread waits through a turn (#1388).
+        future = loop.create_future()
+        key = host_request(method, args, future)[0]
+        try:
+            if method in UNBOUNDED_CALLBACKS:
+                value = await future
+            else:
+                try:
+                    value = await asyncio.wait_for(future, HOST_CALL_TIMEOUT)
+                except asyncio.TimeoutError:
+                    raise TimeoutError("Host callback timed out") from None
+        finally:
+            with _REPLY_LOCK:
+                _REPLIES.pop(key, None)
+        if value.get("error"):
+            raise RuntimeError("Host rejected connector callback")
+        return value.get("result")
+    def resolve(future, value):
+        if not future.done():
+            future.set_result(value)
     async def dispatch(request):
         nonlocal instance
         key = request["id"]
@@ -159,12 +181,23 @@ async def serve(cls, base):
                 if "host_id" in value:
                     with _REPLY_LOCK:
                         pending = _REPLIES.get(value["host_id"])
-                        if pending:
+                        if isinstance(pending, asyncio.Future):
+                            loop.call_soon_threadsafe(resolve, pending, value)
+                        elif pending:
                             pending[1].append(value)
                             pending[0].set()
                 else:
                     loop.call_soon_threadsafe(schedule, value)
         finally:
+            # The host is gone: no reply will come, so every waiting callback fails now.
+            closed = {"error": "Host connection closed"}
+            with _REPLY_LOCK:
+                for pending in list(_REPLIES.values()):
+                    if isinstance(pending, asyncio.Future):
+                        loop.call_soon_threadsafe(resolve, pending, closed)
+                    elif not pending[0].is_set():
+                        pending[1].append(closed)
+                        pending[0].set()
             loop.call_soon_threadsafe(stopped.set)
     threading.Thread(target=read, daemon=True).start()
     await stopped.wait()
