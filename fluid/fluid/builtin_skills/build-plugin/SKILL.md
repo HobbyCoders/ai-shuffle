@@ -124,7 +124,9 @@ The skill that uses the service then tells the agent to:
 1. Call `ChatResources` and look for an approved grant for the service.
 2. If there is none, call `RequestChatAccess` with `kind` `service`, the
    provider, the API address and the purpose. Tell the owner to finish the
-   private access card, and stop until they say it is ready.
+   private access card, then end the turn. The host sends the approval or
+   decline as a notice; use the granted handle it carries. Never poll, and
+   the owner does not need to send another message.
 3. Call `ChatHttpRequest` with that grant. The worker attaches the credential;
    no model sees it.
 
@@ -202,7 +204,7 @@ description: List the DNS records in the owner's Cloudflare zones and flag likel
 ---
 
 1. Call ChatResources and look for an approved Cloudflare service grant.
-2. If there is none, call RequestChatAccess with kind "service", service_provider "cloudflare" and purpose "List zones and their DNS records". Tell the owner to finish the access card, then stop until they say it is ready.
+2. If there is none, call RequestChatAccess with kind "service", service_provider "cloudflare" and purpose "List zones and their DNS records". Tell the owner to finish the access card, then end the turn. Wait for the host's approval or decline notice and use the granted handle it carries; never poll.
 3. Call ChatHttpRequest with the grant, method GET and path /zones.
 4. For each zone, call ChatHttpRequest with method GET and path /zones/<zone id>/dns_records.
 5. Give the record list to the record-auditor subagent.

@@ -596,13 +596,16 @@ async def deliver_outcome(session_id: str, frame: dict, *, subagent: bool) -> No
     """Steer the notice into a running turn, else queue a wake (turn_scheduler).
 
     A local Task child gets it only while its own turn runs: a wake would
-    start a turn its parent never collects. An ended child's grant stays
-    usable if the child is resumed.
+    start a turn its parent never collects. ``steer_only`` carries that through
+    the scheduler, so a child that ends after this check is dropped, never
+    woken. An ended child's grant stays usable if the child is resumed.
     """
     from app.core import session_runtime, turn_scheduler
-    if subagent and session_runtime.get_live_runtime(session_id) is None:
-        logger.info("Private access outcome for ended subagent %s not delivered", session_id)
-        return
+    if subagent:
+        if session_runtime.get_live_runtime(session_id) is None:
+            logger.info("Private access outcome for ended subagent %s not delivered", session_id)
+            return
+        frame = {**frame, "steer_only": True}
     await turn_scheduler.on_access_outcome(session_id, frame)
 
 
