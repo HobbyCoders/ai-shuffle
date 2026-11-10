@@ -2945,8 +2945,8 @@ def create_builtin_tools_server(
         "stop or wait out subagents and background tasks, then call this once and "
         "end the turn with a short summary; restart that work on the target. The "
         "app pushes the branch, syncs the target and moves the session; the chat "
-        "resumes there with your note as its prompt, and a failed move is reported "
-        "back to you. Pass the worker's name as shown in the app (or its device "
+        "resumes there with your note as its prompt, and the outcome is posted in "
+        "the chat. Pass the worker's name as shown in the app (or its device "
         "id) and an optional one-line note on what to continue; use absolute dates.",
         {
             "type": "object",
