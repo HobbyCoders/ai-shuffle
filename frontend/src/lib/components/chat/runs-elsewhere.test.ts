@@ -22,3 +22,9 @@ it('follows the "Runs on" pick for a new chat', () => {
 	// A stale owner from the previous chat does not count for a new one.
 	expect(chatRunsElsewhere({ sessionId: null, isRemote: true, deviceIntent: null })).toBe(false);
 });
+
+it('counts a message held for a queued move as elsewhere', () => {
+	// The move sends it to the new worker, whatever the row says now.
+	expect(chatRunsElsewhere({ ...open, isRemote: false }, { is_remote: false }, true)).toBe(true);
+	expect(chatRunsElsewhere({ ...open, isRemote: false }, { is_remote: false }, false)).toBe(false);
+});

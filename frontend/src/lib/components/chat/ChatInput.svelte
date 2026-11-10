@@ -139,9 +139,6 @@
 		$activeSession.project || ($activeSession.sessionId ? $activeSession.projectV2Id : '') || undefined
 	);
 	const mentionsAvailable = $derived(!!mentionProjectId);
-	const mentionRunsElsewhere = $derived(chatRunsElsewhere(
-		$activeSession, $sessions.find((session) => session.id === $activeSession.sessionId)
-	));
 	let mentionAwaitingProject: string | null = null;
 	const mentionWorktreeId = $derived(
 		$activeSession.worktreeIntent === 'worktree' && !$activeSession.isRemote
@@ -1148,8 +1145,12 @@
 		if (need && projectLane !== 'chat' && ((editorRef?.getMessage() ?? '').trim() || uploadedFiles.length > 0)) {
 			if (!(await holdForProjectSetup(need))) return;
 		}
-		// Get serialized message from editor (includes inline @path references)
-		const finalPrompt = editorRef?.getMessage() ?? '';
+		// Get serialized message from editor (includes inline @path references).
+		// Decided now, against where the message goes: a "Runs on" or owner change
+		// after a note was picked counts (#1364).
+		const finalPrompt = editorRef?.getMessage({ notesAsReferences: chatRunsElsewhere(
+			$activeSession, $sessions.find((session) => session.id === $activeSession.sessionId), !!moveWait
+		) }) ?? '';
 
 		// Surface WHY a send is blocked instead of silently swallowing the click,
 		// which read as a dead app. The guards keep the message in the composer and
@@ -1541,7 +1542,9 @@
 			fullPath: file.path,
 			size: file.size || 0,
 			type: chipType,
-			mention: true
+			mention: true,
+			// Sent as `@Notes/<id>` if the chat runs elsewhere at send time (#1364).
+			noteId: chipType === 'note' ? file.note_id ?? null : null
 		});
 
 		// Update inputValue to reflect text after chip insertion (for autocomplete state)
@@ -1881,7 +1884,6 @@
 							profileId={$activeSession.profile}
 							worktreeId={mentionWorktreeId}
 							sessionId={$activeSession.sessionId ?? undefined}
-							runsElsewhere={mentionRunsElsewhere}
 							visible={showFileAutocomplete}
 							onSelect={handleFileSelect}
 							onClose={() => showFileAutocomplete = false}

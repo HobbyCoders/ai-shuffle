@@ -2323,10 +2323,11 @@ describe('ws-message-handlers', () => {
 		const moved = {
 			owner_device_id: 'dev_gaming',
 			instance_id: 'dev_gaming',
+			is_remote: true,
 			placement: { where: 'runner:dev_gaming' },
 		};
 
-		it('patches owner_device_id, instance_id and placement into the row at once', async () => {
+		it('patches owner_device_id, instance_id, is_remote and placement into the row at once', async () => {
 			vi.useFakeTimers();
 			try {
 				deps = createMockDeps();
@@ -2337,13 +2338,30 @@ describe('ws-message-handlers', () => {
 				expect(deps.mergeSessionPatch).toHaveBeenCalledTimes(1);
 				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', moved);
 				expect(deps.appLoadSessions).not.toHaveBeenCalled();
-				// The new owner's name and remote flag are not in the frame: a
-				// debounced reload brings them.
+				// The new owner's name is not in the frame: a debounced reload
+				// brings it.
 				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
 				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+
+		it('marks the open chat as running elsewhere before the reload (#1364)', () => {
+			let state = mockState();
+			state.sessionId = 'session-1';
+			state.isRemote = false;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-2', updates: moved });
+			expect(state.isRemote).toBe(false);
+
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: moved });
+			expect(state.isRemote).toBe(true);
 		});
 	});
 

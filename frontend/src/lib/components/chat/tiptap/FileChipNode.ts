@@ -15,6 +15,11 @@ export interface FileChipAttributes {
 	uploadReference?: import('$lib/api/rewind').UploadReference;
 	/** Picked from the @ menu: text for the agent, never an upload. */
 	mention?: boolean;
+	/** A note's id (`type: 'note'`). `path` is the note's file on the worker
+	 *  this page is served from; a chat on another worker is sent
+	 *  `@Notes/<noteId>` instead (#1364). Chips saved before this have none
+	 *  and send their path. */
+	noteId?: string | null;
 }
 
 declare module '@tiptap/core' {
@@ -54,6 +59,13 @@ export const FileChipNode = Node.create({
 				default: null,
 				parseHTML: (element) => element.hasAttribute('data-mention') || null,
 				renderHTML: (attributes) => (attributes.mention ? { 'data-mention': '' } : {})
+			},
+			// In the HTML as well, so a copied note chip keeps it. Pasted HTML gains
+			// nothing: `@Notes/<id>` can be typed, and the worker checks access.
+			noteId: {
+				default: null,
+				parseHTML: (element) => element.getAttribute('data-note-id') || null,
+				renderHTML: (attributes) => (attributes.noteId ? { 'data-note-id': attributes.noteId } : {})
 			},
 			path: {
 				default: '',

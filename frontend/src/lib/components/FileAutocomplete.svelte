@@ -43,15 +43,12 @@
     profileId?: string;
     worktreeId?: string;
     sessionId?: string;
-    /** The chat runs, or will run, on another worker (#1364): a picked note is
-     *  inserted as `Notes/<id>` instead of this worker's file path. */
-    runsElsewhere?: boolean;
     onSelect: (file: FileItem) => void;
     onClose: () => void;
     visible: boolean;
   }
 
-  let { inputValue, projectId, subagentProjectId, profileId, worktreeId, sessionId, runsElsewhere = false, onSelect, onClose, visible }: Props = $props();
+  let { inputValue, projectId, subagentProjectId, profileId, worktreeId, sessionId, onSelect, onClose, visible }: Props = $props();
 
   let files = $state<FileItem[]>([]);
   let filteredFiles = $state<FileItem[]>([]);
@@ -404,11 +401,10 @@
         name: note.title,
         type: 'note' as const,
         // `absolute_path` is where the note's file sits on the worker you are
-        // viewing from. A chat on another worker has its own data folder, so
-        // it gets the note's id instead (#1364): that worker turns
-        // `@Notes/<id>` into its own copy of the file, or the note's text when
-        // it has no file yet.
-        path: (!runsElsewhere && note.absolute_path) || `${NOTES_FOLDER}/${note.id}`,
+        // viewing from. The chip keeps `note_id` too: a chat that runs on
+        // another worker is sent `@Notes/<id>` instead (serializeToMessage,
+        // #1364), decided when the message is sent.
+        path: note.absolute_path || `${NOTES_FOLDER}/${note.id}`,
         note_id: note.id,
         preview: note.preview,
         note_tags: note.tags

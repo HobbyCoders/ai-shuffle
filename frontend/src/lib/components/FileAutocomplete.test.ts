@@ -251,17 +251,10 @@ const pickNote = async (extra: Record<string, unknown>) => {
     expect(component.handleKeyDown(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))).toBe(true);
 };
 
-it('inserts a note picked in a chat on another worker as its Notes/<id> reference (#1364)', async () => {
-    // `absolute_path` is where the file sits on the worker you view from; the
-    // worker running the chat has its own data folder and resolves the id.
-    await pickNote({ runsElsewhere: true });
-    expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-        type: 'note', path: 'Notes/note-0123456789ab', note_id: 'note-0123456789ab',
-    }));
-});
-
-it('keeps this worker\'s file path for a note picked in a chat on this worker', async () => {
-    await pickNote({ runsElsewhere: false });
+it('hands over a picked note with its id as well as this worker\'s file path (#1364)', async () => {
+    // `absolute_path` is where the file sits on the worker you view from. The
+    // composer keeps both and sends `@Notes/<id>` to a chat on another worker.
+    await pickNote({});
     expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
         type: 'note', path: '/viewer/data/notes/test.md', note_id: 'note-0123456789ab',
     }));
