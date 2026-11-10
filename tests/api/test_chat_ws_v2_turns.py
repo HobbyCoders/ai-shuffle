@@ -217,6 +217,20 @@ def test_v2_queue_view_carries_recorded_upload_paths(mock_db):
     assert "upload_paths" not in view[1]
 
 
+def test_v2_queue_view_marks_a_row_already_in_the_transcript(mock_db):
+    """A re-queued steer's run records no message: its row says so, so a
+    client does not keep the bubble waiting for one (#1052)."""
+    _make_session("sess-1")
+    turns_db.enqueue_turn("sess-1", "user", prompt="steered before",
+                          payload={"user_message_already_recorded": True})
+    turns_db.enqueue_turn("sess-1", "user", prompt="new words")
+
+    view = cwh._v2_queue_view("sess-1")
+
+    assert view[0]["recorded"] is True
+    assert "recorded" not in view[1]
+
+
 # ═══ handle_query — submit(user) ═════════════════════════════════════════════
 
 

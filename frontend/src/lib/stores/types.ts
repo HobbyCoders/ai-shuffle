@@ -89,6 +89,8 @@ export interface QueuedMessage {
 	unconfirmed?: boolean;
 	/** Attachments the send recorded; the bubble draws them as chips (#1313). */
 	uploadPaths?: string[];
+	/** Its words are already in the transcript (a re-queued steer): running it adds no row. */
+	recorded?: boolean;
 }
 
 /** Attributed peer traffic; has no user unsend/interrupt controls. */

@@ -547,7 +547,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				queueHydration.snapshot(state.sessionId, 'available');
 				const messages = (syncData?.queued_messages ?? []) as Array<{
-					id: string; content: string; created_at: string; client_message_id?: string; command_id?: string; upload_paths?: string[];
+					id: string; content: string; created_at: string; client_message_id?: string; command_id?: string; upload_paths?: string[]; recorded?: boolean;
 				}>;
 				const rows = messages.map(m => {
 					const clientMessageId = m.client_message_id ?? m.command_id;
@@ -558,6 +558,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					return {
 						id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime(), clientMessageId,
 						...(uploadPaths.length ? { uploadPaths } : {}),
+						...(m.recorded ? { recorded: true } : {}),
 					};
 				});
 				// The snapshot is authoritative about what EXISTS, but it is not

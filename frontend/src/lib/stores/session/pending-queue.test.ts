@@ -737,6 +737,29 @@ describe('pendingQueue — a delivered row keeps its bubble until it renders (#1
 		expect(pendingQueue.isHeld(SID, b)).toBe(false);
 	});
 
+	it('retires a marked steer into a re-run turn that recorded no opening message', () => {
+		// A re-queued steer A (older worker: not marked as recorded) is taken to
+		// run. Its run records no opening message, so A is still held when B is
+		// steered into it: B is the first message seen with A's turn id.
+		const a = queued('turn-a', 'queued a');
+		const b = queued('turn-b', 'steer b');
+		let shown = snapshot(snapshot([], [a]), []);
+		shown = snapshot(snapshot(shown, [b]), []);
+		expect(shown.map(e => e.id)).toEqual(['turn-a', 'turn-b']);
+		pendingQueue.noteDelivered(SID, 'steer b', 'turn-a', true, undefined, undefined, true);
+		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
+		expect(pendingQueue.isHeld(SID, b)).toBe(false);
+	});
+
+	it('does not hold a row whose words are already in the transcript', () => {
+		// A re-queued steer: its run records no message, so no delivery would end a hold.
+		const again = { ...queued('turn-a2', 'queued a'), recorded: true };
+		const shown = snapshot([], [again]);
+		expect(shown.map(e => e.id)).toEqual(['turn-a2']);
+		expect(snapshot(shown, [])).toEqual([]);
+		expect(pendingQueue.isHeld(SID, again)).toBe(false);
+	});
+
 	it('shows a server re-queue (same command, new row) once, not hidden and not doubled', () => {
 		const first = queued('turn-a', 'queued a', 'client-a', 1000);
 		let shown = snapshot(snapshot([], [first]), []);

@@ -154,6 +154,8 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
     ``command_id`` and ``client_message_id`` for snapshot reconciliation.
     ``upload_paths`` are the attachments the send recorded, so the bubble can
     show them as chips instead of the ``@path`` mentions in ``content`` (#1313).
+    ``recorded`` marks a row whose message is already in the transcript (a
+    re-queued steer): its run records none, so a client must not wait for one.
     """
     rows: List[Dict[str, Any]] = []
     pos = 0
@@ -163,13 +165,16 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
         created = turn.get("created_at")
         if created is not None and hasattr(created, "isoformat"):
             created = created.isoformat()
+        payload = turn.get("payload")
         rows.append({
             "id": turn["id"],
             **({"command_id": turn["command_id"], "client_message_id": turn["command_id"]}
                if _valid_client_message_id(turn.get("command_id")) else {}),
             "session_id": session_id,
             "content": turn.get("prompt") or "",
-            **_queue_upload_paths(turn.get("payload")),
+            **_queue_upload_paths(payload),
+            **({"recorded": True} if isinstance(payload, dict)
+               and payload.get("user_message_already_recorded") else {}),
             "profile_id": turn.get("profile_id"),
             "project_id": turn.get("project_id"),
             "position": pos,

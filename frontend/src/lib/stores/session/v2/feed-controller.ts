@@ -1186,7 +1186,10 @@ export const feedController: FeedController = {
 						caughtUp,
 						// The bubble's own command handle: retires it exactly, history included (#524).
 						typeof ev.command_id === 'string' && ev.command_id ? ev.command_id : undefined,
-						typeof ev.created_at === 'string' ? ev.created_at : undefined
+						typeof ev.created_at === 'string' ? ev.created_at : undefined,
+						// The recorder's mark for a steer. A "Not sent" row carries it too
+						// but is its own turn's message.
+						ev.checkpoint_backed === false && !ev.not_sent
 					);
 				}
 				seedOptimistic();

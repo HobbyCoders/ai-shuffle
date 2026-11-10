@@ -3028,7 +3028,7 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 	let deps: MessageHandlerDeps;
 	let handlers: ReturnType<typeof createMessageHandlers>;
 
-	function frame(rows: Array<{ id: string; content: string; client_message_id?: string }>): Record<string, unknown> {
+	function frame(rows: Array<{ id: string; content: string; client_message_id?: string; recorded?: boolean }>): Record<string, unknown> {
 		return {
 			type: 'sync',
 			event_type: 'queue_updated',
@@ -3062,6 +3062,18 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 			getState: vi.fn(() => state),
 		});
 		handlers = createMessageHandlers(deps);
+	});
+
+	it('holds a row taken to run until its message shows, but not one already in the transcript', () => {
+		handlers.handleMessage(frame([{ id: 'turn-a', content: 'queued a' }]));
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual(['turn-a']);
+		pendingQueue.noteDelivered('session-1', 'queued a', 'turn-a');
+		// A re-queued steer: the worker marks it, and its run records no message.
+		handlers.handleMessage(frame([{ id: 'turn-b', content: 'steer b', recorded: true }]));
+		expect(pendingIds()).toEqual(['turn-b']);
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual([]);
 	});
 
 	it('keeps attributed peer rows separate, replaces them on delivery, and ignores other sessions', () => {

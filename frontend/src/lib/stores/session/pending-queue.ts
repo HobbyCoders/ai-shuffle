@@ -95,6 +95,7 @@ export interface PendingEntry {
 	status?: QueuedMessage['status'];
 	unconfirmed?: boolean;
 	uploadPaths?: string[];
+	recorded?: boolean;
 }
 
 /** Legacy optimistic ids, retained for old snapshots/tests (new sends use client ids). */
@@ -452,6 +453,9 @@ export const pendingQueue = {
 	 * not an answer to anything pending now, and content-matching it would eat a
 	 * legitimately queued repeat of the same prompt. Turn ids are harvested in
 	 * both phases — that match is exact.
+	 *
+	 * `steered` is the recorder's own mark for a message that joined a running
+	 * turn (`checkpoint_backed: false`): its turn id is that turn's, not a row's.
 	 */
 	noteDelivered(
 		id: string | null,
@@ -459,13 +463,15 @@ export const pendingQueue = {
 		turnId?: string,
 		live = true,
 		commandId?: string,
-		createdAt?: string
+		createdAt?: string,
+		steered = false
 	): void {
 		useSession(id);
-		// Only the message that OPENS a turn names a queue row by turn id. A later
-		// one with the same id was steered into that running turn: it names no row
-		// of its own, so it must stay free to retire its bubble by text.
-		const opensTurn = !!turnId && !deliveredTurnIds.has(turnId);
+		// Only the message that OPENS a turn names a queue row by turn id. A steer
+		// names no row of its own, so it must stay free to retire its bubble by
+		// text. The recorder marks a steer; an older worker's unmarked one is a
+		// later message with a turn id already seen.
+		const opensTurn = !!turnId && !steered && !deliveredTurnIds.has(turnId);
 		if (turnId) deliveredTurnIds.add(turnId);
 		if (commandId) {
 			this.acknowledgeSend(id, commandId);
@@ -530,13 +536,15 @@ export const pendingQueue = {
 	 * Only rows already confirmed and waiting are held: an echo still awaiting
 	 * admission (or unconfirmed) is kept by `sends`, a cancelling row by
 	 * `removals`, and a withdrawn, delivered or pruned row is gone for good.
+	 * A `recorded` row (a re-queued steer) already has its transcript row and
+	 * its run adds none, so no delivery will come to end a hold.
 	 */
 	holdDelivering(id: string | null, previous: PendingEntry[], rows: PendingEntry[], onRelease: () => void): void {
 		const state = cancellationState(id);
 		const listed = new Set(rows.map(removalKey));
 		for (const entry of previous) {
 			const key = removalKey(entry);
-			if (listed.has(key) || entry.status || entry.unconfirmed || state.delivering.has(key)
+			if (listed.has(key) || entry.status || entry.unconfirmed || entry.recorded || state.delivering.has(key)
 				|| state.sends.has(key) || state.removals.has(key)
 				|| state.withdrawn.has(key) || state.withdrawn.has(entry.id) || state.releasedRows.has(entry.id)
 				|| state.deliveredRows.has(entry.id) || prunedIds.has(entry.id)) continue;
