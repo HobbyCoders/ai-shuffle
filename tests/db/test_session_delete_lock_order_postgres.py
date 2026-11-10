@@ -2226,12 +2226,17 @@ def test_a_failed_fact_statement_leaves_the_delete_committable(private_pool, mon
     monkeypatch.setattr(engine, "_context", ctx)
     sid = _owned_chat(ctx, remote, "bad-fact-")
 
-    def broken(cursor, session_id, *, pending):
-        cursor.execute("INSERT INTO no_such_table_1308 VALUES (1)")
+    reached = []
+
+    def broken(cursor, session_id, *, pending, network_id):  # production's signature
+        reached.append(session_id)
+        cursor.execute("INSERT INTO no_such_table_1308 VALUES (1)")  # poisons the transaction
 
     monkeypatch.setattr(store, "remember_session_deletion", broken)
     with caplog.at_level("WARNING", logger=sessions.logger.name):
         assert sessions.delete_session(sid) is True
+    assert reached == [sid], "the failing SQL must run, not a TypeError before it"
+    assert "UndefinedTable" in caplog.text or "no_such_table_1308" in caplog.text
     assert _session_row(sid) is None
     _assert_deleted(sid)
     assert "Could not remember the deletion" in caplog.text
