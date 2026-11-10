@@ -2322,3 +2322,55 @@ def test_lost_wake_error_names_the_worker_session_and_counts_every_monitor():
     assert "worker session worker-sess-2" in many
     assert "Monitor m1, Monitor m2, Monitor m3, Monitor m4 and 2 more" in many
     assert "Monitor m5" not in many
+
+
+class TestDispatchWorkerRestartFence:
+    """#1121: a Task worker's setup holds an admission until it is registered."""
+
+    def test_refused_while_an_idle_restart_is_reserved(self, dispatch_env):
+        from app.core import restart_fence
+
+        assert asyncio.run(restart_fence.reserve("e" * 32))["reserved"] is True
+        outcome = _dispatch(label="reviewer")
+        assert outcome.ok is False and "restart" in (outcome.error or "")
+        assert dispatch_env.create_kwargs == {}, "nothing is created while fenced"
+
+    def test_setup_in_flight_refuses_the_reservation_until_registered(self, dispatch_env, monkeypatch):
+        import threading
+        from app.core import restart_fence
+        from app.core.task_registry import task_registry
+        from app.db import database as db
+
+        entered, release = threading.Event(), threading.Event()
+        create = db.create_session
+
+        def slow_create(**kwargs):
+            entered.set()
+            assert release.wait(10)
+            return create(**kwargs)
+
+        monkeypatch.setattr(db, "create_session", slow_create)
+        registered = []
+        start_task = task_registry.start_task
+
+        def observe(*args, **kwargs):
+            start_task(*args, **kwargs)
+            registered.append(list(restart_fence.in_flight()))
+
+        monkeypatch.setattr(task_registry, "start_task", observe)
+
+        async def scenario():
+            dispatch = asyncio.create_task(pa.dispatch_worker(
+                parent_session_id="parent-1", profile_id="default", provider_id="prov-openai",
+                model_id="gpt-5.5", prompt="do the thing", label="reviewer"))
+            await asyncio.to_thread(entered.wait, 10)
+            refused = await restart_fence.reserve("e" * 32)
+            release.set()
+            outcome = await dispatch
+            return refused, outcome
+
+        refused, outcome = asyncio.run(scenario())
+        assert refused["reserved"] is False and refused["admissions"] == 1
+        assert outcome.ok
+        assert registered and registered[0] == ["Task worker"], "held until the row is written"
+        assert restart_fence.in_flight() == []
