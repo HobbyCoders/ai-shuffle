@@ -137,3 +137,88 @@ async def test_disconnect_cancels_a_queued_command_result() -> None:
     await asyncio.wait_for(connector.disconnect(), 1)
     assert all(task.cancelled() for task in tasks)
     assert not connector._reply_tasks
+
+
+async def test_command_rounds_stop_at_the_cap_and_a_user_message_starts_again(
+    mock_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An agent that answers every command result with another command stops after the cap.
+
+    Every round is a paid turn with no person in it, so after
+    ``MAX_COMMAND_ROUNDS`` results in a row the next one is not fed back. The
+    owner's next message is answered and starts the count again.
+    """
+    import logging
+
+    from app.core.connectors import base
+
+    cap = getattr(base, "MAX_COMMAND_ROUNDS", 5)
+    hard_limit = 20  # without a cap the loop would never end; the test fails instead
+    database.create_api_user("connector-user", "Connector user", "test-hash", profile_ids=["default"])
+    database.create_connector("connector", "homeassistant", "Home", {}, [], api_user_id="connector-user")
+    manager = ConnectorManager()
+    states = [{"entity_id": "light.lamp", "state": "on", "attributes": {"friendly_name": "Lamp"}}]
+    connector = HomeAssistantConnector(
+        "connector", "homeassistant", {"url": "http://ha.test", "access_token": "token"},
+        manager.handle_incoming_message, manager.handle_permission_response,
+        on_trigger=manager._handle_trigger)
+    connector._http_client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=states)))
+    manager._connectors["connector"] = connector
+    listing = "Entities (1):\n" + connector._format_entity_line(states[0])
+
+    prompts: list[str] = []
+    workers: list[asyncio.Task[Any]] = []
+    per_session: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    async def drain(sid: str) -> None:
+        async with per_session[sid]:
+            for row in await asyncio.to_thread(turns.get_queued_turns, sid):
+                recorder = await TurnRecorder.maybe_create(sid)
+                assert recorder is not None
+                recorder.turn_id = row["id"]
+                try:
+                    assert await asyncio.to_thread(turns.start_turn, row["id"], recorder.run_id)
+                    await recorder.start(row["prompt"])
+                    prompts.append(row["prompt"])
+                    # The agent always answers with a command (until the safety stop).
+                    answer = "status" if len(prompts) < hard_limit else "enough"
+                    await recorder.on_event({"type": "stream_delta", "delta_type": "text", "content": answer})
+                    await recorder.on_event({"type": "done", "metadata": {}})
+                    await asyncio.to_thread(turns.settle_turn, row["id"], "completed")
+                finally:
+                    await recorder.close()
+
+    async def settled() -> None:
+        quiet = 0
+        while quiet < 3:
+            await asyncio.sleep(0.05)
+            busy = connector._reply_tasks or manager._message_locks or not all(w.done() for w in workers)
+            quiet = 0 if busy else quiet + 1
+
+    def cap_warnings() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.levelno == logging.WARNING and "connector" in r.getMessage()
+                and CHAT in r.getMessage() and "command" in r.getMessage().lower()]
+
+    monkeypatch.setattr(turn_manager, "_ensure_gateway_listener", lambda: None)
+    turn_manager.register_kick(lambda sid: workers.append(asyncio.create_task(drain(sid))))
+    try:
+        with caplog.at_level(logging.WARNING):
+            await asyncio.wait_for(manager.handle_incoming_message(_user_message("hello", "1")), 5)
+            await asyncio.wait_for(settled(), 10)
+            # The owner's message, then exactly `cap` results fed back; the next is dropped.
+            assert prompts == ["hello", *[listing] * cap]
+            assert len(cap_warnings()) == 1
+
+            # The owner's next message is answered and starts the count again.
+            await asyncio.wait_for(manager.handle_incoming_message(_user_message("again", "2")), 5)
+            await asyncio.wait_for(settled(), 10)
+            assert prompts == ["hello", *[listing] * cap, "again", *[listing] * cap]
+            assert len(cap_warnings()) == 2
+        assert not connector._reply_rounds
+    finally:
+        turn_manager.register_kick(None)
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        await connector.disconnect()

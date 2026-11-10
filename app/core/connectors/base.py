@@ -7,13 +7,23 @@ inherit from BaseConnector and implement the abstract methods.
 
 import asyncio
 import contextlib
+import contextvars
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
+
+#: Command results fed back to an agent in a row before the next one is dropped.
+#: Every round is a paid agent turn with no person in it.
+MAX_COMMAND_ROUNDS = 5
+
+# The message whose turn reply ``send_message`` is running; see ``replying_to``.
+_REPLYING_TO: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "connector_replying_to", default=None)
 
 
 class ConnectorStatus(str, Enum):
@@ -298,10 +308,22 @@ class BaseConnector(ABC):
         self._task: Optional[asyncio.Task] = None
         self._arrival_tails: Dict[str, asyncio.Future[None]] = {}
         self._reply_tasks: Set[asyncio.Task[None]] = set()
+        # Queued result id -> its command round, while its turn runs.
+        self._reply_rounds: Dict[str, int] = {}
+        self._reply_capped: Set[str] = set()
 
     def arrival_place(self, platform_chat_id: str) -> ArrivalPlace:
         """Reserve a message's turn in its chat now; see ``ArrivalPlace``."""
         return ArrivalPlace(self._arrival_tails, str(platform_chat_id), self._on_incoming_message)
+
+    def replying_to(self, message: "OutgoingMessage") -> None:
+        """Call first in a ``send_message`` that runs commands.
+
+        Results it queues then count as the next round after the message the
+        reply answers. Set for the rest of the calling task; every
+        ``send_message`` sets it again before it queues anything.
+        """
+        _REPLYING_TO.set(message.reply_to_message_id)
 
     def queue_reply_message(self, message: "IncomingMessage") -> None:
         """Hand a connector-made message, such as a command's result, to its chat later.
@@ -312,20 +334,48 @@ class BaseConnector(ABC):
         now, so a command's results reach the chat in the order they were made,
         and runs once the current turn ends. ``disconnect`` must call
         ``cancel_reply_messages``.
+
+        An agent that answers every result with another command would loop with
+        no person in it, each round a paid turn. A result answering a turn that
+        a result started is the next round; any other turn (a person's message,
+        a poll event) starts at round one. Past ``MAX_COMMAND_ROUNDS`` the result
+        is not fed back: the command ran, the chat gets nothing more. All of a
+        command's results (a long listing's parts) are one round.
         """
         # Imported here: the isolated connector worker loads base.py before it.
         from app.core.detached_tasks import spawn_detached
 
+        parent = _REPLYING_TO.get()
+        command_round = self._reply_rounds.get(parent, 0) + 1 if parent else 1
+        if command_round > MAX_COMMAND_ROUNDS:
+            if parent not in self._reply_capped:
+                self._reply_capped.add(parent)
+                logger.warning(
+                    "%s connector %s: chat %s answered %d command results in a row "
+                    "with more commands; not feeding the next result back to the agent",
+                    self.connector_type, self.connector_id, message.platform_chat_id,
+                    MAX_COMMAND_ROUNDS,
+                )
+            return
+        # Its own id: the reply to it names it, which is how the next round is counted.
+        key = message.platform_message_id = f"{self.connector_type}-reply-{uuid.uuid4().hex}"
+        self._reply_rounds[key] = command_round
         place = self.arrival_place(message.platform_chat_id)
 
         async def deliver() -> None:
-            with place:
-                await place.hand_off(message)
+            try:
+                with place:
+                    await place.hand_off(message)
+            finally:
+                self._reply_rounds.pop(key, None)
+                self._reply_capped.discard(key)
 
         task = spawn_detached(deliver(), name=f"{self.connector_type}-reply")
         if task is not None:
             self._reply_tasks.add(task)
             task.add_done_callback(self._reply_tasks.discard)
+        else:
+            self._reply_rounds.pop(key, None)
 
     async def cancel_reply_messages(self) -> None:
         """Cancel every ``queue_reply_message`` still waiting or running."""

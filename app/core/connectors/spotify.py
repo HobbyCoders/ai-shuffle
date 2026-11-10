@@ -327,6 +327,7 @@ class SpotifyConnector(BaseConnector):
 
     async def send_message(self, message: OutgoingMessage) -> bool:
         """Parse the message text as a playback command and execute it."""
+        self.replying_to(message)
         if self._http_client is None:
             logger.error("Cannot send message: HTTP client is not initialised")
             return False

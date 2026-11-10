@@ -393,6 +393,7 @@ class HueConnector(BaseConnector):
         Returns True if the command was recognised and executed, False
         otherwise.
         """
+        self.replying_to(message)
         if self._http_client is None:
             logger.error("Cannot send message: HTTP client is not initialised")
             return False
