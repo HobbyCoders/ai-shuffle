@@ -566,8 +566,12 @@ def _recorded_agent_target(
 
 _CALL_SOURCES = ("voice", "typed")
 _CALL_REFUSAL = (
-    "Rewind refused: this message was sent in a call and no checkpoint is bound to it "
-    "(content guard)"
+    "Rewind refused: this message was sent in a call and cannot be tied to a "
+    "checkpoint that holds it alone (content guard)"
+)
+_CALL_BOUNDARY_REFUSAL = (
+    "Rewind refused: the next message was sent in a call and cannot be tied to "
+    "a checkpoint, so where the kept reply ends is unknown (content guard)"
 )
 
 
@@ -606,8 +610,10 @@ def _bound_node(
       binding (``spans``: a reply still streaming when the call queued behind
       it), so cutting the visible history at the row and the engine's at the
       node removes the same messages;
-    * the bound turn ran once: a run that wrote the request's node and died
-      before binding it leaves that node on the path ahead of the rerun's;
+    * the bound turn is known to have run exactly once: a run that wrote the
+      request's node and died before binding it leaves that node on the path
+      ahead of the rerun's, and a log copied without run ids (a fork, a
+      hand-off) cannot show that it did not;
     * that node is exactly one user checkpoint of the current transcript path
       (a node rewound away, compacted out or on another worker's missing tree
       is not, so it refuses).
@@ -645,7 +651,7 @@ def _bound_node(
     if spans is None or any(
         first < first_bound and last > row["seq"]
         for turn, (first, last, _) in spans.items() if turn not in own_turns
-    ) or any(len(spans.get(turn, (0, 0, ()))[2]) > 1 for turn in own_turns):
+    ) or any(len(spans.get(turn, (0, 0, ()))[2]) != 1 for turn in own_turns):
         return None
     if sum(1 for cp in user_cps if cp.uuid == node) != 1:
         return None
@@ -869,12 +875,23 @@ def _resolve_rewind_from_seq(
         # A steer is part of the retained response, not the next standalone
         # prompt. _load_message_events also marks inferred legacy steers.
         # Commands remain real boundaries even without a prompt checkpoint.
-        for row in events[target_idx + 1:]:
+        for i in range(target_idx + 1, len(events)):
+            row = events[i]
             if row["event_type"] != "message.user":
                 continue
             payload = row.get("payload") or {}
-            if payload.get("kind") == "command" or payload.get("checkpoint_backed") is not False:
+            if payload.get("kind") == "command":
                 return int(row["seq"]), None
+            if payload.get("checkpoint_backed") is False:
+                continue
+            if _is_call_message(row):
+                # A call message is a standalone prompt only when its binding
+                # says so: an unbound one may have been steered into the kept
+                # reply, which the engine keeps along with it (#1265).
+                next_cps = [cp for cp in _get_checkpoints(sdk_session_id, working_dir) if cp.role == "user"]
+                if not _bound_node(events, bindings, next_cps, i, spans):
+                    return None, _CALL_BOUNDARY_REFUSAL
+            return int(row["seq"]), None
         return None, None  # already the tail — nothing to drop
     if restored_upload_paths is not None:
         paths = (events[target_idx].get("payload") or {}).get("upload_paths")

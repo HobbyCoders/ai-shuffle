@@ -80,14 +80,24 @@ def _rewound_from():
 CALL_TURN = "turn-call"
 
 
-def _bind(request_id, node, turn=CALL_TURN):
+async def _bind(request_id, node, turn=CALL_TURN, run=None, *, lineage=True):
     """The binding the call request's turn records at its TurnStarted (its
-    recorder's turn id is the queued turn row's id)."""
+    recorder's turn id is the queued turn row's id), under the run lease that
+    execution claimed: a fresh one unless ``run`` is given. ``lineage=False``
+    is the binding as a fork or hand-off copies it, without its run id."""
     from app.core.turn_recorder import TurnRecorder
+    from app.db import runs as runs_db
 
-    recorder = TurnRecorder(SID, None, None, None, None)
+    claimed = run is None and lineage
+    if claimed:
+        run = runs_db.claim_run(SID, "runner-bind", 60)
+    recorder = TurnRecorder(SID, None, run and run["id"], run and run["fence_token"], None)
     recorder.turn_id = turn
-    return recorder.record_call_binding(request_id, node)
+    try:
+        return await recorder.record_call_binding(request_id, node)
+    finally:
+        if claimed:
+            runs_db.release_run(run["id"], run["fence_token"])
 
 
 def _reply(text, turn=CALL_TURN):
@@ -278,9 +288,13 @@ async def test_two_bindings_for_one_request_resolve_only_to_one_and_the_same_nod
     """Item 3: a turn that ran twice (a retry, a requeue) and recorded two
     nodes for one request: neither is the request's, so both lookups refuse.
     The same node recorded twice is still that one node."""
+    from app.db import runs as runs_db
+
     row, request_id, text = await _bound_call(monkeypatch, staged_upload)
-    assert await _bind(request_id, "call-cp")
-    assert await _bind(request_id, second_node)
+    run = runs_db.claim_run(SID, "runner-0", 60)
+    assert await _bind(request_id, "call-cp", run=run)
+    assert await _bind(request_id, second_node, run=run)
+    runs_db.release_run(run["id"], run["fence_token"])
     _patch_checkpoints(monkeypatch, [_cp("call-cp", text), _cp("call-cp-retry", text)])
     requests = (_request(True, None, "inspect this"), _request(False, "call-cp", None),
                 _request(False, "call-cp-retry", None))
@@ -354,8 +368,10 @@ async def test_a_bound_turn_that_ran_twice_is_refused(staged_upload, rewind_env,
         run = runs_db.claim_run(SID, f"runner-{attempt}", 60)
         session_events.append_events(SID, [{"type": "turn.started", "turn_id": CALL_TURN, "payload": {}}],
                                      run_id=run["id"], fence_token=run["fence_token"])
-        runs_db.release_run(run["id"], run["fence_token"])
-    assert await _bind(request_id, "call-cp")
+        if attempt < runs - 1:
+            runs_db.release_run(run["id"], run["fence_token"])
+    assert await _bind(request_id, "call-cp", run=run)
+    runs_db.release_run(run["id"], run["fence_token"])
     session_events.append_events(SID, [_reply("answer")])
     _patch_checkpoints(monkeypatch, [_cp("first-run-cp", text), _cp("call-cp", text)])
     requests = (_request(True, None, "inspect this"), _request(False, "call-cp", None))
@@ -364,6 +380,65 @@ async def test_a_bound_turn_that_ran_twice_is_refused(staged_upload, rewind_env,
         await _assert_cut(rewind_env, requests[0], "call-cp", row, [str(staged_upload)])
         return
     await _assert_refused(rewind_env, *requests)
+
+
+@pytest.mark.parametrize("runs", [1, 2])
+async def test_a_bound_turn_whose_runs_were_not_copied_is_refused(staged_upload, rewind_env, monkeypatch, runs):
+    """Review S5. A fork or hand-off copies the log without run ids, so the
+    crash-and-rerun case above can no longer be told from a turn that ran
+    once. With no known run the binding does not resolve, either way."""
+    row, request_id, text = await _bound_call(monkeypatch, staged_upload)
+    session_events.append_events(SID, [{"type": "turn.started", "turn_id": CALL_TURN, "payload": {}}] * runs)
+    assert await _bind(request_id, "call-cp", lineage=False)
+    session_events.append_events(SID, [_reply("answer")])
+    _patch_checkpoints(monkeypatch, [_cp("first-run-cp", text), _cp("call-cp", text)])
+
+    await _assert_refused(rewind_env, _request(True, None, "inspect this"), _request(False, "call-cp", None))
+
+
+def _keep_reply(uuid):
+    return commands.RewindRequestV2(target_uuid=uuid, target_role="user", include_response=True)
+
+
+async def test_keeping_a_bound_reply_is_refused_when_a_call_message_was_steered_into_it(
+    staged_upload, rewind_env, monkeypatch,
+):
+    """Review S6. Call message C arrived while bound turn R ran and was
+    steered into it: it has no checkpoint of its own, and the engine keeps
+    it, inside R's reply, along with that reply. Keeping R's reply must not
+    cut the visible history at C, which would drop C and R's answer."""
+    row, request_id, text = await _bound_call(monkeypatch, staged_upload)
+    assert await _bind(request_id, "call-cp")
+    await _record_call_words("and the logs too", request_id="ab" * 16)
+    session_events.append_events(SID, [_reply("answer")])
+    _patch_checkpoints(monkeypatch, [_cp("call-cp", text)])
+
+    await _assert_refused(rewind_env, _keep_reply("call-cp"))
+
+
+@pytest.mark.parametrize("next_kind", ["bound call", "typed"])
+async def test_keeping_a_bound_reply_cuts_at_the_next_prompt_that_has_its_own_checkpoint(
+    staged_upload, rewind_env, monkeypatch, next_kind,
+):
+    from app.core.voice_prompts import voice_turn_note
+
+    row, request_id, text = await _bound_call(monkeypatch, staged_upload)
+    assert await _bind(request_id, "call-cp")
+    session_events.append_events(SID, [_reply("answer")])
+    checkpoints = [_cp("call-cp", text)]
+    if next_kind == "typed":
+        session_events.append_events(SID, [_user_ev("next one")])
+        checkpoints.append(_cp("next-cp", "next one"))
+    else:
+        await _record_call_words("next one", request_id="ab" * 16)
+        assert await _bind("ab" * 16, "next-cp", turn="turn-next")
+        checkpoints.append(_cp("next-cp", f"user: next one\n\n{voice_turn_note('')}"))
+    _patch_checkpoints(monkeypatch, checkpoints)
+
+    result = await execute_rewind_and_wait(SID, _keep_reply("call-cp"))
+    assert result.success, result.error
+    assert rewind_env.truncate_calls == ["call-cp"]
+    assert _rewound_from() == _users()[-1]["seq"]
 
 
 async def test_a_binding_recorded_before_its_message_or_for_another_row_is_refused(
