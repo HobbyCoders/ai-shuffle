@@ -523,7 +523,7 @@
 		},
 		{
 			"why": "opening and switching chats (sidebar, new-session screen, reading position)",
-			"journeys": ["switch-chats", "open-unloaded-chat", "cleared-chat", "parked-timer"],
+			"journeys": ["switch-chats", "chat-switch-frames", "open-unloaded-chat", "cleared-chat", "parked-timer"],
 			"globs": [
 				"frontend/src/lib/components/layout/Sidebar*",
 				"frontend/src/lib/components/layout/sidebar/**",
