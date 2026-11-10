@@ -17,7 +17,7 @@ import { runEval, EVAL_MAX_CHARS } from "../src/tools/eval.js";
 import { runConsole } from "../src/tools/console.js";
 import { runTabs } from "../src/tools/tabs.js";
 import { runUpload } from "../src/tools/upload.js";
-import { runAct, typeTimeoutMs, TYPE_MS_PER_CHAR, type ActInput } from "../src/tools/act.js";
+import { runAct, setRefActionTimeoutForTests, typeTimeoutMs, TYPE_MS_PER_CHAR, type ActInput } from "../src/tools/act.js";
 import { runNavigate } from "../src/tools/navigate.js";
 import { capText, errorResult, type McpToolResult } from "../src/tools/result.js";
 import { TOOL_MAP } from "../src/tools/index.js";
@@ -283,6 +283,15 @@ function fakeKeyboard() {
   };
 }
 
+/**
+ * Run with a short ref-action budget (setRefActionTimeoutForTests), for the
+ * cases whose page never answers and so wait the whole budget out.
+ */
+async function withShortBudget<T>(run: () => Promise<T>): Promise<T> {
+  const restore = setRefActionTimeoutForTests(50);
+  try { return await run(); } finally { restore(); }
+}
+
 function actSession(locator: Record<string, unknown>, keyboard = fakeKeyboard()): Session {
   // A ref is focused with an empty type before its keys go out.
   const target = { pressSequentially: async () => {}, ...locator };
@@ -464,7 +473,7 @@ describe("browser_act outcomes", () => {
     const known = keyboard.down.getMockImplementation()!;
     keyboard.down.mockImplementation(async (key: string) => { if (key === fail.hangOn) await new Promise(() => {}); return known(key); });
     keyboard.up.mockImplementation(async () => { throw new Error("Target closed"); });
-    const res = await runAct(actSession({ pressSequentially, count: async () => 1 }, keyboard), { kind: "key", ref: "e7", ...input } as ActInput);
+    const res = await withShortBudget(() => runAct(actSession({ pressSequentially, count: async () => 1 }, keyboard), { kind: "key", ref: "e7", ...input } as ActInput));
     expect(keyboard.up.mock.calls.map(call => call[0])).toEqual(released);
     expect(bodyOf(res)).toMatchObject({ ok: false, code });
     expect(String(bodyOf(res).error)).not.toContain("Target closed");
@@ -482,7 +491,7 @@ describe("browser_act outcomes", () => {
   it("types a ref one character per call and stops the text where the page stopped answering", async () => {
     const keyboard = fakeKeyboard();
     keyboard.type.mockImplementation(async (char: string) => { if (char === "b") await new Promise(() => {}); });
-    const res = await runAct(actSession({ count: async () => 1 }, keyboard), { kind: "type", ref: "e7", value: "abc" });
+    const res = await withShortBudget(() => runAct(actSession({ count: async () => 1 }, keyboard), { kind: "type", ref: "e7", value: "abc" }));
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
     expect(String(bodyOf(res).error)).toContain("1 of 3 characters typed");
     expect(keyboard.type.mock.calls.map(call => call[0])).toEqual(["a", "b"]);

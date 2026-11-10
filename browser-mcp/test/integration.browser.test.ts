@@ -22,7 +22,7 @@ import { compilePolicy } from "../src/ssrf.js";
 import { Session, raceWithTimeout } from "../src/session.js";
 import { runNavigate } from "../src/tools/navigate.js";
 import { runSnapshot } from "../src/tools/snapshot.js";
-import { runAct, type ActInput } from "../src/tools/act.js";
+import { runAct, setRefActionTimeoutForTests, type ActInput } from "../src/tools/act.js";
 import { runScreenshot, MAX_EDGE } from "../src/tools/screenshot.js";
 import { runFind } from "../src/tools/find.js";
 import { runReadText } from "../src/tools/read_text.js";
@@ -45,6 +45,12 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const NET_BODY_MARKER = "net-body-marker-12345";
 /** HOLD_MS: how long /review/hold waits, at most, before it answers by itself. */
 const HOLD_MS = 5000;
+/**
+ * The ref-action budget the blocked-page key tests run under
+ * (setRefActionTimeoutForTests). Each of them waits a budget out, so the 2s
+ * product budget would cost the CI step 2s a test.
+ */
+const BLOCKED_BUDGET_MS = 500;
 /** Answers the /review/hold request a page is blocked on (a synchronous XHR). */
 let answerHold: (() => void) | undefined;
 
@@ -120,8 +126,8 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
       if (url.pathname === "/review/slowreload" && req.method === "POST") setTimeout(send, 400);
       // Answered after the 2s ref-action budget: the click lands long before the reload.
       else if (url.pathname === "/review/stalledreload" && req.method === "POST") setTimeout(send, 2500);
-      // Answered after the 2s ref-action budget, like stalledreload.
-      else if (url.pathname === "/review/slowpage") setTimeout(send, 2500);
+      // Answered after the shortened ref-action budget its test runs under.
+      else if (url.pathname === "/review/slowpage") setTimeout(send, BLOCKED_BUDGET_MS + 500);
       else send();
       return;
     }
@@ -1280,12 +1286,21 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     // actions after it (#1423). The field logs every key event it receives.
     const keyLog = `onkeydown="(window.keys=window.keys||[]).push('down '+event.key+(event.ctrlKey?' ctrl':'')+(event.repeat?' repeat':''))" onkeyup="(window.keys=window.keys||[]).push('up '+event.key+(event.ctrlKey?' ctrl':''))"`;
     const keyEvents = (page: Page, key: string) => page.evaluate(k => ((window as unknown as { keys?: string[] }).keys ?? []).filter(e => e.split(" ")[1] === k), key);
+    // The fixture page without browser_navigate's settle wait, as other tests
+    // here open it: these cases need only a fresh same-origin document.
+    async function quickLoad(html: string) {
+      const page = await session.ensurePage();
+      await page.goto(new URL("prose-app", httpUrl).href);
+      await page.setContent(html);
+      session.notifyNavigation();
+      return page;
+    }
     it.each<[string, Partial<ActInput>, string[], boolean]>([
       ["Control+Foo", { key: "Foo", modifiers: ["Control"] }, ["Control"], true],
       ["a+Foo", { key: "a+Foo" }, ["a"], true],
       ["Control+Foo without a ref", { key: "Foo", modifiers: ["Control"] }, ["Control"], false],
     ])("releases the keys %s pressed before its unknown key", async (_name, chord, pressed, byRef) => {
-      const page = await load(`<input aria-label="Entry" ${keyLog}>`);
+      const page = await quickLoad(`<input aria-label="Entry" ${keyLog}>`);
       if (!byRef) await page.focus("input");
       const target = async () => byRef ? { ref: await ref("Entry") } : {};
       expect(body(await runAct(session, { kind: "key", ...await target(), ...chord } as ActInput))).toMatchObject({ code: "outcome_unknown", outcome: "unknown" });
@@ -1295,10 +1310,11 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(await page.inputValue("input")).toMatch(/c$/);
     });
     // The first focus, key or click the page gets blocks it on a request the
-    // test answers, past the 2s budget of a ref action. Only keys whose keydown
-    // went out may be released, and the release must not wait for the page: the
-    // action reaches its cleanup while the page is still blocked, and the
-    // keyups land once it is free, ahead of the next action's keys.
+    // test answers, past the budget of a ref action (BLOCKED_BUDGET_MS here).
+    // Only keys whose keydown went out may be released, and the release must
+    // not wait for the page: the action reaches its cleanup while the page is
+    // still blocked, and the keyups land once it is free, ahead of the next
+    // action's keys.
     const blockOnce = 'if(!window.blocked){window.blocked=1;const x=new XMLHttpRequest();x.open("GET","/review/hold",false);x.send();}';
     const blockOn = (event: string) => `<script>document.querySelector("[aria-label=Entry]").addEventListener("${event}",()=>{${blockOnce}})</script>`;
     const entry = `<input aria-label="Entry" ${keyLog}>`;
@@ -1311,7 +1327,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       ["combobox select", combobox + blockOn("keydown"), { kind: "select", target: "Entry", value: "One" }, "ArrowDown", { ArrowDown: ["down ArrowDown", "up ArrowDown", "down ArrowDown", "up ArrowDown"] }, null],
       ["Control-click", `<button onclick='${blockOnce}'>Busy</button>${entry}`, { kind: "click", target: "Busy", modifiers: ["Control"] }, "c", { c: ["down c", "up c"] }, "c"],
     ])("releases only the keys a %s sent when a blocked page timed it out, without waiting for the page", async (_name, html, { target, ...action }, next, events, value) => {
-      const page = await load(html);
+      const page = await quickLoad(html);
       const disposeWatch = session.disposeWatch.bind(session);
       let reached = Infinity;
       const started = performance.now();
@@ -1320,17 +1336,19 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         answerHold?.(); // the page is free from here on, so the run ends promptly
         return disposeWatch();
       });
+      const restoreBudget = setRefActionTimeoutForTests(BLOCKED_BUDGET_MS);
       try {
         expect(body(await runAct(session, { ...action, ref: await ref(target) } as ActInput))).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
       } finally {
+        restoreBudget();
         cleanup.mockRestore();
         answerHold?.();
       }
       // An action that waited for the page reaches its cleanup only once the
       // request answers by itself, HOLD_MS after the page asked, so anything
       // under that proves it did not wait. One that did not wait gets there
-      // after its 2s budget and the 250ms release; the 500ms margin below
-      // HOLD_MS leaves a slow runner more than 2s of slack.
+      // after its BLOCKED_BUDGET_MS budget and the 250ms release; the 500ms
+      // margin below HOLD_MS leaves a slow runner more than 3.5s of slack.
       expect(reached).toBeLessThan(HOLD_MS - 500);
       await page.evaluate(() => 0); // answers once the page is free again
       expect(body(await runAct(session, { kind: "key", ref: await ref("Entry"), key: next }))).toMatchObject({ ok: true });
@@ -1343,7 +1361,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     it("sends no keyup for a key whose keydown never went out when the field blocks a second focus", async () => {
       // The first focus is undone at once and a second one blocks. Pressing
       // focuses the ref once, so the key goes where focus is, down then up.
-      const page = await load(`<input aria-label="Entry">${docKeyLog}<script>let focuses=0;const el=document.querySelector("input");el.addEventListener("focus",()=>{if(++focuses===1)queueMicrotask(()=>el.blur());else{${blockOnce}}})</script>`);
+      const page = await quickLoad(`<input aria-label="Entry">${docKeyLog}<script>let focuses=0;const el=document.querySelector("input");el.addEventListener("focus",()=>{if(++focuses===1)queueMicrotask(()=>el.blur());else{${blockOnce}}})</script>`);
       try {
         await runAct(session, { kind: "key", ref: await ref("Entry"), key: "Delete" });
       } finally {
@@ -1356,18 +1374,20 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       // The first key press in a tab, so the press also turns its Page events on.
       const home = session.currentTabId()!;
       const tab = JSON.parse(firstText(await runTabs(session, { op: "create" }))).tab_id as string;
+      const restoreBudget = setRefActionTimeoutForTests(BLOCKED_BUDGET_MS);
       try {
-        const page = await load(`<input aria-label="Entry" onfocus="location.href='/review/slowpage'">`);
+        const page = await quickLoad(`<input aria-label="Entry" onfocus="location.href='/review/slowpage'">`);
         expect(body(await runAct(session, { kind: "key", ref: await ref("Entry"), key: "a" }))).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
         await page.waitForURL(/\/review\/slowpage$/, { timeout: 5000 });
       } finally {
+        restoreBudget();
         await runTabs(session, { op: "select", tab_id: home });
         await runTabs(session, { op: "close", tab_id: tab });
       }
     }, 15000);
     it("sends a chord's keys where the page moved focus between them, as Playwright's press does", async () => {
       // Control moves focus to the second field, so Control+A selects its text.
-      const page = await load(`<input aria-label="Source" value="xx"><input aria-label="Other" value="yyy">${docKeyLog}<script>document.querySelector("[aria-label=Source]").addEventListener("keydown",e=>{if(e.key==="Control")document.querySelector("[aria-label=Other]").focus()})</script>`);
+      const page = await quickLoad(`<input aria-label="Source" value="xx"><input aria-label="Other" value="yyy">${docKeyLog}<script>document.querySelector("[aria-label=Source]").addEventListener("keydown",e=>{if(e.key==="Control")document.querySelector("[aria-label=Other]").focus()})</script>`);
       expect(body(await runAct(session, { kind: "key", ref: await ref("Source"), key: "a", modifiers: ["Control"] }))).toMatchObject({ ok: true });
       expect(await page.evaluate(() => (window as unknown as { keys: string[] }).keys)).toEqual(["down Control ctrl Source", "down a ctrl Other", "up a ctrl Other", "up Control Other"]);
       expect(await page.evaluate(() => { const other = document.querySelector<HTMLInputElement>("[aria-label=Other]")!; return [document.activeElement === other, other.selectionStart, other.selectionEnd]; })).toEqual([true, 0, 3]);

@@ -25,8 +25,20 @@ type Kind = (typeof ACT_KINDS)[number];
  * whose element detached (a minor mutation, no navigation) resolves to a live
  * locator that would otherwise block for Playwright's 30s default before
  * failing. We fail fast and remap the timeout to a clean stale_ref instead.
+ * A `let` only so tests can shorten it (setRefActionTimeoutForTests).
  */
-const REF_ACTION_TIMEOUT_MS = 2000;
+let REF_ACTION_TIMEOUT_MS = 2000;
+
+/**
+ * Test-only seam: shorten the ref-action budget and return a function that
+ * puts it back. Tests that wait the budget out on a blocked page use it to
+ * keep CI within its deadline. Product code never calls it.
+ */
+export function setRefActionTimeoutForTests(ms: number): () => void {
+  const before = REF_ACTION_TIMEOUT_MS;
+  REF_ACTION_TIMEOUT_MS = ms;
+  return () => { REF_ACTION_TIMEOUT_MS = before; };
+}
 
 /**
  * Per-character allowance for `type` on a ref. Playwright's pressSequentially
