@@ -6,6 +6,11 @@ run-name: "${{ github.workflow }} (4 shards, 2 workers each)"
 on:
   pull_request:
   workflow_call:
+    inputs:
+      gated_by_caller:
+        description: The caller judges these jobs itself (main-suite), so the verdict job here does not queue for a runner
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       runner_cpus:
@@ -436,7 +441,7 @@ jobs:
 
   backend:
     name: Backend tests
-    if: always()
+    if: always() && inputs.gated_by_caller != true
     needs: [backend-shard, backend-contracts, backend-security]
     runs-on: ubuntu-latest
     timeout-minutes: 5

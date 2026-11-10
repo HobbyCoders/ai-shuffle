@@ -145,7 +145,7 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert not config["on"]["pull_request"]
     jobs = config["jobs"]
     assert jobs["backend"]["name"] == "Backend tests"
-    assert jobs["backend"]["if"] == "always()"
+    assert jobs["backend"]["if"] == "always() && inputs.gated_by_caller != true"
     assert set(jobs["backend"]["needs"]) == {"backend-shard", "backend-contracts", "backend-security"}
     # After the gate passes on a pull request, "record" leaves a pass record for main-suite.
     record = jobs.pop("record")
