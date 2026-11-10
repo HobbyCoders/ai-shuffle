@@ -162,10 +162,11 @@ describe('ModelPicker keeps the keyboard after a press inside the panel', () => 
 		expect(press(getByLabelText('Search models'))).toBe(false);
 		expect(press(panel.querySelector('.mpp-row .mpp-fav')!)).toBe(false);
 		expect(press(panel.querySelector('.mpp-row .mpp-row-label')!)).toBe(false);
-		// Middle and right presses move focus too; cancelling the press does not
-		// stop the context menu, which has its own event.
-		expect(press(panel.querySelector('.mpp-group-name')!, 1)).toBe(true);
+		// A right press keeps focus too; cancelling it does not stop the context
+		// menu, which has its own event. A middle press is left to the browser, or
+		// Linux would paste the primary selection into the focused search box.
 		expect(press(panel.querySelector('.mpp-group-name')!, 2)).toBe(true);
+		expect(press(panel.querySelector('.mpp-group-name')!, 1)).toBe(false);
 		expect(container.querySelector('.mpk-panel')).not.toBeNull();
 	});
 
