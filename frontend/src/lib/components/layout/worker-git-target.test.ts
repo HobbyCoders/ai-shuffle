@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
+import { draftSetupPending, workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
 
 describe('workerGitTargetKey', () => {
 	it('gives equal keys for equal targets, so a replaced tab does not reload Git', () => {
@@ -53,5 +53,18 @@ describe('workerGitTargetKey', () => {
 		const source = readFileSync(resolve(process.cwd(), 'src/lib/components/layout/MainPanel.svelte'), 'utf8');
 		expect(source).toMatch(/const selectedWorkerTargetKey = \$derived\(workerGitTargetKey\(activeTab\)\)/);
 		expect(source).toMatch(/const selectedWorkerTarget = \$derived\(workerGitTargetFromKey\(selectedWorkerTargetKey\)\)/);
+	});
+});
+
+describe('draftSetupPending (#1342)', () => {
+	it('holds Git for a new chat until its setup run has ended', () => {
+		expect(draftSetupPending({ sessionId: null, setupNeeded: true, setupRunning: true })).toBe(true);
+		// The worker reports the project, but the held message has not gone out yet.
+		expect(draftSetupPending({ sessionId: null, setupNeeded: false, setupRunning: true })).toBe(true);
+		expect(draftSetupPending({ sessionId: null, setupNeeded: false, setupRunning: false })).toBe(false);
+	});
+
+	it("does not blank an open chat's Git state while another new chat is set up", () => {
+		expect(draftSetupPending({ sessionId: 's1', setupNeeded: false, setupRunning: true })).toBe(false);
 	});
 });
