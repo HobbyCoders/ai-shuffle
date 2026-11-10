@@ -15,6 +15,21 @@ import '$lib/test-stubs/composer-dom';
 // server is asked at send time; any answer but "runs here" sends the id.
 
 // The session list the server holds, and what `/live` answers.
+// A voice call on one chat (S1 of PR #1442's review): its text sends are
+// recorded and each waits for an acknowledgement the test gives or withholds.
+const voice = vi.hoisted(() => ({
+	active: null as string | null,
+	sent: [] as string[],
+	acks: [] as { resolve: (ok: boolean) => void; reject: (error: Error) => void }[]
+}));
+vi.mock('$lib/services/voiceCall', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/services/voiceCall')>()),
+	isCallActiveFor: (sessionId: string) => voice.active === sessionId,
+	sendVoiceText: (_owner: string, text: string) => {
+		voice.sent.push(text);
+		return new Promise<boolean>((resolve, reject) => { voice.acks.push({ resolve, reject }); });
+	}
+}));
 const net = vi.hoisted(() => ({
 	rows: [] as Record<string, unknown>[],
 	live: (() => ({ session_meta: { is_remote: false } })) as () => unknown,
@@ -108,6 +123,8 @@ beforeEach(async () => {
 	sends = vi.spyOn(activeSession, 'sendMessage').mockImplementation(async (prompt, options) => {
 		const form = options?.notesForm;
 		sent.push(form && await form.runsHere() ? form.pathPrompt : prompt);
+		// The frame is written: like the store, say so.
+		options?.onDispatched?.();
 		return true;
 	});
 	await auth.checkAuth();
@@ -291,6 +308,9 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 
 	beforeEach(() => {
 		sends.mockRestore();
+		voice.active = null;
+		voice.sent = [];
+		voice.acks = [];
 		Socket.all = [];
 		vi.stubGlobal('WebSocket', Socket);
 	});
@@ -399,6 +419,27 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		answer({ session_meta: { is_remote: false } });
 		await waitFor(() => expect(queries()).toHaveLength(2));
 		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'second']);
+	});
+
+	it('lets the next send go once a voice call note send has written its frame, and never sends it again when its acknowledgement is lost', async () => {
+		voice.active = 'voice-chat';
+		const view = await compose('voice-chat', { isStreaming: true });
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		await waitFor(() => expect(voice.sent).toEqual([BY_PATH]));
+		const editor = (view.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(text: string): void } } }).editor;
+		editor.commands.setContent('second');
+		await fireEvent.submit(form);
+		// The first frame is written, its acknowledgement still awaited: the second goes.
+		await waitFor(() => expect(voice.sent).toEqual([BY_PATH, 'second']));
+		voice.acks[1].resolve(true);
+		// The first one's acknowledgement never comes: it times out.
+		voice.acks[0].reject(new Error('Could not confirm message delivery. Check the conversation before retrying.'));
+		await waitFor(() => expect(view.container.querySelector('[data-file-chip]')).toBeTruthy());
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		// Its words are back in the composer; nothing went out again by itself.
+		expect(voice.sent).toEqual([BY_PATH, 'second']);
+		expect(view.container.querySelector('.ProseMirror')?.textContent).toContain('read');
 	});
 
 	it('sends nothing into another chat opened while the server was asked, and keeps the draft with its chat', async () => {

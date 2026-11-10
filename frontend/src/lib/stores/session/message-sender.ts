@@ -223,6 +223,12 @@ interface SendMessageOptions {
 	 *  note as this worker's file. Asked after every wait of the send, right
 	 *  before the frame is written, so a move during those waits is seen. */
 	notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> };
+	/** Called at most once, synchronously, right after this send's frame is
+	 *  written: the query frame, or a voice call's text frame before its
+	 *  acknowledgement is awaited. Not called by a send that ends without a
+	 *  frame, a compact-first send or a send that creates a worktree. The
+	 *  composer lets the next send go here, so sends keep their order. */
+	onDispatched?: () => void;
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -480,7 +486,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				try {
 					// Streaming calls acknowledge admission before the composer clears
 					// its draft; WebRTC retains its existing local-transport result.
-					const sent = await (uploads ? sendVoiceText(_state.sessionId, prompt, uploads) : sendVoiceText(_state.sessionId, prompt));
+					// The text frame is written inside this call; only its
+					// acknowledgement is awaited below.
+					const pending = uploads ? sendVoiceText(_state.sessionId, prompt, uploads) : sendVoiceText(_state.sessionId, prompt);
+					if (pending !== false) options?.onDispatched?.();
+					const sent = await pending;
 					if (!sent) update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Voice call is not ready. Keep your message and try again when connected.' } : s);
 					return sent;
 				} catch (error) {
@@ -838,6 +848,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					feedController.clearOptimisticSend(_state.sessionId);
 					return false;
 				}
+				options?.onDispatched?.();
 				clearCompactRetry(_state.sessionId!);
 				spendBindingPicks(_state.sessionId);
 				// The pick is spent: the session now exists and its row carries the
