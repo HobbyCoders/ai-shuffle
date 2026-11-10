@@ -189,6 +189,45 @@ def test_own_endpoints_use_the_owner_setting(workers, monkeypatch):
             lan.set_owner_addresses(["198.51.100.4:8000"])
 
 
+@pytest.mark.parametrize("lan_port,enabled,expected", [
+    (8003, True, [TUNNEL_A, "http://10.0.0.20:8003"]),  # the LAN-sync listener is up
+    (None, True, [TUNNEL_A]),  # no listener (port taken or switched off)
+    (8003, False, [TUNNEL_A]),  # LAN-direct is off
+])
+def test_loopback_bound_worker_advertises_only_its_lan_listener(workers, monkeypatch, lan_port, enabled, expected):
+    """The desktop app's worker listens on loopback only: its guessed
+    ``http://<LAN IP>:<port>`` answers nothing, so peers learn its LAN-sync
+    listener or no LAN address at all."""
+    from app.core import cluster, managed_connection
+    w = workers("desktop")
+    monkeypatch.setattr(managed_connection, "status", lambda: {"status": "connected", "url": TUNNEL_A})
+    monkeypatch.setattr(cluster, "advertise_url", lambda: ("http://10.0.0.20:8000", "guess"))
+    monkeypatch.setattr(cluster, "_primary_lan_ip", lambda: "10.0.0.20")
+    monkeypatch.setattr("app.core.config.settings.host", "127.0.0.1")
+    monkeypatch.setattr(lan, "_listener_port", None)
+    lan.set_listener_port(lan_port)
+    with w.active():
+        lan.set_lan_direct_enabled(enabled)
+        assert engine._own_endpoints() == expected
+
+
+@pytest.mark.parametrize("host,source,expected", [
+    # Listening on the network (Docker, server installs): exactly as before.
+    ("0.0.0.0", "guess", [TUNNEL_A, "http://10.0.0.20:8000"]),
+    # An explicit advertise address is the owner's choice, even on loopback.
+    ("127.0.0.1", "config", [TUNNEL_A, "http://10.0.0.20:8000"]),
+])
+def test_network_bound_or_configured_advertise_is_unchanged(workers, monkeypatch, host, source, expected):
+    from app.core import cluster, managed_connection
+    w = workers("server")
+    monkeypatch.setattr(managed_connection, "status", lambda: {"status": "connected", "url": TUNNEL_A})
+    monkeypatch.setattr(cluster, "advertise_url", lambda: ("http://10.0.0.20:8000", source))
+    monkeypatch.setattr("app.core.config.settings.host", host)
+    monkeypatch.setattr(lan, "_listener_port", None)
+    with w.active():
+        assert engine._own_endpoints() == expected
+
+
 # ---------------------------------------------------------------------------
 # Direct path first, authenticated and sealed
 # ---------------------------------------------------------------------------
