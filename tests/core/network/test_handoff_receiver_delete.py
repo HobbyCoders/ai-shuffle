@@ -254,11 +254,43 @@ def test_a_pending_deletion_outlives_retention_and_a_published_one_does_not(pair
     _, b, _, _ = pair
     with b.active(), get_db() as conn:
         cur = conn.cursor()
-        store.remember_session_deletion(cur, "old-published", pending=False)
-        store.remember_session_deletion(cur, "old-pending", pending=True)
-        store.remember_session_deletion(cur, "recent", pending=False)
+        network_id = store.get_state(conn)["network_id"]
+        for sid, pending in (("old-published", False), ("old-pending", True), ("recent", False)):
+            store.remember_session_deletion(cur, sid, pending=pending, network_id=network_id)
         cur.execute("UPDATE network_session_deletions SET deleted_at = %s WHERE session_id <> 'recent'",
                     ("2000-01-01T00:00:00+00:00",))
         assert store.prune_session_deletions(cur) == 1
         cur.execute("SELECT session_id FROM network_session_deletions ORDER BY session_id")
         assert [row["session_id"] for row in cur.fetchall()] == ["old-pending", "recent"]
+
+
+@pytest.mark.asyncio
+async def test_a_fact_of_a_network_this_worker_left_never_refuses_its_new_network(pair, monkeypatch):  # noqa: F811
+    """Review S8: a delete that raced leaving network X wrote X's fact; in network Y it counts for nothing."""
+    a, b, _, _ = pair
+    await _move_to_receiver(a, b, monkeypatch)
+    exchange(a, b)
+    with b.active(), get_db() as conn:
+        # What the delete in flight while B left X committed: X's fact, no row.
+        cur = conn.cursor()
+        store.remember_session_deletion(cur, SID, pending=True, network_id="a-network-this-worker-left")
+        cur.execute("DELETE FROM sessions WHERE id=%s", (SID,))
+        cur.execute("DELETE FROM sync_records WHERE collection='sessions' AND record_id=%s", (SID,))
+    with a.active(), get_db() as conn:
+        # In the new network A holds and owns the same chat id; its record reaches B.
+        conn.cursor().execute("UPDATE sessions SET owner_device_id=%s WHERE id=%s", (a.device_id, SID))
+    with a.active():
+        catalog.publish_owned()
+    exchange(a, b)
+    with b.active():
+        assert database.get_session(SID) is not None, "another network's fact refused the chat"
+        assert engine.publish_session_deletions() == 0
+        catalog.publish_owned()
+    exchange(a, b)
+    with a.active():
+        assert database.get_session(SID) is not None
+    assert not _record(a)["deleted"] and not _record(b)["deleted"]
+    with b.active(), get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT session_id FROM network_session_deletions")
+        assert cur.fetchall() == [], "another network's fact must be pruned"

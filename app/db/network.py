@@ -290,9 +290,12 @@ def create_schema(cursor) -> None:
     """)
     # A chat this worker deleted as its owner (#1308): incoming sync never
     # recreates it, and ``pending`` marks a tombstone still to be published.
+    # ``network_id`` is the network that authorized it: a fact of a network
+    # this worker has since left is ignored and pruned.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS network_session_deletions (
             session_id TEXT PRIMARY KEY,
+            network_id TEXT NOT NULL DEFAULT '',
             pending BOOLEAN NOT NULL DEFAULT FALSE,
             deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
@@ -1456,18 +1459,36 @@ def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_de
 SESSION_DELETION_RETENTION_DAYS = 30  # like the op log (prune_ops)
 
 
-def remember_session_deletion(cursor, session_id: str, *, pending: bool) -> None:
+def remember_session_deletion(cursor, session_id: str, *, pending: bool, network_id: str) -> None:
     """Record, in the owner's delete transaction, that it deleted this chat (#1308)."""
     cursor.execute(
-        """INSERT INTO network_session_deletions (session_id, pending, deleted_at) VALUES (%s, %s, %s)
-           ON CONFLICT (session_id) DO UPDATE SET pending = EXCLUDED.pending, deleted_at = EXCLUDED.deleted_at""",
-        (session_id, bool(pending), _now()))
+        """INSERT INTO network_session_deletions (session_id, network_id, pending, deleted_at)
+           VALUES (%s, %s, %s, %s)
+           ON CONFLICT (session_id) DO UPDATE SET network_id = EXCLUDED.network_id,
+               pending = EXCLUDED.pending, deleted_at = EXCLUDED.deleted_at""",
+        (session_id, network_id, bool(pending), _now()))
+
+
+# Only a fact of the network this worker is in counts (#1308 review S8).
+_CURRENT_NETWORK = "network_id = (SELECT network_id FROM network_state WHERE id = 1)"
 
 
 def session_deletion(cursor, session_id: str) -> Optional[dict]:
-    cursor.execute("SELECT * FROM network_session_deletions WHERE session_id = %s", (session_id,))
+    cursor.execute(f"SELECT * FROM network_session_deletions WHERE session_id = %s AND {_CURRENT_NETWORK}",
+                   (session_id,))
     row = cursor.fetchone()
     return row_to_dict(row) if row else None
+
+
+def deleted_session_ids(cursor, session_ids: List[str]) -> set:
+    """The chats among ``session_ids`` this worker deleted as owner and holds no row of."""
+    if not session_ids:
+        return set()
+    cursor.execute(
+        f"SELECT session_id FROM network_session_deletions WHERE {_CURRENT_NETWORK} AND session_id IN ("
+        + ", ".join(["%s"] * len(session_ids)) + ") AND NOT EXISTS (SELECT 1 FROM sessions "
+        "WHERE sessions.id = network_session_deletions.session_id)", tuple(session_ids))
+    return {row["session_id"] for row in cursor.fetchall()}
 
 
 def set_session_deletion_pending(cursor, session_id: str, pending: bool) -> None:
@@ -1483,18 +1504,25 @@ def pending_session_deletions(cursor, session_ids: Optional[List[str]] = None, *
     if session_ids is not None:
         if not session_ids:
             return []
-        cursor.execute("SELECT session_id FROM network_session_deletions WHERE pending AND session_id IN ("
-                       + ", ".join(["%s"] * len(session_ids)) + ") ORDER BY session_id", tuple(session_ids))
+        cursor.execute(f"SELECT session_id FROM network_session_deletions WHERE pending AND {_CURRENT_NETWORK} "
+                       "AND session_id IN (" + ", ".join(["%s"] * len(session_ids)) + ") ORDER BY session_id",
+                       tuple(session_ids))
     else:
-        cursor.execute("SELECT session_id FROM network_session_deletions WHERE pending "
+        cursor.execute(f"SELECT session_id FROM network_session_deletions WHERE pending AND {_CURRENT_NETWORK} "
                        "ORDER BY session_id LIMIT %s", (limit,))
     return [row["session_id"] for row in cursor.fetchall()]
 
 
 def prune_session_deletions(cursor, *, keep_days: int = SESSION_DELETION_RETENTION_DAYS) -> int:
-    """Forget published or never-networked deletions; a pending one waits for its tombstone."""
+    """Forget published or never-networked deletions; a pending one waits for its tombstone.
+
+    A fact of another network (written by a delete that raced leaving it) is
+    dropped at once, whatever its state.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
-    cursor.execute("DELETE FROM network_session_deletions WHERE NOT pending AND deleted_at < %s", (cutoff,))
+    cursor.execute("DELETE FROM network_session_deletions WHERE (NOT pending AND deleted_at < %s) OR NOT EXISTS "
+                   "(SELECT 1 FROM network_state WHERE network_state.id = 1 "
+                   "AND network_state.network_id = network_session_deletions.network_id)", (cutoff,))
     return cursor.rowcount or 0
 
 

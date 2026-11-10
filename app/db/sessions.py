@@ -1901,14 +1901,12 @@ def delete_session(session_id: str, *, expected_project_id: Optional[str] = None
 
 
 def _deleting_worker() -> tuple:
-    """``(networked, device_id, instance_id, error)`` for the owner check, before the delete's transaction.
+    """``(device_id, instance_id, error)`` for the owner check, before the delete's transaction.
 
-    Python only: no connection and no statement. ``networked`` is True when
-    the network context is cached; otherwise the delete reads network_state on
-    its own connection. The identity and instance id are cached in memory
-    after their first read, which happens here and never under the delete's
-    locks. If either cannot be read, the ids are None: the delete then runs as
-    on main and remembers nothing.
+    Python only: no connection and no statement. The identity and instance id
+    are cached in memory after their first read, which happens here and never
+    under the delete's locks. If either cannot be read, the ids are None: the
+    delete then runs as on main and remembers nothing.
     """
     from app.network import engine
 
@@ -1919,9 +1917,9 @@ def _deleting_worker() -> tuple:
         else:
             from app.network import identity
             device_id = identity.load(create=False).device_id
-        return ctx is not None, device_id, engine._my_instance_id(), None
+        return device_id, engine._my_instance_id(), None
     except Exception as exc:  # noqa: BLE001 - never fail a delete over the fact
-        return ctx is not None, None, None, exc
+        return None, None, exc
 
 
 def _remember_owner_deletion(cursor, session_id: str, row: dict, worker: tuple) -> bool:
@@ -1936,17 +1934,18 @@ def _remember_owner_deletion(cursor, session_id: str, row: dict, worker: tuple) 
     pending at once when the network already holds a record of the chat; a
     chat it never knew has none, and gets a tombstone only if one arrives.
 
-    Writing it can never fail the delete. Off a network (no cached context and
-    no network_state row) nothing is written. A worker that cannot read its
+    Writing it can never fail the delete. One read of network_state on the
+    delete's own connection (no lock) names the network that authorizes the
+    fact; off a network nothing is written. A worker that cannot read its
     own identity cannot tell whether it owns the chat, so it remembers nothing
     and warns: that delete behaves as on main. The writes run in a savepoint,
     so a failed statement leaves the delete's transaction usable.
     """
-    networked, device_id, instance_id, error = worker
-    if not networked:
-        cursor.execute("SELECT 1 FROM network_state WHERE id = 1")
-        if cursor.fetchone() is None:
-            return False
+    device_id, instance_id, error = worker
+    cursor.execute("SELECT network_id FROM network_state WHERE id = 1")
+    network = cursor.fetchone()
+    if network is None:
+        return False
     if device_id is None:
         logger.warning("Session %s was deleted without remembering it for sync: this worker's "
                        "identity could not be read (%s)", session_id, error)
@@ -1960,7 +1959,8 @@ def _remember_owner_deletion(cursor, session_id: str, row: dict, worker: tuple) 
     try:
         with _savepoint(cursor, "sp_owner_deletion"):
             known = network_store.get_record(cursor, "sessions", session_id) is not None
-            network_store.remember_session_deletion(cursor, session_id, pending=known)
+            network_store.remember_session_deletion(cursor, session_id, pending=known,
+                                                    network_id=network["network_id"])
     except Exception:  # noqa: BLE001 - rolled back to the savepoint; the delete goes on
         logger.warning("Could not remember the deletion of session %s for sync", session_id, exc_info=True)
         return False
