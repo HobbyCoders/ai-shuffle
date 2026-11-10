@@ -660,6 +660,16 @@
 			"globs": ["frontend/src/lib/docs/content/**"]
 		},
 		{
+			"why": "the sidebar-truth cases, which two journey files run in halves",
+			"journeys": ["sidebar-truth", "sidebar-truth-2"],
+			"globs": ["frontend/tests/journeys/sidebar-truth*"]
+		},
+		{
+			"why": "the stop-with-queued-messages cases, which two journey files run in halves",
+			"journeys": ["stop-with-queued-messages", "stop-with-queued-messages-2"],
+			"globs": ["frontend/tests/journeys/stop-with-queued-messages*"]
+		},
+		{
 			"why": "a journey file itself",
 			"journeys": ["$self"],
 			"globs": ["frontend/tests/journeys/*.journey.mjs"]
