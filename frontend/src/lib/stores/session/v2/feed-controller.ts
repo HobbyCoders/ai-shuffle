@@ -1430,15 +1430,18 @@ export const feedController: FeedController = {
 	},
 
 	raiseTurnError(sessionId: string, message: string, turnId: string | null) {
-		clearBannerGrace();
 		const hold = (held: string | null) =>
 			deps?.update(s => ((s.errorBannerHeld ?? null) === held ? s : { ...s, errorBannerHeld: held }));
 		if (currentSessionId === null || sessionId !== currentSessionId) {
+			clearBannerGrace();
 			hold(null);
 			return 'shown';
 		}
 		const anchor = raiseTurnError(message, turnId, reducerState.turnOutcomes);
+		// The caller ignores an outlived frame, so the current banner keeps its
+		// hold and must keep the grace that releases it (#1341).
 		if (anchor === 'outlived') return 'outlived';
+		clearBannerGrace();
 		// A frame naming no turn has nothing to follow: it stays until sent or dismissed.
 		bannerAnchor = anchor;
 		if (anchor === null) {

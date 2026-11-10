@@ -2916,6 +2916,33 @@ describe('turn-error banner held for its turn\'s own row (#1341)', () => {
 		feedController.stop();
 	});
 
+	it('keeps the grace of a held banner when a late frame for an outlived failure is ignored', () => {
+		const OLD = 'an older failure';
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		hoisted.onEvent!({ type: 'turn.started', id: 'ts0', session_id: 's1', turn_id: 't0', seq: 1 });
+		hoisted.onEvent!({ type: 'message.user', id: 'mu0', session_id: 's1', turn_id: 't0', seq: 2, content: 'one' });
+		hoisted.onEvent!({ type: 'turn.aborted', id: 'ta0', session_id: 's1', turn_id: 't0', seq: 3, reason: 'error', message: OLD });
+		hoisted.onEvent!({ type: 'turn.started', id: 'ts1', session_id: 's1', turn_id: 't1', seq: 4 });
+		hoisted.onEvent!({ type: 'message.user', id: 'mu1', session_id: 's1', turn_id: 't1', seq: 5, content: 'two' });
+		hoisted.onEvent!({ type: 'turn.completed', id: 'tc1', session_id: 's1', turn_id: 't1', seq: 6 });
+		hoisted.onEvent!({ type: 'turn.started', id: 'ts2', session_id: 's1', turn_id: 't2', seq: 7 });
+		hoisted.onEvent!({ type: 'message.user', id: 'mu2', session_id: 's1', turn_id: 't2', seq: 8, content: 'three' });
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		deps.update(s => ({ ...s, error: MSG }));
+		expect(feedController.raiseTurnError('s1', MSG, 't2')).toBe('shown');
+		expect(visibleTurnError(deps.state)).toBeNull();
+		// t0's delayed frame: t1 finished cleanly after it, so the caller drops it.
+		expect(feedController.raiseTurnError('s1', OLD, 't0')).toBe('outlived');
+		// t2's logged end never arrives: its banner still shows once the grace runs out.
+		vi.advanceTimersByTime(TURN_ERROR_ROW_GRACE_MS);
+		expect(visibleTurnError(deps.state)).toBe(MSG);
+		feedController.stop();
+	});
+
 	it('shows the banner when the feed restarts inside the grace and the replay stalls', () => {
 		const deps = liveTurn();
 		expect(visibleTurnError(deps.state)).toBeNull();
