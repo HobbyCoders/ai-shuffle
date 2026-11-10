@@ -13,7 +13,7 @@ export const entries: SettingEntry[] = [
 		category: 'cloud',
 		section: 'Account',
 		label: 'Cloud account',
-		help: 'Everything on your own machines and network is free and needs no account. A free Cloud account adds two remote workers with no card; a paid plan adds four, plus sync across networks. The plan follows the account: sign in with it on another worker and that worker gets the same plan.',
+		help: 'Everything on your own machines and network is free and needs no account. A free Cloud account adds three remote workers with no card; Pro adds ten and Ultimate thirty, plus sync across networks, billed monthly. The plan follows the account: sign in with it on another worker and that worker gets the same plan.',
 		keywords: [
 			'license',
 			'licence',
@@ -26,9 +26,9 @@ export const entries: SettingEntry[] = [
 			'hobbycoders',
 			'free',
 			'paid',
-			'founder',
-			'monthly',
-			'yearly'
+			'pro',
+			'ultimate',
+			'monthly'
 		]
 	},
 	{
@@ -36,7 +36,7 @@ export const entries: SettingEntry[] = [
 		category: 'cloud',
 		section: 'Account',
 		label: 'Link an account',
-		hint: 'Two remote workers, no card',
+		hint: 'Three remote workers, no card',
 		keywords: ['sign in', 'link account', 'shuffle account', 'connect', 'free account', 'activate']
 	},
 	{
@@ -58,7 +58,7 @@ export const entries: SettingEntry[] = [
 		category: 'cloud',
 		section: 'Plan',
 		label: 'Upgrade',
-		hint: 'Four remote workers, sync',
-		keywords: ['pricing', 'buy', 'paid plan', 'price', 'upgrade']
+		hint: 'Pro: 10 remote workers, Ultimate: 30, sync',
+		keywords: ['pricing', 'buy', 'paid plan', 'pro', 'ultimate', 'price', 'upgrade']
 	}
 ];

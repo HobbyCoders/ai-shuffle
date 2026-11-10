@@ -22,9 +22,29 @@ describe('Cloud status client', () => {
 		expect(transport.post).not.toHaveBeenCalled();
 	});
 
-	it('knows the plan defaults: 2 free, 4 paid, unlimited from 100 seats', () => {
-		expect(license.FREE_WORKERS).toBe(2);
-		expect(license.PAID_WORKERS).toBe(4);
+	it('knows the plan defaults: 3 free, 10 paid, Pro 10, Ultimate 30, unlimited from 100 seats', () => {
+		expect(license.FREE_WORKERS).toBe(3);
+		expect(license.PAID_WORKERS).toBe(10);
+		expect(license.PRO_WORKERS).toBe(10);
+		expect(license.ULTIMATE_WORKERS).toBe(30);
 		expect(license.UNLIMITED_SEATS).toBe(100);
+	});
+
+	it.each([
+		['paid', 'pro', 'Pro'],
+		['paid', 'ultimate', 'Ultimate'],
+		['paid', 'custom', null],
+		['paid', undefined, null],
+		['paid', null, null],
+		['paid', 'enterprise', null],
+		['free', 'free', null],
+		['free', 'pro', null],
+		['not_linked', undefined, null],
+	])('names a %s account with tier %s as %s', (state, tier, name) => {
+		expect(license.paidPlanName({ state, tier } as Parameters<typeof license.paidPlanName>[0])).toBe(name);
+	});
+
+	it('names no plan before the status loads', () => {
+		expect(license.paidPlanName(null)).toBeNull();
 	});
 });
