@@ -724,6 +724,10 @@ describe('peer workers', () => {
 		expect(shell).toMatch(/min-width:\s*0/);
 		expect(shell).toMatch(/text-overflow:\s*ellipsis/);
 		expect(shell).not.toMatch(/flex-shrink:\s*0/);
+		// The folder starts from 0 and takes what is left, so it is gone before
+		// a short name ("sh" read "s…") loses a pixel.
+		const folder = source.match(/\n\t\.tab-folder\s*\{([^}]*)\}/)?.[1] ?? '';
+		expect(folder).toMatch(/flex:\s*1 1 0[;\s]/);
 		// A narrow panel sizes each tab to its name rather than squeezing it.
 		const narrow = source.match(/@container \(max-width: 420px\) \{([\s\S]*?)\n\t\}/)?.[1] ?? '';
 		expect(narrow).toMatch(/\n\t\t\.tab\s*\{[^}]*flex:\s*0 0 auto/);

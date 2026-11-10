@@ -637,8 +637,7 @@
 	.tab.current .tab-select { color: var(--foreground); }
 	.tab-select:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: 6px; }
 	/* Cut with an ellipsis rather than run under the close button when the
-	   tab is narrower than the name ("powershell" in a 96 px tab). The folder
-	   gives way first. */
+	   tab is narrower than the name ("powershell" in a 96 px tab). */
 	.tab-shell { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	/* One line, cut with an ellipsis (the full name is its title). It may
 	   shrink, so it never runs under the close button; the folder gives way first. */
@@ -646,7 +645,8 @@
 		color: var(--muted-foreground); background: var(--muted); }
 	/* A shell on another worker: room for the worker's name next to the shell. */
 	.tab:has(.tab-host) { flex-basis: 232px; max-width: 232px; }
-	.tab-folder { flex-shrink: 100; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle-foreground); }
+	/* Sized from 0 and filling what is left, so it gives way completely before the shell name loses a pixel ("sh" read "s…" in a squeezed tab). */
+	.tab-folder { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle-foreground); }
 	.tab-close { position: absolute; right: 3px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); cursor: pointer; opacity: 0; transition: opacity 0.12s; }
 	.tab:hover .tab-close, .tab.current .tab-close, .tab-close:focus-visible { opacity: 1; }
 	.tab-close:hover { background: var(--hover-overlay); color: var(--foreground); }

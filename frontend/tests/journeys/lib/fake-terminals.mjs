@@ -48,7 +48,7 @@ export function fakeTerminals({ defaultShell = 'bash' } = {}) {
 			return json({
 				worker, supported: true, unsupported_reason: null,
 				targets: [{ kind: 'worker', worker_id: worker.id, name: worker.name, available: true }, peer],
-				shells: [...new Set([defaultShell, 'bash', 'sh'])].map((name) => ({ name, default: name === defaultShell })), default_shell: defaultShell,
+				shells: [...new Set([defaultShell, 'bash', 'sh', 'pwsh', 'powershell'])].map((name) => ({ name, default: name === defaultShell })), default_shell: defaultShell,
 				default_folder: { path: '/workspace/dev-sandbox', source: 'project' },
 				chat_worker_id: null, limit: state.limit, open: state.terminals.size
 			});

@@ -20,6 +20,8 @@
 //   close-before  (360, powershell) seven terminals, the fourth selected at the
 //            strip's right edge, then close the two tabs before it and the two
 //            after it: the selected tab stays in the strip
+//   squeezed (desktop) six tabs of mixed shells squeezed to 96 px: sh, bash
+//            and pwsh are never cut, powershell may be; no name under a close
 // In all, the selected tab's name never runs under its close button.
 import { DEFAULT_VIEWPORTS, runJourney } from './runner.mjs';
 import { composerControl, expect, gotoApp, seededChatId, waitChatOpen } from './lib/app.mjs';
@@ -296,6 +298,50 @@ await runJourney({
 					await tabCount(page, left);
 					await page.waitForTimeout(400);
 					await expectSelectedInView(page, `after ${label}, after the selected tab`);
+				}
+			}
+		},
+		{
+			// Squeezed desktop tabs: the folder gives way completely before a
+			// shell name is cut, so "sh" and "bash" read in full; only a name that
+			// cannot fit ("powershell" in a 96 px tab) gets the ellipsis.
+			name: 'squeezed',
+			viewports: ['desktop'],
+			async setup(ctx) {
+				const { page, status } = ctx;
+				await page.addInitScript(fakeTerminals);
+				await gotoApp(page, status, `/?session=${encodeURIComponent(seededChatId(status, 'worktree'))}`);
+				await waitChatOpen(page, { messagesAtLeast: 2, hold: 1000 });
+			},
+			async act({ page, mark, log }) {
+				const side = page.getByRole('complementary', { name: 'Session side panel' });
+				const panel = side.getByRole('region', { name: 'Terminal' });
+
+				await mark('open terminals with mixed shells');
+				await (await composerControl(page, 'Toggle terminal')).click();
+				await panel.waitFor({ timeout: 15_000 });
+				await panel.getByRole('button', { name: 'Open terminal', exact: true }).click();
+				await tabCount(page, 1);
+				const shells = ['sh', 'pwsh', 'powershell', 'bash', 'sh'];
+				for (const [i, shell] of shells.entries()) {
+					await panel.getByRole('button', { name: 'New terminal', exact: true }).click();
+					const picker = panel.locator('.popover');
+					await picker.getByRole('button', { name: shell, exact: true }).click();
+					await picker.getByRole('button', { name: 'Open terminal', exact: true }).click();
+					await tabCount(page, i + 2);
+				}
+				await page.waitForTimeout(400);
+
+				const names = await page.evaluate(() => [...document.querySelectorAll('aside[aria-label="Session side panel"] .tabs .tab')].map((tab) => {
+					const shell = tab.querySelector('.tab-shell');
+					const close = tab.querySelector('.tab-close').getBoundingClientRect();
+					return { name: shell.textContent, width: tab.getBoundingClientRect().width, cut: shell.scrollWidth - shell.clientWidth, right: shell.getBoundingClientRect().right, closeLeft: close.left };
+				}));
+				log(`tabs: ${JSON.stringify(names)}`);
+				expect(names.some((t) => t.width <= 97), `the tabs are squeezed to their 96 px minimum (${JSON.stringify(names)})`);
+				for (const t of names) {
+					expect(t.right <= t.closeLeft + 1, `"${t.name}" ends before its tab's close button (${JSON.stringify(t)})`);
+					if (t.name !== 'powershell') expect(t.cut <= 0, `"${t.name}" fits a ${t.width}px tab and is not cut (${t.cut}px hidden)`);
 				}
 			}
 		}
