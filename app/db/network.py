@@ -1073,6 +1073,48 @@ def _membership_generation(cur) -> int:
 _MEMBERSHIP_UNCHANGED = "(SELECT generation FROM network_state WHERE id = 1) = %s"
 
 
+def _merged_into_later_row() -> str:
+    """SQL proof that live event record ``r`` was merged into the next row of its session.
+
+    Idle delta compaction (``session_events.compact_session_deltas``) keeps one
+    row per run at the run's last seq, naming the run's first seq in
+    ``merged_from_seq``, and deletes the other fragments without tombstones.
+    A missing row alone proves nothing (#1328). This holds only when the
+    session still exists and the next row above ``r.order_seq`` is a delta
+    whose valid marker (what ``session_events._merged_from`` accepts: a JSON
+    integer with ``0 < merged_from_seq < seq``) reaches down to ``r.order_seq``,
+    and that row has its own live record newer than ``r``. The payload is
+    JSONB, so ``->>`` on any payload cannot fail, and the numeric cast runs
+    only behind the CASE that checked the text is digits.
+    """
+    from app.db.session_events import COMPACTABLE_DELTA_TYPES, MERGED_FROM_KEY
+
+    def literal(value: str) -> str:
+        if not value.replace(".", "").replace("_", "").isalnum():
+            raise ValueError(f"unexpected SQL literal {value!r}")
+        return "'" + value + "'"
+
+    marker = "n.payload ->> " + literal(MERGED_FROM_KEY)
+    types = ", ".join(literal(name) for name in COMPACTABLE_DELTA_TYPES)
+    return """(NOT r.deleted
+                 AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = split_part(r.record_id, '|', 1))
+                 AND EXISTS (
+                     SELECT 1 FROM (
+                         SELECT e.session_id, e.seq, e.event_type, e.payload FROM session_events e
+                         WHERE e.session_id = split_part(r.record_id, '|', 1) AND e.seq > r.order_seq
+                         ORDER BY e.seq LIMIT 1) n
+                     JOIN sync_records sr ON sr.collection = r.collection
+                      AND sr.record_id = n.session_id || '|' || n.seq::text
+                     WHERE n.event_type IN (""" + types + """)
+                       AND NOT sr.deleted AND sr.clock > r.clock
+                       AND CASE WHEN jsonb_typeof(n.payload -> """ + literal(MERGED_FROM_KEY) + """) = 'number'
+                                     AND """ + marker + """ ~ '^[0-9]+$'
+                                THEN (""" + marker + """)::numeric > 0
+                                     AND (""" + marker + """)::numeric <= r.order_seq
+                                     AND (""" + marker + """)::numeric < n.seq
+                                ELSE FALSE END))"""
+
+
 def _stream_frontier(origin: str, incarnation: int, head: int, peers: Dict[str, dict]) -> int:
     """Highest seq of a stream that every recent peer already holds (<= head)."""
     return min([head, *(int((marks.get(origin) or {}).get(str(incarnation), 0)) for marks in peers.values())])
@@ -1130,6 +1172,7 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
 
     total = bytes_estimate = 0
     frontiers = {}
+    merged = _merged_into_later_row()
     for stream in heads:
         origin, incarnation, head = stream["origin_device_id"], int(stream["incarnation"]), int(stream["s"])
         frontier = _stream_frontier(origin, incarnation, head, peers)
@@ -1140,7 +1183,8 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
             continue
         # Keyset-page the stream's UNIQUE(origin, incarnation, seq) index. Never
         # repeatedly sort/rescan the whole retained log. A materialized version
-        # (or tombstone) must still exist for the ordinary snapshot path.
+        # (or tombstone) must still exist for the ordinary snapshot path, or a
+        # merged delta row proven to stand for it (:func:`_merged_into_later_row`).
         sql = """DELETE FROM sync_ops WHERE ingest_id IN (
                      SELECT o.ingest_id FROM sync_ops o
                      WHERE o.origin_device_id = %s AND o.incarnation = %s
@@ -1152,7 +1196,8 @@ def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
                              AND r.record_id = o.record_id AND r.clock >= o.clock
                              AND (r.deleted OR EXISTS (
                                  SELECT 1 FROM session_events e
-                                 WHERE e.session_id = split_part(r.record_id, '|', 1) AND e.seq = r.order_seq)))
+                                 WHERE e.session_id = split_part(r.record_id, '|', 1) AND e.seq = r.order_seq)
+                               OR """ + merged + """))
                      ORDER BY o.seq LIMIT %s)
                  RETURNING seq, pg_column_size(envelope) AS bytes_estimate"""
 
