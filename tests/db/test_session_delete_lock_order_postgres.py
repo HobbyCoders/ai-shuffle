@@ -2121,6 +2121,47 @@ def test_apply_committed_first_then_the_owners_delete_outranks_it(private_pool, 
     assert record["clock"] > 50
 
 
+def test_apply_reaching_an_already_deleted_chat_reads_the_fact_committed_just_before(private_pool, monkeypatch):
+    """#1308 review: the row is already gone when the apply's FOR UPDATE runs.
+
+    The apply holds N and pauses before its row lock; the whole delete commits
+    (row and fact) meanwhile, and only its post-commit publication waits on N.
+    The apply then finds no row, reads the committed fact, keeps the chat
+    deleted, and the tombstone published after it outranks the incoming clock.
+    """
+    from app.network import engine
+
+    ctx, remote = _remote_network("gone-first-")
+    monkeypatch.setattr(engine, "_context", ctx)
+    sid = _owned_chat(ctx, remote, "gone-first-")
+    env = _session_upsert(ctx, remote, sid, clock=50)
+    barriers = _Barriers(monkeypatch, {"incoming": (
+        lambda sql, params: sql.startswith("SELECT id FROM sessions WHERE id = %s FOR UPDATE"), True)})
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="incoming") as syncing, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
+        observer.autocommit = True
+        applying = syncing.submit(engine.apply_batch, [env], ctx=ctx)
+        try:
+            barriers.wait("incoming", applying)  # N held, the row lock not yet asked for
+            deleting = deleter.submit(sessions.delete_session, sid)
+            _wait_for_lock_wait(observer, barriers.pids["incoming"], deleting)
+            waited_on = _waiting_query(observer, barriers.pids["incoming"])
+            assert _session_row(sid) is None, "the delete committed before the apply's row lock"
+            with base.get_db() as conn:
+                assert engine.store.session_deletion(conn.cursor(), sid) is not None
+        finally:
+            barriers.release_all()
+        applying.result(timeout=10)
+        assert deleting.result(timeout=10) is True
+    assert "network_state" in waited_on, waited_on  # only the post-commit publication waited, on N
+    assert _session_row(sid) is None, "the delayed commit record recreated the deleted chat"
+    record = _session_record(sid)
+    assert record["deleted"] and record["origin_device_id"] == ctx.device_id
+    assert record["clock"] > 50, "the owner's tombstone must outrank the record it refused"
+    with base.get_db() as conn:
+        assert not engine.store.session_deletion(conn.cursor(), sid)["pending"]
+
 def test_a_delete_waiting_on_its_chat_holds_no_network_state_lock(private_pool, monkeypatch):
     """#1308 review S6: while the owner's delete waits, N is free and other chats still apply."""
     from app.network import engine
