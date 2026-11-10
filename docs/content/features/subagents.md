@@ -140,7 +140,7 @@ Besides subagents, agents can coordinate with your other open chats:
 - send a message to another chat;
 - start a new, separate chat with a short brief.
 
-A message from another chat is never treated as your instruction, and cannot approve anything. Each chain of work is limited to 32 new chats and 256 actions until you send a new message. One direct reply to each incoming request does not use the action budget, even if the request is still queued. Replies do not earn another free reply, so acknowledgement loops still run into the action limit. Stop, settlement and ownership checks always apply.
+A message from another chat is never treated as your instruction, and cannot approve anything. Each chain of work is limited to 32 new chats and 256 actions until you send a new message. After a chat moves to another worker, a chain it began on the old worker continues on the new one with a fresh limit there, shared by every report from that chain. One direct reply to each incoming request does not use the action budget, even if the request is still queued. Replies do not earn another free reply, so acknowledgement loops still run into the action limit. Stop, settlement and ownership checks always apply.
 
 ### Working without a project
 
