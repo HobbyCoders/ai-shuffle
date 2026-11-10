@@ -1517,12 +1517,15 @@ def prune_session_deletions(cursor, *, keep_days: int = SESSION_DELETION_RETENTI
     """Forget published or never-networked deletions; a pending one waits for its tombstone.
 
     A fact of another network (written by a delete that raced leaving it) is
-    dropped at once, whatever its state.
+    dropped at once, whatever its state, and so is one whose chat has a row
+    here again: the delete removed the row in the fact's own transaction, so
+    a row now means the chat was recreated (whole-database recovery) since.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
     cursor.execute("DELETE FROM network_session_deletions WHERE (NOT pending AND deleted_at < %s) OR NOT EXISTS "
                    "(SELECT 1 FROM network_state WHERE network_state.id = 1 "
-                   "AND network_state.network_id = network_session_deletions.network_id)", (cutoff,))
+                   "AND network_state.network_id = network_session_deletions.network_id) OR EXISTS "
+                   "(SELECT 1 FROM sessions WHERE sessions.id = network_session_deletions.session_id)", (cutoff,))
     return cursor.rowcount or 0
 
 

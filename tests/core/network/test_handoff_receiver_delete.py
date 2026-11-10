@@ -381,3 +381,16 @@ def a_ctx(worker):
     with worker.active():
         return engine.require_context()
 
+
+def test_the_owner_scan_drops_the_fact_of_a_chat_recreated_here(pair):  # noqa: F811
+    """Review (c): a row with the fact's id means the chat came back (whole-database recovery)."""
+    _, b, _, _ = pair
+    with b.active(), get_db() as conn:
+        cur = conn.cursor()
+        store.remember_session_deletion(cur, SID, pending=False, network_id=store.get_state(conn)["network_id"])
+        assert store.session_deletion(cur, SID) is not None
+    with b.active():
+        assert database.get_session(SID) is not None  # the row is here
+        assert engine.publish_session_deletions() == 0
+    with b.active(), get_db() as conn:
+        assert store.session_deletion(conn.cursor(), SID) is None
