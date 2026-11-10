@@ -269,7 +269,9 @@ describe('AppPage initial landing', () => {
   });
   window.history.replaceState({}, '', '/?session=notification-task'); await boot();
   expect(mocks.init).toHaveBeenCalledWith({ deepLinkSessionId: 'notification-task' });
-  expect(mocks.openSession).toHaveBeenCalledWith('notification-task');
+  // The linked chat has been open since init: boot reopens it, which is not
+  // navigation and so does not call off a send waiting on it (#1350).
+  expect(mocks.openSession).toHaveBeenCalledWith('notification-task', undefined, { reopen: true });
   // No feature page is mounted first (its requests would race the deep link).
   expect(mocks.openFeaturePage).not.toHaveBeenCalled();
   expect(get(activeView)).toEqual({ type: 'session', sessionId: 'notification-task' });
@@ -290,8 +292,8 @@ describe('AppPage initial landing', () => {
   expect(get(activeView)).toEqual({ type: 'session', sessionId: 'chat-b' });
   expect(get(active).sessionId).toBe('chat-b');
   release(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
-  expect(mocks.openSession).toHaveBeenCalledWith('chat-b');
-  expect(mocks.openSession).not.toHaveBeenCalledWith('chat-a');
+  expect(mocks.openSession).toHaveBeenCalledWith('chat-b', undefined, { reopen: true });
+  expect(mocks.openSession.mock.calls.map(call => call[0])).not.toContain('chat-a');
  });
  it('does not pull the user back to the link once they left it while it loaded', async () => {
   let release!: () => void;

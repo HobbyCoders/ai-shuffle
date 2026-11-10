@@ -1071,12 +1071,15 @@ export const activeSession = {
 
 	// ── Session Navigation (delegated to session-switcher) ─────────
 
-	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) => {
+	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null, options: { reopen?: boolean } = {}) => {
 		clearUnavailableChat();
 		setSkipRestore(false);
 		// Explicit navigation wins over an async boot restore still reading the
 		// persisted session. Its generation checks will now discard that stale load.
-		bumpInitGeneration();
+		// `reopen` opens the chat already on screen again (boot re-reading a
+		// linked chat once its row has loaded): the user has not left it, so a
+		// send still waiting on that chat must go out, not be called off (#1350).
+		if (!(options.reopen && _state.sessionId === sessionId)) bumpInitGeneration();
 		void switcher.switchSession(sessionId, projectId, worktreeInfo, title, projectV2Id);
 	},
 

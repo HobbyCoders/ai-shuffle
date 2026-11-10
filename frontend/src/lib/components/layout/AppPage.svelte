@@ -341,8 +341,10 @@
 			// Re-open with the row now loaded (lane, worktree). Skip it when the
 			// linked chat already left: the server said it does not exist (the
 			// "chat not found" notice is up) or the user went elsewhere meanwhile.
+			// The chat has been open (and taking sends) since init, so this is a
+			// reopen, not navigation: a send still waiting on it goes out (#1350).
 			if (!navigationClaimed && $activeSession.sessionId === deepLinkSessionId) {
-				handleOpenSession(deepLinkSessionId);
+				handleOpenSession(deepLinkSessionId, undefined, { reopen: true });
 			}
 			const url = new URL(window.location.href);
 			url.searchParams.delete('session');

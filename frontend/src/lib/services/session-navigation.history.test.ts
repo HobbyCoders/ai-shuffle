@@ -9,7 +9,7 @@ import { page } from '$app/state';
 
 type Entry = Record<string, unknown>;
 const h = vi.hoisted(() => ({ stack: [] as Record<string, unknown>[], index: 0 }));
-const active = vi.hoisted(() => ({ store: null as unknown as ReturnType<typeof writable<{ sessionId: string | null }>> }));
+const active = vi.hoisted(() => ({ store: null as unknown as ReturnType<typeof writable<{ sessionId: string | null }>>, switches: [] as unknown[][] }));
 
 vi.mock('$app/navigation', async () => {
 	const { page } = await import('$app/state');
@@ -31,7 +31,7 @@ vi.mock('$lib/stores/active-session', async () => {
 	return {
 		activeSession: {
 			subscribe: active.store.subscribe,
-			switchSession: (id: string) => active.store.set({ sessionId: id })
+			switchSession: (id: string, ...rest: unknown[]) => { active.switches.push([id, ...rest]); active.store.set({ sessionId: id }); }
 		}
 	};
 });
@@ -99,5 +99,17 @@ describe('sidebar chat switches and browser history (#953)', () => {
 			step(-1);
 			expect(openChat()).toBe('chat-a');
 		});
+	});
+});
+
+describe('reopening the chat already open (#1350)', () => {
+	it('tells the store it is a reopen; any other open is navigation', () => {
+		active.switches = [];
+		openSession('chat-a', undefined, { reopen: true });
+		openSession('chat-b');
+		expect(active.switches.map(call => [call[0], call.at(-1)])).toEqual([
+			['chat-a', { reopen: true }],
+			['chat-b', { reopen: false }],
+		]);
 	});
 });
