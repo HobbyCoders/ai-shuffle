@@ -535,3 +535,29 @@ async def test_cancelled_while_queued_for_a_thread_is_not_counted_forever(
         await waiting
     assert memory_sync.pending_publications() == 0
     assert env.db.uploads == [] and len(_markers(env)) == 1  # The next start retries it.
+
+
+async def test_replay_completing_a_running_push_marker_keeps_that_push_counted(target):
+    """The replay may publish the marker of a turn-end push from THIS process;
+    that push's own thread, still blocked, stays unfinished saving."""
+    env = target
+    _write(env.folder, "MEMORY.md", "fact")
+    env.db.stall = True
+    pushing = asyncio.create_task(memory_sync.push_memory("project", str(env.folder), "native"))
+    assert await asyncio.to_thread(env.db.entered.wait, 5)
+    pushing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pushing
+    assert memory_sync.pending_publications() == 1  # Its thread is still blocked.
+
+    env.db.stall = False  # The replay's own write goes through.
+    await memory_sync.publish_pending_memory()
+
+    assert _markers(env) == [] and len(env.db.uploads) == 1
+    assert memory_sync.pending_publications() == 1  # Still the blocked thread.
+    env.db.release.set()
+    for _ in range(500):
+        if memory_sync.pending_publications() == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert memory_sync.pending_publications() == 0

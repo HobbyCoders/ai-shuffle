@@ -492,9 +492,8 @@ async def push_memory(project_id: Optional[str], working_dir: Optional[str],
         else:
             await _run_counted(token, _publish, project_id, working_dir, leg, token)
     except Exception:  # noqa: BLE001
-        if token is not None:
-            # Ended (or never dispatched); its marker stays for the next start.
-            _finish_publication(project_id, token, False)
+        # Ended (or never dispatched): a marker stays for the next start, and
+        # _run_counted has already stopped counting it.
         logger.debug("memory_sync: push failed", exc_info=True)
 
 
@@ -521,8 +520,10 @@ _pending_lock = threading.Lock()
 # queued for a thread or running). Shutdown reports these as unfinished saving.
 # Two writers: ``push_memory`` (one token per push, from ``_queue_publication``)
 # and ``publish_pending_memory`` (one token for the whole startup replay, from
-# before it resolves any project). ``_run_counted`` removes a token when its
-# thread ends, or when its awaiter is cancelled while still queued.
+# before it resolves any project). Only ``_run_counted`` removes a token: when
+# its thread ends, or when its awaiter is cancelled while still queued. Marker
+# cleanup never does, because the startup replay can complete the marker of a
+# turn-end push whose own thread is still running.
 _in_flight: set = set()
 
 
@@ -581,10 +582,9 @@ def _queue_publication(project_id: Optional[str], working_dir: Optional[str],
 
 
 def _finish_publication(project_id: str, token: str, completed: bool) -> None:
+    if not completed:
+        return  # Still owed: the next start retries it.
     with _pending_lock:
-        _in_flight.discard(token)
-        if not completed:
-            return  # Still owed: the next start retries it.
         try:
             path = _pending_path(project_id)
             if json.loads(path.read_text(encoding="utf-8")).get("token") == token:
