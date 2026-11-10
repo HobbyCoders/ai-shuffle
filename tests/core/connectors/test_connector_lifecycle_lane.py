@@ -32,12 +32,14 @@ class GatedConnector(BaseConnector):
                  on_permission_response, on_trigger=None):
         super().__init__(connector_id, connector_type, config, on_incoming_message,
                          on_permission_response, on_trigger=on_trigger)
+        self.connect_started = False
         self.connect_cancelled = False
         self.disconnect_started = False
         self.disconnected = False
         GatedConnector.instances.append(self)
 
     async def connect(self):
+        self.connect_started = True
         gate = GatedConnector.connect_gates.get(self.connector_id)
         if gate is not None:
             try:
@@ -350,3 +352,90 @@ async def test_a_lane_cancelled_before_its_first_step_answers_its_waiters(mgr, d
     assert await asyncio.wait_for(start, 1) is False
     assert "c1" not in mgr._lanes
     assert clients("c1") == []
+
+
+async def test_a_stop_during_the_connecting_write_abandons_the_start(mgr, db, monkeypatch):
+    """Before: a STOP that came while the "connecting" status write was in
+    flight found no connect to cancel, so the lane then began the unwanted
+    connect; hung there, the stop never returned and the receiver lock stayed held."""
+    GatedConnector.connect_gates["c1"] = asyncio.Event()  # a connect would never return
+    paused, release = asyncio.Event(), asyncio.Event()
+    real_run_sync = manager_module.run_sync
+
+    async def run_sync(fn, *args, **kwargs):
+        if fn is database.update_connector_status and args[1:2] == ("connecting",):
+            paused.set()
+            await release.wait()
+        return await real_run_sync(fn, *args, **kwargs)
+
+    monkeypatch.setattr(manager_module, "run_sync", run_sync)
+    start = asyncio.create_task(mgr.start_connector("c1"))
+    stop = None
+    try:
+        await asyncio.wait_for(paused.wait(), 2)
+        stop = asyncio.create_task(mgr.stop_connector("c1"))
+        await settle()
+        release.set()
+        await asyncio.wait_for(stop, 1)
+        assert await asyncio.wait_for(start, 1) is False
+        [built] = clients("c1")
+        assert not built.connect_started and not built.disconnect_started
+        assert not mgr.receiver_lock("c1").locked()
+        assert mgr.get_running_instance("c1") is None and "c1" not in mgr._lanes
+        assert statuses(db, "c1")[-1] == "disconnected"
+    finally:
+        release.set()
+        await cleanup(*(t for t in (start, stop) if t is not None))
+
+
+async def test_a_failed_not_stopped_notice_does_not_end_the_teardown(mgr, db):
+    """Before: when the "previous client has not stopped" write raised, the
+    teardown's disconnect was cancelled and the queued start built a second
+    client while the first had not stopped."""
+    assert await mgr.start_connector("c1") is True
+    first = mgr.get_running_instance("c1")
+    gate = GatedConnector.disconnect_gates["c1"] = asyncio.Event()
+    notices = []
+
+    def update_status(cid, status, **fields):
+        if fields.get("error") == manager_module.PREVIOUS_CLIENT_NOT_STOPPED_MESSAGE:
+            notices.append(cid)
+            raise RuntimeError("database unavailable")
+
+    db.update_connector_status.side_effect = update_status
+    stop = asyncio.create_task(mgr.stop_connector("c1"))
+    start = None
+    try:
+        await until(lambda: first.disconnect_started)
+        start = asyncio.create_task(mgr.start_connector("c1"))
+        await until(lambda: notices)
+        await settle()
+        assert clients("c1") == [first], "no second client while the first has not stopped"
+        assert not stop.done() and not start.done()
+
+        gate.set()  # the disconnect returns: the lane carries on by itself
+        await asyncio.wait_for(stop, 2)
+        assert await asyncio.wait_for(start, 2) is True
+        assert first.disconnected and len(live_clients("c1")) == 1
+        assert notices == ["c1"]  # tried once, not in a loop
+    finally:
+        await cleanup(*(t for t in (stop, start) if t is not None))
+
+
+async def test_a_restart_is_not_swallowed_by_a_run_asked_before_its_stop_ran(mgr, db):
+    """Before: a reconcile's RUN landing before the lane ran a restart's STOP
+    collapsed both into "keep the client", so the restart did not restart."""
+    assert await mgr.start_connector("c1") is True
+    first = mgr.get_running_instance("c1")
+    restart = asyncio.create_task(mgr.restart_connector("c1"))
+    await asyncio.sleep(0)  # the restart has asked STOP; its lane has not run yet
+    assert "c1" in mgr._lanes
+    mgr.request_run("c1")  # a reconcile, before the lane's first step
+    try:
+        assert await asyncio.wait_for(restart, 2) is True
+        assert first.disconnected
+        second = mgr.get_running_instance("c1")
+        assert second is not None and second is not first
+        assert len(live_clients("c1")) == 1
+    finally:
+        await cleanup(restart)

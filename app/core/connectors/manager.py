@@ -52,11 +52,14 @@ CONNECTOR_NEEDS_PROFILE_MESSAGE = (
 class _Lane:
     """One connector's lifecycle lane: the wanted state and the task moving toward it."""
 
-    __slots__ = ("asked", "connect", "task", "waiters", "want")
+    __slots__ = ("asked", "connect", "replace", "task", "waiters", "want")
 
     def __init__(self) -> None:
         self.want = STOP
         self.asked = 0  # bumped by every request; the lane exits once it has served the latest
+        # A STOP was asked since the current pass began: the next RUN pass must
+        # not keep the existing client (stop-then-run means a restart).
+        self.replace = False
         self.waiters: List[Tuple[int, asyncio.Future]] = []
         self.task: Optional[asyncio.Task] = None
         self.connect: Optional[asyncio.Future] = None  # in-flight connect(), cancelled when STOP is wanted
@@ -244,8 +247,10 @@ class ConnectorManager:
             lane.task.add_done_callback(lambda _task, cid=connector_id, ln=lane: self._settle_lane(cid, ln))
         lane.want = want
         lane.asked += 1
-        if want == STOP and lane.connect is not None:
-            lane.connect.cancel()
+        if want == STOP:
+            lane.replace = True
+            if lane.connect is not None:
+                lane.connect.cancel()
         if not wait:
             return None
         waiter = loop.create_future()
@@ -279,11 +284,12 @@ class ConnectorManager:
         outcome: Any = False
         try:
             while True:
-                asked, want = lane.asked, lane.want
+                asked, want, replace = lane.asked, lane.want, lane.replace
+                lane.replace = False
                 error: Optional[BaseException] = None
                 try:
                     if want == RUN and not self._closing:
-                        outcome = await self._start_pass(connector_id, lane)
+                        outcome = await self._start_pass(connector_id, lane, replace)
                     else:
                         await self._stop_pass(connector_id)
                         outcome = False
@@ -326,8 +332,10 @@ class ConnectorManager:
             done, _ = await asyncio.wait({task}, timeout=TEARDOWN_NOTICE_SECONDS)
             if not done:
                 logger.warning(f"Connector {connector_id}: its previous client has not stopped yet")
-                await run_sync(
-                    database.update_connector_status, connector_id, "error",
+                # A failed notice must not end the wait: only the lane's own
+                # cancellation may give up on this disconnect.
+                await self._note_status(
+                    connector_id, "error",
                     status_message=PREVIOUS_CLIENT_NOT_STOPPED_MESSAGE,
                     error=PREVIOUS_CLIENT_NOT_STOPPED_MESSAGE,
                 )
@@ -335,6 +343,14 @@ class ConnectorManager:
         except BaseException:
             task.cancel()  # only the lane's own cancellation (shutdown) gets here
             raise
+
+    @staticmethod
+    async def _note_status(connector_id: str, status: str, **fields: Any) -> None:
+        """A status write the lane must not stop for: a failure is logged, not raised."""
+        try:
+            await run_sync(database.update_connector_status, connector_id, status, **fields)
+        except Exception as e:
+            logger.warning(f"Connector {connector_id}: could not record status {status!r}: {e}")
 
     async def _stop_pass(self, connector_id: str) -> None:
         async with self._lock:
@@ -372,7 +388,7 @@ class ConnectorManager:
         await self.stop_connector(connector_id)
         return await self.start_connector(connector_id)
 
-    async def _start_pass(self, connector_id: str, lane: _Lane) -> bool:
+    async def _start_pass(self, connector_id: str, lane: _Lane, replace: bool = False) -> bool:
         """One RUN step of the lane: keep, or tear down and replace, the client.
 
         Idempotent for a live client: starting a connector that is already
@@ -385,6 +401,8 @@ class ConnectorManager:
         A live client whose row now holds a different config (an edit made
         on another worker, synced here) is replaced as well (#1382).
         Config changes made here go through ``restart_connector``, which stops first.
+        With *replace* (a STOP was asked since the last pass) the existing
+        client is never kept, so a stop followed by a start always restarts.
 
         Teardowns run outside ``receiver_lock``; the lock covers the start
         rule, connect() and registration, as the journal transfer fence needs.
@@ -394,7 +412,7 @@ class ConnectorManager:
             current_config = await run_sync(self._row_config_fingerprint, connector_id)
         async with self._lock:
             existing = self._connectors.get(connector_id)
-            if (existing is not None and self._is_live(connector_id, existing)
+            if (existing is not None and not replace and self._is_live(connector_id, existing)
                     and self._same_config(connector_id, existing, current_config)):
                 logger.info(f"Connector already running: {connector_id}")
                 return True
@@ -409,9 +427,10 @@ class ConnectorManager:
             started, discard = await self._connect_new(connector_id, lane)
         if discard is not None:
             await self._teardown(connector_id, discard)
-            if started is None and connector_id not in self._connectors:
-                # It lost its start rule while connecting.
-                await run_sync(database.update_connector_status, connector_id, "disconnected")
+        if started is None and connector_id not in self._connectors:
+            # It lost its start rule while connecting, or a stop came before
+            # connect() began; the row says "connecting" until this write.
+            await run_sync(database.update_connector_status, connector_id, "disconnected")
         return bool(started)
 
     async def _connect_new(
@@ -421,7 +440,8 @@ class ConnectorManager:
 
         Returns ``(started, discard)``: *discard* is a client the caller tears
         down after releasing the lock; ``started`` is None when it lost the
-        start rule while connecting (the row is then stamped disconnected).
+        start rule while connecting, or was abandoned before connect() began
+        (the row is then stamped disconnected).
         """
 
         def _prepare_blocking() -> Optional[Dict[str, Any]]:
@@ -523,14 +543,19 @@ class ConnectorManager:
             # its own hop; connect() is network work that stays on the loop.
             await run_sync(database.update_connector_status, connector_id, "connecting")
             success = await self._await_connect(connector_id, lane, instance)
+            if success is None:
+                # A stop (or shutdown) came during the status write. connect()
+                # never ran, so the instance is dropped without a disconnect.
+                logger.info(f"Connector {connector_id}: start abandoned, a stop was asked")
+                return None, None
         except asyncio.CancelledError:
             if asyncio.current_task().cancelling():
                 raise  # the lane itself is cancelled (shutdown)
             if lane.asked == asked:
                 # Nobody asked for anything since: connect() cancelled itself.
                 logger.error(f"Connector {connector_id} connect() was cancelled")
-                await run_sync(database.update_connector_status, connector_id, "error",
-                               error="connect() was cancelled")
+                # Quiet: the instance still has to reach the teardown below.
+                await self._note_status(connector_id, "error", error="connect() was cancelled")
             else:
                 # STOP was asked while it connected: tear it down, the lane stops it.
                 logger.info(f"Connector {connector_id}: start cancelled, a stop was asked")
@@ -574,14 +599,20 @@ class ConnectorManager:
             )
             return False, None
 
-    async def _await_connect(self, connector_id: str, lane: _Lane, instance: BaseConnector) -> bool:
+    async def _await_connect(self, connector_id: str, lane: _Lane, instance: BaseConnector) -> Optional[bool]:
         """Await connect() as its own future, so a STOP request can cancel it.
 
         No time limit: only ``_request(STOP)`` (``lane.connect.cancel()``) or
         the lane's own cancellation at shutdown cancels it. If the lane is
         cancelled and connect() still returns True later, that client is
         disconnected rather than left running unregistered.
+
+        Returns None, without calling connect(), when RUN is no longer wanted.
+        That check and installing ``lane.connect`` have no await between them,
+        so a STOP either sees the connect to cancel or is seen here.
         """
+        if lane.want != RUN or self._closing:
+            return None
         connect = lane.connect = asyncio.ensure_future(instance.connect())
         try:
             await asyncio.wait({connect})
