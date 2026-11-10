@@ -96,11 +96,15 @@ This is separate from the device tools in the AI Shuffle Android app. Those ask 
 - `MOBILEMCP_DISABLE_TELEMETRY` turns off the usage reports the package otherwise sends to its maker.
 - Keep the command form shown. The package can also run as a network server (`--listen`), which accepts anyone who can reach it unless you set a token.
 
-**Give the agent only the tools it needs.** The server offers 34 tools. In the agent's **Tools** section, pick tools one by one, not the whole server. These are enough to look at an app and use it:
+**Know which tools the agent gets.** The server offers 34 tools. An agent's **Tools** list does not show a server that was added to one project, so you cannot yet tick its tools one by one. Until you can, treat any agent that works in this project with all tools allowed as able to use all 34.
+
+To pick tools one by one today, add the server for every project in **Settings → MCP servers** instead. It is then available in all your projects, so turn it off there when you are not using it.
+
+These eight are enough to look at an app and use it:
 
 `mobile_list_available_devices`, `mobile_launch_app`, `mobile_list_elements_on_screen`, `mobile_take_screenshot`, `mobile_click_on_screen_at_coordinates`, `mobile_type_keys`, `mobile_swipe_on_screen`, `mobile_press_button`
 
-Leave these four off: `mobile_login_to_cloud_provider`, `mobile_list_remote_devices`, `mobile_allocate_remote_device` and `mobile_release_remote_device`. They rent devices from the maker's cloud service, which can cost money, and when no local device is found the server suggests that service to the agent.
+Four tools rent devices from the maker's cloud service, which can cost money: `mobile_login_to_cloud_provider`, `mobile_list_remote_devices`, `mobile_allocate_remote_device` and `mobile_release_remote_device`. When no local device is found, the server suggests that service to the agent. Leave them off where you can pick tools, and otherwise tell the agent not to use them.
 
 **What the worker needs.** The server runs on the worker that runs the chat, so that worker must reach the device itself. AI Shuffle does not pass a device from one worker to another.
 
