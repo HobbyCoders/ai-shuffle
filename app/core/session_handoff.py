@@ -45,6 +45,7 @@ as the Stop button does, then moves. The rules (#1819):
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import threading
@@ -79,6 +80,9 @@ NOTE_KEYS = ("handoff_id", "status", "worker", "count", "unconfirmed", "messages
 # command id built from the move's request time, so a resend is dropped there.
 RESUME_PAYLOAD = "handoff_resume"
 RESUME_COMMAND_PREFIX = "handoff-resume-"
+# #1419: the turn that tells the agent its hand-off ended here without moving.
+FAILED_PAYLOAD = "handoff_failed"
+FAILED_COMMAND_PREFIX = "handoff-failed-"
 # A peer's note is kept to this: the first NOTE_MESSAGES texts, each cut to
 # NOTE_MESSAGE_CHARS, and at most NOTE_DATA_CHARS of JSON in all.
 NOTE_MESSAGES = 50
@@ -100,6 +104,11 @@ class PendingHandoff:
     # While True, the owner's new messages wait for the move (``hold``).
     holding: bool = field(default=True)
     handoff_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # Set while the move is ending here (#1419); a failed end leaves it set.
+    ending: str = ""
+    # The chat's Stop sequence when the agent asked (#1419); None for an
+    # owner's move or a row from an older build, which get no notice.
+    stop_seq: Optional[int] = None
 
     def __post_init__(self) -> None:
         if not self.expires_at:
@@ -123,6 +132,8 @@ _state_lock = threading.Lock()
 # Serialises holding a message against releasing the held list, so a message
 # is either held (and later released with the rest) or submitted after them.
 _hold_lock = threading.RLock()
+# The session whose held messages this thread is sending here (``_submit_here``).
+_releasing = threading.local()
 _store_lock = threading.Lock()
 
 
@@ -150,7 +161,7 @@ def _save(session_id: str, pending: PendingHandoff) -> None:
 
     session_moves.save(session_id, target_id=pending.target_id, label=pending.label, note=pending.note,
                        requested_by=pending.by, requested_at=pending.requested_at,
-                       expires_at=pending.expires_at, handoff_id=pending.handoff_id)
+                       expires_at=pending.expires_at, handoff_id=pending.handoff_id, stop_seq=pending.stop_seq)
 
 
 def _workers() -> Dict[str, Any]:
@@ -203,9 +214,15 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
            else "commits and pushes the branch and moves this session there")
     # Read before taking _state_lock: busy_state does DB work (#1416).
     holding = _holding_text(session_id)
+    from app.db import wakeups
+
+    stop_seq = wakeups.current_stop_seq(session_id)  # any later Stop cancels the failure notice
     with _state_lock:
         _check_cancelling(session_id)
         current = _active(session_id)
+        if current is not None and current.ending:
+            raise ValueError(f"The last hand-off to {current.label} ended ({current.ending}) and is still "
+                             "being closed. Call HandOffSession again in a minute.")
         if current is not None and current.target_id != row["device_id"]:
             raise ValueError(f"A move to {current.label} is already queued. Cancel it first.")
         message = ("Finish this turn now with a short summary of where the work stands; once the turn "
@@ -215,7 +232,7 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
             return {"queued": True, "worker": current.label, "handoff_id": current.handoff_id,
                     "message": f"Hand-off to {current.label} is already queued. {message}"}
         pending = PendingHandoff(row["device_id"], str(row.get("device_name") or row["device_id"]),
-                                 " ".join((note or "").split())[:2000], time.time())
+                                 " ".join((note or "").split())[:2000], time.time(), stop_seq=stop_seq)
         _save(session_id, pending)
         _pending[session_id] = pending
         return {"queued": True, "worker": pending.label, "handoff_id": pending.handoff_id,
@@ -283,7 +300,7 @@ def holds(session_id: str) -> bool:
     """Whether the owner's new messages to ``session_id`` wait for a queued move.
 
     A cancelled move holds too until its held messages are released here
-    (``_release_here_sync`` ends it), so a newer message never runs before them.
+    (``_release_here_sync`` or ``_end_here_sync`` ends it), so a newer message never runs before them.
     """
     pending = pending_for(session_id)
     return bool(pending and pending.holding)
@@ -322,7 +339,7 @@ def hold(session_id: str, source: str, submit: Dict[str, Any]) -> Optional[str]:
     ``submit`` is the keyword arguments of ``turn_manager._submit_blocking``;
     they are replayed as they are, here or on the new worker.
     """
-    if source not in HOLD_SOURCES:
+    if source not in HOLD_SOURCES or getattr(_releasing, "session", None) == session_id:
         return None
     from app.core.turn_manager import VOICE_DELEGATION
 
@@ -396,20 +413,26 @@ def _held_caller(entry: Dict[str, Any]) -> Optional[str]:
 
 
 def _submit_here(session_id: str, held: List[Dict[str, Any]]) -> Released:
-    """Queue ``held`` here. Returns how many were sent and the ones refused."""
+    """Queue ``held`` here as one unit: a move queued while they are sent
+    (by the turn of the first) never holds the rest (``hold``). Returns how
+    many were sent and the ones refused."""
     from app.core import turn_manager
 
     sent = 0
     unsent: List[Dict[str, Any]] = []
-    for entry in held:
-        try:
-            turn_manager.submit(session_id, str(entry.get("source") or "user"), no_kick=True,
-                                caller=_held_caller(entry),
-                                **{key: entry[key] for key in _SUBMIT_KEYS if key in entry})
-            sent += 1
-        except Exception:  # noqa: BLE001 — one refused message must not stop the rest
-            logger.warning("Could not send a held message of %s here", session_id, exc_info=True)
-            unsent.append(entry)
+    _releasing.session = session_id
+    try:
+        for entry in held:
+            try:
+                turn_manager.submit(session_id, str(entry.get("source") or "user"), no_kick=True,
+                                    caller=_held_caller(entry),
+                                    **{key: entry[key] for key in _SUBMIT_KEYS if key in entry})
+                sent += 1
+            except Exception:  # noqa: BLE001 — one refused message must not stop the rest
+                logger.warning("Could not send a held message of %s here", session_id, exc_info=True)
+                unsent.append(entry)
+    finally:
+        _releasing.session = None
     return sent, unsent
 
 
@@ -470,18 +493,6 @@ async def _queue_changed(session_id: str) -> None:
     from app.core.session_runtime import _broadcast_queue_after_start
 
     await _broadcast_queue_after_start(session_id)
-
-
-async def _release_here(session_id: str, pending: Optional[PendingHandoff]) -> Released:
-    """Send the held messages here. The caller records its outcome, then
-    ``_report_unsent_here`` for the ones refused."""
-    sent, unsent = await asyncio.to_thread(_release_here_sync, session_id, pending)
-    if sent:
-        from app.core import turn_manager
-
-        turn_manager._kick(session_id)
-    await _queue_changed(session_id)
-    return sent, unsent
 
 
 def _resend_safe(target_id: str) -> bool:
@@ -1216,14 +1227,140 @@ async def _expire(session_id: str, pending: PendingHandoff) -> str:
     state = await asyncio.to_thread(busy_state, session_id)
     still = _busy_words(state)
     still_text = f" Still running: {still}." if still else ""
-    sent, unsent = await _release_here(session_id, pending)
     minutes = max(1, round(IDLE_TIMEOUT_S / 60))
-    outcome = (f"{_noun(pending)} to {pending.label} cancelled: this chat was still busy after "
-               f"{minutes} minutes.{still_text}{_sent_here(sent)}")
+    reason = (f"{_noun(pending)} to {pending.label} cancelled: this chat was still busy after "
+              f"{minutes} minutes.{still_text}")
+    sent, unsent = await _end_here(session_id, pending, reason)
+    outcome = reason + _sent_here(sent)
     await _record(session_id, outcome, {"handoff_id": pending.handoff_id, "status": "timeout", "worker": pending.label, "by": pending.by,
                                         "still": still})
     await _report_unsent_here(session_id, unsent, pending.handoff_id)
     return outcome
+
+
+def _notice_wake(session_id: str, pending: PendingHandoff, reason: str) -> Optional[Dict[str, Any]]:
+    """The ordinary persisted wake-up (``pending_wakeups``) that tells an agent
+    its move ended here, or None: never for an owner's move, a cancelled one,
+    or a stopped, archived or deleted chat. From its commit on the wake-up
+    service owns it, like any wake: Stop, refused admission, delete, restart."""
+    if pending.by != "agent" or pending.cancelled or pending.stop_seq is None:
+        return None
+    from app.core import archive_guard, turn_scheduler
+    from app.core.config import settings
+    from app.db import database
+
+    if archive_guard.is_archived(session_id):
+        return None
+    session = database.get_session(session_id)
+    if not session:
+        return None
+    context = turn_scheduler._latest_context_turn(session_id) or {}
+    return {"id": FAILED_COMMAND_PREFIX + pending.handoff_id, "session_id": session_id, "source": FAILED_PAYLOAD,
+            "prompt": (f"[hand-off] Your HandOffSession move did not happen: {reason} This chat still runs on "
+                       "this worker. Fix the cause and call HandOffSession again, or tell the owner why you cannot."),
+            "fire_at": time.time(), "reason": "hand-off notice", "stop_seq": pending.stop_seq,
+            "instance_id": settings.effective_instance_id,
+            "profile_id": context.get("profile_id") or session.get("profile_id"),
+            "project_id": context.get("project_id") or session.get("project_id"),
+            "model": (context.get("overrides") or {}).get("model")}
+
+
+def notice_payload(session_id: str, wakeup_id: str) -> Dict[str, Any]:
+    """The payload the notice wake fires with: the chain context any wake of
+    this chat inherits (root, depth, a remote origin's restriction), so the
+    notice can do no more than the turn that called HandOffSession could."""
+    from app.core import turn_scheduler
+
+    context = turn_scheduler._latest_context_turn(session_id) or {}
+    return {**turn_scheduler._context_payload(context),
+            FAILED_PAYLOAD: {"handoff_id": wakeup_id[len(FAILED_COMMAND_PREFIX):]}}
+
+
+def _here(session: Dict[str, Any]) -> bool:
+    from app.network import control
+
+    return control.owner_of(session) is None
+
+
+def notice_owed(row: Dict[str, Any]) -> bool:
+    """Whether the notice wake ``row`` is still to be delivered: its row is
+    there, no Stop since the request cancelled it, and the chat runs here."""
+    from app.db import database, wakeups
+
+    if not wakeups.pending_not_stopped(str(row.get("id"))):
+        return False
+    session = database.get_session(str(row.get("session_id")))
+    return bool(session) and _here(session)
+
+
+def wait_released() -> None:
+    """Return once no move is releasing held messages here. A notice wake is
+    written inside the same ``_hold_lock`` hold that sends its move's held
+    messages, so a firer that saw the row and passes this queues after them."""
+    with _hold_lock:
+        pass
+
+
+def _retire(session_id: str, pending: PendingHandoff) -> None:
+    """Stop answering for this move, so a new request queues a new move instead
+    of finding this one "already queued". Never removes one queued after it."""
+    with _state_lock:
+        for table in (_waiting, _moving):
+            if table.get(session_id) is pending:
+                del table[session_id]
+
+
+def _end_here_sync(session_id: str, pending: PendingHandoff, reason: str,
+                   release: bool) -> Tuple[Released, Optional[Dict[str, Any]]]:
+    """End the move here. One transaction takes its queued row (``release``)
+    and writes the agent's notice wake; then the move is retired and its held
+    messages sent as one unit no newer move can hold (``_submit_here``).
+    Returns ((sent, unsent), the written wake). A raise leaves the move queued
+    and ending (``request`` refuses a new one) for ``_end_here`` to retry."""
+    from app.db import session_moves
+
+    with _state_lock:
+        pending.ending = reason
+    wake = _notice_wake(session_id, pending, reason)  # its reads stay outside _hold_lock
+    with _hold_lock:
+        if pending.cancelled:  # a cancel holds _hold_lock until it has released the move
+            wake = None
+        row, written = session_moves.take_ended(session_id, pending.handoff_id, take=release, wake=wake,
+                                                still_here=_here)
+        if release:
+            pending.holding = False
+        _retire(session_id, pending)
+        sent, unsent = _submit_here(session_id, list(row.get("held") or [])) if row else (0, [])
+    return (sent, unsent), written
+
+
+# Seconds between attempts to end a move whose transaction raised; the last
+# repeats until it succeeds. A restart before then resumes the queued move.
+END_RETRY_DELAYS: Tuple[float, ...] = (1, 2, 4, 8, 16, 32, 60)
+
+
+async def _end_here(session_id: str, pending: PendingHandoff, reason: str, *, release: bool = True) -> Released:
+    """#1419: the move ended here without moving (``reason``). Its held
+    messages run here, then an agent that queued it is told by one ordinary
+    wake-up that fires after them. Holds no lock while it waits to retry."""
+    for attempt in itertools.count():
+        try:
+            (sent, unsent), wake = await asyncio.to_thread(_end_here_sync, session_id, pending, reason, release)
+            break
+        except Exception:  # noqa: BLE001 — the move stays queued; retried below
+            log = logger.error if attempt == len(END_RETRY_DELAYS) else logger.warning
+            log("Could not end the hand-off %s of %s here; retrying", pending.handoff_id, session_id, exc_info=True)
+        await asyncio.sleep(END_RETRY_DELAYS[min(attempt, len(END_RETRY_DELAYS) - 1)])
+    if sent:
+        from app.core import turn_manager
+
+        turn_manager._kick(session_id)
+    if wake:
+        from app.core import wakeup_service
+
+        wakeup_service.arm_persisted(wake)
+    await _queue_changed(session_id)
+    return sent, unsent
 
 
 def _claim(session_id: str, pending: PendingHandoff) -> bool:
@@ -1296,21 +1433,20 @@ async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
 async def _failed(session_id: str, pending: PendingHandoff, error: Any) -> str:
     """The move raised. Ownership decides what happened, not the error: a move
     whose reply was lost may have finished on the new worker."""
-    try:
-        owner = await asyncio.to_thread(_owner_now, session_id)
-    except Exception:  # noqa: BLE001 — unknown: treated as still here
-        logger.warning("Could not read the owner of %s after a failed move", session_id, exc_info=True)
-        owner = None
+    for attempt in itertools.count():
+        try:
+            owner = await asyncio.to_thread(_owner_now, session_id)
+            break
+        except Exception:  # noqa: BLE001 — unknown is never taken as "still here"
+            logger.warning("Could not read the owner of %s after a failed move; retrying", session_id,
+                           exc_info=True)
+        await asyncio.sleep(END_RETRY_DELAYS[min(attempt, len(END_RETRY_DELAYS) - 1)])
     if owner is not None:
         logger.warning("Move of %s raised (%s) but it now runs on %s", session_id, error, owner)
         return await _moved(session_id, pending, owner)
-    sent, unsent = 0, []
-    if pending.holding:
-        try:
-            sent, unsent = await _release_here(session_id, pending)
-        except Exception:  # noqa: BLE001
-            logger.warning("Could not send held messages of %s here", session_id, exc_info=True)
-    outcome = f"{_noun(pending)} to {pending.label} failed: {error}{_sent_here(sent)}"
+    reason = f"{_noun(pending)} to {pending.label} failed: {error}"
+    sent, unsent = await _end_here(session_id, pending, reason, release=pending.holding)
+    outcome = reason + _sent_here(sent)
     await _record(session_id, outcome, {"handoff_id": pending.handoff_id, "status": "failed", "worker": pending.label})
     await _report_unsent_here(session_id, unsent, pending.handoff_id)
     return outcome
@@ -1333,10 +1469,11 @@ async def run_pending(session_id: str) -> Optional[str]:
         if not idle:
             return await _expire(session_id, pending)
         if await asyncio.to_thread(_open_prompt, session_id):
-            sent, unsent = await _release_here(session_id, pending)
             from app.network.handoff import OPEN_PROMPT
 
-            outcome = f"{_noun(pending)} to {pending.label} cancelled. {OPEN_PROMPT}{_sent_here(sent)}"
+            reason = f"{_noun(pending)} to {pending.label} cancelled. {OPEN_PROMPT}"
+            sent, unsent = await _end_here(session_id, pending, reason)
+            outcome = reason + _sent_here(sent)
             await _record(session_id, outcome, {"handoff_id": pending.handoff_id, "status": "failed", "worker": pending.label,
                                                 "by": pending.by, "reason": "open_prompt"})
             await _report_unsent_here(session_id, unsent, pending.handoff_id)
@@ -1359,9 +1496,8 @@ async def run_pending(session_id: str) -> Optional[str]:
         logger.warning("Hand-off failed for %s", session_id, exc_info=True)
         return await _failed(session_id, pending, exc)
     finally:
+        _retire(session_id, pending)
         with _state_lock:
-            _waiting.pop(session_id, None)
-            _moving.pop(session_id, None)
             _running.discard(session_id)
         # A move queued while a cancelled one was still winding down.
         schedule(session_id)
@@ -1583,7 +1719,8 @@ async def resume_queued() -> int:
             pending = PendingHandoff(str(row["target_id"]), str(row["label"]), str(row.get("note") or ""),
                                      float(row["requested_at"]), by=str(row.get("requested_by") or "agent"),
                                      expires_at=float(row["expires_at"]),
-                                     handoff_id=row.get("handoff_id") or str(uuid.uuid4()))
+                                     handoff_id=row.get("handoff_id") or str(uuid.uuid4()),
+                                     stop_seq=row.get("stop_seq"))
             if not row.get("handoff_id"):
                 await asyncio.to_thread(_save, session_id, pending)
             if owner is not None:
@@ -1599,7 +1736,19 @@ async def resume_queued() -> int:
                 _spawn(deliver_held(session_id, owner, label, resume))
                 continue
             if time.time() >= pending.expires_at:
-                await _expire(session_id, pending)
+                with _state_lock:
+                    if session_id in _running or pending_for(session_id) is not None:
+                        continue
+                    # Reserved like a live end: a request now is refused as closing.
+                    pending.ending = "it ran out of time before this worker restarted"
+                    _running.add(session_id)
+                    _moving[session_id] = pending
+                try:
+                    await _expire(session_id, pending)
+                finally:
+                    _retire(session_id, pending)
+                    with _state_lock:
+                        _running.discard(session_id)
                 continue
             _pending[session_id] = pending
             schedule(session_id)

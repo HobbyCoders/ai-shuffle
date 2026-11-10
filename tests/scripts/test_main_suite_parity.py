@@ -42,10 +42,11 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
     jobs = config["jobs"]
     gate = jobs["main-suite"]
     assert gate["name"] == "Main suite"
-    assert gate["if"] == "always()"
-    assert set(gate["needs"]) - {"proven"} == set(suite.REQUIRED) == set(jobs) - {
-        "main-suite", "journey-issues", "source-ui", "stop-on-failure", "proven"}
-    assert "proven" in gate["needs"]
+    # The verdict starts with the run (after the lookup it reads), so it never
+    # queues for a runner once the last job finishes; it judges the jobs itself.
+    assert gate["if"] == "${{ !cancelled() }}"
+    assert gate["needs"] == ["proven"]
+    assert set(suite.REQUIRED) == set(jobs) - {"main-suite", "source-ui", "proven"}
     expected = {
         "backend": "ci-backend", "javascript": "ci-frontend", "fluid": "ci-fluid",
         "windows": "windows-suite", "browser-workspace": "ci-browser-workspace",
@@ -61,8 +62,10 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
         assert called["on"]["pull_request"] == ""
         assert called["permissions"] == {"contents": "read"}
         assert called["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
-    for job in ["windows", "identity", "desktop", "policy"]:
+    for job in ["identity", "desktop", "policy"]:
         assert jobs[job]["with"] == {"main_suite": "true"}
+    assert jobs["windows"]["with"] == {"main_suite": "true", "gated_by_caller": "true"}
+    assert jobs["backend"]["with"] == jobs["browser-workspace"]["with"] == {"gated_by_caller": "true"}
     on_main = "github.event_name == 'push' || github.ref == 'refs/heads/main'"
     for name in suite.REQUIRED:
         if name in suite.PROVABLE:
@@ -75,9 +78,11 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
         else:
             assert "needs" not in jobs[name]
             assert jobs[name]["if"] == on_main
-    step = gate["steps"][-1]
-    assert step["env"] == {"RESULTS": "${{ toJSON(needs) }}"}
-    assert step["run"] == "python scripts/ci/main_suite.py aggregate"
+    step = next(step for step in gate["steps"] if step.get("id") == "verdict")
+    assert step["env"] == {"GH_TOKEN": "${{ github.token }}", "RESULTS": "${{ toJSON(needs) }}"}
+    assert step["run"] == "python scripts/ci/main_gate.py"
+    source = (ROOT / "scripts/ci/main_gate.py").read_text()
+    assert "from ci.main_suite import LOOKUP, REQUIRED, aggregate" in source and "aggregate(results)" in source
 
 
 def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
@@ -88,10 +93,7 @@ def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
     assert "needs" not in lookup
     # A failed lookup neither fails the run nor stops it: every area then runs.
     assert lookup["continue-on-error"] == "true"
-    spec = importlib.util.spec_from_file_location("stop_on_failure", ROOT / "scripts/ci/stop_on_failure.py")
-    stop = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(stop)
-    assert stop.is_advisory(lookup["name"])
+    assert main_gate().Plan().is_advisory(lookup["name"])
     # Advisory lists change with no file changing, so the blocking audits of the
     # recorded areas always run on main, with the pull-request commands.
     audits = "\n".join(step.get("run", "") for step in jobs["supply-chain"]["steps"])
@@ -121,7 +123,8 @@ def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
     # The JavaScript workflow always runs: it decides the journeys itself.
     javascript = jobs["javascript"]
     assert javascript["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "read"}
-    assert javascript["with"] == {"checks_proven": "${{ needs.proven.outputs.javascript-checks == 'true' }}"}
+    assert javascript["with"] == {"checks_proven": "${{ needs.proven.outputs.javascript-checks == 'true' }}",
+                                  "gated_by_caller": "true"}
     # Every area main may skip is recorded by exactly one job of its pull-request
     # workflow, for this repository's own pull requests only, after its checks passed.
     recorded = {}
@@ -172,7 +175,7 @@ def test_main_suite_has_no_test_secrets_or_paid_runners():
         assert "secrets" not in (ROOT / ".github/workflows" / name).read_text()
         for name, job in config["jobs"].items():
             assert "environment" not in job
-            if name in ("journey-issues", "stop-on-failure", "proven"):
+            if name == "proven":
                 assert job["continue-on-error"] == "true"
             else:
                 assert "continue-on-error" not in job
@@ -180,25 +183,30 @@ def test_main_suite_has_no_test_secrets_or_paid_runners():
                 assert job["runs-on"] == "ubuntu-latest"
 
 
-def test_journey_reporter_is_main_push_only_advisory_and_has_the_only_issue_write_permission():
-    config = workflow()
-    jobs = config["jobs"]
-    reporter = jobs["journey-issues"]
-    assert reporter["if"] == "always() && github.event_name == 'push' && github.ref == 'refs/heads/main'"
-    assert reporter["needs"] == ["javascript"]
-    assert reporter["continue-on-error"] == "true"
-    assert reporter["permissions"] == {"contents": "read", "actions": "read", "issues": "write"}
-    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("issues") == "write"] == ["journey-issues"]
-    assert "journey-issues" not in jobs["main-suite"]["needs"]
-    step = reporter["steps"][1]
-    assert step["run"] == "python3 -m scripts.devloop.journey_issues"
-    assert step["continue-on-error"] == "true"
-    assert step["timeout-minutes"] == "2"
-    assert reporter["timeout-minutes"] == "5"
-    assert reporter["steps"][-1]["if"] == "always() && (failure() || steps.report.outcome == 'failure')"
-    assert "::warning" in reporter["steps"][-1]["run"]
-    # Publishing still checks the whole workflow, making job-level tolerance
-    # essential even though the reporter is excluded from the final aggregate.
+def main_gate():
+    spec = importlib.util.spec_from_file_location("main_gate", ROOT / "scripts/ci/main_gate.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_gate_reports_journeys_on_main_pushes_only_and_never_fails_on_it():
+    jobs = workflow()["jobs"]
+    gate = jobs["main-suite"]
+    steps = {step.get("id"): step for step in gate["steps"]}
+    report = steps["report"]
+    # A red sibling shard must not suppress recovered cases from another shard.
+    assert report["if"] == "always() && github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    assert report["run"] == "python3 -m scripts.devloop.journey_issues"
+    assert report["continue-on-error"] == "true"
+    assert report["timeout-minutes"] == "2"
+    assert gate["steps"][-1]["if"] == "always() && steps.report.outcome == 'failure'"
+    assert "::warning" in gate["steps"][-1]["run"]
+    # Reporting comes after the verdict and the receipt checks, never before them.
+    names = [step.get("id") or step.get("name") for step in gate["steps"]]
+    assert names.index("verdict") < names.index("report")
+    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("issues") == "write"] == ["main-suite"]
+    # Publishing checks the whole workflow; the reporter step can never fail it.
     assert "github.event.workflow_run.conclusion == 'success'" in workflow("desktop-source.yml")["jobs"]["gate"]["if"]
     uploader = next(step for step in workflow("ci-frontend.yml")["jobs"]["journeys"]["steps"]
                     if step.get("name") == "Upload journey timelines")
@@ -206,25 +214,31 @@ def test_journey_reporter_is_main_push_only_advisory_and_has_the_only_issue_writ
     assert uploader["with"]["path"] == "${{ runner.temp }}/ui-journeys/"
 
 
-def test_stop_on_failure_is_advisory_and_holds_the_only_actions_write_permission():
+def test_the_gate_alone_may_cancel_the_run_and_checks_the_receipts_the_skipped_verdicts_checked():
     jobs = workflow()["jobs"]
-    watcher = jobs["stop-on-failure"]
-    assert watcher["if"] == "github.event_name == 'push' || github.ref == 'refs/heads/main'"
-    assert watcher["continue-on-error"] == "true"
-    assert "needs" not in watcher and "stop-on-failure" not in jobs["main-suite"]["needs"]
-    assert watcher["permissions"] == {"contents": "read", "actions": "write"}
-    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("actions") == "write"] == ["stop-on-failure"]
-    step = watcher["steps"][-1]
-    assert step["run"] == "python3 scripts/ci/stop_on_failure.py"
-    assert step["continue-on-error"] == "true"
-    # The names the watcher ignores must be the jobs that cannot fail the run.
-    spec = importlib.util.spec_from_file_location("stop_on_failure", ROOT / "scripts/ci/stop_on_failure.py")
-    stop = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(stop)
-    assert stop.is_advisory(watcher["name"]) and stop.is_advisory(jobs["journey-issues"]["name"])
-    assert stop.is_advisory("source-ui / build") and stop.GATE == jobs["main-suite"]["name"]
-    for name in suite.REQUIRED:
-        assert not stop.is_advisory(f"{name} / anything") and not stop.is_advisory(name)
+    gate = jobs["main-suite"]
+    assert gate["permissions"] == {"contents": "read", "actions": "write", "issues": "write"}
+    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("actions") == "write"] == ["main-suite"]
+    # It holds its runner for the whole run, which is longer than any job.
+    assert int(gate["timeout-minutes"]) >= 150
+    assert gate["runs-on"] == "ubuntu-latest"
+    module = main_gate()
+    assert module.GATE == gate["name"] == "Main suite"
+    steps = gate["steps"]
+    # The same receipt checks as the called workflows' own verdict jobs.
+    backend = workflow("ci-backend.yml")["jobs"]["backend"]["steps"]
+    windows = workflow("windows-suite.yml")["jobs"]["desktop-gate"]["steps"]
+    commands = "\n".join(step.get("run", "") for step in steps)
+    for step in backend + windows:
+        for line in step.get("run", "").splitlines():
+            if "shard_evidence.py" in line or "backend_gate.py" in line or "--desktop-evidence" in line:
+                assert line.strip() in commands
+    downloads = [step["with"]["pattern"] for step in steps if step.get("uses", "").startswith("actions/download-artifact")]
+    assert downloads == [step["with"]["pattern"] for step in backend + windows
+                         if step.get("uses", "").startswith("actions/download-artifact")]
+    for step in steps:
+        if step.get("uses", "").startswith("actions/download-artifact") or "shard_evidence" in step.get("run", ""):
+            assert step["if"] in ("steps.verdict.outputs.backend == 'true'", "steps.verdict.outputs.windows == 'true'")
 
 
 def test_parity_jobs_reuse_local_commands_and_strict_reach(monkeypatch):

@@ -32,7 +32,7 @@ AI Shuffle is an independent product. It is not affiliated with, built, endorsed
 | Page | Read it when |
 | --- | --- |
 | [Updates](/docs/getting-started/updates) | A new version is out. |
-| [AI Shuffle Cloud](/docs/getting-started/cloud) | Free local use, remote workers, paid plans, cancellation and refunds. |
+| [AI Shuffle Cloud](/docs/getting-started/cloud) | Free local use, remote workers, the Pro and Ultimate plans, cancellation and refunds. |
 | [Troubleshooting](/docs/getting-started/troubleshooting) | Something does not work. |
 | [FAQ](/docs/getting-started/faq) | You have a question about accounts, privacy, pricing or support. |
 
