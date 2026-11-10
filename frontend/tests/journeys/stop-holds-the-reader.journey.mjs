@@ -4,8 +4,11 @@
 // Rows past the fold are one deliberate tap on Jump to latest away.
 import { runJourney } from './runner.mjs';
 import {
+	PROJECT,
 	composer,
 	expect,
+	pickAccess,
+	pickProject,
 	scriptTag,
 	scrollTranscriptTo,
 	sendButton,
@@ -38,6 +41,91 @@ function growTranscriptOnePixel(page) {
 }
 
 const jumpToLatestButton = (page) => page.getByRole('button', { name: 'Jump to latest message' });
+
+/** Stop asks first when background work is running, since it ends that too. */
+async function stopEverything(page) {
+	await page.getByRole('button', { name: 'Stop generating' }).click();
+	await page.getByRole('button', { name: 'Stop everything' }).click();
+}
+
+/** The running-task row above the queue, read per painted frame with the rest (#1147). */
+const TASK_ROW = '.chat-column > .inline';
+const taskRowShown = (page) => page.evaluate((sel) => document.querySelector(sel) !== null, TASK_ROW);
+
+/** A turn that starts a real background job and stays open, with messages queued behind it. */
+async function queueBehindABackgroundJob(page, mark, variant, queued) {
+	await mark('start a background job');
+	// A turn taller than the screen, so the room under it is the minimum and the
+	// row's own height is all that holds the scroll range up. The turn then waits
+	// on a minute-long command: still content, still open, until Stop.
+	await typeAndSend(page, `job tok-${uniq()} ${scriptTag(variant, 'tool-background-long', { tps: 400, latency_ms: 0 })}`);
+	await page.locator('[data-ui-mount="MessageArea"]').getByTestId('tasks-toggle').waitFor({ timeout: 60_000 });
+	await page.getByText('Waiting on it.', { exact: false }).last().waitFor({ timeout: 60_000 });
+	await page.waitForTimeout(1000);
+	await waitChat(page, { streaming: 'true' }, { timeout: 30_000 });
+	await mark('queue');
+	const texts = Array.from({ length: queued }, () => `tok-${uniq()}`);
+	for (const text of texts) {
+		await typeAndSend(page, `queued ${text}`);
+		await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+	}
+	await page.waitForFunction(
+		(n) => document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length === n,
+		texts.length,
+		{ timeout: 30_000 }
+	);
+	return texts;
+}
+
+/**
+ * Stop everything with a background job running ends that job too, and its
+ * running-task row leaves the transcript above the queued bubbles (#1147). In
+ * the frame it leaves, nothing on screen may move: not the line being read, not
+ * the bubbles, not the scroll position.
+ */
+const stopWithARunningTask = {
+	async setup(ctx) {
+		await openStopChat(ctx);
+		// Shell tools need a project; Bypass so the job starts without approvals.
+		await pickProject(ctx.page, ctx.page.getByRole('region', { name: 'New chat' }), PROJECT);
+		await pickAccess(ctx.page, 'Bypass');
+		await ctx.page.waitForTimeout(800);
+		await typeAndSend(ctx.page, `history tok-${uniq()} ${scriptTag(ctx.variant, 'long', { tps: 400 })}`);
+		await waitTurnSettled(ctx.page, { text: 'Here is a long answer', messagesAtLeast: 2, timeout: 90_000 });
+	},
+	async act({ page, mark, variant, log }) {
+		const texts = await queueBehindABackgroundJob(page, mark, variant, 2);
+		const collect = await watchStopFrames(page, texts);
+		await mark('stop');
+		expect(await taskRowShown(page), 'the running-task row is in the transcript before Stop');
+		await stopEverything(page);
+		await page.waitForFunction((sel) => document.querySelector(sel) === null, TASK_ROW, { timeout: 15_000 });
+		await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+		for (const text of texts) {
+			await page.locator('[data-not-sent="true"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+		}
+		await page.waitForTimeout(500);
+		const frames = await collect();
+		const geometry = frames.filter((f, i) => i === 0 || ['scrollTop', 'scrollHeight', 'taskRow', 'lineTop'].some((k) => f[k] !== frames[i - 1][k]) || f.messages.some((m, j) => m.top !== frames[i - 1].messages[j].top));
+		log(`[at, scrollTop, scrollHeight, task row, first line on screen, queued tops] ${JSON.stringify(geometry.map((f) => [f.at, f.scrollTop, f.scrollHeight, f.taskRow, f.lineTop, f.messages.map((m) => `${m.bubbles ? 'b' : 'r'}${m.top}`).join(' ')]))}`);
+		const gone = frames.findIndex((f, i) => i > 0 && f.taskRow === null && frames[i - 1].taskRow !== null);
+		expect(gone > 0, `watched the running-task row leave (${frames.length} frames)`);
+		const [was, now] = [frames[gone - 1], frames[gone]];
+		expect(was.taskRow > 40, `the row had height before it left (${was.taskRow}px)`);
+		expect(was.lineTop !== null && now.lineTop !== null, 'the first line on screen was found on both sides of the removal');
+		const lineMoved = Math.abs(now.lineTop - was.lineTop);
+		const scrollMoved = Math.abs(now.scrollTop - was.scrollTop);
+		log(`task row left at ${now.at}ms: line moved ${lineMoved}px, scrollTop ${was.scrollTop} -> ${now.scrollTop}`);
+		expect(lineMoved <= 1, `the line being read stayed put as the row left (moved ${lineMoved}px)`);
+		expect(scrollMoved <= 1, `the scroll position held as the row left (${was.scrollTop} -> ${now.scrollTop})`);
+		now.messages.forEach((message, m) => {
+			const before = was.messages[m];
+			expect(message.bubbles === 1 && before.bubbles === 1, `queued message ${m} was still a bubble when the row left`);
+			const moved = Math.abs(message.top - before.top);
+			expect(moved <= 1, `queued message ${m} stayed put as the row left (moved ${moved}px)`);
+		});
+	}
+};
 
 /** Stop with queued messages must not move what the person is reading, then or later. */
 function stopReadingPosition({ scrolled, queued = 3, overflows = false, rounds = 1 }) {
@@ -149,6 +237,20 @@ await runJourney({
 		// More of them, Stop after Stop in one chat with no filler in between.
 		{ name: 'stop-holds-the-reader-with-four-queued', ...stopReadingPosition({ scrolled: false, queued: 4, overflows: true, rounds: 2 }) },
 		{ name: 'stop-holds-the-reader-scrolled-up', ...stopReadingPosition({ scrolled: true }) },
+		{
+			// The frame the running-task row leaves is checked pixel by pixel in the case.
+			// Later, when the stopped turn settles, its finished steps fold and the rows
+			// under them move; on a phone that fold is large enough to count as a shift.
+			name: 'stop-with-a-running-task-holds-the-bubbles',
+			...stopWithARunningTask,
+			allow: [
+				{
+					kind: 'layout_shift',
+					message: /moved: div\.msg-virtualized in MessageArea/,
+					reason: 'known bug #1147: a stopped turn folds its finished steps about 0.8 s after Stop and the Not sent rows move with it'
+				}
+			]
+		},
 		{
 			// A reply arriving in large pieces, followed at the bottom. The follow has to
 			// land in the frame the piece does, or for one frame everything below the
