@@ -1022,7 +1022,14 @@ function resetFeedFlags(): void {
  * resume; the restart path passes false because it is explicitly discarding it.
  */
 function teardown(capture: boolean): void {
-	if (capture) captureTranscript();
+	if (capture) {
+		// A send echoed since the last fold is on screen but not yet in the
+		// reducer. Adopt it while the leaving chat is still the app's, or the
+		// switch back restores the chat one message short (#1142). A refusal
+		// that lands later retracts it from the cache (retractOptimisticSend).
+		seedOptimistic();
+		captureTranscript();
+	}
 	feedGeneration++;
 	if (feed) {
 		feed.stop();
