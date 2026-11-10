@@ -457,7 +457,17 @@
 		if (!ownsComposer()) return;
 		// Adoption is not a navigation away from the draft we already painted.
 		if (!newSessionId && $activeSession.isRestoringSession && prevSessionId === composerBootSessionId) return;
-		if (newSessionId !== prevSessionId) {
+		if (newSessionId !== prevSessionId && editorRef && prevSessionId === null
+			&& newChatSendNavigation === getInitGeneration()) {
+			// New chat taking the id its own send created, with no navigation since,
+			// is not a leave: what was typed after Send stays in the editor (caret
+			// included) and becomes the adopted chat's draft, moved out of the New
+			// chat slot the send emptied (#1361).
+			detachComposerDictation(editorRef.getEditor());
+			prevSessionId = newSessionId;
+			saveDraftImmediately();
+			writeDraft(null, '');
+		} else if (newSessionId !== prevSessionId) {
 			// Move capture off the shared editor before replacing its document.
 			detachComposerDictation(editorRef?.getEditor());
 			// A send still waiting for the chat being left keeps this, the newest
@@ -472,14 +482,11 @@
 			// the editor at once, so it can only hold what was typed or deleted
 			// since. A send held for this chat puts its words back in front of
 			// this draft later (send-destination.ts), so nothing here overwrites
-			// that. The one exception is New chat taking the id its own send
-			// created, with no navigation since: that is not a leave, and the send
-			// has already emptied the New chat slot. New chat and every chat
-			// switch move the navigation count on, so leaving New chat for another
-			// chat is always saved, whatever was sent elsewhere (PR #1212 review
-			// S2, S4, S5).
-			const adoptingOwnSend = prevSessionId === null && newChatSendNavigation === getInitGeneration();
-			if (editorRef && !adoptingOwnSend) {
+			// that. The one exception, New chat adopting its own send's chat, is
+			// handled above. New chat and every chat switch move the navigation
+			// count on, so leaving New chat for another chat is always saved,
+			// whatever was sent elsewhere (PR #1212 review S2, S4, S5).
+			if (editorRef) {
 				const leavingDraft = getDraftJSON();
 				activeSession.saveDraftForSession(prevSessionId, leavingDraft);
 				// Keep the persisted mirror aligned with the ephemeral cache so the

@@ -81,6 +81,30 @@ async function reloadWithHistoryHeld(page, token, mark) {
 	return { release, feed };
 }
 
+/**
+ * Hold the chat socket's `session_created` and every frame after it until
+ * released, so a new chat gets its id when the case says (setup, before load).
+ */
+async function holdSessionCreated(page) {
+	let holding = true;
+	let held = 0;
+	const queued = [];
+	await page.routeWebSocket(/\/api\/v1\/ws\/chat/, (ws) => {
+		const server = ws.connectToServer();
+		ws.onMessage((message) => server.send(message));
+		server.onMessage((message) => {
+			if (holding && (queued.length || String(message).includes('"session_created"'))) {
+				if (!queued.length) held += 1;
+				queued.push(() => ws.send(message));
+			} else ws.send(message);
+		});
+	});
+	return {
+		held: () => held,
+		release() { holding = false; for (const send of queued.splice(0)) send(); }
+	};
+}
+
 async function clearComposer(page) {
 	await composer(page).click();
 	await composer(page).press('ControlOrMeta+A');
@@ -184,6 +208,45 @@ await runJourney({
 			expect((await chatState(page)).session === chatA, 'the first chat is open again');
 			expect((await editorText(page)).includes(token), 'the message waits there as its draft');
 			expect((await countUserRows(page, token)) === 0, 'and it was not sent in that chat either');
+			await clearComposer(page);
+			await page.waitForTimeout(500);
+		}
+	}, {
+		// Typing right after a new chat's first Send: the chat getting its id
+		// mid-word used to replace the composer with the new chat's empty draft
+		// (#1361). Adopting its own send's chat is not a navigation.
+		name: 'text-typed-after-a-new-chats-first-send-survives-its-session-id',
+		throttles: ['fast'],
+		async setup(ctx) {
+			await watchQueries(ctx.page);
+			ctx.created = await holdSessionCreated(ctx.page);
+			await openNewChat(ctx, { project: PROJECT });
+		},
+		async act({ page, mark, log, created }) {
+			const first = `first-${uniq()}`;
+			const typed = `typed-${uniq()}`;
+			const half = Math.floor(typed.length / 2);
+			await composer(page).click();
+			await composer(page).pressSequentially(first);
+			await mark('Send the first message, then type at once');
+			await sendButton(page).click();
+			await page.waitForFunction((t) => !document.querySelector('[data-message-editor]')?.textContent?.includes(t), first, { timeout: 10_000 });
+			for (let waited = 0; created.held() === 0 && waited < 15_000; waited += 50) await page.waitForTimeout(50);
+			expect(created.held() > 0, 'the server created the chat');
+			// The id lands inside the composer's draft debounce, as on CI.
+			await composer(page).pressSequentially(typed.slice(0, half));
+			expect(!/^s:/.test((await chatState(page)).session ?? ''), 'the composer has no session id yet');
+			await mark('the chat gets its id mid-word');
+			created.release();
+			await composer(page).pressSequentially(typed.slice(half));
+			await waitChat(page, { session: /^s:/ }, { timeout: 10_000 });
+			await page.waitForTimeout(1000);
+			const text = await editorText(page);
+			log(`composer: ${JSON.stringify(text)}`);
+			expect(text === typed, `everything typed after Send is still in the composer (${JSON.stringify(text)})`);
+			expect(await sendButton(page).isEnabled(), 'and can be sent');
+			const sent = await queries(page);
+			expect(sent.length === 1 && sent[0].includes(first), `only the first message went out (${JSON.stringify(sent)})`);
 			await clearComposer(page);
 			await page.waitForTimeout(500);
 		}
