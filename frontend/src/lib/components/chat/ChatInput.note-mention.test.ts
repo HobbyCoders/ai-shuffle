@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import ChatInput from './ChatInput.svelte';
+import GenerationChoiceCard from './GenerationChoiceCard.svelte';
+import { generationChoices } from '$lib/stores/generation-choices.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import { appData } from '$lib/stores/app-data.svelte';
@@ -8,6 +10,7 @@ import { startLiveSync } from '$lib/services/live-sync';
 import type { ChatMessage } from '$lib/stores/types';
 import type { GenerationOption } from '$lib/utils/generation-choice';
 import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+import { takePendingSends } from '$lib/stores/session/pending-send-note';
 import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
 import '$lib/test-stubs/composer-dom';
 
@@ -616,7 +619,6 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		expect(readDraft('refused-remount-chat')).toContain(NOTE_ID);
 		expect(readDraft('refused-remount-chat')).toContain('newer text');
 		// Handed over, so its reload note is done, and it survives another remount.
-		const { takePendingSends } = await import('$lib/stores/session/pending-send-note');
 		expect(takePendingSends('refused-remount-chat', 'another-page')).toBe('');
 		replacement.unmount();
 		const reopened = render(ChatInput);
@@ -636,8 +638,6 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 	});
 
 	it('sends a generation choice\'s reply in its place when the card unmounts while the pick saves (#1444)', async () => {
-		const { default: GenerationChoiceCard } = await import('./GenerationChoiceCard.svelte');
-		const { generationChoices } = await import('$lib/stores/generation-choices.svelte');
 		vi.spyOn(generationChoices, 'load').mockResolvedValue(undefined);
 		let finish!: (value: never) => void;
 		const saving = vi.spyOn(generationChoices, 'save').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
