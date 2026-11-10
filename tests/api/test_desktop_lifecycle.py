@@ -38,9 +38,10 @@ async def test_duplicate_stop_requests_join_cleanup_and_disconnect_does_not_canc
     monkeypatch.setattr(internal, "_shutdown_task", None)
     request = Request({"type": "http", "shuffle.ingress": "local", "headers": [(b"authorization", b"Bearer secret")]})
     started, finish = asyncio.Event(), asyncio.Event()
-    async def cleanup():
+    async def cleanup(*, deadline=None):
         started.set()
         await finish.wait()
+        return True
     with patch("app.core.desktop_lifecycle.stop_running_sessions", side_effect=cleanup) as stop:
         first = asyncio.create_task(internal.desktop_stop_sessions(request))
         await started.wait()

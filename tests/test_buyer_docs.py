@@ -130,15 +130,17 @@ def test_prose_is_not_hard_wrapped(slug):
 def test_cloud_docs_explain_free_local_use_and_optional_remote_capacity():
     text = pages()["cloud"]
     for phrase in ("# AI Shuffle Cloud", "without an account or a key", "Updates are free",
-                   "2 remote workers", "no card", "4 remote workers", "same-LAN sync",
+                   "3 remote workers", "no card", "10 remote workers", "same-LAN sync",
                    "across different networks", "connector endpoints", "OAuth relay", "support",
-                   "$14/month", "$140/year", "$20/month", "$200/year",
+                   "| Pro | 10 | $10/month |", "| Ultimate | 30 | $30/month |", "billed monthly",
                    "Nothing in the app stops working", "7 days of your first charge",
                    "European Union or the United Kingdom"):
         assert phrase in text, phrase
     assert not (BUYER / "license.md").exists()
     for name, page in pages().items():
         assert not re.search(r"pull[ _-]tokens?", page, re.I), name
+        # Monthly billing only, and no founder offer.
+        assert not re.search(r"founder|yearly|/year\b|per year|annual", page, re.I), name
 
 
 def test_readme_is_for_users_not_building_from_source():
