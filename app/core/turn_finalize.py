@@ -40,7 +40,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Optional, Tuple
+
+if TYPE_CHECKING:
+    from app.core.provider.session_admission import Lease
 
 logger = logging.getLogger(__name__)
 
@@ -194,29 +197,77 @@ def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]
     return (session_branch or recorded, head)
 
 
-async def _write_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
+def _parking_kind(session_id: str) -> Optional[str]:
+    """The marker a turn ending now writes: the first parking work's kind."""
+    from app.core.task_registry import task_registry
+
+    work = task_registry.get_parking_background_work(session_id)
+    return (work[0].get("kind") or "agent") if work else None
+
+
+def _parking_kind_unchanged(session_id: str, kind: Optional[str]) -> bool:
+    """True while the registry still gives ``kind`` (#1285).
+
+    Fences a turn-end write with no turn of its own, and the idle clear (with
+    ``kind=None``): between the registry read and the locked update, a later
+    turn may park ("agent" must not become a stale None) or the work may end
+    (a stale "agent" must not stay on an idle chat). Runs on the update's
+    worker thread; a read that raises counts as changed and the write is
+    skipped. The next turn-end write or idle clear then settles the marker.
+    """
+    try:
+        return _parking_kind(session_id) == kind
+    except Exception:  # noqa: BLE001 — fail closed: skip the write.
+        return False
+
+
+async def _write_parked_task_kind(
+    session_id: str, kind: Optional[str], *, writer: Optional[Lease] = None,
+    only_if: Optional[Callable[[], bool]] = None,
+) -> bool:
     """Write ``sessions.parked_task_kind`` and broadcast the change.
 
     Shared by the turn-end write and the between-turns clear so both produce
     exactly the same row update and the same ``session.updated`` broadcast.
     Returns whether the row actually changed. Never raises.
+
+    ``writer`` is the admission lease of the turn writing, if any. A rewind can
+    give up waiting for that turn and let the next one start; from then on the
+    old turn neither changes the marker nor publishes it (#1285). ``only_if``
+    is a further condition the write depends on: the idle clear and a turn-end
+    write with no turn pass :func:`_parking_kind_unchanged`. Both are checked inside the update's own
+    critical section (``set_session_parked_task_kind``) and again by the
+    broadcaster right before each publication.
     """
+    checks = []
+    if writer is not None:
+        from app.core.provider import session_admission
+
+        checks.append(lambda: session_admission.holds_chat(writer))
+    if only_if is not None:
+        checks.append(only_if)
+
+    def still_valid() -> bool:
+        return all(check() for check in checks)
+
+    fence = {"still_valid": still_valid} if checks else {}
     try:
         from app.db import database
 
         updated = await asyncio.to_thread(
-            database.set_session_parked_task_kind, session_id, kind
+            database.set_session_parked_task_kind, session_id, kind, **fence
         )
         if updated:
             try:
                 from app.core.sync_engine import sync_engine
 
                 session = await asyncio.to_thread(database.get_session, session_id)
-                if session:
+                if session and (not checks or still_valid()):
                     await sync_engine.broadcast_user_session_updated(
                         user_id=session.get("api_user_id") or "admin",
                         session_id=session_id,
                         updates={"parked_task_kind": kind},
+                        **({"still_current": still_valid} if checks else {}),
                     )
             except Exception:
                 logger.debug("broadcasting parked_task_kind failed", exc_info=True)
@@ -226,7 +277,9 @@ async def _write_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
         return False
 
 
-async def clear_parked_marker_if_idle(session_id: str) -> bool:
+async def clear_parked_marker_if_idle(
+    session_id: str, *, writer: Optional[Lease] = None,
+) -> bool:
     """Drop ``parked_task_kind`` once nothing is left to park on. Never raises.
 
     The marker is written at turn end and otherwise cleared only by the NEXT
@@ -240,14 +293,19 @@ async def clear_parked_marker_if_idle(session_id: str) -> bool:
     Deliberately CLEAR-ONLY. Setting the marker is the turn's decision — it
     knows about launches that have no registry record yet — and a terminal-task
     callback that could also SET it would race a turn that is still running.
-    Returns True only when a marker was actually removed.
+    Returns True only when a marker was actually removed. ``writer`` fences the
+    clear to that turn's admission, as in :func:`_write_parked_task_kind`.
+
+    Idle means no parking background work (an unresolved launch does not hold
+    the marker: the only non-NULL writer takes its kind from parking work).
+    The idle decision is taken again where the clear is applied and published:
+    a later turn may end with new work and write its marker while this clear
+    waits (#1285).
     """
     if not session_id:
         return False
     try:
-        from app.core.task_registry import task_registry
-
-        if task_registry.get_parking_background_work(session_id):
+        if not _parking_kind_unchanged(session_id, None):
             return False
         from app.db import database
 
@@ -261,7 +319,10 @@ async def clear_parked_marker_if_idle(session_id: str) -> bool:
     # Before the marker clear, so a turn that takes the live slot in between
     # still sees the park and banks it up to its own start.
     await close_park_work_time(session_id)
-    cleared = await _write_parked_task_kind(session_id, None)
+    cleared = await _write_parked_task_kind(
+        session_id, None, writer=writer,
+        only_if=lambda: _parking_kind_unchanged(session_id, None),
+    )
     if cleared:
         logger.info(
             "turn_finalize: cleared the parked marker on %s — its last "
@@ -295,7 +356,9 @@ async def broadcast_work_time(session_id: str) -> None:
         logger.debug("work-time broadcast failed for %s", session_id, exc_info=True)
 
 
-async def settle_stopped_monitor_parks(session_id: str) -> bool:
+async def settle_stopped_monitor_parks(
+    session_id: str, *, writer: Optional[Lease] = None,
+) -> bool:
     """Settle an idle park whose Monitor wake was deliberately suppressed.
 
     Called both by per-task Stop and after the park write: Stop can finish
@@ -332,22 +395,32 @@ async def settle_stopped_monitor_parks(session_id: str) -> bool:
         if settled:
             # Settling banked the park's working time; show the final total.
             await broadcast_work_time(session_id)
-        await clear_parked_marker_if_idle(session_id)
+        await clear_parked_marker_if_idle(session_id, writer=writer)
         return bool(settled)
     except Exception:
         logger.debug("stopped Monitor park cleanup failed for %s", session_id, exc_info=True)
         return False
 
 
-async def persist_turn_end_state(session_id: str, *, resync_branch: bool = True) -> None:
-    """Persist turn-end state; a refused checkout must not adopt another HEAD."""
+async def persist_turn_end_state(
+    session_id: str, *, resync_branch: bool = True, writer: Optional[Lease] = None,
+) -> None:
+    """Persist turn-end state; a refused checkout must not adopt another HEAD.
+
+    A turn passes its admission lease as ``writer`` so its parked-marker write
+    is fenced to it (#1285). Callers with no turn of their own pass nothing;
+    their write applies and publishes only while the registry still gives the
+    kind they read (see :func:`_parking_kind_unchanged`).
+    """
     # 1. Durable parked marker (set or clear).
     try:
-        from app.core.task_registry import task_registry
-
-        work = task_registry.get_parking_background_work(session_id)
-        kind = (work[0].get("kind") or "agent") if work else None
-        await _write_parked_task_kind(session_id, kind)
+        kind = _parking_kind(session_id)
+        # With no turn to fence on, the write must still match the registry
+        # when it lands: a later turn may have parked, or its work ended.
+        only_if = None if writer is not None else (
+            lambda: _parking_kind_unchanged(session_id, kind)
+        )
+        await _write_parked_task_kind(session_id, kind, writer=writer, only_if=only_if)
     except Exception:
         logger.debug("persisting parked_task_kind failed", exc_info=True)
 

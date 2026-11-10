@@ -69,7 +69,7 @@ def quiet_parked_marker(monkeypatch):
     monkeypatch.setattr(
         database,
         "set_session_parked_task_kind",
-        lambda sid, kind: calls.append(("parked", sid, kind)),
+        lambda sid, kind, **_fence: calls.append(("parked", sid, kind)),
     )
     return calls
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import threading
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, TypedDict
+from typing import Any, Callable, Dict, Iterable, List, Optional, TypedDict
 
 from app.core.session_modes import normalize_session_mode, storage_session_mode
 from app.db.base import get_db, get_cursor, row_to_dict, rows_to_list, logger
@@ -1763,7 +1764,15 @@ def latest_pr_number_for_branch(
         return None
 
 
-def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
+#: Serializes this process's parked-marker writes per session (striped, so the
+#: set stays bounded). See :func:`set_session_parked_task_kind`.
+_PARKED_MARKER_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def set_session_parked_task_kind(
+    session_id: str, kind: Optional[str], *,
+    still_valid: Optional[Callable[[], bool]] = None,
+) -> bool:
     """Persist (or clear, with ``None``) the durable parked marker.
 
     Non-NULL means the parent turn ended while background work was still
@@ -1775,15 +1784,27 @@ def set_session_parked_task_kind(session_id: str, kind: Optional[str]) -> bool:
     restart. Deliberately does NOT touch ``updated_at`` — a park/unpark marker
     write must not reorder the sessions list. Returns True if a row was
     updated.
+
+    ``still_valid`` is the writer's condition for the write (#1285): the
+    writing turn still holds the chat; for an idle clear, nothing is left to
+    park on; for a turn-end write with no turn, the task registry still gives
+    the kind being written. It runs under a per-session lock that every write here holds
+    through its commit, so a stale writer writes nothing, and one that passed
+    the check commits before any later writer's update. A write without it
+    is still ordered by the lock. It must be synchronous and must not touch
+    the database (it runs on this thread, before the connection is taken).
     """
     _ph = ph()
-    with get_db() as conn:
-        cursor = get_cursor(conn)
-        cursor.execute(
-            f"UPDATE sessions SET parked_task_kind = {_ph} WHERE id = {_ph}",
-            (kind, session_id),
-        )
-        return cursor.rowcount > 0
+    with _PARKED_MARKER_LOCKS[hash(session_id) % len(_PARKED_MARKER_LOCKS)]:
+        if still_valid is not None and not still_valid():
+            return False
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(
+                f"UPDATE sessions SET parked_task_kind = {_ph} WHERE id = {_ph}",
+                (kind, session_id),
+            )
+            return cursor.rowcount > 0
 
 
 def set_working_set_ref(session_id: str, value: Optional[str]) -> bool:

@@ -1259,7 +1259,7 @@ async def test_nothing_is_steered_into_a_turn_that_is_finalizing(mock_db):
     seen = {}
     stranded = AsyncMock()
 
-    async def _during_finalize(session_id):
+    async def _during_finalize(session_id, **_kwargs):
         # persist_turn_end_state runs inside _finalize, after the clear.
         seen["steered"] = await session_runtime.try_steer_pending(sid)
         seen["note"] = await session_runtime.try_steer_task_notification(

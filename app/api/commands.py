@@ -682,6 +682,18 @@ def _resolve_rewind_from_seq(
                 f"matching the target's text but the transcript places it at "
                 f"occurrence {occurrence} (content guard)"
             )
+        matching_cps = sum(1 for cp in user_cps if (cp.full_message or "").strip() == want)
+        if matching_cps > len(prompts):
+            # A checkpoint with this text has no prompt row of it (a call
+            # message's wrapped request, pasted later as a normal prompt), so
+            # the n-th checkpoint need not be the n-th row: the two histories
+            # would be cut at different messages (#1318). Refuse; no text
+            # matching of call messages (#1265).
+            return None, (
+                f"Rewind refused: transcript has {matching_cps} user prompt(s) "
+                f"matching the target's text but the event log has "
+                f"{len(prompts)} (content guard)"
+            )
         target_idx = prompts[occurrence][0]
 
     if target_role == "assistant" or include_response:

@@ -937,10 +937,17 @@ class SyncEngine:
         message: Dict[str, Any],
         source_device_id: Optional[str] = None,
         relay: bool = True,
+        still_current: Optional[Callable[[], bool]] = None,
     ):
         """Send a message to all devices for a user, excluding source device.
 
         Private helper used by user-level broadcast methods.
+
+        ``still_current`` (optional) is checked right before each publication
+        (the lifecycle event and each bucket's fan-out), with no await between
+        the check and what it guards; once it returns False nothing more is
+        published. A write fenced to its turn (#1285) passes its fence so a
+        lookup or lock wait here cannot let a replaced turn publish late.
 
         Takes a snapshot of connections under the lock, releases it, then hands
         the frame to each device's writer queue. The fan-out itself performs NO
@@ -970,6 +977,8 @@ class SyncEngine:
                         audience = "admin" if owner_id is None else "api_user"
                 except Exception:
                     logger.debug("Global lifecycle owner lookup failed", exc_info=True)
+            if still_current is not None and not still_current():
+                return
             global_events.lifecycle(
                 owner_id, message, user_type=audience, **({} if relay else {"relay": False}),
             )
@@ -987,6 +996,8 @@ class SyncEngine:
         for bucket, targets in by_bucket.items():
             if not targets:
                 continue
+            if still_current is not None and not still_current():
+                return
             failed_devices = self._fan_out_to_user_devices(bucket, targets, message)
             if failed_devices:
                 # Registration ids are only unique within a bucket, so prune
@@ -1155,6 +1166,7 @@ class SyncEngine:
         updates: Dict[str, Any],
         source_device_id: Optional[str] = None,
         relay: bool = True,
+        still_current: Optional[Callable[[], bool]] = None,
     ):
         """Broadcast a session metadata change to all of a user's devices.
 
@@ -1165,6 +1177,7 @@ class SyncEngine:
 
         ``relay=False`` stays on this worker: other installs are told through
         the database, so a change that exists only here has nothing to tell them.
+        ``still_current``: see :meth:`_broadcast_user_message`.
         """
         await self._broadcast_user_message(
             user_id=user_id,
@@ -1175,6 +1188,7 @@ class SyncEngine:
             },
             source_device_id=source_device_id,
             relay=relay,
+            still_current=still_current,
         )
 
     async def broadcast_user_session_cleared(

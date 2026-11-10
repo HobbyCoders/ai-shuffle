@@ -237,3 +237,159 @@ async def test_replaced_runtime_deregisters_without_stopping_or_completing_direc
             await asyncio.wait_for(running, 5)
             if direct is not None:
                 await wait_for_lease_release(direct)
+
+
+@pytest.mark.parametrize("delay", ["before_write", "inside_write"])
+async def test_rewind_timeout_fences_old_parked_marker_write_and_broadcast(mock_db, delay):
+    """A's delayed parked-marker clear can neither undo nor publish over B's marker (#1285).
+
+    The real turn-end helper and the real row update run; only the update's
+    worker thread is held. ``before_write`` holds it before the update starts
+    (the issue's interleaving: B writes while A waits). ``inside_write`` holds
+    it after A passed its ownership check, while the rewind still ran, so B's
+    write has to queue behind A's instead of landing first.
+    """
+    import threading
+
+    from app.core import turn_finalize
+    from app.db import database
+
+    database.create_session(session_id=SID, profile_id="default")
+    turn = turns.enqueue_turn(SID, "user", prompt="old turn")
+    real_persist = turn_finalize.persist_turn_end_state
+    real_write = database.set_session_parked_task_kind
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def held_write(session_id, kind, **kwargs):
+        calls.append(kind)
+        if len(calls) == 1:  # turn A's write
+            guard = kwargs.get("still_valid")
+            if delay == "inside_write" and guard is not None:
+                def checked_then_held():
+                    owner = guard()
+                    entered.set()
+                    assert release.wait(5)
+                    return owner
+                kwargs["still_valid"] = checked_then_held
+            else:
+                entered.set()
+                assert release.wait(5)
+        return real_write(session_id, kind, **kwargs)
+
+    published = []
+
+    async def broadcast(*, user_id, session_id, updates, **kwargs):
+        if "parked_task_kind" in updates:
+            published.append(updates["parked_task_kind"])
+
+    with _runtime_env(pump=pump) as env, patch(
+        "app.core.turn_finalize.persist_turn_end_state", new=real_persist,
+    ), patch.object(database, "set_session_parked_task_kind", side_effect=held_write), patch(
+        "app.core.sync_engine.sync_engine.broadcast_user_session_updated", side_effect=broadcast,
+    ), patch("app.core.session_pr_state.schedule_session_pr_reconcile"), patch(
+        "app.core.session_handoff.schedule",
+    ), patch("app.core.pg_session_store.flush_summary_folds"), patch.object(
+        admission, "_ENDING_WAIT_SECONDS", 0.01,
+    ):
+        rt = session_runtime.SessionRuntime(turn)
+        running = asyncio.create_task(rt.execute())
+        direct = successor = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 5), "turn A never reached its marker write"
+            old = rt._admission_lease
+            rewind = await admission.begin_rewind(SID)
+            assert admission.take_for_rewind(rewind) is old
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(old.exited.wait(), 0.01)
+            await wait_for_lease_release(rewind)
+            # Turn B is admitted, starts background work and records its park.
+            direct = await admission.acquire(SID)
+            env["registry"].get_parking_background_work.return_value = [{"kind": "agent"}]
+            successor = asyncio.create_task(turn_finalize.persist_turn_end_state(SID, resync_branch=False))
+            if delay == "before_write":
+                await asyncio.wait_for(successor, 5)
+                assert database.get_session(SID)["parked_task_kind"] == "agent"
+            else:
+                while len(calls) < 2:  # B's write thread has started
+                    await asyncio.sleep(0.01)
+                done, _ = await asyncio.wait({successor}, timeout=0.2)
+                assert not done, "B's park landed while A's checked write was still in flight"
+            release.set()
+            assert await asyncio.wait_for(running, 5) == "aborted"
+            await asyncio.wait_for(successor, 5)
+            assert database.get_session(SID)["parked_task_kind"] == "agent", "A's stale clear overwrote B's park"
+            assert published == ["agent"], f"A published a stale marker update: {published}"
+            assert admission._holders[SID] is direct
+        finally:
+            release.set()
+            await asyncio.wait_for(running, 5)
+            if successor is not None:
+                await asyncio.wait_for(successor, 5)
+            if direct is not None:
+                await wait_for_lease_release(direct)
+
+
+async def test_old_parked_marker_publication_is_fenced_inside_the_broadcaster(mock_db):
+    """#1285 review: the broadcaster awaits its owner lookup before publishing.
+
+    A writes its clear, passes every check before the broadcast, then waits
+    inside ``_broadcast_user_message`` on the owner lookup. A rewind takes the
+    chat and gives up; B writes and publishes "agent". A's resumed broadcast
+    must reach neither the lifecycle stream nor any device queue.
+    """
+    from types import SimpleNamespace
+
+    from app.core import turn_finalize
+    from app.core.global_events import global_events
+    from app.core.sync_engine import sync_engine
+    from app.db import async_database, database
+
+    database.create_session(session_id=SID, profile_id="default")
+    real_run_sync = async_database.run_sync
+    entered, release = asyncio.Event(), asyncio.Event()
+    hold = {"next": False}
+
+    async def run_sync(fn, *args, **kwargs):
+        if hold["next"] and fn is database.get_session:
+            hold["next"] = False
+            entered.set()
+            await release.wait()
+        return await real_run_sync(fn, *args, **kwargs)
+
+    lifecycle, devices = [], []
+
+    def fan_out(bucket, targets, message):
+        devices.append(message["updates"].get("parked_task_kind", "-"))
+        return []
+
+    with patch.object(async_database, "run_sync", new=run_sync), patch.object(
+        global_events, "lifecycle",
+        side_effect=lambda owner, message, **kw: lifecycle.append(message["updates"].get("parked_task_kind", "-")),
+    ), patch.object(sync_engine, "_fan_out_to_user_devices", side_effect=fan_out), patch.dict(
+        sync_engine._user_connections, {"admin": {"d1": SimpleNamespace(device_id="d1")}},
+    ), patch.object(admission, "_ENDING_WAIT_SECONDS", 0.01):
+        old = await admission.acquire(SID)
+        direct = None
+        hold["next"] = True
+        stale = asyncio.create_task(turn_finalize._write_parked_task_kind(SID, None, writer=old))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            rewind = await admission.begin_rewind(SID)
+            assert admission.take_for_rewind(rewind) is old
+            await wait_for_lease_release(rewind)
+            assert not admission.holds_chat(old)
+            direct = await admission.acquire(SID)
+            assert await turn_finalize._write_parked_task_kind(SID, "agent", writer=direct)
+            release.set()
+            await asyncio.wait_for(stale, 5)
+            assert database.get_session(SID)["parked_task_kind"] == "agent"
+            assert lifecycle == ["agent"], f"A's stale clear reached the lifecycle stream: {lifecycle}"
+            assert devices == ["agent"], f"A's stale clear reached a device queue: {devices}"
+        finally:
+            release.set()
+            await asyncio.wait_for(stale, 5)
+            admission.close(old)
+            await wait_for_lease_release(old)
+            if direct is not None:
+                await wait_for_lease_release(direct)

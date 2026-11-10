@@ -1168,6 +1168,39 @@ async def test_a_message_from_a_call_is_refused_and_neither_history_changes(
     assert se.get_events(SID) == before
 
 
+@pytest.mark.parametrize("target", ["paste-by-content", "call-by-uuid"])
+async def test_a_pasted_call_request_never_cuts_the_histories_at_different_messages(
+    rewind_env, monkeypatch, target,
+):
+    """#1318: two checkpoints carry the wrapped text, one prompt row does.
+
+    The transcript's first match is the call message; the event log's only
+    match is the later paste. Mapping occurrence 0 across those two different
+    populations would cut the model's history at the call message and the
+    visible history at the paste. The rewind is refused before either changes.
+    """
+    wrapped = _call_checkpoint_text("hello")
+    seed_session(SID)
+    se.append_events(SID, [_call_row("hello", "typed"), _asst_ev("a1", uuid="a1"), _user_ev(wrapped), _asst_ev("a2", uuid="a2")])
+    _patch_checkpoints(monkeypatch, [_cp("call-cp", wrapped), _cp("paste-cp", wrapped, index=1)])
+    before = se.get_events(SID)
+    # The two lookups, side by side: the transcript side picks the call message.
+    assert _resolve_checkpoint_uuid_from_content(SDK, WD, wrapped, 0) == ("call-cp", None)
+    seq, err = _resolve_rewind_from_seq(SID, SDK, WD, "call-cp", False, "user")
+    assert seq is None and "content guard" in (err or ""), "event log mapped the call checkpoint onto the paste"
+
+    if target == "paste-by-content":
+        request = RewindRequestV2(target_content=wrapped, target_occurrence=0, include_response=False)
+    else:
+        request = RewindRequestV2(target_uuid="call-cp", include_response=False)
+    resp = await execute_rewind_and_wait(SID, request)
+
+    assert resp.success is False
+    assert "content guard" in (resp.error or "")
+    assert rewind_env.truncate_calls == []
+    assert se.get_events(SID) == before
+
+
 @pytest.mark.parametrize("by_content", [True, False])
 async def test_a_call_message_stays_refused_after_its_wrapped_text_is_pasted(rewind_env, monkeypatch, by_content):
     """The later paste carries the call's checkpoint text; the call message stays refused."""

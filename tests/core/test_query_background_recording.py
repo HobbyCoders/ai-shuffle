@@ -16,7 +16,7 @@ end-of-turn side effects extracted from ``live_session_store.end_streaming``.
 
 import asyncio
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -241,8 +241,9 @@ async def test_background_turn_records_full_event_sequence(mock_db):
     sync.broadcast_stream_chunk.assert_not_called()
     sync.broadcast_stream_end.assert_not_called()
 
-    # The durable end-of-turn helper ran.
-    finalize.assert_awaited_once_with(sid)
+    # The durable end-of-turn helper ran, fenced to this turn's lease (#1285).
+    finalize.assert_awaited_once_with(sid, writer=ANY)
+    assert finalize.await_args.kwargs["writer"] is not None
 
     # The pooled client got exactly one prompt and is idle again.
     state.adapter.send_query.assert_awaited_once_with("hello")
@@ -608,7 +609,7 @@ async def test_persist_turn_end_state_records_parked_kind():
          patch.object(database, "set_session_parked_task_kind", new=set_kind):
         await persist_turn_end_state("sess-park")
 
-    set_kind.assert_called_once_with("sess-park", "shell")
+    set_kind.assert_called_once_with("sess-park", "shell", still_valid=ANY)
 
 
 async def test_persist_turn_end_state_clears_marker_when_idle_and_never_raises():
@@ -623,7 +624,7 @@ async def test_persist_turn_end_state_clears_marker_when_idle_and_never_raises()
         # A persistence failure is swallowed (never breaks turn teardown).
         await persist_turn_end_state("sess-idle")
 
-    set_kind.assert_called_once_with("sess-idle", None)
+    set_kind.assert_called_once_with("sess-idle", None, still_valid=ANY)
 
 
 @pytest.mark.parametrize("kind", ["agent", "shell", None])
@@ -648,12 +649,13 @@ async def test_persist_turn_end_state_pushes_marker_after_write(kind, api_user_i
                       new=AsyncMock(side_effect=broadcast)) as push:
         await persist_turn_end_state("sess-park")
 
-    set_kind.assert_called_once_with("sess-park", kind)
+    set_kind.assert_called_once_with("sess-park", kind, still_valid=ANY)
     assert writes_at_broadcast == [1]
     push.assert_awaited_once_with(
         user_id=api_user_id or "admin",
         session_id="sess-park",
         updates={"parked_task_kind": kind},
+        still_current=ANY,
     )
 
 

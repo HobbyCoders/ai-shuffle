@@ -310,3 +310,128 @@ async def test_sweep_rechecks_settlement_guards_at_mutation(mock_db, test_db, ra
         mutation.assert_called_once()
 
     assert turns.get_turn(parked["id"])["state"] == "parked"
+
+
+async def test_a_held_idle_clear_cannot_undo_a_later_park(mock_db, test_db):
+    """#1285 review: the idle decision is re-checked where the clear is applied.
+
+    The clear sees nothing to park on and is held before the marker write; a
+    later turn ends with new background work and writes "agent". The resumed
+    clear must neither overwrite that marker nor publish a clear.
+    """
+    import asyncio
+
+    from app.core import turn_finalize
+
+    session_id = _parked_session(test_db, kind="shell")
+    registry = _registry([])
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held_close(_session_id):
+        entered.set()
+        await release.wait()
+        return False
+
+    published = []
+
+    async def broadcast(*, user_id, session_id, updates, **kwargs):
+        published.append(updates.get("parked_task_kind"))
+
+    with patch("app.core.task_registry.task_registry", new=registry), patch(
+        "app.core.turn_finalize.close_park_work_time", new=held_close,
+    ), patch("app.core.sync_engine.sync_engine") as sync, patch(
+        "app.core.session_pr_state.schedule_session_pr_reconcile",
+    ), patch("app.core.session_handoff.schedule"), patch("app.core.pg_session_store.flush_summary_folds"):
+        sync.broadcast_user_session_updated = AsyncMock(side_effect=broadcast)
+        clear = asyncio.create_task(clear_parked_marker_if_idle(session_id))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            registry.get_parking_background_work.return_value = [{"id": "new-agent", "kind": "agent"}]
+            await turn_finalize.persist_turn_end_state(session_id, resync_branch=False)
+            assert _marker(test_db, session_id) == "agent"
+            release.set()
+            assert await asyncio.wait_for(clear, 5) is False
+        finally:
+            release.set()
+            await asyncio.wait_for(clear, 5)
+
+    assert _marker(test_db, session_id) == "agent", "the stale idle clear overwrote the later park"
+    assert published == ["agent"], f"the stale idle clear was published: {published}"
+
+
+@pytest.mark.parametrize(
+    "decided, later",
+    [(None, "agent"), ("agent", None)],
+    ids=["stale-clear", "stale-park"],
+)
+async def test_a_held_ownerless_turn_end_write_cannot_undo_a_later_one(mock_db, test_db, decided, later):
+    """#1285 review: a turn-end write with no turn (resource monitor, worktree
+    manager) re-checks the kind it read where the write lands.
+
+    It reads the registry, decides ``decided`` and is held before the marker
+    lock; the registry then changes and a later turn-end write lands
+    ``later``. The resumed write must neither overwrite it nor publish.
+    """
+    import asyncio
+    import threading
+
+    from app.core import turn_finalize
+
+    session_id = _parked_session(test_db, kind="shell")
+    registry = _registry([{"id": "w", "kind": decided}] if decided else [])
+    real_write = database.set_session_parked_task_kind
+    held, release = threading.Event(), threading.Event()
+
+    def write(sid, kind, **fence):
+        if not held.is_set():
+            held.set()
+            release.wait(5)
+        return real_write(sid, kind, **fence)
+
+    published = []
+
+    async def broadcast(*, user_id, session_id, updates, **kwargs):
+        published.append(updates.get("parked_task_kind"))
+
+    with patch("app.core.task_registry.task_registry", new=registry), patch.object(
+        database, "set_session_parked_task_kind", side_effect=write,
+    ), patch("app.core.sync_engine.sync_engine") as sync, patch(
+        "app.core.session_pr_state.schedule_session_pr_reconcile",
+    ), patch("app.core.session_handoff.schedule"), patch("app.core.pg_session_store.flush_summary_folds"):
+        sync.broadcast_user_session_updated = AsyncMock(side_effect=broadcast)
+        stale = asyncio.create_task(turn_finalize.persist_turn_end_state(session_id, resync_branch=False))
+        try:
+            assert await asyncio.to_thread(held.wait, 5)
+            registry.get_parking_background_work.return_value = (
+                [{"id": "later", "kind": later}] if later else []
+            )
+            await turn_finalize.persist_turn_end_state(session_id, resync_branch=False)
+            assert _marker(test_db, session_id) == later
+        finally:
+            release.set()
+            await asyncio.wait_for(stale, 5)
+
+    assert _marker(test_db, session_id) == later, "the held turn-end write overwrote the later one"
+    assert published == [later], f"the held turn-end write was published: {published}"
+
+
+async def test_an_unresolved_launch_does_not_hold_a_finished_park(mock_db, test_db):
+    """#1285 review: idle means no parking work, as before this fix.
+
+    A background launch rejected before registration can stay unresolved for
+    the life of the registry. It never set the marker (the turn-end write
+    takes its kind from parking work), so it must not keep it either.
+    """
+    session_id = _parked_session(test_db, kind="shell")
+    registry = _registry([])
+    registry.has_unresolved_background_launches.return_value = True
+
+    with patch("app.core.task_registry.task_registry", new=registry), \
+            patch("app.core.sync_engine.sync_engine") as sync:
+        sync.broadcast_user_session_updated = AsyncMock()
+        cleared = await clear_parked_marker_if_idle(session_id)
+
+    assert cleared is True
+    assert _marker(test_db, session_id) is None
+    sync.broadcast_user_session_updated.assert_awaited_once()
+    assert sync.broadcast_user_session_updated.await_args.kwargs["updates"] == {"parked_task_kind": None}

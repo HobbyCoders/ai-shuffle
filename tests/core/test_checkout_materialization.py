@@ -1298,7 +1298,7 @@ async def test_out_of_order_session_intake_preserves_prompt_branch_and_spawn_con
     # Drive the real preflight error producer through SessionRuntime and its
     # real finalizer. Only provider/recorder and unrelated background work are
     # substituted; a refused turn must not silently resync A to the other HEAD.
-    from unittest.mock import patch
+    from unittest.mock import ANY, patch
 
     from app.core import query_engine, session_runtime, turn_finalize
     from app.db import turns as turns_db
@@ -1322,7 +1322,7 @@ async def test_out_of_order_session_intake_preserves_prompt_branch_and_spawn_con
     connect.assert_not_awaited()
     assert any(call.args[0].get("code") == "checkout_unavailable"
                for call in env["recorder"].on_event.await_args_list)
-    finalize.assert_awaited_once_with(first.session_id, resync_branch=False)
+    finalize.assert_awaited_once_with(first.session_id, resync_branch=False, writer=ANY)
     assert turns_db.get_turn(turn["id"])["state"] == "aborted"
     assert database.get_session(first.session_id)["branch"] == first.branch_name
     assert checkout_manager.git_service.get_current_branch(second.worktree_path) == second.branch_name
