@@ -55,8 +55,17 @@ const input = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
 
 let instructions: { current: string; default: string; is_customized: boolean };
 
+/** The row's value button, once its data has loaded (it is busy and disabled before). */
+async function loadedButton(name: RegExp) {
+	return waitFor(() => {
+		const button = screen.getByRole('button', { name }) as HTMLButtonElement;
+		expect(button.disabled).toBe(false);
+		return button;
+	});
+}
+
 async function openPassword() {
-	await fireEvent.click(await screen.findByRole('button', { name: /^Owner password/ }));
+	await fireEvent.click(await loadedButton(/^Owner password/));
 }
 
 async function fill(values: Record<string, string>) {
@@ -98,6 +107,43 @@ describe('coverage', () => {
 	it('leaves "Agents run as you" out of the web app', () => {
 		render(SecurityPage);
 		expect(screen.queryByText('Agents run as you')).toBeNull();
+	});
+});
+
+describe('while loading', () => {
+	it('draws the loaded rows\' value buttons and hint, busy and closed, so nothing grows when the data lands (#1301)', async () => {
+		let answerOwner!: (value: ReturnType<typeof loaded>) => void;
+		let answerInstructions!: (value: typeof instructions) => void;
+		owner.fetchOwnerStatus.mockReturnValue(new Promise((done) => (answerOwner = done)));
+		transport.get.mockImplementation((path: string) =>
+			path === '/settings/security-instructions' ? new Promise((done) => (answerInstructions = done)) : Promise.resolve({})
+		);
+		render(SecurityPage);
+
+		const password = screen.getByRole('button', { name: /^Owner password/ });
+		const chat = screen.getByRole('button', { name: /^Chat instructions/ });
+		for (const button of [password, chat]) {
+			expect(button.classList.contains('st-vbtn')).toBe(true);
+			expect((button as HTMLButtonElement).disabled).toBe(true);
+			expect(button.getAttribute('aria-busy')).toBe('true');
+			expect(button.getAttribute('aria-expanded')).toBe('false');
+		}
+		expect(password.closest('.st-row')?.querySelector('.st-rh')?.textContent).toBe('Loading…');
+		expect(chat.textContent).toContain('Loading…');
+
+		answerOwner(loaded());
+		answerInstructions({ ...instructions });
+		const ready = await screen.findByRole('button', { name: 'Owner password Set' });
+		expect((ready as HTMLButtonElement).disabled).toBe(false);
+		expect(ready.closest('.st-row')?.querySelector('.st-rh')?.textContent).toBe('Asked once per browser');
+		expect(((await screen.findByRole('button', { name: 'Chat instructions Customized' })) as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it('drops the busy button once the status fails, for a plain value and a retry', async () => {
+		owner.fetchOwnerStatus.mockResolvedValue({ ok: false, reason: 'unreachable' });
+		render(SecurityPage);
+		expect(await screen.findByText('Could not load')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: /^Owner password/ })).toBeNull();
 	});
 });
 
@@ -286,7 +332,7 @@ it('does not offer an OS sandbox setting or fetch its retired status', async () 
 
 describe('chat instructions', () => {
 	async function openEditor() {
-		await fireEvent.click(await screen.findByRole('button', { name: /^Chat instructions/ }));
+		await fireEvent.click(await loadedButton(/^Chat instructions/));
 		return screen.getByLabelText('Chat instructions', { selector: 'textarea' }) as HTMLTextAreaElement;
 	}
 

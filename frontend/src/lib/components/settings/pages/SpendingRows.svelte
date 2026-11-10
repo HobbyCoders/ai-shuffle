@@ -64,8 +64,15 @@
 					<span class="spend-bar" aria-hidden="true"><i style:width="{model.usedRatio * 100}%"></i></span>
 				{/if}
 			</div>
+		{:else if model.forbidden || model.loadError}
+			<ValueText value={model.forbidden ? 'Owner only' : 'Unavailable'} />
 		{:else}
-			<ValueText value={model.forbidden ? 'Owner only' : 'Loading…'} />
+			<!-- The meter's own box while it loads: a narrow page drops it under the
+			     label, so a short "Loading…" beside it would grow the row (#1301). -->
+			<div class="spend" data-state="loading" aria-busy="true">
+				<span class="spend-figures"><b class="pending">Loading…</b></span>
+				<span class="spend-bar" aria-hidden="true"></span>
+			</div>
 		{/if}
 	</SettingRow>
 	<SettingRow id="usage.spendLimit" value={l?.spend_limit_enabled} onReset={() => void model.save({ spend_limit_enabled: true })}>
@@ -150,6 +157,10 @@
 		font-weight: 600;
 		letter-spacing: -0.01em;
 		color: var(--st-fg);
+	}
+	.spend-figures b.pending {
+		font-weight: 400;
+		color: var(--st-mfg);
 	}
 	.of {
 		font-size: 12.5px;

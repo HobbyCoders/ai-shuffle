@@ -41,6 +41,10 @@
 	let lanBusy = $state(false);
 	let signInError = $state('');
 
+	/* Until the status lands, the row already has its loaded shape: a hint line
+	   and the value button (which a narrow page drops under the label), so the
+	   rows under it are not pushed down when it does (#1301). */
+	const ownerPending = $derived(!owner && !ownerFailure);
 	const ownerHint = $derived(
 		ownerOutcome === 'changed'
 			? 'Other browsers signed out'
@@ -50,7 +54,9 @@
 					? owner.password_set
 						? 'Asked once per browser'
 						: 'Not set yet'
-					: undefined
+					: ownerPending
+						? 'Loading…'
+						: undefined
 	);
 
 	async function loadOwner() {
@@ -349,7 +355,7 @@
 					{ownerLoading ? 'Retrying…' : 'Try again'}
 				</button>
 			{:else}
-				<ValueText value="Loading…" />
+				<ExpandToggle value="" open={false} pending />
 			{/if}
 		</SettingRow>
 		<SettingRow
@@ -429,6 +435,9 @@
 		<SettingRow id="security.secInstr" expanded={instrOpen && instrLoad === 'ok' ? instrEditor : undefined}>
 			{#if instrLoad === 'ok'}
 				<ExpandToggle value={instrValue} bind:open={instrOpen} />
+			{:else if instrLoad === 'loading'}
+				<!-- Holds the loaded row's shape (#1301). -->
+				<ExpandToggle value={instrValue} open={false} pending />
 			{:else}
 				<ValueText value={instrValue} />
 			{/if}

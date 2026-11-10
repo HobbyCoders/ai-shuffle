@@ -93,3 +93,17 @@ it('keeps every row for a non-owner, marked owner only', async () => {
 	expect(await screen.findByText('Owner only')).toBeTruthy();
 	expect(screen.getByRole('switch', { name: 'Daily spending limit' }).hasAttribute('disabled')).toBe(true);
 });
+
+it("holds the meter's box while today's spend loads, then says when it could not be read (#1301)", async () => {
+	let answer!: (response: Response) => void;
+	vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((done) => (answer = done))));
+	const { container } = render(SpendingRows);
+	const pending = container.querySelector('.spend[data-state="loading"]');
+	expect(pending?.getAttribute('aria-busy')).toBe('true');
+	expect(pending?.querySelector('.spend-bar')).toBeTruthy();
+	expect(pending?.textContent).toContain('Loading…');
+
+	answer(new Response(JSON.stringify({ detail: 'boom' }), { status: 500 }));
+	expect(await screen.findByText('Unavailable')).toBeTruthy();
+	expect(container.querySelector('.spend')).toBeNull();
+});

@@ -10,6 +10,10 @@
 	 *
 	 * A search target with `open: '<row id>'` opens it on arrival. Never
 	 * disabled by read-only mode (the editor's fieldset is).
+	 *
+	 * `pending` draws the same button, disabled and busy, while the row's data
+	 * loads, so the row already has the shape it keeps once the value lands
+	 * (a narrow page drops this button under its label; #1301).
 	 */
 	import { ChevronDown } from 'lucide-svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -22,9 +26,11 @@
 		onToggle?: (open: boolean) => void;
 		mono?: boolean;
 		label?: string;
+		/** The value is still loading: shown, but it cannot open yet. */
+		pending?: boolean;
 	}
 
-	let { value, open = $bindable(false), onToggle, mono = false, label }: Props = $props();
+	let { value, open = $bindable(false), onToggle, mono = false, label, pending = false }: Props = $props();
 
 	const row = getRowContext();
 	const uid = $props.id();
@@ -32,7 +38,7 @@
 
 	$effect(() => {
 		const id = row?.id;
-		if (id && settingsNav.pendingOpen === id && settingsNav.consumeOpen(id) && !open) {
+		if (id && !pending && settingsNav.pendingOpen === id && settingsNav.consumeOpen(id) && !open) {
 			open = true;
 			onToggle?.(true);
 		}
@@ -52,6 +58,8 @@
 	aria-label={label ? `${label}: ${value}` : undefined}
 	aria-labelledby={!label && row ? `${row.labelId} ${valueId}` : undefined}
 	aria-describedby={row?.hintId}
+	aria-busy={pending || undefined}
+	disabled={pending}
 	onclick={toggle}
 >
 	<span id={valueId} class:st-mono={mono}>{value}</span><ChevronDown />
@@ -70,6 +78,10 @@
 		font-size: 13px;
 		white-space: nowrap;
 		max-width: 260px;
+	}
+	.st-vbtn:disabled {
+		color: var(--st-mfg);
+		cursor: progress;
 	}
 	.st-vbtn > span {
 		overflow: hidden;
