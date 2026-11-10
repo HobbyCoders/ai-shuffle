@@ -24,6 +24,9 @@ from collections.abc import Callable
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
+# Module level, not inside _spawn_background: that function also runs after the
+# process dropped to an account that cannot read the application's own files.
+from app.core import restart_fence
 from app.core.monitor_spawn import MAX_WAIT_SECONDS, WAIT_SECONDS_PARAM
 from app.mcp.config_helpers import _json_default
 
@@ -1337,7 +1340,6 @@ async def _spawn_background(
     argv, spawn_cwd, env = agent_runner.wrap([*resolve_shell().argv_prefix, command], cwd, child_env())
     # An idle update restart must see this shell from before the process
     # exists until it is registered; refused while one is prepared (#1121).
-    from app.core import restart_fence
     admission = restart_fence.admit("background shell") if session_id else None
     creation = None
     registered = False
