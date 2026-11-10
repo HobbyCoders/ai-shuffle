@@ -64,8 +64,15 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 		await page.evaluate(() => window.__journeyBootHold.release());
 		await page.waitForFunction(() => performance.getEntriesByName('shuffle:boot.reconciled').length > 0);
 		expect(await panel.isVisible(), 'initial landing reconciliation keeps the notification panel open');
+		// Judge the scrim over the page as it settles: the chat under the panel
+		// (the seeded transcript at 1000 and 800) can still be filling in when
+		// bootstrap reconciles. The panel re-checks the strip it covers on the
+		// next frame after the page changes, so measure after that frame.
+		await waitChat(page, width === 1440 ? { surface: 'new', loading: 'false' } : { surface: 'active', loading: 'false', messagesAtLeast: 1 });
+		expect(await panel.isVisible(), 'the notification panel stays open while the chat under it loads');
 		// Measure where it settles, not partway through its 120ms entrance.
 		await panel.evaluate(el => Promise.all(el.getAnimations().map(a => a.finished)));
+		await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
 		const geometry = await panel.evaluate(el => {
 			const rail = document.querySelector('aside.sidebar nav.rail').getBoundingClientRect();
 			const bell = document.querySelector('aside.sidebar .notif-center.rail .notif-btn').getBoundingClientRect();
