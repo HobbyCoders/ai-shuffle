@@ -372,6 +372,7 @@ jobs:
             tests/db/test_stop_receipt_authority_postgres.py tests/db/test_scoped_remote_stop_postgres.py \
             tests/db/test_stop_recovery_and_notice_postgres.py \
             tests/db/test_session_delete_lock_order_postgres.py tests/db/test_pool_shutdown_postgres.py \
+            tests/db/test_agent_memory_postgres.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
 
           python -m pytest --durations=50 --junitxml=reports/security-13-3.xml tests/core/test_start_model_replay_scope.py \

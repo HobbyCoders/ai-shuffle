@@ -47,7 +47,7 @@ async def test_close_pool_runs_strictly_after_pool_shutdown():
     # (V2: the live session store is deleted — the in-memory resets are the
     # permission handler and the task registry only.)
     with patch("app.core.desktop_lifecycle.stop_running_sessions",
-               new=AsyncMock(side_effect=lambda: calls.append("sessions_stopped"))), \
+               new=AsyncMock(side_effect=lambda **_: calls.append("sessions_stopped"))), \
          patch("app.core.session_pool.get_session_pool", return_value=pool), \
          patch("app.core.permission_handler.permission_handler.reset_all",
                side_effect=lambda: calls.append("perm_reset")), \
