@@ -622,13 +622,14 @@ journeys, then `down`. With one shard it runs
 `*.journey.mjs`; with N shards it splits the journey files by measured
 hosted runtime from `scripts/devloop/journey_weights.json` when the current
 `--list` case count matches the recorded inventory. Unmeasured files or changed
-case counts automatically use a conservative case-count estimate (global median
-plus explicit floors, and at least the old runtime scaled up for case growth).
+case counts automatically use a conservative case-count estimate (the global
+median per case, and at least the old runtime scaled up for case growth).
 Historical rows remain unchanged; feature PRs do not need a pre-merge measurement.
 `python -m scripts.devloop.ci plan --shards N` prints the JSON split, with
 estimated minutes in stderr and `$GITHUB_STEP_SUMMARY`. Refresh the medians
-with `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]` using
-recent green hosted runs ([measurement details](../ci/pr-checks.md#ui-journeys)).
+with `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]`
+using recent green main-suite runs on main; files a run lacks or measured with
+other cases keep their entries ([measurement details](../ci/pr-checks.md#ui-journeys)).
 It runs each file of its shard, all of them even after a failure. `--build` builds
 and stamps the UI first when the stamp is missing or stale. It writes
 `devloop.log`, `logs/<journey>.log` and the per-case timelines (and contact

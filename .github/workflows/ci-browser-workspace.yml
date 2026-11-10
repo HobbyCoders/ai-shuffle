@@ -76,6 +76,19 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-mcp/package-lock.json') }}
+      - name: Name the Chromium system-package cache
+        id: chromium-debs
+        # The hosted image (ImageOS, ImageVersion) decides what is preinstalled,
+        # and playwright-core decides what Chromium needs.
+        run: echo "key=chromium-debs-$ImageOS-$ImageVersion-${{ runner.arch }}-$(node -p 'require("./browser-mcp/node_modules/playwright-core/package.json").version')" >> "$GITHUB_OUTPUT"
+      - name: Cache Chromium's system packages
+        # Fonts and libraries apt fetched on a miss (an index refresh plus about
+        # 21 MB from the Ubuntu archive, which is sometimes slow); a hit installs
+        # the same signed .deb files with no download.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chromium-debs
+          key: ${{ steps.chromium-debs.outputs.key }}-${{ hashFiles('scripts/ci/bounded_apt.py') }}
       - name: Install isolated Chromium
         timeout-minutes: 13
         working-directory: browser-mcp
@@ -86,7 +99,7 @@ jobs:
           sudo sed -i -E 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
           # Bound root OS dependencies, clean up the whole tree, and repair dpkg
           # after an interrupted attempt before the one permitted retry.
-          python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium
+          python3 ../scripts/ci/bounded_apt.py --debs ~/.cache/chromium-debs npx --no-install playwright-core install-deps chromium
           # Browser downloads stay owned by the runner and use its cache.
           timeout --kill-after=10s 90s npx --no-install playwright-core install chromium
           node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'

@@ -258,7 +258,190 @@ def test_every_apt_install_uses_shared_bounded_supervisor(workflow, job, step_na
     assert step["timeout-minutes"] == "13"
     assert "continue-on-error" not in step
     if workflow in ("ci-frontend.yml", "ci-browser-workspace.yml"):
-        assert "bounded_apt.py npx --no-install playwright-core install-deps chromium" in step["run"]
+        assert ("bounded_apt.py --debs ~/.cache/chromium-debs npx --no-install playwright-core "
+                "install-deps chromium") in step["run"]
+        steps = data["jobs"][job]["steps"]
+        cache = next(step for step in steps if step.get("name") == "Cache Chromium's system packages")
+        assert cache["uses"] == "actions/cache@v4"
+        assert cache["with"]["path"] == "~/.cache/chromium-debs"
+        # Keyed on what the image preinstalls and what Chromium needs.
+        name = next(step for step in steps if step.get("id") == "chromium-debs")["run"]
+        assert "$ImageOS-$ImageVersion" in name and "playwright-core/package.json" in name
+        assert steps.index(cache) < steps.index(step)
         assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in step["run"]
         assert "sudo env" not in step["run"]
         assert "--with-deps" not in step["run"]
+
+
+@pytest.fixture
+def deb_cache(tmp_path):
+    """Fake apt/dpkg tools for the --debs cache paths; no root, network or real apt."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    def executable(name, body):
+        path = bin_dir / name
+        path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body), encoding="utf-8")
+        path.chmod(0o755)
+
+    # The install command (Playwright's apt in CI): downloads into apt's archive
+    # directory, which already holds an older download that is not this install's.
+    archives = tmp_path / "archives"
+    (archives / "partial").mkdir(parents=True)
+    (archives / "older_1.0_all.deb").write_text("older")
+    executable("install-deps", r'''
+        import os, pathlib, sys
+        root = pathlib.Path(__file__).parents[1]
+        with (root / "events").open("a") as log:
+            log.write("apt\n")
+        config = pathlib.Path(os.environ["APT_CONFIG"]).read_text()
+        assert 'APT::Keep-Downloaded-Packages "true";' in config
+        archives = root / "archives"
+        if (root / "nothing-new").exists():
+            sys.exit(0)
+        for name in ("fonts-b", "fonts-a"):
+            (archives / f"{name}_1.0_all.deb").write_text(name)
+        (root / "installed").write_text("fonts-a\nfonts-b\n")
+        sys.exit(int((root / "deps-exit").read_text()) if (root / "deps-exit").exists() else 0)
+    ''')
+    executable("apt-get", r'''
+        import pathlib, sys
+        root = pathlib.Path(__file__).parents[1]
+        with (root / "events").open("a") as log:
+            log.write("cached " + " ".join(pathlib.Path(arg).name for arg in sys.argv[1:]) + "\n")
+        assert sys.argv[1:6] == ["install", "-y", "-q", "--no-download", "--no-install-recommends"]
+        if (root / "cached-fails").exists():
+            sys.exit(100)
+        (root / "installed").write_text("".join(
+            pathlib.Path(arg).read_text() + "\n" for arg in sys.argv[6:]))
+    ''')
+    executable("dpkg-query", r'''
+        import pathlib, sys
+        root = pathlib.Path(__file__).parents[1]
+        installed = (root / "installed").read_text().split() if (root / "installed").exists() else []
+        if sys.argv[-1] in installed:
+            print("installed", end="")
+        else:
+            sys.exit(1)
+    ''')
+    executable("dpkg-deb", r'''
+        import pathlib, sys
+        print(pathlib.Path(sys.argv[-1]).read_text())
+    ''')
+    executable("dpkg", r'''
+        import pathlib, sys
+        assert sys.argv[1:] == ["--configure", "-a"]
+        with (pathlib.Path(__file__).parents[1] / "events").open("a") as log:
+            log.write("repair\n")
+    ''')
+    helper = load_helper()
+    source = SCRIPT.read_text()
+    for lock in helper.LOCKS:
+        source = source.replace(lock, str(tmp_path / "lock"))
+    source = source.replace('Path("/var/cache/apt/archives")', f'Path("{archives}")')
+    (tmp_path / "bounded_apt.py").write_text(source)
+    (tmp_path / "lock").touch()
+    env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
+    env.pop("SUDO_UID", None)
+    env.pop("SUDO_GID", None)
+
+    def run(debs):
+        return subprocess.run([sys.executable, str(tmp_path / "bounded_apt.py"), "--root",
+                               "--debs", str(debs), "install-deps"],
+                              env=env, text=True, capture_output=True, timeout=30, check=False)
+
+    return tmp_path, run
+
+
+def events(root):
+    return (root / "events").read_text().splitlines()
+
+
+def fresh_runner(root):
+    """The next job's machine: the restored cache, but nothing installed or downloaded."""
+    for path in [root / "events", root / "installed", *(root / "archives").glob("fonts-*.deb")]:
+        path.unlink(missing_ok=True)
+
+
+def test_a_miss_installs_with_apt_and_keeps_the_downloads_for_the_cache(deb_cache):
+    root, run = deb_cache
+    debs = root / "debs"
+    result = run(debs)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert events(root) == ["apt"]
+    # Only this install's downloads and their names, readable by the runner.
+    assert sorted(path.name for path in debs.iterdir()) == [
+        "fonts-a_1.0_all.deb", "fonts-b_1.0_all.deb", "packages.txt"]
+    assert (debs / "packages.txt").read_text() == "fonts-a\nfonts-b\n"
+    assert "kept 2 downloaded packages" in result.stdout
+
+
+def test_a_hit_installs_the_cached_debs_without_running_apt(deb_cache):
+    root, run = deb_cache
+    debs = root / "debs"
+    assert run(debs).returncode == 0
+    fresh_runner(root)
+    result = run(debs)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert events(root) == [("cached install -y -q --no-download --no-install-recommends "
+                             "fonts-a_1.0_all.deb fonts-b_1.0_all.deb")]
+    assert "installed 2 cached packages" in result.stdout
+
+
+def test_a_failed_cached_install_repairs_dpkg_and_falls_back_to_apt(deb_cache):
+    root, run = deb_cache
+    debs = root / "debs"
+    assert run(debs).returncode == 0
+    fresh_runner(root)
+    (root / "cached-fails").touch()
+    result = run(debs)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert events(root)[1:] == ["repair", "apt"]
+    assert "Cached dependency install failed" in result.stdout
+    assert (debs / "packages.txt").read_text() == "fonts-a\nfonts-b\n"
+
+
+def test_a_hit_that_leaves_a_package_missing_falls_back_to_apt(deb_cache):
+    root, run = deb_cache
+    debs = root / "debs"
+    assert run(debs).returncode == 0
+    (debs / "packages.txt").write_text("fonts-a\nfonts-b\nfonts-c\n")
+    fresh_runner(root)
+    result = run(debs)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert events(root)[1:] == ["repair", "apt"]
+    assert "left fonts-c missing" in result.stdout
+
+
+def test_a_miss_that_downloads_nothing_records_no_cache(deb_cache):
+    root, run = deb_cache
+    (root / "nothing-new").touch()
+    result = run(root / "debs")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (root / "debs").exists()
+    assert "nothing was downloaded; not caching" in result.stdout
+
+
+def test_a_failed_miss_fails_closed_and_records_no_cache(deb_cache):
+    root, run = deb_cache
+    (root / "deps-exit").write_text("100")
+    debs = root / "debs"
+    result = run(debs)
+    assert result.returncode == 1
+    assert events(root) == ["apt", "apt"]
+    assert not (debs / "packages.txt").exists()
+
+
+def test_elevation_passes_an_absolute_deb_cache(monkeypatch, tmp_path):
+    helper = load_helper()
+    monkeypatch.chdir(tmp_path)
+    seen = []
+
+    def execute(program, args):
+        seen.append(args)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(helper.os, "execvp", execute)
+    with pytest.raises(SystemExit):
+        helper.main(["--debs", "debs", "apt-get", "update"])
+    assert seen[0][-5:] == ["--root", "--debs", str(tmp_path / "debs"), "apt-get", "update"]

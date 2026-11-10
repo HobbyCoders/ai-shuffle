@@ -3,7 +3,7 @@
     python -m scripts.devloop.ci plan [--shards N] [--only NAMES]
     python -m scripts.devloop.ci matrix [--shards N]
     python -m scripts.devloop.ci journeys [--shard I/N] [--only NAMES] [--out DIR] [--build]
-    python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...]
+    python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]
 
 ``journeys`` starts ``python -m scripts.devloop up --ci`` as its own child (so
 the instance's parent lease is this process, not a CI shell step that
@@ -65,7 +65,7 @@ FRONTEND = ROOT / "frontend"
 JOURNEYS = FRONTEND / "tests" / "journeys"
 RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
-HOSTED_SHARDS = 16
+HOSTED_SHARDS = 18
 EVERY_JOURNEY = "*"
 SELECTOR = JOURNEYS / "select.mjs"
 SUFFIX = ".journey.mjs"
@@ -76,16 +76,6 @@ JOURNEY_MAP = "frontend/tests/journeys/map.json"
 # must not spend that uncertainty out of the full retry/teardown reserves.
 SETUP_SECONDS = 30
 CALIBRATION_ERROR_SECONDS = 120
-# Conservative planning budgets, NOT hosted measurements, for files no green
-# run has timed yet; a matched green refresh replaces each. Three journeys that
-# each filled a shard (944s, 908s and 778s in main run 42664620034) now run as
-# two files apiece. Their per-case seconds in main run 42719765869 put the
-# halves near 475s, 455s and 390s; reserve about a minute more than that.
-UNMEASURED_BUDGET_FLOORS = {
-    "chat-position-stability.journey.mjs": 540, "chat-position-stability-2.journey.mjs": 540,
-    "stop-with-queued-messages.journey.mjs": 540, "stop-with-queued-messages-2.journey.mjs": 510,
-    "sidebar-truth.journey.mjs": 450, "sidebar-truth-2.journey.mjs": 450,
-}
 READY_SECONDS = 420
 JOURNEY_SECONDS = 1500
 SUMMARY_CASE_CHARS = 12_000
@@ -170,7 +160,7 @@ def estimated_seconds(directory: Path = JOURNEYS, weights_path: Path = WEIGHTS,
         if name in measured and cases == recorded_cases:
             weights[name] = measured[name]
             continue
-        fallback = max(cases * per_case, UNMEASURED_BUDGET_FLOORS.get(name, 0))
+        fallback = cases * per_case
         if name in measured:
             # Never make a grown slow file cheaper by using the global median.
             # Nor assume removed cases were the expensive ones. Keep the old
@@ -423,107 +413,118 @@ def parse_journey_log(log: str) -> list[tuple[str, float, int]]:
     return samples
 
 
-def require_matching_workload(run_id: int, revision: str) -> None:
-    """Do not apply old timings to changed code, even when case counts match."""
+RETRY_MARKER = re.compile(r"\[ci\] retrying \S+\.journey\.mjs:")
+
+
+def _run_samples(run_id: int, repo: str) -> tuple[str, list[tuple[str, float, int]]]:
+    """(revision, first-pass samples) of one clean green main-suite run.
+
+    The run itself must qualify, or nothing is refreshed. A job log with a
+    retry or an unfinished journey is skipped whole: a retry's footer must never
+    pass for the first attempt's runtime.
+    """
+    state = json.loads(subprocess.check_output(
+        ["gh", "run", "view", str(run_id), "--repo", repo, "--json",
+         "status,conclusion,attempt,headSha,event,headBranch,workflowName"],
+        cwd=ROOT, text=True, timeout=120))
+    if state.get("status") != "completed" or state.get("conclusion") != "success":
+        raise ValueError(f"Run {run_id} must be completed and green: {state}")
+    if state.get("attempt") != 1:
+        raise ValueError(f"Run {run_id} cannot be used for runtime weights: "
+                         f"attempt {state.get('attempt')} is not 1; re-run logs omit earlier jobs. "
+                         "Choose a clean first-attempt run.")
+    # main-suite push jobs check out headSha. PR runs check out a merge revision
+    # the run's headSha does not name, so their source is not recorded.
+    if (state.get("event"), state.get("headBranch"), state.get("workflowName")) != (
+            "push", "main", "main-suite"):
+        raise ValueError(f"Run {run_id} must be a push to main from main-suite; "
+                         "PR/other runs do not establish the checkout revision. "
+                         "No weights were replaced.")
+    revision = state.get("headSha")
     if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError(f"Run {run_id} has no valid source revision")
-    # Ignore documentation, unit-test implementations and selection metadata.
-    # Never exclude whole test directories: fake_claude/cli.py dynamically loads
-    # fluid/tests/fixtures/fake_claude_script.py, which imports fake_guard_ready.
-    # Runtime fixtures, helpers, dependencies and fake providers stay protected.
-    paths = ["app", "fluid", "frontend", "browser-mcp", "tools", "requirements*.txt",
-             "scripts/devloop", ":(exclude)scripts/devloop/ci.py",
-             ":(exclude)scripts/devloop/journey_weights.json",
-             ":(exclude,glob)**/README*", ":(exclude,glob)**/docs/**",
-             ":(exclude,glob)**/*.test.*", ":(exclude,glob)**/*.spec.*",
-             ":(exclude,glob)**/test_*.py", ":(exclude,glob)**/conftest.py",
-             ":(exclude)frontend/tests/journeys/map.json",
-             ":(exclude)frontend/tests/journeys/select.mjs"]
-    commands = [["git", "diff", "--quiet", revision, "--", *paths],
-                ["git", "ls-files", "--others", "--exclude-standard", "--", *paths]]
-    for command in commands:
-        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0 or result.stdout.strip():
-            raise ValueError(f"Run {run_id} workload differs from this checkout or revision "
-                             f"{revision} is unavailable. Fetch that revision and choose a "
-                             "complete matching run; no weights were replaced.")
+    logs = subprocess.check_output(
+        ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/logs"], cwd=ROOT, timeout=120)
+    with zipfile.ZipFile(io.BytesIO(logs)) as archive:
+        # The archive includes both whole-job logs and copies per step.
+        job_logs = [(name, archive.read(name).decode("utf-8-sig")) for name in sorted(archive.namelist())
+                    if "/" not in name and "UI journeys" in name and name.endswith(".txt")]
+    samples = []
+    for name, log in job_logs:
+        if RETRY_MARKER.search(log):
+            print(f"[ci] run {run_id}: skipping {name}: it retried a journey", file=sys.stderr)
+            continue
+        try:
+            samples.extend(parse_journey_log(log))
+        except ValueError as error:
+            print(f"[ci] run {run_id}: skipping {name}: {error}", file=sys.stderr)
+    measured = [name for name, _, _ in samples]
+    if len(set(measured)) != len(measured):
+        raise ValueError(f"Run {run_id} has duplicate journey measurements")
+    return revision, samples
 
 
-def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS) -> None:
-    """Recompute medians from complete, clean first-attempt runs matching this checkout."""
+def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path | None = None) -> None:
+    """Median hosted seconds per journey file from clean green first-attempt main-suite runs.
+
+    A sample counts only when its case count matches the file's current
+    ``--list`` count. A run that lacks a file, or measured it with other cases,
+    adds nothing for that file. A file with no usable sample keeps its existing
+    entry and the case count it was measured at, so planning still treats a
+    changed file as stale. Files no longer in the checkout are dropped. Writes
+    ``out`` (default: ``weights_path``) only after every run has been read.
+    """
+    out = weights_path if out is None else out
     expected_cases = {path.name: case_count(path, strict=True) for path in journey_files(JOURNEYS)}
-    expected = set(expected_cases)
     repo = subprocess.check_output(["gh", "repo", "view", "--json", "nameWithOwner",
                                     "--jq", ".nameWithOwner"], cwd=ROOT, text=True, timeout=120).strip()
     durations = defaultdict(list)
     per_case = []
-    run_ids = sorted(set(run_ids))
     revisions = {}
-    for run_id in run_ids:
-        state = json.loads(subprocess.check_output(
-            ["gh", "run", "view", str(run_id), "--repo", repo, "--json",
-             "status,conclusion,attempt,headSha,event,headBranch,workflowName"],
-            cwd=ROOT, text=True, timeout=120))
-        if state.get("status") != "completed" or state.get("conclusion") != "success":
-            raise ValueError(f"Run {run_id} must be completed and green: {state}")
-        if state.get("attempt") != 1:
-            raise ValueError(f"Run {run_id} cannot be used for runtime weights: "
-                             f"attempt {state.get('attempt')} is not 1; re-run logs omit earlier jobs. "
-                             "Choose a clean first-attempt run.")
-        # main-suite push jobs use actions/checkout without a ref override, so
-        # headSha is their checkout. PR runs instead check out a merge revision;
-        # the run's headSha cannot identify that producing tree. Fail closed.
-        if (state.get("event"), state.get("headBranch"), state.get("workflowName")) != (
-                "push", "main", "main-suite"):
-            raise ValueError(f"Run {run_id} must be a push to main from main-suite; "
-                             "PR/other runs do not establish the checkout revision. "
-                             "No weights were replaced.")
-        revision = state.get("headSha", "")
-        require_matching_workload(run_id, revision)
-        revisions[str(run_id)] = revision
-        logs = subprocess.check_output(
-            ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/logs"], cwd=ROOT, timeout=120)
-        samples = []
-        with zipfile.ZipFile(io.BytesIO(logs)) as archive:
-            # The archive includes both whole-job logs and copies per step.
-            job_logs = [archive.read(name).decode("utf-8-sig") for name in sorted(archive.namelist())
-                        if "/" not in name and "UI journeys" in name and name.endswith(".txt")]
-        # Check the entire run before parsing attempt 1's failed/incomplete footer.
-        # A whole-file retry's footer must never be mistaken for attempt 1's runtime.
-        if any(re.search(r"\[ci\] retrying \S+\.journey\.mjs:", log) for log in job_logs):
-            raise ValueError(f"Run {run_id} contained retries and cannot be used for runtime weights; "
-                             "choose a clean first-pass run")
-        for log in job_logs:
-            samples.extend(parse_journey_log(log))
-        if not samples:
-            raise ValueError(f"Run {run_id} has no completed UI journey measurements")
-        measured = {name for name, _, _ in samples}
-        if len(measured) != len(samples):
-            raise ValueError(f"Run {run_id} has duplicate journey measurements")
-        if measured != expected:
-            raise ValueError(f"Run {run_id} has mismatched journey coverage: "
-                             f"missing {sorted(expected - measured)}; unexpected {sorted(measured - expected)}. "
-                             "Choose a complete run matching this checkout.")
+    for run_id in sorted(set(run_ids)):
+        revision, samples = _run_samples(run_id, repo)
         for name, seconds, cases in samples:
-            if cases != expected_cases[name]:
-                raise ValueError(f"Run {run_id} has mismatched case count for {name}: "
-                                 f"measured {cases}, checkout {expected_cases[name]}. "
-                                 "Choose a complete run matching this checkout.")
-            durations[name].append(seconds)
-            per_case.append(seconds / cases)
+            if name not in expected_cases:
+                print(f"[ci] run {run_id}: {name} is no longer a journey file", file=sys.stderr)
+            elif cases != expected_cases[name]:
+                print(f"[ci] run {run_id}: {name} ran {cases} cases, the file now has "
+                      f"{expected_cases[name]}; sample not used", file=sys.stderr)
+            else:
+                durations[name].append(seconds)
+                per_case.append(seconds / cases)
+                revisions[str(run_id)] = revision
+    if not durations:
+        raise ValueError("No usable UI journey measurements in those runs; no weights were replaced")
+    existing = json.loads(weights_path.read_text(encoding="utf-8")) if weights_path.is_file() else {}
+    old_seconds, old_counts = existing.get("seconds", {}), existing.get("case_counts", {})
+    kept = sorted(name for name in expected_cases
+                  if name not in durations and name in old_seconds and name in old_counts)
+    for name in sorted(set(expected_cases) - set(durations)):
+        print(f"[ci] no usable sample for {name}: "
+              + ("kept its existing weight" if name in kept else "it keeps the per-case fallback"),
+              file=sys.stderr)
+    sources = dict(revisions)
+    if kept:  # Kept values still come from the runs that measured them.
+        sources = {**existing.get("source_revisions", {}), **sources}
+    seconds = {name: round(median(values), 2) for name, values in durations.items()}
+    seconds.update({name: old_seconds[name] for name in kept})
+    counts = {name: expected_cases[name] for name in durations}
+    counts.update({name: old_counts[name] for name in kept})
     data = {
         "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from "
                     "green main-suite push-to-main runs: python -m scripts.devloop.ci refresh-weights "
-                    "RUN_ID [RUN_ID ...]. seconds_per_case is the median of seconds/cases per sample.",
-        "source_runs": run_ids,
-        "source_revisions": revisions,
-        "case_counts": expected_cases,
+                    "RUN_ID [RUN_ID ...] [--out PATH]. Only samples whose case count matches the file "
+                    "count; a file with no such sample keeps its entry. seconds_per_case is the median "
+                    "of seconds/cases per sample.",
+        "source_runs": sorted(int(run_id) for run_id in sources),
+        "source_revisions": dict(sorted(sources.items(), key=lambda item: int(item[0]))),
+        "case_counts": dict(sorted(counts.items())),
         "seconds_per_case": round(median(per_case), 2),
-        "seconds": {name: round(median(values), 2) for name, values in sorted(durations.items())},
+        "seconds": dict(sorted(seconds.items())),
     }
-    # Do not replace the checked-in measurements until every run was validated.
-    weights_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    print(f"[ci] refreshed {len(durations)} journey weights from {len(run_ids)} green runs: {weights_path}")
+    out.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print(f"[ci] refreshed {len(durations)} journey weights from {len(revisions)} green runs "
+          f"({len(kept)} kept): {out}")
 
 
 def commands_for(shard_files: list[str], shards: int, directory: Path = JOURNEYS) -> list[list[str]]:
@@ -811,6 +812,8 @@ def main(argv: list[str] | None = None) -> int:
     choose.add_argument("--shards", type=int, default=HOSTED_SHARDS)
     refresh = commands.add_parser("refresh-weights", help="Measure journey runtimes from green hosted runs")
     refresh.add_argument("run_ids", type=int, nargs="+", metavar="RUN_ID")
+    refresh.add_argument("--out", type=Path, default=None,
+                         help=f"Write the refreshed weights here instead of {WEIGHTS.name}")
     run = commands.add_parser("journeys", help="Run a shard of the journeys on a fresh instance")
     run.add_argument("--shard", type=_shard, default=(1, 1), metavar="I/N")
     run.add_argument("--only", help=only_help)
@@ -831,7 +834,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "matrix":
         return matrix(args.shards)
     if args.command == "refresh-weights":
-        refresh_weights(args.run_ids)
+        refresh_weights(args.run_ids, out=args.out)
         return 0
     return journeys(args)
 

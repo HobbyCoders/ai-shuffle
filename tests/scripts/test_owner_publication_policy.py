@@ -194,7 +194,7 @@ def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
     assert setup["timeout-minutes"] == "13"
     assert "if" not in setup  # OS dependencies are needed even on a cache hit.
     assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in setup["run"]
-    assert "python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium" in setup["run"]
+    assert "python3 ../scripts/ci/bounded_apt.py --debs ~/.cache/chromium-debs npx --no-install playwright-core install-deps chromium" in setup["run"]
     assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in setup["run"]
     assert "URIs: https://archive.ubuntu.com/ubuntu/" in setup["run"]
     assert "--allow-unauthenticated" not in setup["run"]
