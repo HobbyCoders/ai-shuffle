@@ -291,7 +291,9 @@ def _connector_should_run(connector_id: str) -> Optional[bool]:
 
     Reads the committed row, so a repeated or out-of-order record changes
     nothing: the latest row decides. An unowned active row is claimed here
-    only by the claimant ``start_all`` would pick.
+    only by the claimant ``start_all`` would pick. A claim that changes no row
+    may have lost to this worker's own ``start_all``, so the row is read again
+    and its owner then decides.
     """
     from app.network import ownership
     if not ownership.enrolled():
@@ -301,7 +303,12 @@ def _connector_should_run(connector_id: str) -> Optional[bool]:
         return False
     decision = ownership.decide_connector(row)
     if decision == "claim":
-        return ownership.claim("connectors", connector_id)
+        if ownership.claim("connectors", connector_id):
+            return True
+        row = database.get_connector(connector_id)
+        if not row or not row.get("is_active"):
+            return False
+        decision = ownership.decide_connector(row)
     return decision == "start"
 
 
@@ -315,10 +322,9 @@ async def _follow_connector_rows(connector_manager, connector_ids) -> None:
     for connector_id in sorted(ids):
         try:
             run_here = await run_sync(_connector_should_run, connector_id)
-            running = connector_manager.get_running_instance(connector_id) is not None
-            if run_here and not running:
+            if run_here:  # keeps a live client; replaces an errored or stuck one
                 await connector_manager.start_connector(connector_id)
-            elif run_here is False and running:
+            elif run_here is False and connector_manager.get_running_instance(connector_id) is not None:
                 await connector_manager.stop_connector(connector_id)
         except Exception:  # noqa: BLE001 - one connector must not hold the others back
             logger.warning("Reconciling connector %s failed", connector_id, exc_info=True)

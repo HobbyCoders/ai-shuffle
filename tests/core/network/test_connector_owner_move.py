@@ -20,6 +20,11 @@ from tests.core.network.harness import _ACTIVE, converge, exchange, join
 CONNECTOR = "conn-move-1316"
 
 
+class _Client:
+    def __init__(self, live=True):
+        self.live = live
+
+
 class _FakeManager:
     def __init__(self):
         self.running = {}
@@ -35,9 +40,11 @@ class _FakeManager:
         # The real start re-reads the row and refuses one owned elsewhere.
         if ownership.decide_connector(database.get_connector(connector_id)) != "start":
             return False
-        if connector_id not in self.running:
+        # Like the real start: a live client is kept, a dead one replaced.
+        existing = self.running.get(connector_id)
+        if existing is None or not existing.live:
             self.events.append(("start", connector_id))
-            self.running[connector_id] = object()
+            self.running[connector_id] = _Client()
         return True
 
     async def stop_connector(self, connector_id):
@@ -68,7 +75,7 @@ def pair(workers, monkeypatch):
         engine.scan_all()
     converge([a, b])
     fakes = {a.name: _FakeManager(), b.name: _FakeManager()}
-    fakes[a.name].running[CONNECTOR] = object()  # A runs it before the move
+    fakes[a.name].running[CONNECTOR] = _Client()  # A runs it before the move
     monkeypatch.setattr(manager_mod, "connector_manager", _PerWorker(fakes))
 
     scheduled = []
@@ -187,3 +194,64 @@ async def test_switching_off_or_deleting_on_another_worker_stops_the_owner(pair)
     exchange(a, b)
     await _run(scheduled)
     assert not fakes[b.name].running
+
+
+async def test_a_claim_lost_to_this_workers_own_start_keeps_the_connector(pair, monkeypatch):
+    a, b, fakes, scheduled = pair
+    with a.active():
+        ownership.assign("connectors", CONNECTOR, None)
+        engine.scan_all()
+    converge([a, b])
+    for _worker, coro in scheduled:
+        coro.close()
+    scheduled.clear()
+    claimant = None
+    for worker in (a, b):  # the worker ``claim`` lets through for an unowned row
+        with worker.active():
+            if ownership._claimant(engine.require_context()) == worker.device_id:
+                claimant = worker
+                break
+    assert claimant is not None
+    fakes[a.name].running.clear()
+    fakes[claimant.name].running[CONNECTOR] = _Client()  # boot's start_all claimed and started it
+
+    real_claim = ownership.claim
+
+    def claim_after_start_all(table, row_id):
+        assert real_claim(table, row_id)  # start_all's claim lands first ...
+        return real_claim(table, row_id)  # ... so the reconcile's own claim changes no row
+
+    monkeypatch.setattr(ownership, "claim", claim_after_start_all)
+    with claimant.active():
+        await startup._reconcile_owned_connectors([CONNECTOR])
+        assert database.get_connector(CONNECTOR)["owner_device_id"] == claimant.device_id
+    assert fakes[claimant.name].events == []
+    assert CONNECTOR in fakes[claimant.name].running
+
+
+async def test_a_reconcile_replaces_a_registered_client_that_died(pair):
+    a, b, fakes, scheduled = pair
+    fakes[a.name].running[CONNECTOR] = _Client(live=False)  # registered, but its login failed
+    with a.active():
+        await startup._reconcile_owned_connectors([CONNECTOR])
+    assert fakes[a.name].events == [("start", CONNECTOR)]
+    assert fakes[a.name].running[CONNECTOR].live
+
+    with a.active():  # a healthy client is left alone
+        await startup._reconcile_owned_connectors([CONNECTOR])
+    assert fakes[a.name].events == [("start", CONNECTOR)]
+
+
+async def test_outside_a_network_the_reconcile_changes_nothing(workers, monkeypatch):
+    solo = workers("worker-solo")
+    fake = _FakeManager()
+    fake.running[CONNECTOR] = _Client(live=False)
+    monkeypatch.setattr(manager_mod, "connector_manager", fake)
+    with solo.active():
+        database.create_connector(CONNECTOR, "webhook", "Hook", {"mode": "inbound", "inbound_path": "h"},
+                                  [], is_active=False)
+        assert not ownership.enrolled()
+        await startup._reconcile_owned_connectors([CONNECTOR])
+        database.delete_connector(CONNECTOR)
+        await startup._reconcile_owned_connectors([CONNECTOR])
+    assert fake.events == []
