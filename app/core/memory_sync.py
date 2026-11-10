@@ -220,7 +220,8 @@ def memory_leg_for_options(options: object) -> str:
 
 
 def _resolve_target(
-    project_id: str, working_dir: str, leg: str = "delegated"
+    project_id: str, working_dir: str, leg: str = "delegated", *,
+    project: Optional[dict] = None, strict: bool = False,
 ) -> Tuple[Optional[str], Optional[Path]]:
     """Resolve a session's (memory_key, memory_dir), anchored on the project.
 
@@ -233,12 +234,19 @@ def _resolve_target(
 
     ``leg`` picks the projects root; the memory_key is the same
     either way, which is what makes the two mirrors one shared memory.
+
+    ``project`` skips the lookup when the caller already holds the record.
+    ``strict`` lets a failed lookup raise instead of reading as "no project":
+    a queued publication must not be cleared when the answer is unknown.
     """
-    try:
-        project = database.get_project(project_id)
-    except Exception:  # noqa: BLE001 — never break the caller
-        logger.debug("memory_sync: get_project failed for %s", project_id, exc_info=True)
-        project = None
+    if project is None:
+        try:
+            project = database.get_project(project_id)
+        except Exception:  # noqa: BLE001 — never break the caller
+            if strict:
+                raise
+            logger.debug("memory_sync: get_project failed for %s", project_id, exc_info=True)
+            project = None
     memory_key = memory_key_for_project(project)
     if not memory_key:
         return None, None
@@ -433,13 +441,16 @@ def reconcile_memory_sync(project_id: Optional[str], working_dir: Optional[str],
 
 
 def push_memory_sync(project_id: Optional[str], working_dir: Optional[str],
-                     leg: str = "delegated", *, recovery: bool = False) -> None:
-    # Native only — see reconcile_memory_sync.
+                     leg: str = "delegated", *, recovery: bool = False,
+                     project: Optional[dict] = None, strict: bool = False) -> None:
+    # Native only — see reconcile_memory_sync. ``project``/``strict``: see
+    # _resolve_target; the queued-publication path (_publish) passes strict.
     if leg != "native":
         return
     if not settings.agent_memory_sync or not project_id or not working_dir:
         return
-    memory_key, memory_dir = _resolve_target(project_id, working_dir, leg)
+    memory_key, memory_dir = _resolve_target(project_id, working_dir, leg,
+                                             project=project, strict=strict)
     if not memory_key or memory_dir is None:
         return
     allow_deletes = (
@@ -551,10 +562,13 @@ def _finish_publication(project_id: str, token: str, completed: bool) -> None:
 
 
 def _publish(project_id: str, working_dir: str, leg: str, token: str,
-             recovery: bool = False) -> None:
+             recovery: bool = False, project: Optional[dict] = None) -> None:
+    # Completed means published, or genuinely nothing to publish (no such
+    # project, no folder). A failed lookup raises: unknown keeps the marker.
     completed = False
     try:
-        push_memory_sync(project_id, working_dir, leg, recovery=recovery)
+        push_memory_sync(project_id, working_dir, leg, recovery=recovery,
+                         project=project, strict=True)
         completed = True
     finally:
         _finish_publication(project_id, token, completed)
@@ -610,7 +624,7 @@ def publish_pending() -> int:
         with _pending_lock:
             _in_flight.add(token)
         try:
-            _publish(project_id, working_dir, leg, token, recovery=True)
+            _publish(project_id, working_dir, leg, token, recovery=True, project=project)
         except Exception:  # noqa: BLE001
             logger.warning("memory_sync: queued publication retained for the next start",
                            exc_info=True)

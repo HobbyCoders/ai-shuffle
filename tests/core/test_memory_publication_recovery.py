@@ -19,6 +19,8 @@ from app.core import memory_sync
 from app.db import agent_memory
 from tests.core.test_memory_sync import KEY, T0
 
+_real_resolve_target = memory_sync._resolve_target
+
 
 class StallableDb:
     """Real SQL; writes block while ``stall`` is set and released writes fail
@@ -79,7 +81,7 @@ def target(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_sync, "memdb", fake)
     monkeypatch.setattr(memory_sync, "settings", config)
     monkeypatch.setattr(memory_sync, "database", SimpleNamespace(get_project=projects.get))
-    monkeypatch.setattr(memory_sync, "_resolve_target", lambda *args: (KEY, folder))
+    monkeypatch.setattr(memory_sync, "_resolve_target", lambda *args, **kwargs: (KEY, folder))
     memory_sync.reset_state()
     yield SimpleNamespace(folder=folder, db=fake, config=config, projects=projects)
     fake.release.set()  # Let a still-stalled thread fail and exit.
@@ -366,3 +368,65 @@ def test_conditional_write_never_moves_a_stamp_backwards(deleted):
     rows = {row["relative_path"]: row for row in agent_memory.get_memory_files(KEY)}
     assert rows["f.md"]["content"] == "same time" and not rows["f.md"]["deleted"]
     assert memory_sync._as_dt(rows["g.md"]["updated_at"]) == older
+
+
+# --- A failed project lookup is not "nothing to publish" (S3) ----------------
+# Through the real _resolve_target: only the folder location is pinned.
+
+@pytest.fixture
+def real_lookup(target, monkeypatch):
+    env = target
+    env.projects["project"] = {"id": "project", "path": str(env.folder), "link_group_id": KEY}
+    env.lookups = []
+
+    def get_project(project_id):
+        env.lookups.append(project_id)
+        if env.lookup_fails(len(env.lookups)):
+            raise ConnectionError("database unavailable")
+        return env.projects.get(project_id)
+
+    env.lookup_fails = lambda attempt: False
+    monkeypatch.setattr(memory_sync, "_resolve_target", _real_resolve_target)
+    monkeypatch.setattr(memory_sync, "memory_dir_for_working_dir", lambda anchor, leg: env.folder)
+    monkeypatch.setattr(memory_sync, "database", SimpleNamespace(get_project=get_project))
+    return env
+
+
+async def test_lookup_failure_in_turn_end_push_keeps_the_marker(real_lookup):
+    env = real_lookup
+    _write(env.folder, "MEMORY.md", "fact")
+    env.lookup_fails = lambda attempt: True
+
+    await memory_sync.push_memory("project", str(env.folder), "native")
+
+    assert env.db.uploads == [] and len(_markers(env)) == 1
+    assert memory_sync.pending_publications() == 0
+    env.lookup_fails = lambda attempt: False
+    await memory_sync.publish_pending_memory()  # The next start publishes it.
+    assert len(env.db.uploads) == 1 and _markers(env) == []
+
+
+async def test_replay_does_not_depend_on_a_second_project_lookup(real_lookup):
+    env = real_lookup
+    _write(env.folder, "MEMORY.md", "fact")
+    await _stop_during_stalled_push(
+        env, lambda: memory_sync.push_memory("project", str(env.folder), "native"))
+    env.lookups.clear()
+    env.lookup_fails = lambda attempt: attempt > 1  # The database drops after one read.
+
+    await memory_sync.publish_pending_memory()
+
+    assert env.db.get_memory_file(KEY, "MEMORY.md")["content"] == "fact"
+    assert env.lookups == ["project"] and _markers(env) == []
+
+
+async def test_replay_lookup_failure_keeps_the_marker(real_lookup):
+    env = real_lookup
+    _write(env.folder, "MEMORY.md", "fact")
+    await _stop_during_stalled_push(
+        env, lambda: memory_sync.push_memory("project", str(env.folder), "native"))
+    env.lookup_fails = lambda attempt: True
+
+    await memory_sync.publish_pending_memory()
+
+    assert env.db.uploads == [] and len(_markers(env)) == 1
