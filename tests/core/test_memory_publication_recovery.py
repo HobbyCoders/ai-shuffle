@@ -1,41 +1,71 @@
 """A memory push cut off by shutdown is finished by the next start (#1305).
 
-The DB layer is the in-memory ``FakeMemDb`` from test_memory_sync, but its
-write is a real blocking call on the real push thread: the stall is in the
-transport, not a mock of the push. "Process death" abandons that thread and
-then makes its write fail, so the old process never completes the push.
+The DB layer is the real ``app.db.agent_memory`` SQL on the per-test database
+(conftest's ``_auto_db_shim``), wrapped so a write is a real blocking call on
+the real push thread: the stall is in the transport, not a mock of the push.
+"Process death" abandons that thread and then makes its write fail, so the old
+process never completes the push.
 """
 import asyncio
 import json
 import os
 import threading
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from app.core import memory_sync
-from tests.core.test_memory_sync import FakeMemDb, KEY, T0
+from app.db import agent_memory
+from tests.core.test_memory_sync import KEY, T0
 
 
-class StallableDb(FakeMemDb):
-    """Writes block while ``stall`` is set; released writes fail like a dead process."""
+class StallableDb:
+    """Real SQL; writes block while ``stall`` is set and released writes fail
+    like a dead process. ``before_write`` runs once, just before the next write."""
+
+    get_memory_files = staticmethod(agent_memory.get_memory_files)
+    get_memory_file = staticmethod(agent_memory.get_memory_file)
+    tombstone_memory_file = staticmethod(agent_memory.tombstone_memory_file)
 
     def __init__(self):
-        super().__init__()
         self.stall = False
         self.entered = threading.Event()
         self.release = threading.Event()
         self.uploads = []
+        self.before_write = None
 
-    def upsert_memory_file(self, memory_key, relative_path, content, content_hash,
-                           updated_by=None, updated_at=None):
+    def _gate(self):
+        hook, self.before_write = self.before_write, None
+        if hook is not None:
+            hook()
         if self.stall:
             self.entered.set()
             assert self.release.wait(10)
             raise ConnectionError("process killed while the write was in flight")
+
+    def upsert_memory_file(self, memory_key, relative_path, content, content_hash,
+                           updated_by=None, updated_at=None):
+        self._gate()
         self.uploads.append((relative_path, content_hash))
-        super().upsert_memory_file(memory_key, relative_path, content, content_hash,
-                                   updated_by, updated_at)
+        agent_memory.upsert_memory_file(memory_key, relative_path, content, content_hash,
+                                        updated_by, updated_at)
+
+    def upsert_memory_file_if_not_newer(self, memory_key, relative_path, content,
+                                        content_hash, updated_by, updated_at):
+        self._gate()
+        wrote = agent_memory.upsert_memory_file_if_not_newer(
+            memory_key, relative_path, content, content_hash, updated_by, updated_at)
+        if wrote:
+            self.uploads.append((relative_path, content_hash))
+        return wrote
+
+    def seed_live(self, rel, content, updated_at):
+        agent_memory.upsert_memory_file(KEY, rel, content, memory_sync._sha256(content),
+                                        "remote", updated_at.isoformat())
+
+    def seed_tombstone(self, rel, updated_at):
+        agent_memory.tombstone_memory_file(KEY, rel, "remote", updated_at.isoformat())
 
 
 @pytest.fixture
@@ -109,16 +139,16 @@ async def test_kill_during_startup_retry_retries_once_per_file_version(target):
         env, lambda: memory_sync.push_memory("project", str(env.folder), "native"))
     # The retry publishes one file, then is killed while writing the second.
     _write(env.folder, "topic.md", "second file", offset=61)
-    original = env.db.upsert_memory_file
+    original = env.db.upsert_memory_file_if_not_newer
 
     def stall_after_first(*args, **kwargs):
         if env.db.uploads:
             env.db.stall = True
         return original(*args, **kwargs)
 
-    env.db.upsert_memory_file = stall_after_first
+    env.db.upsert_memory_file_if_not_newer = stall_after_first
     await _stop_during_stalled_push(env, memory_sync.publish_pending_memory, stall=False)
-    del env.db.upsert_memory_file
+    del env.db.upsert_memory_file_if_not_newer
     assert len(_markers(env)) == 1  # Still owed after the second death.
 
     await memory_sync.publish_pending_memory()
@@ -237,3 +267,102 @@ async def test_in_flight_publication_is_reported_until_it_ends(target):
     await pushing
     assert memory_sync.pending_publications() == 0
     assert len(_markers(env)) == 1
+
+
+# --- The replay publishes an old edit late (S1, S2) --------------------------
+# A real turn reconciles at its start and pushes at its end; the replay must
+# neither outrank that turn's newer edit nor revive a newer peer delete.
+
+def _turn(env, name, text, offset):
+    memory_sync.reconcile_memory_sync("project", str(env.folder), "native")
+    _write(env.folder, name, text, offset)
+    memory_sync.push_memory_sync("project", str(env.folder), "native")
+
+
+def _stamp(env, name):
+    return memory_sync._as_dt(env.db.get_memory_file(KEY, name)["updated_at"])
+
+
+async def test_replay_delayed_past_a_newer_turn_edit_does_not_replace_it(target):
+    env = target
+    _write(env.folder, "MEMORY.md", "old fact", offset=60)
+    await _stop_during_stalled_push(
+        env, lambda: memory_sync.push_memory("project", str(env.folder), "native"))
+    # The replay has scanned the old file; before its write lands, a turn edits
+    # the file and publishes the edit.
+    env.db.before_write = lambda: _turn(env, "MEMORY.md", "newer fact", offset=120)
+
+    await memory_sync.publish_pending_memory()
+
+    assert env.db.get_memory_file(KEY, "MEMORY.md")["content"] == "newer fact"
+    memory_sync.reconcile_memory_sync("project", str(env.folder), "native")
+    assert (env.folder / "MEMORY.md").read_text() == "newer fact"
+    assert _markers(env) == []
+
+
+async def test_replay_landing_first_does_not_outrank_the_later_turn_edit(target):
+    env = target
+    _write(env.folder, "MEMORY.md", "old fact", offset=60)
+    await _stop_during_stalled_push(
+        env, lambda: memory_sync.push_memory("project", str(env.folder), "native"))
+
+    await memory_sync.publish_pending_memory()
+    # The late upload keeps the file's own time, not the time it was replayed.
+    assert _stamp(env, "MEMORY.md") == T0 + timedelta(seconds=60)
+    _turn(env, "MEMORY.md", "newer fact", offset=120)
+
+    assert env.db.get_memory_file(KEY, "MEMORY.md")["content"] == "newer fact"
+    memory_sync.reconcile_memory_sync("project", str(env.folder), "native")  # Next turn.
+    assert (env.folder / "MEMORY.md").read_text() == "newer fact"
+
+
+async def test_replay_does_not_revive_a_newer_peer_delete(target):
+    env = target
+    _write(env.folder, "topic.md", "old fact", offset=60)
+    await _stop_during_stalled_push(
+        env, lambda: memory_sync.push_memory("project", str(env.folder), "native"))
+    env.db.seed_tombstone("topic.md", T0 + timedelta(seconds=120))
+
+    await memory_sync.publish_pending_memory()
+
+    row = env.db.get_memory_file(KEY, "topic.md")
+    assert row["deleted"] and _stamp(env, "topic.md") == T0 + timedelta(seconds=120)
+    assert env.db.uploads == [] and _markers(env) == []
+    assert (env.folder / "topic.md").read_text() == "old fact"  # Never writes local files.
+
+
+async def test_replay_revives_an_older_peer_delete(target):
+    env = target
+    env.db.seed_tombstone("topic.md", T0)
+    _write(env.folder, "topic.md", "re-created fact", offset=60)
+    await _stop_during_stalled_push(
+        env, lambda: memory_sync.push_memory("project", str(env.folder), "native"))
+
+    await memory_sync.publish_pending_memory()
+
+    row = env.db.get_memory_file(KEY, "topic.md")
+    assert not row["deleted"] and row["content"] == "re-created fact"
+    assert _stamp(env, "topic.md") == T0 + timedelta(seconds=60)
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_conditional_write_never_moves_a_stamp_backwards(deleted):
+    """The real statement: replace a live row or tombstone only when not newer."""
+    newer, older = T0 + timedelta(seconds=120), T0 + timedelta(seconds=60)
+    if deleted:
+        agent_memory.tombstone_memory_file(KEY, "f.md", "peer", newer.isoformat())
+    else:
+        agent_memory.upsert_memory_file(KEY, "f.md", "peer", "h-peer", "peer", newer.isoformat())
+
+    assert not agent_memory.upsert_memory_file_if_not_newer(
+        KEY, "f.md", "late", "h-late", "replay", older.isoformat())
+    row = agent_memory.get_memory_file(KEY, "f.md")
+    assert bool(row["deleted"]) is deleted and memory_sync._as_dt(row["updated_at"]) == newer
+
+    assert agent_memory.upsert_memory_file_if_not_newer(
+        KEY, "f.md", "same time", "h-same", "replay", newer.isoformat())
+    assert agent_memory.upsert_memory_file_if_not_newer(
+        KEY, "g.md", "new file", "h-new", "replay", older.isoformat())
+    rows = {row["relative_path"]: row for row in agent_memory.get_memory_files(KEY)}
+    assert rows["f.md"]["content"] == "same time" and not rows["f.md"]["deleted"]
+    assert memory_sync._as_dt(rows["g.md"]["updated_at"]) == older

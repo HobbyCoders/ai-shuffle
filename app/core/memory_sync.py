@@ -252,7 +252,15 @@ def _resolve_target(
     return memory_key, memory_dir_for_working_dir(anchor, leg)
 
 
-def _scan_local(memory_dir: Path) -> _LocalState:
+def _scan_local(memory_dir: Path, stable: bool = False) -> _LocalState:
+    """Local memory files. ``stable`` pairs each content with ITS mtime.
+
+    The ordinary scan reads, then stats, so an edit in between pairs the old
+    content with the new mtime; harmless where the push stamps uploads "now".
+    The startup replay stamps an upload with the mtime, so it stats before and
+    after reading and skips a file that changed meanwhile (its own turn
+    publishes it).
+    """
     state: _LocalState = {}
     if not memory_dir.exists():
         return state
@@ -270,9 +278,13 @@ def _scan_local(memory_dir: Path) -> _LocalState:
             logger.warning("memory_sync: skipping out-of-tree memory file %s", path)
             continue
         try:
+            before = path.stat().st_mtime_ns if stable else None
             content = path.read_text(encoding="utf-8")
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            stat = path.stat()
+            mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
         except (OSError, UnicodeDecodeError):
+            continue
+        if stable and stat.st_mtime_ns != before:
             continue
         rel = path.relative_to(memory_dir).as_posix()
         state[rel] = (content, _sha256(content), mtime)
@@ -344,13 +356,25 @@ def reconcile(memory_key: str, memory_dir: Path, instance_id: Optional[str],
 
 
 def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
-         allow_deletes: bool, leg: str = "delegated") -> None:
-    """Upload local changes to the DB; tombstone local deletions if allowed."""
+         allow_deletes: bool, leg: str = "delegated", *, recovery: bool = False) -> None:
+    """Upload local changes to the DB; tombstone local deletions if allowed.
+
+    ``recovery`` is the startup replay of a push a previous process did not
+    finish. It publishes an OLD edit late, so each upload keeps the file's
+    mtime as its stamp and the database replaces a row (live or tombstone)
+    only when that row is not newer. It never tombstones, never writes a local
+    file and leaves the reconcile baseline alone.
+    """
     db_rows = {r["relative_path"]: r for r in memdb.get_memory_files(memory_key)}
-    local = _scan_local(memory_dir)
+    local = _scan_local(memory_dir, stable=recovery)
 
     for rel, (content, local_hash, local_mtime) in local.items():
         row = db_rows.get(rel)
+        if recovery:
+            if row is None or row.get("deleted") or row.get("content_hash") != local_hash:
+                memdb.upsert_memory_file_if_not_newer(
+                    memory_key, rel, content, local_hash, instance_id, local_mtime.isoformat())
+            continue
         if row is None:
             memdb.upsert_memory_file(memory_key, rel, content, local_hash, instance_id)
             continue
@@ -359,6 +383,11 @@ def push(memory_key: str, memory_dir: Path, instance_id: Optional[str],
             # is always overwritten by a present local file (revive).
             if row.get("deleted") or local_mtime >= _as_dt(row.get("updated_at")):
                 memdb.upsert_memory_file(memory_key, rel, content, local_hash, instance_id)
+
+    if recovery:
+        logger.info("memory_sync: replayed push key=%s leg=%s dir=%s db_files=%d local_files=%d",
+                    memory_key, leg, memory_dir, len(db_rows), len(local))
+        return
 
     if allow_deletes:
         # Only tombstone a GENUINE local delete: a path we had in our baseline
@@ -404,7 +433,7 @@ def reconcile_memory_sync(project_id: Optional[str], working_dir: Optional[str],
 
 
 def push_memory_sync(project_id: Optional[str], working_dir: Optional[str],
-                     leg: str = "delegated") -> None:
+                     leg: str = "delegated", *, recovery: bool = False) -> None:
     # Native only — see reconcile_memory_sync.
     if leg != "native":
         return
@@ -414,9 +443,11 @@ def push_memory_sync(project_id: Optional[str], working_dir: Optional[str],
     if not memory_key or memory_dir is None:
         return
     allow_deletes = (
-        _state_key(memory_key, memory_dir) in _reconciled_keys and memory_dir.exists()
+        not recovery
+        and _state_key(memory_key, memory_dir) in _reconciled_keys and memory_dir.exists()
     )
-    push(memory_key, memory_dir, settings.effective_instance_id, allow_deletes, leg)
+    push(memory_key, memory_dir, settings.effective_instance_id, allow_deletes, leg,
+         recovery=recovery)
 
 
 # ---------------------------------------------------------------------------
@@ -461,9 +492,11 @@ async def push_memory(project_id: Optional[str], working_dir: Optional[str],
 # Writers: ``push_memory`` (before dispatch) overwrites it with a new token;
 # ``_finish_publication`` deletes it only when the push that wrote that token
 # ran to completion, so a newer queued push is never cleared by an older one.
-# Reader: ``publish_pending`` at startup re-runs the ordinary ``push`` for each
-# marker: last-write-wins against the DB, never writes a local file, and never
-# tombstones (no reconcile baseline in a fresh process). Re-running a push is
+# Reader: ``publish_pending`` at startup runs ``push`` in recovery mode for each
+# marker: every upload keeps the local file's mtime as its stamp and replaces a
+# row (live or tombstone) only when that row is not newer, in one conditional
+# statement, so a late replay never outranks a newer turn edit, peer copy or
+# delete. It never writes a local file and never tombstones. Re-running it is
 # idempotent per file version (unchanged hashes are not uploaded), so a process
 # killed during the retry simply retries again on the next start.
 # ---------------------------------------------------------------------------
@@ -517,10 +550,11 @@ def _finish_publication(project_id: str, token: str, completed: bool) -> None:
             logger.debug("memory_sync: could not clear queued publication", exc_info=True)
 
 
-def _publish(project_id: str, working_dir: str, leg: str, token: str) -> None:
+def _publish(project_id: str, working_dir: str, leg: str, token: str,
+             recovery: bool = False) -> None:
     completed = False
     try:
-        push_memory_sync(project_id, working_dir, leg)
+        push_memory_sync(project_id, working_dir, leg, recovery=recovery)
         completed = True
     finally:
         _finish_publication(project_id, token, completed)
@@ -576,7 +610,7 @@ def publish_pending() -> int:
         with _pending_lock:
             _in_flight.add(token)
         try:
-            _publish(project_id, working_dir, leg, token)
+            _publish(project_id, working_dir, leg, token, recovery=True)
         except Exception:  # noqa: BLE001
             logger.warning("memory_sync: queued publication retained for the next start",
                            exc_info=True)
