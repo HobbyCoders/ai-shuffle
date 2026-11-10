@@ -23,7 +23,7 @@
       "module": "whatsapp",
       "class": "WhatsAppConnector",
       "files": {
-        "whatsapp.py": "0892c0344df8d18a4cdaaffe3f1b39f01850223491716d21ededf4b9644ce436",
+        "whatsapp.py": "cafa15fbd4644868190cb8f85b7f78682653ae1c5a867308e3f14adeed8233f4",
         "whatsapp_actions.py": "172afe2188cf34fb5d9dd44c71d57801f73b764fd11e0f438e955aa52c78abd2"
       }
     },
@@ -38,7 +38,7 @@
       "module": "slack",
       "class": "SlackConnector",
       "files": {
-        "slack.py": "ada2535e945a3a8c857e6208d4031ed162be91e5bd3f903fa7329465f75dc46b",
+        "slack.py": "c8fe7402917d8764af5a7adfac790f738950b0c605f586e942fee667d2d84e64",
         "slack_actions.py": "a7e2fe70523d2c21125605649ffaf69a1ad8d88f575c0bed5a480cf4911e58fb",
         "watch_history.py": "043086d62c915463920475b285e0286ee32dd5c21c19de6055c20241e6b81f71"
       }
@@ -47,7 +47,7 @@
       "module": "line",
       "class": "LINEConnector",
       "files": {
-        "line.py": "16389b0ff4bb1fa6c8b4a00ccf48e2b2e9eed658bc7ba62e496464b77c82ebfe",
+        "line.py": "bad87d5178ec8c4c887028676d7bf91c69ff0b9b05b7049a6bf9d136d838727a",
         "line_actions.py": "0f309fffdaf75c954976285c6b03fe6833728319fc57f4ed2bb6d7966ca28078"
       }
     },
@@ -145,5 +145,5 @@
     ]
   },
   "sdk": 1,
-  "release": "560c8831bc27947d"
+  "release": "8b2cb90e2bc3e55a"
 }
