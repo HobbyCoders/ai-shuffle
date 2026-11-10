@@ -178,10 +178,11 @@ to a shared or synced folder.
 
 Docker, with the container running: the managed backup in `docs/RESTORE.md`
 ("Managed one-container backups"). With the container stopped, copy the whole
-data volume into a private directory, with the archive readable by its owner
-only:
+data volume into a new private directory, with the archive readable by its
+owner only. If the directory already exists the command stops; pick another
+name rather than reusing it:
 
-    mkdir -m 700 ai-shuffle-backup
+    mkdir -m 700 ai-shuffle-backup && \
     docker run --rm -v <data-volume>:/data:ro -v "$PWD/ai-shuffle-backup":/out busybox \
       sh -c 'umask 077 && tar -czf /out/ai-shuffle-data.tgz -C /data .'
 

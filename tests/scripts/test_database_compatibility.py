@@ -119,12 +119,46 @@ def test_a_table_named_through_a_constant_or_a_loop_is_counted_with_its_value():
             [("app/db/database.py", item) for item in found])
 
 
+@pytest.mark.parametrize("before, after", [
+    # A constant is read where it is set, not where the statement is.
+    ("BASE = 'rate_limits'\nTABLE = BASE\ndef drop(cursor):\n    BASE = 'request_log'\n"
+     "    cursor.execute(f'DROP TABLE {TABLE}')\n", "BASE = 'sessions'"),
+    # A variable named like a builtin is still a variable.
+    ("id = 'rate_limits'\ndef drop(cursor):\n    cursor.execute(f'DROP TABLE {id}')\n", "id = 'sessions'"),
+    # The nearest binding wins over the module's.
+    ("table = 'a'\ndef drop(cursor):\n    table = 'rate_limits'\n    cursor.execute(f'DROP TABLE {table}')\n",
+     "    table = 'sessions'"),
+])
+def test_a_changed_value_changes_the_statement(before, after):
+    line = next(line for line in before.splitlines() if line.split(" = ")[0] == after.split(" = ")[0])
+    found, changed = check.statements_in(before), check.statements_in(before.replace(line, after, 1))
+    assert len(found) == 1 and check.UNRESOLVED not in found[0], found
+    assert changed != found and "'sessions'" in changed[0], changed
+
+
+def test_names_that_refer_to_each_other_end():
+    found = check.statements_in("A = B\nB = A\ndef drop(cursor):\n    cursor.execute(f'DROP TABLE {A}')\n")
+    assert found == ["DROP TABLE {A} -- A = B; B = A"]
+
+
 @pytest.mark.parametrize("source", [
     "def drop(cursor, table):\n    cursor.execute(f'DROP TABLE {table}')\n",
     "from names import TABLE\ndef drop(cursor):\n    cursor.execute(f'DROP TABLE {TABLE}')\n",
     "def drop(self, cursor):\n    cursor.execute(f'DROP TABLE {self.table}')\n",
     "def drop(cursor):\n    cursor.execute(f'DROP TABLE {name()}')\n",
     "def drop(cursor, tables):\n    for table in tables:\n        cursor.execute(f'DROP TABLE {table}')\n",
+    # Bound in a way the script does not follow, even where a plain binding is also in reach.
+    "T = ('a',)\nT += ('sessions',)\ndef drop(cursor):\n    for table in T:\n        cursor.execute(f'DROP TABLE {table}')\n",
+    "table = 'a'\ndef drop(cursor):\n    [cursor.execute(f'DROP TABLE {table}') for table in ('sessions',)]\n",
+    "table = 'a'\ndrop = lambda cursor, table: cursor.execute(f'DROP TABLE {table}')\n",
+    "def outer(cursor, table):\n    def inner():\n        table = 'a'\n    cursor.execute(f'DROP TABLE {table}')\n",
+    "table = 'a'\ndef drop(cursor):\n    global table\n    table = 'sessions'\ndef run(cursor):\n"
+    "    cursor.execute(f'DROP TABLE {table}')\n",
+    "table = 'a'\ndef drop(cursor):\n    if (table := 'sessions'):\n        cursor.execute(f'DROP TABLE {table}')\n",
+    "from names import *\ntable = 'a'\ndef drop(cursor):\n    cursor.execute(f'DROP TABLE {table}')\n",
+    "class Drop:\n    table = 'a'\n    def run(self, cursor):\n        cursor.execute(f'DROP TABLE {table}')\n",
+    "def drop(cursor):\n    cursor.execute(f\"DROP TABLE {'rate':_<8}\")\n",
+    "TABLE = 'a'\ndef drop(cursor):\n    cursor.execute(f'DROP TABLE {TABLE!r}')\n",
 ])
 def test_a_name_that_cannot_be_followed_fails_the_check(source):
     found = check.statements_in(source)

@@ -21,10 +21,12 @@ that release's update keeps a copy of the database once.
     python scripts/ci/database_compatibility.py --list     # the statements counted
 
 A statement that names its table or column through a variable is counted with
-what that variable holds: a literal, a loop over literals, or a constant in the
-same file (the retired-table tuples in app/db/database.py). A name the script
-cannot follow (a function parameter, an import, an attribute) fails the check:
-name the table in the statement or in a constant beside it.
+what that variable holds, when the variable is set only by plain assignments
+and for loops, in the function the statement is in or at the top of the same
+file (the retired-table tuples in app/db/database.py). Anything else fails the
+check: a parameter, an import, an attribute, a call, a comprehension or
+augmented assignment, a global declaration, a format specification. Name the
+table in the statement, or in a plain constant or loop beside it.
 
 What it cannot see: SQL joined with + or built by format() or %, and data
 rewrites (UPDATE or DELETE that changes what a column means). A change like
@@ -34,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import builtins
 import hashlib
 import json
 from pathlib import Path
@@ -59,8 +60,9 @@ REQUIRED_COLUMN = re.compile(r"\bADD\s+COLUMN\b(?:(?!\bADD\s+COLUMN\b)[^;,])*?\b
                              re.IGNORECASE | re.DOTALL)
 
 
-# Marks a name in a destructive statement whose value is not in the file.
-UNRESOLVED = "<not in this file>"
+# Marks a destructive statement whose table or column the script cannot follow.
+UNRESOLVED = "<cannot be followed>"
+SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
 
 
 def _text(node):
@@ -74,49 +76,80 @@ def _text(node):
     return None
 
 
-def _bound(name, node, parents):
-    """The source of every value ``name`` can take where ``node`` is: loops and
-    assignments in the enclosing functions, then the module. Empty when the
-    name is a parameter, an import or otherwise not followable."""
-    scope = node
+def _own(scope):
+    """The nodes of a scope, without those of a function, lambda or class in
+    it. A comprehension's nodes count as the scope's own, so its variable is a
+    binding the script does not follow."""
+    pending = list(ast.iter_child_nodes(scope))
+    while pending:
+        node = pending.pop()
+        yield node
+        if not isinstance(node, SCOPES):
+            pending.extend(ast.iter_child_nodes(node))
+
+
+def _binds(node, name):
+    if isinstance(node, ast.Name):
+        return node.id == name and not isinstance(node.ctx, ast.Load)
+    if isinstance(node, ast.arg):
+        return node.arg == name
+    if isinstance(node, ast.alias):
+        return node.name == "*" or (node.asname or node.name.split(".")[0]) == name
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                         ast.MatchAs, ast.MatchStar)):
+        return node.name == name
+    return isinstance(node, ast.MatchMapping) and node.rest == name
+
+
+def _bound(name, site, parents, declared):
+    """(note, value, binding statement) for every value ``name`` can take at
+    ``site``, from the nearest scope that binds it. None when it cannot be
+    followed: the scope binds it any other way than plain assignment or a for
+    loop, a class binds it, a global or nonlocal statement names it, or
+    nothing in the file binds it."""
+    if name in declared:
+        return None
+    scope = parents.get(id(site))
     while scope is not None:
+        if isinstance(scope, SCOPES):
+            found, followed = [], set()
+            for node in _own(scope):
+                if isinstance(node, (ast.For, ast.AsyncFor)):
+                    targets, value, how = [node.target], node.iter, "in"
+                elif isinstance(node, ast.Assign):
+                    targets, value, how = node.targets, node.value, "="
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    targets, value, how = [node.target], node.value, "="
+                else:
+                    continue
+                for leaf in (leaf for target in targets for leaf in ast.walk(target)):
+                    if isinstance(leaf, ast.Name) and leaf.id == name:
+                        followed.add(id(leaf))
+                        found.append((f"{name} {how} {ast.unparse(value)}", value, node))
+            if any(_binds(node, name) and id(node) not in followed for node in _own(scope)):
+                return None
+            if found:
+                return None if isinstance(scope, ast.ClassDef) else found
         scope = parents.get(id(scope))
-        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
-            continue
-        found = []
-        for inner in ast.walk(scope):
-            if isinstance(inner, (ast.For, ast.AsyncFor)):
-                targets, value, how = [inner.target], inner.iter, "in"
-            elif isinstance(inner, ast.Assign):
-                targets, value, how = inner.targets, inner.value, "="
-            elif isinstance(inner, ast.AnnAssign) and inner.value is not None:
-                targets, value, how = [inner.target], inner.value, "="
-            else:
-                continue
-            if any(isinstance(leaf, ast.Name) and leaf.id == name for target in targets for leaf in ast.walk(target)):
-                found.append((f"{name} {how} {ast.unparse(value)}", value))
-        if found:
-            return found
-        if not isinstance(scope, ast.Module) and any(
-                argument.arg == name for argument in ast.walk(scope.args) if isinstance(argument, ast.arg)):
-            return []
-    return []
+    return None
 
 
-def _values(expression, node, parents, seen):
-    """What the names in ``expression`` hold, followed through constants. An
-    expression without names needs no note: its source is already counted."""
+def _values(expression, site, parents, declared, seen):
+    """What the names in ``expression`` hold where ``site`` is, each bound
+    value followed from where it is bound. An expression without names needs
+    no note: its source is already counted."""
     notes = []
-    for leaf in ast.walk(expression):
-        if not isinstance(leaf, ast.Name) or leaf.id in seen or hasattr(builtins, leaf.id):
+    for name in sorted({leaf.id for leaf in ast.walk(expression) if isinstance(leaf, ast.Name)}):
+        bound = _bound(name, site, parents, declared)
+        if bound is None:
+            notes.append(f"{name} {UNRESOLVED}")
             continue
-        seen.add(leaf.id)
-        bound = _bound(leaf.id, node, parents)
-        if not bound:
-            notes.append(f"{leaf.id} {UNRESOLVED}")
-        for note, value in sorted(bound, key=lambda item: item[0]):
+        for note, value, statement in sorted(bound, key=lambda item: item[0]):
+            if (name, id(statement)) in seen:
+                continue
+            seen.add((name, id(statement)))
             notes.append(note)
-            notes.extend(_values(value, node, parents, seen))
+            notes.extend(_values(value, statement, parents, declared, seen))
     return notes
 
 
@@ -129,6 +162,7 @@ def statements_in(source):
     except SyntaxError:
         return []
     parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    declared = {name for node in ast.walk(tree) if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names}
     docstrings = {id(node.value) for node in ast.walk(tree)
                   if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
     inside = {id(part) for node in ast.walk(tree) if isinstance(node, ast.JoinedStr) for part in node.values}
@@ -143,13 +177,17 @@ def statements_in(source):
                  for pattern in (DESTRUCTIVE, EMPTIED) for match in pattern.finditer(text)}
         spans |= {(_start(text, match.start()), _end(text, match.end())) for match in REQUIRED_COLUMN.finditer(text)
                   if not re.search(r"\bDEFAULT\b", match.group(0), re.IGNORECASE)}
-        substituted = ({"{" + ast.unparse(part.value) + "}": part.value for part in node.values
-                        if isinstance(part, ast.FormattedValue)} if isinstance(node, ast.JoinedStr) else {})
+        substituted = ([part for part in node.values if isinstance(part, ast.FormattedValue)]
+                       if isinstance(node, ast.JoinedStr) else [])
         for start, end in sorted(spans):
             statement, seen, notes = " ".join(text[start:end].split()), set(), []
-            for shown, expression in substituted.items():
-                if shown in text[start:end]:
-                    notes.extend(_values(expression, node, parents, seen))
+            for part in substituted:
+                shown = "{" + ast.unparse(part.value) + "}"
+                if shown not in text[start:end]:
+                    continue
+                if part.conversion != -1 or part.format_spec is not None:
+                    notes.append(f"{shown} formatted {UNRESOLVED}")
+                notes.extend(note for note in _values(part.value, node, parents, declared, seen) if note not in notes)
             found.append(statement + (" -- " + "; ".join(notes) if notes else ""))
     return found
 
@@ -199,8 +237,8 @@ def errors(current, actual, base=None, pairs=None):
     ``base`` is the declaration on the branch this change merges into,
     ``pairs`` the statements, checked for names that could not be followed."""
     problems = [
-        f"{file}: cannot tell what this statement removes or renames, because a name in it is not set in the "
-        f"file: {statement}. Name the table or column in the statement, or in a constant beside it."
+        f"{file}: cannot tell what this statement removes or renames: {statement}. "
+        f"Name the table or column in the statement, or in a plain constant or loop beside it."
         for file, statement in pairs or [] if UNRESOLVED in statement]
     if current["destructive"] != actual:
         problems.append(
