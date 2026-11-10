@@ -230,6 +230,8 @@ curl -X POST http://localhost:8000/api/v1/network/owners \
 
 **Response:** `{"table": "connectors", "id": "conn-1a2b3c4d", "owner_device_id": "DEVICE_ID"}`. `400` when `device_id` is a phone or browser, `404` for an unknown definition or a device that is not an active member, `409` when this worker is not in a network.
 
+A connector moves without a restart: the worker that lost it disconnects and the new owner connects as soon as the change reaches each of them. An automation's owner is checked at each run, so the move takes effect at its next run.
+
 ## Recovery key
 
 A recovery key lets you restore the network onto a fresh worker.

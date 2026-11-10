@@ -286,8 +286,62 @@ async def _stop_running_connectors(connector_manager) -> None:
             logger.warning("Stopping fenced connector %s failed", connector_id, exc_info=True)
 
 
-async def _reconcile_owned_connectors() -> None:
-    """Close connections when committed membership changes fence this worker.
+def _connector_should_run(connector_id: str) -> Optional[bool]:
+    """Whether this worker should hold *connector_id*'s client now (None: not in a network).
+
+    Reads the committed row, so a repeated or out-of-order record changes
+    nothing: the latest row decides. An unowned active row is claimed here
+    only by the claimant ``start_all`` would pick.
+    """
+    from app.network import ownership
+    if not ownership.enrolled():
+        return None
+    row = database.get_connector(connector_id)
+    if not row or not row.get("is_active"):
+        return False
+    decision = ownership.decide_connector(row)
+    if decision == "claim":
+        return ownership.claim("connectors", connector_id)
+    return decision == "start"
+
+
+async def _follow_connector_rows(connector_manager, connector_ids) -> None:
+    """Start or stop the named connectors to match their rows' owner and switch."""
+    ids = set(connector_ids)
+    if "" in ids:  # a collection-wide notice (a bootstrap import): every row and every client
+        ids.discard("")
+        ids.update(row["id"] for row in await run_sync(database.get_all_connectors))
+        ids.update(cid for cid, _instance in connector_manager.get_running_connectors())
+    for connector_id in sorted(ids):
+        try:
+            run_here = await run_sync(_connector_should_run, connector_id)
+            running = connector_manager.get_running_instance(connector_id) is not None
+            if run_here and not running:
+                await connector_manager.start_connector(connector_id)
+            elif run_here is False and running:
+                await connector_manager.stop_connector(connector_id)
+        except Exception:  # noqa: BLE001 - one connector must not hold the others back
+            logger.warning("Reconciling connector %s failed", connector_id, exc_info=True)
+
+
+def request_connector_reconcile(connector_ids=None) -> None:
+    """Schedule a reconcile on the app loop without waiting for it.
+
+    ``None`` is the membership pass; a list of ids follows those connector
+    rows. Safe from the sync thread or the loop: a slow connect or disconnect
+    never holds up the caller.
+    """
+    from app.core.global_events import global_events
+    loop = getattr(global_events, "_loop", None)
+    if loop and not loop.is_closed():
+        ids = None if connector_ids is None else list(connector_ids)
+        asyncio.run_coroutine_threadsafe(_reconcile_owned_connectors(ids), loop)
+
+
+async def _reconcile_owned_connectors(connector_ids=None) -> None:
+    """Close connections when committed membership changes fence this worker,
+    or, given connector ids, start or stop those connectors after their rows
+    changed owner, were switched on or off, or were deleted.
 
     Serialised: a fence and the re-admission right after it are applied in
     the order they were scheduled, so the later decision is the one that holds.
@@ -295,6 +349,9 @@ async def _reconcile_owned_connectors() -> None:
     from app.core.connectors.manager import connector_manager
     from app.network import ownership
     async with _connector_reconcile_lock():
+        if connector_ids is not None:
+            await _follow_connector_rows(connector_manager, connector_ids)
+            return
         if ownership.can_execute_local():
             await connector_manager.start_all()
             return
@@ -405,9 +462,11 @@ def _on_applied(touched) -> None:
             from app.core.provider_usage import provider_usage_monitor
             loop.call_soon_threadsafe(provider_usage_monitor.request_network_refresh)
     if any(collection == "membership" for collection, _record, _op in touched):
-        loop = getattr(global_events, "_loop", None)
-        if loop and not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(_reconcile_owned_connectors(), loop)
+        request_connector_reconcile()
+    connector_ids = [r for c, r, _op in touched if c == "connectors"]
+    if connector_ids:
+        # A move, a switch on or off, or a delete made on another worker.
+        request_connector_reconcile(connector_ids)
     settled_ids = [r for c, r, op in touched if c == "session_active" and op == "upsert"]
     if settled_ids:
         loop = getattr(global_events, "_loop", None)

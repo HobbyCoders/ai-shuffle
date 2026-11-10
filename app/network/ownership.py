@@ -4,8 +4,12 @@ A definition (an automation, a connector) is shared data; the work it does
 is not. Only the device named in ``owner_device_id`` fires it or holds its
 platform session. A definition that arrives on a worker with no owner, or
 with an owner this worker is not, stays inactive here. Reassigning an owner
-is an explicit action that rewrites the definition; the previous owner stops
-on its next tick after seeing the new revision.
+is an explicit action that rewrites the definition. An automation's owner is
+read again at every fire, so the previous owner stops at its next fire. A
+connector is reconciled when its new revision lands: on the worker that made
+the move right after ``assign``, and on every other worker when the synced
+record is applied (``app/network/startup.py``). The worker that lost it
+disconnects, the new owner connects.
 
 Outside a network (a worker that never joined one) these helpers fall back
 to the legacy install-affinity rules the callers already had.

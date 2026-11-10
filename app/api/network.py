@@ -371,7 +371,13 @@ async def assign_owner(body: OwnerAssignment, _: str = Depends(require_admin)) -
     """Hand an automation or connector to a device (None leaves it inactive)."""
     from app.network import ownership
     try:
-        return await run_sync(ownership.assign, body.table, body.id, body.device_id)
+        result = await run_sync(ownership.assign, body.table, body.id, body.device_id)
+        if body.table == "connectors":
+            # This worker may be the one losing or gaining it; peers follow
+            # when the record reaches them.
+            from app.network.startup import request_connector_reconcile
+            request_connector_reconcile([body.id])
+        return result
     except engine.NotEnrolled as exc:
         raise HTTPException(409, str(exc)) from exc
     except KeyError:
