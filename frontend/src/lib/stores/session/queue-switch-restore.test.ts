@@ -216,6 +216,38 @@ describe('#524 consumed while away', () => {
 		expect(bubbles()).toEqual([]);
 	});
 
+	it('drops it when the chat was opened again before its return snapshot landed', async () => {
+		const { switcher, handleMessage } = harness();
+		queuedOnA(handleMessage);
+		await switcher.switchSession(B);
+		await switcher.switchSession(A);
+		handleMessage(unavailable(A));
+		await switcher.switchSession(A);
+		expect(bubbles()).toEqual(['also check the tests']);
+		handleMessage(available(A, []));
+		expect(bubbles()).toEqual([]);
+	});
+
+	it('drops a bubble that was already held for its delivery when the chat was left', async () => {
+		const { switcher, handleMessage } = harness();
+		queuedOnA(handleMessage);
+		// Taken to run while A is open: held until its transcript row shows.
+		handleMessage(available(A, []));
+		expect(bubbles()).toEqual(['also check the tests']);
+		await switcher.switchSession(B);
+		await switcher.switchSession(A);
+		handleMessage(available(A, []));
+		expect(bubbles()).toEqual([]);
+	});
+
+	it('keeps holding a delivery when the open chat is opened again', async () => {
+		const { switcher, handleMessage } = harness();
+		queuedOnA(handleMessage);
+		await switcher.switchSession(A);
+		handleMessage(available(A, []));
+		expect(bubbles()).toEqual(['also check the tests']);
+	});
+
 	it('drops it when replayed history carries its receipt, even while the queue is unreadable', async () => {
 		const { switcher, handleMessage } = harness();
 		queuedOnA(handleMessage);

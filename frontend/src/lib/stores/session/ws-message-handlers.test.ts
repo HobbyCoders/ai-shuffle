@@ -3028,7 +3028,7 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 	let deps: MessageHandlerDeps;
 	let handlers: ReturnType<typeof createMessageHandlers>;
 
-	function frame(rows: Array<{ id: string; content: string; client_message_id?: string }>): Record<string, unknown> {
+	function frame(rows: Array<{ id: string; content: string; client_message_id?: string; recorded?: boolean }>): Record<string, unknown> {
 		return {
 			type: 'sync',
 			event_type: 'queue_updated',
@@ -3062,6 +3062,31 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 			getState: vi.fn(() => state),
 		});
 		handlers = createMessageHandlers(deps);
+	});
+
+	it('holds a row taken to run until its message shows, but not one already in the transcript', () => {
+		handlers.handleMessage(frame([{ id: 'turn-a', content: 'queued a' }]));
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual(['turn-a']);
+		pendingQueue.noteDelivered('session-1', 'queued a', 'turn-a');
+		// A row the worker marks as already in the transcript, with no command id
+		// (a voice hand-off): its run records no message, so nothing is waited for.
+		handlers.handleMessage(frame([{ id: 'turn-b', content: 'steer b', recorded: true }]));
+		expect(pendingIds()).toEqual(['turn-b']);
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual([]);
+	});
+
+	it('holds a re-queued steer taken to run only while its recorded message is not on screen', () => {
+		const again = [{ id: 'turn-b', content: 'steer b', client_message_id: 'client-b', recorded: true }];
+		handlers.handleMessage(frame(again));
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual(['turn-b']);
+		// Listed again, and now its message is in the transcript this page shows.
+		handlers.handleMessage(frame(again));
+		state.messages = [{ id: 'm1', role: 'user', content: 'steer b', commandId: 'client-b' }];
+		handlers.handleMessage(frame([]));
+		expect(pendingIds()).toEqual([]);
 	});
 
 	it('keeps attributed peer rows separate, replaces them on delivery, and ignores other sessions', () => {

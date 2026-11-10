@@ -35,6 +35,24 @@ describe('PendingMessages', () => {
 		expect(container.querySelector('.pending-messages')).toBeNull();
 	});
 
+	it('shows a recorded attachment as a chip, never its raw upload path (#1313)', () => {
+		const path = '/data/uploads/s-1/note.txt';
+		const { container } = renderPending([
+			makeMessage({ content: `@${path} read @/typed/by/hand please`, uploadPaths: [path] })
+		]);
+		const text = container.querySelector('.bubble-text')!;
+		expect(text.querySelector('.attachment-chip')?.textContent).toBe('note.txt');
+		expect(text.textContent).not.toContain(path);
+		// Words that merely look like a path stay as typed.
+		expect(text.textContent).toContain('read @/typed/by/hand please');
+	});
+
+	it('keeps plain text when the row recorded no uploads', () => {
+		const { container } = renderPending([makeMessage({ content: '@/data/uploads/s-1/x.txt hi' })]);
+		expect(container.querySelector('.attachment-chip')).toBeNull();
+		expect(container.querySelector('.bubble-text')!.textContent).toBe('@/data/uploads/s-1/x.txt hi');
+	});
+
 	it('renders one right-aligned user bubble per pending message', () => {
 		const { container } = renderPending([
 			makeMessage({ id: 'q-1', content: 'first' }),

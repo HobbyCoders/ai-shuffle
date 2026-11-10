@@ -30,6 +30,18 @@ export async function watchStopFrames(page, texts) {
 		const logTop = log.getBoundingClientRect().top;
 		const rows = () => [...log.querySelectorAll('.chat-column > .msg-virtualized')];
 		const key = rows().find((el) => el.getBoundingClientRect().bottom > logTop + 1)?.dataset.transcriptKey;
+		// The first line on screen inside that row. A row taller than the screen
+		// can fold or grow above the viewport while its top stays put; this is what
+		// the person actually sees. Found again by its text if it is re-rendered.
+		const LINES = 'p, li, pre, h1, h2, h3, h4, blockquote, tr';
+		const lineIn = (row) => row && [...row.querySelectorAll(LINES)].find((el) => el.getBoundingClientRect().top >= logTop);
+		const firstLine = lineIn(rows().find((el) => el.dataset.transcriptKey === key));
+		const lineText = firstLine?.textContent ?? null;
+		const visibleLine = () => {
+			if (!lineText) return null;
+			const row = rows().find((el) => el.dataset.transcriptKey === key);
+			return row ? [...row.querySelectorAll(LINES)].find((el) => el.textContent === lineText) ?? null : null;
+		};
 		const watch = (window.__stopFrames = { frames: [], next: 0, running: true, startedAt: performance.now() });
 		const slot = document.querySelector('.input-slot');
 		const bubblesAndRows = () => [
@@ -44,11 +56,16 @@ export async function watchStopFrames(page, texts) {
 				const topOf = (el) =>
 					Math.round((painted.get(el) ?? el.getBoundingClientRect().top) * 10) / 10;
 				const anchor = rows().find((el) => el.dataset.transcriptKey === key);
+				const line = visibleLine();
 				watch.frames.push({
 					order,
 					at: Math.round(performance.now() - watch.startedAt),
 					scrollTop: Math.round(log.scrollTop),
+					scrollHeight: log.scrollHeight,
+					// The running-task row at the history tail, if any (#1147).
+					taskRow: log.querySelector('.chat-column > .inline')?.getBoundingClientRect().height ?? null,
 					anchorTop: anchor ? topOf(anchor) : null,
+					lineTop: line ? topOf(line) : null,
 					replyHeight: rows().at(-1)?.getBoundingClientRect().height ?? null,
 					composerTop: slot ? topOf(slot) : 0,
 					messages: texts.map((text) => {
@@ -64,7 +81,7 @@ export async function watchStopFrames(page, texts) {
 					})
 				});
 			});
-			for (const el of [log, slot, ...rows(), ...bubblesAndRows()].filter(Boolean)) seen.observe(el);
+			for (const el of [log, slot, visibleLine(), ...rows(), ...bubblesAndRows()].filter(Boolean)) seen.observe(el);
 			requestAnimationFrame(frame);
 		};
 		requestAnimationFrame(frame);

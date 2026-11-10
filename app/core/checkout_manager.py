@@ -251,6 +251,77 @@ def _reattach_detached_checkout(path: str, branch: str) -> bool:
     return True
 
 
+def switch_detached_checkout_to_branch(path: str, branch: str) -> Optional[str]:
+    """Switch a clean, detached session checkout back to its bound branch (#1437).
+
+    :func:`_reattach_detached_checkout` runs first and keeps the working
+    tree. When it declines because the branch has commits HEAD lacks (an
+    agent ran ``git checkout origin/main`` for a baseline run), this runs
+    ``git switch <branch>``, which moves the working tree to the branch tip.
+    It switches only when nothing can be lost:
+
+    - ``path`` is a linked worktree (never a project's main checkout), on a
+      detached HEAD, and the bound branch exists locally;
+    - no staged or unstaged change to a tracked file;
+    - HEAD's commit is on a local branch, a remote-tracking ref or a tag,
+      so no commit made while detached becomes unreachable.
+
+    Git refuses the rest itself: a branch another worktree has checked out,
+    an untracked or ignored file the switch would overwrite
+    (``--no-overwrite-ignore``), a rebase, merge or bisect in progress. Never
+    forces, resets or discards. Callers decide when moving the working tree
+    is the session's own business (the turn-start path,
+    ``project_resolver.reattach_own_detached_checkout``). Returns the
+    commit HEAD was on when it switched, else ``None``.
+    """
+    if not branch or branch.startswith("-"):
+        return None
+    try:
+        _require_checkout_root(path)
+    except WorktreeError:
+        return None
+    if not os.path.isfile(os.path.join(path, ".git")):
+        return None  # the main working tree is never a session's own
+    with repo_worktree_lock(path):
+        if git_service._run_git(path, ["symbolic-ref", "-q", "HEAD"], timeout=10).returncode == 0:
+            return None
+        if _reattach_detached_checkout(path, branch):
+            return None  # attached in place; the working tree did not move
+        head = git_service._run_git(path, ["rev-parse", "--verify", "-q", "HEAD^{commit}"], timeout=10)
+        head_sha = (head.stdout or "").strip()
+        if head.returncode != 0 or not head_sha:
+            return None
+        if git_service._run_git(
+            path, ["rev-parse", "--verify", "-q", f"refs/heads/{branch}^{{commit}}"], timeout=10
+        ).returncode != 0:
+            return None
+        status = git_service._run_git(
+            path, ["status", "--porcelain", "--untracked-files=no"], timeout=30
+        )
+        if status.returncode != 0 or (status.stdout or "").strip():
+            return None
+        refs = git_service._run_git(path, [
+            "for-each-ref", "--count=1", "--format=%(refname)", f"--contains={head_sha}",
+            "refs/heads", "refs/remotes", "refs/tags",
+        ], timeout=30)
+        if refs.returncode != 0 or not (refs.stdout or "").strip():
+            return None
+        switched = git_service._run_git(
+            path, ["switch", "--no-overwrite-ignore", branch], timeout=60
+        )
+        if switched.returncode != 0 or git_service.get_current_branch(path) != branch:
+            logger.info(
+                "checkout_manager: did not switch detached %s back to %r: %s",
+                path, branch, (switched.stderr or "").strip()[:300],
+            )
+            return None
+    logger.info(
+        "checkout_manager: switched detached checkout %s from %s back to its branch %r",
+        path, head_sha[:12], branch,
+    )
+    return head_sha
+
+
 def _require_branch_binding(path: str, branch: str) -> None:
     """Refuse stale/adopted branch paths without switching HEAD or rewriting rows."""
     _require_checkout_root(path)

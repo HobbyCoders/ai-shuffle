@@ -383,6 +383,18 @@ async def test_first_turn_is_durably_queued(project):
     assert queued_turns[0]["source"] == "worktree"
 
 
+async def test_first_turn_carries_the_senders_command_id(project):
+    """#1351: the remote-target first turn keeps the sender's command id too."""
+    _give_peer_a_base_checkout(project)
+    command_id = "client-" + "cd" * 16
+
+    with _Patches():
+        resp = await _create(project, _body(prompt="do the thing", client_message_id=command_id))
+
+    queued_turns = turns_db.get_queued_turns(resp.session_id)
+    assert [t["command_id"] for t in queued_turns] == [command_id]
+
+
 async def test_uploads_travel_as_blobs_attached_to_the_turn(project):
     _give_peer_a_base_checkout(project)
     staged = project["path"] / "uploads" / "spec.md"

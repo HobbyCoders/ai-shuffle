@@ -1,0 +1,461 @@
+{
+ "_source": "Job names of a green push run of main-suite (run 42795525982), reshaped to this gate: the called workflows' own verdict jobs skipped, the old watcher and reporter jobs gone. The selection job's step that names its shards is added, as ci-frontend.yml now names it.",
+ "jobs": [
+  {
+   "id": 1,
+   "name": "Find what a pull request already proved",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 5,
+   "name": "android-and-docs",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 6,
+   "name": "backend / Backend tests",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 7,
+   "name": "backend / backend-contracts",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 8,
+   "name": "backend / backend-security",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 9,
+   "name": "backend / backend-shard 1",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 10,
+   "name": "backend / backend-shard 2",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 11,
+   "name": "backend / backend-shard 3",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 12,
+   "name": "backend / backend-shard 4",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 13,
+   "name": "backend / record",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 14,
+   "name": "browser-workspace / Browser editor smoke checks",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 15,
+   "name": "browser-workspace / Browser workspace (direct-page-demand)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 16,
+   "name": "browser-workspace / Browser workspace (external)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 17,
+   "name": "browser-workspace / Browser workspace (panel-demand)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 18,
+   "name": "browser-workspace / Real browser workspace",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 19,
+   "name": "browser-workspace / record",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 20,
+   "name": "container / Single-container PostgreSQL and browser",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 21,
+   "name": "container / record",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 22,
+   "name": "desktop / Assemble worker runtime (linux-x64)",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 23,
+   "name": "desktop / Package Windows shell",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 24,
+   "name": "desktop / Stable installer channel choice (silent installs)",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 25,
+   "name": "desktop / Typecheck and unit tests",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 26,
+   "name": "desktop / Windows preview installer and fresh database",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 27,
+   "name": "desktop-source / check",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 28,
+   "name": "desktop-source / record",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 29,
+   "name": "fluid / delegated tool-output contract (2.1.286)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 30,
+   "name": "fluid / delegated tool-output contract (2.1.308)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 31,
+   "name": "fluid / delegated tool-output contract (2.1.314)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 32,
+   "name": "fluid / fluid unit tests",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 33,
+   "name": "fluid / record",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 34,
+   "name": "identity / Instance identity (windows-latest)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 35,
+   "name": "identity / record",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 36,
+   "name": "javascript / Browser MCP build and tests",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 37,
+   "name": "javascript / Frontend and mobile production build",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 38,
+   "name": "javascript / Frontend and mobile typechecks",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 39,
+   "name": "javascript / Frontend tests (1/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 40,
+   "name": "javascript / Frontend tests (2/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 41,
+   "name": "javascript / Frontend tests (3/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 42,
+   "name": "javascript / Frontend tests (4/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 43,
+   "name": "javascript / JavaScript contracts, docs and frontend audit",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 44,
+   "name": "javascript / JavaScript package checks",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 45,
+   "name": "javascript / Mobile tests",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 46,
+   "name": "javascript / Select UI journeys",
+   "status": "completed",
+   "conclusion": "success",
+   "steps": [
+    {
+     "name": "Select the journeys and their shards",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Selected UI journey shards: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 47,
+   "name": "javascript / Tools tests and WebCrypto vectors",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 48,
+   "name": "javascript / UI journeys (1/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 49,
+   "name": "javascript / UI journeys (10/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 50,
+   "name": "javascript / UI journeys (11/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 51,
+   "name": "javascript / UI journeys (12/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 52,
+   "name": "javascript / UI journeys (13/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 53,
+   "name": "javascript / UI journeys (14/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 54,
+   "name": "javascript / UI journeys (15/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 55,
+   "name": "javascript / UI journeys (16/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 56,
+   "name": "javascript / UI journeys (2/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 57,
+   "name": "javascript / UI journeys (3/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 58,
+   "name": "javascript / UI journeys (4/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 59,
+   "name": "javascript / UI journeys (5/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 60,
+   "name": "javascript / UI journeys (6/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 61,
+   "name": "javascript / UI journeys (7/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 62,
+   "name": "javascript / UI journeys (8/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 63,
+   "name": "javascript / UI journeys (9/16)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 64,
+   "name": "javascript / Visual regression (4 viewports)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 65,
+   "name": "javascript / record-checks",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 66,
+   "name": "javascript / record-journeys",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 67,
+   "name": "policy / policy",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 68,
+   "name": "source-ui / build",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 69,
+   "name": "supply-chain",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 70,
+   "name": "update-reach",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 71,
+   "name": "windows / Selected tests on Windows",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 72,
+   "name": "windows / Windows ${{ matrix.part }}",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 73,
+   "name": "windows / Windows desktop",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
+   "id": 74,
+   "name": "windows / Windows desktop shard (1/3)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 75,
+   "name": "windows / Windows desktop shard (2/3)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 76,
+   "name": "windows / Windows desktop shard (3/3)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 77,
+   "name": "windows / record",
+   "status": "completed",
+   "conclusion": "skipped"
+  }
+ ]
+}

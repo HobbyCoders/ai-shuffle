@@ -1045,6 +1045,55 @@ describe('feedController queue reconciliation (#588)', () => {
 		expect(deps.state.queuedMessages).toEqual([]);
 	});
 
+	// #1052: the socket's snapshot can land between the message's arrival and the
+	// fold that shows its row. The bubble must stay until that fold, which then
+	// swaps it for the row in one update.
+	it('keeps a delivered bubble until the fold that shows its row', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		flushRaf();
+
+		const a = { id: 'turn-a', content: 'queued a', queuedAt: 1 };
+		const b = { id: 'turn-b', content: 'queued b', queuedAt: 2 };
+		seedServerQueue(deps, [a, b]);
+		hoisted.onEvent!(userMessage('evt-a', 'turn-a', 'queued a'));
+		// queue_updated without row A, before the frame: ws-message-handlers' order.
+		pendingQueue.holdDelivering('s1', [a, b], [b], () => {});
+		seedServerQueue(deps, [b]);
+		expect(deps.state.messages.some(m => m.content === 'queued a')).toBe(false);
+		expect((deps.state.queuedMessages as Array<{ id: string }>).map((q) => q.id)).toEqual(['turn-a', 'turn-b']);
+
+		flushRaf();
+		expect(deps.state.messages.some(m => m.content === 'queued a')).toBe(true);
+		expect((deps.state.queuedMessages as Array<{ id: string }>).map((q) => q.id)).toEqual(['turn-b']);
+	});
+
+	it('drops a marked steer whose turn id names another held bubble', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		// Row A was taken to run as a re-run that records no opening message, so
+		// its bubble is still held when B is steered into that turn.
+		const a = { id: 'turn-a', content: 'queued a', queuedAt: 1 };
+		const b = { id: 'turn-b', content: 'steer b', queuedAt: 2 };
+		seedServerQueue(deps, [a]);
+		pendingQueue.holdDelivering('s1', [a], [], () => {});
+		seedServerQueue(deps, []);
+		seedServerQueue(deps, [b]);
+		pendingQueue.holdDelivering('s1', [a, b], [], () => {});
+		seedServerQueue(deps, []);
+		expect((deps.state.queuedMessages as Array<{ id: string }>).map((q) => q.id)).toEqual(['turn-a', 'turn-b']);
+
+		hoisted.onEvent!({ ...userMessage('evt-b', 'turn-a', 'steer b'), checkpoint_backed: false });
+		flushRaf();
+
+		expect(deps.state.queuedMessages).toEqual([]);
+	});
+
 	it('keeps a row the server put back after the interrupt that swallowed it', () => {
 		const deps = makeDeps();
 		feedController.attach(deps);

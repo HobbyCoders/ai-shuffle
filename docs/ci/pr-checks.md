@@ -204,7 +204,7 @@ what an area depends on, so a record can never stand for different code.
   audits of the backend and JavaScript checks also run in the always-running
   `supply-chain` job.
 - The lookup job is only a shortcut. If it fails, every area runs and the run
-  can still pass; the failure watcher ignores it.
+  can still pass; the `Main suite` gate ignores its failure.
 - Only a push looks for records. The daily scheduled run (08:00 UTC, its own
   concurrency groups, in `main-suite.yml` and every workflow it calls, so it
   never queues with or displaces a push run) and a dispatch (its own groups
@@ -212,12 +212,40 @@ what an area depends on, so a record can never stand for different code.
   push and dispatch runs only. Dispatch `main-suite.yml` on `main` before a
   stable release to prove the whole tree in one run.
 
-A dispatch on another ref skips the suites and fails the aggregate. A started
-run finishes unless a required job fails: the advisory `stop-on-failure` job
-(`scripts/ci/stop_on_failure.py`) then names the failed jobs in the run summary
-and cancels the run at once, because it can no longer publish and would only
-hold the lane while the fix waits. Such a run also ends "cancelled" but has
-jobs; `nightly_wait.py` reports it as a failure. GitHub keeps one more run waiting behind it; a newer merge
+A dispatch on another ref skips the suites and fails the aggregate.
+
+**The verdict never waits for a runner.** Runners are shared with every open
+pull request, so a job that starts only after the last test job finishes can
+queue for many minutes to do seconds of work. The `Main suite` job therefore
+starts with the run (it needs only `proven`) and keeps its runner:
+`scripts/ci/main_gate.py` reads the run's jobs through the Actions API every 20
+seconds and gives the verdict as soon as the last job finishes. It knows which
+jobs to expect from `main-suite.yml` and the workflows it calls, so a matrix
+or a call that GitHub has not created yet is waited for, never mistaken for
+done; a final listing taken a few seconds later must be identical. Every
+matrix member counts on its own. The UI journey shards are chosen during the
+run, so the selection job names a step after its choice
+(`Selected UI journey shards: [...]`) and the gate waits for exactly those
+shards; a choice it cannot read never completes the run. A matrix shape the
+gate cannot expand fails its tests. A re-run attempt ("Re-run failed jobs" or
+one job) lists the jobs it does not run again as completed copies, so the gate
+reads only the current attempt. The called
+workflows (`ci-backend.yml`, `ci-frontend.yml`, `windows-suite.yml`,
+`ci-browser-workspace.yml`) skip their own verdict jobs when main-suite passes
+`gated_by_caller: true`, and the gate applies their rules instead: every inner
+job must succeed (or, for the JavaScript checks, be skipped exactly when their
+pass record proved them; the journeys only when the selection chose none), and
+the backend and Windows desktop shard receipts are checked in the gate job
+itself. On pull requests those verdict jobs run as before, under the same
+required names. Advisory jobs (`source-ui`, the record lookup) never decide.
+
+A started run finishes unless a required job fails, is cancelled or times out:
+the gate then names the failed jobs in the run summary and cancels the run at
+once, because it can no longer publish and would only hold the lane while the
+fix waits. The gate itself ends red, so such a run never reports green; it ends
+"cancelled" but has jobs, and `nightly_wait.py` reports it as a failure. If the
+jobs cannot be read for ten minutes, or an expected job never appears within
+five minutes of everything else finishing, the gate fails closed. GitHub keeps one more run waiting behind it; a newer merge
 replaces that waiting run, which GitHub then lists as "cancelled". It never
 started and nothing is lost: the newer run tests a main revision that contains
 the replaced commit, and the publisher ships the newest proven revision with
@@ -239,8 +267,9 @@ never published; the reason is printed), or 2 on timeout (default 120 minutes).
 The root workflow calls the same checked-in reusable
 CI workflows; their PR triggers, matrices, full test selection and gates remain
 in force. No test job has signing secrets; workflow-default permissions are
-`contents: read`, using only standard free hosted runners. The separate,
-non-blocking main-push journey reporter alone can write issues (see below). Windows calls select the existing
+`contents: read`, using only standard free hosted runners. Only the `Main suite`
+gate can cancel the run (`actions: write`) and write issues, for the
+non-blocking main-push journey reporting step (see below). Windows calls select the existing
 three desktop shards, not the separate stable-release portability matrix.
 
 | Local `full` stage | Hosted job / reusable workflow |
@@ -263,9 +292,9 @@ three desktop shards, not the separate stable-release portability matrix.
 
 Additional existing gates are required too: Windows desktop (three shards),
 real browser workspace (three cases + smoke), container lifecycle/buyer install,
-Windows identity and desktop-source protocol checks. `Main suite` uses `always()`
-and requires every called workflow and parity job to succeed. Missing, failed,
-cancelled or skipped dependencies fail closed; the checked-in parity inventory
+Windows identity and desktop-source protocol checks. `Main suite` runs unless
+the run was cancelled and requires every called workflow and parity job to
+succeed. Missing, failed, cancelled or unproven skipped jobs fail closed; the checked-in parity inventory
 also catches new local stages without a mapping. A backend test-map cache is a
 local optimization, not additional test evidence.
 
@@ -1136,7 +1165,9 @@ cases its `FIRST_HALF` names and `<name>-2.journey.mjs` runs every other one
 over 200 seconds of headroom. The six halves use planning budgets in
 `UNMEASURED_BUDGET_FLOORS` until a green main run is refreshed into the
 weights. A regression test refuses any file estimated above 600 seconds: split
-it the same way. The one-percent-refresh regression also
+it the same way. `queue-while-busy` was split like that when three cases joined
+it: its first half keeps the seven cases the hosted measurement timed, so that
+measurement still applies, and the new cases run in `queue-while-busy-2`. The one-percent-refresh regression also
 preserves the uncertainty reserve when it adds two new journeys. Older green runs with changed app/journey
 workloads cannot refresh these measurements: the guarded producer refuses them.
 New or grown files keep their conservative case-count fallbacks until a complete
@@ -1213,8 +1244,8 @@ and the CI driver without the flag still run once.
 
 **Main retries too:** `main-suite.yml` calls `ci-frontend.yml` with the same
 retry behavior. A main run that passes only on retry can authorize nightly
-publication. On **push-to-main runs only**, the advisory `journey-issues` job
-reads the root `summary.json` receipts from the existing `ui-journeys-<N>`
+publication. On **push-to-main runs only**, the last step of the `Main suite`
+job (after the verdict, so it adds no queued job) reads the root `summary.json` receipts from the existing `ui-journeys-<N>`
 artifacts and opens one issue per recovered journey + full case ID (including
 viewport/throttle). A crashed file without per-case evidence retains the
 receipt's `(whole journey)` identity. A first-pass success, an unrecovered
@@ -1239,15 +1270,18 @@ Public issue text contains only journey/case IDs, both attempt
 outcomes, the run link and commit, **never raw logs, errors or evidence paths**.
 The full evidence still expires after 3 days.
 
-The reporter waits only for the reusable JavaScript workflow and uses
-`always()`, so a recovered case is still reported when another shard/job is
-red. It is excluded from `Main suite`'s required dependency inventory and is
-non-blocking at both step and job level: an API/reporting failure emits a
-warning and cannot make the full workflow red or prevent nightly publication.
-Only this new job has `issues: write` (and `actions: read` to fetch artifacts);
-workflow defaults and all PR jobs remain read-only. Reporting has a two-minute
-step deadline within a five-minute job timeout, no dependency installation,
-and does not run any tests again. An unexpectedly ineligible non-dry-run
+The reporting step uses `always()`, so a recovered case is still reported when
+another shard/job is red. On a cancelled run the step before it waits (non-blocking) for the cancelled
+jobs to stop, because a cancelled shard still uploads its receipts. GitHub
+force-stops a cancelled job five minutes after the cancel, the gate job
+included, so the wait gives up after 90 seconds (two-minute step limit) and
+the two-minute reporting step still fits: a shard that has not finished
+uploading by then is not collected, which only costs this advisory report. It is non-blocking (`continue-on-error`): an
+API/reporting failure emits a warning and cannot change the verdict or prevent
+nightly publication. Only the `Main suite` job has `issues: write` (beside
+`actions: write` for the verdict); workflow defaults and all PR jobs remain
+read-only. Reporting has a two-minute step deadline, no dependency
+installation, and does not run any tests again. An unexpectedly ineligible non-dry-run
 execution warns rather than silently disabling reporting.
 
 Read-only end-to-end reporting probe against a real main run (no issues or

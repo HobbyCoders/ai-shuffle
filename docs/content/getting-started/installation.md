@@ -25,7 +25,7 @@ The Docker image runs on 64-bit Intel or AMD machines only. Check the [requireme
 - **Docker** suits a machine that is always on, like a server or NAS. Agents run inside the container, away from the rest of the machine.
 - **The desktop app** suits a single PC. Agents run as your own user, with your files and programs. It is the only install that can use **computer use** (agents controlling the screen), because a container has no desktop.
 
-You can use both for free on your LAN or VPN. Same-LAN sync is free. An optional [Cloud account](/docs/getting-started/cloud) adds managed remote access: 2 workers for free or 4 on the paid plan.
+You can use both for free on your LAN or VPN. Same-LAN sync is free. An optional [Cloud account](/docs/getting-started/cloud) adds managed remote access: 3 workers for free, 10 on Pro or 30 on Ultimate.
 
 ## What every install has in common
 

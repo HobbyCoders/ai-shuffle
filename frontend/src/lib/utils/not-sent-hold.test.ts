@@ -34,6 +34,12 @@ describe('holdNotSentRows', () => {
 		]);
 	});
 
+	it('keeps the attachment chips of the queued bubble it replaces', () => {
+		const withFile: ChatMessage = { ...row('1', 'live'), metadata: { ...row('1', 'live').metadata, upload_paths: ['/uploads/a.png'] } };
+		const held = holdNotSentRows([reply, withFile, row('2', 'live')], 'live');
+		expect(held.bubbles.map(b => b.uploadPaths)).toEqual([['/uploads/a.png'], undefined]);
+	});
+
 	it('hands every row over together when the turn ends', () => {
 		const messages = [reply, row('1', 'live'), row('2', 'live')];
 		const held = holdNotSentRows(messages, null);

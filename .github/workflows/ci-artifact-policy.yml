@@ -45,4 +45,4 @@ jobs:
       - if: inputs.main_suite != true
         run: python scripts/ci/main_suite.py android-and-docs
       - if: inputs.main_suite == true
-        run: python -m pytest -q -o addopts="" --confcutdir=tests/scripts tests/scripts/test_owner_publication_policy.py tests/scripts/test_edge_publication_gate.py tests/scripts/test_local_ci.py tests/scripts/test_local_ci_preflight.py tests/scripts/test_local_ci_stages.py tests/scripts/test_security_gate.py tests/scripts/test_pip_audit_retry.py tests/scripts/test_cloud_split.py tests/scripts/test_main_suite_parity.py
+        run: python -m pytest -q -o addopts="" --confcutdir=tests/scripts tests/scripts/test_owner_publication_policy.py tests/scripts/test_edge_publication_gate.py tests/scripts/test_local_ci.py tests/scripts/test_local_ci_preflight.py tests/scripts/test_local_ci_stages.py tests/scripts/test_security_gate.py tests/scripts/test_pip_audit_retry.py tests/scripts/test_cloud_split.py tests/scripts/test_main_suite_parity.py tests/scripts/test_main_gate.py

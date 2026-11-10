@@ -941,6 +941,10 @@ class SessionRuntime:
         # 0. Placement gate. A session explicitly placed on ANOTHER
         #    runner must not be executed here even if this install's kick fired
         #    first — leave the turn queued for that runner's claim loop.
+        #    That loop reads this database, so it only reaches a runner that
+        #    shares it. A paired worker with its own database never sees the
+        #    row: producers must send such work to the owner rather than
+        #    queue it here (turn_claim's module note, #1443).
         #    FAIL-OPEN: a resolver error must never block local execution (the
         #    run lease below still guarantees single-runner exclusivity).
         #    ``kind == "none"`` (pinned owner offline / no capable runner) also
