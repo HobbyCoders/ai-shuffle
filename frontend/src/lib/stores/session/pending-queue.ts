@@ -127,6 +127,8 @@ interface Delivery {
 	/** The entry this delivery retired — a delivery answers exactly one bubble. */
 	matchedEntryId: string | null;
 	createdAt?: number;
+	/** False until the transcript publishes this message's row: until then it retires nothing. */
+	onScreen: boolean;
 }
 
 let sessionId: string | null = null;
@@ -137,6 +139,13 @@ let lastAuthorityAt = 0;
 const firstSeen = new Map<string, number>();
 /** Turn ids delivered on the transcript (#588: a drained queue row's id IS its turn id). */
 const deliveredTurnIds = new Set<string>();
+/**
+ * Turn ids of live deliveries the transcript has not published yet (#1052). The
+ * feed notes a `message.user` when it arrives and shows its row at the next fold,
+ * a frame later; a queue snapshot landing in between must not take the bubble
+ * down before that row is up. `published` clears it.
+ */
+const turnIdsAwaitingFold = new Set<string>();
 /** Entry ids already retired — sticky, so a stale snapshot cannot resurrect them. */
 const prunedIds = new Set<string>();
 let deliveries: Delivery[] = [];
@@ -257,6 +266,7 @@ function resetState(next: string | null): void {
 	lastAuthorityAt = 0;
 	firstSeen.clear();
 	deliveredTurnIds.clear();
+	turnIdsAwaitingFold.clear();
 	prunedIds.clear();
 	deliveries = [];
 	replayedCommands.clear();
@@ -289,7 +299,7 @@ function answeredByHistory(entry: PendingEntry): boolean {
 function sawRecordedMessage(id: string | null, entry: PendingEntry): boolean {
 	const command = entry.clientMessageId;
 	if (!command || id !== sessionId) return false;
-	return replayedCommands.has(command) || deliveries.some(d => d.commandId === command);
+	return replayedCommands.has(command) || deliveries.some(d => d.onScreen && d.commandId === command);
 }
 
 /** Bind feed observations to a session; cancellation transactions are separate. */
@@ -500,6 +510,10 @@ export const pendingQueue = {
 	 *
 	 * `steered` is the recorder's own mark for a message that joined a running
 	 * turn (`checkpoint_backed: false`): its turn id is that turn's, not a row's.
+	 *
+	 * `awaitingFold` is set by the feed, which shows the message's row at its next
+	 * fold rather than now: a live delivery then retires no bubble until
+	 * `published`, so the bubble and its row change in the same update (#1052).
 	 */
 	noteDelivered(
 		id: string | null,
@@ -508,7 +522,8 @@ export const pendingQueue = {
 		live = true,
 		commandId?: string,
 		createdAt?: string,
-		steered = false
+		steered = false,
+		awaitingFold = false
 	): void {
 		useSession(id);
 		// Only the message that OPENS a turn names a queue row by turn id. A steer
@@ -516,6 +531,8 @@ export const pendingQueue = {
 		// text. The recorder marks a steer; an older worker's unmarked one is a
 		// later message with a turn id already seen.
 		const opensTurn = !!turnId && !steered && !deliveredTurnIds.has(turnId);
+		const onScreen = !(live && awaitingFold);
+		if (turnId && !onScreen && !deliveredTurnIds.has(turnId)) turnIdsAwaitingFold.add(turnId);
 		if (turnId) deliveredTurnIds.add(turnId);
 		if (commandId) {
 			this.acknowledgeSend(id, commandId);
@@ -535,13 +552,23 @@ export const pendingQueue = {
 		}
 		const text = normalize(content);
 		if (!text && !commandId) return;
-		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}), ...(opensTurn ? { turnId } : turnId ? { joinedTurnId: turnId } : {}) });
+		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, onScreen, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}), ...(opensTurn ? { turnId } : turnId ? { joinedTurnId: turnId } : {}) });
 		// A long session delivers a lot of messages and only the recent ones can
 		// still be answering something pending. Forgetting the oldest only ever
 		// makes pruning more conservative.
 		if (deliveries.length > MAX_TRACKED_DELIVERIES) {
 			deliveries = deliveries.slice(-MAX_TRACKED_DELIVERIES);
 		}
+	},
+
+	/**
+	 * The feed published every message it has noted so far: their rows are in the
+	 * `messages` of the update this precedes, so they may now retire bubbles.
+	 */
+	published(id: string | null): void {
+		if (id !== sessionId) return;
+		for (const d of deliveries) d.onScreen = true;
+		turnIdsAwaitingFold.clear();
 	},
 
 	/** An × requests a verdict; it is not evidence of withdrawal. */
@@ -761,9 +788,12 @@ export const pendingQueue = {
 		// A held row left the queue's front to run: it stays where it was, first.
 		const held = missing(delivering);
 		const candidates = [...held, ...entries, ...missing(unresolved).filter(e => !delivering.has(removalKey(e)))];
+		// Only messages already on screen answer a bubble (#1052): one the feed has
+		// not folded yet would leave neither its row nor its bubble showing.
+		const shown = deliveries.filter(d => d.onScreen);
 		// A delivery that names a bubble by turn id answers that bubble, so its text
 		// must not also retire another bubble with the same words.
-		for (const d of deliveries) {
+		for (const d of shown) {
 			if (d.matchedEntryId === null && d.turnId
 				&& (prunedIds.has(d.turnId) || candidates.some(e => e.id === d.turnId))) d.matchedEntryId = d.turnId;
 		}
@@ -773,12 +803,13 @@ export const pendingQueue = {
 			const bornAt = stamp(entry.id), text = normalize(entry.content);
 			// Identity beats first-sighting order; server timestamps still allow a
 			// genuinely new re-queue after an interrupted delivered steer.
-			const delivery = deliveries.find(d => d.commandId && entry.clientMessageId
+			const delivery = shown.find(d => d.commandId && entry.clientMessageId
 				? d.commandId === entry.clientMessageId && (isOptimistic(entry)
 					|| !Number.isFinite(d.createdAt) || entry.queuedAt <= d.createdAt!)
 				: d.matchedEntryId === null && d.joinedTurnId !== entry.id && bornAt < d.seq && d.content === text);
 			if (withdrawn.has(key) || withdrawn.has(entry.id)
-				|| deliveredRows.has(entry.id) || deliveredTurnIds.has(entry.id) || prunedIds.has(entry.id)
+				|| deliveredRows.has(entry.id) || (deliveredTurnIds.has(entry.id) && !turnIdsAwaitingFold.has(entry.id))
+				|| prunedIds.has(entry.id)
 				|| answeredByHistory(entry) || delivery
 				// A held re-queued steer waits only for the message it already recorded.
 				|| (entry.recorded && delivering.get(key)?.id === entry.id && sawRecordedMessage(id, entry))) {

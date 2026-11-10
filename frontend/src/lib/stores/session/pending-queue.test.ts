@@ -632,6 +632,34 @@ describe('pendingQueue — a delivered row keeps its bubble until it renders (#1
 		expect(snapshot([], [a])).toEqual([]);
 	});
 
+	it('keeps the bubble until the fold that shows its row when the snapshot lands in between', () => {
+		const a = queued('turn-a', 'queued a', 'client-a');
+		const b = queued('turn-b', 'queued b', 'client-b');
+		let shown = snapshot([], [a, b]);
+		// The feed notes the message on arrival; its row shows at the next fold.
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-a', true, 'client-a', new Date(2000).toISOString(), false, true);
+		// The socket's snapshot without that row lands before the fold.
+		shown = snapshot(shown, [b]);
+		expect(shown.map(e => e.id)).toEqual(['turn-a', 'turn-b']);
+		// The fold publishes the row and retires the bubble in the same update.
+		pendingQueue.published(SID);
+		shown = pendingQueue.reconcile(SID, shown);
+		expect(shown.map(e => e.id)).toEqual(['turn-b']);
+		expect(pendingQueue.isHeld(SID, a)).toBe(false);
+	});
+
+	it('matches an unpublished delivery by command or text only once it is published', () => {
+		const a = queued('local-a', 'queued a', 'client-a');
+		const c = queued('turn-c', 'queued c');
+		const shown = [a, c];
+		expect(pendingQueue.reconcile(SID, shown)).toBe(shown);
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-x', true, 'client-a', new Date(2000).toISOString(), false, true);
+		pendingQueue.noteDelivered(SID, 'queued c', 'turn-y', true, undefined, undefined, false, true);
+		expect(pendingQueue.reconcile(SID, shown)).toBe(shown);
+		pendingQueue.published(SID);
+		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
+	});
+
 	it('releases the bubble after the bounded wait, and a late delivery adds no second copy', () => {
 		vi.useFakeTimers();
 		const onRelease = vi.fn();

@@ -726,6 +726,8 @@ function fold(hydrationComplete = false): void {
 	// before the next event. Only a subsequent local array needs seeding.
 	seededMessages = patch.messages ?? null;
 	const anchor = bannerAnchor;
+	// The rows this update publishes may now retire their bubbles, in this same update.
+	pendingQueue.published(currentSessionId);
 	deps.update((s) => {
 		if (s.sessionId !== currentSessionId) return s;
 		// A failed turn's banner leaves once the log has moved past that
@@ -1189,7 +1191,9 @@ export const feedController: FeedController = {
 						typeof ev.created_at === 'string' ? ev.created_at : undefined,
 						// The recorder's mark for a steer. A "Not sent" row carries it too
 						// but is its own turn's message.
-						ev.checkpoint_backed === false && !ev.not_sent
+						ev.checkpoint_backed === false && !ev.not_sent,
+						// Its row shows at the next fold, which publishes it (#1052).
+						true
 					);
 				}
 				seedOptimistic();
