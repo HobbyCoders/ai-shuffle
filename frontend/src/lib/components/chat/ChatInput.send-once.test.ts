@@ -102,6 +102,31 @@ describe('Send activates once', () => {
 		expect(sends.mock.calls[1][0]).toBe('second');
 		accept(true);
 	});
+
+	// #1344: Send, type, Send again while the first is still being checked.
+	// The second click was dropped with no word and its message stayed put.
+	it('sends a new message typed during the first send\'s check, after the first', async () => {
+		activeSession.setDraft('first');
+		const view = render(ChatInput);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: import('@tiptap/core').Editor };
+		await waitFor(() => expect(editor.textContent).toBe('first'));
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		await waitFor(() => expect(answerCacheState).not.toBeNull());
+		expect(editor.textContent).toBe('');
+
+		editor.editor.commands.insertContent('second');
+		await fireEvent.submit(form);
+		// Not ahead of the first: it waits for that check.
+		expect(sends).not.toHaveBeenCalled();
+		expect(editor.textContent).toBe('second');
+		answerCacheState!();
+		await waitFor(() => expect(heldChecks.length).toBe(1));
+		await waitFor(() => expect(editor.textContent).toBe(''));
+		answerCacheState!();
+		await waitFor(() => expect(sends).toHaveBeenCalledTimes(2));
+		expect(sends.mock.calls.map(([prompt]) => prompt)).toEqual(['first', 'second']);
+	});
 });
 
 describe('composer selection follows the chat', () => {

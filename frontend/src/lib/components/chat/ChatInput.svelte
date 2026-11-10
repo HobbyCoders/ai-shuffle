@@ -1101,8 +1101,10 @@
 	// submitted slash command, Send anyway, Compact first) comes through here,
 	// and the checks below await before the composer is cleared; a second
 	// click or tap in that window would read the same text and send it again.
-	// Held until the composer is cleared, so a new message may go at once.
-	let submitPending = false;
+	// Once the composer is cleared it holds a new message: that send waits for
+	// this one's cold-cache check, so two sends keep their order, then goes
+	// (#1344). Held until the check has answered.
+	let pendingSubmit: { cleared: boolean; done: Promise<void> } | null = null;
 
 	// Send clears the composer at the click, and an empty composer offers Talk
 	// in Send's place. The Send circle keeps the slot through a double click's
@@ -1124,14 +1126,27 @@
 	}
 
 	async function handleSubmit(compactBeforeSend = false) {
-		if (submitPending) return;
-		submitPending = true;
+		if (pendingSubmit) {
+			if (!pendingSubmit.cleared) return;
+			// New chat or a switch during the wait: the words stay as the draft
+			// of the chat they were typed in (session-change effect).
+			const clickedIn = captureDestination(composerPlace());
+			while (pendingSubmit) await pendingSubmit.done;
+			if (!stillAtDestination(clickedIn, composerPlace(), { adoptedOwnChat: true })) return;
+		}
+		let settle!: () => void;
+		const submit = { cleared: false, done: new Promise<void>((resolve) => { settle = resolve; }) };
+		pendingSubmit = submit;
 		const releaseSendCircle = holdSendCircle();
-		try {
-			await submitComposer(compactBeforeSend, () => { submitPending = false; releaseSendCircle(); });
-		} finally {
-			submitPending = false;
+		const release = () => {
+			if (pendingSubmit === submit) pendingSubmit = null;
+			settle();
 			releaseSendCircle();
+		};
+		try {
+			await submitComposer(compactBeforeSend, release);
+		} finally {
+			release();
 		}
 	}
 
@@ -1336,6 +1351,7 @@
 		// Clear editor content. Words an earlier refused send put back go out
 		// with this one.
 		editorRef?.clear();
+		if (pendingSubmit) pendingSubmit.cleared = true;
 		retirePutBack(destination.chat);
 
 		// Clear draft immediately (not debounced) - important because
