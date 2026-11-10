@@ -91,8 +91,10 @@ def never_retargeted(pull: dict, repository: str, token: str, call=request) -> b
     events = call(f"/repos/{repository}/issues/{pull['number']}/events?per_page=100", token)
     if not isinstance(events, list) or len(events) >= 100:
         return False  # no history, or more than one page of it: unknown
+    # base_ref_changed, automatic_base_change_succeeded and any other event about
+    # the base: none may appear, whatever GitHub names the next one.
     return all(isinstance(event, dict) and isinstance(event.get("event"), str)
-               and event["event"] != "base_ref_changed" for event in events)
+               and "base" not in event["event"].lower() for event in events)
 
 
 def ran_on(run: dict, pull: dict, tree: str, repository: str, token: str, call=request) -> bool:

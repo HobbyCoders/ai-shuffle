@@ -179,7 +179,10 @@ def test_a_retargeted_pull_request_proves_nothing():
     """Opened against an unreviewed base, checked there, then pointed at main and merged."""
     record = artifact()
     assert found(record, events=[])
-    assert not found(record, events=[{"event": "base_ref_changed"}, {"event": "merged"}])
+    # By hand, by GitHub when a stacked pull request's base branch merged, or any other change of the base.
+    for change in ("base_ref_changed", "automatic_base_change_succeeded", "automatic_base_change_failed",
+                   "base_ref_force_pushed", "base_ref_deleted", "Some_New_BASE_event"):
+        assert not found(record, events=[{"event": change}, {"event": "merged"}]), change
     # No history, an odd answer, or more than one page of it: unknown, so not proven.
     assert not found(record, events={"message": "error"})
     assert not found(record, events=[{"event": "merged"}, "odd"])
