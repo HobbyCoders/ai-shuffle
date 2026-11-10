@@ -250,11 +250,13 @@ def safe_path(path):
     return path
 
 
-def check_owned(path, *, directory=False, private=True):
+def check_owned(path, *, directory=False, private=True, missing_ok=False):
     safe_path(path)
     try:
         info = path.lstat()
     except FileNotFoundError:
+        if missing_ok:
+            return
         raise RuntimeFailure("retained database state is missing; operator recovery required") from None
     kind = stat.S_ISDIR if directory else stat.S_ISREG
     if not kind(info.st_mode) or info.st_uid != os.geteuid():
@@ -927,10 +929,13 @@ class Database:
         check_owned(self.data, directory=True)
         # PG permits symlinks (tablespaces/WAL), but this single-volume contract
         # does not. Refuse instead of following/chowning arbitrary host paths.
+        # Online, the running server removes temporary files, recycled WAL and
+        # statistics between the listing and the lstat: an entry that vanished
+        # is not missing state. The fixed files below stay required either way.
         for directory, dirs, files in os.walk(self.data, followlinks=False):
             for name in dirs + files:
                 item = Path(directory) / name
-                check_owned(item, directory=item.is_dir(), private=False)
+                check_owned(item, directory=item.is_dir(), private=False, missing_ok=online)
         version = self.data / "PG_VERSION"
         if not version.is_file() or version.read_text().strip() != MAJOR:
             raise RuntimeFailure("unsupported or missing PostgreSQL major version; expected 16")

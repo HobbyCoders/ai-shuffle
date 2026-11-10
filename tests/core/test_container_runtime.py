@@ -270,6 +270,50 @@ def test_cluster_identity_and_restore_failure_are_binding(settings_factory, tmp_
         db.validate_cluster()
 
 
+def test_online_check_skips_a_file_the_running_server_removed(settings_factory, tmp_path, monkeypatch):
+    """#1445: PostgreSQL deletes temp/WAL/stats files while an online dump checks."""
+    db = runtime.Database(settings_factory())
+    pg = tmp_path / "postgres"
+    pg.mkdir(mode=0o700)
+    data = pg / "data"
+    data.mkdir(mode=0o700)
+    (data / "base" / "pgsql_tmp").mkdir(mode=0o700, parents=True)
+    runtime.write_private(pg / "cluster.json", json.dumps({"version": 1, "mode": "embedded", "state": "ready", "system_identifier": "123"}))
+    runtime.write_private(pg / "password", "a" * 96)
+    monkeypatch.setattr(db, "control_identifier", lambda: "123")
+    real_walk = os.walk
+    vanish = set()
+
+    def walk(top, **kwargs):
+        # Remove the named entries after they are listed, before they are inspected.
+        for directory, dirs, files in real_walk(top, **kwargs):
+            for name in files:
+                if name in vanish:
+                    (Path(directory) / name).unlink()
+            yield directory, dirs, files
+
+    monkeypatch.setattr(runtime.os, "walk", walk)
+
+    def reset():
+        for path, text in ((data / "PG_VERSION", "16\n"),
+                           (data / "base" / "pgsql_tmp" / "pgsql_tmp1.0", "spill")):
+            if not path.exists():
+                runtime.write_private(path, text)
+
+    vanish.add("pgsql_tmp1.0")
+    reset()
+    db.validate_cluster(online=True)
+    assert db.identifier == "123"
+    reset()
+    with pytest.raises(runtime.RuntimeFailure, match="retained database state is missing"):
+        db.validate_cluster()
+    # The fixed files stay required online too.
+    vanish.add("PG_VERSION")
+    reset()
+    with pytest.raises(runtime.RuntimeFailure, match="major version"):
+        db.validate_cluster(online=True)
+
+
 def test_unexpected_clean_app_exit_still_fails_container():
     app = Mock()
     app.poll.return_value = 0
