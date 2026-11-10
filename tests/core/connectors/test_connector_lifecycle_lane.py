@@ -75,6 +75,12 @@ def clients(cid):
     return [c for c in GatedConnector.instances if c.connector_id == cid]
 
 
+def connecting(cid):
+    """connect() has begun (the client is built before the "connecting" write;
+    a stop that lands during that write abandons the start instead)."""
+    return bool(clients(cid)) and clients(cid)[-1].connect_started
+
+
 def live_clients(cid):
     """Clients that connected and have not finished disconnecting."""
     return [c for c in clients(cid)
@@ -215,7 +221,7 @@ async def test_stop_during_connect_cancels_it_and_frees_the_receiver_lock(mgr, d
     gate = GatedConnector.connect_gates["c1"] = asyncio.Event()
     start = asyncio.create_task(mgr.start_connector("c1"))
     try:
-        await until(lambda: clients("c1"))
+        await until(lambda: connecting("c1"))
         [unwanted] = clients("c1")
         await asyncio.wait_for(mgr.stop_connector("c1"), 2)
         assert unwanted.connect_cancelled
@@ -236,7 +242,7 @@ async def test_wanted_slow_connect_is_never_cancelled(mgr, db, monkeypatch):
     gate = GatedConnector.connect_gates["c1"] = asyncio.Event()
     start = asyncio.create_task(mgr.start_connector("c1"))
     try:
-        await until(lambda: clients("c1"))
+        await until(lambda: connecting("c1"))
         [slow] = clients("c1")
         # Much later on the manager's clock: no time limit on a wanted connect.
         real = manager_module.time.monotonic
@@ -297,7 +303,7 @@ async def test_shutdown_settles_an_inflight_connect_and_refuses_new_starts(mgr, 
     gate = GatedConnector.connect_gates["c1"] = asyncio.Event()
     start = asyncio.create_task(mgr.start_connector("c1"))
     try:
-        await until(lambda: clients("c1"))
+        await until(lambda: connecting("c1"))
         await asyncio.wait_for(mgr.shutdown_all(), 2)
         gate.set()  # the connect would finish now
         await settle()
@@ -317,6 +323,7 @@ async def test_shutdown_disconnects_a_connect_that_finishes_after_closing(mgr, d
     gate = asyncio.Event()
 
     async def stubborn_connect(self):
+        self.connect_started = True
         while not gate.is_set():
             try:
                 await gate.wait()
@@ -328,7 +335,7 @@ async def test_shutdown_disconnects_a_connect_that_finishes_after_closing(mgr, d
     monkeypatch.setattr(GatedConnector, "connect", stubborn_connect)
     start = asyncio.create_task(mgr.start_connector("c1"))
     try:
-        await until(lambda: clients("c1"))
+        await until(lambda: connecting("c1"))
         [client] = clients("c1")
         shutdown = asyncio.create_task(mgr.shutdown_all())
         await until(lambda: client.connect_cancelled)
@@ -439,3 +446,122 @@ async def test_a_restart_is_not_swallowed_by_a_run_asked_before_its_stop_ran(mgr
         assert len(live_clients("c1")) == 1
     finally:
         await cleanup(restart)
+
+
+async def test_a_stop_and_run_during_a_replacing_teardown_keep_the_new_client(mgr, db):
+    """Before: a STOP then RUN asked while a start tore down an errored client
+    marked the lane, so after the start built B the next pass disconnected B,
+    a client begun after that STOP, and built a third."""
+    assert await mgr.start_connector("c1") is True
+    errored = mgr.get_running_instance("c1")
+    errored._status = ConnectorStatus.ERROR  # its login failed: the next start replaces it
+    gate = GatedConnector.disconnect_gates["c1"] = asyncio.Event()
+    replacing = asyncio.create_task(mgr.start_connector("c1"))
+    callers = [replacing]
+    try:
+        await until(lambda: errored.disconnect_started)
+        callers.append(asyncio.create_task(mgr.stop_connector("c1")))
+        callers.append(asyncio.create_task(mgr.start_connector("c1")))
+        await settle()
+        gate.set()
+        replaced, stopped, started = await asyncio.wait_for(asyncio.gather(*callers), 2)
+        await until(lambda: not mgr._lanes)
+        assert replaced is True and started is True and stopped is None
+        assert len(clients("c1")) == 2, "exactly one new client"
+        new = clients("c1")[-1]
+        assert mgr.get_running_instance("c1") is new
+        assert errored.disconnected and not new.disconnect_started
+    finally:
+        await cleanup(*callers)
+
+
+async def test_a_start_abandoned_by_shutdown_alone_leaves_the_row_disconnected(mgr, db, monkeypatch):
+    """Shutdown sets ``_closing`` before it asks the lanes to stop: a start
+    whose "connecting" write is in flight then is abandoned with no STOP
+    request, and the row must still end "disconnected"."""
+    paused, release, relay_gate = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    real_run_sync = manager_module.run_sync
+
+    async def run_sync(fn, *args, **kwargs):
+        if fn is database.update_connector_status and args[1:2] == ("connecting",):
+            paused.set()
+            await release.wait()
+        return await real_run_sync(fn, *args, **kwargs)
+
+    async def relay_stop():
+        await relay_gate.wait()
+
+    monkeypatch.setattr(manager_module, "run_sync", run_sync)
+    mgr._event_relay = SimpleNamespace(stop=relay_stop)  # holds shutdown after ``_closing``
+    start = asyncio.create_task(mgr.start_connector("c1"))
+    shutdown = None
+    try:
+        await asyncio.wait_for(paused.wait(), 2)
+        shutdown = asyncio.create_task(mgr.shutdown_all())
+        await until(lambda: mgr._closing)
+        release.set()
+        assert await asyncio.wait_for(start, 1) is False
+        await until(lambda: "c1" not in mgr._lanes)
+        assert mgr._lanes == {}, "the lane ended with no STOP request"
+        [built] = clients("c1")
+        assert not built.connect_started and not built.disconnect_started
+        assert not mgr.receiver_lock("c1").locked()
+        assert statuses(db, "c1")[-1] == "disconnected"
+        relay_gate.set()
+        await asyncio.wait_for(shutdown, 2)
+    finally:
+        release.set()
+        relay_gate.set()
+        await cleanup(*(t for t in (start, shutdown) if t is not None))
+
+
+async def test_a_failed_cancelled_connect_write_still_tears_the_client_down(mgr, db, monkeypatch):
+    """A connect() that cancels itself after half connecting is torn down even
+    when its "connect() was cancelled" status write fails."""
+
+    async def half_connect(self):
+        self.connect_started = True
+        self._status = ConnectorStatus.CONNECTED
+        raise asyncio.CancelledError
+
+    def update_status(cid, status, **fields):
+        if fields.get("error") == "connect() was cancelled":
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(GatedConnector, "connect", half_connect)
+    db.update_connector_status.side_effect = update_status
+    assert await asyncio.wait_for(mgr.start_connector("c1"), 2) is False
+    [client] = clients("c1")
+    assert client.disconnected
+    assert mgr.get_running_instance("c1") is None
+    assert not mgr.receiver_lock("c1").locked()
+
+
+async def test_a_stop_after_connect_returned_but_before_registering_restarts(mgr, db):
+    """A STOP then RUN that land after connect() returned, while registration
+    waits for the manager lock, cancel nothing; the client still registers.
+    Its connect began before that STOP, so the next pass replaces it: the
+    stop's waiter is answered only after a teardown."""
+    gate = GatedConnector.connect_gates["c1"] = asyncio.Event()
+    first_start = asyncio.create_task(mgr.start_connector("c1"))
+    callers = [first_start]
+    try:
+        await until(lambda: connecting("c1"))
+        [first] = clients("c1")
+        await mgr._lock.acquire()  # registration will wait here
+        try:
+            gate.set()
+            await until(lambda: first.status == ConnectorStatus.CONNECTED)
+            await settle()
+            callers.append(asyncio.create_task(mgr.stop_connector("c1")))
+            callers.append(asyncio.create_task(mgr.start_connector("c1")))
+            await settle()
+        finally:
+            mgr._lock.release()
+        await asyncio.wait_for(asyncio.gather(*callers), 2)
+        await until(lambda: not mgr._lanes)
+        assert first.disconnected, "the client begun before the STOP is not kept"
+        assert len(clients("c1")) == 2 and mgr.get_running_instance("c1") is clients("c1")[-1]
+        assert not clients("c1")[-1].disconnect_started
+    finally:
+        await cleanup(*callers)

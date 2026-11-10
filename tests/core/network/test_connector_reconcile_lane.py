@@ -31,6 +31,7 @@ from app.network import (
 from tests.core.connectors.test_connector_lifecycle_lane import (
     GatedConnector,
     clients,
+    connecting,
     live_clients,
     open_gates,
     settle,
@@ -140,6 +141,7 @@ async def test_a_hung_connect_does_not_delay_the_fence_stopping_another(net):
     lock, so the fence queued behind it never stopped B."""
     GatedConnector.connect_gates[A] = asyncio.Event()  # A's connect never returns
     await running(net, B)  # the same pass started A, still connecting
+    await until(lambda: connecting(A))
     assert len(clients(A)) == 1 and net.mgr.get_running_instance(A) is None
 
     net.state["fenced"] = True
