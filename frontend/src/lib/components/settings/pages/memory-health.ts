@@ -5,6 +5,7 @@
  */
 import { api } from '$lib/api/client';
 import type { UpdateResultRow } from './updates-state.svelte';
+import { relativeAgo } from '../integrations/api-users.svelte';
 
 export interface MemorySignal {
 	id: string;
@@ -50,6 +51,44 @@ export function memorySummary(health: MemoryHealth | null): string {
 	}
 	const n = (health.signals ?? []).filter((s) => s.state === 'attention').length;
 	return n === 1 ? 'Needs attention' : `${n} need attention`;
+}
+
+/**
+ * When the worker last ran the check, for the row's hint ("Checked 12m ago"),
+ * so a fresh warning can be told from an old one. Same wording as the
+ * Memory page's times.
+ */
+export function memoryChecked(health: MemoryHealth, now = Date.now()): string {
+	if (!health.checked_at) return 'Not checked yet';
+	const ago = relativeAgo(new Date(health.checked_at * 1000).toISOString(), now);
+	return ago ? `Checked ${ago}` : 'Not checked yet';
+}
+
+/**
+ * The same moment in full, for the opened list ("Last checked Nov 9, 2026,
+ * 8:40 PM"). Empty before the first check: the hint already says so.
+ */
+export function memoryCheckedAt(health: MemoryHealth): string {
+	const date = new Date((health.checked_at ?? NaN) * 1000);
+	if (!health.checked_at || Number.isNaN(date.getTime())) return '';
+	return `Last checked ${date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`;
+}
+
+/**
+ * The warning the collapsed row shows under itself while something needs
+ * attention: the first check's name and the first sentence of its reason
+ * ("Capacity: Automatic cleanup has recorded 3 permanent deletions…"), and
+ * how many more there are. Empty when healthy. The full reasons are in the
+ * opened list.
+ */
+export function memoryAlert(health: MemoryHealth): string {
+	if (health.state === 'healthy') return '';
+	const signals = (health.signals ?? []).filter((s) => s.state === 'attention');
+	if (!signals.length) return 'Memory needs attention.';
+	const [first] = signals;
+	const sentence = (first.reason ?? '').trim().split(/(?<=[.!?])\s+/)[0] ?? '';
+	const more = signals.length > 1 ? ` ${signals.length - 1} more ${signals.length === 2 ? 'check needs' : 'checks need'} attention.` : '';
+	return `${first.label}: ${sentence || 'needs attention.'}${more}`;
 }
 
 const WEEK = 7 * 24 * 3600;

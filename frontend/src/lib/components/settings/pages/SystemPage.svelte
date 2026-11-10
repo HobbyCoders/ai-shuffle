@@ -36,7 +36,15 @@
 	import { UpdatesState } from './updates-state.svelte';
 	import { lockedReason, UpdateChannelState, type Channel } from './update-channel.svelte';
 	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
-	import { fetchMemoryHealth, memoryRows, memorySummary, type MemoryHealth } from './memory-health';
+	import {
+		fetchMemoryHealth,
+		memoryAlert,
+		memoryChecked,
+		memoryCheckedAt,
+		memoryRows,
+		memorySummary,
+		type MemoryHealth
+	} from './memory-health';
 	import ReportProblemForm, { type ReportFormResult } from './editors/ReportProblemForm.svelte';
 	import type { ReportKind } from '$lib/api/support';
 	import {
@@ -218,6 +226,12 @@
 	const memoryValue = $derived(
 		memoryLoad === 'error' ? 'Unavailable' : memoryLoad === 'forbidden' ? FORBIDDEN_TEXT : memorySummary(memory)
 	);
+	/* "Checked 12m ago" replaces the entry's "Checks itself every hour" once the
+	   answer lands, so a warning can be told fresh or old (#1042); a minute
+	   clock keeps it true while the page stays open. */
+	let memoryNow = $state(Date.now());
+	const memoryHint = $derived(memoryLoad === 'ok' && memory ? memoryChecked(memory, memoryNow) : undefined);
+	const memoryWarning = $derived(memoryLoad === 'ok' && memory ? memoryAlert(memory) : '');
 
 	/* ---------- help: report a problem ---------- */
 
@@ -280,6 +294,8 @@
 		void supportCaps.load();
 		updates.start();
 		void channel.refresh();
+		const memoryClock = setInterval(() => (memoryNow = Date.now()), 60_000);
+		return () => clearInterval(memoryClock);
 	});
 	onDestroy(() => {
 		alive = false;
@@ -437,7 +453,7 @@
 	{#if channel.error}<p class="st-msg err" role="alert">{channel.error}</p>{/if}
 
 	<RowGroup title="Memory">
-		<SettingRow id="system.memoryHealth" expanded={memoryOpen && memory ? memoryList : undefined}>
+		<SettingRow id="system.memoryHealth" hint={memoryHint} expanded={memoryOpen && memory ? memoryList : undefined}>
 			<span class="st-status" data-testid="memory-health">
 				{#if memoryLoad === 'ok' && memory}
 					<StatusDot tone={memory.state === 'healthy' ? 'ok' : 'warn'} /><ExpandToggle value={memoryValue} bind:open={memoryOpen} />
@@ -447,6 +463,15 @@
 			</span>
 		</SettingRow>
 	</RowGroup>
+	{#if memoryWarning && !memoryOpen}
+		<!-- A warning is read without opening the row; healthy stays quiet (#1042). -->
+		<InlineBanner tone="warn">
+			{memoryWarning}
+			{#snippet actions()}
+				<button type="button" class="st-btn sm" onclick={() => (memoryOpen = true)}>Details</button>
+			{/snippet}
+		</InlineBanner>
+	{/if}
 	{#if memoryError}<p class="st-msg err" role="alert">{memoryError}</p>{/if}
 
 	{#if canSendSupportReport() || aiReportOpen}
@@ -497,7 +522,7 @@
 {/snippet}
 
 {#snippet memoryList()}
-	<MemoryHealthList rows={memory ? memoryRows(memory) : []} />
+	<MemoryHealthList rows={memory ? memoryRows(memory) : []} checked={memory ? memoryCheckedAt(memory) : ''} />
 {/snippet}
 
 <style>
