@@ -197,7 +197,9 @@
 		untrack(() => void focusHeading(req.pane, req.n));
 	});
 
-	async function focusHeading(pane: 'page' | 'detail', n: number, tries = 40): Promise<void> {
+	// A first visit loads the page's code; on a slow link or a busy machine that
+	// has taken over 5s, so keep looking for 15s. A newer navigation ends it.
+	async function focusHeading(pane: 'page' | 'detail', n: number, tries = 300): Promise<void> {
 		await tick();
 		if (settingsNav.focusRequest?.n !== n) return;
 		const el = root?.querySelector<HTMLElement>(`[data-settings-heading="${pane}"]`);

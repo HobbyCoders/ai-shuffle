@@ -137,6 +137,25 @@ describe('SettingsShell index', () => {
 		// The cold lazy import alone has passed 5s on a loaded hosted runner.
 	}, 30_000);
 
+	it('still focuses the heading when the page takes seconds to load', async () => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+			settingsNav.focusRequest = null;
+		});
+		const { container } = render(SettingsShell);
+		settingsNav.focusRequest = { pane: 'detail', n: (settingsNav.focusRequest?.n ?? 0) + 1000 };
+		// No heading for 6s: longer than the cold load seen on a hosted runner.
+		await vi.advanceTimersByTimeAsync(6_000);
+		expect(container.querySelector('[data-settings-heading="detail"]')).toBeNull();
+		const late = document.createElement('h2');
+		late.tabIndex = -1;
+		late.dataset.settingsHeading = 'detail';
+		container.querySelector('.settings-shell')!.append(late);
+		await vi.advanceTimersByTimeAsync(100);
+		expect(document.activeElement).toBe(late);
+	});
+
 	it('shows an attention count from a category module', async () => {
 		const { MODULES } = await import('$lib/settings/registry');
 		const before = MODULES.logs;
