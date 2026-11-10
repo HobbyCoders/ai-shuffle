@@ -1786,8 +1786,9 @@ def set_session_parked_task_kind(
     updated.
 
     ``still_valid`` is the writer's condition for the write (#1285): the
-    writing turn still holds the chat, and for an idle clear, nothing is left
-    to park on. It runs under a per-session lock that every write here holds
+    writing turn still holds the chat; for an idle clear, nothing is left to
+    park on; for a turn-end write with no turn, the task registry still gives
+    the kind being written. It runs under a per-session lock that every write here holds
     through its commit, so a stale writer writes nothing, and one that passed
     the check commits before any later writer's update. A write without it
     is still ordered by the lock. It must be synchronous and must not touch

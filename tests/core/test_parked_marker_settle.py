@@ -357,3 +357,59 @@ async def test_a_held_idle_clear_cannot_undo_a_later_park(mock_db, test_db):
 
     assert _marker(test_db, session_id) == "agent", "the stale idle clear overwrote the later park"
     assert published == ["agent"], f"the stale idle clear was published: {published}"
+
+
+@pytest.mark.parametrize(
+    "decided, later",
+    [(None, "agent"), ("agent", None)],
+    ids=["stale-clear", "stale-park"],
+)
+async def test_a_held_ownerless_turn_end_write_cannot_undo_a_later_one(mock_db, test_db, decided, later):
+    """#1285 review: a turn-end write with no turn (resource monitor, worktree
+    manager) re-checks the kind it read where the write lands.
+
+    It reads the registry, decides ``decided`` and is held before the marker
+    lock; the registry then changes and a later turn-end write lands
+    ``later``. The resumed write must neither overwrite it nor publish.
+    """
+    import asyncio
+    import threading
+
+    from app.core import turn_finalize
+
+    session_id = _parked_session(test_db, kind="shell")
+    registry = _registry([{"id": "w", "kind": decided}] if decided else [])
+    real_write = database.set_session_parked_task_kind
+    held, release = threading.Event(), threading.Event()
+
+    def write(sid, kind, **fence):
+        if not held.is_set():
+            held.set()
+            release.wait(5)
+        return real_write(sid, kind, **fence)
+
+    published = []
+
+    async def broadcast(*, user_id, session_id, updates, **kwargs):
+        published.append(updates.get("parked_task_kind"))
+
+    with patch("app.core.task_registry.task_registry", new=registry), patch.object(
+        database, "set_session_parked_task_kind", side_effect=write,
+    ), patch("app.core.sync_engine.sync_engine") as sync, patch(
+        "app.core.session_pr_state.schedule_session_pr_reconcile",
+    ), patch("app.core.session_handoff.schedule"), patch("app.core.pg_session_store.flush_summary_folds"):
+        sync.broadcast_user_session_updated = AsyncMock(side_effect=broadcast)
+        stale = asyncio.create_task(turn_finalize.persist_turn_end_state(session_id, resync_branch=False))
+        try:
+            assert await asyncio.to_thread(held.wait, 5)
+            registry.get_parking_background_work.return_value = (
+                [{"id": "later", "kind": later}] if later else []
+            )
+            await turn_finalize.persist_turn_end_state(session_id, resync_branch=False)
+            assert _marker(test_db, session_id) == later
+        finally:
+            release.set()
+            await asyncio.wait_for(stale, 5)
+
+    assert _marker(test_db, session_id) == later, "the held turn-end write overwrote the later one"
+    assert published == [later], f"the held turn-end write was published: {published}"

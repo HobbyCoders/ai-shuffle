@@ -214,6 +214,30 @@ def _nothing_to_park_on(session_id: str) -> bool:
         return False
 
 
+def _parking_kind(session_id: str) -> Optional[str]:
+    """The marker a turn ending now writes: the first parking work's kind."""
+    from app.core.task_registry import task_registry
+
+    work = task_registry.get_parking_background_work(session_id)
+    return (work[0].get("kind") or "agent") if work else None
+
+
+def _parking_kind_unchanged(session_id: str, kind: Optional[str]) -> bool:
+    """True while the registry still gives ``kind`` (#1285).
+
+    Fences a turn-end write with no turn of its own: between its registry read
+    and the locked update, a later turn may park ("agent" must not become a
+    stale None) or the work may end (a stale "agent" must not stay on an idle
+    chat). Runs on the update's worker thread; a read that raises counts as
+    changed and the write is skipped. The next turn-end write or idle clear
+    then settles the marker.
+    """
+    try:
+        return _parking_kind(session_id) == kind
+    except Exception:  # noqa: BLE001 — fail closed: skip the write.
+        return False
+
+
 async def _write_parked_task_kind(
     session_id: str, kind: Optional[str], *, writer: Optional[Lease] = None,
     only_if: Optional[Callable[[], bool]] = None,
@@ -228,7 +252,8 @@ async def _write_parked_task_kind(
     give up waiting for that turn and let the next one start; from then on the
     old turn neither changes the marker nor publishes it (#1285). ``only_if``
     is a further condition the write depends on (the idle clear passes
-    :func:`_nothing_to_park_on`). Both are checked inside the update's own
+    :func:`_nothing_to_park_on`, a turn-end write with no turn passes
+    :func:`_parking_kind_unchanged`). Both are checked inside the update's own
     critical section (``set_session_parked_task_kind``) and again by the
     broadcaster right before each publication.
     """
@@ -399,15 +424,19 @@ async def persist_turn_end_state(
     """Persist turn-end state; a refused checkout must not adopt another HEAD.
 
     A turn passes its admission lease as ``writer`` so its parked-marker write
-    is fenced to it (#1285). Callers with no turn of their own pass nothing.
+    is fenced to it (#1285). Callers with no turn of their own pass nothing;
+    their write applies and publishes only while the registry still gives the
+    kind they read (see :func:`_parking_kind_unchanged`).
     """
     # 1. Durable parked marker (set or clear).
     try:
-        from app.core.task_registry import task_registry
-
-        work = task_registry.get_parking_background_work(session_id)
-        kind = (work[0].get("kind") or "agent") if work else None
-        await _write_parked_task_kind(session_id, kind, writer=writer)
+        kind = _parking_kind(session_id)
+        # With no turn to fence on, the write must still match the registry
+        # when it lands: a later turn may have parked, or its work ended.
+        only_if = None if writer is not None else (
+            lambda: _parking_kind_unchanged(session_id, kind)
+        )
+        await _write_parked_task_kind(session_id, kind, writer=writer, only_if=only_if)
     except Exception:
         logger.debug("persisting parked_task_kind failed", exc_info=True)
 
