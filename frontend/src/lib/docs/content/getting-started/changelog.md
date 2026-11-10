@@ -8,6 +8,81 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.3.0 (2026-11-10)
+
+New Cloud plans, direct sync between workers on the same network, Settings > Memory, one Away switch for every chat, three new providers, and steadier hand-offs, updates and chat.
+
+### Action needed
+
+- On Windows, the desktop app now takes sync from your other workers on the same network on its own port (8003). The first start may show a Windows Defender Firewall prompt: allow it on private networks for direct sync. If it stays blocked, sync goes through the tunnel as before.
+
+### License
+
+- New AI Shuffle Cloud plans: Free includes 3 remote workers, Pro 10 for $10/month and Ultimate 30 for $30/month. All plans are billed monthly. Settings > Cloud shows the plan you are on.
+
+### Sync and workers
+
+- Workers on the same network sync directly again, including the desktop app, instead of sending everything through the tunnel.
+- A chat's terminal opens on the worker that runs the chat, in the chat's folder, from whichever worker you are using.
+- Setting an existing local Git folder up on other workers clones the same project there, instead of making an empty folder or a second project.
+- A connected phone can add another worker from Settings > Devices.
+
+### Agents and providers
+
+- Kimi, MiniMax and OpenCode are built-in providers. Set each up with a subscription plan key or an API key in Settings, first-run setup or the phone app.
+- Each worker checks for a Claude Code update when it starts. With **Update all workers** on, **Check for update** in Settings > Providers > Claude updates every worker.
+- Agents know the current time in the timezone saved in Settings > General, and how long it has been since your last message.
+- When an Anthropic or OpenAI safety check reroutes or blocks a request, the chat says so and lets you continue on the suggested model.
+- Turning Fast on or off during a turn says which turn it applies to, and each turn shows what it really ran.
+- An agent's Models tab can pin any provider's model on the Claude row.
+
+### Hand-offs
+
+- A hand-off says what holds the move, such as running subagents or background tasks, and the agent is told when a move ends without moving.
+- After a hand-off, reports from chats the moved chat started reach it on its new worker, once.
+
+### Sessions and interface
+
+- One design across the app: the rail, side panels, Settings, Notes, Files, Projects, Agents, Automations and the phone app.
+- **Settings > Memory** lets you see, search, edit and delete saved memories.
+- **Away for all chats** (the moon at the foot of the rail, or in the top bar on a phone) puts every chat on every worker in Away mode: questions get their recommended answer and approvals wait, never granted. Turning it off returns each chat to its own setting.
+- Every permission request in an app chat uses the regular permission prompt. Typing "yes" no longer approves anything.
+- A chat is told when you approve or decline its service access card.
+
+### Chat
+
+- Sends keep their order and your typed text, even when you send quickly or right after a reload.
+- Queued messages keep their attachment chips and no longer vanish when the turn starts. Attachments no longer go missing, including in chats running on another worker.
+- Rewinds no longer blank the transcript, keep typed words apart and bring attachments back as chips.
+- A failed turn's error shows once, sidebar rows no longer jump when a new chat arrives, and the sidebar says what is true of each chat.
+
+### Updates
+
+- Docker updates have much shorter downtime. An update skips the database copy when the database level is unchanged, and on volumes that support it (btrfs, XFS, ZFS) clones the database instead of copying it. Set `AI_SHUFFLE_UPDATE_RESTORE_POINT=always` to take a copy before every update.
+- The Windows desktop updater no longer leaves a copy of the database and unused dependencies on disk.
+- A restart that waits for the worker to be idle no longer stops work that started while the update was being checked.
+
+### Android app
+
+- Phone questions have **Skip this question**, and the question card has more room to read and tap.
+- Device-tool fixes: one bad screen read no longer refuses an approved action, and actions that hand off to another app finish reliably.
+- On first launch, the app waits for your notification answer before opening a worker.
+
+### Security
+
+- Webhook signing secrets are write-only: Settings shows whether a hook has one, never the secret itself.
+
+### Removed
+
+- Chat archiving. Chats are Active or Settled; every archived chat moves to Settled with its transcript and history.
+- The old $14 and $20 paid plans and their 12-month billing option. Every Cloud plan is now billed monthly.
+- The Auto-scroll, Show timestamps and Compact message view settings, which nothing in the app used.
+
+### Fixed
+
+- Many sync, memory and connector reliability fixes: a much smaller sync log, memory synced one fact at a time, one stuck connector no longer blocking the others, and quick messages in a connector chat kept in order.
+- Lower database load, and scratch and checkout cleanup that frees disk again.
+
 ## 1.2.1 (2026-11-01)
 
 Finishes the 1.2.0 release, whose Windows installer, Android APK download and Docker image did not finish publishing. Everything listed under 1.2.0 is in this release.
