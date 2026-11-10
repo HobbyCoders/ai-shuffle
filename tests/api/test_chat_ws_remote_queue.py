@@ -97,7 +97,7 @@ async def test_late_queue_response_cannot_overwrite_new_watch(next_session: str)
     ):
         handler = h.make_handler()
         await handler.handle_watch_session(dict(WATCH))
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), QUEUE_HYDRATION_HANG_GUARD_SECONDS)
         await _watch_and_hydrate(handler, {"session_id": next_session})
     frames = _queue_frames(h.ws)
     assert len(frames) == 1
@@ -159,7 +159,7 @@ async def test_slow_peer_does_not_block_serialized_dispatch(
     )
     async with _connect(ws_env) as conn:
         conn.wire.push({"type": "watch_session", "session_id": remote})
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), QUEUE_HYDRATION_HANG_GUARD_SECONDS)
         hydration = conn.handler._queue_watch_task
         if following_frame == "remove_queued_message":
             # The real receive loop must dispatch the withdrawal while the peer
@@ -202,7 +202,7 @@ async def test_disconnect_cancels_inflight_hydration(
     monkeypatch.setattr(control, "call", read)
     async with _connect(ws_env) as conn:
         conn.wire.push({"type": "watch_session", "session_id": sid})
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), QUEUE_HYDRATION_HANG_GUARD_SECONDS)
         hydration = conn.handler._queue_watch_task
     assert hydration.cancelled()
     assert cancelled.is_set()
