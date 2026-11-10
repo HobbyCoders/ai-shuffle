@@ -82,6 +82,17 @@ const MAX_REASON_CHARS = 240;
 const DISPATCHED_RE = /^\s*-\s*performing \S+(?: and \S+)? action$/m;
 
 /**
+ * Did the attempt Playwright was on when it failed get as far as sending the
+ * input? Only the last attempt counts: one Playwright retried after "performing"
+ * was withheld from the page, because something else (an overlay that appeared
+ * as the pointer arrived) had become the hit target.
+ */
+function inputWentOut(message: string): boolean {
+  const log = message.replace(ANSI_RE, "");
+  return DISPATCHED_RE.test(log.slice(log.lastIndexOf("retrying ") + 1));
+}
+
+/**
  * Condense a Playwright failure on a ref that still resolves into one line: the
  * last call-log line naming the blocker (e.g. "<div></div> intercepts pointer
  * events", "element is not stable"), else the error's headline.
@@ -284,7 +295,7 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     const msg = err instanceof Error ? err.message : String(err);
     // Playwright's call log names the step it reached. Past "performing …
     // action" the input went out, so the outcome is no longer not_executed.
-    if (input.ref !== undefined && DISPATCHED_RE.test(msg.replace(ANSI_RE, ""))) sent = true;
+    if (input.ref !== undefined && inputWentOut(msg)) sent = true;
     const remedy = invalidInputRemedy(msg);
     if (remedy) return sent
       ? errorResult(outcomeUnknownMessage(input.kind, remedy), { outcome: "unknown" })
@@ -439,7 +450,7 @@ async function landedGesture(gesture: Promise<void>, markSent: () => void): Prom
     await gesture;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (!/Timeout \d+ms exceeded/i.test(msg) || !DISPATCHED_RE.test(msg.replace(ANSI_RE, ""))) throw err;
+    if (!/Timeout \d+ms exceeded/i.test(msg) || !inputWentOut(msg)) throw err;
     markSent();
   }
 }

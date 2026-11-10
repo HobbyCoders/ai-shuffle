@@ -1212,6 +1212,15 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Busy result") });
       expect(await page.locator("#out button").count()).toBe(20);
     }, 10000);
+    it("does not count a click Playwright blocked and retried as done", async () => {
+      // The cover appears as the pointer arrives, so Playwright withholds the
+      // click, retries against the covered button and runs out its budget.
+      const page = await load(`<button style="position:fixed;left:333px;top:277px" onmouseenter="cover.style.display='block'" onclick="window.clicks=(window.clicks||0)+1">Guarded</button><div id="cover" style="display:none;position:fixed;inset:0"></div>`);
+      const result = await runAct(session, { kind: "click", ref: await ref("Guarded") });
+      expect(body(result)).toMatchObject({ code: "not_actionable", outcome: "not_executed" });
+      expect(firstText(result)).toContain("intercepts pointer events");
+      expect(await page.evaluate(() => (window as unknown as { clicks?: number }).clicks ?? 0)).toBe(0);
+    }, 10000);
     it("ignores a 5s toast dismissal without skipping a short 700ms render", async () => {
       await load(`<button onclick="out.textContent='Saved';setTimeout(()=>out.textContent='',5000)">Toast</button><div id="out"></div>`);
       const result = body(await runAct(session, { kind: "click", ref: await ref("Toast") }));
