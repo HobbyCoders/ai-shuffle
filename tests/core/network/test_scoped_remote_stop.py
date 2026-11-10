@@ -8,7 +8,7 @@ from app.core.task_persistence import flush
 from app.core.query_session_lifecycle import stop_all_background_tasks
 from app.core.task_registry import task_registry
 from app.db import remote_tasks, session_events, turns
-from app.network import control, engine
+from app.network import control, engine, memory_records
 from tests.core.network.harness import converge
 from tests.core.network.test_remote_task_control import network, started_child, all_turns, UNRAID_URL
 from tests.core.network.test_remote_task_messaging import body
@@ -80,7 +80,8 @@ def test_explicit_old_or_malformed_capabilities_are_not_replaced(workers, monkey
         engine.create_network("Home")
         engine.publish_presence(capabilities=explicit)
         assert engine.presence_of(a.device_id)["capabilities"] == {
-            SECRET_CAPABILITY: 1, native_providers.CAPABILITY: 1, **explicit}
+            SECRET_CAPABILITY: 1, native_providers.CAPABILITY: 1,
+            memory_records.CAPABILITY: 1, **explicit}
         assert not scoped_remote_stop.advertised(a.device_id)
 
 
@@ -94,7 +95,8 @@ def test_bare_presence_with_unavailable_detection_is_unknown(workers, monkeypatc
         engine.create_network("Home")
         engine.publish_presence()
         assert engine.presence_of(a.device_id)["capabilities"] == {
-            SECRET_CAPABILITY: 1, native_providers.CAPABILITY: 1}
+            SECRET_CAPABILITY: 1, native_providers.CAPABILITY: 1,
+            memory_records.CAPABILITY: 1}
         assert not scoped_remote_stop.advertised(a.device_id)
 
 

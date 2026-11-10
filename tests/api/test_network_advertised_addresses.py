@@ -11,7 +11,7 @@ from app.core.config import settings
 from app.db import database
 from app.db import network as store
 import app.network.advertisements as advertisements
-from app.network import engine, lan, policy, tokens, transport
+from app.network import engine, lan, memory_records, policy, tokens, transport
 from tests.core.network.conftest import workers  # noqa: F401
 from tests.core.network.harness import exchange, join
 from tests.core.network.test_token_binding import post, request_body
@@ -58,6 +58,7 @@ def test_public_alias_with_tunnel_repairs_binding_and_is_signed_into_presence(se
         assert alias in engine.presence_of(server.device_id)["endpoints"]
         assert engine.presence_of(server.device_id)["capabilities"] == {
             **capabilities, "nested-secret-rekey": 1, native_providers.CAPABILITY: 1,
+            memory_records.CAPABILITY: 1,
         }
         assert advertisements.owner_urls() == []  # another worker's local config is not imported
     with server.active():
