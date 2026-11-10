@@ -36,11 +36,18 @@ async def _post(*, blocking=False, tool_use_id="ask-tool", questions=QUESTIONS):
     from app.core.user_question_handler import user_question_handler
 
     if blocking:
-        return asyncio.create_task(
+        from app.core import interaction_wait
+
+        callback = asyncio.create_task(
             user_question_handler.request_answers(
                 "original", tool_use_id or "original", "s1", questions, AsyncMock()
             )
         )
+        # The callback posts its row several awaits before it registers the
+        # waiter. A hand-off that runs in between finds no waiter to cancel and
+        # leaves the question alone, so return only once the callback is parked.
+        await _settle(lambda: callback.done() or interaction_wait.has_waiters("s1"))
+        return callback
     await user_question_handler.post_question(
         request_id="original",
         tool_use_id="ask-tool",
