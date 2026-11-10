@@ -78,6 +78,8 @@ const ANSI_RE = /\x1b\[[0-9;]*m/g;
 /** Call-log lines that name why an action could not proceed. */
 const BLOCKER_RE = /intercepts pointer events|element is not |element is outside of the viewport|not attached|is disabled/i;
 const MAX_REASON_CHARS = 240;
+/** Call-log line Playwright writes just before it sends the input events. */
+const DISPATCHED_RE = /^\s*-\s*performing \S+(?: and \S+)? action$/m;
 
 /**
  * Condense a Playwright failure on a ref that still resolves into one line: the
@@ -280,6 +282,9 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     endRequestWatch(page);
     await session.disposeWatch();
     const msg = err instanceof Error ? err.message : String(err);
+    // Playwright's call log names the step it reached. Past "performing …
+    // action" the input went out, so the outcome is no longer not_executed.
+    if (input.ref !== undefined && DISPATCHED_RE.test(msg.replace(ANSI_RE, ""))) sent = true;
     const remedy = invalidInputRemedy(msg);
     if (remedy) return sent
       ? errorResult(outcomeUnknownMessage(input.kind, remedy), { outcome: "unknown" })
@@ -420,6 +425,25 @@ async function answerDialog(session: Session, input: ActInput): Promise<McpToolR
   });
 }
 
+/**
+ * Run a ref pointer gesture (click, dblclick, hover). REF_ACTION_TIMEOUT_MS is
+ * meant for the actionability wait, but Playwright's timeout also covers what
+ * it does after sending the input: confirming the hit target and waiting for a
+ * navigation the gesture scheduled. A form POST answered slowly, or a page that
+ * blocks its main thread right after the click, ran out that budget after the
+ * input had gone out. Once the call log shows the input was sent, the gesture
+ * happened, as it does for a coordinate gesture; settle reports what it did.
+ */
+async function landedGesture(gesture: Promise<void>, markSent: () => void): Promise<void> {
+  try {
+    await gesture;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/Timeout \d+ms exceeded/i.test(msg) || !DISPATCHED_RE.test(msg.replace(ANSI_RE, ""))) throw err;
+    markSent();
+  }
+}
+
 async function performAction(
   session: Session,
   page: Page,
@@ -448,17 +472,17 @@ async function performAction(
 
   switch (kind) {
     case "click":
-      if (locator) await locator.click(refTimeout);
+      if (locator) await landedGesture(locator.click(refTimeout), markSent);
       else { markSent(); await page.mouse.click(point![0], point![1]); }
       return;
 
     case "dblclick":
-      if (locator) await locator.dblclick(refTimeout);
+      if (locator) await landedGesture(locator.dblclick(refTimeout), markSent);
       else { markSent(); await page.mouse.dblclick(point![0], point![1]); }
       return;
 
     case "hover":
-      if (locator) await locator.hover(refTimeout);
+      if (locator) await landedGesture(locator.hover(refTimeout), markSent);
       else { markSent(); await page.mouse.move(point![0], point![1]); }
       return;
 

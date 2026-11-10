@@ -88,6 +88,7 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
         "/review/jsredir": '<title>Redirect</title><p>Redirecting</p><script>setTimeout(()=>location.href="/review/single",5)</script>',
         "/review/reload": '<title>Reload</title><form method="post" action="/review/reload"><button>Save</button></form>',
         "/review/slowreload": '<title>Reload</title><form method="post" action="/review/slowreload"><button>Save</button></form>',
+        "/review/stalledreload": '<title>Reload</title><form method="post" action="/review/stalledreload"><button>Save</button></form>',
         "/review/latereload": '<title>Reload</title><button onclick="setTimeout(()=>location.reload(),400)">Later</button>',
       };
       let html = pages[url.pathname];
@@ -104,6 +105,8 @@ fetch("/api/data").then(r=>r.json()).then(d=>{document.getElementById("out").tex
       }
       const send = () => { res.writeHead(200, { "content-type": "text/html" }); res.end(html ?? "not found"); };
       if (url.pathname === "/review/slowreload" && req.method === "POST") setTimeout(send, 400);
+      // Answered after the 2s ref-action budget: the click lands long before the reload.
+      else if (url.pathname === "/review/stalledreload" && req.method === "POST") setTimeout(send, 2500);
       else send();
       return;
     }
@@ -1187,7 +1190,7 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(result.timings.settle_ms).toBeLessThan(600);
       expect(await page.locator("p").innerText()).toContain("Rendered article");
     });
-    it.each(["reload", "slowreload", "latereload"])("refreshes refs after a same-URL %s", async path => {
+    it.each(["reload", "slowreload", "stalledreload", "latereload"])("refreshes refs after a same-URL %s", async path => {
       await runNavigate(session, { url: httpUrl + "review/" + path });
       const page = await session.ensurePage();
       const before = await page.evaluate(() => performance.timeOrigin);
@@ -1197,8 +1200,13 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(result.content[1]).toMatchObject({ text: expect.stringContaining(path === "latereload" ? "Later" : "Save") });
       expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(before);
     });
-    it("does not claim none when a 3s blocked main thread prevents observation", async () => {
-      const page = await load(`<button onclick="setTimeout(()=>{const t=Date.now();while(Date.now()-t<3000);out.innerHTML='<button>Busy result</button>'.repeat(20)},0)">Busy</button><div id="out"></div>`);
+    // "inline" blocks inside the click handler itself, so the click's own
+    // dispatch outlasts the 2s ref-action budget after the input went out.
+    it.each([
+      ["deferred", "setTimeout(()=>{const t=Date.now();while(Date.now()-t<3000);out.innerHTML='<button>Busy result</button>'.repeat(20)},0)"],
+      ["inline", "const t=Date.now();while(Date.now()-t<3000);setTimeout(()=>{out.innerHTML='<button>Busy result</button>'.repeat(20)},0)"],
+    ])("does not claim none when a 3s blocked main thread prevents observation (%s)", async (_mode, handler) => {
+      const page = await load(`<button onclick="${handler}">Busy</button><div id="out"></div>`);
       const result = await runAct(session, { kind: "click", ref: await ref("Busy") });
       expect(body(result)).toMatchObject({ ok: true, dom_mutated: "major", snapshot_stale: true });
       expect(result.content[1]).toMatchObject({ text: expect.stringContaining("Busy result") });
