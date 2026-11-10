@@ -725,16 +725,23 @@ def _arrived_by_move(session):
     return isinstance(placement, dict) and bool((placement.get("handoff") or {}).get("token"))
 
 
+# Written on every request receipt queued under a stand-in root: the missing
+# root it stands in for. Receipts are the chain's dedupe and budget rows, so
+# the stand-in is fixed in the same transaction that first counts against it.
+STAND_IN_KEY = "orchestration_stands_in_for"
+
+
 def _chain_root(cursor, sender, context, *, lock=False):
     """The turn that scopes this call's dedupe and budget: the chain's root.
 
     Human input starts a chain (the turn itself); automated turns carry its
     ``orchestration_root``. After a hand-off (#1417) that can be a turn on the
     worker the chat ran on before. The chain then continues here under one
-    local stand-in, the oldest turn of this chat carrying the missing root, so
-    every report of that chain shares one budget and dedupe scope. Only a chat
-    that arrived by a move gets it, and only while the recorded root is
-    missing here; any other missing root (a deleted turn) still refuses.
+    local stand-in, so every report of that chain shares one budget and dedupe
+    scope: the root of the receipts already marked as standing in for it, or
+    else the oldest turn of this chat carrying the missing root. Only a chat
+    that arrived by a move picks a stand-in, and only while the recorded root
+    is missing here; any other missing root (a deleted turn) still refuses.
     ``lock`` locks the returned row, serialising budget checks per chain.
     """
     recorded = (context.get("payload") or {}).get("orchestration_root")
@@ -743,14 +750,30 @@ def _chain_root(cursor, sender, context, *, lock=False):
     cursor.execute("SELECT id FROM turns WHERE id=%s" + suffix, (root,))
     if cursor.fetchone():
         return root
-    if recorded and _arrived_by_move(sender):
-        cursor.execute("SELECT id FROM turns WHERE session_id=%s AND payload ->> 'orchestration_root'=%s "
-                       "ORDER BY insert_order ASC, created_at ASC, id ASC LIMIT 1" + suffix,
-                       (sender["id"], recorded))
+    if recorded:
+        cursor.execute("SELECT receipt.parent_turn_id AS id FROM turns receipt "
+                       "JOIN turns stand_in ON stand_in.id = receipt.parent_turn_id "
+                       "WHERE stand_in.session_id=%s AND receipt.payload ->> %s = %s "
+                       "ORDER BY receipt.created_at ASC, receipt.id ASC LIMIT 1",
+                       (sender["id"], STAND_IN_KEY, recorded))
         row = cursor.fetchone()
+        if row is None and _arrived_by_move(sender):
+            cursor.execute("SELECT id FROM turns WHERE session_id=%s AND payload ->> 'orchestration_root'=%s "
+                           "ORDER BY insert_order ASC, created_at ASC, id ASC LIMIT 1",
+                           (sender["id"], recorded))
+            row = cursor.fetchone()
         if row:
+            if lock:
+                cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (row["id"],))
             return row["id"]
     raise ValueError(ORIGIN_GONE)
+
+
+def _stand_in(context, root_id):
+    """The receipt payload that marks ``root_id`` as the stand-in of the
+    chain's missing root; empty when the recorded root is the root."""
+    recorded = (context.get("payload") or {}).get("orchestration_root")
+    return {STAND_IN_KEY: recorded} if recorded and recorded != root_id else {}
 
 
 def _locked_root(cursor, sender, context, root_id):
@@ -1317,7 +1340,7 @@ def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id,
         if task_registry.is_user_stopped(sender["id"]):
             raise ValueError("The user stopped a participating session.")
         receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": peer["device_id"],
-                           "remote_session_id": session_id}
+                           "remote_session_id": session_id, **_stand_in(context, root_id)}
         if reply_to:
             receipt_payload["orchestration_reply_to"] = body["reply_to"] = reply_to
         receipt = turns.enqueue_turn(
@@ -1826,7 +1849,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
                                 project_v2_id=project_v2_id, assistant=assistant, model_plan=plan,
                                 permission_mode=started_mode, runtime_model=runtime_model)
             receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": remote["device_id"],
-                               "remote_session_id": body["session_id"], "remote_start_body": body}
+                               "remote_session_id": body["session_id"], "remote_start_body": body,
+                               **_stand_in(context, root_id)}
             if plan:
                 receipt_payload["model_override"] = _override_record(plan)
             if assistant:
@@ -1862,7 +1886,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None, discovered_
             profile_id=target["profile_id"], project_id=target.get("project_id"),
             worktree_id=None if placement is not None or checkout is not None else (
                 target_context.get("worktree_id") or target.get("worktree_id")),
-            overrides=overrides, payload=payload, command_id=command_id,
+            overrides=overrides, payload={**payload, **_stand_in(context, root_id)}, command_id=command_id,
             parent_turn_id=root_id, _conn=conn,
         )
     result = {"session_id": target["id"], "turn_id": turn["id"], "status": "queued",

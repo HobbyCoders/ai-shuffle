@@ -78,3 +78,69 @@ def test_a_missing_root_without_a_hand_off_still_refuses_and_says_what_to_do(pee
         orch._queue("caller", {"session_id": "peer", "message": "hi", "request_id": "m1"}, "message")
     assert "owner's next message" in str(refused.value)
     assert turns.get_queued_turns("peer") == []
+
+
+# ---------------------------------------------------------------------------
+# The stand-in stays the chain's root here once a request was counted under
+# it, whatever turn carrying the old root arrives later.
+# ---------------------------------------------------------------------------
+
+def _older_candidate(session_id, root=MISSING):
+    """A turn carrying the old root that arrives later but sorts first: an
+    imported launch marker is forced completed and keeps insert_order 0."""
+    turn = turns.enqueue_turn(session_id, "agent_message", prompt="launch", profile_id="agent",
+                              payload={"orchestration_root": root})
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed', insert_order=0, "
+                              "created_at='2000-01-01 00:00:00' WHERE id=%s", (turn["id"],))
+    return turn
+
+
+def test_two_reports_of_one_moved_chain_keep_one_root_when_an_older_turn_arrives(peers, monkeypatch):
+    monkeypatch.setattr(orch, "MAX_STARTS", 1)
+    _arrived_by_move("caller")
+    first = _report_back("caller")
+    sent = orch._queue("caller", {"session_id": "peer", "message": "Review it", "request_id": "m1"}, "message")
+    started = orch._queue("caller", {"title": "Work", "prompt": "go", "request_id": "s1"}, "start")
+    assert turns.get_turn(started["turn_id"])["payload"]["orchestration_root"] == first["id"]
+    _settle(first)
+    _older_candidate("caller")
+    _report_back("caller")
+    again = orch._queue("caller", {"session_id": "peer", "message": "Review it", "request_id": "m1"}, "message")
+    assert again["turn_id"] == sent["turn_id"] and again["created"] is False
+    # One budget for both reports: the second start is over it.
+    with pytest.raises(ValueError, match="budget"):
+        orch._queue("caller", {"title": "Work", "prompt": "go", "request_id": "s2"}, "start")
+    later = orch._queue("caller", {"session_id": "peer", "message": "Next", "request_id": "m2"}, "message")
+    assert turns.get_turn(later["turn_id"])["payload"]["orchestration_root"] == first["id"]
+
+
+async def test_the_report_of_a_started_chat_that_also_moved_can_message(peers):
+    """The likely production route: the parent and the chat it started both
+    moved here. The started chat's carried start turn names the old root; its
+    report after the hand-off resume lands in the parent here."""
+    from app.db import database
+    from app.core import session_handoff as sh
+
+    _arrived_by_move("caller")
+    database.create_session("child", "agent")
+    start = turns.enqueue_turn("child", "agent_message", prompt="go", profile_id="agent",
+                               command_id="orchestration:start:carried",
+                               payload={"orchestration_sender": "caller", "orchestration_root": MISSING,
+                                        "orchestration_depth": 1})
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW() "
+                              "WHERE id=%s", (start["id"],))
+    resume = turns.enqueue_turn("child", "wakeup", prompt="resume", profile_id="agent",
+                                payload={sh.RESUME_PAYLOAD: {"handoff_id": "move-1"}})
+    assert turns.start_turn(resume["id"])
+    settled = turns.settle_turn(resume["id"], "completed")
+    await orch.report_settled_start("child", settled, "completed")
+    [report] = [row for row in turns.get_queued_turns("caller") if row["source"] == "unpark"]
+    assert report["payload"]["orchestration_root"] == MISSING
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='running' WHERE id=%s", (report["id"],))
+    sent = orch._queue("caller", {"session_id": "peer", "message": "Review it", "request_id": "m1"}, "message")
+    assert sent["delivery_status"] == "queued"
+    assert turns.get_turn(sent["turn_id"])["payload"]["orchestration_root"] == report["id"]
+
