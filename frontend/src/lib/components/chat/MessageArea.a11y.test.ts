@@ -31,9 +31,22 @@ describe('MessageArea error banner', () => {
 
 	it('is one snippet, used wherever the error shows (empty and active transcript)', () => {
 		expect(banner.length).toBeGreaterThan(0);
-		expect(source.match(/\{@render errorBanner\(\$activeSession\.error, \$activeSession\.forkOfferSessionId\)\}/g)).toHaveLength(2);
+		expect(source.match(/\{@render errorBanner\(bannerError, \$activeSession\.forkOfferSessionId\)\}/g)).toHaveLength(2);
+		// Both read the one visibility rule (#1341: steps aside for its turn's own row).
+		expect(source).toContain('const bannerError = $derived(visibleTurnError($activeSession));');
 		// No second, hand-rolled copy of the old banner.
 		expect(source).not.toContain('&times;</button>');
+	});
+
+	it('leaves Stop following the failure, not its banner (#1341)', () => {
+		// A banner that stepped aside for its turn's Error row still owns the held
+		// queue slot; keying these on the banner let Stop's rows push that slot
+		// down on phone (long-cli-error-stop journey).
+		const follow = source.slice(source.indexOf('function followGrowthNow()'), source.indexOf('async function pinBelowCurrentReserve()'));
+		expect(follow).toContain('restingOnNotSentRows(notSentHold.messages) && !$activeSession.error) return;');
+		const stay = source.slice(source.indexOf('async function stayWhereNotSentRowsLeftTheReader()'), source.indexOf('const notSentRowsArrival'));
+		expect(stay).toContain('if ($activeSession.error && shouldAutoScroll && !pendingScrollToBottom)');
+		expect(`${follow}${stay}`).not.toContain('bannerError');
 	});
 
 	it('is announced as an alert, with a named dismiss button', () => {

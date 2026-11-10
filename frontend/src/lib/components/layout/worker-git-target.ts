@@ -43,3 +43,15 @@ export function workerGitTargetFromKey(key: string | null): WorkerGitTarget | nu
 	const [workerId, branch] = JSON.parse(key) as [string, string | null];
 	return { workerId, branch };
 }
+
+/**
+ * A new chat whose first send is still setting its project up on the picked
+ * worker has no checkout there yet (#1342), so it has no Git state to show.
+ *
+ * `setupRunning` outlasts `setupNeeded`: the need clears when the worker
+ * reports the project, a moment before the setup run ends and the held
+ * message goes out. Without it the worker's main checkout loads in between.
+ */
+export function draftSetupPending(d: { sessionId?: string | null; setupNeeded: boolean; setupRunning: boolean }): boolean {
+	return d.setupNeeded || (!d.sessionId && d.setupRunning);
+}

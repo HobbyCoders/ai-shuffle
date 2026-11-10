@@ -7,6 +7,7 @@ import { pendingQueue } from '$lib/stores/session/pending-queue';
 import { isUserScrollUpGesture } from '$lib/stores/session/auto-scroll';
 import { createTranscriptWindow } from './transcript-window';
 import { landedFromQueue } from '$lib/utils/queue-handoff';
+import { visibleTurnError } from '$lib/stores/session/turn-error-banner';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -45,7 +46,7 @@ function probe() {
 	const env = {
 		session: session('long'), scrollTop: 5000, proseEnd: 200,
 		follows: true, pendingHeight: 0, gap: 18, calls: [] as string[], ticks: [] as (() => void)[],
-		landedFromQueue
+		landedFromQueue, visibleTurnError
 	};
 	const create = new Function('env', `
 		let $activeSession = env.session, lastKnownScrollTop = env.scrollTop;
@@ -67,6 +68,7 @@ function probe() {
 		const maintainCurrentTurnAnchor = () => env.calls.push('anchor');
 		const followGrowthNow = () => env.calls.push('follow');
 		const landedFromQueue = env.landedFromQueue;
+		let bannerError = null;
 		let effect;
 		const $effect = { pre: fn => { effect = fn; } };
 		${reserve}
@@ -78,6 +80,7 @@ function probe() {
 			run() {
 				cleanup?.();
 				$activeSession = env.session;
+				bannerError = env.visibleTurnError($activeSession);
 				lastKnownScrollTop = env.scrollTop;
 				shouldAutoScroll = env.follows;
 				cleanup = effect();

@@ -15,6 +15,7 @@ import {
 	releaseMessages,
 	sealState,
 	withLogEpoch,
+	STOPPED_BEFORE_REPLY,
 	type WireEvent,
 } from './reducer';
 import type { ChatMessage, Task } from '../../types';
@@ -407,6 +408,123 @@ describe('turn lifecycle', () => {
 		const texts = s.messages.filter((m) => m.role === 'assistant' && m.type === 'text');
 		expect(texts).toHaveLength(1);
 		expect(texts[0].content).toBe('first answer');
+	});
+
+	// #1340: a stop before any reply text left only the user's message.
+	describe('a stop before the first reply text', () => {
+		const stoppedRecords = (s: ReturnType<typeof fold>) =>
+			s.messages.filter((m) => m.role === 'system' && m.content === STOPPED_BEFORE_REPLY);
+
+		it('leaves one neutral stopped record after the user message', () => {
+			const s = fold([
+				ev('message.user', { content: 'go' }),
+				ev('turn.started'),
+				ev('assistant.thinking_delta', { text: 'hmm' }),
+				ev('turn.aborted', { id: 'abort-1', reason: 'interrupt' }),
+			]);
+			const records = stoppedRecords(s);
+			expect(records).toHaveLength(1);
+			expect(records[0]).toMatchObject({ type: 'system', systemSubtype: 'info' });
+			expect(s.messages.at(-1)).toBe(records[0]);
+			expect(s.messages.filter((m) => m.role === 'user').map((m) => m.content)).toEqual(['go']);
+		});
+
+		it('records a turn that ran only tool calls', () => {
+			const s = fold([
+				ev('message.user', { content: 'go' }),
+				ev('turn.started'),
+				ev('tool.use', { tool_use_id: 't1', name: 'Bash' }),
+				ev('turn.aborted', { reason: 'interrupt' }),
+			]);
+			expect(stoppedRecords(s)).toHaveLength(1);
+			expect(s.messages.find((m) => m.toolId === 't1')!.toolStatus).toBe('error');
+		});
+
+		it('records it once when the abort folds again (replay)', () => {
+			const abort = ev('turn.aborted', { reason: 'interrupt' });
+			const s1 = fold([ev('message.user', { content: 'go' }), ev('turn.started'), abort]);
+			const s2 = reduce(s1, abort);
+			const s3 = reduce(s2, { ...abort, id: 'abort-dup', seq: abort.seq + 1 } as WireEvent);
+			expect(stoppedRecords(s3)).toHaveLength(1);
+			const log = [ev('message.user', { content: 'go' }), ev('turn.started'), ev('turn.aborted', { reason: 'interrupt' })];
+			expect(reduceAll(log)).toEqual(reduceAll(log));
+		});
+
+		it('keeps the [Stopped] marker and adds no record when text had started', () => {
+			const s = fold([
+				ev('message.user', { content: 'go' }),
+				ev('turn.started'),
+				ev('assistant.text_delta', { text: 'partial answer' }),
+				ev('turn.aborted', { reason: 'interrupt' }),
+			]);
+			expect(s.messages.find((m) => m.role === 'assistant' && m.type === 'text')!.content)
+				.toBe('partial answer\n\n[Stopped]');
+			expect(stoppedRecords(s)).toHaveLength(0);
+		});
+
+		it('records the stopped turn, never stamping the previous one', () => {
+			const s = fold([
+				ev('message.user', { content: 'first' }),
+				ev('turn.started'),
+				ev('assistant.text_delta', { text: 'first answer' }),
+				ev('turn.completed', {}),
+				ev('message.user', { content: 'second' }),
+				ev('turn.started'),
+				ev('turn.aborted', { reason: 'interrupt' }),
+			]);
+			expect(s.messages.find((m) => m.role === 'assistant' && m.type === 'text')!.content).toBe('first answer');
+			expect(stoppedRecords(s)).toHaveLength(1);
+			expect(s.messages.map((m) => m.content).slice(-2)).toEqual(['second', STOPPED_BEFORE_REPLY]);
+		});
+
+		it('a second no-text stop on a later message gets its own record', () => {
+			const s = fold([
+				ev('message.user', { content: 'first' }),
+				ev('turn.started'),
+				ev('turn.aborted', { reason: 'interrupt' }),
+				ev('message.user', { content: 'second' }),
+				ev('turn.started'),
+				ev('turn.aborted', { reason: 'interrupt' }),
+			]);
+			expect(stoppedRecords(s)).toHaveLength(2);
+		});
+
+		it('records a stop after a steer below the steer, when no text followed it', () => {
+			// The record follows the last delivered message, as the [Stopped]
+			// scan always has: the reply above the steer was complete, and a
+			// marker there would read as a stop before the steer was sent.
+			const s = fold([
+				ev('message.user', { content: 'go' }),
+				ev('turn.started'),
+				ev('assistant.text_delta', { text: 'working on it' }),
+				ev('tool.use', { tool_use_id: 't1', name: 'Bash' }),
+				ev('message.user', { content: 'also this', checkpoint_backed: false }),
+				ev('turn.aborted', { reason: 'interrupt' }),
+			]);
+			expect(s.messages.find((m) => m.role === 'assistant' && m.type === 'text')!.content).toBe('working on it');
+			expect(stoppedRecords(s)).toHaveLength(1);
+			expect(s.messages.map((m) => m.content).slice(-2)).toEqual(['also this', STOPPED_BEFORE_REPLY]);
+		});
+
+		it('still records it when Stop wrote not-sent rows for queued messages', () => {
+			const s = fold([
+				ev('message.user', { content: 'go' }),
+				ev('turn.started'),
+				ev('message.user', { id: 'unsent-1', content: 'queued', not_sent: true }),
+				ev('turn.aborted', { reason: 'interrupt' }),
+			]);
+			expect(stoppedRecords(s)).toHaveLength(1);
+			expect(s.messages.filter((m) => m.metadata?.not_sent).map((m) => m.content)).toEqual(['queued']);
+		});
+
+		it('an error abort adds no stopped record', () => {
+			const s = fold([
+				ev('message.user', { content: 'go' }),
+				ev('turn.started'),
+				ev('turn.aborted', { reason: 'error', message: 'boom' }),
+			]);
+			expect(stoppedRecords(s)).toHaveLength(0);
+		});
 	});
 
 	it('[Stopped] still reaches the reply when Stop wrote not-sent rows after it', () => {

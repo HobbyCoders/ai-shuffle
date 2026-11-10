@@ -215,6 +215,11 @@ export interface V2SessionState {
 	turnOutcomes?: TurnOutcomes;
 }
 
+/** The neutral transcript record a user stop leaves when nothing was said since
+ *  the last delivered message (the turn's own, or one steered into it), so
+ *  there is no reply text below it to mark with "[Stopped]" (#1340). */
+export const STOPPED_BEFORE_REPLY = 'Stopped before a reply';
+
 /** One failed turn, as the log recorded it: a `turn.aborted` with reason
  *  'error', or a `turn.completed` carrying the provider's failure. */
 export interface TurnFailureFact {
@@ -1677,9 +1682,13 @@ function reduceInternal(
 				// Stop writes it before this turn's terminal event arrives.
 				const msgs = next.messages;
 				let target = -1;
+				let recorded = false;
 				for (let i = msgs.length - 1; i >= 0; i--) {
 					const m = msgs[i];
 					if (m.role === 'user' && !m.metadata?.not_sent) break;
+					if (m.role === 'system' && m.systemSubtype === 'info' && m.content === STOPPED_BEFORE_REPLY) {
+						recorded = true;
+					}
 					if (m.role === 'assistant' && m.type === 'text' && m.content.trim()) {
 						target = i;
 						break;
@@ -1692,6 +1701,21 @@ function reduceInternal(
 						content: marked[target].content + '\n\n[Stopped]',
 					};
 					next = { ...next, messages: marked };
+				} else if (target === -1 && !recorded) {
+					// No reply text to mark (stopped while thinking, or after
+					// only tool calls): leave one neutral record instead, so the
+					// stop survives a reload like the marker does (#1340). It is
+					// folded from the durable event, so every device shows it;
+					// the scan above keeps a replayed event from adding a second.
+					next = appendMessage(next, {
+						id: event.id,
+						role: 'system',
+						type: 'system',
+						content: STOPPED_BEFORE_REPLY,
+						systemSubtype: 'info',
+						systemData: { content: STOPPED_BEFORE_REPLY },
+						timestamp: createdAt || undefined,
+					}, seq);
 				}
 			} else if (reason === 'error') {
 				// Surface the abort's error message in the transcript (#606 item 2).
