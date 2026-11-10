@@ -107,3 +107,39 @@ describe('phone effort slot across late capability changes', () => {
   expect(screen.queryByRole('radio', { name: 'Ultra' })).toBeNull();
  });
 });
+
+describe('phone controls panel keeps keyboard focus while open (#1407)', () => {
+ const panel = () => document.querySelector<HTMLElement>('.mcp')!;
+ const tab = (shiftKey = false) => {
+  const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+  (document.activeElement as HTMLElement).dispatchEvent(event);
+  return event.defaultPrevented;
+ };
+ const tabbable = () => [...panel().querySelectorAll<HTMLElement>('button:not([disabled]), [role="radio"], input:not([disabled])')]
+  .filter(el => el.getAttribute('tabindex') !== '-1' && !el.closest('[inert], [hidden]'));
+
+ it('wraps Shift+Tab from the first control to the last, and Tab from the last to the first', () => {
+  render(MobileComposerControlsSheet, props());
+  const els = tabbable();
+  expect(els.length).toBeGreaterThan(1);
+  els[0].focus();
+  expect(tab(true)).toBe(true);
+  expect(panel().contains(document.activeElement)).toBe(true);
+  expect(document.activeElement).not.toBe(els[0]);
+  const last = document.activeElement as HTMLElement;
+  expect(tab()).toBe(true);
+  expect(document.activeElement).toBe(els[0]);
+  // Between controls the browser moves focus as usual.
+  last.focus();
+  els[0].focus();
+  expect(tab()).toBe(false);
+ });
+
+ it('does not hold Tab while closed', () => {
+  render(MobileComposerControlsSheet, props({ open: false }));
+  const close = panel().querySelector<HTMLElement>('.mcp-close')!;
+  const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+  close.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(false);
+ });
+});

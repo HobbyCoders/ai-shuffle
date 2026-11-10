@@ -53,6 +53,9 @@ describe('ModelPicker "Custom…" row (#1337)', () => {
 		expect(queryByRole('option', { name: /Custom/ })).toBeNull();
 	});
 
+	// A caller may offer "Custom…" only when it also renders a field to type the
+	// id; none does today, so each must pass allowCustom={false}. A caller that
+	// adds such a field should be exempted here by file.
 	it('is turned off by every caller, the API user form included, since none has a field to type the id', () => {
 		const tags = pickerTags();
 		expect(tags.some(({ file }) => file.endsWith('/integrations/ApiUserDetail.svelte'))).toBe(true);

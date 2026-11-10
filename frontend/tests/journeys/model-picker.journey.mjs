@@ -12,6 +12,7 @@
 //   Escape hands focus back to whatever opened the panel.
 // - #1345: leaving Settings with the keyboard left the picker open in the
 //   hidden page, and it was still open on return.
+// - #1407: Tab or Shift+Tab out of an open picker left it open over the page.
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp, isPhone, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -63,6 +64,22 @@ async function arrowsMoveHighlight(page) {
 	await page.keyboard.press('ArrowUp');
 	const back = await highlightedRow(page);
 	expect(back === first, `ArrowUp moves back: ${second} -> ${back}`);
+}
+
+/**
+ * From the focused search box, Shift+Tab once lands on the trigger with the
+ * panel still open; once more leaves the picker, which closes it and leaves
+ * focus on the control Shift+Tab moved to (#1407).
+ */
+async function shiftTabOut(page, trigger, panelSelector, what) {
+	await page.keyboard.press('Shift+Tab');
+	expect((await trigger.getAttribute('aria-expanded')) === 'true', `${what}: Shift+Tab to the trigger keeps it open`);
+	await page.keyboard.press('Shift+Tab');
+	await page.locator(panelSelector).waitFor({ state: 'detached', timeout: 5000 });
+	expect((await trigger.getAttribute('aria-expanded')) === 'false', `${what}: the trigger reads closed`);
+	const now = await focused(page);
+	const onTrigger = await trigger.evaluate((el) => el === document.activeElement);
+	expect(now.tag !== 'BODY' && !onTrigger, `${what}: focus stays where Shift+Tab sent it: ${JSON.stringify(now)}`);
 }
 
 /**
@@ -166,6 +183,30 @@ await runJourney({
 				await trigger.waitFor();
 				expect((await trigger.getAttribute('aria-expanded')) === 'false', 'the picker is closed on return');
 				expect((await page.locator('.mpk-panel').count()) === 0, 'no panel on return');
+			}
+		},
+		{
+			name: 'closes-when-focus-tabs-out',
+			// Opening puts focus in the search box only with a mouse and keyboard.
+			viewports: ['desktop'],
+			async setup({ page, status, variant }) {
+				await page.setViewportSize({ width: 1280, height: 800 });
+				await gotoApp(page, status);
+				await openApiUserForm(page, variant);
+			},
+			async act({ page, mark }) {
+				const trigger = page.locator('#api-user-model');
+				await mark('open the API user Model picker');
+				await openPicker(page, trigger);
+				await shiftTabOut(page, trigger, '.mpk-panel', 'the Settings picker');
+
+				await mark('open the composer Model chip');
+				await page.getByRole('button', { name: 'Back to chats', exact: true }).click();
+				const chip = page.getByRole('button', { name: /^Model: / }).first();
+				await chip.click();
+				await page.getByRole('textbox', { name: SEARCH }).waitFor();
+				await page.waitForTimeout(300);
+				await shiftTabOut(page, chip, '.model-menu', 'the composer Model list');
 			}
 		},
 		{

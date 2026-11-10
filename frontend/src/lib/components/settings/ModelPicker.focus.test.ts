@@ -96,6 +96,57 @@ describe('ModelPicker focus on open (#1339)', () => {
 	});
 });
 
+describe('ModelPicker closes when focus Tabs out of it (#1407)', () => {
+	it('closes when focus moves to a control outside the picker, and leaves focus there', async () => {
+		pointer('fine');
+		const back = document.createElement('button');
+		back.textContent = 'Back to Default models';
+		document.body.prepend(back);
+		const { container, trigger } = await openPicker();
+		const search = document.activeElement as HTMLElement;
+
+		// Shift+Tab to the trigger: still the picker, still open.
+		trigger.focus();
+		await fireEvent.focusOut(search, { relatedTarget: trigger });
+		expect(container.querySelector('.mpk-panel')).not.toBeNull();
+
+		// Shift+Tab again, out to the page.
+		back.focus();
+		await fireEvent.focusOut(trigger, { relatedTarget: back });
+		expect(container.querySelector('.mpk-panel')).toBeNull();
+		expect(trigger.getAttribute('aria-expanded')).toBe('false');
+		expect(document.activeElement).toBe(back);
+	});
+
+	it('stays open when focus moves within the panel or goes nowhere', async () => {
+		pointer('fine');
+		const { container } = await openPicker();
+		const search = document.activeElement as HTMLElement;
+		const star = container.querySelector<HTMLButtonElement>('.mpk-panel .mpp-row button')!;
+
+		// A favourite star keeps focus when pressed.
+		star.focus();
+		await fireEvent.focusOut(search, { relatedTarget: star });
+		// A press on plain panel text, or the window losing focus: no new target.
+		await fireEvent.focusOut(star, { relatedTarget: null });
+		expect(container.querySelector('.mpk-panel')).not.toBeNull();
+	});
+
+	it('does not react to focus moves while closed', async () => {
+		pointer('fine');
+		const outside = document.createElement('button');
+		document.body.append(outside);
+		const { container, trigger } = await openPicker();
+		await fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' });
+		expect(document.activeElement).toBe(trigger);
+
+		outside.focus();
+		await fireEvent.focusOut(trigger, { relatedTarget: outside });
+		expect(container.querySelector('.mpk-panel')).toBeNull();
+		expect(document.activeElement).toBe(outside);
+	});
+});
+
 describe('ModelPicker closes when hidden (#1345)', () => {
 	it('closes when the picker stops being shown, as when Settings is hidden behind the chat', async () => {
 		pointer('fine');

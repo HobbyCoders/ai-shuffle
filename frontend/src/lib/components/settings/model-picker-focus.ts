@@ -14,6 +14,19 @@ export function canFocusModelSearch(): boolean {
 }
 
 /**
+ * True when a `focusout` moved keyboard focus to an element outside every
+ * root: Tab or Shift+Tab left an open picker, so it should close (#1407).
+ * A focus that goes nowhere (a press on plain panel text, the window losing
+ * focus, a focused row filtered away) is not leaving: the outside press
+ * handlers deal with real outside clicks.
+ */
+export function focusLeftRoots(event: FocusEvent, ...roots: (Node | null | undefined)[]): boolean {
+	const next = event.relatedTarget;
+	if (!(next instanceof Node)) return false;
+	return !roots.some((root) => root?.contains(next));
+}
+
+/**
  * Focus the search box of the model picker panel inside `root`. Returns false,
  * and leaves focus alone, on a touch-first device or when there is no panel.
  */

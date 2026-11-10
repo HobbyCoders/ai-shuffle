@@ -31,6 +31,32 @@ export function focusableWithin(node: HTMLElement): HTMLElement[] {
 	);
 }
 
+/**
+ * Keep a Tab or Shift+Tab press inside `node`: from its last (or first)
+ * focusable element focus wraps to the other end. Other keys are ignored. For
+ * a modal that stays mounted while closed and so cannot use `focusTrap`.
+ */
+export function wrapTabWithin(node: HTMLElement, event: KeyboardEvent) {
+	if (event.key !== 'Tab') return;
+	const focusable = focusableWithin(node);
+	if (focusable.length === 0) {
+		event.preventDefault();
+		node.focus();
+		return;
+	}
+	const first = focusable[0];
+	const last = focusable[focusable.length - 1];
+	const active = document.activeElement;
+	const outside = !node.contains(active);
+	if (event.shiftKey && (active === first || active === node || outside)) {
+		event.preventDefault();
+		last.focus();
+	} else if (!event.shiftKey && (active === last || active === node || outside)) {
+		event.preventDefault();
+		first.focus();
+	}
+}
+
 export function focusTrap(node: HTMLElement, options: FocusTrapOptions = {}) {
 	const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 	let initial = options.initial;
@@ -43,24 +69,7 @@ export function focusTrap(node: HTMLElement, options: FocusTrapOptions = {}) {
 	}
 
 	function onKeydown(event: KeyboardEvent) {
-		if (event.key !== 'Tab') return;
-		const focusable = focusableWithin(node);
-		if (focusable.length === 0) {
-			event.preventDefault();
-			node.focus();
-			return;
-		}
-		const first = focusable[0];
-		const last = focusable[focusable.length - 1];
-		const active = document.activeElement;
-		const outside = !node.contains(active);
-		if (event.shiftKey && (active === first || active === node || outside)) {
-			event.preventDefault();
-			last.focus();
-		} else if (!event.shiftKey && (active === last || active === node || outside)) {
-			event.preventDefault();
-			first.focus();
-		}
+		wrapTabWithin(node, event);
 	}
 
 	node.addEventListener('keydown', onKeydown);

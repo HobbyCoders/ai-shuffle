@@ -21,6 +21,7 @@
 	import { decodeProviderModel, CUSTOM_VALUE } from '$lib/constants/models';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import ModelPickerPanel from './ModelPickerPanel.svelte';
+	import { focusLeftRoots } from './model-picker-focus';
 	import ProviderGlyph from './ProviderGlyph.svelte';
 
 	interface Props {
@@ -202,6 +203,11 @@
 	function onDocClick(e: MouseEvent) {
 		if (rootEl && !rootEl.contains(e.target as Node)) close();
 	}
+	// Tab or Shift+Tab out of the picker closes it, leaving focus where the
+	// user sent it (#1407).
+	function onFocusOut(e: FocusEvent) {
+		if (open && focusLeftRoots(e, rootEl)) close();
+	}
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key !== 'Escape') return;
 		e.preventDefault();
@@ -240,7 +246,7 @@
 	});
 </script>
 
-<div class="mpk" bind:this={rootEl}>
+<div class="mpk" bind:this={rootEl} onfocusout={onFocusOut}>
 	<button
 		type="button"
 		{id}

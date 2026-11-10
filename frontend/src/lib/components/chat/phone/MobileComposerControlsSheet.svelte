@@ -37,7 +37,9 @@
 	 *   Running tasks   RunningTasksList as a page;
 	 *   Export chat     ChatExportActions as a page with a pinned button.
 	 * There is no visible close button; a visually hidden one stays for
-	 * keyboard and screen-reader users. Prompts never render here: they dock
+	 * keyboard and screen-reader users. While open the panel is modal: Tab and
+	 * Shift+Tab wrap inside it instead of reaching the page behind (#1407).
+	 * Prompts never render here: they dock
 	 * above the composer (MobilePromptDock).
 	 *
 	 * ControlsDock (shared $lib) computes every value and owns the open state;
@@ -61,6 +63,7 @@
 	import ChatExportActions from '$lib/components/layout/ChatExportActions.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { focusModelSearch } from '$lib/components/settings/model-picker-focus';
+	import { wrapTabWithin } from '$lib/components/ui/focus-trap';
 	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
@@ -900,6 +903,7 @@
 		aria-hidden={!panelVisible}
 		inert={!open}
 		tabindex="-1"
+		onkeydown={(e) => { if (open && panelRef) wrapTabWithin(panelRef, e); }}
 		style:transform={`translateY(${panelShift})`}
 	>
 		<!-- Grip and title: dragging either down closes the sheet from any page. -->
