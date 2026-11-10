@@ -1715,7 +1715,9 @@ class HarnessAdapter(ProviderAdapter):
             if not isinstance(frame, dict):
                 continue
             task_id = frame.get("task_id")
-            if not task_id:
+            # A private-access card's outcome (chat_access.outcome_frame) rides
+            # the notification lane but names no task the engine started.
+            if not task_id or frame.get("kind") == "access":
                 continue
             status = status_map.get(str(frame.get("status") or "completed"), "failed")
             opts = self._options

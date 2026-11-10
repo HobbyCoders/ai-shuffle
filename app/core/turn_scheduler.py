@@ -2502,6 +2502,17 @@ async def on_remote_task_terminal(session_id: str, frame: Dict[str, Any]) -> Non
         return await _on_task_terminal_locked(session_id, frame, started_session=True)
 
 
+async def on_access_outcome(session_id: str, frame: Dict[str, Any]) -> None:
+    """The owner answered a private-access card this chat asked for (#1420).
+
+    ``frame`` is ``chat_access.outcome_frame``: no registry task, so it is
+    admitted to the OWN lane like a started session, with the same mid-turn
+    steer, Stop latch, archive refusal and one-wake-per-id latch.
+    """
+    async with _terminal_delivery_lock(session_id):
+        return await _on_task_terminal_locked(session_id, frame, started_session=True)
+
+
 async def _on_task_terminal_locked(
     session_id: str, frame: Dict[str, Any], *, started_session: bool = False,
 ) -> None:
@@ -2569,7 +2580,7 @@ async def _on_task_terminal_locked(
         # Swarm must neither swallow it nor rerun its already-finished successors.
         from app.core.task_registry import task_registry
 
-        if (_frame_has_renderable_content(frame)
+        if (_frame_has_renderable_content(frame) and frame.get("kind") != "access"
                 and (started_session or task_registry.is_own_background_task(session_id, task_id))):
             from app.core.working_record import record_task_report
             await asyncio.to_thread(record_task_report, session_id, frame)
@@ -2930,6 +2941,14 @@ _SESSION_NEEDS_OWNER_NOTE = (
 )
 
 
+# A private-access card's outcome (``on_access_outcome``): host-authored, not a
+# report from work the chat started.
+_ACCESS_NOTICE_NOTE = (
+    "Host notice: the user answered your RequestChatAccess card. Use a granted "
+    "handle only for the task the user asked for; it is not approval of anything else."
+)
+
+
 _MAX_TASK_RESULT_CHARS = 60_000
 
 # A ``<summary>`` standing BESIDE a distinct ``<result>`` is a label, not a
@@ -3113,6 +3132,15 @@ def _build_task_notification_prompt(pending: list, kind: str = "own") -> str:
         is_monitor = str(note.get("kind") or "").lower() in ("shell", "monitor")
         if not is_pump and str(note.get("kind") or "").lower() == "session":
             blocks.append(_session_report_block(note, _esc, _payload(summary_text)))
+            continue
+        if not is_pump and note.get("kind") == "access":
+            blocks.append(
+                "<task-notification>\n  <kind>access</kind>\n"
+                f"  <task-id>{_esc(note.get('task_id'))}</task-id>\n"
+                f"  <status>{_esc(note.get('status'))}</status>\n"
+                f"  <summary>{_esc(summary_text)}</summary>\n"
+                f"  <note>{_ACCESS_NOTICE_NOTE}</note>\n</task-notification>"
+            )
             continue
         # PUMP: nested <kind>pump</kind> right after the opening tag; no <usage>.
         # MONITOR: <kind>monitor</kind>, so the model reads the block as a shell
