@@ -340,6 +340,32 @@ async def test_a_call_message_sent_while_a_reply_still_streams_is_refused(staged
     await _assert_refused(rewind_env, _request(True, None, "inspect this"), _request(False, "call-cp", None))
 
 
+@pytest.mark.parametrize("runs", [1, 2])
+async def test_a_bound_turn_that_ran_twice_is_refused(staged_upload, rewind_env, monkeypatch, runs):
+    """Items 3 and 4: the turn's first run wrote the request's node and died
+    before recording the binding; the rerun wrote a second node and bound
+    that. The first node is still on the path ahead of the bound one, so a
+    cut there would leave the request in the agent's history. Each run claims
+    its own lease, so two runs under one turn id refuse; one run resolves."""
+    from app.db import runs as runs_db
+
+    row, request_id, text = await _bound_call(monkeypatch, staged_upload)
+    for attempt in range(runs):
+        run = runs_db.claim_run(SID, f"runner-{attempt}", 60)
+        session_events.append_events(SID, [{"type": "turn.started", "turn_id": CALL_TURN, "payload": {}}],
+                                     run_id=run["id"], fence_token=run["fence_token"])
+        runs_db.release_run(run["id"], run["fence_token"])
+    assert await _bind(request_id, "call-cp")
+    session_events.append_events(SID, [_reply("answer")])
+    _patch_checkpoints(monkeypatch, [_cp("first-run-cp", text), _cp("call-cp", text)])
+    requests = (_request(True, None, "inspect this"), _request(False, "call-cp", None))
+
+    if runs == 1:
+        await _assert_cut(rewind_env, requests[0], "call-cp", row, [str(staged_upload)])
+        return
+    await _assert_refused(rewind_env, *requests)
+
+
 async def test_a_binding_recorded_before_its_message_or_for_another_row_is_refused(
     staged_upload, rewind_env, monkeypatch,
 ):

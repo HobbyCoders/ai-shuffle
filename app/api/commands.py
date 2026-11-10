@@ -392,8 +392,9 @@ def _load_rewind_log(
 ) -> tuple[List[dict], List[dict], dict]:
     """``(message rows, call bindings, turn spans)``: :func:`_load_message_events`'s
     rows, the ``call.checkpoint_bound`` events still visible, seq order, and
-    for every turn but a call's own ``voice-`` exchanges the first and last seq
-    of any event it recorded (a reply streams as deltas, not message rows).
+    for every turn but a call's own ``voice-`` exchanges ``(first seq, last
+    seq, run ids)`` over every event it recorded (a reply streams as deltas,
+    not message rows; each execution of a turn claims its own run).
 
     A binding a ``transcript.rewound`` erased (seq >= its from_seq) is dropped
     like a message row, so a binding lives exactly as long as the turn that
@@ -414,8 +415,8 @@ def _load_rewind_log(
             cursor = row["seq"]
             turn = row.get("turn_id")
             if turn and not str(turn).startswith("voice-"):
-                first, _ = spans.get(turn, (row["seq"], row["seq"]))
-                spans[turn] = (first, row["seq"])
+                first, _, runs = spans.get(turn, (row["seq"], row["seq"], frozenset()))
+                spans[turn] = (first, row["seq"], runs | {row["run_id"]} if row.get("run_id") else runs)
             if row["event_type"] in ("message.user", "message.assistant"):
                 rows.append(row)
             elif row["event_type"] == CALL_BINDING_EVENT:
@@ -605,6 +606,8 @@ def _bound_node(
       binding (``spans``: a reply still streaming when the call queued behind
       it), so cutting the visible history at the row and the engine's at the
       node removes the same messages;
+    * the bound turn ran once: a run that wrote the request's node and died
+      before binding it leaves that node on the path ahead of the rerun's;
     * that node is exactly one user checkpoint of the current transcript path
       (a node rewound away, compacted out or on another worker's missing tree
       is not, so it refuses).
@@ -641,8 +644,8 @@ def _bound_node(
     own_turns = {b.get("turn_id") for b in own}
     if spans is None or any(
         first < first_bound and last > row["seq"]
-        for turn, (first, last) in spans.items() if turn not in own_turns
-    ):
+        for turn, (first, last, _) in spans.items() if turn not in own_turns
+    ) or any(len(spans.get(turn, (0, 0, ()))[2]) > 1 for turn in own_turns):
         return None
     if sum(1 for cp in user_cps if cp.uuid == node) != 1:
         return None
