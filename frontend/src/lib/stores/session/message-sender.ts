@@ -217,6 +217,12 @@ interface SendMessageOptions {
 	 *  (send-destination.ts). Read once the send knows its target; false
 	 *  sends nothing, sets no error, and the caller keeps the draft (#1077). */
 	stillAtDestination?: () => boolean;
+	/** A message with a note chip sent into an open chat (#1364). `prompt`
+	 *  carries the notes as `@Notes/<id>`; `runsHere` asks the server whether
+	 *  this worker runs the chat, and only "yes" sends `pathPrompt`, with each
+	 *  note as this worker's file. Asked after every wait of the send, right
+	 *  before the frame is written, so a move during those waits is seen. */
+	notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> };
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -434,6 +440,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// New chat or a switch during that wait: the target below would be
 			// the view the user moved to, not the chat they wrote in.
 			if (options?.stillAtDestination && !options.stillAtDestination()) return false;
+			// Picks the note form (see notesForm). False when the view moved while
+			// the server was asked: nothing is sent and the words stay with their chat.
+			// Awaited only with a notesForm: any other send keeps its timing.
+			const settleNotesForm = async (): Promise<boolean> => {
+				if (!options?.notesForm) return true;
+				if (await options.notesForm.runsHere()) prompt = options.notesForm.pathPrompt.trim();
+				return !options.stillAtDestination || options.stillAtDestination();
+			};
 
 			const _state = getState();
 			// The call button is creating this compose's session right now. A
@@ -459,6 +473,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				} finally {
 					clearTimeout(contextTimeout);
 				}
+				if (options?.notesForm && !(await settleNotesForm())) return false;
 				const paths = options?.pendingUploadPaths;
 				const references = options?.pendingUploadReferences;
 				const uploads = paths?.length || references?.length ? { paths, references } : undefined;
@@ -580,6 +595,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// Existing-chat sends already know their target: keep that id and
 				// its captured binding even if the view switches meanwhile (#418).
 				if (!_state.sessionId && getState().sessionId !== _state.sessionId) return false;
+
+				// The note form, from an answer taken after the waits above. From
+				// here to the frame nothing awaits, so a move cannot slip in.
+				if (options?.notesForm && !(await settleNotesForm())) return false;
 
 				const userMsgId = `user-${Date.now()}`;
 				const isFirstMessage = _state.title === 'New Chat';
