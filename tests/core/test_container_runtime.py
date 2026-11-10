@@ -2622,6 +2622,8 @@ class _FenceUpdates:
     def lifecycle(self, action):
         self.calls.append(action)
         answer = self.answers[action.split("?", 1)[0]]
+        if isinstance(answer, list):  # one answer per call, in order
+            answer = answer.pop(0)
         if isinstance(answer, BaseException):
             raise answer
         return answer
@@ -2680,4 +2682,19 @@ def test_preflight_failure_or_interruption_releases_the_same_reservation(tmp_pat
 def test_committed_idle_restart_keeps_the_fence_through_the_quiesce(tmp_path, no_processes):
     updates = _FenceUpdates(tmp_path, {"restart-reserve": {"reserved": True}, "stop-sessions": {"stopped": True}})
     assert runtime.restart_into_update("old-app", updates, {}) == "new-app"
-    assert [c.split("?")[0] for c in updates.calls] == ["restart-reserve", "stop-sessions"]
+    # The second reserve renews the lease right before the quiesce.
+    assert [c.split("?")[0] for c in updates.calls] == ["restart-reserve", "restart-reserve", "stop-sessions"]
+    assert updates.calls[0] == updates.calls[1]
+
+
+@pytest.mark.parametrize("second", [{"reserved": False, "active_sessions": 1}, RuntimeError("no answer")])
+def test_work_that_started_after_the_lease_ran_out_is_never_stopped(tmp_path, no_processes, second):
+    """Verification outlasted the lease and a turn started: the confirm before
+    the quiesce is refused (or unanswered), so stop-sessions is never sent."""
+    updates = _FenceUpdates(tmp_path, {"restart-reserve": [{"reserved": True}, second],
+                                       "restart-release": {"released": True}})
+    with pytest.raises(runtime.RestartRejected):
+        runtime.restart_into_update("old-app", updates, {})
+    assert "stop-sessions" not in updates.calls
+    runtime.stop_group.assert_not_called()
+    runtime.start_app.assert_not_called()

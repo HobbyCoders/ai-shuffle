@@ -2114,6 +2114,18 @@ def _reserve_restart(updates):
     return None
 
 
+def _confirm_restart(updates, token):
+    if token is None:
+        return
+    try:
+        held = updates.lifecycle(f"restart-reserve?token={token}").get("reserved") is True
+    except Exception as exc:
+        _release_restart(updates, token)
+        raise RestartRejected("Application update preflight failed") from exc
+    if not held:
+        raise RestartRejected("Finish active sessions before restarting")
+
+
 def restart_into_update(current, updates, env, before_start=None):
     """Replace the running app with the staged update; returns the new process.
 
@@ -2131,6 +2143,10 @@ def restart_into_update(current, updates, env, before_start=None):
         if not isinstance(exc, Exception):
             raise
         raise RestartRejected("Application update preflight failed", str(exc) if _update_error(exc) else None) from exc
+    # Verification can outlast the reservation's lease, which reopens
+    # admission. Asking again with the same token renews a held lease, or
+    # takes a new one only if the worker is still idle.
+    _confirm_restart(updates, token)
     # Admission is closed, so this quiesce finds nothing new to stop; an
     # older app without the fence keeps today's behaviour.
     # Once sent, even a timeout cannot prove the worker is still usable.

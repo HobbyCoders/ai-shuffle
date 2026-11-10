@@ -185,7 +185,9 @@ async def reserve(token: str) -> Dict[str, Any]:
     """Close admission for an idle restart, or refuse and change nothing.
 
     ``token`` is chosen by the caller, so it can release a reservation whose
-    answer it never received. The same token reserving again is idempotent.
+    answer it never received. The same token reserving again renews the lease
+    while it is held; after the lease ran out it is a fresh request, granted
+    only if the worker is idle again.
     """
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
         raise ValueError("Invalid restart reservation token")
@@ -201,6 +203,9 @@ async def reserve(token: str) -> Dict[str, Any]:
     _expire_if_due()
     if _reservation is not None:
         if _reservation["token"] == token:
+            # The holder asking again renews its lease (the supervisor does
+            # this right before it quiesces, after a verification of any length).
+            _latch(token)
             return {"reserved": True, "lease_seconds": LEASE_SECONDS}
         return {"reserved": False, "active_sessions": 0, "admissions": len(_admissions),
                 "queries": 0, "reason": "Another restart is already being prepared"}
@@ -210,14 +215,22 @@ async def reserve(token: str) -> Dict[str, Any]:
     if busy or _admissions or queries:
         return {"reserved": False, "active_sessions": len(busy), "admissions": len(_admissions),
                 "queries": queries, "reason": "Finish active sessions before restarting"}
+    _latch(token)
+    logger.info("Restart fence: admission closed for an idle restart")
+    return {"reserved": True, "lease_seconds": LEASE_SECONDS}
+
+
+def _latch(token: str) -> None:
+    """Hold admission closed for ``token`` for one full lease from now."""
+    global _reservation
+    if _reservation is not None and _reservation.get("timer") is not None:
+        _reservation["timer"].cancel()
     timer = None
     try:
         timer = asyncio.get_running_loop().call_later(LEASE_SECONDS + 0.05, _expire_if_due)
     except RuntimeError:
         pass
     _reservation = {"token": token, "expires_at": time.monotonic() + LEASE_SECONDS, "timer": timer}
-    logger.info("Restart fence: admission closed for an idle restart")
-    return {"reserved": True, "lease_seconds": LEASE_SECONDS}
 
 
 def release(token: str) -> bool:

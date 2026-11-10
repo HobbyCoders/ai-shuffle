@@ -78,6 +78,28 @@ async def test_lease_expiry_reopens_and_kicks(monkeypatch, _idle):
     assert restart_fence.admit("after expiry").held
 
 
+async def test_the_holder_asking_again_renews_its_lease(monkeypatch, _idle):
+    monkeypatch.setattr(restart_fence, "LEASE_SECONDS", 0.3)
+    await restart_fence.reserve(TOKEN)
+    await asyncio.sleep(0.2)
+    assert (await restart_fence.reserve(TOKEN))["reserved"] is True
+    await asyncio.sleep(0.2)  # past the first lease, inside the renewed one
+    assert restart_fence.is_closed()
+    with pytest.raises(restart_fence.AdmissionClosed):
+        restart_fence.admit("late start")
+
+
+async def test_the_same_token_after_expiry_is_refused_when_work_started_meanwhile(monkeypatch):
+    monkeypatch.setattr(restart_fence, "LEASE_SECONDS", 0.05)
+    await restart_fence.reserve(TOKEN)
+    await asyncio.sleep(0.2)
+    admission = restart_fence.admit("started after the lease ran out")
+    assert (await restart_fence.reserve(TOKEN))["reserved"] is False
+    assert not restart_fence.is_closed()
+    admission.release()
+    assert (await restart_fence.reserve(TOKEN))["reserved"] is True
+
+
 async def test_cancelled_thread_admission_stays_busy_until_the_thread_returns():
     started, finish = threading.Event(), threading.Event()
 

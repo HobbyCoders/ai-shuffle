@@ -171,8 +171,8 @@ def test_update_stderr_failure_still_returns_the_live_candidate(monkeypatch, tmp
     command, env = ["candidate"], {"A": "1"}
     updates = SimpleNamespace(
         root=tmp_path,
-        # The idle-restart fence reservation (#1121), then the quiesce.
-        lifecycle=Mock(side_effect=[{"reserved": True, "lease_seconds": 120.0}, {"stopped": True}]),
+        # The idle-restart fence reservation (#1121), its renewal, then the quiesce.
+        lifecycle=Mock(side_effect=[{"reserved": True, "lease_seconds": 120.0}] * 2 + [{"stopped": True}]),
         launch=Mock(return_value=(command, tmp_path, env)),
         snapshot_room=Mock(),
         activating=Mock(),

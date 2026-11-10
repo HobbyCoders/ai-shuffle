@@ -404,7 +404,7 @@ async def test_idle_restart_never_stops_a_turn_admitted_during_verification(heal
                 await _wait_state(turns, arriving["id"], "completed")
             else:
                 assert await asyncio.wait_for(restart, 10) == "new-app"
-                assert actions == ["restart-reserve", "stop-sessions"]
+                assert actions == ["restart-reserve", "restart-reserve", "stop-sessions"]
                 # Nothing was running to stop; the turn is durable for the next boot.
                 assert began.empty()
                 assert turns.get_turn(arriving["id"])["state"] == "queued"
