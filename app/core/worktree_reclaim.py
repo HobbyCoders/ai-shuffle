@@ -362,6 +362,51 @@ def _session_folder(context, cwd):
     return folder
 
 
+def _unrecorded_folder(context, session):
+    """``(folder, its branch)`` of an open session that records neither.
+
+    Such a session used to count as a user of every checkout of its project:
+    one ordinary chat in the project's main folder stopped all cleanup for as
+    long as it stayed open, and finished checkouts piled up by the hundred.
+    The folder is the one the session itself resolves at run time (a pure
+    read, the same answer the Git activity guard uses). None means it could
+    not be established, and the caller still treats that session as a possible
+    user of everything.
+    """
+    cache = context.setdefault("_unrecorded_folders", {})
+    key = session.get("id")
+    if key not in cache:
+        found = None
+        try:
+            from app.core.project_resolver import resolve_session_cwd
+
+            cwd = resolve_session_cwd(dict(session)) if key else None
+            if cwd and os.path.isdir(cwd):
+                folder = str(Path(cwd).resolve())
+                found = (os.path.normcase(folder),
+                         (wr._git(folder, "symbolic-ref", "--short", "HEAD") or "").strip() or None)
+        except Exception:  # noqa: BLE001 - unknown stays unknown, which keeps everything
+            logger.debug("Session %s: folder not established", key, exc_info=True)
+        cache[key] = found
+    return cache[key]
+
+
+def _unrecorded_user(context, session, branches, target=None):
+    """Whether an open session with no recorded branch or folder may be using
+    this checkout (``target``, when it has a folder) or these branches."""
+    if not (session.get("is_active") or session.get("running")):
+        return False
+    if session.get("branch") or session.get("worktree_branch") or session.get("worktree_path"):
+        return False
+    found = _unrecorded_folder(context, session)
+    if found is None:
+        return True
+    folder, branch = found
+    if branch and branch in branches:
+        return True
+    return bool(target and (folder == target or folder.startswith(target.rstrip(os.sep) + os.sep)))
+
+
 def _bound_sessions(context, registered, branch):
     target = os.path.normcase(str(Path(registered["path"]).resolve()))
     inside = target.rstrip(os.sep) + os.sep
@@ -373,8 +418,8 @@ def _bound_sessions(context, registered, branch):
         cwd = session.get("worktree_path")
         folder = _session_folder(context, cwd) if cwd else None
         by_path = bool(folder and (folder == target or folder.startswith(inside)))
-        unknown_active = (session.get("is_active") or session.get("running")) and not logical and not cwd
-        if logical & branches or session.get("worktree_id") in ids or by_path or unknown_active:
+        if (logical & branches or session.get("worktree_id") in ids or by_path
+                or _unrecorded_user(context, session, branches, target)):
             bound.append(session)
     return bound
 
@@ -1161,9 +1206,7 @@ def _branch_sessions(context, name):
     bound = []
     for session in context["sessions"]:
         logical = {b for b in (session.get("branch"), session.get("worktree_branch")) if b}
-        unknown_active = ((session.get("is_active") or session.get("running"))
-                          and not logical and not session.get("worktree_path"))
-        if name in logical or unknown_active:
+        if name in logical or _unrecorded_user(context, session, {name}):
             bound.append(session)
     return bound
 

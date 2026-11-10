@@ -19,7 +19,6 @@ detached guardian (``scripts/devloop/guardian.py``) finishes the teardown if
 from __future__ import annotations
 
 import argparse
-import hashlib
 import http.client
 import ipaddress
 import json
@@ -29,7 +28,6 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -68,16 +66,18 @@ class StatusError(Exception):
 
 def status_directory() -> Path:
     """Private to this user: ``$XDG_RUNTIME_DIR`` when set, else a per-uid temp dir."""
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime:
-        return Path(runtime) / "ai-shuffle-devloop"
-    return Path(tempfile.gettempdir()) / f"ai-shuffle-devloop-{os.getuid()}"
+    from app.core.temp_scratch import devloop_status_directory
+    return devloop_status_directory()
 
 
 def default_status_path(root: Path = ROOT) -> Path:
-    """Per checkout, in :func:`status_directory` (never the repo)."""
-    digest = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:12]
-    return status_directory() / f"{digest}.json"
+    """Per checkout, in :func:`status_directory` (never the repo).
+
+    The definition lives in ``app.core.temp_scratch``: the installed app's
+    scratch reaper reads the same path and ships without this package.
+    """
+    from app.core.temp_scratch import devloop_status_path
+    return devloop_status_path(root)
 
 
 def ensure_private_dir(directory: Path) -> None:

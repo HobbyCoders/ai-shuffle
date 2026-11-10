@@ -135,6 +135,79 @@ def test_active_sidebar_running_and_open_pr_protected(repository, monkeypatch, s
     assert path.exists()
 
 
+def _merged_checkout(repository):
+    repo, _ = repository
+    path = checkout(repository)
+    commit(path)
+    git(repo, "merge", "--ff-only", "feature")
+    return repo, path
+
+
+@pytest.mark.parametrize("session", [{"id": "chat", "is_active": True}, {"id": "chat", "running": True}])
+def test_open_chat_in_the_main_folder_does_not_keep_every_checkout(repository, monkeypatch, session):
+    """One open chat that records no branch and no folder (it runs in the
+    project's main folder) used to stop all cleanup in the project."""
+    from app.core import project_resolver
+
+    repo, path = _merged_checkout(repository)
+    monkeypatch.setattr(rc, "_project_sessions", lambda source: [dict(session)])
+    monkeypatch.setattr(project_resolver, "resolve_session_cwd", lambda row, **kwargs: str(repo))
+    result = reclaim(dry_run=False)
+    assert result["reclaimed"] == 1 and not path.exists()
+
+
+@pytest.mark.parametrize("where", ["unknown", "missing", "raises", "checkout", "inside", "no-id"])
+def test_open_session_with_no_established_folder_still_keeps_the_checkout(repository, monkeypatch, where):
+    from app.core import project_resolver
+
+    repo, path = _merged_checkout(repository)
+    (path / "sub").mkdir()
+    age_directory(path)
+
+    def resolve(row, **kwargs):
+        if where == "raises":
+            raise RuntimeError("database unavailable")
+        return {"unknown": None, "missing": str(repo / "gone"), "checkout": str(path),
+                "inside": str(path / "sub"), "no-id": str(repo)}[where]
+
+    session = {"is_active": True} if where == "no-id" else {"id": "chat", "is_active": True}
+    monkeypatch.setattr(rc, "_project_sessions", lambda source: [session])
+    monkeypatch.setattr(project_resolver, "resolve_session_cwd", resolve)
+    result = reclaim(dry_run=False)
+    assert result["reclaimed"] == 0 and path.exists()
+    assert result["items"][0]["reason"] == "bound to an active or running session"
+
+
+def test_settled_session_with_no_folder_never_bound_a_checkout(repository, monkeypatch):
+    from app.core import project_resolver
+
+    _, path = _merged_checkout(repository)
+    old = datetime.fromtimestamp(time.time() - 2 * rc.GRACE_SECONDS, timezone.utc).isoformat()
+    monkeypatch.setattr(rc, "_project_sessions", lambda source: [
+        {"id": "done", "is_active": False, "updated_at": old, "finished_at": old}])
+    monkeypatch.setattr(project_resolver, "resolve_session_cwd",
+                        lambda row, **kwargs: pytest.fail("a settled session's folder is not looked up"))
+    assert reclaim(dry_run=False)["reclaimed"] == 1 and not path.exists()
+
+
+def test_unrecorded_session_binds_the_branch_its_folder_is_on(repository, monkeypatch):
+    """The branch-only sweep: the session's folder is on that very branch."""
+    from app.core import project_resolver
+
+    repo, _ = repository
+    folder = repo.parent / "elsewhere"
+    git(repo, "worktree", "add", "-q", "-b", "fluid/topic", str(folder))
+    context = {"sessions": [{"id": "chat", "is_active": True}]}
+    monkeypatch.setattr(project_resolver, "resolve_session_cwd", lambda row, **kwargs: str(folder))
+    assert [s["id"] for s in rc._branch_sessions(context, "fluid/topic")] == ["chat"]
+    assert rc._branch_sessions(context, "fluid/other") == []
+    # Resolved once per pass, however many checkouts and branches are planned.
+    monkeypatch.setattr(project_resolver, "resolve_session_cwd", lambda row, **kwargs: pytest.fail("cached"))
+    assert rc._branch_sessions(context, "fluid/third") == []
+    monkeypatch.setattr(project_resolver, "resolve_session_cwd", lambda row, **kwargs: None)
+    assert [s["id"] for s in rc._branch_sessions({"sessions": context["sessions"]}, "fluid/other")] == ["chat"]
+
+
 @pytest.mark.parametrize("state,exact,expected", [("OPEN", True, 0), ("CLOSED", True, 0),
                                                 ("MERGED", False, 0), ("MERGED", True, 1)])
 def test_pr_head_must_match_and_open_always_wins(repository, monkeypatch, state, exact, expected):

@@ -1,4 +1,5 @@
 """Stdlib-only ownership receipt shared by checks and the app's scratch reaper."""
+import hashlib
 import json
 import os
 import signal
@@ -9,6 +10,24 @@ from pathlib import Path
 
 MARKER = ".ai-shuffle-scratch-owner"
 PREFIXES = ("ai-shuffle-ci-", "ai-shuffle-pytest-", "ai-shuffle-probe-", "ai-shuffle-preview-", "ai-shuffle-browser-")
+
+
+def devloop_status_directory():
+    """Private to this user: ``$XDG_RUNTIME_DIR`` when set, else a per-uid temp dir."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return Path(runtime) / "ai-shuffle-devloop"
+    return Path(tempfile.gettempdir()) / f"ai-shuffle-devloop-{os.getuid()}"
+
+
+def devloop_status_path(root):
+    """Where ``scripts.devloop`` keeps a checkout's status (never in the repo).
+
+    Defined here, not in ``scripts``: the installed app ships without that
+    package, and its scratch reaper reads this path to recognise a dev instance.
+    """
+    digest = hashlib.sha256(str(Path(root).resolve()).encode()).hexdigest()[:12]
+    return devloop_status_directory() / f"{digest}.json"
 
 
 def process_identity(pid, proc=Path("/proc")):
