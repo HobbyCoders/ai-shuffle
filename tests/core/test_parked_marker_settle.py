@@ -413,3 +413,25 @@ async def test_a_held_ownerless_turn_end_write_cannot_undo_a_later_one(mock_db, 
 
     assert _marker(test_db, session_id) == later, "the held turn-end write overwrote the later one"
     assert published == [later], f"the held turn-end write was published: {published}"
+
+
+async def test_an_unresolved_launch_does_not_hold_a_finished_park(mock_db, test_db):
+    """#1285 review: idle means no parking work, as before this fix.
+
+    A background launch rejected before registration can stay unresolved for
+    the life of the registry. It never set the marker (the turn-end write
+    takes its kind from parking work), so it must not keep it either.
+    """
+    session_id = _parked_session(test_db, kind="shell")
+    registry = _registry([])
+    registry.has_unresolved_background_launches.return_value = True
+
+    with patch("app.core.task_registry.task_registry", new=registry), \
+            patch("app.core.sync_engine.sync_engine") as sync:
+        sync.broadcast_user_session_updated = AsyncMock()
+        cleared = await clear_parked_marker_if_idle(session_id)
+
+    assert cleared is True
+    assert _marker(test_db, session_id) is None
+    sync.broadcast_user_session_updated.assert_awaited_once()
+    assert sync.broadcast_user_session_updated.await_args.kwargs["updates"] == {"parked_task_kind": None}

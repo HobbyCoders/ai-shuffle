@@ -197,23 +197,6 @@ def resync_session_branch_from_head(session_id: str) -> Optional[Tuple[str, str]
     return (session_branch or recorded, head)
 
 
-def _nothing_to_park_on(session_id: str) -> bool:
-    """True when this process has no work a turn would park on.
-
-    The same two registry reads the park decision uses: wake-capable work, and
-    a launch with no registry record yet. Both are synchronous and in-memory;
-    this also runs on the marker update's worker thread, where a registry
-    changing mid-read can raise. Any failure counts as work: keep the marker.
-    """
-    try:
-        from app.core.task_registry import task_registry
-
-        return not (task_registry.get_parking_background_work(session_id)
-                    or task_registry.has_unresolved_background_launches(session_id))
-    except Exception:  # noqa: BLE001 — fail closed: an unreadable registry keeps the marker.
-        return False
-
-
 def _parking_kind(session_id: str) -> Optional[str]:
     """The marker a turn ending now writes: the first parking work's kind."""
     from app.core.task_registry import task_registry
@@ -225,12 +208,12 @@ def _parking_kind(session_id: str) -> Optional[str]:
 def _parking_kind_unchanged(session_id: str, kind: Optional[str]) -> bool:
     """True while the registry still gives ``kind`` (#1285).
 
-    Fences a turn-end write with no turn of its own: between its registry read
-    and the locked update, a later turn may park ("agent" must not become a
-    stale None) or the work may end (a stale "agent" must not stay on an idle
-    chat). Runs on the update's worker thread; a read that raises counts as
-    changed and the write is skipped. The next turn-end write or idle clear
-    then settles the marker.
+    Fences a turn-end write with no turn of its own, and the idle clear (with
+    ``kind=None``): between the registry read and the locked update, a later
+    turn may park ("agent" must not become a stale None) or the work may end
+    (a stale "agent" must not stay on an idle chat). Runs on the update's
+    worker thread; a read that raises counts as changed and the write is
+    skipped. The next turn-end write or idle clear then settles the marker.
     """
     try:
         return _parking_kind(session_id) == kind
@@ -251,9 +234,8 @@ async def _write_parked_task_kind(
     ``writer`` is the admission lease of the turn writing, if any. A rewind can
     give up waiting for that turn and let the next one start; from then on the
     old turn neither changes the marker nor publishes it (#1285). ``only_if``
-    is a further condition the write depends on (the idle clear passes
-    :func:`_nothing_to_park_on`, a turn-end write with no turn passes
-    :func:`_parking_kind_unchanged`). Both are checked inside the update's own
+    is a further condition the write depends on: the idle clear and a turn-end
+    write with no turn pass :func:`_parking_kind_unchanged`. Both are checked inside the update's own
     critical section (``set_session_parked_task_kind``) and again by the
     broadcaster right before each publication.
     """
@@ -314,6 +296,8 @@ async def clear_parked_marker_if_idle(
     Returns True only when a marker was actually removed. ``writer`` fences the
     clear to that turn's admission, as in :func:`_write_parked_task_kind`.
 
+    Idle means no parking background work (an unresolved launch does not hold
+    the marker: the only non-NULL writer takes its kind from parking work).
     The idle decision is taken again where the clear is applied and published:
     a later turn may end with new work and write its marker while this clear
     waits (#1285).
@@ -321,7 +305,7 @@ async def clear_parked_marker_if_idle(
     if not session_id:
         return False
     try:
-        if not _nothing_to_park_on(session_id):
+        if not _parking_kind_unchanged(session_id, None):
             return False
         from app.db import database
 
@@ -337,7 +321,7 @@ async def clear_parked_marker_if_idle(
     await close_park_work_time(session_id)
     cleared = await _write_parked_task_kind(
         session_id, None, writer=writer,
-        only_if=lambda: _nothing_to_park_on(session_id),
+        only_if=lambda: _parking_kind_unchanged(session_id, None),
     )
     if cleared:
         logger.info(
