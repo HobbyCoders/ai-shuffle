@@ -120,7 +120,8 @@ await runJourney({
 				expect(left.length === 0, `no banner is left once the follow-up succeeded, not ${JSON.stringify(left)}`);
 				// The failed turn's Error row is its durable record, above the reply.
 				const row = errorRow(page, HTTP_500);
-				expect((await row.count()) === 1, 'the failed turn keeps its one Error row');
+				const rows = await row.count();
+				expect(rows === 1, `the failed turn keeps its one Error row (${rows} found)`);
 				const reply = page.getByRole('log', { name: 'Conversation messages' }).getByText(`You said: “${follow}`).first();
 				const [rowBox, replyBox] = [await row.first().boundingBox(), await reply.boundingBox()];
 				expect(rowBox && replyBox && rowBox.y < replyBox.y, `the Error row stays above the successful reply (${rowBox?.y} vs ${replyBox?.y})`);
