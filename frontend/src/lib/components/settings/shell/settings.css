@@ -182,7 +182,9 @@
 	grid-template-columns: minmax(0, 1fr);
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] > .st-divider,
-.settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] > .st-lcol {
+/* A remembered item the page no longer has shows its idle state, which hides
+   the detail: keep the list then, or the page would be blank. */
+.settings-shell:not([data-stacked]) .st-coll[data-replace='detail']:not(:has(> .st-dpane > .st-empty-detail[data-idle])) > .st-lcol {
 	display: none;
 }
 .settings-shell:not([data-stacked]) .st-coll[data-replace='detail'] .st-dwrap {

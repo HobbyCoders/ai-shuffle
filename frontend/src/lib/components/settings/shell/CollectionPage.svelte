@@ -124,17 +124,27 @@
 			target?.focus({ preventScroll: !current });
 		});
 	});
-	// Going narrow with an item open hides the list: focus left on a list row
-	// would fall to the page, so it moves to the detail's title instead.
+	// The list can hide under the reader's focus: the window narrows with an
+	// item open, or a remembered draft reopens under the same id. Focus would
+	// fall to the page, so it moves to the detail's title instead.
+	let lcol: HTMLDivElement | undefined = $state();
+	let listFocused = false;
+	function onfocusin(event: FocusEvent) {
+		listFocused = !!lcol?.contains(event.target as Node);
+	}
 	$effect(() => {
-		if (!narrow || replaceOnSelect || !openItem) return;
-		untrack(() => {
-			void tick().then(() => {
-				const active = document.activeElement;
-				if (!active || !el?.querySelector(':scope > .st-lcol')?.contains(active)) return;
-				el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')?.focus({ preventScroll: true });
-			});
+		if (!lcol || typeof ResizeObserver === 'undefined') return;
+		const list = lcol;
+		const ro = new ResizeObserver((entries) => {
+			// Stacked mode moves focus with its own steps.
+			if ((entries[0]?.contentRect.width ?? 1) > 0 || !listFocused || settingsNav.stacked) return;
+			const active = document.activeElement;
+			if (active && active !== document.body && !list.contains(active)) return;
+			listFocused = false;
+			el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')?.focus({ preventScroll: true });
 		});
+		ro.observe(list);
+		return () => ro.disconnect();
 	});
 
 	$effect(() => {
@@ -162,12 +172,13 @@
 <div
 	class="st-coll"
 	bind:this={el}
+	{onfocusin}
 	style:--st-list-width="{width}px"
 	data-replace={replace ? (openItem ? 'detail' : 'list') : undefined}
 	data-narrow={narrow ? '' : undefined}
 >
 	<ListDivider bind:width {containerWidth} onchange={(w) => (preferred = w)} />
-	<div class="st-lcol">
+	<div class="st-lcol" bind:this={lcol}>
 		<div class="st-lhead">
 			{#if onBack !== null}<BackRow label="Settings" onclick={() => (onBack ? onBack() : settingsNav.back())} />{/if}
 			<PageTitle title={label} {count}>
