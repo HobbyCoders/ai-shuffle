@@ -51,12 +51,15 @@ _failures: dict = {}
 _verification_flights: dict = {}
 _verification_generation = 0
 # Hub answers are written in the order their checks started, never the order
-# they finish: each check takes a ticket, and a cache write (confirm, forget,
+# they finish: each check takes a ticket, and a cache write (confirm, refusal,
 # remembered failure) for a device is dropped if a later-started check already
 # wrote. Otherwise a slow check from before a sign-in could overwrite the
-# sign-in's fresh answer, in either direction (#1424).
+# sign-in's fresh answer, in either direction (#1424). The record lives only
+# while that device has a check open: key -> [open checks, last written
+# ticket]. It is never evicted under load, and once no check is open every
+# later check has a higher ticket, so nothing is lost by dropping it.
 _check_ticket = 0
-_last_write: dict = {}
+_open_checks: dict = {}
 _VERDICT_CAP = 2048
 
 # Badge metadata only: never consulted by authorization or revocation checks.
@@ -132,21 +135,30 @@ def _verdict_age(key):
     return None if confirmed_at is None else time.monotonic() - confirmed_at
 
 
-def _take_ticket():
-    """Order of this check among checks that may write the cache. Lock held."""
+def _open_check(key):
+    """Open a check that may write the cache; its ticket orders it. Lock held."""
     global _check_ticket
     _check_ticket += 1
+    _open_checks.setdefault(key, [0, 0])[0] += 1
     return _check_ticket
 
 
 def _may_write(key, ticket):
-    """True and record the write if no later-started check wrote. Lock held."""
-    if _last_write.get(key, 0) > ticket:
+    """True and record the write if no later-started check wrote. Lock held,
+    and only while this check is open, so the device's record exists."""
+    record = _open_checks[key]
+    if record[1] > ticket:
         return False
-    _last_write[key] = ticket
-    if len(_last_write) > _VERDICT_CAP:
-        _last_write.pop(min(_last_write, key=_last_write.get), None)
+    record[1] = ticket
     return True
+
+
+def _close_check(key):
+    """Lock held. The last open check for a device drops its record."""
+    record = _open_checks[key]
+    record[0] -= 1
+    if record[0] == 0:
+        del _open_checks[key]
 
 
 def reset_verification_cache():
@@ -155,7 +167,6 @@ def reset_verification_cache():
     with _VERDICT_LOCK:
         _verdicts.clear()
         _failures.clear()
-        _last_write.clear()
         _verification_generation += 1
 
 
@@ -501,7 +512,7 @@ def require_active(owner, *, fresh=False):
             leader = True
             future = Future()
             flight_key = None
-            ticket = _take_ticket()
+            ticket = _open_check(key)
         elif failed is not None and time.monotonic() - failed[0] < settings.mobile_account_hub_verify_ttl_seconds:
             # The hub answered this device within the TTL without confirming
             # it: give the same answer (grace still applies below) unasked.
@@ -511,7 +522,7 @@ def require_active(owner, *, fresh=False):
             leader = True
             future = Future()
             _verification_flights[flight_key] = future
-            ticket = _take_ticket()
+            ticket = _open_check(key)
     try:
         if leader:
             try:
@@ -555,6 +566,7 @@ def require_active(owner, *, fresh=False):
             finally:
                 with _VERDICT_LOCK:
                     _verification_flights.pop(flight_key, None)
+                    _close_check(key)
         future.result(timeout=30)
     except (HTTPException, TimeoutError) as exc:
         failure = exc if isinstance(exc, HTTPException) else HTTPException(status_code=503, detail='Account authorization unavailable')

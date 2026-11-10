@@ -774,6 +774,38 @@ def test_an_older_slow_allow_does_not_undo_a_fresh_refusal(setup, monkeypatch):
     assert len(calls) == 2  # the fresh refusal is replayed, not re-asked
 
 
+def test_an_older_slow_allow_cannot_undo_a_fresh_refusal_under_cache_pressure(setup, monkeypatch):
+    """Checks for many other devices while the old check is still out must
+    not erase the record that the fresh refusal came later (#1424)."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(account_hub, '_VERDICT_CAP', 4)
+    entered, release, calls = _slow_then_fresh(monkeypatch, slow_active=True, fresh_active=False)
+    thread, outcome = _run_slow_check(owner)
+    assert entered.wait(5)
+    with pytest.raises(HTTPException):
+        account_hub.require_active(owner, fresh=True)
+
+    def others(binding, method, suffix, body=None):
+        calls.append(suffix)
+        return {'active': True, 'account_id': ACCOUNT, 'device_id': suffix.split('/')[-1]}
+
+    monkeypatch.setattr(account_hub, 'call', others)
+    for n in range(8):
+        account_hub.require_active({**owner, 'hub_device_id': f'44444444-4444-4444-4444-{n:012d}'})
+    release.set()
+    thread.join(5)
+    assert outcome['value']['server_id'] == SERVER
+    asked = len(calls)
+    with pytest.raises(HTTPException) as later:
+        account_hub.require_active(owner)
+    assert later.value.status_code == 401
+    assert len(calls) == asked  # still the fresh refusal, replayed unasked
+    assert not account_hub._open_checks  # nothing left behind once all checks close
+
+
 def test_an_older_slow_refusal_does_not_undo_a_fresh_allow(setup, monkeypatch):
     """The inverse: an old refusal that lands after a fresh confirmation must
     not block the phone for a TTL (#1424)."""
