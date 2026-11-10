@@ -300,6 +300,7 @@ def reset_for_tests() -> None:
         _context = None
         _listeners.clear()
         _kick = None
+    reset_scan_cache()
 
 
 def on_applied(listener: Callable[[List[Tuple[str, str, str]]], None]) -> Callable[[], None]:
@@ -1132,6 +1133,138 @@ def record_after_commit(collection: str, record_id: str) -> None:
 # Scanning (change detection without per-function hooks)
 # ---------------------------------------------------------------------------
 
+# A whole-collection pass used to read every row in full to learn that
+# nothing changed: about 100 MB for a 7,000-session catalog, every few seconds
+# under load, which is what kept the worker's heap gigabytes above its live
+# set. The database now fingerprints the rows; only rows whose fingerprint (or
+# whose published record) moved since this process last serialized them are
+# read, in bounded chunks.
+# Kill switch: AI_SHUFFLE_PERF_SCAN_FINGERPRINT=0 (or false/off/no) restores
+# the full read on every pass.
+SCAN_FINGERPRINT_ENV = "AI_SHUFFLE_PERF_SCAN_FINGERPRINT"
+#: Rows read per statement on the changed-row path: bounds the pass's memory.
+SCAN_FETCH_BATCH = 200
+#: A whole-collection pass re-serializes every row this often, so a
+#: fingerprint that failed to move (a hash collision, a value whose text
+#: changed but whose hash did not) cannot hide a change for longer.
+SCAN_FINGERPRINT_VERIFY_SECONDS = 1800.0
+_SCAN_ROW = "scan_row__"
+_SCAN_FINGERPRINT_COLUMN = "scan_fingerprint__"
+#: Tried in order, per table. ``hash_record_extended`` (PostgreSQL 14+) hashes
+#: in place; a table with a column type that has no hash support (``json``)
+#: and older servers fall back to the row's text.
+_SCAN_FINGERPRINT_SQL = (f"hash_record_extended({_SCAN_ROW}, 0)", f"md5({_SCAN_ROW}::text)")
+_UNDEFINED_FUNCTION = "42883"
+_scan_cache_lock = threading.Lock()
+#: table -> index into _SCAN_FINGERPRINT_SQL (len() means: no fingerprint works).
+_scan_fingerprint_choice: Dict[str, int] = {}
+#: (collection, owner_only, device, instance) -> _ScanCache
+_scan_caches: Dict[Tuple[str, bool, str, str], "_ScanCache"] = {}
+_SCAN_CACHES_MAX = 64
+
+
+class _ScanCache:
+    """What this process last learned about each row of one collection.
+
+    ``rows`` maps a row's key columns to ``(fingerprint, record_id, hash)``:
+    a row with that fingerprint serializes to that record and content hash
+    (``record_id`` is None for a row that is not shared). That is a pure
+    function of the row for the collections :func:`_fingerprint_scannable`
+    admits, so an entry never goes stale; whether the record is *published*
+    is still checked against ``sync_records`` on every pass.
+    """
+
+    __slots__ = ("rows", "verified_at")
+
+    def __init__(self):
+        self.rows: Dict[tuple, Tuple[Any, Optional[str], Optional[str]]] = {}
+        self.verified_at = time.monotonic()
+
+
+def _fingerprint_scannable(coll: policy.Collection) -> bool:
+    """Collections whose record is a pure function of the stored row.
+
+    Credentials decrypt against storage that can lock, nested secrets follow
+    the network's rekey quorum, and a serialize hook may read anything: those
+    collections (all small) keep the full read. ``session_active`` republishes
+    an unchanged pending row and ``presence`` filters by device.
+    """
+    if os.environ.get(SCAN_FINGERPRINT_ENV, "").strip().lower() in ("0", "false", "off", "no"):
+        return False
+    return (not coll.encrypted and coll.map_secrets is None and coll.serialize_hook is None
+            and coll.name not in ("model_providers", "session_active", "presence"))
+
+
+def _scan_cache(coll: policy.Collection, ctx: NetworkContext, owner_only: bool) -> _ScanCache:
+    key = (coll.name, owner_only, ctx.device_id, _my_instance_id())
+    with _scan_cache_lock:
+        cache = _scan_caches.get(key)
+        if cache is None:
+            if len(_scan_caches) >= _SCAN_CACHES_MAX:
+                _scan_caches.clear()
+            cache = _scan_caches[key] = _ScanCache()
+        return cache
+
+
+def reset_scan_cache() -> None:
+    with _scan_cache_lock:
+        _scan_caches.clear()
+        _scan_fingerprint_choice.clear()
+
+
+def _row_fingerprints(coll: policy.Collection, where: Sequence[str],
+                      params: Sequence[Any]) -> Optional[Tuple[str, Dict[tuple, Any]]]:
+    """``(fingerprint SQL, {row key: fingerprint})`` for the rows a scan covers.
+
+    None when the rows cannot be fingerprinted (the caller reads them in
+    full). Runs in its own transaction: an unsupported expression fails the
+    statement, and with it the transaction, before the next one is tried.
+    """
+    keys = ", ".join(f"{_SCAN_ROW}.{name}" for name in coll.keys)
+    while True:
+        with _scan_cache_lock:
+            choice = _scan_fingerprint_choice.get(coll.table, 0)
+        if choice >= len(_SCAN_FINGERPRINT_SQL):
+            return None
+        expression = _SCAN_FINGERPRINT_SQL[choice]
+        query = f"SELECT {keys}, {expression} AS {_SCAN_FINGERPRINT_COLUMN} FROM {coll.table} {_SCAN_ROW}"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        found: Dict[tuple, Any] = {}
+        unkeyed = False
+        try:
+            with get_db() as conn:
+                version = getattr(conn, "server_version", None)
+                if not isinstance(version, int):
+                    return None  # not a PostgreSQL connection: nothing to ask
+                if choice == 0 and version < 140000:
+                    raise _NoFingerprint()
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                for row in cursor.fetchall():
+                    key = tuple(row[name] for name in coll.keys)
+                    unkeyed = unkeyed or key in found or None in key
+                    found[key] = row[_SCAN_FINGERPRINT_COLUMN]
+        except Exception as exc:  # noqa: BLE001
+            if not isinstance(exc, _NoFingerprint) and getattr(exc, "pgcode", None) != _UNDEFINED_FUNCTION:
+                raise
+            # An older server, or a column type without hash support: both
+            # are permanent for this table, so remember the next choice.
+            with _scan_cache_lock:
+                _scan_fingerprint_choice[coll.table] = max(choice + 1, _scan_fingerprint_choice.get(coll.table, 0))
+            logger.info("Scan of %s cannot use row fingerprint %d; trying the next", coll.name, choice)
+            continue
+        if unkeyed:
+            # The key columns do not identify every row here (a duplicate, or
+            # a NULL that no key lookup can match): nothing to key on.
+            return None
+        return expression, found
+
+
+class _NoFingerprint(Exception):
+    """This server cannot evaluate the fingerprint expression."""
+
+
 def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, owner_only: bool = False,
                     record_ids: Optional[Iterable[str]] = None, retain: Iterable[str] = ()) -> int:
     """Publish every row that differs from the network's view; return the count.
@@ -1155,66 +1288,138 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
         if not ids:
             return 0
     published = 0
+    where: List[str] = []
+    params: tuple[Any, ...] = ()
+    if owner_only:
+        # Keep mirrored payloads out of this process. Match the legacy
+        # NULL/empty-instance rule below; runtime rows have no instance.
+        legacy = "owner_device_id IS NULL"
+        params = (ctx.device_id,)
+        if "instance_id" in coll.local_fields:
+            legacy += " AND (instance_id IS NULL OR instance_id = '' OR instance_id = %s)"
+            params += (_my_instance_id(),)
+        where.append(f"(owner_device_id = %s OR ({legacy}))")
+    if ids is not None:
+        where.append(f"{coll.keys[0]} IN ({', '.join(['%s'] * len(ids))})")
+        params += tuple(ids)
+    def read_known(cursor) -> Dict[str, Any]:
+        if ids is None:
+            return store.records_for_collection(cursor, collection)
+        return store.records_for_ids(cursor, collection, ids)
+
+    cache = _scan_cache(coll, ctx, owner_only) if _fingerprint_scannable(coll) else None
+    known: Optional[Dict[str, Any]] = None
+    fingerprinted = None
+    if cache is not None:
+        # The published records are read before the rows, as the full read
+        # does: a record that exists now and has no row afterwards was really
+        # deleted. The other order would retract a row that was inserted and
+        # published between the two statements.
+        with get_db() as conn:
+            known = read_known(conn.cursor())
+        fingerprinted = _row_fingerprints(coll, where, params)
     # Phase one reads without publishing, so the state row lock that
     # ``record`` takes is held only while the changed rows are written out
     # (in bounded batches), not for the whole table walk.
     changed: List[Tuple[str, Optional[dict]]] = []
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if ids is None:
-            known = store.records_for_collection(cursor, collection)
-        else:
-            known = store.records_for_ids(cursor, collection, ids)
-        query = f"SELECT * FROM {coll.table}"
-        params: tuple[Any, ...] = ()
-        where: List[str] = []
-        if owner_only:
-            # Keep mirrored payloads out of this process. Match the legacy
-            # NULL/empty-instance rule below; runtime rows have no instance.
-            legacy = "owner_device_id IS NULL"
-            params = (ctx.device_id,)
-            if "instance_id" in coll.local_fields:
-                legacy += " AND (instance_id IS NULL OR instance_id = '' OR instance_id = %s)"
-                params += (_my_instance_id(),)
-            where.append(f"(owner_device_id = %s OR ({legacy}))")
-        if ids is not None:
-            where.append(f"{coll.keys[0]} IN ({', '.join(['%s'] * len(ids))})")
-            params += tuple(ids)
-        if where:
-            query += " WHERE " + " AND ".join(where)
-        cursor.execute(query, params)
-        rows = [dict(r) for r in cursor.fetchall()]
     seen = set()
     skipped = 0
-    for row in rows:
+    learned: Dict[tuple, Tuple[Any, Optional[str], Optional[str]]] = {}
+
+    def consider(row: dict, fingerprint: Any = None, remember: bool = False) -> None:
+        nonlocal skipped
         if owner_only:
             owner = row.get("owner_device_id")
             if owner not in (None, ctx.device_id):
-                continue
+                return
             # NULL owner means "this worker" only for rows this install
             # wrote; a shared database's rows from other installs wait for
             # their device to join (legacy map) before anyone publishes them.
             if owner is None and (row.get("instance_id") or "") not in ("", _my_instance_id()):
-                continue
+                return
         try:
             plaintext = serialize_row(coll, row)
         except ApplyError:
             # One unreadable row (locked credential storage, a bad value) must
             # not stop the rest of the collection.
             skipped += 1
-            continue
+            return
+        key = tuple(row.get(name) for name in coll.keys) if remember else None
         if plaintext is None:
-            continue
+            if remember:
+                learned[key] = (fingerprint, None, None)
+            return
         record_id = coll.record_id(plaintext)
         seen.add(record_id)
         if coll.name == "presence" and record_id != ctx.device_id:
-            continue  # only that device publishes it; peers refuse it from anyone else
+            return  # only that device publishes it; peers refuse it from anyone else
         existing = known.get(record_id)
         pending_active = coll.name == "session_active" and bool(row.get("local_pending"))
+        digest = content_hash(coll, plaintext) if remember else None
+        if remember:
+            learned[key] = (fingerprint, record_id, digest)
         if (not pending_active and existing is not None and not bool(existing["deleted"])
-                and existing["content_hash"] == content_hash(coll, plaintext)):
-            continue
+                and existing["content_hash"] == (digest if remember else content_hash(coll, plaintext))):
+            return
         changed.append((record_id, row))
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if known is None:
+            known = read_known(cursor)
+        if fingerprinted is None:
+            query = f"SELECT * FROM {coll.table}"
+            if where:
+                query += " WHERE " + " AND ".join(where)
+            cursor.execute(query, params)
+            for row in [dict(r) for r in cursor.fetchall()]:
+                consider(row)
+        else:
+            expression, fingerprints = fingerprinted
+            trusted = cache.rows
+            if ids is None and time.monotonic() - cache.verified_at >= SCAN_FINGERPRINT_VERIFY_SECONDS:
+                trusted = {}
+            misses: List[tuple] = []
+            for key, fingerprint in fingerprints.items():
+                entry = trusted.get(key)
+                if entry is not None and entry[0] == fingerprint:
+                    record_id = entry[1]
+                    if record_id is None:
+                        learned[key] = entry
+                        continue  # still the same unshared row
+                    existing = known.get(record_id)
+                    if (existing is not None and not bool(existing["deleted"])
+                            and existing["content_hash"] == entry[2]):
+                        seen.add(record_id)
+                        learned[key] = entry
+                        continue  # unchanged row, already published
+                misses.append(key)
+            width = len(coll.keys)
+            one = "%s" if width == 1 else "(" + ", ".join(["%s"] * width) + ")"
+            columns = (f"{_SCAN_ROW}.{coll.keys[0]}" if width == 1
+                       else "(" + ", ".join(f"{_SCAN_ROW}.{name}" for name in coll.keys) + ")")
+            for start in range(0, len(misses), SCAN_FETCH_BATCH):
+                batch = misses[start:start + SCAN_FETCH_BATCH]
+                # The fingerprint is read with its row: one statement, one
+                # snapshot, so it can never describe an older version.
+                query = (f"SELECT {_SCAN_ROW}.*, {expression} AS {_SCAN_FINGERPRINT_COLUMN} "
+                         f"FROM {coll.table} {_SCAN_ROW} WHERE " + " AND ".join(
+                             [*where, f"{columns} IN ({', '.join([one] * len(batch))})"]))
+                cursor.execute(query, params + tuple(value for key in batch for value in key))
+                for row in [dict(r) for r in cursor.fetchall()]:
+                    consider(row, row.pop(_SCAN_FINGERPRINT_COLUMN), True)
+    if cache is not None and fingerprinted is not None:
+        with _scan_cache_lock:
+            if ids is None:
+                # Whole collection: rows that are gone leave the cache too.
+                if trusted is not cache.rows:
+                    cache.verified_at = time.monotonic()
+                cache.rows = learned
+            else:
+                for key in fingerprinted[1]:
+                    if key not in learned:
+                        cache.rows.pop(key, None)
+                cache.rows.update(learned)
     if skipped:
         # A row we could not read has a record id we could not compute, so a
         # missing id proves nothing this pass: publish no deletions.
