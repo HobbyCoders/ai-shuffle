@@ -195,23 +195,9 @@ class ShuffleAccessibilityService : AccessibilityService() {
             if (withTimeoutOrNull((expires - System.currentTimeMillis()).coerceAtLeast(1)) { reply.await() } == true && confirmed()) expires else null
         } finally { countdown.cancel(); consent = null; consentId = null; consentTargetValid = null; removeOverlay(); updateIndicator() }
     }
-    /**
-     * Where a consent button really is on screen, read from the panel's own view. For a test run in
-     * which Android's accessibility window list never caught up with a panel that is showing.
-     * Main thread only; it never authorizes anything.
-     */
-    @androidx.annotation.VisibleForTesting internal fun consentButtonBounds(text: String): android.graphics.Rect? {
-        if (consent == null) return null
-        val panel = overlay?.takeIf { it.isAttachedToWindow && it.isShown } ?: return null
-        fun find(view: android.view.View): Button? = when (view) {
-            is Button -> view.takeIf { it.text?.toString() == text }
-            is android.view.ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) }
-            else -> null
-        }
-        val button = find(panel)?.takeIf { it.isShown && it.width > 0 && it.height > 0 } ?: return null
-        val at = IntArray(2).also { button.getLocationOnScreen(it) }
-        return android.graphics.Rect(at[0], at[1], at[0] + button.width, at[1] + button.height)
-    }
+    /** Whether a consent panel is really on screen, for a test whose accessibility window list does not show one. Read off the main thread, so only fit for a failure message. */
+    @androidx.annotation.VisibleForTesting internal fun consentShowing(): Boolean =
+        consent != null && overlay?.let { it.isAttachedToWindow && it.isShown } == true
     private fun fenceTrace(detail: String) {
         if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) android.util.Log.i("AppControlFence", detail)
     }

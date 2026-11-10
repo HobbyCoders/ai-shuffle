@@ -95,43 +95,35 @@ class CrossAppFenceTest {
     /** What the app itself says about app control, for a failure that would otherwise only say a panel is missing. */
     private fun fenceState(): String {
         val prefs = ToolsPreferences(context)
-        val overlays = runCatching {
-            automation.windows.filter { it.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY }.map { "${it.id}:${it.root?.packageName}" }
+        fun overlays(windows: () -> List<AccessibilityWindowInfo>?) = runCatching {
+            windows().orEmpty().filter { it.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY }.map { it.id }.toString()
         }.getOrElse { it.javaClass.simpleName }
+        val showing = runCatching { ShuffleAccessibilityService.current?.consentShowing() == true }.getOrDefault(false)
         return "service=${ShuffleAccessibilityService.current != null} appControl=${prefs.crossAppEnabled} accessibility=${prefs.accessibilityEnabled} " +
-            "availability=${DeviceToolsRuntime.availability.value} lastDisarm=${ToolsPreferences.lastDisarm} overlays=$overlays " +
+            "availability=${DeviceToolsRuntime.availability.value} lastDisarm=${ToolsPreferences.lastDisarm} panelShowing=$showing " +
+            "overlaysListedToTest=${overlays { automation.windows }} overlaysListedToService=${overlays { ShuffleAccessibilityService.current?.windows }} " +
             "requests=${requests.map { it.second.get()?.toString() ?: if (it.first.count == 0L) "ended" else "pending" }}"
     }
-    /**
-     * The panel's own button, read from its view: Android's accessibility window list can miss the
-     * last of several quick window changes and then never list a panel that is on screen.
-     */
-    private fun unlistedPanelButton(text: String): Rect? {
-        var bounds: Rect? = null
-        instrumentation.runOnMainSync { bounds = ShuffleAccessibilityService.current?.consentButtonBounds(text) }
-        return bounds
-    }
     private fun panelUp() {
-        val started = System.currentTimeMillis()
+        var refreshAt = System.currentTimeMillis() + 1_000
         try {
             await("Consent panel never appeared") {
                 if (panelButton("Allow once") != null) return@await true
-                if (System.currentTimeMillis() - started > 4_000 && unlistedPanelButton("Allow once") != null) {
-                    android.util.Log.w("CrossAppFenceTest", "Consent panel is showing but not in the accessibility window list: ${fenceState()}")
-                    return@await true
-                }
                 // Nothing left that could still raise a panel: say why now, not after the full wait.
                 if (requests.isNotEmpty() && requests.all { it.first.count == 0L }) throw AssertionError("Every request ended without a consent panel")
+                if (System.currentTimeMillis() > refreshAt) {
+                    // UiAutomation answers from a cached window list until an event tells it the windows changed, and a list
+                    // fetched just before the panel was added can be cached after that event. Setting its service info
+                    // drops the cache, so the next lookup asks Android again. Well inside the shortest command deadline (4 s).
+                    refreshAt = System.currentTimeMillis() + 1_000
+                    android.util.Log.w("CrossAppFenceTest", "No consent panel listed, asking Android for its windows again: ${fenceState()}")
+                    automation.serviceInfo = automation.serviceInfo
+                }
                 false
             }
         } catch (failure: AssertionError) { throw AssertionError("${failure.message}: ${fenceState()}", failure) }
     }
-    /** A real touch either way; the panel's own view only says where, when the window list has not caught up. */
-    private fun allow() {
-        panelUp()
-        if (touch("Allow once")) return
-        assertTrue("Allow once was not there to touch: ${fenceState()}", inject(requireNotNull(unlistedPanelButton("Allow once")) { "Consent panel closed before it was approved: ${fenceState()}" }))
-    }
+    private fun allow() { panelUp(); assertTrue(touch("Allow once")) }
     /**
      * Android can reconnect the service while a test is still setting up, and a fresh connection
      * always starts with app control off. Only that is opted in again; anything else that ended it
