@@ -881,6 +881,18 @@
 				};
 			}
 
+			case 'away_decision': {
+				// Away mode answered a question or deferred an action for the
+				// owner (DECISION_SUBTYPE in app/core/away_mode.py).
+				const kind = typeof data.kind === 'string' ? data.kind : '';
+				return {
+					title: 'Away Decision',
+					content: (typeof data.content === 'string' && data.content) || message.content || '',
+					badge: kind === 'answered' ? 'answered' : kind === 'deferred' ? 'deferred' : 'away',
+					badgeColor: kind === 'deferred' ? 'amber' : 'blue'
+				};
+			}
+
 			case 'rewind_warning': {
 				// Rewind partial success warning (chat rewound but file restore unavailable)
 				return {
@@ -926,7 +938,8 @@
 				return {
 					title: subtype.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
 					content: defaultContent,
-					badge: subtype,
+					// Never show the internal subtype name itself (#1346).
+					badge: subtype.replace(/_/g, ' '),
 					badgeColor: isError ? 'red' : 'gray'
 				};
 			}

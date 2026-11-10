@@ -14,7 +14,7 @@
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
 	import { pendingDeepLink } from '$lib/stores/pending-deep-link';
 	import { activeSession } from '$lib/stores/active-session';
-	import { newChatSetupNeed } from '$lib/stores/project-setup';
+	import { newChatSetup, newChatSetupNeed } from '$lib/stores/project-setup';
 	import { get } from 'svelte/store';
 	import { askAgentUnavailableReason } from '$lib/review/scope';
 	import {
@@ -68,7 +68,7 @@
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
 	import NoProjectPill from './NoProjectPill.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
-	import { workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
+	import { draftSetupPending, workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle, NEW_CHAT_LABEL } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
@@ -391,6 +391,15 @@
 	const selectedWorkerTargetKey = $derived(workerGitTargetKey(activeTab));
 	const selectedWorkerTarget = $derived(workerGitTargetFromKey(selectedWorkerTargetKey));
 	const workerSetupPending = $derived(!!$newChatSetupNeed);
+	// A sent draft whose project is being set up, or whose chat is being created,
+	// runs on a checkout that does not exist yet: the worker's main checkout is
+	// not its state (#1342).
+	const setupHeld = $derived(draftSetupPending({
+		sessionId: activeTab?.sessionId,
+		setupNeeded: workerSetupPending,
+		setupRunning: $newChatSetup.phase === 'running'
+	}));
+	const draftWorktreeCreating = $derived(!activeTab?.sessionId && $activeSession.isCreatingWorktree);
 	const activeWorktreeId = $derived(
 		!selectedWorkerTarget && (activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeWorktreeDeleted
 			? (activeTab.worktreeId ?? null)
@@ -461,7 +470,7 @@
 		const isRemote = activeIsRemote;
 		const workerTarget = selectedWorkerTarget;
 		const subagent = activeIsSubagent;
-		const setupPending = workerSetupPending;
+		const setupPending = setupHeld || draftWorktreeCreating;
 		// Track session ID so the effect re-fires on every tab switch,
 		// even when two sessions share the same project/worktree.
 		// This ensures git state is always fresh after a session change.
@@ -561,7 +570,8 @@
 		isRemote: activeIsRemote,
 		sessionMode: activeTab?.mode,
 		isSubagent: activeIsSubagent,
-		workerSetupPending
+		// Hidden while the project is set up; greyed in place while the chat is created.
+		workerSetupPending: setupHeld
 	});
 	const gitUiVisible = $derived(!!activeTab && shouldShowHeaderGitActions(headerGitInput));
 

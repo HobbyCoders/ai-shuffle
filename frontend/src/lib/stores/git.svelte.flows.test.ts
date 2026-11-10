@@ -46,7 +46,7 @@ vi.mock('./github.svelte', () => ({
 }));
 
 import { transformGitStatus, type GitStatus, type PrState } from '$lib/api/git';
-import { git } from './git.svelte';
+import { git, CHECKOUT_PREPARING_RETRY_MS } from './git.svelte';
 
 function status(overrides: Record<string, unknown> = {}): GitStatus {
 	return transformGitStatus({
@@ -306,5 +306,64 @@ describe('git store — slow background refresh', () => {
 		git.stopBackgroundRefresh();
 		await vi.advanceTimersByTimeAsync(10 * 60_000);
 		expect(mocks.getPrState.mock.calls.length).toBe(prCalls + 1);
+	});
+});
+
+describe('git store — a new worktree chat whose checkout is still being created (#1342)', () => {
+	const preparing = {
+		status: 409,
+		detail: "This session's checkout is still being set up on this device.",
+		body: { detail: { error_code: 'checkout_preparing', error: "This session's checkout is still being set up on this device." } },
+	};
+	const plain409 = {
+		status: 409,
+		detail: "This session's checkout is not available on this device.",
+		body: { detail: "This session's checkout is not available on this device." },
+	};
+	/** What the header control shows: GitHeaderActions renders "Git unavailable · Retry"
+	 *  for `error`, nothing while unhydrated with no status, else the status. */
+	const shown = () => git.current.error ? 'Git unavailable'
+		: !git.current.hydrated && !git.current.status ? 'neutral'
+		: git.current.status?.current_branch ?? 'neutral';
+
+	it('feeds the issue\'s sequence: worker 200, session 409 while preparing, then 200', async () => {
+		vi.useFakeTimers();
+		// The draft on the chosen worker reads that worker's main checkout.
+		git.setWorkerTarget({ workerId: 'w2', branch: null });
+		mocks.getGitStatus.mockResolvedValueOnce(status({ current_branch: 'main', differs_from_base: false, modified: [] }));
+		await git.loadRepository('p');
+		expect(shown()).toBe('main');
+
+		// POST /sessions/with-worktree returned; the checkout does not exist yet.
+		git.setWorkerTarget(null);
+		mocks.getGitStatus.mockRejectedValueOnce(preparing);
+		await git.loadRepository('p', false, 's-new');
+		expect(shown()).toBe('neutral');
+		expect(git.current.error).toBeNull();
+
+		// Still preparing on the next look: still neutral, never "Git unavailable".
+		mocks.getGitStatus.mockRejectedValueOnce(preparing);
+		await vi.advanceTimersByTimeAsync(CHECKOUT_PREPARING_RETRY_MS);
+		expect(shown()).toBe('neutral');
+
+		// The checkout exists: its own branch shows.
+		mocks.getGitStatus.mockResolvedValue(status({ current_branch: 'feature/x' }));
+		await vi.advanceTimersByTimeAsync(CHECKOUT_PREPARING_RETRY_MS);
+		await vi.waitFor(() => expect(shown()).toBe('feature/x'));
+		expect(git.current.hydrated).toBe(true);
+	});
+
+	it('a plain 409 (a real failure, or an older worker) still shows Git unavailable', async () => {
+		mocks.getGitStatus.mockRejectedValueOnce(plain409);
+		await git.loadRepository('p', false, 's-new');
+		expect(shown()).toBe('Git unavailable');
+	});
+
+	it('a real failure after the checkout exists still shows Git unavailable', async () => {
+		await git.loadRepository('p', false, 's1');
+		expect(shown()).toBe('feat/x');
+		mocks.getGitStatus.mockRejectedValueOnce(plain409);
+		await git.refreshStatus();
+		expect(shown()).toBe('Git unavailable');
 	});
 });
