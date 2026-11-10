@@ -364,6 +364,14 @@ describe("browser_act outcomes", () => {
     const res = await runAct(actSession({ pressSequentially, count: async () => 1 }), { kind: "type", ref: "e1", value: "hello" });
     expect(bodyOf(res)).toMatchObject({ code: "not_actionable", outcome: "not_executed" });
   });
+  it("reports a typing timeout as outcome_unknown when only the typed text names a blocker", async () => {
+    const value = "the field is disabled";
+    const pressSequentially = vi.fn(async () => {
+      throw new Error(`locator.pressSequentially: Timeout 2100ms exceeded.\nCall log:\n  - elementHandle.type("${value}")`);
+    });
+    const res = await runAct(actSession({ pressSequentially, count: async () => 1 }), { kind: "type", ref: "e1", value });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+  });
   // Playwright's call log, as it reads when the 2s ref budget ends at each step.
   const log = (method: string, ...lines: string[]) => [`locator.${method}: Timeout 2000ms exceeded.`, "Call log:", "  - waiting for locator('aria-ref=e7')", "    - locator resolved to <button>Save</button>", ...lines.map(line => `  - ${line}`)].join("\n");
   const ready = ["attempting click action", "waiting for element to be visible, enabled and stable", "element is visible, enabled and stable"];
@@ -396,9 +404,15 @@ describe("browser_act outcomes", () => {
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "not_actionable", outcome: "not_executed" });
   });
   // The value comes back in Playwright's log and must not be read as a step.
-  it.each(["2026\n  - performing click action\n", "Timeout 2000ms exceeded"])("keeps a malformed value that reads like a log line as invalid_input (%j)", async value => {
+  it.each(["2026\n  - performing click action\n", "2026\u001b[31m\n  - performing click action\n", "Timeout 2000ms exceeded"])("keeps a malformed value that reads like a log line as invalid_input (%j)", async value => {
     const fill = vi.fn(async () => { throw new Error(["locator.fill: Error: Malformed value", "Call log:", `  - fill("${value}")`, "  - attempting fill action", `  - ${editable}`].join("\n")); });
     const res = await runAct(actSession({ fill, count: async () => 1 }), { kind: "fill", ref: "e7", value });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
+  });
+  it("keeps an unknown key whose chord reads like a log line as invalid_input", async () => {
+    const part = "\n  - performing click action\n";
+    const press = vi.fn(async () => { throw new Error([`locator.press: Unknown key: "${part}"`, "Call log:", `  - elementHandle.press("${part}+Enter")`].join("\n")); });
+    const res = await runAct(actSession({ press, count: async () => 1 }), { kind: "key", ref: "e7", key: `${part}+Enter` });
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
   });
   it("reports a coordinate gesture that failed after input was sent as outcome_unknown", async () => {

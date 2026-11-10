@@ -93,18 +93,20 @@ const TIMEOUT_RE = /^\S+: Timeout \d+ms exceeded\./;
 const GESTURE_DONE_RE = /^\s*-\s*\S+(?: and \S+)? action done$/m;
 
 /**
- * The failure text as the step patterns read it: without colour codes and
- * without the value or key the caller sent. Playwright quotes that text back
- * (`fill("…")`, `press("…")`, `Unknown key: "…"`), and its lines could read
- * like steps Playwright took. Each cut ends at the closing quote, which stays,
- * so a line it touches still holds a quote and matches no pattern.
+ * The failure text as the step patterns read it: without the value or key the
+ * caller sent and without colour codes. Playwright quotes that text back
+ * (`fill("…")`, `type("…")`, `press("…")`, `Unknown key: "…"`), and its lines
+ * could read like steps Playwright took. The whole key goes before its parts,
+ * and both go before the colour codes, which the caller's text may hold too.
+ * Each cut ends at the closing quote, which stays, so a line it touches still
+ * holds a quote and matches no pattern.
  */
 function stepLog(message: string, input: ActInput): string {
-  let text = message.replace(ANSI_RE, "");
-  for (const echoed of [input.value, ...(input.key?.split("+") ?? [])]) {
+  let text = message;
+  for (const echoed of [input.value, input.key, ...(input.key?.split("+") ?? [])]) {
     if (echoed) text = text.split(`${echoed}"`).join('"');
   }
-  return text;
+  return text.replace(ANSI_RE, "");
 }
 
 /** The call log of the attempt Playwright was on when it failed. */
@@ -345,7 +347,8 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     const msg = err instanceof Error ? err.message : String(err);
     // Playwright's call log names the step it reached. Once it started to
     // change the page the outcome is no longer not_executed.
-    if (input.ref !== undefined && inputMayHaveGoneOut(stepLog(msg, input))) sent = true;
+    const steps = stepLog(msg, input);
+    if (input.ref !== undefined && inputMayHaveGoneOut(steps)) sent = true;
     const remedy = invalidInputRemedy(msg);
     if (remedy) return sent
       ? errorResult(outcomeUnknownMessage(input.kind, remedy), { outcome: "unknown" })
@@ -361,7 +364,7 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     if (input.ref !== undefined && locator && isRefResolutionFailure(msg)) {
       // Typing is the one ref action that can stop half way: a timeout that
       // does not name a blocker may have left part of the text behind.
-      if (input.kind === "type" && !BLOCKER_RE.test(msg.replace(ANSI_RE, ""))) {
+      if (input.kind === "type" && !BLOCKER_RE.test(steps)) {
         return errorResult(outcomeUnknownMessage("type", msg), { outcome: "unknown" });
       }
       if (!(await refStillResolves(locator))) return errorResult(new StaleRefError(input.ref).message, NOT_EXECUTED);
