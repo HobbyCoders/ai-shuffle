@@ -639,10 +639,10 @@ def test_unconfirmed_device_costs_one_hub_call_per_ttl(setup, monkeypatch, hub_s
     if hub_status == 'inactive':
         hub = Mock(side_effect=lambda *a, **k: {'active': False, 'account_id': ACCOUNT, 'device_id': DEVICE})
         monkeypatch.setattr(account_hub, 'call', hub)
-        asked = lambda: hub.call_count  # noqa: E731
+        asked = lambda: hub.call_count
     else:
         remaining = _hub_answers(monkeypatch, *[hub_status] * 5)  # spares expose extra calls
-        asked = lambda: 5 - len(remaining)  # noqa: E731
+        asked = lambda: 5 - len(remaining)
     for elapsed in (0, 30, 60, 89):  # four re-checks inside one TTL
         clock[0] = 1000.0 + elapsed
         with pytest.raises(HTTPException) as failure:
