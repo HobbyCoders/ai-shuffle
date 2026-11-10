@@ -367,6 +367,7 @@ describe("browser_act outcomes", () => {
   // Playwright's call log, as it reads when the 2s ref budget ends at each step.
   const log = (method: string, ...lines: string[]) => [`locator.${method}: Timeout 2000ms exceeded.`, "Call log:", "  - waiting for locator('aria-ref=e7')", "    - locator resolved to <button>Save</button>", ...lines.map(line => `  - ${line}`)].join("\n");
   const ready = ["attempting click action", "waiting for element to be visible, enabled and stable", "element is visible, enabled and stable"];
+  const editable = "waiting for element to be visible, enabled and editable";
   it("counts a click Playwright confirmed as done when only the navigation wait ran out", async () => {
     const click = vi.fn(async () => { throw new Error(log("click", ...ready, "performing click action", "click action done", "waiting for scheduled navigations to finish")); });
     expect(bodyOf(await runAct(actSession({ click, count: async () => 1 }), { kind: "click", ref: "e7" }))).toMatchObject({ ok: true });
@@ -374,8 +375,10 @@ describe("browser_act outcomes", () => {
   it.each<[string, string, Record<string, unknown>, string[]]>([
     ["a click sent but not confirmed", "click", { kind: "click" }, [...ready, "performing click action"]],
     ["a key press", "press", { kind: "key", key: "Enter" }, ['elementHandle.press("Enter")']],
-    ["a fill the page never answered", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", "waiting for element to be visible, enabled and editable"]],
+    ["a fill the page never answered", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable]],
     ["a check whose click went out", "setChecked", { kind: "check" }, [...ready, "performing click action", "click action done"]],
+    ["a fill on a field that turned enabled and then never answered", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable, "element is not enabled", "retrying fill action", "waiting 20ms", editable]],
+    ["a fill whose text reads like a refusal", "fill", { kind: "fill", value: "x\n  - element is not enabled" }, ['fill("x\n  - element is not enabled")', "attempting fill action", editable]],
   ])("reports a timeout after %s as outcome_unknown", async (_name, method, input, lines) => {
     const fail = vi.fn(async () => { throw new Error(log(method, ...lines)); });
     const res = await runAct(actSession({ [method]: fail, count: async () => 1 }), { ...input, ref: "e7" } as ActInput);
@@ -384,11 +387,17 @@ describe("browser_act outcomes", () => {
   });
   it.each<[string, string, Record<string, unknown>, string[]]>([
     ["a click Playwright withheld and retried", "click", { kind: "click" }, [...ready, "performing click action", "<div></div> intercepts pointer events", "retrying click action", "waiting 500ms"]],
-    ["a fill polled on a field that stays disabled", "fill", { kind: "fill", value: "is disabled" }, ['fill("is disabled")', "attempting fill action", "waiting for element to be visible, enabled and editable", "element is not enabled", "retrying fill action", "waiting 500ms", "waiting for element to be visible, enabled and editable"]],
+    ["a fill on a field that stays disabled", "fill", { kind: "fill", value: "x" }, ['fill("x")', "attempting fill action", editable, "element is not enabled", "retrying fill action", "waiting 500ms"]],
   ])("keeps a timeout after %s as not_actionable", async (_name, method, input, lines) => {
     const fail = vi.fn(async () => { throw new Error(log(method, ...lines)); });
     const res = await runAct(actSession({ [method]: fail, count: async () => 1 }), { ...input, ref: "e7" } as ActInput);
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "not_actionable", outcome: "not_executed" });
+  });
+  // The value comes back in Playwright's log and must not be read as a step.
+  it.each(["2026\n  - performing click action", "Timeout 2000ms exceeded"])("keeps a malformed value that reads like a log line as invalid_input (%j)", async value => {
+    const fill = vi.fn(async () => { throw new Error(["locator.fill: Error: Malformed value", "Call log:", `  - fill("${value}")`, "  - attempting fill action", `  - ${editable}`].join("\n")); });
+    const res = await runAct(actSession({ fill, count: async () => 1 }), { kind: "fill", ref: "e7", value });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
   });
   it("reports a coordinate gesture that failed after input was sent as outcome_unknown", async () => {
     const session = {

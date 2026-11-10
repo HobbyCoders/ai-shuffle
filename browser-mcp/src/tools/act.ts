@@ -87,12 +87,24 @@ const PERFORMING_RE = /^\s*-\s*performing \S+(?: and \S+)? action$/m;
  * says the input went out only when the call then got no answer.
  */
 const STARTED_RE = /^\s*-\s*(?:elementHandle\.press\(.*|waiting for element to be visible(?:, enabled and editable| and enabled))$/m;
-/** Call-log line for a fill or select attempt the element refused. */
-const REFUSED_RE = /^\s*-\s*(?:element is not \w+|did not find some options|option being selected is not enabled)$/m;
-/** Playwright's own budget ran out: the call got no answer. */
-const TIMEOUT_RE = /Timeout \d+ms exceeded/i;
+/** Playwright's own budget ran out: the call got no answer. Only its headline says so. */
+const TIMEOUT_RE = /^\S+: Timeout \d+ms exceeded\./;
 /** Call-log line Playwright writes once the page took a pointer gesture on its target. */
 const GESTURE_DONE_RE = /^\s*-\s*\S+(?: and \S+)? action done$/m;
+
+/**
+ * Playwright's failure text without colour codes and without a multi-line
+ * value or key it quotes back. That text is the caller's own, and its lines
+ * can read like steps Playwright took. A single line cannot: it stays inside
+ * the line that quotes it.
+ */
+function failureText(err: unknown, input: ActInput): string {
+  let text = err instanceof Error ? err.message : String(err);
+  for (const echoed of [input.value, input.key]) {
+    if (echoed && /[\r\n\u2028\u2029]/.test(echoed)) text = text.split(echoed).join("");
+  }
+  return text.replace(ANSI_RE, "");
+}
 
 /** The call log of the attempt Playwright was on when it failed. */
 function lastAttempt(message: string): string {
@@ -102,24 +114,23 @@ function lastAttempt(message: string): string {
 
 /**
  * Could the action have changed the page before it failed? Playwright's call
- * log names the step it reached.
+ * log names the step it reached, and only the attempt it was on counts.
  *
- * For a pointer gesture only the last attempt counts: one Playwright retried
- * was withheld from the page, because something else (an overlay that appeared
- * as the pointer arrived) had become the hit target.
+ * A pointer gesture Playwright retried was withheld from the page, because
+ * something else (an overlay that appeared as the pointer arrived) had become
+ * the hit target.
  *
- * A key press, fill or select counts once its call started and then got no
- * answer, unless the element refused an earlier attempt: a field that stays
- * disabled is polled until the budget ends, and a budget that ends mid-poll
- * must still read as not actionable. Playwright gives up waiting on a blocked
- * page, but a call it already sent still runs once the page is free. An answer
- * that is an error (an unknown key, a malformed date, an element that is not a
- * select) means nothing was sent.
+ * A key press, fill or select counts once that attempt's call started and then
+ * got no answer. Playwright gives up waiting on a blocked page, but a call it
+ * already sent still runs once the page is free. A field that stays disabled
+ * is refused and retried, and its budget ends in the pause before the next
+ * attempt, so it still reads as not actionable. An answer that is an error (an
+ * unknown key, a malformed date, an element that is not a select) means
+ * nothing was sent.
  */
 function inputMayHaveGoneOut(message: string): boolean {
-  if (PERFORMING_RE.test(lastAttempt(message))) return true;
-  const log = message.replace(ANSI_RE, "");
-  return TIMEOUT_RE.test(log) && STARTED_RE.test(log) && !REFUSED_RE.test(log);
+  const attempt = lastAttempt(message);
+  return PERFORMING_RE.test(attempt) || (TIMEOUT_RE.test(message) && STARTED_RE.test(attempt));
 }
 
 /**
@@ -330,7 +341,7 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     session.invalidateScreenshot();
     endRequestWatch(page);
     await session.disposeWatch();
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = failureText(err, input);
     // Playwright's call log names the step it reached. Once it started to
     // change the page the outcome is no longer not_executed.
     if (input.ref !== undefined && inputMayHaveGoneOut(msg)) sent = true;

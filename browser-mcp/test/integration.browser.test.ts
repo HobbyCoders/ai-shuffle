@@ -1224,6 +1224,17 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       // The input did reach the page, once.
       await expect.poll(() => state(page), { timeout: 5000 }).toBe(expected);
     }, 10000);
+    it("reports a select that turned enabled, then blocked, as outcome_unknown", async () => {
+      // Playwright is refused while the select is disabled and retries. The
+      // attempt that gets through changes the value and never hears back.
+      const page = await load(`<select aria-label="Late" disabled onchange="${stall}window.state=(window.state||'')+this.value"><option>a</option><option>b</option></select>`);
+      const target = await ref("Late");
+      await page.evaluate(() => { setTimeout(() => { document.querySelector("select")!.disabled = false; }, 400); });
+      const result = await runAct(session, { kind: "select", ref: target, value: "b" });
+      expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+      // The change handler ran once.
+      await expect.poll(() => state(page), { timeout: 5000 }).toBe("b");
+    }, 10000);
     it("reports Enter that submitted a slowly answered form as outcome_unknown", async () => {
       const page = await load(`<form method="post" action="/review/stalledreload"><input aria-label="Query" name="q"></form>`);
       const result = await runAct(session, { kind: "key", key: "Enter", ref: await ref("Query") });
