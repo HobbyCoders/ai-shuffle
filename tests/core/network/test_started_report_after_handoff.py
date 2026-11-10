@@ -938,3 +938,36 @@ async def test_a_report_for_a_starter_not_synced_here_waits_until_it_arrives(pai
         [kept] = orch.pending_forwarded_reports()
         assert kept["payload"]["home"] == "boss"
         assert _deferred_events("boss") == []
+
+
+@pytest.mark.asyncio
+async def test_a_report_kept_while_its_worker_is_out_of_the_network_reaches_the_starter(pair, monkeypatch):
+    """S13: having no network is not proof the starter was deleted. B holds
+    the moved chat but not yet boss's row, leaves the network, and the chat
+    settles. The report waits in B's outbox; once B joins again and gets
+    boss (run by A), it is admitted on A, once."""
+    a, b, _, _ = pair
+    _mirror_child_on_b(a, b, monkeypatch)
+    with b.active():
+        await handoff.receive(database.get_session(PARENT))
+        _working(PARENT)
+        with get_db() as conn:  # boss's row has not reached B yet
+            conn.cursor().execute("DELETE FROM sessions WHERE id='boss'")
+            conn.cursor().execute("DELETE FROM sync_records WHERE collection='sessions' AND record_id='boss'")
+        engine.leave_network()
+        work = turns.enqueue_turn(PARENT, "agent_message", prompt="more", profile_id="default",
+                                  payload={"orchestration_sender": "boss"})
+        assert turns.start_turn(work["id"])
+        await orch.report_settled_start(PARENT, _settle(work), "completed")
+        await orch.deliver_forwarded_reports(force=True)
+        assert len(orch.pending_forwarded_reports()) == 1
+        assert _deferred_events("boss") == []
+    join(a, b)
+    with b.active():
+        assert control.owner_of(database.get_session("boss")) == a.device_id
+        await orch.deliver_forwarded_reports(force=True)
+        assert orch.pending_forwarded_reports() == []
+        assert _all_reports("boss") == []
+    with a.active():
+        [wake] = _reports("boss")
+        assert wake["payload"]["pending_frames"][0]["task_id"] == PARENT

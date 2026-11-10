@@ -2579,13 +2579,14 @@ def _starter_deleted(session_id):
     """True when ``session_id``, absent here, was deleted, not merely not
     synced here yet. The sync engine's rule (``engine`` event reservation):
     a deletion mark, or ``sync_records`` knowing a chat whose row is gone
-    (sessions have no undelete). Without a network nothing can bring it."""
+    (sessions have no undelete). Having no network now proves nothing: a
+    worker that left may join again and receive the chat. Without either
+    fact (a standalone delete before a restart) the report stays retryable."""
     from app.db.base import get_db
     from app.db.session_locks import deleted_sessions
-    from app.network import engine
     if _has_session(session_id):
         return False
-    if deleted_sessions([session_id]) or engine.context() is None:
+    if deleted_sessions([session_id]):
         return True
     with get_db() as conn:
         cursor = conn.cursor()
