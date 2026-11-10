@@ -38,17 +38,36 @@ async function watchExactlyOnce(page, needles) {
 	await page.evaluate((needles) => {
 		const started = performance.now();
 		const state = (window.__journeyOnce = { running: true, frames: 0, seen: {}, gaps: {}, twice: {} });
+		const counts = () => {
+			const rows = [...document.querySelectorAll('[data-user-turn-id], .pending-messages [role="article"]')];
+			return needles.map((needle) => rows.filter((el) => (el.textContent || '').includes(needle)).length);
+		};
+		// A frame is judged on two reads: one in its animation-frame callback and one
+		// in a task right after its paint. The transcript publishes a delivered row in
+		// an animation-frame callback of its own, which can run after this one, so the
+		// first read alone can see a bubble gone and its row not yet there in a state
+		// that is never painted. Only a state both reads agree on counts.
+		let before = null;
+		let at = 0;
+		const painted = new MessageChannel();
+		painted.port1.onmessage = () => {
+			if (!state.running || !before) return;
+			const after = counts();
+			needles.forEach((needle, i) => {
+				const most = Math.max(before[i], after[i]);
+				const least = Math.min(before[i], after[i]);
+				if (most > 0 && state.seen[needle] === undefined) state.seen[needle] = at;
+				if (most === 0 && state.seen[needle] !== undefined) (state.gaps[needle] ||= []).push(at);
+				if (least > 1) (state.twice[needle] ||= []).push(at);
+			});
+			before = null;
+		};
 		const tick = () => {
 			if (!state.running) return;
 			state.frames++;
-			const rows = [...document.querySelectorAll('[data-user-turn-id], .pending-messages [role="article"]')];
-			const at = Math.round(performance.now() - started);
-			for (const needle of needles) {
-				const count = rows.filter((el) => (el.textContent || '').includes(needle)).length;
-				if (count > 0 && state.seen[needle] === undefined) state.seen[needle] = at;
-				if (count === 0 && state.seen[needle] !== undefined) (state.gaps[needle] ||= []).push(at);
-				if (count > 1) (state.twice[needle] ||= []).push(at);
-			}
+			before = counts();
+			at = Math.round(performance.now() - started);
+			painted.port2.postMessage(0);
 			requestAnimationFrame(tick);
 		};
 		requestAnimationFrame(tick);
@@ -184,10 +203,21 @@ export const journey = {
 			},
 			async act({ page, mark, variant, log }) {
 				await mark('send the first');
-				await typeAndSend(page, `first tok-${uniq()} [script:slow latency_ms=4000 tps=300]`);
+				// The first text waits long enough for a slow browser to queue both. Only Stop
+				// ends the turn: a slow browser can paint the whole reply and the first queued
+				// row's delivery as one frame, which would leave no frame of the reply to judge.
+				await typeAndSend(page, `first tok-${uniq()} [script:slow latency_ms=7000 tps=300 hold_open=true]`);
 				await waitChat(page, { streaming: 'true' });
-				// Watch from before the queue: the first text can come while the second is typed.
-				// Frames count once both bubbles show; typing's own shifts have recent input.
+				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
+				await mark('queue before the text');
+				for (const text of texts) {
+					// Typing key by key can take a slow browser longer than the first text waits.
+					await quickSend(page, `queued ${text}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+				}
+				// Watch once both bubbles have settled: the second one arriving moves the
+				// first, and on a slow browser that move can take more than one frame.
+				await page.waitForTimeout(500);
 				await page.evaluate(() => {
 					const scores = (window.__bubbleShifts = []);
 					new PerformanceObserver((list) => {
@@ -197,19 +227,20 @@ export const journey = {
 						}
 					}).observe({ type: 'layout-shift' });
 				});
-				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
 				const collect = await watchStopFrames(page, texts);
-				await mark('queue before the text');
-				for (const text of texts) {
-					await typeAndSend(page, `queued ${text}`);
-					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
-				}
-				expect((await page.getByText(SLOW_REPLY.start, { exact: false }).count()) === 0, 'both were queued before the first text');
+				expect((await page.getByText(SLOW_REPLY.start, { exact: false }).count()) === 0, 'both were queued and watched before the first text');
 				await mark('the first text arrives');
 				await page.getByText(SLOW_REPLY.end, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await page.waitForTimeout(300);
 				const frames = (await collect()).filter((f) => f.messages.every((m) => m.bubbles === 1));
 				expect(new Set(frames.map((f) => f.replyHeight)).size > 1, `the reply started while both bubbles were watched (${frames.length} frames)`);
 				const scores = await page.evaluate(() => window.__bubbleShifts);
+				await mark('stop');
+				await stopButton(page).click();
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+				for (const text of texts) {
+					await page.locator('[data-not-sent="true"]').filter({ hasText: text }).waitFor({ timeout: 15_000 });
+				}
 				const steps = frames.filter((f, i) => i === 0 || f.messages[0].top !== frames[i - 1].messages[0].top);
 				log(`bubble top by time: ${steps.map((f) => `${f.at}ms ${f.messages[0].top} (scrollTop ${f.scrollTop}, reply ${f.replyHeight})`).join(', ')}`);
 				log(`bubble shift scores: ${JSON.stringify(scores)}`);
