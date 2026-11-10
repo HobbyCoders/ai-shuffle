@@ -67,18 +67,40 @@
 
 	// A narrow strip scrolls sideways with its scrollbar hidden, so bring the
 	// current tab into view when it changes (a new tab lands off the edge).
+	function revealTab(strip: HTMLElement, id: string) {
+		const tab = Array.from(strip.querySelectorAll('[role="tab"]')).find((el) => el.id === `terminal-tab-${id}`)?.closest('.tab');
+		if (!tab) return;
+		const box = strip.getBoundingClientRect();
+		const at = tab.getBoundingClientRect();
+		if (at.left < box.left) strip.scrollLeft -= box.left - at.left;
+		else if (at.right > box.right) strip.scrollLeft += at.right - box.right;
+	}
+	// Also when a tab opens or closes beside it (tabOrder): closing the tabs
+	// before it slid the current tab off the left edge at the same scroll.
 	$effect(() => {
 		const id = activeId;
 		const strip = tabsEl;
+		void tabOrder;
 		if (!id || !strip) return;
-		void tick().then(() => {
-			const tab = Array.from(strip.querySelectorAll('[role="tab"]')).find((el) => el.id === `terminal-tab-${id}`)?.closest('.tab');
-			if (!tab) return;
-			const box = strip.getBoundingClientRect();
-			const at = tab.getBoundingClientRect();
-			if (at.left < box.left) strip.scrollLeft -= box.left - at.left;
-			else if (at.right > box.right) strip.scrollLeft += at.right - box.right;
+		void tick().then(() => revealTab(strip, id));
+	});
+	// And when the strip gets narrower or wider (#1394): a phone rotating, the
+	// panel dragged, the header moving between one and two rows. Width only, so
+	// a swipe through the tabs is left alone; a hidden panel reports 0 and is
+	// put right when it shows again. Disconnected when the strip goes away.
+	$effect(() => {
+		const strip = tabsEl;
+		if (!strip || typeof ResizeObserver === 'undefined') return;
+		let width = -1;
+		const observer = new ResizeObserver((entries) => {
+			const next = entries[entries.length - 1]?.contentRect.width ?? 0;
+			if (next === width) return;
+			width = next;
+			const id = untrack(() => activeId);
+			if (id && next > 0) revealTab(strip, id);
 		});
+		observer.observe(strip);
+		return () => observer.disconnect();
 	});
 	/** The button behind the request being handled, while it is handled. */
 	let requestOrigin: Element | null = null;
@@ -90,6 +112,8 @@
 	const ready = $derived(probe.status === 'ready' && access.kind === 'ready' ? probe : null);
 	const tabState = $derived(terminals.tabsFor(sessionId));
 	const activeId = $derived(tabState.active);
+	/** Changes only when a tab opens, closes or moves, not on every list refresh. */
+	const tabOrder = $derived(tabState.ids.join(' '));
 	const activeInfo = $derived(activeId ? terminals.terminal(activeId) : null);
 	const activeLink = $derived(activeId ? terminals.connection(activeId) : null);
 	const notice = $derived(terminals.notice(sessionId));
@@ -412,7 +436,7 @@
 					{@const link = terminals.connection(id)}
 					<div class="tab" class:current={id === activeId}>
 						<button id={`terminal-tab-${id}`} class="tab-select" role="tab" aria-selected={id === activeId}
-							tabindex={id === activeId ? 0 : -1} title={hostName(info) !== ready.worker ? `${hostName(info)}: ${info?.cwd ?? ''}` : info?.cwd}
+							tabindex={id === activeId ? 0 : -1} title={`${info?.shell ?? 'shell'} · ${hostName(info) !== ready.worker ? `${hostName(info)}: ${info?.cwd ?? ''}` : (info?.cwd ?? '')}`}
 							onclick={() => terminals.select(sessionId, id)} onkeydown={(e) => tabKeydown(e, index)}>
 							<span class="dot" data-tone={info?.state === 'exited' ? 'bad' : link.status === 'live' ? (info?.busy ? 'run' : 'ok') : link.status === 'reconnecting' ? 'warn' : 'wait'} aria-hidden="true"></span>
 							<span class="tab-shell">{info?.shell ?? 'shell'}</span>
@@ -612,14 +636,17 @@
 	.tab-select { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 100%; padding: 0 22px 0 10px; border: 0; background: transparent; color: var(--muted-foreground); font: 500 12px var(--font-sans); cursor: pointer; text-align: left; }
 	.tab.current .tab-select { color: var(--foreground); }
 	.tab-select:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: 6px; }
-	.tab-shell { flex-shrink: 0; }
+	/* Cut with an ellipsis rather than run under the close button when the
+	   tab is narrower than the name ("powershell" in a 96 px tab). */
+	.tab-shell { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	/* One line, cut with an ellipsis (the full name is its title). It may
 	   shrink, so it never runs under the close button; the folder gives way first. */
 	.tab-host { flex: 0 1 auto; min-width: 0; max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 5px; border-radius: 4px; font: 600 10.5px var(--font-sans);
 		color: var(--muted-foreground); background: var(--muted); }
 	/* A shell on another worker: room for the worker's name next to the shell. */
 	.tab:has(.tab-host) { flex-basis: 232px; max-width: 232px; }
-	.tab-folder { flex-shrink: 100; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle-foreground); }
+	/* Sized from 0 and filling what is left, so it gives way completely before the shell name loses a pixel ("sh" read "s…" in a squeezed tab). */
+	.tab-folder { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--subtle-foreground); }
 	.tab-close { position: absolute; right: 3px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); cursor: pointer; opacity: 0; transition: opacity 0.12s; }
 	.tab:hover .tab-close, .tab.current .tab-close, .tab-close:focus-visible { opacity: 1; }
 	.tab-close:hover { background: var(--hover-overlay); color: var(--foreground); }
@@ -687,12 +714,27 @@
 	.mobile .tab-select { padding-right: 32px; }
 	@container (max-width: 420px) {
 		.tab-folder { display: none; }
-		.tab { flex-basis: 96px; min-width: 76px; }
+		/* Each tab as wide as its shell name and close button (up to 168 px),
+		   never squeezed below them: the strip scrolls instead. */
+		.tab { flex: 0 0 auto; min-width: 76px; }
 		/* A shell on another worker: the worker matters more than the shell
 		   name here (the status bar still shows both), so the badge gets the room. */
 		.tab:has(.tab-host) { flex-basis: 156px; min-width: 112px; max-width: 156px; }
 		.tab-select:has(.tab-host) .tab-shell { display: none; }
 		.tab-host { max-width: none; }
+	}
+	/* Too narrow for the tabs to share the row with the tools, Watch command
+	   and the panel's buttons (#1309): the tabs were the only item that could
+	   shrink and ended up a few pixels wide. They move to a row of their own
+	   under the tools, with + right after them, so the current tab still meets
+	   the terminal. The ::after is the line break between the two rows. Wider
+	   than this (the default 480 px side panel) the header stays one row. */
+	@container (max-width: 470px) {
+		.bar:has(.tabs) { flex-wrap: wrap; row-gap: 0; }
+		.bar:has(.tabs)::after { content: ''; order: 1; flex-basis: 100%; }
+		/* Room for + on the same row, so a long strip scrolls instead of pushing + down. */
+		.bar .tabs { order: 2; max-width: calc(100% - 46px); }
+		.bar:has(.tabs) .plus-wrap { order: 2; }
 	}
 
 	@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--success) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }

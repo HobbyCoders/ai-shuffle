@@ -81,6 +81,7 @@ vi.mock('$lib/terminal/connection', () => ({
 
 import TerminalPanel from './TerminalPanel.svelte';
 import { get } from 'svelte/store';
+import { tick } from 'svelte';
 import { composerInsert } from '$lib/stores/composer-insert';
 import TerminalPage from './TerminalPage.svelte';
 import { TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
@@ -410,6 +411,83 @@ describe('tab strip', () => {
 		await waitFor(() => expect(scrollLeft).toBe(110));
 		vi.restoreAllMocks();
 	});
+
+	it('keeps the current tab in view when the strip gets narrower, and stops watching on unmount (#1394)', async () => {
+		const observers: { target?: Element; fire: (width: number) => void; disconnected: boolean }[] = [];
+		vi.stubGlobal('ResizeObserver', class {
+			entry: (typeof observers)[number];
+			constructor(cb: (entries: { contentRect: { width: number } }[]) => void) {
+				this.entry = { fire: (width) => cb([{ contentRect: { width } }]), disconnected: false };
+				observers.push(this.entry);
+			}
+			observe(el: Element) { this.entry.target = el; }
+			disconnect() { this.entry.disconnected = true; }
+		});
+		const view = await mount([info('t1'), info('t2')]);
+		const strip = await waitFor(() => view.getByRole('tablist'));
+		await waitFor(() => expect(view.getByRole('tab', { selected: true }).id).toBe('terminal-tab-t2'));
+		const watcher = observers.find((o) => o.target === strip);
+		expect(watcher).toBeDefined();
+		let scrollLeft = 0;
+		Object.defineProperty(strip, 'scrollLeft', { get: () => scrollLeft, set: (v: number) => { scrollLeft = v; } });
+		let stripRight = 332;
+		const rect = (left: number, right: number) => ({ left, right, top: 0, bottom: 30, width: right - left, height: 30, x: left, y: 0, toJSON() {} }) as DOMRect;
+		vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+			if (this === strip) return rect(6, stripRight);
+			if (this.classList?.contains('tab') && this.querySelector('[role="tab"]')?.id === 'terminal-tab-t2') return rect(262 - scrollLeft, 338 - scrollLeft);
+			return rect(0, 60);
+		});
+		// The strip narrows from 332 to 302 px: the current tab's right edge is cut off.
+		stripRight = 308;
+		watcher!.fire(302);
+		expect(scrollLeft).toBe(30);
+		// A height-only change (same width) leaves a swipe through the tabs alone.
+		scrollLeft = 0;
+		watcher!.fire(302);
+		expect(scrollLeft).toBe(0);
+		// A hidden panel reports 0 wide: nothing to measure, nothing scrolls.
+		watcher!.fire(0);
+		expect(scrollLeft).toBe(0);
+		view.unmount();
+		expect(watcher!.disconnected).toBe(true);
+		vi.restoreAllMocks();
+	});
+
+	it('keeps the current tab in view when tabs before it close, without undoing a swipe on a refresh', async () => {
+		const view = await mount([info('t1'), info('t2'), info('t3'), info('t4')]);
+		const strip = await waitFor(() => view.getByRole('tablist'));
+		let scrollLeft = 58;
+		Object.defineProperty(strip, 'scrollLeft', { get: () => scrollLeft, set: (v: number) => { scrollLeft = v; } });
+		const rect = (left: number, right: number) => ({ left, right, top: 0, bottom: 30, width: right - left, height: 30, x: left, y: 0, toJSON() {} }) as DOMRect;
+		// 120 px tabs in a 6-308 strip, laid out in their current order.
+		vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+			if (this === strip) return rect(6, 308);
+			if (this.classList?.contains('tab')) {
+				const at = Array.from(strip.querySelectorAll('.tab')).indexOf(this as HTMLElement);
+				return rect(6 + at * 120 - scrollLeft, 126 + at * 120 - scrollLeft);
+			}
+			return rect(0, 60);
+		});
+		terminals.select('s1', 't3'); // at the strip's right edge: 188-308
+		await waitFor(() => expect(view.getByRole('tab', { selected: true }).id).toBe('terminal-tab-t3'));
+		await tick();
+		expect(scrollLeft).toBe(58);
+		terminals.drop('t2'); // t3 slides to 68-188, still in view: no scroll
+		await tick(); await tick();
+		expect(scrollLeft).toBe(58);
+		terminals.drop('t1'); // t3 would sit at -52-68, past the left edge
+		await waitFor(() => expect(scrollLeft).toBe(0));
+		expect(view.getByRole('tab', { selected: true }).id).toBe('terminal-tab-t3');
+		// The tab's title names its shell too (a squeezed tab shows "po…").
+		expect(view.getByRole('tab', { selected: true }).title).toBe('bash · /workspace/app');
+		// A swipe, then a list refresh with the same tabs: the swipe stands.
+		scrollLeft = 100;
+		api.list.mockResolvedValue({ terminals: [info('t3'), info('t4')], open: 2, running: 0, limit: 8, worker: targets.worker });
+		await terminals.load('s1');
+		await tick(); await tick();
+		expect(scrollLeft).toBe(100);
+		vi.restoreAllMocks();
+	});
 });
 
 describe('emulator options', () => {
@@ -616,5 +694,42 @@ describe('peer workers', () => {
 		expect(rule).toMatch(/min-width:\s*0/);
 		expect(rule).not.toMatch(/flex-shrink:\s*0/);
 		expect(rule).toMatch(/flex:\s*0 1 auto/);
+	});
+
+	it('gives the tabs a row of their own in a narrow panel (#1309)', () => {
+		// jsdom has no layout, so read the rules. Sharing one row with +, the
+		// tools, Watch command and the panel's buttons, the strip was the only
+		// item that could shrink: 12 px wide at 390, its tab off the left edge.
+		// The real-browser bounds check is the terminal-tabs journey.
+		const source = readFileSync('src/lib/components/terminal/TerminalPanel.svelte', 'utf8');
+		const block = source.match(/@container \(max-width: 470px\) \{([\s\S]*?)\n\t\}/)?.[1] ?? '';
+		expect(block).toMatch(/\.bar:has\(\.tabs\)\s*\{[^}]*flex-wrap:\s*wrap/);
+		// The break: a full-width item between the tools' row and the tabs' row.
+		expect(block).toMatch(/\.bar:has\(\.tabs\)::after\s*\{[^}]*order:\s*1;[^}]*flex-basis:\s*100%/);
+		// Tabs and + sit after the break, + right after the tabs with room kept for it.
+		expect(block).toMatch(/\.bar \.tabs\s*\{[^}]*order:\s*2;[^}]*max-width:\s*calc\(100% - 46px\)/);
+		expect(block).toMatch(/\.plus-wrap\s*\{[^}]*order:\s*2/);
+		// The strip itself still shrinks and scrolls: it must not refuse to shrink.
+		const tabs = source.match(/\n\t\.tabs\s*\{([^}]*)\}/)?.[1] ?? '';
+		expect(tabs).toMatch(/min-width:\s*0/);
+		expect(tabs).toMatch(/overflow-x:\s*auto/);
+		expect(tabs).not.toMatch(/flex-shrink:\s*0/);
+	});
+
+	it('keeps a long shell name clear of the tab\'s close button', () => {
+		// "powershell" could not shrink and ran 23-29 px under the close button
+		// in a 96 px tab. The journey checks the real bounds with that name.
+		const source = readFileSync('src/lib/components/terminal/TerminalPanel.svelte', 'utf8');
+		const shell = source.match(/\n\t\.tab-shell\s*\{([^}]*)\}/)?.[1] ?? '';
+		expect(shell).toMatch(/min-width:\s*0/);
+		expect(shell).toMatch(/text-overflow:\s*ellipsis/);
+		expect(shell).not.toMatch(/flex-shrink:\s*0/);
+		// The folder starts from 0 and takes what is left, so it is gone before
+		// a short name ("sh" read "s…") loses a pixel.
+		const folder = source.match(/\n\t\.tab-folder\s*\{([^}]*)\}/)?.[1] ?? '';
+		expect(folder).toMatch(/flex:\s*1 1 0[;\s]/);
+		// A narrow panel sizes each tab to its name rather than squeezing it.
+		const narrow = source.match(/@container \(max-width: 420px\) \{([\s\S]*?)\n\t\}/)?.[1] ?? '';
+		expect(narrow).toMatch(/\n\t\t\.tab\s*\{[^}]*flex:\s*0 0 auto/);
 	});
 });
