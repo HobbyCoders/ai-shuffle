@@ -10,7 +10,7 @@
  * (input was sent; observe before anything else, never auto-retried).
  */
 
-import type { Locator, Page } from "playwright-core";
+import type { CDPSession, Locator, Page } from "playwright-core";
 import { StaleRefError, raceWithTimeout, type Session } from "../session.js";
 import { jsonResult, errorResult, errorCode, text, type McpToolResult } from "./result.js";
 import { CAPTCHA_AGENT_NOTE } from "../captcha.js";
@@ -25,8 +25,20 @@ type Kind = (typeof ACT_KINDS)[number];
  * whose element detached (a minor mutation, no navigation) resolves to a live
  * locator that would otherwise block for Playwright's 30s default before
  * failing. We fail fast and remap the timeout to a clean stale_ref instead.
+ * A `let` only so tests can shorten it (setRefActionTimeoutForTests).
  */
-const REF_ACTION_TIMEOUT_MS = 2000;
+let REF_ACTION_TIMEOUT_MS = 2000;
+
+/**
+ * Test-only seam: shorten the ref-action budget and return a function that
+ * puts it back. Tests that wait the budget out on a blocked page use it to
+ * keep CI within its deadline. Product code never calls it.
+ */
+export function setRefActionTimeoutForTests(ms: number): () => void {
+  const before = REF_ACTION_TIMEOUT_MS;
+  REF_ACTION_TIMEOUT_MS = ms;
+  return () => { REF_ACTION_TIMEOUT_MS = before; };
+}
 
 /**
  * Per-character allowance for `type` on a ref. Playwright's pressSequentially
@@ -85,12 +97,14 @@ const MAX_REASON_CHARS = 240;
 /** Call-log line Playwright writes just before it sends a pointer gesture's events. */
 const PERFORMING_RE = /^\s*-\s*performing \S+(?: and \S+)? action$/;
 /**
- * Call-log lines for the actions that have no "about to send" line: a key
- * press on the resolved element, and fill and select, which check the element
- * and set its value in one page call. Each marks the call as started, so it
- * says the input went out only when the call then got no answer.
+ * Call-log lines for the actions that have no "about to send" line: fill and
+ * select, which check the element and set its value in one page call. Each
+ * marks the call as started, so it says the input went out only when the call
+ * then got no answer. Key presses track what they sent themselves.
  */
-const STARTED_RE = /^\s*-\s*(?:elementHandle\.press\(|waiting for element to be visible(?:, enabled and editable| and enabled)$)/;
+const STARTED_RE = /^\s*-\s*waiting for element to be visible(?:, enabled and editable| and enabled)$/;
+/** Call-log line of the empty type that focuses a ref before its keys (focusForKeys). */
+const FOCUS_STARTED_RE = /^\s*-\s*elementHandle\.type\(""\)$/;
 /** Playwright's own budget ran out: the call got no answer. Only its headline says so. */
 const TIMEOUT_RE = /^\S+: Timeout \d+ms exceeded\./;
 /** Call-log line Playwright writes once the page took a pointer gesture on its target. */
@@ -135,9 +149,175 @@ function chordPartlyPressed(message: string, chord: string): boolean {
 }
 
 /**
+ * The keys of a chord `page.keyboard.press` left down when it failed. It
+ * presses them in order and stops at the first key it does not know, with the
+ * keys before it down; the last key the failure could be naming is used, so an
+ * ambiguous name releases more rather than less. It has no timeout, so any
+ * other failure (the page went away) may have stopped at any key.
+ */
+function keysLeftDown(message: string, chord: string): string[] {
+  const keys = chordKeys(chord);
+  for (let at = keys.length - 1; at >= 0; at--) if (refusesKey(message, keys[at])) return keys.slice(0, at);
+  return keys;
+}
+
+/**
+ * How long a call waits for its keys to be released. A page that is still
+ * blocked gets the keyups once it is free; the call does not wait for that.
+ */
+const KEY_RELEASE_WAIT_MS = 250;
+
+/**
+ * Release keys, last pressed first. Playwright counts a key as up as soon as it
+ * receives the release, before the page answers, so input sent after this
+ * carries none of them even while their keyups wait on a blocked page. It never
+ * throws, so a failed release cannot replace the action's own error.
+ */
+async function releaseKeys(page: Page, keys: string[]): Promise<void> {
+  const ups = [...keys].reverse().map(key => {
+    try { return page.keyboard.up(key).catch(() => undefined); } catch { return undefined; }
+  });
+  await raceWithTimeout(Promise.all(ups), KEY_RELEASE_WAIT_MS, "key release timed out").catch(() => undefined);
+}
+
+const errorText = (err: unknown): string => err instanceof Error ? err.message : String(err);
+
+/** Time left before `deadline`, as a Playwright timeout (0 would mean none). */
+const timeLeft = (deadline: number): number => Math.max(1, Math.ceil(deadline - performance.now()));
+
+/**
+ * Focus a ref the way Playwright's press and type do (an input that was not
+ * focused gets its caret reset), before any key goes out. A press or type that
+ * then times out on a blocked page was blocked by a key, not by the page's
+ * focus handler, so the keys it may have left down are known (#1423). A focus
+ * Playwright began and never heard back from may have run the page's focus
+ * handler, so it counts as sent, as it did when the press focused.
+ */
+async function focusForKeys(locator: Locator, timeout: number, markSent: () => void): Promise<void> {
+  try {
+    await locator.pressSequentially("", { timeout });
+  } catch (err) {
+    const lines = failureLines(errorText(err));
+    if (TIMEOUT_RE.test(lines[0] ?? "") && lines.some(line => FOCUS_STARTED_RE.test(line))) markSent();
+    throw err;
+  }
+}
+
+/** The main frame's id for each CDP session whose Page events are on. */
+const pageEventsOn = new WeakMap<CDPSession, Promise<string>>();
+
+/**
+ * Wait for a navigation a key press started, the way Playwright's own press
+ * does in Chromium: the renderer reports a navigation it was asked for
+ * (Page.frameRequestedNavigation) while it handles the key, so once the keys
+ * are sent, one more Page call returns after any such report. A main-frame
+ * navigation is then waited for until it commits, stays in the document or
+ * stops loading. Without a CDP session the press does not wait, as a press
+ * without a ref never does.
+ */
+async function watchNavigation(session: Session, deadline: number): Promise<{ settle(): Promise<void>; stop(): void } | undefined> {
+  let cdp: CDPSession;
+  try { cdp = await session.currentCDP(); } catch { return undefined; }
+  let main = pageEventsOn.get(cdp);
+  if (!main) {
+    main = Promise.all([cdp.send("Page.enable"), cdp.send("Target.getTargetInfo")]).then(([, info]) => info.targetInfo.targetId);
+    pageEventsOn.set(cdp, main);
+    main.catch(() => pageEventsOn.delete(cdp));
+  }
+  // A page that does not answer here has had no key yet: the press times out
+  // with nothing sent.
+  const frame = await raceWithTimeout(main, timeLeft(deadline), `keyboard.press: Timeout ${REF_ACTION_TIMEOUT_MS}ms exceeded.`);
+  let requested = false;
+  let done = false;
+  let wake = () => {};
+  const onRequest = (event: { frameId: string }) => { if (event.frameId === frame) { requested = true; done = false; } };
+  const onEnd = (frameId: string) => { if (requested && frameId === frame) { done = true; wake(); } };
+  const onCommit = (event: { frame: { id: string } }) => onEnd(event.frame.id);
+  const onFrameEvent = (event: { frameId: string }) => onEnd(event.frameId);
+  cdp.on("Page.frameRequestedNavigation", onRequest);
+  cdp.on("Page.frameNavigated", onCommit);
+  cdp.on("Page.navigatedWithinDocument", onFrameEvent);
+  cdp.on("Page.frameStoppedLoading", onFrameEvent);
+  const timeout = `keyboard.press: Timeout ${REF_ACTION_TIMEOUT_MS}ms exceeded.`;
+  return {
+    async settle() {
+      await raceWithTimeout(cdp.send("Page.enable"), timeLeft(deadline), timeout);
+      if (!requested || done) return;
+      await raceWithTimeout(new Promise<void>(resolve => { wake = resolve; }), timeLeft(deadline), `${timeout} The navigation the key started had not committed.`);
+    },
+    stop() {
+      cdp.off("Page.frameRequestedNavigation", onRequest);
+      cdp.off("Page.frameNavigated", onCommit);
+      cdp.off("Page.navigatedWithinDocument", onFrameEvent);
+      cdp.off("Page.frameStoppedLoading", onFrameEvent);
+    },
+  };
+}
+
+/**
+ * Press a chord on a ref, leaving none of its keys down when it fails
+ * (#1423). Playwright's own press gives up on a page that stops answering with
+ * the keys it had pressed still down, says nothing of how far it got, and
+ * focuses the element again first, which a page can block on before any key
+ * goes out. So the ref is focused once, then every key goes down and up at page
+ * level in Playwright's order, each recorded before it is sent: keys follow the
+ * page's own focus changes between them, as they do in Playwright's press, and
+ * a failure releases exactly the keys whose keydown went out, without waiting
+ * on a page that is still blocked. A navigation the keys started is waited for
+ * as Playwright's press waits for it, and so is one the focus started: if it
+ * has not committed when the budget runs out, the press may have reached
+ * either page.
+ */
+async function pressOnRef(session: Session, page: Page, locator: Locator, chord: string, markSent: () => void): Promise<void> {
+  const deadline = performance.now() + REF_ACTION_TIMEOUT_MS;
+  // Watching starts before the focus, which can start a navigation too, as it
+  // can in Playwright's press.
+  const navigation = await watchNavigation(session, deadline);
+  const send = (verb: "down" | "up", key: string) => raceWithTimeout(page.keyboard[verb](key), timeLeft(deadline), `keyboard.${verb}: Timeout ${REF_ACTION_TIMEOUT_MS}ms exceeded.`);
+  const down: string[] = [];
+  try {
+    await focusForKeys(locator, timeLeft(deadline), markSent);
+    for (const key of chordKeys(chord)) {
+      markSent();
+      down.push(key);
+      try {
+        await send("down", key);
+      } catch (err) {
+        if (refusesKey(errorText(err), key)) down.pop();
+        throw err;
+      }
+    }
+    // Playwright counts a key as up once it sends the keyup, so it leaves the
+    // list first and a keyup that then times out is never sent again.
+    while (down.length) await send("up", down.pop()!);
+    await navigation?.settle();
+  } finally {
+    navigation?.stop();
+    await releaseKeys(page, down);
+  }
+}
+
+/**
+ * Type into a ref one character per call. Playwright's pressSequentially gives
+ * up on a page that stops answering with the key it was pressing still down
+ * (#1423). A call of its own for each character has no timeout of
+ * Playwright's, so Playwright finishes the key in flight (its keyup goes out
+ * once the page answers) while this stops the text there.
+ */
+async function typeOnRef(page: Page, locator: Locator, value: string, markSent: () => void): Promise<void> {
+  const budget = typeTimeoutMs(value);
+  const deadline = performance.now() + budget;
+  await focusForKeys(locator, budget, markSent);
+  const chars = [...value];
+  for (const [at, char] of chars.entries()) {
+    markSent();
+    await raceWithTimeout(page.keyboard.type(char), timeLeft(deadline), `keyboard.type: Timeout ${budget}ms exceeded with ${at} of ${chars.length} characters typed.`);
+  }
+}
+
+/**
  * Where Playwright quotes this action's text back in a failure: the value of a
- * type or a fill, the chord of a key press, and the key of that chord it does
- * not know. Only the field the action sent is listed. The other kinds send
+ * type or a fill, and the key of a chord it does not know. Only the field the action sent is listed. The other kinds send
  * Playwright no text of the caller's, and an option label reaches it only
  * inside a locator, which it writes with line breaks escaped.
  */
@@ -145,8 +325,7 @@ function echoedText(input: ActInput): Echo[] {
   if (input.kind === "type") return [['elementHandle.type("', input.value ?? "", '")']];
   if (input.kind === "fill") return [['fill("', input.value ?? "", '")']];
   if (input.kind !== "key") return [];
-  const chord = keyChord(input);
-  return [['elementHandle.press("', chord, '")'], ...chordKeys(chord).map((key): Echo => ['Unknown key: "', key, '"'])];
+  return chordKeys(keyChord(input)).map((key): Echo => ['Unknown key: "', key, '"']);
 }
 
 /**
@@ -603,7 +782,7 @@ async function performAction(
       for (const modifier of input.modifiers) { await page.keyboard.down(modifier); held.push(modifier); }
       await performAction(session, page, { ...input, modifiers: [] }, locator, markSent, evidence);
     } finally {
-      for (const modifier of held.reverse()) await page.keyboard.up(modifier);
+      await releaseKeys(page, held);
     }
     return;
   }
@@ -632,7 +811,7 @@ async function performAction(
 
     case "type": {
       const value = requireValue(input.value, "type");
-      if (locator) await locator.pressSequentially(value, { timeout: typeTimeoutMs(value) });
+      if (locator) await typeOnRef(page, locator, value, markSent);
       else {
         markSent();
         await page.mouse.click(point![0], point![1]);
@@ -654,7 +833,7 @@ async function performAction(
     }
 
     case "select": {
-      await selectValues(locator!, input, markSent);
+      await selectValues(session, page, locator!, input, markSent);
       return;
     }
 
@@ -666,8 +845,15 @@ async function performAction(
     case "key": {
       if (!input.key) throw new Error("invalid_input: `key` requires `key`");
       const combo = keyChord(input);
-      if (locator) await locator.press(combo, refTimeout);
-      else { markSent(); await page.keyboard.press(combo); }
+      if (locator) { await pressOnRef(session, page, locator, combo, markSent); return; }
+      markSent();
+      try {
+        await page.keyboard.press(combo);
+      } catch (err) {
+        // Playwright releases a chord only when the whole press succeeds.
+        await releaseKeys(page, keysLeftDown(errorText(err), combo));
+        throw err;
+      }
       return;
     }
 
@@ -750,7 +936,7 @@ function readScrollPosition(el: Element, args: { direction: string; point?: numb
   return { x: target.scrollLeft, y: target.scrollTop, max_x: maxX, max_y: maxY, at_end: atEnd };
 }
 
-async function selectValues(locator: Locator, input: ActInput, markSent: () => void): Promise<void> {
+async function selectValues(session: Session, page: Page, locator: Locator, input: ActInput, markSent: () => void): Promise<void> {
   if (input.value !== undefined && input.values !== undefined) throw new Error("invalid_input: select takes value OR values[], not both");
   const values = input.values ?? [requireValue(input.value, "select")];
   if (!Array.isArray(values) || values.some(value => typeof value !== "string")) throw new Error("invalid_input: values must be an array of option values/labels");
@@ -782,7 +968,7 @@ async function selectValues(locator: Locator, input: ActInput, markSent: () => v
   if (info.role === "combobox") {
     await locator.click({ timeout: REF_ACTION_TIMEOUT_MS });
     markSent();
-    if (!(await scope.getByRole("option").first().isVisible())) await locator.press("ArrowDown", { timeout: REF_ACTION_TIMEOUT_MS });
+    if (!(await scope.getByRole("option").first().isVisible())) await pressOnRef(session, page, locator, "ArrowDown", markSent);
   }
   const option = scope.getByRole("option", { name: values[0], exact: true });
   try { await option.first().waitFor({ state: "visible", timeout: REF_ACTION_TIMEOUT_MS }); }
