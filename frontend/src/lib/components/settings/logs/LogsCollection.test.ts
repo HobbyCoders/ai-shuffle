@@ -190,6 +190,56 @@ describe('entries', () => {
 	});
 });
 
+describe('same logger where the open entry replaces the list', () => {
+	// The page reports its width the moment CollectionPage observes it.
+	function pageWidth(width: number) {
+		vi.stubGlobal(
+			'ResizeObserver',
+			class {
+				constructor(private cb: ResizeObserverCallback) {}
+				observe() {
+					this.cb([{ contentRect: { width } } as ResizeObserverEntry], this as unknown as ResizeObserver);
+				}
+				disconnect() {}
+			}
+		);
+	}
+	afterEach(() => vi.unstubAllGlobals());
+
+	it('closes the entry so the filtered list shows, with focus on its row', async () => {
+		pageWidth(600);
+		await mount();
+		const coll = document.querySelector<HTMLElement>('.st-coll')!;
+		const items = () => Array.from(document.querySelectorAll<HTMLElement>('[data-settings-item]'));
+		const id = items()[0].dataset.settingsItem;
+		await fireEvent.click(items()[0]);
+		await tick();
+		expect(coll.dataset.replace).toBe('detail');
+
+		await fireEvent.click(screen.getByRole('button', { name: /Same logger/ }));
+		await tick();
+		await tick();
+		expect(settingsNav.selectedItem('logs')).toBeNull();
+		expect(coll.dataset.replace).toBe('list');
+		expect(items()).toHaveLength(2);
+		expect((document.activeElement as HTMLElement | null)?.closest('[data-settings-item]')?.getAttribute('data-settings-item')).toBe(id);
+	});
+
+	it('keeps the entry open beside the filtered list when there is room', async () => {
+		pageWidth(1200);
+		await mount();
+		const coll = document.querySelector<HTMLElement>('.st-coll')!;
+		const items = () => Array.from(document.querySelectorAll<HTMLElement>('[data-settings-item]'));
+		const id = items()[0].dataset.settingsItem;
+		await fireEvent.click(items()[0]);
+		await fireEvent.click(screen.getByRole('button', { name: /Same logger/ }));
+		await tick();
+		expect(settingsNav.selectedItem('logs')).toBe(id);
+		expect(coll.dataset.replace).toBeUndefined();
+		expect(items()).toHaveLength(2);
+	});
+});
+
 describe('helpers', () => {
 	it('gives identical lines distinct, stable ids', () => {
 		const twice = [lines[0], lines[0]];

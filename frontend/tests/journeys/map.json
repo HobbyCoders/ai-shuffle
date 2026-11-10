@@ -131,6 +131,11 @@
 			"globs": ["frontend/tests/journeys/shell-geometry.journey.mjs", "frontend/src/lib/components/settings/shell/PageTitle.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/layout/view/PanelToggle.svelte", "frontend/src/lib/components/layout/AppLayout.svelte"]
 		},
 		{
+			"why": "a Settings collection too narrow for list and detail shows one pane, keeps a way back and shows list actions' results",
+			"journeys": ["settings-narrow-collection"],
+			"globs": ["frontend/tests/journeys/settings-narrow-collection.journey.mjs", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/settings/shell/settings.css", "frontend/src/lib/components/settings/shell/EmptyDetail.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/settings/navigation.svelte.ts", "frontend/src/lib/settings/list-width.ts", "frontend/src/lib/components/settings/logs/LogsCollection.svelte"]
+		},
+		{
 			"why": "Settings > Memory lists, edits and deletes saved memories without losing a draft",
 			"journeys": ["settings-memory"],
 			"globs": ["frontend/tests/journeys/settings-memory.journey.mjs", "frontend/src/lib/components/settings/memory/**", "frontend/src/lib/settings/entries/memory.ts"]

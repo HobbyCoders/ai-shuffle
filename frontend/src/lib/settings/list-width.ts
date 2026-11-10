@@ -8,6 +8,11 @@ export const LIST_WIDTH_MIN = 300;
 export const DETAIL_WIDTH_MIN = 440;
 /** Fixed list width between 601 and 900px of shell width (no divider there). */
 export const LIST_WIDTH_NARROW = 280;
+/**
+ * Narrowest collection page that still fits the narrow list beside a usable
+ * detail. Below it the page shows one at a time (see `showsOnePane`).
+ */
+export const SPLIT_WIDTH_MIN = LIST_WIDTH_NARROW + DETAIL_WIDTH_MIN;
 export const LIST_WIDTH_STEP = 16;
 export const LIST_WIDTH_STEP_LARGE = 64;
 export const LIST_WIDTH_STORAGE_KEY = 'settings.listWidth';
@@ -22,6 +27,15 @@ export function clampListWidth(width: number, containerWidth: number): number {
 	const max = maxListWidth(containerWidth);
 	const w = Number.isFinite(width) ? width : LIST_WIDTH_DEFAULT;
 	return Math.round(Math.max(LIST_WIDTH_MIN, Math.min(w, max)));
+}
+
+/**
+ * True when a collection page `containerWidth` wide is too narrow for the list
+ * and a detail side by side, so an open item replaces the list. 0 means not
+ * measured yet: keep the split rather than flash a single pane.
+ */
+export function showsOnePane(containerWidth: number): boolean {
+	return containerWidth > 0 && containerWidth < SPLIT_WIDTH_MIN;
 }
 
 export function readListWidth(): number {
