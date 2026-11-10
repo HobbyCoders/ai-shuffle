@@ -18,6 +18,7 @@ def target(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_sync, "memdb", fake)
     monkeypatch.setattr(memory_sync, "settings", SimpleNamespace(
         agent_memory_sync=True, effective_instance_id="test-instance",
+        effective_data_dir=tmp_path / "data",
     ))
     monkeypatch.setattr(memory_sync, "_resolve_target", lambda *args: (KEY, folder))
     memory_sync.reset_state()

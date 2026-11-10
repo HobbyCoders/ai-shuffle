@@ -54,8 +54,12 @@ The gate and the baseline are therefore keyed per dir, not per memory_key.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import re
+import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -101,6 +105,8 @@ def reset_state() -> None:
     """Clear all in-memory sync state (reconcile gate + baselines). For tests."""
     _reconciled_keys.clear()
     _local_baseline.clear()
+    with _pending_lock:
+        _in_flight.clear()
 
 
 def _sha256(text: str) -> str:
@@ -432,7 +438,159 @@ async def push_memory(project_id: Optional[str], working_dir: Optional[str],
                       leg: str = "delegated") -> None:
     if not settings.agent_memory_sync:
         return
+    # Queued before dispatch: a push still waiting for a thread when the stop
+    # deadline cancels this awaiter is owed just like one stalled mid-write.
+    token = _queue_publication(project_id, working_dir, leg)
     try:
-        await run_sync(push_memory_sync, project_id, working_dir, leg)
+        if token is None:
+            await run_sync(push_memory_sync, project_id, working_dir, leg)
+        else:
+            await run_sync(_publish, project_id, working_dir, leg, token)
     except Exception:  # noqa: BLE001
         logger.debug("memory_sync: push failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Durable publication queue (#1305)
+#
+# One small JSON marker per project under ``<data_dir>/memory-sync-pending/``,
+# on this install's local disk (a stalled database cannot block writing it).
+# Writers: ``push_memory`` (before dispatch) overwrites it with a new token;
+# ``_finish_publication`` deletes it only when the push that wrote that token
+# ran to completion, so a newer queued push is never cleared by an older one.
+# Reader: ``publish_pending`` at startup re-runs the ordinary ``push`` for each
+# marker: last-write-wins against the DB, never writes a local file, and never
+# tombstones (no reconcile baseline in a fresh process). Re-running a push is
+# idempotent per file version (unchanged hashes are not uploaded), so a process
+# killed during the retry simply retries again on the next start.
+# ---------------------------------------------------------------------------
+
+_PENDING_DIR = "memory-sync-pending"
+_pending_lock = threading.Lock()
+# Tokens of publications this process issued that have not ended yet (still
+# queued for a thread or running). Shutdown reports these as unfinished saving.
+_in_flight: set = set()
+
+
+def _pending_path(project_id: str) -> Path:
+    name = hashlib.sha256(project_id.encode("utf-8")).hexdigest()[:32]
+    return Path(settings.effective_data_dir) / _PENDING_DIR / f"{name}.json"
+
+
+def _queue_publication(project_id: Optional[str], working_dir: Optional[str],
+                       leg: str) -> Optional[str]:
+    """Record an owed native push; None when nothing would be pushed."""
+    if leg != "native" or not settings.agent_memory_sync or not project_id or not working_dir:
+        return None
+    token = uuid.uuid4().hex
+    with _pending_lock:
+        _in_flight.add(token)
+        try:
+            path = _pending_path(project_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f".{token}.tmp")
+            temporary.write_text(json.dumps({
+                "project_id": project_id, "working_dir": working_dir,
+                "leg": leg, "token": token,
+            }), encoding="utf-8")
+            os.replace(temporary, path)
+        except Exception:  # noqa: BLE001 — the push itself still runs.
+            logger.warning("memory_sync: could not queue publication for retry", exc_info=True)
+    return token
+
+
+def _finish_publication(project_id: str, token: str, completed: bool) -> None:
+    with _pending_lock:
+        _in_flight.discard(token)
+        if not completed:
+            return  # Still owed: the next start retries it.
+        try:
+            path = _pending_path(project_id)
+            if json.loads(path.read_text(encoding="utf-8")).get("token") == token:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001 — a leftover marker only retries a no-op push.
+            logger.debug("memory_sync: could not clear queued publication", exc_info=True)
+
+
+def _publish(project_id: str, working_dir: str, leg: str, token: str) -> None:
+    completed = False
+    try:
+        push_memory_sync(project_id, working_dir, leg)
+        completed = True
+    finally:
+        _finish_publication(project_id, token, completed)
+
+
+def pending_publications() -> int:
+    """Publications this process issued that have not ended (for shutdown)."""
+    with _pending_lock:
+        return len(_in_flight)
+
+
+def publish_pending() -> int:
+    """Finish pushes a previous process queued but did not complete.
+
+    Sync turned off: nothing is pushed and markers stay for when it is back on.
+    A project that no longer exists (or a memory folder that is gone) has
+    nothing to publish, so its marker is dropped. A database error keeps the
+    marker for the next start. Returns how many publications completed.
+    """
+    if not settings.agent_memory_sync:
+        return 0
+    folder = Path(settings.effective_data_dir) / _PENDING_DIR
+    try:
+        markers = sorted(folder.glob("*.json"))
+    except OSError:
+        return 0
+    completed = 0
+    for path in markers:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            project_id, working_dir = record["project_id"], record["working_dir"]
+            leg, token = record["leg"], record["token"]
+            if not all(isinstance(value, str) and value
+                       for value in (project_id, working_dir, leg, token)):
+                raise ValueError("incomplete marker")
+            if _pending_path(project_id) != path or leg != "native":
+                raise ValueError("marker does not name a native project")
+        except FileNotFoundError:
+            continue
+        except Exception:  # noqa: BLE001 — unreadable: nothing to retry.
+            logger.warning("memory_sync: dropping unreadable queued publication %s", path.name)
+            path.unlink(missing_ok=True)
+            continue
+        try:
+            project = database.get_project(project_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("memory_sync: queued publication retained; project lookup failed",
+                           exc_info=True)
+            continue
+        if not project:
+            _finish_publication(project_id, token, True)
+            continue
+        with _pending_lock:
+            _in_flight.add(token)
+        try:
+            _publish(project_id, working_dir, leg, token)
+        except Exception:  # noqa: BLE001
+            logger.warning("memory_sync: queued publication retained for the next start",
+                           exc_info=True)
+            continue
+        completed += 1
+    if completed:
+        logger.info("memory_sync: published %d queued memory folder(s) from a previous run",
+                    completed)
+    return completed
+
+
+async def publish_pending_memory() -> None:
+    """Startup entry point for ``publish_pending``; never raises."""
+    if not settings.agent_memory_sync:
+        return
+    try:
+        await run_sync(publish_pending)
+    except Exception:  # noqa: BLE001
+        logger.warning("memory_sync: queued publications retained for the next start",
+                       exc_info=True)

@@ -340,6 +340,10 @@ async def lifespan(app: FastAPI):
         bg_tasks = start_background_tasks()
         from app.services.attention_dispatcher import dispatcher
         bg_tasks.append(asyncio.create_task(dispatcher.run(), name="attention-push"))
+        # Memory-folder pushes a previous process was stopped during (#1305);
+        # off the boot path, and retained for the next start if cut off again.
+        from app.core.memory_sync import publish_pending_memory
+        bg_tasks.append(asyncio.create_task(publish_pending_memory(), name="memory-publication-recovery"))
         if os.environ.get("AI_SHUFFLE_SCRATCH_REAPER") != "0":
             from app.core.scratch_reaper import maintain_scratch
             bg_tasks.append(asyncio.create_task(maintain_scratch(), name="scratch-maintenance"))
