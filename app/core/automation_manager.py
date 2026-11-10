@@ -116,8 +116,40 @@ class _ShutdownBeforeTurn(Exception):
 DISABLED_TRIGGER_MESSAGE = "Automation is disabled — enable it before triggering"
 
 
-class AutomationDisabledError(RuntimeError):
+class AutomationTriggerRefused(RuntimeError):
+    """A manual trigger that starts nothing; the message says why."""
+
+
+class AutomationDisabledError(AutomationTriggerRefused):
     """A manual trigger of a disabled automation: refused, never a silent no-op."""
+
+
+class AutomationNotOwnedError(AutomationTriggerRefused):
+    """A manual trigger on a worker that does not own the automation (#1397)."""
+
+
+def _network_refusal(automation: Dict[str, Any]) -> Optional[str]:
+    """Why this worker must not run *automation*, or None when it may.
+
+    One owner rule for every start (#1397), the one a scheduled fire uses:
+    outside a network nothing changes; on a network only the owner runs it,
+    an unowned one is claimed by the worker ``claim`` lets through, and a
+    fenced or not yet admitted worker runs nothing. Fails closed, like the
+    scheduled gate: running on two workers duplicates outside work.
+    """
+    from app.network import ownership
+    try:
+        decided = ownership.decide_automation(automation)
+    except Exception:  # noqa: BLE001
+        logger.exception("Network ownership unavailable; automation %s not started", automation.get("id"))
+        return "network ownership is unavailable on this worker"
+    if decided is None or decided[0]:
+        return None
+    owner = ownership.owner_of(automation)
+    if owner and owner != ownership.my_device_id():
+        return f"Automation '{automation.get('name') or automation.get('id')}' runs on worker " \
+               f"{ownership.owner_label(owner)}; start it there"
+    return f"This worker cannot run the automation now ({decided[1]})"
 
 
 class AutomationManager:
@@ -625,6 +657,10 @@ class AutomationManager:
             return None
         if not automation.get("is_enabled"):
             raise AutomationDisabledError(DISABLED_TRIGGER_MESSAGE)
+        refusal = await run_sync(_network_refusal, automation)
+        if refusal:
+            # Answer the caller instead of a "triggered" that never runs here.
+            raise AutomationNotOwnedError(refusal)
 
         trigger_data = {"trigger": "manual", "fired_at": datetime.now(timezone.utc).isoformat()}
         self._create_tracked_task(self._execute(automation_id, trigger_data), name=f"auto-manual-{automation_id}")
@@ -645,6 +681,17 @@ class AutomationManager:
 
         if not automation.get("is_enabled"):
             logger.debug(f"Automation {automation_id} is disabled — skipping")
+            return
+
+        # Every start path reaches here: only the owning worker runs it. A
+        # start that arrives elsewhere is dropped before any run row, approval
+        # or budget count, so the owner's history stays the only one.
+        refusal = await run_sync(_network_refusal, automation)
+        if refusal:
+            logger.warning(
+                "Automation %s: %s trigger dropped on this worker: %s",
+                automation_id, trigger_data.get("trigger", "unknown"), refusal,
+            )
             return
 
         # Concurrency check — only one run at a time per automation
@@ -909,6 +956,9 @@ class AutomationManager:
                 error = "Choose an agent before running this automation"
             elif not current.get("is_enabled"):
                 error = "Enable this automation before running it"
+            else:
+                # An approved run waited here; the automation may have moved.
+                error = _network_refusal(current)
             if error is None:
                 return False
             database.update_automation_run(

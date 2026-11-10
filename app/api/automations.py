@@ -347,7 +347,11 @@ async def trigger_automation(
         # disabled automation, so a fake "triggered" here would mislead the
         # caller into thinking a run started. Reject explicitly — the user
         # must enable the automation first.
-        from app.core.automation_manager import AutomationDisabledError, DISABLED_TRIGGER_MESSAGE
+        from app.core.automation_manager import (
+            DISABLED_TRIGGER_MESSAGE,
+            AutomationDisabledError,
+            AutomationNotOwnedError,
+        )
 
         if not automation.get("is_enabled"):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=DISABLED_TRIGGER_MESSAGE)
@@ -356,6 +360,9 @@ async def trigger_automation(
         except AutomationDisabledError:
             # Disabled between the read above and the trigger.
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=DISABLED_TRIGGER_MESSAGE)
+        except AutomationNotOwnedError as not_owned:
+            # Another worker owns it (#1397): say which, start nothing here.
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(not_owned))
         if not result:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to trigger automation")
         return result
