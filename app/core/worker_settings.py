@@ -197,8 +197,11 @@ def _local_action(action: Action) -> dict[str, Any]:
         state = claude_cli_install.payload()
         if not state["can_install"]:
             return _result("unsupported", "platform")
+        # An update is the CLI's own `claude update`, which replaces a running
+        # install the way its auto-updater does; only an install waits for the
+        # CLI to be idle.
         if ((state.get("job") and state["job"]["state"] == "running")
-                or claude_cli_install._in_use()):
+                or (action.operation == "claude-install" and claude_cli_install._in_use())):
             return _result("refused", "busy")
         if action.operation == "claude-update" and not state["installed"]:
             return _result("refused", "not-installed")
@@ -345,11 +348,14 @@ async def snapshot() -> dict[str, list[dict[str, Any]]]:
     return {"workers": await asyncio.gather(*(read(row) for row in rows))}
 
 
-async def dispatch(request: Dispatch) -> dict[str, Any]:
+async def dispatch(request: Dispatch, *, include_self: bool = True) -> dict[str, Any]:
     rows = await run_sync(_directory)
-    selected = rows if request.target == "all" else [r for r in rows if r["device_id"] == request.target]
-    if not selected:
-        raise LookupError("Unknown worker; no action was sent")
+    if request.target == "all":
+        selected = [r for r in rows if include_self or not r["is_self"]]
+    else:
+        selected = [r for r in rows if r["device_id"] == request.target]
+        if not selected:
+            raise LookupError("Unknown worker; no action was sent")
     request_id = str(uuid.uuid4())
     body = ActionRequest(operation="action", request_id=request_id, expires_at=time.time() + 15,
                          action=request.action)
@@ -394,3 +400,13 @@ async def dispatch(request: Dispatch) -> dict[str, Any]:
             return {"device_id": row["device_id"], "device_name": row["device_name"], **result}
 
     return {"request_id": request_id, "workers": await asyncio.gather(*(send(row) for row in selected))}
+
+
+async def update_claude_on_peers() -> list[dict[str, Any]]:
+    """Ask every other worker to run its own `claude update`; one result per worker.
+
+    The "Update all workers" part of "Check for update" in Settings > Providers
+    > Claude. The connected worker starts its own job first and is not asked here.
+    """
+    request = Dispatch(target="all", action=ClaudeInstall(operation="claude-update"))
+    return (await dispatch(request, include_self=False))["workers"]

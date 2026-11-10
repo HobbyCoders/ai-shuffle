@@ -54,9 +54,12 @@ CAPABILITIES = {
     "runtime-overlays-v1": "the baked bootstrap can verify and cold-start signed runtime overlays",
     "source-supervisor": "the image starts the supervisor, the updater and the Chromium launch "
                          "scripts of the active verified update instead of its own copies",
+    "database-clone-v1": "the image's own supervisor can put back a database copy an update took as "
+                         "a copy-on-write clone of the cluster directory (a first start that fails "
+                         "across a container restart is put right by the image's supervisor)",
 }
 # What an image built from this source provides.
-PROVIDES = ("base-1", "source-supervisor", "runtime-overlays-v1")
+PROVIDES = ("base-1", "source-supervisor", "runtime-overlays-v1", "database-clone-v1")
 # What this source needs from the image it runs on.
 REQUIRES = ("base-1",)
 # What a coming release will require. Images without it say so in advance.

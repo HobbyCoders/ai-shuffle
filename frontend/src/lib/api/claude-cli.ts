@@ -115,6 +115,19 @@ export interface ClaudeCliInstallation {
 	can_remove: boolean;
 	platform: 'docker' | 'desktop' | 'local';
 	job: ClaudeCliJob | null;
+	/** "Update all workers" is on: an update is also sent to every other worker. */
+	update_all_workers?: boolean;
+	/** Only on the reply to an update sent to every worker: one result per other
+	 *  worker, or null when they could not be asked. */
+	workers?: ClaudeCliPeerResult[] | null;
+}
+
+/** What another worker answered when asked to run its own `claude update`. */
+export interface ClaudeCliPeerResult {
+	device_id: string;
+	device_name: string;
+	outcome: 'ok' | 'accepted' | 'offline' | 'unsupported' | 'refused' | 'uncertain';
+	reason: string;
 }
 
 export function getClaudeCliInstallation(): Promise<ClaudeCliInstallation> {
