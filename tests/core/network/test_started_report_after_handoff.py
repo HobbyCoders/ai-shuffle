@@ -705,3 +705,71 @@ async def test_a_report_at_the_hop_limit_is_kept_and_delivered_later(pair, tmp_p
     finally:
         c.close()
         d.close()
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: no steer for a report with a receipt, an older receiver
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_report_for_a_parent_mid_turn_is_queued_with_its_receipt_not_steered(pair, monkeypatch):
+    """S8: a steer is held only in memory. A report with a receipt is a queued
+    wake written with that receipt, so a crash cannot leave the receipt alone."""
+    from app.core import turn_scheduler
+    a, _b, _, _ = pair
+    steered = []
+
+    async def steer(*args, **kwargs):
+        steered.append(args[0])
+        return True  # the live turn would take it, then the process dies
+    monkeypatch.setattr(turn_scheduler, "_try_steer_terminal_notification", steer)
+    with a.active():
+        start = _start_child()
+        await orch.report_settled_start(CHILD, _settle(start), "completed")
+        assert steered == []
+        [wake] = _reports(PARENT)
+        assert wake["payload"]["pending_frames"][0]["task_id"] == CHILD
+        assert len(_receipts()) == 1
+
+
+def _as_older_receiver(monkeypatch):
+    """The receiver's commit body as main's names it: no report receipts."""
+    real = handoff._moving_wakes
+
+    def older(data):
+        fields = dict(real(data))
+        fields.pop("report_receipts", None)
+        return fields
+    monkeypatch.setattr(handoff, "_moving_wakes", older)
+
+
+@pytest.mark.asyncio
+async def test_a_chat_with_report_receipts_does_not_move_to_an_older_worker(pair, monkeypatch):
+    """S10: an older receiver neither installs nor names the receipts. The
+    commit is refused, so the report is never admitted again over there."""
+    a, b, _, _ = pair
+    with a.active():
+        start = _start_child()
+        await orch.report_settled_start(CHILD, _settle(start), "completed")
+        assert len(_receipts()) == 1
+        [wake] = _reports(PARENT)
+        _run(wake)
+    _as_older_receiver(monkeypatch)
+    monkeypatch.setattr(control, "call", _route([a, b]))
+    with b.active():
+        with pytest.raises(Exception, match="update that worker"):
+            await handoff.receive(database.get_session(PARENT))
+        assert control.owner_of(database.get_session(PARENT)) == a.device_id
+    with a.active():
+        assert control.owner_of(database.get_session(PARENT)) is None
+        assert len(_receipts()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_chat_without_report_receipts_still_moves_to_an_older_worker(pair, monkeypatch):
+    """S10: nothing to carry, so the move is the same as on main."""
+    a, b, _, _ = pair
+    with a.active():
+        assert _receipts() == []
+    _as_older_receiver(monkeypatch)
+    await _move_parent(a, b, monkeypatch)

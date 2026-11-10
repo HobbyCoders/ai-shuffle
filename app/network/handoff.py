@@ -1054,17 +1054,21 @@ def _commit(sid, target, payload, token):
         # started chat's report, #1443) is visible only now: refuse as _idle
         # does, rolling the flip back, so it runs here and the move is retried.
         _check_open_turns(cur, sid)
-        carried = payload.get("report_receipts")
-        if carried is not None:
-            # Report receipts are written under this row lock too. One written
-            # since begin's export would stay behind, and the chat's new worker
-            # would admit that report again (#1443).
-            from app.core.session_orchestration import REPORT_RECEIPT_KIND
+        # Report receipts are written under this row lock too. One the receiver
+        # does not install would stay behind, and the chat's new worker would
+        # admit that report again (#1443): one written since begin's export, or
+        # any, for a receiver too old to carry them (it names none).
+        from app.core.session_orchestration import REPORT_RECEIPT_KIND
 
-            cur.execute("SELECT id FROM pending_interactions WHERE session_id=%s AND kind=%s AND state='answered'",
-                        (sid, REPORT_RECEIPT_KIND))
-            if {row["id"] for row in cur.fetchall()} - set(carried):
-                raise ValueError("A report reached this chat during the move; ownership was not moved. Try again.")
+        carried = payload.get("report_receipts")
+        cur.execute("SELECT id FROM pending_interactions WHERE session_id=%s AND kind=%s AND state='answered'",
+                    (sid, REPORT_RECEIPT_KIND))
+        left = {row["id"] for row in cur.fetchall()} - set(carried or [])
+        if left and carried is None:
+            raise ValueError("This chat has delivered reports the target worker cannot carry yet; "
+                             "update that worker, then try again. Ownership was not moved.")
+        if left:
+            raise ValueError("A report reached this chat during the move; ownership was not moved. Try again.")
         if session_branch is None:
             cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
         cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))

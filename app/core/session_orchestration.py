@@ -2149,6 +2149,7 @@ async def defer_started_report(starter_id, frame, admit=None):
     report's receipt, so it is never kept on a worker that does not run the
     starter (#1443).
     """
+    import functools
     from contextlib import nullcontext
     from app.db import sessions, session_events
     from app.core.task_registry import user_stop_holds
@@ -2181,7 +2182,10 @@ async def defer_started_report(starter_id, frame, admit=None):
         def write(conn):
             noted.append(record(conn))
             return {"id": event_id}
-        verdict, _row = await asyncio.to_thread(admit, write)
+        # record() appends an event under the child's (or starter's) runtime
+        # locks: admit takes them before the starter's session row.
+        verdict, _row = await asyncio.to_thread(
+            functools.partial(admit, write, runtime=(frame.get("task_id"), starter_id)))
         if verdict == "moved":
             return "moved"
         recorded = verdict == "written" and noted and noted[0]
@@ -2388,7 +2392,7 @@ def _settle_forward(row_id, *, delivered=False, refused=None, attempts=None, dev
         cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row_id))
 
 
-def admit_report(home, event_id, write):
+def admit_report(home, event_id, write, *, runtime=()):
     """Admit a report for ``home`` here, once: ``write(conn)`` queues its wake.
 
     One transaction: the session row lock (the hand-off flips ownership under
@@ -2399,6 +2403,10 @@ def admit_report(home, event_id, write):
     came from), ``moved`` (another worker runs ``home`` now), ``gone`` or
     ``unwritten`` (nothing written: ``write`` answered no row). A ``write``
     that answers None changes nothing and only probes the verdict.
+    ``runtime``: chats whose run and event-counter locks ``write`` takes.
+    They are taken first, with ``home``'s, in the order of
+    ``app.db.session_locks`` (run, counter, session; never run or counter
+    after a session row), the order a chat delete uses.
     """
     from app.db.base import transaction
     from app.network import control
@@ -2406,6 +2414,9 @@ def admit_report(home, event_id, write):
         raise ValueError("A report is admitted only with its report id")
     with transaction() as conn:
         cursor = conn.cursor()
+        if runtime:
+            from app.db.session_locks import lock_session_runtimes
+            lock_session_runtimes(cursor, {home, *[sid for sid in runtime if sid]})
         cursor.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (home,))
         row = cursor.fetchone()
         if row is None:

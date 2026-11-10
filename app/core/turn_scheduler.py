@@ -2526,9 +2526,14 @@ async def on_started_session_terminal(
     Returns the outcome (see ``_on_task_terminal_locked``), or ``deferred``
     when the starter is at rest and keeps the report on the child. Every
     report passes an ``admit`` guard (``session_orchestration.admit_report``)
-    with its durable id: the wake, the steer receipt and the deferral are all
-    admitted once, on the worker that runs the starter, else ``moved`` (#1443).
+    with its durable id: the wake and the deferral are admitted once, on the
+    worker that runs the starter, else ``moved`` (#1443). Such a report is
+    never steered into a live turn: a steer is held only in memory, so its
+    receipt could outlive a crash that loses the report. It is a queued wake,
+    written in the same transaction as its receipt.
     """
+    if admit is not None:
+        steer = False
     async with _terminal_delivery_lock(session_id):
         from app.core.session_orchestration import defer_started_report, record_started_report
         try:
@@ -2812,19 +2817,11 @@ async def _on_task_terminal_locked(
             # session is genuinely at rest (or unsteerable), which falls through
             # to the queued wake below. Latch only after acceptance; the
             # session delivery lock prevents concurrent duplicate submissions.
-            if steer and admit is not None:
-                # A report with an id steers only if it was never admitted
-                # and this worker still runs the chat; the receipt follows.
-                verdict, _row = await asyncio.to_thread(admit, lambda conn: None)
-                if verdict in ("moved", "duplicate", "gone"):
-                    return {"moved": "moved", "duplicate": "admitted"}.get(verdict, "refused")
             if steer and await _try_steer_terminal_notification(
                 session_id, prompt, [frame], wake_task_ids, carry_held=True,
             ):
                 task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"),
                                                  incarnation=frame.get("task_incarnation"))
-                if admit is not None:
-                    await _admit_latched(admit, "steered")
                 logger.info(
                     "turn_scheduler: unpark for %s — task %s terminal (%s) "
                     "steered into the live turn",
