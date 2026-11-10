@@ -75,11 +75,16 @@ JOURNEY_MAP = "frontend/tests/journeys/map.json"
 # must not spend that uncertainty out of the full retry/teardown reserves.
 SETUP_SECONDS = 30
 CALIBRATION_ERROR_SECONDS = 120
-# Conservative planning budgets, NOT hosted measurements. The new 47-case
-# producer took ~17 minutes in red run 42107295628 (job 127526542398), versus
-# 8.6 minutes from the generic per-case fallback. Reserve 18 minutes until a
-# complete green run supplies its median; never add red evidence to WEIGHTS.
-UNMEASURED_BUDGET_FLOORS = {"chat-position-stability.journey.mjs": 18 * 60}
+# Conservative planning budgets, NOT hosted measurements, for files no green
+# run has timed yet; a matched green refresh replaces each. Three journeys that
+# each filled a shard (944s, 908s and 778s in main run 42664620034) now run as
+# two files apiece. Their per-case seconds in main run 42719765869 put the
+# halves near 475s, 455s and 390s; reserve about a minute more than that.
+UNMEASURED_BUDGET_FLOORS = {
+    "chat-position-stability.journey.mjs": 540, "chat-position-stability-2.journey.mjs": 540,
+    "stop-with-queued-messages.journey.mjs": 540, "stop-with-queued-messages-2.journey.mjs": 510,
+    "sidebar-truth.journey.mjs": 450, "sidebar-truth-2.journey.mjs": 450,
+}
 READY_SECONDS = 420
 JOURNEY_SECONDS = 1500
 SUMMARY_CASE_CHARS = 12_000

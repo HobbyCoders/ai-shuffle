@@ -213,7 +213,7 @@
 		},
 		{
 			"why": "what a sidebar row says is true: one row's failed change undoes only that change, a failed turn reads Failed on every producer, a project is listed once in the Filter",
-			"journeys": ["sidebar-truth"],
+			"journeys": ["sidebar-truth", "sidebar-truth-2"],
 			"globs": [
 				"frontend/src/lib/stores/app-data*",
 				"frontend/src/lib/components/layout/Sidebar.svelte",
@@ -463,12 +463,12 @@
 		},
 		{
 			"why": "stopping a turn",
-			"journeys": ["stop-midstream", "chat-send-stream", "stop-holds-the-reader", "stop-with-queued-messages"],
+			"journeys": ["stop-midstream", "chat-send-stream", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2"],
 			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
 		},
 		{
 			"why": "queued (pending) messages",
-			"journeys": ["queue-while-busy", "stop-holds-the-reader", "stop-with-queued-messages"],
+			"journeys": ["queue-while-busy", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2"],
 			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*", "frontend/src/lib/utils/not-sent-hold*"]
 		},
 		{
@@ -599,8 +599,8 @@
 		},
 		{
 			"why": "per-frame transcript/composer stability regression cases",
-			"journeys": ["chat-position-stability"],
-			"globs": ["frontend/tests/journeys/chat-position-stability.journey.mjs"]
+			"journeys": ["chat-position-stability", "chat-position-stability-2"],
+			"globs": ["frontend/tests/journeys/chat-position-stability*"]
 		},
 		{
 			"why": "sending a draft that changes the composer's height keeps the turn rail still",
@@ -658,6 +658,16 @@
 			"why": "in-app documentation text: no journey reads it, so it needs none (and is not an uncovered UI source file)",
 			"journeys": [],
 			"globs": ["frontend/src/lib/docs/content/**"]
+		},
+		{
+			"why": "the sidebar-truth cases, which two journey files run in halves",
+			"journeys": ["sidebar-truth", "sidebar-truth-2"],
+			"globs": ["frontend/tests/journeys/sidebar-truth*"]
+		},
+		{
+			"why": "the stop-with-queued-messages cases, which two journey files run in halves",
+			"journeys": ["stop-with-queued-messages", "stop-with-queued-messages-2"],
+			"globs": ["frontend/tests/journeys/stop-with-queued-messages*"]
 		},
 		{
 			"why": "a journey file itself",

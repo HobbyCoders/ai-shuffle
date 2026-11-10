@@ -1060,11 +1060,16 @@ The Nov 9 refresh from clean matched main run `42664620034` covers 64 files and
 910 seconds against the 990-second planning limit, so nearly every pull request
 that added journey cases failed the headroom regression until its author
 rebalanced the suite: 15 of 22 failed backend runs on Nov 8–9, across nine
-branches. Sixteen shards still peak at 944.27 seconds (one file,
-`chat-position-stability`, with `stop-with-queued-messages` next at 907.59),
-but every other shard plans at or under about 780 seconds, leaving over 200
-seconds for new cases. Growth in those two files is the remaining limit: split
-them before adding cases to either. The one-percent-refresh regression also
+branches. Sixteen shards then still peaked at 944.27 seconds, because one file
+(`chat-position-stability`, with `stop-with-queued-messages` next at 907.59)
+filled a shard by itself. Those two and `sidebar-truth` now run as two journey
+files each: the cases live in `<name>.cases.mjs`, `<name>.journey.mjs` runs the
+cases its `FIRST_HALF` names and `<name>-2.journey.mjs` runs every other one
+(`lib/split.mjs`). All sixteen shards now plan at about 13.5 step minutes with
+over 200 seconds of headroom. The six halves use planning budgets in
+`UNMEASURED_BUDGET_FLOORS` until a green main run is refreshed into the
+weights. A regression test refuses any file estimated above 600 seconds: split
+it the same way. The one-percent-refresh regression also
 preserves the uncertainty reserve when it adds two new journeys. Older green runs with changed app/journey
 workloads cannot refresh these measurements: the guarded producer refuses them.
 New or grown files keep their conservative case-count fallbacks until a complete
