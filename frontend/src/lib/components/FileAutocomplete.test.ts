@@ -242,17 +242,27 @@ it('offers project agents only from the local project it is told about', async (
     expect(getSubagentsForAutocomplete.mock.calls[0][1]).toBeUndefined();
 });
 
-it('inserts a picked note as its Notes/<id> reference, not the viewing worker\'s file path (#1364)', async () => {
-    // `absolute_path` is where the file sits on the worker you view from; a
-    // chat on another worker has a different data folder, so the chip must
-    // carry the id the running worker resolves itself.
+const pickNote = async (extra: Record<string, unknown>) => {
     getNotesAutocomplete.mockResolvedValue([
         { ...note('Pelican note'), id: 'note-0123456789ab', absolute_path: '/viewer/data/notes/test.md' },
     ]);
-    const { component } = render(FileAutocomplete, { ...props, inputValue: '@Notes/remote' });
+    const { component } = render(FileAutocomplete, { ...props, inputValue: '@Notes/remote', ...extra });
     await screen.findByText('Pelican note');
     expect(component.handleKeyDown(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))).toBe(true);
+};
+
+it('inserts a note picked in a chat on another worker as its Notes/<id> reference (#1364)', async () => {
+    // `absolute_path` is where the file sits on the worker you view from; the
+    // worker running the chat has its own data folder and resolves the id.
+    await pickNote({ runsElsewhere: true });
     expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
         type: 'note', path: 'Notes/note-0123456789ab', note_id: 'note-0123456789ab',
+    }));
+});
+
+it('keeps this worker\'s file path for a note picked in a chat on this worker', async () => {
+    await pickNote({ runsElsewhere: false });
+    expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        type: 'note', path: '/viewer/data/notes/test.md', note_id: 'note-0123456789ab',
     }));
 });

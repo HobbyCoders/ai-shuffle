@@ -29,8 +29,9 @@
 //   note-pick-names-the-note a note picked in a chat on another worker is
 //                        inserted as `Notes/<id>`, not the viewing worker's
 //                        file path (#1364)
-//   note-pick-resolves-on-running-worker the same pick, sent: the worker
-//                        running the turn hands the model its own note file
+//   note-pick-same-worker-keeps-path a note picked in a chat on this worker
+//                        keeps this worker's file path, and the model is sent
+//                        exactly that path
 //
 // Slow desktop and phone only. Shards have little time to spare, and the races
 // here show up under the slow throttle.
@@ -374,24 +375,22 @@ await runJourney({
 			}
 		},
 		{
-			name: 'note-pick-resolves-on-running-worker',
+			name: 'note-pick-same-worker-keeps-path',
 			setup: async (ctx) => {
 				await startNewChat(ctx);
 				ctx.note = await stageNote(ctx.page);
 			},
 			async act({ page, mark, status, note }) {
-				await mark('take the note');
+				await mark('take the note in a new chat on this worker');
 				const path = await pickNote(page, note);
-				expect(path === `Notes/${note.id}`, `the chip names the note in every chat, got ${path}`);
+				expect(/[\\/]notes[\\/][^/\\]+\.md$/.test(path ?? ''), `the chip keeps this worker's note file, got ${path}`);
 				const token = uniq();
 				// Focus without a tap: on a phone the tap lands on the chip, selecting it.
 				await composer(page).press('ControlOrMeta+End');
 				await page.keyboard.type(` read ${token}`);
 				await mark('send it');
 				const prompt = await sendAndExpectReply(page, status, token, 2);
-				// The worker running the turn expands the reference to its own file.
-				expect(!prompt.includes(`Notes/${note.id}`) && /[\\/]notes[\\/][^"\s]+\.md/.test(prompt),
-					`the model gets the running worker's copy of the note, got ${prompt.slice(0, 400)}`);
+				expect(prompt.includes(JSON.stringify(`@${path}`).slice(1, -1)), `the model gets that same path, got ${prompt.slice(0, 400)}`);
 			}
 		}
 	],

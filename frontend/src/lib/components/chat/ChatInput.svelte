@@ -76,6 +76,7 @@
 	import { detectProjectMismatch } from './project-mismatch';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
+	import { chatRunsElsewhere } from './runs-elsewhere';
 	import { UI_MOUNT } from '$lib/utils/ui-signature';
 	import TiptapEditor from './TiptapEditor.svelte';
 	import type { Editor } from '@tiptap/core';
@@ -138,6 +139,9 @@
 		$activeSession.project || ($activeSession.sessionId ? $activeSession.projectV2Id : '') || undefined
 	);
 	const mentionsAvailable = $derived(!!mentionProjectId);
+	const mentionRunsElsewhere = $derived(chatRunsElsewhere(
+		$activeSession, $sessions.find((session) => session.id === $activeSession.sessionId)
+	));
 	let mentionAwaitingProject: string | null = null;
 	const mentionWorktreeId = $derived(
 		$activeSession.worktreeIntent === 'worktree' && !$activeSession.isRemote
@@ -1877,6 +1881,7 @@
 							profileId={$activeSession.profile}
 							worktreeId={mentionWorktreeId}
 							sessionId={$activeSession.sessionId ?? undefined}
+							runsElsewhere={mentionRunsElsewhere}
 							visible={showFileAutocomplete}
 							onSelect={handleFileSelect}
 							onClose={() => showFileAutocomplete = false}

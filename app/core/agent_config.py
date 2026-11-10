@@ -7,10 +7,10 @@ from app.db import database
 def resolve_note_references(prompt: str) -> str:
     """Resolve @Notes/note-id references in a prompt on this worker.
 
-    The chat @ menu inserts these references for notes (#1364): a note's file
-    path is per-worker, so the worker that runs the turn redirects the
-    reference to its own copy of the file, or inlines the content when it has
-    no file for the note yet.
+    The chat @ menu inserts these references for a note picked in a chat on
+    another worker (#1364): a note's file path is per-worker, so the worker
+    that runs the turn redirects the reference to its own copy of the file, or
+    inlines the content when it has no file for the note yet.
     """
     def replace_note(match):
         note_id = match.group(1)

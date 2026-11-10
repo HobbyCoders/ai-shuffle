@@ -2087,15 +2087,8 @@ class SessionRuntime:
                     steer_id = (command_id if isinstance(command_id, str)
                                 and command_id.startswith("client-") else row_id)
                     self._steer_ids[row_id] = steer_id
-                    from app.core.query_engine import _resolve_note_references_for
                     from app.core.time_awareness import owner_message_receipt
 
-                    # A message steered into the live turn skips the engine's
-                    # turn setup, so expand its ``@Notes/<id>`` references here,
-                    # the same way and on this (the running) worker (#1364).
-                    prompt = await asyncio.to_thread(
-                        _resolve_note_references_for, prompt, self.api_user_id,
-                    )
                     await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id,
                                         accepted_at=owner_message_receipt(row)["owner_message_at"])
                     # Armed only once the engine took the message: a steer that
@@ -2393,7 +2386,8 @@ class SessionRuntime:
 
         * attachments (``upload_blob_ids``): the files have to be materialized
           into the working dir before the prompt makes sense, which is turn
-          setup, not something a tool result can carry;
+          setup, not something a tool result can carry; the same for a
+          ``@Notes/<id>`` reference, which turn setup expands;
         * a different model / effort / permission mode, or a different set of
           workspace folders (a row that names none means the chat's stored
           folders, and joins only while the live turn has that set);
@@ -2422,6 +2416,13 @@ class SessionRuntime:
             # hand-over; this predicate is also used by the startup probe.
         if payload.get("upload_blob_ids") or payload.get("upload_references"):
             return "attachments need turn setup"
+        if row.get("source") != "agent_message":
+            from app.core.query_engine import NOTE_REFERENCE
+
+            if NOTE_REFERENCE.search(row.get("prompt") or ""):
+                # The engine expands ``@Notes/<id>`` at turn setup, on this
+                # worker and as the principal that sent this row (#1364).
+                return "a note reference needs turn setup"
         # Never steer external observation into a foreground/broad-permission
         # turn (or vice versa). Admission is part of the execution identity.
         if payload.get("_assistant_proactive") != (self.turn.get("payload") or {}).get("_assistant_proactive"):

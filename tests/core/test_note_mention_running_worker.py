@@ -2,16 +2,18 @@
 
 A note's ``file_path`` is per-worker (``local_fields`` in the sync policy), so
 the absolute path the viewing worker's ``/notes/autocomplete`` reports means
-nothing on another worker with a different data folder. The @ menu now
-inserts ``@Notes/<id>``, and the running worker expands that itself: to its own
-copy of the note file, or to the note's text while it has no file yet.
+nothing on another worker with a different data folder. In a chat on another
+worker the @ menu inserts ``@Notes/<id>``, and the running worker expands that
+at turn setup: to its own copy of the note file, or to the note's text while it
+has no file yet.
 
 Two workers are modelled the way they differ for notes: one shared database
 and two data folders. Worker A writes the note through the real notes API;
 worker B sees the row as sync delivers it (no ``file_path``), and later as its
 startup materialization leaves it (its own file). Both turns on B run through
-the real engine entry (``_stream_to_websocket_impl``), and a message steered
-into B's live turn goes through ``SessionRuntime.steer_pending``.
+the real engine entry (``_stream_to_websocket_impl``). A message queued while a
+turn runs is never steered into it (steering has no turn setup): it waits and
+runs as its own turn, as the principal that sent it.
 """
 
 from pathlib import Path
@@ -96,23 +98,52 @@ async def test_worker_b_points_at_its_own_copy_once_materialized(workers, tmp_pa
     assert not Path(workers.viewer_path).is_relative_to(workers.dir_b)
 
 
-async def test_a_note_steered_into_a_live_turn_is_expanded_on_worker_b(workers):
+async def test_a_queued_note_reference_is_not_steered_and_holds_its_place(workers, tmp_path):
     sid = "note-steer-1364"
-    _live_runtime(sid, _start_live(sid))
+    runtime = _live_runtime(sid, _start_live(sid))
     row = turns_db.enqueue_turn(sid, "user", prompt=f"also @Notes/{workers.note_id}")
+    after = turns_db.enqueue_turn(sid, "user", prompt="and one more thing")
     adapter = _Adapter()
     with _on_worker(workers.dir_b), _pooled(adapter):
+        assert await session_runtime.try_steer_pending(sid) == 0
+        # x and edit on the waiting chip: nothing was handed to the engine.
+        assert await session_runtime.try_cancel_steer(sid, row["id"]) == "not_submitted"
+    assert adapter.calls == [] and adapter.cancels == []
+    assert runtime._steer_refusal(row) == "a note reference needs turn setup"
+    # The message behind it does not overtake it.
+    assert [r["id"] for r in turns_db.get_queued_turns(sid)] == [row["id"], after["id"]]
+
+    # Its own turn on B, as the principal that sent it, expands the reference.
+    queued = session_runtime.SessionRuntime(turns_db.get_turn(row["id"]))
+    with _on_worker(workers.dir_b):
+        sent = await _sent_prompt(row["prompt"], queued.api_user_id, tmp_path)
+    assert sent == f"also [Note: Repro 1364]\n{CONTENT}"
+
+
+async def test_a_queued_message_without_a_note_reference_still_steers(workers):
+    sid = "note-steer-1364-plain"
+    _live_runtime(sid, _start_live(sid))
+    row = turns_db.enqueue_turn(sid, "user", prompt="Notes/ is just a folder name here")
+    adapter = _Adapter()
+    with _pooled(adapter):
         assert await session_runtime.try_steer_pending(sid) == 1
-    assert adapter.calls == [(f"also [Note: Repro 1364]\n{CONTENT}", row["id"])]
+    assert adapter.calls == [("Notes/ is just a folder name here", row["id"])]
 
 
-async def test_a_steered_note_reference_keeps_the_api_key_rule(workers):
-    """An API key's turn expands only the key's own notes, mid-turn too."""
+async def test_a_key_queuing_into_an_owner_turn_gets_only_its_own_notes(workers, tmp_path):
+    """The owner's live turn never expands a reference an API key queued."""
     sid = "note-steer-1364-key"
     runtime = _live_runtime(sid, _start_live(sid))
-    runtime.api_user_id = "key-1"
-    turns_db.enqueue_turn(sid, "user", prompt=f"also @Notes/{workers.note_id}")
+    assert runtime.api_user_id is None
+    row = turns_db.enqueue_turn(
+        sid, "user", prompt=f"also @Notes/{workers.note_id}", payload={"api_user_id": "key-1"},
+    )
     adapter = _Adapter()
     with _on_worker(workers.dir_b), _pooled(adapter):
-        assert await session_runtime.try_steer_pending(sid) == 1
-    assert [text for text, _ in adapter.calls] == [f"also @Notes/{workers.note_id}"]
+        assert await session_runtime.try_steer_pending(sid) == 0
+    assert adapter.calls == []
+    queued = session_runtime.SessionRuntime(turns_db.get_turn(row["id"]))
+    assert queued.api_user_id == "key-1"
+    with _on_worker(workers.dir_b):
+        sent = await _sent_prompt(row["prompt"], queued.api_user_id, tmp_path)
+    assert sent == f"also @Notes/{workers.note_id}"

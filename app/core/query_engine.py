@@ -115,7 +115,9 @@ _STREAM_DEBUG = bool(
     os.environ.get("STREAM_DEBUG") or os.environ.get("AIHUB_DEBUG_STREAM")
 )
 
-_LEGACY_NOTE_REF = re.compile(r"@Notes/(note-[a-f0-9]+)")
+# What the chat @ menu inserts for a note (#1364); session_runtime refuses to
+# steer a message carrying one, so it runs as a turn that expands it.
+NOTE_REFERENCE = re.compile(r"@Notes/(note-[a-f0-9]+)")
 
 
 def _resolve_note_references_for(prompt: str, api_user_id: Optional[str]) -> str:
@@ -136,7 +138,7 @@ def _resolve_note_references_for(prompt: str, api_user_id: Optional[str]) -> str
             return match.group(0)
         return resolve_note_references(match.group(0))
 
-    return _LEGACY_NOTE_REF.sub(expand, prompt)
+    return NOTE_REFERENCE.sub(expand, prompt)
 
 
 def _rate_limit_event_dict(rli: Any, session_id: str) -> Dict[str, Any]:
