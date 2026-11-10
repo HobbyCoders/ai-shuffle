@@ -2675,6 +2675,22 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     so in plain words. Returns ``{"text", "is_error"}`` for the tool result;
     "queued" is never reported as delivered.
     """
+    from app.core import restart_fence
+
+    # A resume re-registers the child here (reopen); admitted before the
+    # first await and held until then (#1121).
+    try:
+        admission = restart_fence.admit("remote child message")
+    except restart_fence.AdmissionClosed as exc:
+        return {"text": f"Could not deliver to {row['name']}: {exc}", "is_error": True}
+    try:
+        return await _send_to_child(sender_session_id, row, text, urgent=urgent, kind=kind)
+    finally:
+        admission.release()
+
+
+async def _send_to_child(sender_session_id: str, row: Mapping[str, Any], text: str, *,
+                         urgent: bool, kind: Optional[str]) -> Dict[str, Any]:
     from app.core import agent_messaging
     from app.core.task_registry import user_stop_holds, task_registry
     from app.db import remote_tasks
@@ -2958,6 +2974,24 @@ async def handle_task_message(body: Dict[str, Any], from_device: str) -> Dict[st
     id is applied once; a retry gets the first answer back with
     ``duplicate: true``.
     """
+    from app.core import restart_fence
+
+    # Admitted before the first await and held until the answer is recorded
+    # (#1121). While an idle restart is reserved a retry still gets its first
+    # answer; a new message is refused, retryably, before anything is applied.
+    try:
+        admission = restart_fence.admit("remote message")
+    except restart_fence.AdmissionClosed:
+        admission = None
+    try:
+        return await _handle_task_message(body, from_device, admitted=admission is not None)
+    finally:
+        if admission is not None:
+            admission.release()
+
+
+async def _handle_task_message(body: Dict[str, Any], from_device: str, *, admitted: bool) -> Dict[str, Any]:
+    from app.core import restart_fence
     from app.db import remote_tasks
     from app.db.async_database import run_sync
 
@@ -2971,6 +3005,8 @@ async def handle_task_message(body: Dict[str, Any], from_device: str) -> Dict[st
                 raise ValueError("This message id was already used for another message.")
             if not seen["answer"].get("_scope_pending"):
                 return {**seen["answer"], "duplicate": True}
+        if not admitted:
+            raise ValueError(restart_fence.RETRY_MESSAGE)
         from app.core.worker_checkout import WorkerCheckoutError
 
         try:

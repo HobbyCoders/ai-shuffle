@@ -33,7 +33,7 @@ async def test_reserve_refuses_while_an_admission_is_in_flight_and_changes_nothi
 async def test_reserve_refuses_registered_work(monkeypatch):
     monkeypatch.setattr("app.core.desktop_lifecycle.active_session_ids", lambda: {"s1"})
     answer = await restart_fence.reserve(TOKEN)
-    assert answer == {"reserved": False, "active_sessions": 1, "admissions": 0,
+    assert answer == {"reserved": False, "active_sessions": 1, "admissions": 0, "queries": 0,
                       "reason": "Finish active sessions before restarting"}
     assert not restart_fence.is_closed()
 
@@ -128,3 +128,15 @@ async def test_registered_task_rows_count_as_busy(monkeypatch):
 def test_invalid_token_is_rejected():
     with pytest.raises(ValueError):
         asyncio.run(restart_fence.reserve("short"))
+
+
+async def test_a_running_headless_query_refuses_and_none_starts_while_reserved():
+    from app.core import query_shutdown
+
+    async with query_shutdown.turn():
+        answer = await restart_fence.reserve(TOKEN)
+        assert answer["reserved"] is False and answer["queries"] == 1
+    assert (await restart_fence.reserve(TOKEN))["reserved"] is True
+    with pytest.raises(restart_fence.AdmissionClosed):
+        async with query_shutdown.turn():
+            pass

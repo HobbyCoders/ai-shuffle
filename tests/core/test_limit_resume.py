@@ -417,6 +417,29 @@ async def test_fire_continues_a_paused_worker_for_its_parent(monkeypatch):
     assert parent_row["task_id"] == "w1"
 
 
+async def test_a_worker_resume_during_an_idle_restart_is_rearmed_not_dropped(monkeypatch):
+    """#1121: the worker resume would be refused by the restart fence; the
+    wake is re-armed for later instead of recorded as dropped."""
+    from app.core import restart_fence
+
+    env = _Env(monkeypatch)
+    monkeypatch.setattr(lr, "still_blocked_until", lambda *a, **k: None)
+    monkeypatch.setattr("app.core.desktop_lifecycle.active_session_ids", lambda: set())
+    on_message = AsyncMock(return_value="turn-w2")
+    rearm = AsyncMock()
+    assert (await restart_fence.reserve("l" * 32))["reserved"] is True
+    try:
+        with patch("app.core.turn_scheduler.on_agent_message", on_message), \
+                patch("app.core.wakeup_service._rearm_after_failed_submit", rearm):
+            row = _wake_row({"owner": "parent-1", "compact": False}, session_id="w1")
+            assert await lr.fire(row) is None
+    finally:
+        restart_fence._reset_for_tests()
+    on_message.assert_not_awaited()
+    rearm.assert_awaited_once_with(row, restart_fence.RETRY_MESSAGE)
+    assert env.recorded == []
+
+
 def test_a_resumed_workers_report_carries_one_note_to_its_parent():
     assert lr.report_note({lr.PAYLOAD_KEY: {"limit_key": "k"}}) == lr.WORKER_REPORT_NOTE
     assert lr.report_note({"agent_message_reply_to": "p"}) is None

@@ -19,7 +19,9 @@ Rules (every reader and writer goes through these functions):
   Producers refuse with its retryable message; a turn instead stays a durable
   queued row and is kicked again on release (:func:`defer_kick`).
 - :func:`reserve` closes admission in one event-loop step, only when no
-  admission is in flight and no work is registered. It never stops anything.
+  admission is in flight, no work is registered and no headless query runs
+  (``query_shutdown.turn`` refuses new ones while closed). It never stops
+  anything.
 - :func:`release` (or the lease running out) reopens admission and kicks the
   turns that were held back.
 
@@ -94,7 +96,13 @@ class Admission:
         """Keep this admission busy until ``operation`` finishes, whatever
         happens to the coroutine awaiting it. Returns ``operation``."""
         self._refs += 1
-        operation.add_done_callback(lambda _: self._unref())
+
+        def done(finished: "asyncio.Future[Any]") -> None:
+            if not finished.cancelled():
+                finished.exception()  # retrieved: a shielded awaiter may be gone
+            self._unref()
+
+        operation.add_done_callback(done)
         return operation
 
     def _pinned(self, fn: Callable[[], Any]) -> Callable[[], Any]:
@@ -181,7 +189,7 @@ async def reserve(token: str) -> Dict[str, Any]:
     """
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
         raise ValueError("Invalid restart reservation token")
-    from app.core import desktop_lifecycle, session_runtime
+    from app.core import desktop_lifecycle, query_shutdown, session_runtime
 
     try:
         # A turn that already ended must not refuse the restart.
@@ -195,11 +203,13 @@ async def reserve(token: str) -> Dict[str, Any]:
         if _reservation["token"] == token:
             return {"reserved": True, "lease_seconds": LEASE_SECONDS}
         return {"reserved": False, "active_sessions": 0, "admissions": len(_admissions),
-                "reason": "Another restart is already being prepared"}
+                "queries": 0, "reason": "Another restart is already being prepared"}
     busy = desktop_lifecycle.active_session_ids()
-    if busy or _admissions:
+    # Headless queries (the query API) are in no session registry.
+    queries = query_shutdown.active_count()
+    if busy or _admissions or queries:
         return {"reserved": False, "active_sessions": len(busy), "admissions": len(_admissions),
-                "reason": "Finish active sessions before restarting"}
+                "queries": queries, "reason": "Finish active sessions before restarting"}
     timer = None
     try:
         timer = asyncio.get_running_loop().call_later(LEASE_SECONDS + 0.05, _expire_if_due)

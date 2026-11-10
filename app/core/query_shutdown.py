@@ -88,6 +88,10 @@ async def run(factory):
 async def turn():
     if _closing_loop is asyncio.get_running_loop():
         raise RuntimeError("Worker is shutting down; query was not started")
+    from app.core import restart_fence
+
+    if restart_fence.is_closed():  # an idle update restart is being prepared (#1121)
+        raise restart_fence.AdmissionClosed()
     work = _Turn(asyncio.current_task())
     _turns.add(work)
     token = _current.set(work)
@@ -97,6 +101,11 @@ async def turn():
         _current.reset(token)
         _turns.discard(work)
         work.finished.set()
+
+
+def active_count() -> int:
+    """Headless queries running now; they are in no session registry (#1121)."""
+    return len(_turns)
 
 
 async def track_stream(stream):
