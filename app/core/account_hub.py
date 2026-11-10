@@ -429,8 +429,12 @@ def worker_link_call(action, body):
             conn.close()
 
 
-def require_active(owner):
+def require_active(owner, *, fresh=False):
     """Hub check for a device, at most one live call per verify TTL.
+
+    ``fresh`` is for a just-exchanged sign-in ticket: it asks the hub now
+    instead of replaying a remembered refusal or joining a check that started
+    before the sign-in. A young confirmation still answers it.
 
     None means a legacy/direct-paired credential. The local binding is checked
     on every call. The hub is asked again once the remembered verdict is older
@@ -454,11 +458,17 @@ def require_active(owner):
         if confirmed_at is not None and time.monotonic() - confirmed_at < settings.mobile_account_hub_verify_ttl_seconds:
             return binding
         generation = _verification_generation
-        failed = _failures.get(key)
+        failed = None if fresh else _failures.get(key)
         flight_key = (generation, _display_identity(binding), key)
-        future = _verification_flights.get(flight_key)
+        future = None if fresh else _verification_flights.get(flight_key)
         leader = False
-        if failed is not None and time.monotonic() - failed[0] < settings.mobile_account_hub_verify_ttl_seconds:
+        if fresh:
+            # Own flight, not shared: later callers neither join it nor lose
+            # a flight registered by someone else when it finishes.
+            leader = True
+            future = Future()
+            flight_key = None
+        elif failed is not None and time.monotonic() - failed[0] < settings.mobile_account_hub_verify_ttl_seconds:
             # The hub answered this device within the TTL without confirming
             # it: give the same answer (grace still applies below) unasked.
             future = Future()

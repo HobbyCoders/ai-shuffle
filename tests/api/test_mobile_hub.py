@@ -689,6 +689,37 @@ def test_sign_out_reset_forgets_a_remembered_refusal(setup, monkeypatch):
     assert remaining == []
 
 
+def test_fresh_sign_in_is_checked_now_not_refused_from_memory(setup, monkeypatch):
+    """A refusal remembered for this device must not reject the sign-in that
+    fixed it: the ticket exchange is followed by a live hub check."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    clock = _fake_clock(monkeypatch)
+    monkeypatch.setattr(account_hub, 'call', lambda *a, **k: {'active': False, 'account_id': ACCOUNT,
+                                                              'device_id': DEVICE})
+    with pytest.raises(HTTPException) as failure:
+        account_hub.require_active(owner)
+    assert failure.value.status_code == 401
+    clock[0] += 1  # the user signs in again a second later, well inside the TTL
+    checks = []
+
+    def hub(binding, method, suffix, body=None):
+        if suffix == 'exchange':
+            return identity()
+        checks.append(suffix)
+        return active()
+
+    monkeypatch.setattr(account_hub, 'call', hub)
+    response = setup.post('/api/v1/mobile/hub/enroll',
+                          json={'ticket': 'fresh-ticket', 'device_info': info().model_dump()})
+    assert response.status_code == 200, response.text
+    assert checks == [f'devices/{DEVICE}']
+    # The live confirmation now answers the device's own re-checks.
+    assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert checks == [f'devices/{DEVICE}']
+
+
 def test_binding_deactivation_bypasses_cache(setup, monkeypatch):
     bind()
     insert()
