@@ -1030,3 +1030,54 @@ def test_applying_a_session_tombstone_again_records_it_once(pair):
             assert cursor.fetchone()["n"] == 1
         assert sessions.chat_was_deleted("gone")
         assert not sessions.chat_was_deleted(PARENT)
+
+
+@pytest.mark.asyncio
+async def test_a_tombstone_for_a_starter_that_never_reached_this_worker_is_recorded(pair, monkeypatch):
+    """S16: PARENT moved to B before its starter "boss" (on A) reached B. A
+    deletes boss; B accepts a signed snapshot holding boss's tombstone, which
+    deletes no row here. B leaves the network and loses its deletion mark.
+    When PARENT settles, the report still stays on it: one deferral, one
+    bell, nothing pending in the outbox."""
+    from app.db import session_locks, sessions
+    from app.services import notification_service
+    a, b, _, _ = pair
+    bells = []
+
+    async def bell(*args, **kwargs):
+        bells.append(kwargs)
+    monkeypatch.setattr(notification_service, "emit_notification", bell)
+    monkeypatch.setattr(control, "call", _route([a, b]))
+    with a.active():  # boss's start marker; boss's row is written later
+        start = turns.enqueue_turn(PARENT, "agent_message", prompt="do the work", profile_id="default",
+                                   command_id="orchestration:start:" + "e" * 64,
+                                   payload={"orchestration_sender": "boss", "orchestration_root": "root-turn",
+                                            "orchestration_depth": 1})
+        assert turns.start_turn(start["id"])
+        _settle(start)
+    with b.active():
+        await handoff.receive(database.get_session(PARENT))
+        _working(PARENT)
+    with a.active():
+        database.create_session("boss", "default", title="Boss")
+        engine.scan_all()  # A knows boss; nothing carries it to B
+        assert sessions.delete_session("boss")
+        engine.scan_all()
+        chunk = engine.snapshot_chunk("sessions", 0)
+    with b.active():
+        assert database.get_session("boss") is None and not sessions.chat_was_deleted("boss")
+        engine.apply_snapshot_chunk(chunk)
+        assert database.get_session("boss") is None
+        assert sessions.chat_was_deleted("boss")
+        engine.leave_network()
+        monkeypatch.setattr(session_locks, "_DELETED", {})
+        work = turns.enqueue_turn(PARENT, "agent_message", prompt="more", profile_id="default",
+                                  payload={"orchestration_sender": "boss"})
+        assert turns.start_turn(work["id"])
+        await orch.report_settled_start(PARENT, _settle(work), "completed")
+        await orch.report_settled_start(PARENT, turns.get_turn(work["id"]), "completed")
+        await orch.deliver_forwarded_reports(force=True)
+        assert len(_deferred_events("boss")) == 1
+        assert [b["title"] for b in bells] == ["Session work finished"]
+        assert orch.pending_forwarded_reports() == []
+        assert _all_reports("boss") == []

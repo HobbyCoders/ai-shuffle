@@ -737,10 +737,11 @@ def materialize(
             delete_connector_row(cursor, *keys)
             return None
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
-        if coll.name == "sessions" and cursor.rowcount > 0:
+        if coll.name == "sessions":
             # The same durable deletion record a local delete writes, so a
             # started chat held here still defers its report after leaving the
-            # network clears sync_records (#1443).
+            # network clears sync_records (#1443). Also when the row never
+            # reached this worker: the accepted tombstone is the proof.
             from app.db.sessions import record_deleted_chat
             record_deleted_chat(cursor, record_id)
         return None
