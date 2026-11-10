@@ -430,7 +430,7 @@
 		},
 		{
 			"why": "sending, streaming and rendering a reply",
-			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "stop-holds-the-reader", "reload-midstream"],
+			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "queue-while-busy-2", "stop-holds-the-reader", "reload-midstream"],
 			"globs": [
 				"frontend/src/lib/components/chat/AssistantMessage*",
 				"frontend/src/lib/components/chat/UserMessage*",
@@ -497,7 +497,7 @@
 		},
 		{
 			"why": "queued (pending) messages",
-			"journeys": ["queue-while-busy", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2"],
+			"journeys": ["queue-while-busy", "queue-while-busy-2", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2"],
 			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*", "frontend/src/lib/utils/not-sent-hold*"]
 		},
 		{
@@ -698,6 +698,11 @@
 			"why": "in-app documentation text: no journey reads it, so it needs none (and is not an uncovered UI source file)",
 			"journeys": [],
 			"globs": ["frontend/src/lib/docs/content/**"]
+		},
+		{
+			"why": "the queue-while-busy cases, which two journey files run in halves",
+			"journeys": ["queue-while-busy", "queue-while-busy-2"],
+			"globs": ["frontend/tests/journeys/queue-while-busy*"]
 		},
 		{
 			"why": "the sidebar-truth cases, which two journey files run in halves",

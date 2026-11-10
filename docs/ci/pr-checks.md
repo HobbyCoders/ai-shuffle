@@ -1136,7 +1136,9 @@ cases its `FIRST_HALF` names and `<name>-2.journey.mjs` runs every other one
 over 200 seconds of headroom. The six halves use planning budgets in
 `UNMEASURED_BUDGET_FLOORS` until a green main run is refreshed into the
 weights. A regression test refuses any file estimated above 600 seconds: split
-it the same way. The one-percent-refresh regression also
+it the same way. `queue-while-busy` was split like that when three cases joined
+it: its first half keeps the seven cases the hosted measurement timed, so that
+measurement still applies, and the new cases run in `queue-while-busy-2`. The one-percent-refresh regression also
 preserves the uncertainty reserve when it adds two new journeys. Older green runs with changed app/journey
 workloads cannot refresh these measurements: the guarded producer refuses them.
 New or grown files keep their conservative case-count fallbacks until a complete
