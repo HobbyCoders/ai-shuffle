@@ -1600,3 +1600,35 @@ async def test_2012_a_resume_the_new_worker_refuses_is_reported_there():
                                     "Send a message there to continue.")
     assert notes[-1]["data"] == {"status": "resume_failed", "worker": "DesktopWorker", "reason": "This chat is archived",
                                  "handoff_id": result["handoff_id"]}
+
+
+# ---------------------------------------------------------------------------
+# #1416: the queued result names what holds the move besides the calling turn.
+# ---------------------------------------------------------------------------
+
+def test_1416_a_queued_hand_off_names_the_background_work_holding_it():
+    from app.core.task_registry import task_registry
+    _chat()
+    task_registry.start_task("s1", "rev-1", "agent", "Review the PR", tool_use_id="rev-1")
+    task_registry.start_task("s1", "ci-1", "shell", "Watch CI", tool_use_id="ci-1")
+    try:
+        # The calling turn itself is always running; it is not named.
+        with patch("app.core.streaming_status.has_active_run", return_value=True):
+            queued = sh.request("s1", "DesktopWorker")
+            again = sh.request("s1", "DesktopWorker")
+    finally:
+        task_registry.clear_session("s1")
+    for result in (queued, again):
+        assert "Held by 2 background tasks: Watch CI, Review the PR." in result["message"]
+        assert "at most 10 minutes" in result["message"]
+        assert "the turn" not in result["message"].split("Held by")[1]
+    assert queued["message"].startswith("Hand-off to DesktopWorker is queued.")
+    assert again["message"].startswith("Hand-off to DesktopWorker is already queued.")
+
+
+def test_1416_a_queued_hand_off_says_when_nothing_else_holds_it():
+    _chat()
+    with patch("app.core.streaming_status.has_active_run", return_value=True):
+        result = sh.request("s1", "DesktopWorker")
+    assert "Nothing else holds it now." in result["message"]
+    assert "Held by" not in result["message"]
