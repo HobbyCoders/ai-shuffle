@@ -508,6 +508,17 @@
 			]
 		},
 		{
+			"why": "the chat's Terminal side panel: its header, tabs and actions at desktop and phone widths",
+			"journeys": ["terminal-tabs"],
+			"globs": [
+				"frontend/tests/journeys/terminal-tabs.journey.mjs",
+				"frontend/src/lib/components/terminal/**",
+				"frontend/src/lib/stores/terminals*",
+				"frontend/src/lib/terminal/**",
+				"frontend/src/lib/api/terminals.ts"
+			]
+		},
+		{
 			"why": "clearing a chat",
 			"journeys": ["cleared-chat"],
 			"globs": ["app/db/sessions.py", "frontend/src/lib/stores/session/ws-message-handlers*"]

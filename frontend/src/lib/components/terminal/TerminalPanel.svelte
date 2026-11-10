@@ -694,6 +694,19 @@
 		.tab-select:has(.tab-host) .tab-shell { display: none; }
 		.tab-host { max-width: none; }
 	}
+	/* Too narrow for the tabs to share the row with the tools, Watch command
+	   and the panel's buttons (#1309): the tabs were the only item that could
+	   shrink and ended up a few pixels wide. They move to a row of their own
+	   under the tools, with + right after them, so the current tab still meets
+	   the terminal. The ::after is the line break between the two rows. Wider
+	   than this (the default 480 px side panel) the header stays one row. */
+	@container (max-width: 470px) {
+		.bar:has(.tabs) { flex-wrap: wrap; row-gap: 0; }
+		.bar:has(.tabs)::after { content: ''; order: 1; flex-basis: 100%; }
+		/* Room for + on the same row, so a long strip scrolls instead of pushing + down. */
+		.bar .tabs { order: 2; max-width: calc(100% - 46px); }
+		.bar:has(.tabs) .plus-wrap { order: 2; }
+	}
 
 	@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--success) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
 	@keyframes blink { 50% { opacity: 0.35; } }

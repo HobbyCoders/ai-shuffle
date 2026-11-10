@@ -617,4 +617,24 @@ describe('peer workers', () => {
 		expect(rule).not.toMatch(/flex-shrink:\s*0/);
 		expect(rule).toMatch(/flex:\s*0 1 auto/);
 	});
+
+	it('gives the tabs a row of their own in a narrow panel (#1309)', () => {
+		// jsdom has no layout, so read the rules. Sharing one row with +, the
+		// tools, Watch command and the panel's buttons, the strip was the only
+		// item that could shrink: 12 px wide at 390, its tab off the left edge.
+		// The real-browser bounds check is the terminal-tabs journey.
+		const source = readFileSync('src/lib/components/terminal/TerminalPanel.svelte', 'utf8');
+		const block = source.match(/@container \(max-width: 470px\) \{([\s\S]*?)\n\t\}/)?.[1] ?? '';
+		expect(block).toMatch(/\.bar:has\(\.tabs\)\s*\{[^}]*flex-wrap:\s*wrap/);
+		// The break: a full-width item between the tools' row and the tabs' row.
+		expect(block).toMatch(/\.bar:has\(\.tabs\)::after\s*\{[^}]*order:\s*1;[^}]*flex-basis:\s*100%/);
+		// Tabs and + sit after the break, + right after the tabs with room kept for it.
+		expect(block).toMatch(/\.bar \.tabs\s*\{[^}]*order:\s*2;[^}]*max-width:\s*calc\(100% - 46px\)/);
+		expect(block).toMatch(/\.plus-wrap\s*\{[^}]*order:\s*2/);
+		// The strip itself still shrinks and scrolls: it must not refuse to shrink.
+		const tabs = source.match(/\n\t\.tabs\s*\{([^}]*)\}/)?.[1] ?? '';
+		expect(tabs).toMatch(/min-width:\s*0/);
+		expect(tabs).toMatch(/overflow-x:\s*auto/);
+		expect(tabs).not.toMatch(/flex-shrink:\s*0/);
+	});
 });
