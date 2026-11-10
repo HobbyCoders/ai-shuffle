@@ -8,8 +8,10 @@ the record and skips that area instead of running it a second time.
 
 The tree covers the workflows and tests too, so a record can only stand for
 the same checks on the same files. Nothing here lists what an area depends on.
-Only records uploaded by this repository's own runs count (never a fork's), and
-only a push to main looks: scheduled and dispatched runs prove everything again.
+A record counts only when it came from the area's own checks on the pull
+request that was merged as this very commit (never a fork's, never another
+branch's run), and only a push to main looks: scheduled and dispatched runs
+prove everything again.
 
     python scripts/ci/proven.py check --areas backend,fluid >> "$GITHUB_OUTPUT"
 """
@@ -48,13 +50,61 @@ def record_name(area: str, tree: str, key: str = "") -> str:
     return f"{PREFIX}-{area}-{tree}" + (f"-{key}" if key else "")
 
 
-def exists(name: str, repository: str, token: str, call=request) -> bool:
-    """True when this repository's own run uploaded a live record with that name."""
+# The workflow whose checks stand behind each area's record.
+WORKFLOWS = {
+    "backend": "ci-backend.yml", "fluid": "ci-fluid.yml", "windows": "windows-suite.yml",
+    "browser-workspace": "ci-browser-workspace.yml", "container": "container-postgres.yml",
+    "identity": "ci-instance-identity.yml", "desktop-source": "desktop-source-checks.yml",
+    "javascript-checks": "ci-frontend.yml", "journeys": "ci-frontend.yml",
+}
+BAD = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
+
+
+def merged_heads(repository: str, commit: str, token: str, call=request) -> set[str]:
+    """Head commits of this repository's pull requests that were merged to main as ``commit``."""
+    heads = set()
+    for pull in call(f"/repos/{repository}/commits/{commit}/pulls?per_page=100", token) or []:
+        head, base = pull.get("head") or {}, pull.get("base") or {}
+        if (pull.get("merged_at") and pull.get("merge_commit_sha") == commit and base.get("ref") == "main"
+                and (head.get("repo") or {}).get("full_name") == repository and head.get("sha")):
+            heads.add(head["sha"])
+    return heads
+
+
+def passed(run_id, area: str, heads: set[str], repository: str, token: str, call=request) -> bool:
+    """True when that run is the area's own pull request workflow, on a merged head, with nothing failed."""
+    run = call(f"/repos/{repository}/actions/runs/{run_id}", token)
+    if (run.get("event") != "pull_request" or run.get("head_sha") not in heads
+            or run.get("path") != f".github/workflows/{WORKFLOWS[area]}"):
+        return False
+    data = call(f"/repos/{repository}/actions/runs/{run_id}/jobs?filter=latest&per_page=100", token)
+    jobs = data.get("jobs") or []
+    if not jobs or data.get("total_count") != len(jobs):
+        return False
+    return not any(job.get("conclusion") in BAD for job in jobs)
+
+
+def exists(name: str, repository: str, token: str, call=request, *, area: str, commit: str | None = None) -> bool:
+    """True when the checks of the pull request merged as ``commit`` left a live record with that name.
+
+    A name alone proves nothing: any run in the repository can upload an
+    artifact. The record counts only when its run is the area's own workflow,
+    started by a pull request of this repository (never a fork) whose head was
+    then merged to main as exactly this commit, and no job of that run failed.
+    """
+    commit = commit or os.environ.get("GITHUB_SHA", "")
+    if area not in WORKFLOWS or not commit:
+        return False
+    heads = None
     data = call(f"/repos/{repository}/actions/artifacts?per_page=100&name={urllib.parse.quote(name)}", token)
     for artifact in data.get("artifacts") or []:
         run = artifact.get("workflow_run") or {}
         own = run.get("repository_id") is not None and run.get("repository_id") == run.get("head_repository_id")
-        if artifact.get("name") == name and artifact.get("expired") is False and own:
+        if artifact.get("name") != name or artifact.get("expired") is not False or not own or not run.get("id"):
+            continue
+        if heads is None:
+            heads = merged_heads(repository, commit, token, call)
+        if run.get("head_sha") in heads and passed(run["id"], area, heads, repository, token, call):
             return True
     return False
 
@@ -85,7 +135,7 @@ def check(areas: list[str], root: Path = ROOT, call=request) -> dict[str, bool]:
     try:
         tree = head_tree(root)
         for area in areas:
-            found[area] = exists(record_name(area, tree), *where, call=call)
+            found[area] = exists(record_name(area, tree), *where, call=call, area=area)
     except Exception as error:  # noqa: BLE001 - a lookup must never fail the run
         print(f"[proven] lookup failed, running everything not yet found: {error}", file=sys.stderr)
     return found

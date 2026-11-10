@@ -365,7 +365,7 @@ def already_proven(key: str, root: Path = ROOT) -> bool:
         return False
     try:
         tree = proven.head_tree(root)
-        return any(proven.exists(proven.record_name("journeys", tree, name), *where) for name in dict.fromkeys((key, "all")))
+        return any(proven.exists(proven.record_name("journeys", tree, name), *where, area="journeys") for name in dict.fromkeys((key, "all")))
     except Exception as error:  # noqa: BLE001 - a failed lookup means running the journeys
         print(f"[ci] pass-record lookup failed: {error}", file=sys.stderr)
         return False

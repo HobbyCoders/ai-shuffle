@@ -72,7 +72,7 @@ class CostPolicyTests(unittest.TestCase):
                 self.assertEqual(config["permissions"], {"contents": "read"})
                 self.assertEqual(config["concurrency"], {
                     "group": name[:-4] + "-${{ github.event.pull_request.number || github.ref }}"
-                             "${{ github.event_name == 'schedule' && '-daily' || '' }}",
+                             "${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}",
                     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
                 })
                 for forbidden in ("secrets.", "pull_request_target", ".draft", "secrets: inherit"):
@@ -84,7 +84,7 @@ class CostPolicyTests(unittest.TestCase):
                         self.assertIn("github.event_name == 'pull_request'", job["if"])
                         continue
                     # Only the journey selection reads earlier runs and pass records.
-                    allowed = ({"contents": "read", "actions": "read"}
+                    allowed = ({"contents": "read", "actions": "read", "pull-requests": "read"}
                                if (name, key) == ("ci-frontend.yml", "journey-plan") else {"contents": "read"})
                     self.assertEqual(job.get("permissions", {"contents": "read"}), allowed)
                     runner = job.get("runs-on")
@@ -142,8 +142,8 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(plan["outputs"], {"only": "${{ steps.select.outputs.only }}",
                                            "shards": "${{ steps.select.outputs.shards }}",
                                            "key": "${{ steps.select.outputs.key }}"})
-        # Reads earlier main-suite runs and pass records; never writes.
-        self.assertEqual(plan["permissions"], {"contents": "read", "actions": "read"})
+        # Reads earlier main-suite runs, pass records and the merged pull request; never writes.
+        self.assertEqual(plan["permissions"], {"contents": "read", "actions": "read", "pull-requests": "read"})
         checkout, select = plan["steps"]
         # A pull request needs the merge commit's parents; a push the history
         # back to the last commit main-suite passed on.

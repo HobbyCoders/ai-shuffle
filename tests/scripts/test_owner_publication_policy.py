@@ -180,7 +180,8 @@ def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
     job = jobs["browser-mcp"]
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == "15"
-    assert "needs" not in job and "if" not in job
+    # It waits on nothing; main skips it only when a pull request passed it on the same files.
+    assert "needs" not in job and job["if"] == "inputs.checks_proven != true"
     assert "continue-on-error" not in job
     steps = job["steps"]
     setup = next(step for step in steps if step.get("name") == "Prepare sandboxed Chromium")

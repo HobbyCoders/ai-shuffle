@@ -9,7 +9,7 @@ permissions:
   contents: read
 concurrency:
   # main-suite's daily run gets its own group so it never queues with a push run.
-  group: desktop-source-checks-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || '' }}
+  group: desktop-source-checks-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

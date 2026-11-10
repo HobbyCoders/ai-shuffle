@@ -20,7 +20,7 @@ permissions:
 # every run, so nothing was proven and the nightly stalled until main went quiet.
 # The daily run has its own group so it can never displace a waiting push run.
 concurrency:
-  group: main-suite-${{ github.ref }}${{ github.event_name == 'schedule' && '-daily' || '' }}
+  group: main-suite-${{ github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -46,6 +46,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       backend: ${{ steps.check.outputs.backend }}
       fluid: ${{ steps.check.outputs.fluid }}
@@ -77,6 +78,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     uses: ./.github/workflows/ci-frontend.yml
     with:
       checks_proven: ${{ needs.proven.outputs.javascript-checks == 'true' }}

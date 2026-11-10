@@ -18,7 +18,7 @@ permissions:
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
   # main-suite's daily run gets its own group so it never queues with a push run.
-  group: ci-frontend-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || '' }}
+  group: ci-frontend-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -277,6 +277,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       only: ${{ steps.select.outputs.only }}
       shards: ${{ steps.select.outputs.shards }}

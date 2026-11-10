@@ -36,7 +36,7 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
     # The daily run skips nothing and cannot displace a waiting push run.
     assert config["on"]["schedule"] == [{"cron": "0 8 * * *"}]
     assert config["concurrency"]["group"] == (
-        "main-suite-${{ github.ref }}${{ github.event_name == 'schedule' && '-daily' || '' }}")
+        "main-suite-${{ github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}")
     # A burst of merges must not cancel every run and stall the nightly.
     assert config["concurrency"]["cancel-in-progress"] == "false"
     jobs = config["jobs"]
@@ -56,7 +56,7 @@ def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
         assert jobs[job]["uses"] == f"./.github/workflows/{name}.yml"
         called = workflow(name + ".yml")
         # The daily run never shares a queue with a push run's called workflows.
-        assert called["concurrency"]["group"].endswith("${{ github.event_name == 'schedule' && '-daily' || '' }}")
+        assert called["concurrency"]["group"].endswith("${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}")
         assert "workflow_call" in called["on"]
         assert called["on"]["pull_request"] == ""
         assert called["permissions"] == {"contents": "read"}
@@ -112,7 +112,7 @@ def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
     for name in suite.PROVABLE:
         text = (ROOT / ".github/workflows" / jobs[name]["uses"].rsplit("/", 1)[1]).read_text()
         assert (" audit --audit-level" in text or "pip_audit" in text) == (name == "backend")
-    assert lookup["permissions"] == {"contents": "read", "actions": "read"}
+    assert lookup["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "read"}
     areas = [*suite.PROVABLE, "javascript-checks"]
     assert lookup["outputs"] == {area: f"${{{{ steps.check.outputs.{area} }}}}" for area in areas}
     step = lookup["steps"][-1]
@@ -120,7 +120,7 @@ def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
     assert step["run"] == f'python3 scripts/ci/proven.py check --areas {",".join(areas)} >> "$GITHUB_OUTPUT"'
     # The JavaScript workflow always runs: it decides the journeys itself.
     javascript = jobs["javascript"]
-    assert javascript["permissions"] == {"contents": "read", "actions": "read"}
+    assert javascript["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "read"}
     assert javascript["with"] == {"checks_proven": "${{ needs.proven.outputs.javascript-checks == 'true' }}"}
     # Every area main may skip is recorded by exactly one job of its pull-request
     # workflow, for this repository's own pull requests only, after its checks passed.

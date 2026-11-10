@@ -177,8 +177,11 @@ what an area depends on, so a record can never stand for different code.
   [UI journeys](#ui-journeys)). `policy` and `desktop` run more on main than on
   a pull request, and `android-and-docs`, `supply-chain` and `update-reach`
   have no pull-request twin: they always run.
-- Only a live artifact uploaded by this repository's own run counts, never a
-  fork's. Records expire after 7 days. A failed lookup, a missing token or any
+- A record's name alone proves nothing, because any run can upload an artifact.
+  A record counts only when it is live, its run is the area's own workflow
+  started by a pull request of this repository (never a fork), that pull
+  request's head was merged to main as exactly this commit, and no job of that
+  run failed or was cancelled. Records expire after 7 days. A failed lookup, a missing token or any
   error answers "not proven": the area runs. Losing a record only loses the
   shortcut, so the record steps never fail a pull request.
 - Dependency audits depend on advisory lists, which change without any file
@@ -189,8 +192,8 @@ what an area depends on, so a record can never stand for different code.
   can still pass; the failure watcher ignores it.
 - Only a push looks for records. The daily scheduled run (08:00 UTC, its own
   concurrency groups, in `main-suite.yml` and every workflow it calls, so it
-  never queues with or displaces a push run) and a dispatch
-  run **everything**. The scheduled run never publishes: the nightly follows
+  never queues with or displaces a push run) and a dispatch (its own groups
+  too) run **everything**. The scheduled run never publishes: the nightly follows
   push and dispatch runs only. Dispatch `main-suite.yml` on `main` before a
   stable release to prove the whole tree in one run.
 
