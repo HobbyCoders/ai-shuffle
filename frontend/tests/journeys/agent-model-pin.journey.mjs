@@ -24,13 +24,13 @@ async function agentOnDisk(page) {
  * The Dev agent is the default for every other journey on this seed: whatever
  * the save does to its config, put the seeded config back, pass or fail.
  *
- * The seed has no streaming setting, which runs as on, but the read API reports
- * it as off (#1314). Writing that back would stop every later journey's reply
- * from streaming, so name the value the agent actually runs with.
+ * The seed has no streaming setting, which runs as on, and the read API reports
+ * it the same way, so what was read is written back as it is. When the read
+ * API reported it as off (#1314), this write stopped every later journey's
+ * reply from streaming.
  */
 async function restoreAgent(page, seeded) {
-	const config = { ...seeded.config, include_partial_messages: true };
-	await api(page, 'PUT', `/agents/${AGENT}`, { name: seeded.name, description: seeded.description, config });
+	await api(page, 'PUT', `/agents/${AGENT}`, { name: seeded.name, description: seeded.description, config: seeded.config });
 }
 
 async function openAgentModels(page, variant) {
@@ -84,6 +84,10 @@ await runJourney({
 				const saved = await agentOnDisk(page);
 				const value = Object.values(saved.config.provider_models ?? {}).join(' ');
 				expect(value.includes(PINNED), `the save reached the server: ${value}`);
+				// #1314: the agent had no saved streaming setting, which runs as on; neither
+				// reading it nor the editor's save may turn live replies off.
+				expect(seeded.config.include_partial_messages === true, 'an agent with no saved streaming setting reads as streaming');
+				expect(saved.config.include_partial_messages === true, 'saving from the editor left live replies on');
 				// The app reopens on the view it was left on, so a reload lands back here.
 				await page.reload();
 				await reopenAgentModels(page, variant);

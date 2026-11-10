@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from app.core.temp_scratch import MARKER, PREFIXES, process_identity
+from app.core.temp_scratch import MARKER, PREFIXES, devloop_status_path, process_identity
 
 log = logging.getLogger(__name__)
 MAX_ENTRIES = 10000
@@ -239,8 +239,7 @@ def _isolated_preview(base, proc, deadline):
                     continue
             # A different worktree is fine. Its live status, when available,
             # supplies the actual source checkout as another protected root.
-            from scripts.devloop.__main__ import default_status_path
-            status_path = default_status_path(checkout)
+            status_path = devloop_status_path(checkout)
             for pos, arg in enumerate(launcher):
                 if arg == b"--status" and pos + 1 < len(launcher):
                     status_path = checkout / os.fsdecode(launcher[pos + 1])

@@ -18,7 +18,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.db.base import get_db, row_to_dict, rows_to_list, utc_now_iso as _now
+from app.db.base import background_database_work, get_db, row_to_dict, rows_to_list, utc_now_iso as _now
 
 logger = logging.getLogger(__name__)
 
@@ -892,6 +892,7 @@ def retention_heads(_conn=None) -> List[dict]:
         return _log_heads(cur)
 
 
+@background_database_work
 def prune_ops(*, keep_days: int = 30, _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
     """Legacy retention for superseded ops; latest transcript ops are pruned separately.
 
@@ -1077,6 +1078,7 @@ def _stream_frontier(origin: str, incarnation: int, head: int, peers: Dict[str, 
     return min([head, *(int((marks.get(origin) or {}).get(str(incarnation), 0)) for marks in peers.values())])
 
 
+@background_database_work
 def prune_transcript_ops(local_device_id: str, peer_observations: dict, *,
                          min_age_hours: Optional[float] = None, _conn=None, stop=None,
                          _heads: Optional[List[dict]] = None) -> int:
@@ -1259,6 +1261,7 @@ def _compact_superseded_ops(collections: Tuple[str, ...], *, label: str, kill_sw
     return total
 
 
+@background_database_work
 def compact_memory_ops(local_device_id: str, peer_observations: dict, *,
                        _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
     """Drop superseded ``memory`` envelopes every recent peer already holds.
@@ -1275,6 +1278,7 @@ def compact_memory_ops(local_device_id: str, peer_observations: dict, *,
                                    _conn=_conn, stop=stop, _heads=_heads)
 
 
+@background_database_work
 def compact_session_ops(local_device_id: str, peer_observations: dict, *,
                         _conn=None, stop=None, _heads: Optional[List[dict]] = None) -> int:
     """Drop superseded ``sessions`` / ``session_runtime`` envelopes every recent peer holds.

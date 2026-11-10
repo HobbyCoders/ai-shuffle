@@ -362,6 +362,65 @@ def _session_folder(context, cwd):
     return folder
 
 
+def _base_folder(session):
+    """This worker's base folder of the project a session is bound to.
+
+    The report's lookup, not the session resolver: the resolver heals legacy
+    bindings as it reads (it writes session and project rows), which a cleanup
+    pass and a report must never do. A session bound to no project resolves
+    to nothing here and stays unknown.
+    """
+    from app.core import checkout_manager
+    from app.core.project_resolver import _local_checkout
+
+    project = session.get("project_v2_id")
+    row = _local_checkout(project, settings.effective_instance_id) if project else None
+    return checkout_manager._resolve_checkout_path(row["path"]) if row and row.get("path") else None
+
+
+def _unrecorded_folder(context, session):
+    """``(folder, its branch)`` of an open session that records neither.
+
+    Such a session used to count as a user of every checkout of its project:
+    one ordinary chat in the project's main folder stopped all cleanup for as
+    long as it stayed open, and finished checkouts piled up by the hundred.
+    A session with no branch runs in its project's base folder on this worker
+    (:func:`_base_folder`, a pure read). None means that folder could not be
+    established, and the caller still treats the session as a possible user
+    of everything.
+    """
+    cache = context.setdefault("_unrecorded_folders", {})
+    key = session.get("id")
+    if key not in cache:
+        found = None
+        try:
+            cwd = _base_folder(session) if key else None
+            if cwd and os.path.isdir(cwd):
+                folder = str(Path(cwd).resolve())
+                found = (os.path.normcase(folder),
+                         (wr._git(folder, "symbolic-ref", "--short", "HEAD") or "").strip() or None)
+        except Exception:  # noqa: BLE001 - unknown stays unknown, which keeps everything
+            logger.debug("Session %s: folder not established", key, exc_info=True)
+        cache[key] = found
+    return cache[key]
+
+
+def _unrecorded_user(context, session, branches, target=None):
+    """Whether an open session with no recorded branch or folder may be using
+    this checkout (``target``, when it has a folder) or these branches."""
+    if not (session.get("is_active") or session.get("running")):
+        return False
+    if session.get("branch") or session.get("worktree_branch") or session.get("worktree_path"):
+        return False
+    found = _unrecorded_folder(context, session)
+    if found is None:
+        return True
+    folder, branch = found
+    if branch and branch in branches:
+        return True
+    return bool(target and (folder == target or folder.startswith(target.rstrip(os.sep) + os.sep)))
+
+
 def _bound_sessions(context, registered, branch):
     target = os.path.normcase(str(Path(registered["path"]).resolve()))
     inside = target.rstrip(os.sep) + os.sep
@@ -373,8 +432,8 @@ def _bound_sessions(context, registered, branch):
         cwd = session.get("worktree_path")
         folder = _session_folder(context, cwd) if cwd else None
         by_path = bool(folder and (folder == target or folder.startswith(inside)))
-        unknown_active = (session.get("is_active") or session.get("running")) and not logical and not cwd
-        if logical & branches or session.get("worktree_id") in ids or by_path or unknown_active:
+        if (logical & branches or session.get("worktree_id") in ids or by_path
+                or _unrecorded_user(context, session, branches, target)):
             bound.append(session)
     return bound
 
@@ -1161,9 +1220,7 @@ def _branch_sessions(context, name):
     bound = []
     for session in context["sessions"]:
         logical = {b for b in (session.get("branch"), session.get("worktree_branch")) if b}
-        unknown_active = ((session.get("is_active") or session.get("running"))
-                          and not logical and not session.get("worktree_path"))
-        if name in logical or unknown_active:
+        if name in logical or _unrecorded_user(context, session, {name}):
             bound.append(session)
     return bound
 

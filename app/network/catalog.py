@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.db import network as store
-from app.db.base import get_db
+from app.db.base import background_database_work, get_db
 from app.network import engine, envelope as envelope_mod, policy
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,7 @@ def owned_session_ids(session_ids: Iterable[str], *, ctx: Optional[engine.Networ
         return _owned_session_ids(conn.cursor(), ctx.device_id, recent_only=False, session_ids=ids)
 
 
+@background_database_work
 def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
                   session_ids: Optional[Iterable[str]] = None) -> int:
     """Publish this device's sessions, tags, prompts and recent transcript tail.

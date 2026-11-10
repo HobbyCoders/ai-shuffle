@@ -16,8 +16,10 @@ from tests.api.test_chat_ws_dispatch_contract import (
     ws_env,  # noqa: F401 — fixture for the real serialized dispatcher
 )
 from tests.api.test_chat_ws_handler_watch import (
+    QUEUE_HYDRATION_HANG_GUARD_SECONDS,
     WATCH,
     _HandlerHarness,
+    _await_queue_hydration,
     _queue_frames,
     _watch_and_hydrate,
 )
@@ -95,7 +97,7 @@ async def test_late_queue_response_cannot_overwrite_new_watch(next_session: str)
     ):
         handler = h.make_handler()
         await handler.handle_watch_session(dict(WATCH))
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), QUEUE_HYDRATION_HANG_GUARD_SECONDS)
         await _watch_and_hydrate(handler, {"session_id": next_session})
     frames = _queue_frames(h.ws)
     assert len(frames) == 1
@@ -157,7 +159,7 @@ async def test_slow_peer_does_not_block_serialized_dispatch(
     )
     async with _connect(ws_env) as conn:
         conn.wire.push({"type": "watch_session", "session_id": remote})
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), QUEUE_HYDRATION_HANG_GUARD_SECONDS)
         hydration = conn.handler._queue_watch_task
         if following_frame == "remove_queued_message":
             # The real receive loop must dispatch the withdrawal while the peer
@@ -200,7 +202,7 @@ async def test_disconnect_cancels_inflight_hydration(
     monkeypatch.setattr(control, "call", read)
     async with _connect(ws_env) as conn:
         conn.wire.push({"type": "watch_session", "session_id": sid})
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), QUEUE_HYDRATION_HANG_GUARD_SECONDS)
         hydration = conn.handler._queue_watch_task
     assert hydration.cancelled()
     assert cancelled.is_set()
@@ -241,7 +243,7 @@ async def test_hydration_rereads_after_newer_queue_mutation(
     try:
         async with _connect(ws_env) as conn:
             conn.wire.push({"type": "watch_session", "session_id": sid})
-            await asyncio.wait_for(read_done.wait(), 1)
+            await asyncio.wait_for(read_done.wait(), QUEUE_HYDRATION_HANG_GUARD_SECONDS)
             frame = {"type": mutation, "session_id": sid, "content": "keep this queued"}
             if queued is not None:
                 frame["message_id"] = queued["id"]
@@ -277,7 +279,7 @@ async def test_hydration_rereads_after_newer_queue_mutation(
             # The newer authoritative snapshot has reached the observer already.
             # Resume the earlier read; hydration must discard it and read again.
             release.set()
-            await asyncio.wait_for(conn.handler._queue_watch_task, 1)
+            await _await_queue_hydration(conn.handler)
             await conn.wait_for(lambda fs: any(
                 f.get("event_type") == "queue_updated"
                 and f["data"].get("queue_status") == "available" for f in fs

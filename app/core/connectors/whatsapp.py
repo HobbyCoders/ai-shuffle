@@ -10,6 +10,7 @@ import httpx
 
 from app.core.connectors.base import (
     ActionDef,
+    ArrivalPlace,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
@@ -335,21 +336,23 @@ class WhatsAppConnector(BaseConnector):
         Meta's webhook POST requests.
         """
         try:
-            entries = payload.get("entry", [])
-            for entry in entries:
-                changes = entry.get("changes", [])
-                for change in changes:
+            delivery = []
+            for entry in payload.get("entry", []):
+                for change in entry.get("changes", []):
                     value = change.get("value", {})
-                    messages = value.get("messages", [])
-                    for msg_data in messages:
-                        await self._process_webhook_message(msg_data, value)
+                    for msg_data in value.get("messages", []):
+                        # Text messages take their chat's place; button answers take none.
+                        chat_id = msg_data.get("from", "") if msg_data.get("type") == "text" else None
+                        delivery.append((chat_id, lambda place, msg_data=msg_data, value=value:
+                                         self._process_webhook_message(msg_data, value, place)))
+            await self.handle_delivery(delivery)
         except Exception as exc:
             logger.exception("Error processing WhatsApp webhook payload: %s", exc)
 
     async def _process_webhook_message(
-        self, msg_data: Dict[str, Any], value: Dict[str, Any]
+        self, msg_data: Dict[str, Any], value: Dict[str, Any], place: Optional[ArrivalPlace] = None
     ) -> None:
-        """Process a single message from the webhook payload."""
+        """Process a single message from the webhook payload; a text message has its ``place``."""
         sender = msg_data.get("from", "")
 
         # Filter by allowed phone numbers
@@ -397,7 +400,7 @@ class WhatsAppConnector(BaseConnector):
                 text=text_body,
                 platform_message_id=msg_data.get("id"),
             )
-            await self._on_incoming_message(msg)
+            await place.hand_off(msg)
 
     def _find_contact(self, value: Dict[str, Any], phone: str) -> str:
         """Look up a display name from the contacts list in the webhook payload."""

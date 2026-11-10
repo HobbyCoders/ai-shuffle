@@ -15,6 +15,10 @@ from fluid.messages import Message, Text
 from fluid.store.base import SessionNode
 
 MIB = 1024 * 1024
+# Hang guard for the cross-thread handshakes below, not a latency budget. A
+# worker thread starts when the runner schedules it: CI entered the trim about
+# a second after the test began waiting, and a 1s limit failed (#1336).
+WORKER_HANG_GUARD_SECONDS = 30
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +103,7 @@ async def test_cancelled_caller_cannot_allow_an_overlapping_trim(monkeypatch):
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     def trim(_):
         entered.set()
-        assert release.wait(2)
+        assert release.wait(WORKER_HANG_GUARD_SECONDS)
         return 1
     monkeypatch.setattr(memory, "_glibc_functions", lambda: (
         lambda: SimpleNamespace(fordblks=128 * MIB), trim))
@@ -112,7 +116,7 @@ async def test_cancelled_caller_cannot_allow_an_overlapping_trim(monkeypatch):
     monkeypatch.setattr(memory, "_trim_glibc", worker)
     task = asyncio.create_task(memory.release_unused_memory())
     try:
-        assert await asyncio.to_thread(entered.wait, 1)
+        assert await asyncio.to_thread(entered.wait, WORKER_HANG_GUARD_SECONDS)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -121,7 +125,7 @@ async def test_cancelled_caller_cannot_allow_an_overlapping_trim(monkeypatch):
         assert not original()
     finally:
         release.set()
-        assert await asyncio.to_thread(finished.wait, 1)
+        assert await asyncio.to_thread(finished.wait, WORKER_HANG_GUARD_SECONDS)
 
 
 @pytest.mark.asyncio
