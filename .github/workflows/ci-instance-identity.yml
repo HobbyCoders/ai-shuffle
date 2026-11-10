@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-instance-identity-${{ github.event.pull_request.number || github.ref }}
+  # main-suite's daily run gets its own group so it never queues with a push run.
+  group: ci-instance-identity-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -98,3 +99,12 @@ jobs:
           python -m pytest tests/test_transcript_projection_child_boundary.py
           tests/test_transcript_projection_preparation.py
           --confcutdir=tests/core -o addopts="" -p no:cacheprovider --timeout=45 -q
+
+  # Leave a record that these checks passed on exactly these files, so
+  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
+  record:
+    needs: [identity]
+    if: needs.identity.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/record-pass.yml
+    with:
+      area: identity

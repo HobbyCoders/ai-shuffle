@@ -11,7 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: container-postgres-${{ github.event.pull_request.number || github.ref }}
+  # main-suite's daily run gets its own group so it never queues with a push run.
+  group: container-postgres-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -76,3 +77,12 @@ jobs:
           name: container-postgres-${{ github.sha }}
           path: ${{ runner.temp }}/container-postgres
           if-no-files-found: ignore
+
+  # Leave a record that these checks passed on exactly these files, so
+  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
+  record:
+    needs: [container-postgres]
+    if: needs.container-postgres.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/record-pass.yml
+    with:
+      area: container

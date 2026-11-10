@@ -11,7 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-fluid-${{ github.event.pull_request.number || github.ref }}
+  # main-suite's daily run gets its own group so it never queues with a push run.
+  group: ci-fluid-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -78,3 +79,12 @@ jobs:
         env:
           FLUID_TEST_CLAUDE_BIN: ${{ runner.temp }}/claude-fixture
         run: python -m pytest fluid/tests/unit/test_delegated_tool_markers.py -q -p no:cacheprovider
+
+  # Leave a record that these checks passed on exactly these files, so
+  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
+  record:
+    needs: [unit, delegated-tool-output]
+    if: needs.unit.result == 'success' && needs.delegated-tool-output.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/record-pass.yml
+    with:
+      area: fluid
