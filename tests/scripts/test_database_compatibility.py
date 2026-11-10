@@ -19,7 +19,8 @@ def declaration(level=1, destructive="0" * 64):
 
 def test_this_checkout_pins_its_destructive_migrations():
     current = check.read((ROOT / check.FILE).read_text())
-    problems = check.errors(current, check.digest(check.statements()))
+    pairs = check.statements()
+    problems = check.errors(current, check.digest(pairs), pairs=pairs)
     assert not problems, "\n".join(problems)
 
 
@@ -80,8 +81,56 @@ def migrate(conn, table):
             DROP COLUMN IF EXISTS project_id
     """)
 '''
-    assert check.statements_in(source) == ["DROP TABLE IF EXISTS {}", "ALTER TABLE notes DROP COLUMN IF EXISTS project_id"]
+    assert check.statements_in(source) == [f"DROP TABLE IF EXISTS {{table}} -- table {check.UNRESOLVED}",
+                                           "ALTER TABLE notes DROP COLUMN IF EXISTS project_id"]
     assert check.statements_in("def broken(:\n") == []
+
+
+RETIRED = '''
+RETIRED_TABLES = ("rate_limits", "request_log")
+OLD = "webhooks"
+
+def migrate(cursor):
+    for table in RETIRED_TABLES:
+        cursor.execute(f"DROP TABLE IF EXISTS {table}")
+    cursor.execute(f"DROP TABLE IF EXISTS {OLD}")
+    for column in ("warned", "reached"):
+        cursor.execute(f"ALTER TABLE limits DROP COLUMN {column}")
+    for old, new in (("a", "b"),):
+        cursor.execute(f"ALTER TABLE {old} RENAME TO {new}")
+'''
+
+
+def test_a_table_named_through_a_constant_or_a_loop_is_counted_with_its_value():
+    found = sorted(check.statements_in(RETIRED))
+    assert found == sorted([
+        "DROP TABLE IF EXISTS {table} -- table in RETIRED_TABLES; RETIRED_TABLES = ('rate_limits', 'request_log')",
+        "DROP TABLE IF EXISTS {OLD} -- OLD = 'webhooks'",
+        "ALTER TABLE limits DROP COLUMN {column} -- column in ('warned', 'reached')",
+        "ALTER TABLE {old} RENAME TO {new} -- old in (('a', 'b'),); new in (('a', 'b'),)",
+    ])
+    assert not [statement for statement in found if check.UNRESOLVED in statement]
+    # Adding a table to the tuple is a new destructive statement, though no SQL text changed.
+    for before, after in [('"request_log")', '"request_log", "sessions")'), ('"reached")', '"reached", "title")'),
+                          ('OLD = "webhooks"', 'OLD = "sessions"'), ('(("a", "b"),)', '(("a", "b"), ("c", "d"))')]:
+        changed = sorted(check.statements_in(RETIRED.replace(before, after)))
+        assert before in RETIRED and changed != found, before
+        assert check.digest([("app/db/database.py", item) for item in changed]) != check.digest(
+            [("app/db/database.py", item) for item in found])
+
+
+@pytest.mark.parametrize("source", [
+    "def drop(cursor, table):\n    cursor.execute(f'DROP TABLE {table}')\n",
+    "from names import TABLE\ndef drop(cursor):\n    cursor.execute(f'DROP TABLE {TABLE}')\n",
+    "def drop(self, cursor):\n    cursor.execute(f'DROP TABLE {self.table}')\n",
+    "def drop(cursor):\n    cursor.execute(f'DROP TABLE {name()}')\n",
+    "def drop(cursor, tables):\n    for table in tables:\n        cursor.execute(f'DROP TABLE {table}')\n",
+])
+def test_a_name_that_cannot_be_followed_fails_the_check(source):
+    found = check.statements_in(source)
+    assert len(found) == 1 and check.UNRESOLVED in found[0]
+    problems = check.errors(declaration(), "0" * 64, pairs=[("app/db/x.py", found[0])])
+    assert len(problems) == 1 and "Name the table or column" in problems[0]
 
 
 def test_the_digest_follows_the_statements_and_their_files():

@@ -20,14 +20,21 @@ that release's update keeps a copy of the database once.
                                                            # raise the level and pin the new digest
     python scripts/ci/database_compatibility.py --list     # the statements counted
 
-What it cannot see: SQL assembled at run time from names that are not in the
-source, and data rewrites (UPDATE or DELETE that changes what a column means).
-A change like that raises the level by hand: edit "level" in the file.
+A statement that names its table or column through a variable is counted with
+what that variable holds: a literal, a loop over literals, or a constant in the
+same file (the retired-table tuples in app/db/database.py). A name the script
+cannot follow (a function parameter, an import, an attribute) fails the check:
+name the table in the statement or in a constant beside it.
+
+What it cannot see: SQL joined with + or built by format() or %, and data
+rewrites (UPDATE or DELETE that changes what a column means). A change like
+that raises the level by hand: edit "level" in the file.
 """
 from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import hashlib
 import json
 from pathlib import Path
@@ -52,24 +59,76 @@ REQUIRED_COLUMN = re.compile(r"\bADD\s+COLUMN\b(?:(?!\bADD\s+COLUMN\b)[^;,])*?\b
                              re.IGNORECASE | re.DOTALL)
 
 
+# Marks a name in a destructive statement whose value is not in the file.
+UNRESOLVED = "<not in this file>"
+
+
 def _text(node):
-    """The literal text of a string or f-string node ({} where a value is
-    substituted), or None for anything else."""
+    """The literal text of a string or f-string node, each substituted value
+    shown as its source ({table}), or None for anything else."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
-        return "".join(part.value if isinstance(part, ast.Constant) and isinstance(part.value, str) else "{}"
-                       for part in node.values)
+        return "".join(part.value if isinstance(part, ast.Constant) and isinstance(part.value, str)
+                       else "{" + ast.unparse(part.value) + "}" for part in node.values)
     return None
 
 
+def _bound(name, node, parents):
+    """The source of every value ``name`` can take where ``node`` is: loops and
+    assignments in the enclosing functions, then the module. Empty when the
+    name is a parameter, an import or otherwise not followable."""
+    scope = node
+    while scope is not None:
+        scope = parents.get(id(scope))
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            continue
+        found = []
+        for inner in ast.walk(scope):
+            if isinstance(inner, (ast.For, ast.AsyncFor)):
+                targets, value, how = [inner.target], inner.iter, "in"
+            elif isinstance(inner, ast.Assign):
+                targets, value, how = inner.targets, inner.value, "="
+            elif isinstance(inner, ast.AnnAssign) and inner.value is not None:
+                targets, value, how = [inner.target], inner.value, "="
+            else:
+                continue
+            if any(isinstance(leaf, ast.Name) and leaf.id == name for target in targets for leaf in ast.walk(target)):
+                found.append((f"{name} {how} {ast.unparse(value)}", value))
+        if found:
+            return found
+        if not isinstance(scope, ast.Module) and any(
+                argument.arg == name for argument in ast.walk(scope.args) if isinstance(argument, ast.arg)):
+            return []
+    return []
+
+
+def _values(expression, node, parents, seen):
+    """What the names in ``expression`` hold, followed through constants. An
+    expression without names needs no note: its source is already counted."""
+    notes = []
+    for leaf in ast.walk(expression):
+        if not isinstance(leaf, ast.Name) or leaf.id in seen or hasattr(builtins, leaf.id):
+            continue
+        seen.add(leaf.id)
+        bound = _bound(leaf.id, node, parents)
+        if not bound:
+            notes.append(f"{leaf.id} {UNRESOLVED}")
+        for note, value in sorted(bound, key=lambda item: item[0]):
+            notes.append(note)
+            notes.extend(_values(value, node, parents, seen))
+    return notes
+
+
 def statements_in(source):
-    """Destructive SQL in one Python source text, whitespace normalised.
-    Docstrings and comments are not SQL the application runs."""
+    """Destructive SQL in one Python source text, whitespace normalised, each
+    followed by what its substituted names hold. Docstrings and comments are
+    not SQL the application runs."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     docstrings = {id(node.value) for node in ast.walk(tree)
                   if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
     inside = {id(part) for node in ast.walk(tree) if isinstance(node, ast.JoinedStr) for part in node.values}
@@ -84,7 +143,14 @@ def statements_in(source):
                  for pattern in (DESTRUCTIVE, EMPTIED) for match in pattern.finditer(text)}
         spans |= {(_start(text, match.start()), _end(text, match.end())) for match in REQUIRED_COLUMN.finditer(text)
                   if not re.search(r"\bDEFAULT\b", match.group(0), re.IGNORECASE)}
-        found.extend(" ".join(text[start:end].split()) for start, end in sorted(spans))
+        substituted = ({"{" + ast.unparse(part.value) + "}": part.value for part in node.values
+                        if isinstance(part, ast.FormattedValue)} if isinstance(node, ast.JoinedStr) else {})
+        for start, end in sorted(spans):
+            statement, seen, notes = " ".join(text[start:end].split()), set(), []
+            for shown, expression in substituted.items():
+                if shown in text[start:end]:
+                    notes.extend(_values(expression, node, parents, seen))
+            found.append(statement + (" -- " + "; ".join(notes) if notes else ""))
     return found
 
 
@@ -128,10 +194,14 @@ def read(text):
     return data
 
 
-def errors(current, actual, base=None):
+def errors(current, actual, base=None, pairs=None):
     """Why the declaration is wrong, as messages; empty when it holds.
-    ``base`` is the declaration on the branch this change merges into."""
-    problems = []
+    ``base`` is the declaration on the branch this change merges into,
+    ``pairs`` the statements, checked for names that could not be followed."""
+    problems = [
+        f"{file}: cannot tell what this statement removes or renames, because a name in it is not set in the "
+        f"file: {statement}. Name the table or column in the statement, or in a constant beside it."
+        for file, statement in pairs or [] if UNRESOLVED in statement]
     if current["destructive"] != actual:
         problems.append(
             "A migration that removes, renames or retypes part of the database was added, changed or removed "
@@ -182,7 +252,7 @@ def main(argv=None):
         else:
             print(f"{FILE}: unchanged (level {current['level']})")
         return 0
-    problems = errors(current, actual, base_declaration(args.base) if args.base else None)
+    problems = errors(current, actual, base_declaration(args.base) if args.base else None, pairs)
     for problem in problems:
         print(problem, file=sys.stderr)
     if not problems:

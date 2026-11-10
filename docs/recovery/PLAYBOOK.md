@@ -172,14 +172,22 @@ release that fixes the migration, or reporting it.
 
 ## 5. Back up before a risky step
 
+The backup holds the database and the keys saved credentials are encrypted
+with. Write it to a directory only the person's own account can read, and never
+to a shared or synced folder.
+
 Docker, with the container running: the managed backup in `docs/RESTORE.md`
-("Managed one-container backups"). With the container stopped: copy the whole
-data volume (`docker run --rm -v <data-volume>:/data:ro -v "$PWD":/out busybox
-tar -czf /out/ai-shuffle-data.tgz -C /data .`).
+("Managed one-container backups"). With the container stopped, copy the whole
+data volume into a private directory, with the archive readable by its owner
+only:
+
+    mkdir -m 700 ai-shuffle-backup
+    docker run --rm -v <data-volume>:/data:ro -v "$PWD/ai-shuffle-backup":/out busybox \
+      sh -c 'umask 077 && tar -czf /out/ai-shuffle-data.tgz -C /data .'
 
 Desktop: close the app, check that no `postgres` process from it is left, then
-copy `<userData>/postgres/data` and the worker data directory together. They
-only work as a pair.
+copy `<userData>/postgres/data` and the worker data directory together, into a
+folder only their account can read. They only work as a pair.
 
 Say where the backup is and how large it is before you go on.
 
