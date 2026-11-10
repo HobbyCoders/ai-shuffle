@@ -214,11 +214,17 @@ def _idle(cursor, sid):
 WAKE_COLUMNS = ("id", "prompt", "fire_at", "profile_id", "project_id", "reason", "model", "source")
 
 
+def _travels(row):
+    """Whether a pending wake moves with the chat. A hand-off failure notice
+    (#1419) is about this worker: it stays, and is dropped here once moved."""
+    return row.get("source") != "handoff_failed"
+
+
 def _session_wakes(sid):
     from app.db import wakeups
 
     return [{column: row.get(column) for column in WAKE_COLUMNS}
-            for row in wakeups.get_session_wakeups(sid)]
+            for row in wakeups.get_session_wakeups(sid) if _travels(row)]
 
 
 def wake_carry(target):
@@ -1015,8 +1021,8 @@ def _commit(sid, target, payload, token):
         if moving is not None:
             # The receiver installs only the wakes begin sent. One created or
             # replaced since would be deleted here without running anywhere.
-            cur.execute("SELECT id FROM pending_wakeups WHERE session_id=%s", (sid,))
-            if {row["id"] for row in cur.fetchall()} != set(moving):
+            cur.execute("SELECT id, source FROM pending_wakeups WHERE session_id=%s", (sid,))
+            if {row["id"] for row in cur.fetchall() if _travels(row)} != set(moving):
                 raise ValueError("A wake-up of this chat changed during the move; ownership was not moved. "
                                  "Try again.")
         from app.db.base import parse_jsonb

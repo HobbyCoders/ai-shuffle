@@ -214,15 +214,21 @@ async def desktop_stop_sessions(request: Request, token: str | None = None):
         _shutdown_task.done() and _shutdown_task.exception() is not None
     ):
         from app.core import query_shutdown
+        from app.core.desktop_lifecycle import unfinished_saving
 
         async def stop_all():
             # Windows terminates the process without SIGTERM after this route.
             # Headless queries are not in the session pool/runtime registry.
-            _, queries_settled = await asyncio.gather(
+            # Sessions keep this route's own allowance (25 s, inside every
+            # caller's request timeout): no kill timer runs yet, so the shorter
+            # SIGTERM budget does not apply here. Neither result is a clean stop
+            # while saving is unfinished (#1305).
+            sessions_settled, queries_settled = await asyncio.gather(
                 stop_running_sessions(), query_shutdown.settle(grace=0),
             )
-            if not queries_settled:
-                raise RuntimeError("Request-owned queries have not finished saving")
+            unfinished = unfinished_saving(sessions=bool(sessions_settled), queries=queries_settled)
+            if unfinished:
+                raise RuntimeError("Stop deadline reached; not finished saving: " + ", ".join(unfinished))
 
         _shutdown_task = asyncio.create_task(stop_all())
     await asyncio.shield(_shutdown_task)
