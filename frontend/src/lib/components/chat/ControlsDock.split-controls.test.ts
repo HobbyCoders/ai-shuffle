@@ -424,6 +424,64 @@ describe('ControlsDock split controls', () => {
 		expect(screen.queryByRole('dialog', { name: /choose model/i })).toBeNull();
 	});
 
+	it('closes the model picker when Tab moves focus out of it, leaving focus there (#1407)', async () => {
+		renderDock();
+		const chip = screen.getByRole('button', { name: /^model:/i });
+		await fireEvent.click(chip);
+		const dialog = screen.getByRole('dialog', { name: /choose model/i });
+		const search = screen.getByRole('textbox', { name: /search models/i });
+
+		// Within the popover, or back to its own chip: still open.
+		const star = dialog.querySelector<HTMLButtonElement>('.mpp-row button')!;
+		await fireEvent.focusOut(search, { relatedTarget: star });
+		await fireEvent.focusOut(search, { relatedTarget: chip });
+		// Focus going nowhere (a press on plain panel text) is not leaving.
+		await fireEvent.focusOut(search, { relatedTarget: null });
+		expect(screen.getByRole('dialog', { name: /choose model/i })).toBeTruthy();
+
+		// Shift+Tab past the chip to the next dock control: closed.
+		const other = screen.getByRole('button', { name: /^effort:/i });
+		other.focus();
+		await fireEvent.focusOut(chip, { relatedTarget: other });
+		expect(screen.queryByRole('dialog', { name: /choose model/i })).toBeNull();
+		expect(chip.getAttribute('aria-expanded')).toBe('false');
+		expect(document.activeElement).toBe(other);
+	});
+
+	it('keeps focus in the model popover on a press on its plain text, and Escape after a lost focus returns to the chip', async () => {
+		renderDock();
+		const chip = screen.getByRole('button', { name: /^model:/i });
+		await fireEvent.click(chip);
+		const dialog = screen.getByRole('dialog', { name: /choose model/i });
+		const press = (el: Element) => !el.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true, cancelable: true }));
+		expect(press(dialog.querySelector('.mpp-group-name')!)).toBe(true);
+		expect(press(screen.getByRole('textbox', { name: /search models/i }))).toBe(false);
+		expect(press(dialog.querySelector('.mpp-row button')!)).toBe(false);
+
+		// However focus was lost to the page, Escape hands it back to the chip.
+		(document.activeElement as HTMLElement | null)?.blur();
+		expect(document.activeElement).toBe(document.body);
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.queryByRole('dialog', { name: /choose model/i })).toBeNull();
+		expect(document.activeElement).toBe(chip);
+	});
+
+	it('closes the tool-access menu and effort card when focus Tabs out of them (#1407)', async () => {
+		renderDock();
+		const access = screen.getByRole('button', { name: /^permission mode:/i });
+		await fireEvent.click(access);
+		const item = screen.getByRole('menuitemradio', { name: /bypass/i });
+		await fireEvent.focusOut(access, { relatedTarget: item });
+		expect(screen.getByRole('menu', { name: /tool access/i })).toBeTruthy();
+		await fireEvent.focusOut(item, { relatedTarget: screen.getByRole('button', { name: /^model:/i }) });
+		expect(screen.queryByRole('menu', { name: /tool access/i })).toBeNull();
+
+		const effort = screen.getByRole('button', { name: /^effort:/i });
+		await fireEvent.click(effort);
+		await fireEvent.focusOut(effort, { relatedTarget: access });
+		expect(screen.queryByRole('dialog', { name: /reasoning effort/i })).toBeNull();
+	});
+
 	it('offers Ask, Accept Edits and Bypass without a project', async () => {
 		setLane('chat');
 		const { container } = renderDock();

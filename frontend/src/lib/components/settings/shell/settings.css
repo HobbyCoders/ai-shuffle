@@ -254,10 +254,11 @@
 }
 /* Secondary labels remain primary ink even inside a muted list summary. */
 .settings-shell .st-btn:not(.primary, .danger, .warn) { color: var(--st-fg); }
-.settings-shell .st-btn:hover:not(:disabled) {
+/* aria-disabled: busy but still focusable, so the keyboard keeps its place. */
+.settings-shell .st-btn:hover:not(:disabled, [aria-disabled='true']) {
 	background: var(--st-hover);
 }
-.settings-shell .st-btn:disabled {
+.settings-shell .st-btn:is(:disabled, [aria-disabled='true']) {
 	opacity: 0.45;
 }
 .settings-shell .st-btn.primary {
@@ -568,18 +569,22 @@
 	margin-left: auto;
 	flex-wrap: wrap;
 }
-.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) > .st-rc {
+/* A row with a text field stacks its control under the label. The model
+   picker's own search box is not that field: counting it restacked the row
+   the moment the picker opened, so the trigger jumped out from under the
+   panel placed for it (#1338). */
+.settings-shell[data-stacked] .st-row:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']):not(.mpp-search-inp))) > .st-rc {
 	flex: 1 1 100%;
 	width: 100%;
 	margin-left: 0;
 	flex-wrap: nowrap;
 }
 .settings-shell[data-stacked] .st-row > .st-rc :is(.st-text-field, .st-path, form) { flex: 1; width: 100%; }
-.settings-shell[data-stacked] .st-row > .st-rc :is(input:not([type='checkbox']):not([type='range']):not([type='radio']), textarea) { width: 100%; min-width: 0; }
+.settings-shell[data-stacked] .st-row > .st-rc :is(input:not([type='checkbox']):not([type='range']):not([type='radio']):not(.mpp-search-inp), textarea) { width: 100%; min-width: 0; }
 @media (max-width: 600px) {
 	.settings-shell { --st-gutter: 16px; }
-	.settings-shell .st-row:has(> .st-rc :is(.st-txt, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-	.settings-shell .st-row > .st-rc:has(:is(.st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))) { width: 100%; justify-content: flex-start; }
+	.settings-shell .st-row:has(> .st-rc :is(.st-txt, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']):not(.mpp-search-inp))) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+	.settings-shell .st-row > .st-rc:has(:is(.st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']):not(.mpp-search-inp))) { width: 100%; justify-content: flex-start; }
 	.settings-shell .st-row > .st-rc :is(.st-text-field, .st-path, form) { flex: 1; width: 100%; }
 }
 .settings-shell[data-stacked] .st-row .st-txt {
@@ -706,7 +711,7 @@
 		flex-wrap: wrap;
 	}
 	.settings-shell:not([data-stacked]) .st-row:is(
-			:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))),
+			:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']):not(.mpp-search-inp))),
 			.st-phone-stack,
 			:has(.st-rh):has(> .st-rc :is(select, [role='combobox'], [aria-haspopup], .st-vbtn, .st-seg))
 		) > .st-rc {
@@ -717,7 +722,7 @@
 		flex-wrap: nowrap;
 	}
 	.settings-shell:not([data-stacked]) .st-row:is(
-			:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']))),
+			:has(> .st-rc :is(.st-txt, .st-meter, .st-text-field, .st-path, textarea, input:not([type='checkbox']):not([type='range']):not([type='radio']):not(.mpp-search-inp))),
 			.st-phone-stack,
 			:has(.st-rh):has(> .st-rc :is(select, [role='combobox'], [aria-haspopup], .st-vbtn, .st-seg))
 		) > .st-rc :is(.st-text-field, .st-path, form, .st-sel-wrap, [role='combobox'], [aria-haspopup], .st-vbtn, .st-seg) {
@@ -728,7 +733,7 @@
 	.settings-shell:not([data-stacked]) .st-row > .st-rc > .st-seg button {
 		flex: 1;
 	}
-	.settings-shell:not([data-stacked]) .st-row > .st-rc :is(input:not([type='checkbox']):not([type='range']):not([type='radio']), textarea) {
+	.settings-shell:not([data-stacked]) .st-row > .st-rc :is(input:not([type='checkbox']):not([type='range']):not([type='radio']):not(.mpp-search-inp), textarea) {
 		width: 100%;
 		min-width: 0;
 	}

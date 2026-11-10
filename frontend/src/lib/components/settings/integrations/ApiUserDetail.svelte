@@ -327,7 +327,7 @@
 	<RowGroup title="Runs with">
 		<SettingRow label="Model" help={user?.owner_sender_connector ? OWNER_CONNECTOR_MODEL_HELP : MODEL_HELP}>
 			<span class="picker">
-				<ModelPicker id="api-user-model" value={current} allowEmpty apiKeyOnly={!user?.owner_sender_connector} emptyLabel="Agent default" onSelect={onModel} />
+				<ModelPicker id="api-user-model" value={current} allowEmpty allowCustom={false} apiKeyOnly={!user?.owner_sender_connector} emptyLabel="Agent default" onSelect={onModel} />
 			</span>
 		</SettingRow>
 		<SettingRow label="Effort">

@@ -87,7 +87,8 @@ def pg(cluster, monkeypatch):
     monkeypatch.setattr(assistant, "RETENTION_BATCH", 2)
     monkeypatch.setattr(startup_reconcile, "record_error", lambda *a, **k: None)
     monkeypatch.setattr(session_events, "compact_idle_session_deltas", lambda **k: {"rows": 0})
-    monkeypatch.setattr(fluid_events, "prune_fluid_delta_events", lambda *a, **k: 0)
+    monkeypatch.setattr(fluid_events, "maintain_fluid_event_log",
+                        lambda *a, **k: {"pruned": 0, "compacted": 0})
 
     def sql(query, params=None):
         with connect(False) as conn:

@@ -41,6 +41,7 @@
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import EffortPopoverCard from './EffortPopoverCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
+	import { focusLeftRoots, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
@@ -165,6 +166,15 @@
 		openPopover = null;
 	}
 
+	/** Escape: close, and give focus back to the chip if it was in the popover or lost to the page (#1339). */
+	function dismissPopover() {
+		const wrap = openPopover ? wrapFor(openPopover) : null;
+		// Focus lost to the page still goes back to the chip.
+		const hadFocus = pickerHoldsFocus(wrap, modelLayerRef);
+		closePopover();
+		if (hadFocus) wrap?.querySelector<HTMLButtonElement>('button[aria-expanded]')?.focus({ preventScroll: true });
+	}
+
 	function handleDocumentClick(e: MouseEvent) {
 		if (!openPopover) return;
 		const wrap = wrapFor(openPopover);
@@ -172,11 +182,16 @@
 		openPopover = null;
 	}
 
+	/** Tab or Shift+Tab out of an open popover closes it; focus stays where it went (#1407). */
+	function handlePopoverFocusOut(kind: DockPopover, e: FocusEvent) {
+		if (openPopover === kind && focusLeftRoots(e, wrapFor(kind), modelLayerRef)) closePopover();
+	}
+
 	function handleWindowKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape' && openPopover) {
 			e.preventDefault();
 			e.stopPropagation();
-			closePopover();
+			dismissPopover();
 		}
 	}
 
@@ -522,7 +537,7 @@
 		>
 			<SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden="true" />
 		</button>
-			<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef} data-decision="access">
+			<div class="dock-pop-wrap desktop-controls" bind:this={permissionWrapRef} onfocusout={(e) => handlePopoverFocusOut('permission', e)} data-decision="access">
 				<button
 					type="button"
 					class="dock-txt chevron-after"
@@ -642,7 +657,7 @@
 			<ContextUsageBar onOpenChange={onUsageOpenChange} />
 		</div>
 		{/if}
-		<div class="dock-pop-wrap desktop-controls model-wrap" bind:this={modelWrapRef}>
+		<div class="dock-pop-wrap desktop-controls model-wrap" bind:this={modelWrapRef} onfocusout={(e) => handlePopoverFocusOut('model', e)}>
 			<button
 				type="button"
 				class="dock-txt model-btn"
@@ -682,7 +697,8 @@
 							// Stay open so context-window controls remain reachable.
 							activeSession.setModelOverride(v);
 						}}
-						onRequestClose={closePopover}
+						onRequestClose={dismissPopover}
+						focusSearchOnOpen
 					/>
 				</div>
 			</div>
@@ -691,7 +707,7 @@
 
 		{#if showEffort}
 		<span class="dock-dot desktop-controls" aria-hidden="true">·</span>
-		<div class="dock-pop-wrap desktop-controls" bind:this={effortWrapRef}>
+		<div class="dock-pop-wrap desktop-controls" bind:this={effortWrapRef} onfocusout={(e) => handlePopoverFocusOut('effort', e)}>
 			<button
 				type="button"
 				class="dock-txt effort-btn chevron-after"

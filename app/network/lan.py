@@ -72,7 +72,10 @@ the account hub relays at admission are sealed to the admitted device
 (``seal_admission_addresses``). In Docker the bridge address (172.17.0.0/16)
 another host cannot reach is not advertised unless the owner configured it;
 the host's LAN address is, once the owner reached the worker on it or set
-it (``network_lan_addresses``, or the cluster advertise address).
+it (``network_lan_addresses``, or the cluster advertise address). A worker
+bound only to loopback (the desktop app's) answers nothing on its guessed
+address: it advertises its LAN-sync listener (``app.serve.configured_lan_port``),
+which serves these three paths and nothing else, or no LAN address at all.
 """
 from __future__ import annotations
 
@@ -286,6 +289,30 @@ def set_owner_addresses(values: Iterable[str]) -> List[str]:
         raise ValueError(f"At most {MAX_OWNER_ADDRESSES} addresses")
     database.set_system_setting(SETTING_ADDRESSES, json.dumps(out))
     return out
+
+
+# The LAN-sync listener of a worker bound only to loopback (``app.serve``).
+_listener_port: Optional[int] = None
+
+
+def set_listener_port(port: Optional[int]) -> None:
+    """Record the bound LAN-sync listener (None when there is none or it failed)."""
+    global _listener_port
+    _listener_port = int(port) if port else None
+
+
+def listener_port() -> Optional[int]:
+    return _listener_port
+
+
+def listener_endpoint() -> Optional[str]:
+    """``http://<this host's LAN IP>:<port>`` of the LAN-sync listener, or None without one."""
+    if not _listener_port:
+        return None
+    from app.core.cluster import _primary_lan_ip
+    ip = _primary_lan_ip()
+    url = f"http://{ip}:{_listener_port}" if ip else None
+    return url if is_lan_candidate(url) else None
 
 
 def advertised_addresses(*, tunnel: bool, advertise: Optional[str], source: str,

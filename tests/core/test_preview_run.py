@@ -114,6 +114,7 @@ def test_cli_passes_preview_host_and_lease(
     assert env["SHUFFLE_PREVIEW_HOST"] == host
     assert env["SHUFFLE_PREVIEW_ACCESS_HOST"] == browser_host
     assert env["SHUFFLE_PREVIEW_ACCESS_TTL"] == "60"
+    assert env["SHUFFLE_LAN_PORT"] == "off"
     assert supervise_mock.call_args.kwargs["ttl"] == 60
     ports = {int(env[key]) for key in ("PORT", "SHUFFLE_PROTECTED_PORT", "SHUFFLE_PREVIEW_PORT")}
     ports.add(database.call_args.kwargs["port"])
