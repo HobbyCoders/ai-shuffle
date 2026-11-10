@@ -325,7 +325,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Use distinct isolated ports and a positive TTL of at most four hours")
     from docker import container_runtime as runtime
 
-    stopped = threading.Event()
+    # Set from a signal handler: a lock-free flag, not threading.Event (#1317).
+    stopped = runtime.StopFlag()
     def stop(signum: int, frame: FrameType | None) -> None:
         stopped.set()
         runtime.STOP.set()

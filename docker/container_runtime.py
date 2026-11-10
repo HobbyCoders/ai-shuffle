@@ -55,7 +55,45 @@ STACK_DUMP_SETTLE = 1.0
 APP_USER = "ai_shuffle"
 APP_DB = "ai_shuffle"
 ADMIN = "shuffle_admin"
-STOP = threading.Event()
+
+
+class StopFlag:
+    """A stop request that a signal handler can set without taking a lock (#1317).
+
+    Python runs a signal handler in the main thread between two bytecodes. A
+    threading.Event takes its internal lock in both wait() and set(), and that
+    lock is not reentrant. When SIGTERM lands while the main thread is inside
+    STOP.wait() holding it, a handler calling Event.set() waits forever on its
+    own thread: the supervisor never stops the app, and docker kills the whole
+    container (exit 137) when the stop timeout runs out. set() here is a single
+    attribute store; wait() polls in short sleeps, which a signal interrupts.
+    """
+
+    POLL_SECONDS = 0.05
+
+    def __init__(self):
+        self._stopped = False
+
+    def set(self):
+        self._stopped = True
+
+    def clear(self):
+        self._stopped = False
+
+    def is_set(self):
+        return self._stopped
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self._stopped:
+            remaining = self.POLL_SECONDS if deadline is None else deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self.POLL_SECONDS, remaining))
+        return self._stopped
+
+
+STOP = StopFlag()
 APP_STOP_SECONDS = 30
 # Hand-over (#1821). An image that provides "source-supervisor" starts the
 # active update's own copy of this file, passing SHUFFLE_HANDED_OVER (the
@@ -2233,6 +2271,17 @@ def run(settings, action, filename=None):
                     shutil.rmtree(chrome_scripts, ignore_errors=True)
 
 
+def request_stop(signum, frame):
+    # Signal context: no locks, no logging (see StopFlag).
+    STOP.set()
+
+
+def install_stop_handlers():
+    STOP.clear()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, request_stop)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action")
@@ -2246,9 +2295,7 @@ def main(argv=None):
     for action in ("dump", "restore"):
         sub.add_parser(action).add_argument("--file", required=True)
     args = parser.parse_args(argv)
-    STOP.clear()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: STOP.set())
+    install_stop_handlers()
     try:
         if args.action in {"validate-isolation", "remap-home"}:
             validate_isolation_startup(args.new_uid, args.new_gid)
