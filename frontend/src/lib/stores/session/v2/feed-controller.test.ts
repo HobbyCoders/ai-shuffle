@@ -100,7 +100,9 @@ import {
 	TRANSCRIPT_CACHE_MAX,
 	TRANSCRIPT_CACHE_TTL_MS,
 	cachedTranscriptCount,
+	TURN_ERROR_ROW_GRACE_MS,
 } from './feed-controller';
+import { visibleTurnError } from '../turn-error-banner';
 import { pendingQueue } from '../pending-queue';
 import { createMessageHandlers, type MessageHandlerDeps } from '../ws-message-handlers';
 vi.mock('$lib/services/error-reporter', () => ({ reportClientError: vi.fn() }));
@@ -2862,4 +2864,55 @@ describe('feedController turn-error banner (#1082, #1175, #1238)', () => {
 		expect(deps.state.error).toBe(FAILED);
 	});
 
+});
+
+describe('turn-error banner held for its turn\'s own row (#1341)', () => {
+	const MSG = 'provider returned HTTP 500: fake-ai: scripted internal server error';
+	function liveTurn() {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		hoisted.onEvent!({ type: 'turn.started', id: 'ts', session_id: 's1', turn_id: 't1', seq: 1 });
+		hoisted.onEvent!({ type: 'message.user', id: 'mu', session_id: 's1', turn_id: 't1', seq: 2, content: 'hi' });
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		// The socket's error frame, as ws-message-handlers sets it.
+		deps.update(s => ({ ...s, error: MSG }));
+		expect(feedController.raiseTurnError('s1', MSG, 't1')).toBe('shown');
+		return deps;
+	}
+	const abortT1 = (message = MSG) =>
+		({ type: 'turn.aborted', id: 'ta', session_id: 's1', turn_id: 't1', seq: 3, reason: 'error', message });
+
+	it('holds the banner back while the matching error row arrives, so the failure shows once', () => {
+		const deps = liveTurn();
+		expect(visibleTurnError(deps.state)).toBeNull();
+		hoisted.onEvent!(abortT1());
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		vi.advanceTimersByTime(TURN_ERROR_ROW_GRACE_MS * 2);
+		expect(deps.state.error).toBe(MSG);
+		expect(visibleTurnError(deps.state)).toBeNull();
+		expect(deps.state.messages.filter(m => m.systemSubtype === 'error' && m.content === MSG)).toHaveLength(1);
+		feedController.stop();
+	});
+
+	it('shows the banner when the logged failure says something else', () => {
+		const deps = liveTurn();
+		hoisted.onEvent!(abortT1('a different reason'));
+		vi.advanceTimersByTime(STREAM_FOLD_MS);
+		flushRaf();
+		expect(visibleTurnError(deps.state)).toBe(MSG);
+		feedController.stop();
+	});
+
+	it('shows the banner once the grace runs out with no logged failure', () => {
+		const deps = liveTurn();
+		vi.advanceTimersByTime(TURN_ERROR_ROW_GRACE_MS - 1);
+		expect(visibleTurnError(deps.state)).toBeNull();
+		vi.advanceTimersByTime(1);
+		expect(visibleTurnError(deps.state)).toBe(MSG);
+		feedController.stop();
+	});
 });

@@ -45,6 +45,7 @@ import {
 	isTranscriptOnlyTurn,
 	NO_TURN_OUTCOMES,
 	type TurnOutcomes,
+	type V2SessionState,
 	type WireEvent,
 } from './v2/reducer';
 
@@ -105,4 +106,35 @@ export function followTurnError(anchor: TurnErrorAnchor, event: WireEvent): Turn
  *  anchor waits for its turn's end again, unless it is already outlived. */
 export function unplaceTurnError(anchor: TurnErrorAnchor): TurnErrorAnchor {
 	return anchor.outlived ? anchor : { ...anchor, failure: null };
+}
+
+/**
+ * Whether the transcript already shows this banner's words for its own failed
+ * turn (#1341): the error row the reducer appended for that turn's logged end
+ * (same seq) says exactly what the banner says. Then the banner adds nothing
+ * and steps aside. A failure that folded into a spent retry card, a different
+ * message, a frame naming no turn, or a failure not logged yet keeps it.
+ */
+export function bannerRepeatsRow(anchor: TurnErrorAnchor, state: Pick<V2SessionState, 'messages' | 'messageOriginSeq'>): boolean {
+	const failure = anchor.failure;
+	if (!failure || anchor.outlived) return false;
+	for (let i = state.messages.length - 1; i >= 0; i--) {
+		const m = state.messages[i];
+		const origin = state.messageOriginSeq.get(m.id);
+		if (origin === undefined) continue;
+		// Rows are in log order: everything earlier predates the failure.
+		if (origin < failure.seq) return false;
+		if (origin === failure.seq && m.role === 'system' && m.systemSubtype === 'error') {
+			return m.content === anchor.message;
+		}
+	}
+	return false;
+}
+
+/** The banner text to show, or null: a held-back banner (its failed turn's
+ *  row says the same, see `errorBannerHeld`) shows only when it offers an
+ *  action of its own (Fork here). Any other `error` always shows. */
+export function visibleTurnError(s: { error: string | null; errorBannerHeld?: string | null; forkOfferSessionId?: string | null }): string | null {
+	if (!s.error) return null;
+	return s.errorBannerHeld === s.error && !s.forkOfferSessionId ? null : s.error;
 }

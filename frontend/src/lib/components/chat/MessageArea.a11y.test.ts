@@ -31,7 +31,9 @@ describe('MessageArea error banner', () => {
 
 	it('is one snippet, used wherever the error shows (empty and active transcript)', () => {
 		expect(banner.length).toBeGreaterThan(0);
-		expect(source.match(/\{@render errorBanner\(\$activeSession\.error, \$activeSession\.forkOfferSessionId\)\}/g)).toHaveLength(2);
+		expect(source.match(/\{@render errorBanner\(bannerError, \$activeSession\.forkOfferSessionId\)\}/g)).toHaveLength(2);
+		// Both read the one visibility rule (#1341: steps aside for its turn's own row).
+		expect(source).toContain('const bannerError = $derived(visibleTurnError($activeSession));');
 		// No second, hand-rolled copy of the old banner.
 		expect(source).not.toContain('&times;</button>');
 	});

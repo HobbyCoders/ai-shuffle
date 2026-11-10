@@ -58,6 +58,7 @@
 	import TurnActivity from './TurnActivity.svelte';
 	import TurnNavigator from './TurnNavigator.svelte';
 	import { streamingAnchorId, shouldShowGapIndicator, shouldRenderAssistantText } from '$lib/stores/session/gap-indicator';
+	import { visibleTurnError } from '$lib/stores/session/turn-error-banner';
 	import {
 		JUMP_TO_LATEST_DELAY_MS,
 		MIN_TRANSCRIPT_TAIL_RESERVE,
@@ -253,6 +254,9 @@
 	let tailErrorOffsetPx = $state(0);
 	let tailQueueSlotPx = $state(0);
 	let presentedTailError: string | null = null;
+	// The banner a failed turn raised steps aside while its own transcript error
+	// row says the same words (#1341); one with an action (Fork here) stays.
+	const bannerError = $derived(visibleTurnError($activeSession));
 	let followedViewportEnd = 0;
 	let followedFloorContext: { sessionId: string | null } | null = null;
 	let currentTurnAnchorId: string | null = null;
@@ -1429,7 +1433,7 @@
 		if (!containerRef || !tailSpacerRef || selectionBlocksNavigation) return;
 		// Not-sent rows preserve the stopped reader (#1066), unless an error
 		// below them is already the visible tail being followed.
-		if (restingOnNotSentRows(notSentHold.messages) && !$activeSession.error) return;
+		if (restingOnNotSentRows(notSentHold.messages) && !bannerError) return;
 		if (!currentTurnAnchorId && !shouldAutoScroll) return;
 		const contentEnd = renderedFollowEnd();
 		const delta = resolveAnchoredRevealDelta(containerRef.scrollTop, containerRef.clientHeight, contentEnd);
@@ -1530,7 +1534,7 @@
 		// An already-visible error is the followed reading surface, after the
 		// queued rows. Keep that banner in place as Stop returns their words;
 		// ordinary Stop still preserves the transcript exactly as in #1066.
-		if ($activeSession.error && shouldAutoScroll && !pendingScrollToBottom) {
+		if (bannerError && shouldAutoScroll && !pendingScrollToBottom) {
 			followGrowthNow();
 			updateJumpToLatestVisibility();
 			updateCurrentTurnIndex();
@@ -2195,7 +2199,7 @@
 			tailErrorOffsetPx = 0;
 			tailQueueSlotPx = 0;
 		}
-		if (s.error && !presentedTailError) {
+		if (bannerError && !presentedTailError) {
 			const pendingHeight = tailControlsRef?.getBoundingClientRect().height ?? 0;
 			const gap = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0 : 0;
 			// Queue auto-handoff may clear/enrich the same failure before Stop.
@@ -2206,7 +2210,7 @@
 			// geometry too: dequeue can coincide with transcript growth/follow,
 			// otherwise the bottom-docked wrapper shrinks in that same paint.
 			tailQueueSlotPx = pendingHeight;
-			presentedTailError = s.error;
+			presentedTailError = bannerError;
 		}
 		// A queued prompt's row can land in the same commit its bubble leaves
 		// (#1052). The row's follow scroll and the slot's shrink in one paint
@@ -2229,7 +2233,7 @@
 			followedViewportEnd = 0;
 			followedFloorContext = { sessionId: s.sessionId };
 		}
-		const boundary = `${s.sessionId}:${s.messages.length}:${s.isStreaming}:${s.liveTurnId}:${s.error}:${tailSendRevision}:${s.queuedMessages.map(m => `${m.id}:${m.status ?? ''}`).join(',')}`;
+		const boundary = `${s.sessionId}:${s.messages.length}:${s.isStreaming}:${s.liveTurnId}:${bannerError}:${tailSendRevision}:${s.queuedMessages.map(m => `${m.id}:${m.status ?? ''}`).join(',')}`;
 		if (boundary === layoutBoundary) return;
 		layoutBoundary = boundary;
 		// lastKnownScrollTop still belongs to the outgoing/cleared slice here.
@@ -2591,9 +2595,9 @@
 		<!-- Empty State -->
 		<div class="h-full flex flex-col">
 			<!-- Error display for empty state -->
-			{#if $activeSession.error}
+			{#if bannerError}
 				<div class="max-w-5xl mx-auto w-full px-4 sm:px-8 pt-4">
-					{@render errorBanner($activeSession.error, $activeSession.forkOfferSessionId)}
+					{@render errorBanner(bannerError, $activeSession.forkOfferSessionId)}
 				</div>
 			{/if}
 			<div class="flex-1 flex items-center justify-center">
@@ -2723,9 +2727,9 @@
 						/>
 					{/if}
 				</div>
-				{#if $activeSession.error}
+				{#if bannerError}
 					<div class="tail-error" bind:this={tailErrorRef} style:--error-tail-offset={`${tailErrorOffsetPx}px`}>
-						{@render errorBanner($activeSession.error, $activeSession.forkOfferSessionId)}
+						{@render errorBanner(bannerError, $activeSession.forkOfferSessionId)}
 					</div>
 				{/if}
 			</div>

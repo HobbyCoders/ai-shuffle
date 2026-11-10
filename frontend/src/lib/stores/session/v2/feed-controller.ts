@@ -35,6 +35,7 @@ import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages, restoredDraftFields } from '../pending-queue';
 import {
+	bannerRepeatsRow,
 	followTurnError,
 	raiseTurnError,
 	unplaceTurnError,
@@ -124,6 +125,15 @@ let sentinelPending = false;
 // through every reduced event (turn-error-banner.ts). Null when no banner of
 // the current session came from the socket's `error` frame.
 let bannerAnchor: TurnErrorAnchor | null = null;
+// A turn-named banner whose failure is not logged yet is held back for this
+// long, so its transcript row can arrive and say it once (#1341). Past it the
+// banner shows anyway: a stalled feed never hides a failure.
+export const TURN_ERROR_ROW_GRACE_MS = 1500;
+let bannerGraceTimer: ReturnType<typeof setTimeout> | null = null;
+function clearBannerGrace(): void {
+	if (bannerGraceTimer !== null) clearTimeout(bannerGraceTimer);
+	bannerGraceTimer = null;
+}
 // A requested event during hydration is only a hint. Hold one dirty bit until
 // the authoritative history boundary (or hydration fallback) so a long replay
 // cannot issue one WS snapshot request per SSE chunk. Tracked per kind so a
@@ -733,6 +743,11 @@ function fold(hydrationComplete = false): void {
 		// A failed turn's banner leaves once the log has moved past that
 		// failure: rewound away, or followed by a turn that finished cleanly.
 		const outlived = anchor?.outlived === true && s.error === anchor.message;
+		// Once the failure is logged, the banner steps aside exactly when the
+		// failed turn's own error row says the same words (#1341).
+		const held = !outlived && anchor?.failure && s.error === anchor.message
+			? (bannerRepeatsRow(anchor, reducerState) ? anchor.message : null)
+			: undefined;
 		return {
 			...s,
 			...patch,
@@ -743,12 +758,16 @@ function fold(hydrationComplete = false): void {
 			queuedMessages: reconcileQueuedMessages(s.queuedMessages),
 			pendingPeerMessages: reconcilePendingPeerMessages(s.pendingPeerMessages ?? [], patch.messages ?? s.messages),
 			...(outlived ? { error: null, forkOfferSessionId: null } : {}),
+			...(held !== undefined && held !== (s.errorBannerHeld ?? null) ? { errorBannerHeld: held } : {}),
 		};
 	});
 	// Done with, or the banner it was taken for is gone (sent, dismissed,
 	// replaced): nothing is left to follow.
 	if (anchor && bannerAnchor === anchor && (anchor.outlived || deps.getState().error !== anchor.message)) {
 		bannerAnchor = null;
+		clearBannerGrace();
+		// A hold outlives its banner only to hide a later, unrelated identical error.
+		deps.update(s => (s.sessionId === currentSessionId && s.errorBannerHeld ? { ...s, errorBannerHeld: null } : s));
 	}
 }
 
@@ -987,6 +1006,7 @@ function resetFeedFlags(): void {
 	everCaughtUp = false;
 	sentinelPending = false;
 	bannerAnchor = null;
+	clearBannerGrace();
 	pendingResyncDirty.clear();
 	eventsReduced = 0;
 	transcriptPublished = false;
@@ -1398,11 +1418,33 @@ export const feedController: FeedController = {
 	},
 
 	raiseTurnError(sessionId: string, message: string, turnId: string | null) {
-		if (currentSessionId === null || sessionId !== currentSessionId) return 'shown';
+		clearBannerGrace();
+		const hold = (held: string | null) =>
+			deps?.update(s => ((s.errorBannerHeld ?? null) === held ? s : { ...s, errorBannerHeld: held }));
+		if (currentSessionId === null || sessionId !== currentSessionId) {
+			hold(null);
+			return 'shown';
+		}
 		const anchor = raiseTurnError(message, turnId, reducerState.turnOutcomes);
 		if (anchor === 'outlived') return 'outlived';
 		// A frame naming no turn has nothing to follow: it stays until sent or dismissed.
 		bannerAnchor = anchor;
+		if (anchor === null) {
+			hold(null);
+		} else if (anchor.failure) {
+			// A late frame: its failure is already reduced, so the row is known.
+			hold(bannerRepeatsRow(anchor, reducerState) ? message : null);
+		} else {
+			// The usual order: the frame beats its turn's logged end. Hold the
+			// banner until that end folds (the fold decides), or the grace runs out.
+			hold(message);
+			const fed = currentSessionId;
+			bannerGraceTimer = setTimeout(() => {
+				bannerGraceTimer = null;
+				if (currentSessionId !== fed || bannerAnchor?.failure) return;
+				deps?.update(s => (s.errorBannerHeld === message ? { ...s, errorBannerHeld: null } : s));
+			}, TURN_ERROR_ROW_GRACE_MS);
+		}
 		return 'shown';
 	},
 
