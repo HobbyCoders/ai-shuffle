@@ -681,12 +681,17 @@ def test_interrupted_concurrent_build_is_rebuilt_on_the_next_pass() -> None:
         deadline = time.monotonic() + 20
         cancelled = False
         while time.monotonic() < deadline and not cancelled:
-            with base.get_db() as admin:
-                probe = admin.cursor()
-                probe.execute("SELECT pg_cancel_backend(pid) AS ok FROM pg_stat_activity "
-                              "WHERE query LIKE 'CREATE INDEX CONCURRENTLY%%' "
-                              "AND pid <> pg_backend_pid()")
-                cancelled = bool(probe.fetchall())
+            # Cancel only once the build's first transaction has committed the
+            # INVALID catalog entry and the build is waiting behind the open
+            # writer. A cancel that lands earlier rolls the entry back and
+            # leaves nothing to rebuild (#1467).
+            if _invalid_indexes():
+                with base.get_db() as admin:
+                    probe = admin.cursor()
+                    probe.execute("SELECT pg_cancel_backend(pid) AS ok FROM pg_stat_activity "
+                                  "WHERE query LIKE 'CREATE INDEX CONCURRENTLY%%' "
+                                  "AND pid <> pg_backend_pid()")
+                    cancelled = any(row["ok"] for row in probe.fetchall())
             time.sleep(0.05)
         assert cancelled, "the build never reached its concurrent phase"
         worker.join(20)
