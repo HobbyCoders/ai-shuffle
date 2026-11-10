@@ -448,6 +448,24 @@ describe('ControlsDock split controls', () => {
 		expect(document.activeElement).toBe(other);
 	});
 
+	it('keeps focus in the model popover on a press on its plain text, and Escape after a lost focus returns to the chip', async () => {
+		renderDock();
+		const chip = screen.getByRole('button', { name: /^model:/i });
+		await fireEvent.click(chip);
+		const dialog = screen.getByRole('dialog', { name: /choose model/i });
+		const press = (el: Element) => !el.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true, cancelable: true }));
+		expect(press(dialog.querySelector('.mpp-group-name')!)).toBe(true);
+		expect(press(screen.getByRole('textbox', { name: /search models/i }))).toBe(false);
+		expect(press(dialog.querySelector('.mpp-row button')!)).toBe(false);
+
+		// However focus was lost to the page, Escape hands it back to the chip.
+		(document.activeElement as HTMLElement | null)?.blur();
+		expect(document.activeElement).toBe(document.body);
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.queryByRole('dialog', { name: /choose model/i })).toBeNull();
+		expect(document.activeElement).toBe(chip);
+	});
+
 	it('closes the tool-access menu and effort card when focus Tabs out of them (#1407)', async () => {
 		renderDock();
 		const access = screen.getByRole('button', { name: /^permission mode:/i });

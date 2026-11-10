@@ -147,6 +147,37 @@ describe('ModelPicker closes when focus Tabs out of it (#1407)', () => {
 	});
 });
 
+describe('ModelPicker keeps the keyboard after a press inside the panel', () => {
+	/** True when the press's default (moving focus) was cancelled. */
+	const press = (el: Element, button = 0) => !el.dispatchEvent(new MouseEvent('mousedown', { button, bubbles: true, cancelable: true }));
+
+	it('keeps focus in place on a press on a group name or the list, not on fields, stars or rows', async () => {
+		pointer('fine');
+		const { container, getByLabelText } = await openPicker();
+		const panel = container.querySelector<HTMLElement>('.mpk-panel')!;
+		expect(press(panel.querySelector('.mpp-group-name')!)).toBe(true);
+		expect(press(panel.querySelector('.mpp-list')!)).toBe(true);
+		// The caret and text selection in the search box, the stars and the rows
+		// keep the browser's own press.
+		expect(press(getByLabelText('Search models'))).toBe(false);
+		expect(press(panel.querySelector('.mpp-row .mpp-fav')!)).toBe(false);
+		expect(press(panel.querySelector('.mpp-row .mpp-row-label')!)).toBe(false);
+		// Only the main button; a right-click keeps its menu.
+		expect(press(panel.querySelector('.mpp-group-name')!, 2)).toBe(false);
+		expect(container.querySelector('.mpk-panel')).not.toBeNull();
+	});
+
+	it('Escape returns focus to the trigger even after focus was lost to the page', async () => {
+		pointer('fine');
+		const { container, trigger } = await openPicker();
+		(document.activeElement as HTMLElement).blur();
+		expect(document.activeElement).toBe(document.body);
+		await fireEvent.keyDown(document.body, { key: 'Escape' });
+		expect(container.querySelector('.mpk-panel')).toBeNull();
+		expect(document.activeElement).toBe(trigger);
+	});
+});
+
 describe('ModelPicker closes when hidden (#1345)', () => {
 	it('closes when the picker stops being shown, as when Settings is hidden behind the chat', async () => {
 		pointer('fine');

@@ -21,7 +21,7 @@
 	import { decodeProviderModel, CUSTOM_VALUE } from '$lib/constants/models';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import ModelPickerPanel from './ModelPickerPanel.svelte';
-	import { focusLeftRoots } from './model-picker-focus';
+	import { focusLeftRoots, pickerHoldsFocus } from './model-picker-focus';
 	import ProviderGlyph from './ProviderGlyph.svelte';
 
 	interface Props {
@@ -211,7 +211,8 @@
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key !== 'Escape') return;
 		e.preventDefault();
-		close(rootEl?.contains(document.activeElement) ?? false);
+		// Focus lost to the page still goes back to the trigger.
+		close(pickerHoldsFocus(rootEl));
 		// This Escape closed the panel; keep it from also closing a dialog the
 		// picker sits in (those listen on window, after this document listener).
 		e.stopPropagation();

@@ -41,7 +41,7 @@
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import EffortPopoverCard from './EffortPopoverCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
-	import { focusLeftRoots } from '$lib/components/settings/model-picker-focus';
+	import { focusLeftRoots, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
@@ -166,11 +166,11 @@
 		openPopover = null;
 	}
 
-	/** Escape: close, and give focus back to the chip if it was in the popover (#1339). */
+	/** Escape: close, and give focus back to the chip if it was in the popover or lost to the page (#1339). */
 	function dismissPopover() {
 		const wrap = openPopover ? wrapFor(openPopover) : null;
-		const active = document.activeElement;
-		const hadFocus = !!active && (!!wrap?.contains(active) || !!modelLayerRef?.contains(active));
+		// Focus lost to the page still goes back to the chip.
+		const hadFocus = pickerHoldsFocus(wrap, modelLayerRef);
 		closePopover();
 		if (hadFocus) wrap?.querySelector<HTMLButtonElement>('button[aria-expanded]')?.focus({ preventScroll: true });
 	}

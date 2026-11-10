@@ -47,7 +47,7 @@
 		getModelWindowInfo,
 		saveModelWindow
 	} from '$lib/stores/model-window';
-	import { canFocusModelSearch } from './model-picker-focus';
+	import { canFocusModelSearch, keepFocusOnPanelPress } from './model-picker-focus';
 
 	interface ExtraRow {
 		value: string;
@@ -580,7 +580,8 @@
 
 </script>
 
-<div class="mpp" data-model-picker-panel>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="mpp" data-model-picker-panel onmousedown={keepFocusOnPanelPress}>
 	<div class="mpp-body">
 	<div class="mpp-main">
 		<div class="mpp-search">
