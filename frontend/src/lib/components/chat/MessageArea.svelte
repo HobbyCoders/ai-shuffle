@@ -32,6 +32,7 @@
 	import { tick, untrack, onMount, onDestroy, getContext } from 'svelte';
 	import { X } from 'lucide-svelte';
 	import { derived as derivedStore, get } from 'svelte/store';
+	import { landedFromQueue, type QueueHandoffMark } from '$lib/utils/queue-handoff';
 	import { activeSession as liveActiveSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { notify } from '$lib/stores/notifications';
 	import { TRANSCRIPT_PRESENTATION, TRANSCRIPT_ACTIONS, type TranscriptPresentation, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
@@ -2171,6 +2172,7 @@
 	let layoutBoundary = '';
 	let tailSendContext = '';
 	let tailSendRevision = 0;
+	let handoffMark: QueueHandoffMark | null = null;
 	$effect.pre(() => {
 		const s = $activeSession;
 		const sendContext = s.sessionId ?? '';
@@ -2205,6 +2207,22 @@
 			// otherwise the bottom-docked wrapper shrinks in that same paint.
 			tailQueueSlotPx = pendingHeight;
 			presentedTailError = s.error;
+		}
+		// A queued prompt's row can land in the same commit its bubble leaves
+		// (#1052). The row's follow scroll and the slot's shrink in one paint
+		// read as a shift, so hold the painted slot for that paint only and give
+		// it back on the next frame, where it shrinks on its own.
+		const mark = { sessionId: s.sessionId, messages: s.messages.length, queued: s.queuedMessages.length };
+		const handoff = landedFromQueue(handoffMark, mark) && s.isStreaming && !s.stopRequestedTurnId && !presentedTailError;
+		handoffMark = mark;
+		if (handoff) {
+			const pendingHeight = tailControlsRef?.getBoundingClientRect().height ?? 0;
+			if (pendingHeight > untrack(() => tailQueueSlotPx)) {
+				tailQueueSlotPx = pendingHeight;
+				requestAnimationFrame(() => requestAnimationFrame(() => {
+					if (!presentedTailError && tailQueueSlotPx === pendingHeight) tailQueueSlotPx = 0;
+				}));
+			}
 		}
 		const resetFloor = s.sessionId !== followedFloorContext?.sessionId || (!s.messages.length && !s.isStreaming) || untrack(() => windowShifting);
 		if (resetFloor) {

@@ -547,12 +547,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				queueHydration.snapshot(state.sessionId, 'available');
 				const messages = (syncData?.queued_messages ?? []) as Array<{
-					id: string; content: string; created_at: string; client_message_id?: string; command_id?: string;
+					id: string; content: string; created_at: string; client_message_id?: string; command_id?: string; upload_paths?: string[]; recorded?: boolean;
 				}>;
-				const rows = messages.map(m => ({
-					id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime(),
-					clientMessageId: m.client_message_id ?? m.command_id,
-				}));
+				const rows = messages.map(m => {
+					const clientMessageId = m.client_message_id ?? m.command_id;
+					// The row's recorded attachments, or (from an older worker) this
+					// page's own record of what its send carried.
+					const uploadPaths = Array.isArray(m.upload_paths) && m.upload_paths.length
+						? m.upload_paths : pendingQueue.sendUploadPaths(clientMessageId);
+					return {
+						id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime(), clientMessageId,
+						...(uploadPaths.length ? { uploadPaths } : {}),
+						...(m.recorded ? { recorded: true } : {}),
+					};
+				});
 				// The snapshot is authoritative about what EXISTS, but it is not
 				// ordered against the other producer of this frame (the turn pump's
 				// clearing broadcast), so a pre-absorption snapshot can land last and
@@ -562,6 +570,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					if (row.clientMessageId) clearCompactRetry(sid, row.clientMessageId);
 				}
 				pendingQueue.noteAuthoritative(sid, rows);
+				// #1052: the snapshot drops a row the moment it is taken to run, but
+				// the delivered row comes on the events feed, usually later. Keep the
+				// bubble until that row shows (or a bounded wait). Not after Stop:
+				// its rows become "Not sent" rows, which the Stop hold covers.
+				if (!state.stopRequestedTurnId) pendingQueue.holdDelivering(sid, state.queuedMessages, rows, () => {
+					update(s => s.sessionId === sid ? { ...s, queuedMessages: pendingQueue.reconcile(sid, s.queuedMessages) } : s);
+				}, command => state.messages.some(m => m.role === 'user' && m.commandId === command));
 				const reconciled = pendingQueue.reconcile(sid, rows);
 				const peers = (syncData?.pending_peer_messages ?? []) as Array<{
 					id: string; content: string; sender_label: string; sender_session_id?: string; created_at: string;

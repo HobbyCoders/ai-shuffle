@@ -17,7 +17,7 @@ import pytest
 from app.core import checkout_manager
 from app.db import checkouts as checkouts_db
 from app.db import projects_v2
-from tests.shared_fixtures import foreign_keys_off  # noqa: F401  (autouse fixture)
+from tests.shared_fixtures import clean_task_registry, foreign_keys_off  # noqa: F401  (fixtures)
 
 RUNNER = "runnerA"
 
@@ -1741,3 +1741,148 @@ def test_reattach_never_takes_a_branch_another_worktree_holds(
     assert _out(base_checkout, "symbolic-ref", "--short", "HEAD") == branch
     with pytest.raises(subprocess.CalledProcessError):
         _out(path, "symbolic-ref", "-q", "HEAD")
+
+
+# ---------------------------------------------------------------------------
+# #1437: the next turn puts a clean detached checkout back on its branch
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def turn_start(project, base_checkout, workspace_root, monkeypatch):
+    """A session bound to a branch with a commit main lacks, and its turn-start resolve."""
+    from app.core import query_options
+    from app.core.config import settings
+    from app.db import database
+
+    monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda self: RUNNER))
+    branch = "fix/display"
+    path = _session_checkout_with_commit(project, branch)
+    database.create_session(
+        "sess-1437", None, project_v2_id=project["id"], worktree_branch=branch,
+        derive_provider_from_profile=False,
+    )
+
+    def resolve():
+        return query_options._resolve_checkout_for_options(database.get_session("sess-1437"))
+
+    def resolve_refused():
+        """The new turn-start step declines, and the binding check still refuses."""
+        from app.core import project_resolver
+
+        assert project_resolver.reattach_own_detached_checkout(
+            database.get_session("sess-1437")) is False
+        return resolve()
+
+    main_sha = _out(base_checkout, "rev-parse", "HEAD")
+    resolve.refused = resolve_refused
+    return path, branch, _out(path, "rev-parse", "HEAD"), main_sha, resolve
+
+
+def _assert_still_detached(path):
+    with pytest.raises(subprocess.CalledProcessError):
+        _out(path, "symbolic-ref", "-q", "HEAD")
+
+
+def test_turn_start_switches_a_detached_checkout_back_to_its_branch(turn_start):
+    """The agent ran `git checkout origin/main` for a baseline; every later turn was refused."""
+    path, branch, tip, main_sha, resolve = turn_start
+    _git(path, "checkout", "--detach", main_sha)
+    (Path(path) / "notes.txt").write_text("untracked\n", encoding="utf-8")
+
+    assert resolve() == path
+    assert _out(path, "symbolic-ref", "--short", "HEAD") == branch
+    assert _out(path, "rev-parse", "HEAD") == tip
+    assert (Path(path) / "work.txt").read_text(encoding="utf-8") == "work\n"
+    assert (Path(path) / "notes.txt").read_text(encoding="utf-8") == "untracked\n"
+
+
+def test_turn_start_keeps_refusing_with_a_tracked_change(turn_start):
+    path, branch, tip, main_sha, resolve = turn_start
+    _git(path, "checkout", "--detach", main_sha)
+    (Path(path) / "README.md").write_text("edited while detached\n", encoding="utf-8")
+
+    assert resolve.refused() is None
+    _assert_still_detached(path)
+    assert (Path(path) / "README.md").read_text(encoding="utf-8") == "edited while detached\n"
+    assert _out(path, "rev-parse", branch) == tip
+
+
+def test_turn_start_keeps_refusing_when_head_is_on_no_ref(turn_start):
+    """A commit made while detached would become unreachable after the switch."""
+    path, branch, tip, main_sha, resolve = turn_start
+    _git(path, "checkout", "--detach", main_sha)
+    (Path(path) / "detached.txt").write_text("only here\n", encoding="utf-8")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-m", "made while detached")
+    head = _out(path, "rev-parse", "HEAD")
+
+    assert resolve.refused() is None
+    _assert_still_detached(path)
+    assert _out(path, "rev-parse", "HEAD") == head
+    assert _out(path, "rev-parse", branch) == tip
+
+
+def test_turn_start_keeps_refusing_when_another_worktree_has_the_branch(turn_start, base_checkout):
+    path, branch, tip, main_sha, resolve = turn_start
+    _git(path, "checkout", "--detach", main_sha)
+    _git(base_checkout, "switch", branch)
+
+    assert resolve.refused() is None
+    _assert_still_detached(path)
+    assert _out(path, "rev-parse", "HEAD") == main_sha
+    assert _out(base_checkout, "symbolic-ref", "--short", "HEAD") == branch
+
+
+def test_turn_start_keeps_refusing_while_background_work_runs(turn_start, monkeypatch):
+    """A background command still running may be working in the detached tree."""
+    from app.core.task_registry import task_registry
+
+    path, branch, tip, main_sha, resolve = turn_start
+    _git(path, "checkout", "--detach", main_sha)
+    monkeypatch.setattr(task_registry, "get_parking_background_work",
+                        lambda sid: [{"id": "bg-1"}] if sid == "sess-1437" else [])
+
+    assert resolve.refused() is None
+    _assert_still_detached(path)
+    assert _out(path, "rev-parse", "HEAD") == main_sha
+
+
+def test_turn_start_keeps_refusing_while_a_serving_monitor_runs(turn_start, clean_task_registry):
+    """A dev server or watcher left running (Monitor serves=True) never parks
+    the session, but it still runs in the detached tree."""
+    from app.core.task_registry import task_registry
+
+    path, branch, tip, main_sha, resolve = turn_start
+    _git(path, "checkout", "--detach", main_sha)
+    task_registry.start_task("sess-1437", "server", "shell", "dev server")
+    task_registry.mark_monitor_shell_task("sess-1437", "server", serves=True)
+    assert task_registry.get_parking_background_work("sess-1437") == []
+
+    assert resolve.refused() is None
+    _assert_still_detached(path)
+    assert _out(path, "rev-parse", "HEAD") == main_sha
+
+
+def test_turn_start_keeps_refusing_while_another_sessions_serving_monitor_runs(
+    turn_start, project, clean_task_registry
+):
+    """Another session on the same branch left a dev server running in the
+    detached tree, with no durable task row yet: the switch would move the
+    files under it."""
+    from app.core.session_reservations import holds_resources
+    from app.core.task_registry import task_registry
+    from app.db import database
+
+    path, branch, tip, main_sha, resolve = turn_start
+    _git(path, "checkout", "--detach", main_sha)
+    database.create_session(
+        "sess-1437-b", None, project_v2_id=project["id"], worktree_branch=branch,
+        derive_provider_from_profile=False,
+    )
+    task_registry.start_task("sess-1437-b", "server", "shell", "dev server")
+    task_registry.mark_monitor_shell_task("sess-1437-b", "server", serves=True)
+    assert holds_resources("sess-1437-b") is False
+
+    assert resolve.refused() is None
+    _assert_still_detached(path)
+    assert _out(path, "rev-parse", "HEAD") == main_sha
