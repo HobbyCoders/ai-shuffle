@@ -1500,6 +1500,24 @@ def forget_session_deletion(cursor, session_id: str) -> None:
     cursor.execute("DELETE FROM network_session_deletions WHERE session_id = %s", (session_id,))
 
 
+def owe_session_tombstones(cursor, device_id: str) -> int:
+    """Mark pending each current fact whose chat the network may still hold live (#1308 review S9).
+
+    Derived from durable state only: unless this worker's own tombstone is
+    the chat's sync record here, a peer may still hold a live copy (no
+    record, a live record, or another worker's tombstone at a version that
+    need not beat it), so its tombstone is owed. A chat with a row here was
+    recreated and owes nothing.
+    """
+    cursor.execute(
+        f"UPDATE network_session_deletions SET pending = TRUE WHERE NOT pending AND {_CURRENT_NETWORK} "
+        "AND NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.id = network_session_deletions.session_id) "
+        "AND NOT EXISTS (SELECT 1 FROM sync_records r WHERE r.collection = 'sessions' "
+        "AND r.record_id = network_session_deletions.session_id AND r.deleted AND r.origin_device_id = %s)",
+        (device_id,))
+    return cursor.rowcount or 0
+
+
 def pending_session_deletions(cursor, session_ids: Optional[List[str]] = None, *, limit: int = 100) -> List[str]:
     if session_ids is not None:
         if not session_ids:

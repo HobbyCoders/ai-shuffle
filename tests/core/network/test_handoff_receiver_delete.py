@@ -394,3 +394,41 @@ def test_the_owner_scan_drops_the_fact_of_a_chat_recreated_here(pair):  # noqa: 
         assert engine.publish_session_deletions() == 0
     with b.active(), get_db() as conn:
         assert store.session_deletion(conn.cursor(), SID) is None
+
+
+@pytest.mark.asyncio
+async def test_a_lost_refusal_still_owes_the_tombstone_when_another_peer_moves_the_frontier(
+        pair, tmp_path, monkeypatch):  # noqa: F811
+    """Review S9: the refusing copy rolled back and B restarted; C's snapshot then says 'deleted at A's version'."""
+    from tests.core.network.harness import Worker, join
+
+    a, b, _, _ = pair
+    c = Worker("c", tmp_path)
+    join(a, c)
+    exchange(a, b)  # B learns C is a member
+    await _delete_unsynced_on_receiver(a, b, monkeypatch)  # a fact with nothing to publish yet
+    exchange(a, c)
+    a_version = _record(a)
+    assert not a_version["deleted"]
+    with c.active(), get_db() as conn:
+        # C purges its mirror: the chat is a tombstone at A's version there.
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sessions WHERE id=%s", (SID,))
+        cur.execute("UPDATE sync_records SET deleted=TRUE, content_hash='' "
+                    "WHERE collection='sessions' AND record_id=%s", (SID,))
+    # The refusing copy from A rolled back, and B restarted: no pending fact, no hint.
+    monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)
+    assert not _fact(b)["pending"]
+    with c.active():
+        manifest = engine.snapshot_manifest()
+    _copy_state(b, _snapshot(c, "sessions"))
+    with b.active():
+        engine.adopt_watermarks(manifest["watermarks"])  # B acknowledges A's stream through C
+        catalog.publish_owned()
+    converge([a, b, c])
+    with a.active():
+        assert database.get_session(SID) is None, "A kept the chat its owner deleted"
+    record = _record(a)
+    assert record["deleted"] and record["origin_device_id"] == b.device_id
+    assert record["clock"] > a_version["clock"], "an equal-version tombstone does not replace a live record"
+    c.close()

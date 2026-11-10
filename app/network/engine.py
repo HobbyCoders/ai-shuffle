@@ -1146,10 +1146,9 @@ def record_after_commit(collection: str, record_id: str) -> None:
 # incoming sync never recreates the chat, and its tombstone is published until
 # it is recorded, over whichever worker signed the chat's record.
 
-# Chats whose record or child sync refused here because of the fact. In
-# memory, so the obligation outlives a rollback of the transaction that
-# refused (the next publication marks them pending in its own transaction);
-# after a restart, the retried copy or op refuses again.
+# Chats whose record or child sync refused here because of the fact: only a
+# hint that publishes sooner after an apply. The obligation itself is derived
+# from durable state by ``store.owe_session_tombstones`` on every owner scan.
 _refused_session_ids: set = set()
 _refused_lock = threading.Lock()
 
@@ -1223,6 +1222,8 @@ def publish_session_deletions(*, ctx: Optional[NetworkContext] = None,
             # A refusal whose transaction rolled back still owes its tombstone.
             for session_id in sorted(store.deleted_session_ids(cursor, refused)):
                 store.set_session_deletion_pending(cursor, session_id, True)
+            if session_ids is None:
+                store.owe_session_tombstones(cursor, ctx.device_id)  # the durable obligation (S9)
             ids = store.pending_session_deletions(cursor, None if session_ids is None else sorted(set(session_ids)))
             if session_ids is None:
                 store.prune_session_deletions(cursor)
@@ -1241,6 +1242,9 @@ def publish_session_deletions(*, ctx: Optional[NetworkContext] = None,
             if cursor.fetchone() is not None:
                 store.forget_session_deletion(cursor, session_id)  # recreated here since
                 continue
+            existing = store.get_record(cursor, "sessions", session_id)
+            if existing is not None:  # outrank the version seen, not tie it
+                store.observe_clock(cursor, int(existing["clock"]))
             if record(cursor, "sessions", session_id, None, ctx=ctx, force=True) is None:
                 continue
             store.set_session_deletion_pending(cursor, session_id, False)
