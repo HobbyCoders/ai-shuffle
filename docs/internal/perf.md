@@ -245,6 +245,17 @@ Python dependencies); importing `app.main` as the app runs is 3.4 s without
 prepared bytecode and 2.0 s with the `bytecode` stage (about 2 s of
 preparation, 81 MB). The clone needs image capability `database-clone-v1`.
 
+An update that declares the same database level as the version it replaces
+(`app/db/compatibility.json`) takes no database copy at all; this needs image
+capability `database-level-v1`. Lab, real PostgreSQL 16 (2026-11-09): the
+schema setup of release 1.2.1 (schema 94) ran three times over a database
+migrated by main 402 commits later (schema 96), alternating with main's, with
+no error and no table or column lost (139 tables, 1,198 columns throughout).
+The destructive-migration digest is the same at both revisions, so none of
+those updates would have taken a copy. Not measured: a full app start of the
+older version over the newer database, and the downtime of a real container
+update without the copy.
+
 Phase 1 found ~50k element nodes in real 120-row windows versus ~8.6k in the
 old synthetic fixture. Use the new rich fixture's measured DOM count alongside
 latency so a cheaper synthetic window cannot masquerade as a field win.

@@ -2062,7 +2062,7 @@ def restart_into_update(current, updates, env, before_start=None):
     if updates.lifecycle("stop-sessions").get("stopped") is not True:
         raise RuntimeFailure("Could not quiesce the worker")
     stop_group(current, APP_STOP_SECONDS)
-    updates.activating()  # copies the database, then records the first start
+    updates.activating()  # copies the database when the update needs it, then records the first start
     if before_start is not None:
         before_start(child_env)
     return start_app(command, cwd, child_env, updates.root)
@@ -2165,7 +2165,8 @@ def run(settings, action, filename=None):
                 try:
                     updates = ContainerUpdates(root, image, (image_dir() / "application-update-key.pem").read_bytes(),
                                                lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle,
-                                               channel=channel, database=db, refresh_mode=updater_refresh_mode(image))
+                                               channel=channel, database=db, refresh_mode=updater_refresh_mode(image),
+                                               image_root=image_dir().parent)
                 except UpdateError as exc:
                     raise RuntimeFailure(str(exc)) from exc
         chrome_selection = None

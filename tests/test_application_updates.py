@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from app.core import application_updates as policy
+from docker import application_updates
 from docker.application_updates import (ContainerUpdates, UpdateError, build_environment, extract_source,
                                         tree_lines, verify_manifest)
 
@@ -1472,7 +1473,8 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
     )
     monkeypatch.setattr(supervisor, "__file__", str(packaging / "container_runtime.py"))
     database = FakeDatabase()
-    def factory(root, image, public_key, allowed, lifecycle, channel, database=None, *, refresh_mode="unknown"):
+    def factory(root, image, public_key, allowed, lifecycle, channel, database=None, *, refresh_mode="unknown",
+                image_root=None):
         assert channel == "stable", "customers follow signed releases unless UPDATE_CHANNEL says otherwise"
         assert database is db, "the supervisor hands the updater its managed database"
         assert refresh_mode == "image_update_required", "the fixture image has no source-supervisor capability"
@@ -1953,3 +1955,163 @@ def test_handover_needs_the_supervisor_files_in_the_signed_listing(feed):
     for name in ("chrome-supervisor.sh", "start-chrome.sh"):
         (script.parent / name).write_text("planted")
     assert handover_target(current.root, NEW_IMAGE, current.public_key) is None
+
+
+# --- Updates that take no database copy (same database level on both sides) ---
+
+def level_file(level):
+    return json.dumps({"format": 1, "level": level, "destructive": "0" * 64})
+
+
+def declare_image_level(updater, tmp_path, level):
+    """The image's own code declares ``level`` (None: code from before levels),
+    and its supervisor understands an update that took no copy."""
+    updater.image_root = tmp_path / "image"
+    updater.image["provides"] = [*updater.image.get("provides", ["base-1"]), application_updates.LEVEL_CAPABILITY]
+    if level is not None:
+        path = updater.image_root / application_updates.DATABASE_COMPATIBILITY
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(level_file(level))
+
+
+def stage(updater, publish, revision=B, sequence=2, level=1, **fields):
+    entries = {f"ai-shuffle-{revision}/source.txt": "content"}
+    if level is not None:
+        entries[f"ai-shuffle-{revision}/{application_updates.DATABASE_COMPATIBILITY}"] = level_file(level)
+    publish(revision=revision, sequence=sequence, entries=entries, **fields)
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.snapshot_room()
+    updater.activating()
+
+
+def test_an_update_at_the_same_database_level_takes_no_copy(feed, tmp_path):
+    updater, publish, _, _, _ = feed
+    updater.database = database = FakeDatabase(free=0, need=10**12)  # no room for a copy, and none is needed
+    declare_image_level(updater, tmp_path, 1)
+    stage(updater, publish)
+    assert updater.state == {"pending": B, "booting": B, "compatible": True}
+    assert not [call for call in database.calls if call[0] in ("space", "snapshot")]
+    updater.healthy()
+    assert updater.state == {"active": B} and database.databases == {"ai_shuffle": "before"}
+
+
+def test_a_failed_first_start_without_a_copy_goes_back_to_the_previous_version(feed, tmp_path):
+    updater, publish, _, _, _ = feed
+    updater.database = database = FakeDatabase()
+    declare_image_level(updater, tmp_path, 1)
+    stage(updater, publish, version="1.2.3")
+    database.databases["ai_shuffle"] = "migrated"
+    assert updater.failed() is True
+    assert updater.state == {"failed": [B]}
+    assert database.databases == {"ai_shuffle": "migrated"}, "the previous version runs over the same database"
+    assert not [call for call in database.calls if call[0] == "restore"]
+    status = status_of(updater)
+    assert status["phase"] == "error" and "1.2.3 failed to start" in status["error"]
+    assert "needed no copy of the database" in status["error"]
+    assert updater.launch({})[1] is None and updater.running is None
+    assert updater.failed() is False, "nothing left to go back from"
+
+
+def test_power_loss_during_a_first_start_without_a_copy_starts_the_previous_version(feed, tmp_path):
+    updater, publish, _, _, _ = feed
+    updater.database = database = FakeDatabase()
+    declare_image_level(updater, tmp_path, 1)
+    stage(updater, publish)
+    restarted = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {},
+                                 database=database, image_root=updater.image_root)
+    assert restarted.state == {"failed": [B]} and restarted.launch({})[1] is None
+    assert status_of(restarted)["phase"] == "error"
+
+
+def test_an_external_database_goes_back_too_when_the_level_is_the_same(feed, tmp_path):
+    updater, publish, _, _, _ = feed  # no managed database: there is never a copy
+    declare_image_level(updater, tmp_path, 1)
+    stage(updater, publish)
+    assert updater.state == {"pending": B, "booting": B, "compatible": True}
+    assert updater.failed() is True and "blocked" not in updater.state
+
+
+@pytest.mark.parametrize("image_level,release_level", [(1, 2), (2, 1), (None, 1), (1, None), (None, None)])
+def test_a_different_or_undeclared_database_level_keeps_the_copy(feed, tmp_path, image_level, release_level):
+    updater, publish, _, _, _ = feed
+    updater.database = database = FakeDatabase()
+    declare_image_level(updater, tmp_path, image_level)
+    stage(updater, publish, level=release_level)
+    snapshot = "ai_shuffle_rollback_" + B[:12]
+    assert updater.state == {"pending": B, "booting": B, "snapshot": snapshot}
+    assert ("snapshot", snapshot) in database.calls and ("space",) in database.calls
+
+
+def test_the_level_is_compared_with_the_installed_update_not_the_image(feed, tmp_path):
+    updater, publish, _, _, _ = feed
+    updater.database = database = FakeDatabase()
+    declare_image_level(updater, tmp_path, 1)
+    stage(updater, publish, level=2)  # the image is at 1: a copy
+    updater.healthy()
+    assert updater.state == {"active": B}
+    database.calls.clear()
+    stage(updater, publish, revision=C, sequence=3, level=2)  # B is at 2: none
+    assert updater.state == {"active": B, "pending": C, "booting": C, "compatible": True}
+    assert not [call for call in database.calls if call[0] == "snapshot"]
+
+
+def test_an_image_built_before_database_levels_keeps_the_copy(feed, tmp_path):
+    # A container restart during the first start is handled by the image's own
+    # supervisor, which would find no copy and block.
+    updater, publish, _, _, _ = feed
+    updater.database = database = FakeDatabase()
+    declare_image_level(updater, tmp_path, 1)
+    updater.image["provides"].remove(application_updates.LEVEL_CAPABILITY)
+    stage(updater, publish)
+    assert updater.state["snapshot"] == "ai_shuffle_rollback_" + B[:12] and "compatible" not in updater.state
+    assert ("snapshot", updater.state["snapshot"]) in database.calls
+
+
+def test_an_image_built_from_this_source_provides_the_level_capability():
+    assert application_updates.LEVEL_CAPABILITY in contract.PROVIDES
+    assert application_updates.LEVEL_CAPABILITY in contract.image_record(A, 1)["provides"]
+
+
+def test_the_copy_can_be_kept_for_every_update(feed, tmp_path, monkeypatch):
+    updater, publish, _, _, _ = feed
+    updater.database = database = FakeDatabase()
+    declare_image_level(updater, tmp_path, 1)
+    monkeypatch.setenv("AI_SHUFFLE_UPDATE_RESTORE_POINT", "always")
+    stage(updater, publish)
+    assert updater.state["snapshot"] == "ai_shuffle_rollback_" + B[:12] and "compatible" not in updater.state
+    assert ("snapshot", updater.state["snapshot"]) in database.calls
+
+
+def test_a_first_start_recorded_without_a_copy_or_a_level_still_blocks(feed, tmp_path):
+    # "compatible" is the only thing that lets older code run again without a copy.
+    updater, publish, _, _, _ = feed
+    declare_image_level(updater, tmp_path, 1)
+    stage(updater, publish)
+    state = json.loads(updater.state_path.read_text())
+    state.pop("compatible")
+    updater.state_path.write_text(json.dumps(state))
+    with pytest.raises(UpdateError, match="failed first boot"):
+        ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {},
+                         image_root=updater.image_root)
+    updater.state_path.write_text(json.dumps(dict(state, blocked=False, compatible="yes")))
+    with pytest.raises(UpdateError, match="Invalid container update state"):
+        ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {})
+
+
+@pytest.mark.parametrize("content,level", [
+    (level_file(3), 3), ("{}", None), ("not json", None), (json.dumps({"format": 2, "level": 1}), None),
+    (json.dumps({"format": 1, "level": True}), None), (json.dumps({"format": 1, "level": 0}), None),
+    (json.dumps({"format": 1, "level": "1"}), None), (json.dumps([1]), None), (None, None),
+    ("{" + " " * 5000 + "}", None),
+])
+def test_database_level_reads_only_a_well_formed_declaration(tmp_path, content, level):
+    if content is not None:
+        path = tmp_path / application_updates.DATABASE_COMPATIBILITY
+        path.parent.mkdir(parents=True)
+        path.write_text(content)
+    assert application_updates.database_level(tmp_path) == level
+
+
+def test_this_checkout_declares_a_database_level_the_updater_can_read():
+    assert application_updates.database_level(Path(__file__).resolve().parents[1]) >= 1
