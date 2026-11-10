@@ -771,6 +771,11 @@ def workload_repo(tmp_path, monkeypatch):
     (root / "app/core/runtime.py").write_text("SPEED = 1\n")
     (root / "docs").mkdir()
     (root / "docs/notes.md").write_text("notes\n")
+    (root / ".github/workflows").mkdir(parents=True)
+    (root / ".github/workflows/ci-frontend.yml").write_text("env:\n  JOURNEY_SHEETS: '0'\n")
+    (root / "scripts/devloop").mkdir(parents=True)
+    (root / "scripts/devloop/ci.py").write_text("SHEETS_DEFAULT = '0'\n")
+    (root / "scripts/devloop/journey_weights.json").write_text("{}\n")
     _git(root, "init", "-q")
     _git(root, "add", "-A")
     _git(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "old")
@@ -842,6 +847,33 @@ def test_same_case_count_changed_workload_keeps_the_current_weight(
         assert "shell-geometry.journey.mjs or a module it imports changed" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("change,edit", [
+    # A workflow-only change that turns on contact sheets makes every journey
+    # slower at the same case count.
+    (".github/workflows/ci-frontend.yml", ("JOURNEY_SHEETS: '0'", "JOURNEY_SHEETS: '1'")),
+    # So does changing a runner default in the planner script.
+    ("scripts/devloop/ci.py", ("SHEETS_DEFAULT = '0'", "SHEETS_DEFAULT = '1'")),
+])
+def test_execution_settings_change_rejects_every_sample(workload_repo, monkeypatch, capsys, change, edit):
+    root, old, path = workload_repo
+    (root / change).write_text((root / change).read_text().replace(*edit))
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qam", "new")
+    assert ci.changed_workload(10, old) == [change]
+    monkeypatch.setattr(ci.subprocess, "check_output",
+                        _gh({10: _log("shell-geometry", 74.81, 22) + _log("other", 40, 22)}, headSha=old))
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match="No usable UI journey measurements"):
+        ci.refresh_weights([10], path)
+    assert path.read_bytes() == original
+    assert f"shared journey runtime changed since the run ({change})" in capsys.readouterr().err
+
+
+def test_weights_file_alone_is_not_workload(workload_repo):
+    root, old, _ = workload_repo
+    (root / "scripts/devloop/journey_weights.json").write_text('{"seconds": {}}\n')
+    assert ci.changed_workload(10, old) == []
+
+
 def test_shared_runtime_change_refuses_before_downloading_logs(
         tmp_path, monkeypatch, refresh_inventory, capsys):
     refresh_inventory.append("app/core/runtime.py")
@@ -864,6 +896,7 @@ def test_shared_runtime_change_refuses_before_downloading_logs(
 def test_workload_paths_ignore_docs_and_metadata_but_not_runtime():
     paths = ci.WORKLOAD_PATHS
     assert {"app", "fluid", "frontend", "browser-mcp", "tools", "scripts/devloop"} <= set(paths)
-    assert ":(exclude)scripts/devloop/ci.py" in paths
+    assert ":(exclude)scripts/devloop/ci.py" not in paths
+    assert ".github/workflows/ci-frontend.yml" in paths
     assert ":(exclude)scripts/devloop/journey_weights.json" in paths
     assert ":(exclude)frontend/tests/journeys/map.json" in paths

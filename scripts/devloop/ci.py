@@ -419,8 +419,11 @@ RETRY_MARKER = re.compile(r"\[ci\] retrying \S+\.journey\.mjs:")
 # directories: fake_claude/cli.py dynamically loads
 # fluid/tests/fixtures/fake_claude_script.py, which imports fake_guard_ready.
 # Runtime fixtures, helpers, dependencies and fake providers stay protected.
+# The journeys workflow and this file count too: they set how journeys run
+# (environment such as JOURNEY_SHEETS, runner flags and defaults), so a change
+# to either makes every earlier sample stale. Only the weights file is exempt.
 WORKLOAD_PATHS = ["app", "fluid", "frontend", "browser-mcp", "tools", "requirements*.txt",
-                  "scripts/devloop", ":(exclude)scripts/devloop/ci.py",
+                  "scripts/devloop", ".github/workflows/ci-frontend.yml",
                   ":(exclude)scripts/devloop/journey_weights.json",
                   ":(exclude,glob)**/README*", ":(exclude,glob)**/docs/**",
                   ":(exclude,glob)**/*.test.*", ":(exclude,glob)**/*.spec.*",

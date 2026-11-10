@@ -1187,8 +1187,11 @@ case count does not show that a timing still describes the code: a journey, or
 the runtime under it, can get slower with the same cases. So each run's
 revision is compared with the checkout (committed, uncommitted and untracked
 changes) over the journey workload: `app`, `fluid`, `frontend`, `browser-mcp`,
-`tools`, `requirements*.txt` and `scripts/devloop`, without documentation, unit
-tests, `ci.py`, the weights file and the journey selection metadata. A changed
+`tools`, `requirements*.txt`, `scripts/devloop` (including `ci.py`) and
+`.github/workflows/ci-frontend.yml`, without documentation, unit tests, the
+weights file and the journey selection metadata. The workflow and `ci.py` count
+because they set how journeys run (for example `JOURNEY_SHEETS`), so editing
+either drops every earlier sample. A changed
 journey file, or a module it reaches by relative import (for example
 `runner.mjs`, `lib/*.mjs` or its `.cases.mjs`), drops that run's samples for
 the journeys that import it. Any other workload change, or a revision this
