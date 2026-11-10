@@ -197,6 +197,24 @@ def test_v2_queue_view_filters_sources_and_numbers_sequentially(mock_db):
     assert [r["content"] for r in view] == ["first", "second"]
     assert [r["position"] for r in view] == [0, 1]
     assert all(r["session_id"] == "sess-1" for r in view)
+    assert all("upload_paths" not in r for r in view)
+
+
+def test_v2_queue_view_carries_recorded_upload_paths(mock_db):
+    """#1313: a queued send's recorded attachments ride its row, so the
+    bubble can draw chips; the prompt's @path mentions stay in content."""
+    _make_session("sess-1")
+    path = "/data/uploads/sess-1/note.txt"
+    turns_db.enqueue_turn("sess-1", "user", prompt=f"@{path} read this",
+                          payload={"upload_paths": [path, "", 7]})
+    turns_db.enqueue_turn("sess-1", "user", prompt="@/typed/by/hand plain",
+                          payload={"upload_paths": "not-a-list"})
+
+    view = cwh._v2_queue_view("sess-1")
+
+    assert view[0]["upload_paths"] == [path]
+    assert view[0]["content"] == f"@{path} read this"
+    assert "upload_paths" not in view[1]
 
 
 # ═══ handle_query — submit(user) ═════════════════════════════════════════════

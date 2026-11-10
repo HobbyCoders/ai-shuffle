@@ -87,6 +87,8 @@ export interface QueuedMessage {
 	status?: 'cancelling' | 'delivered' | 'stopped';
 	/** Transport succeeded but no server admission was observed. */
 	unconfirmed?: boolean;
+	/** Attachments the send recorded; the bubble draws them as chips (#1313). */
+	uploadPaths?: string[];
 }
 
 /** Attributed peer traffic; has no user unsend/interrupt controls. */

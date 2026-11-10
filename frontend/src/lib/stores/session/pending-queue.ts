@@ -94,6 +94,7 @@ export interface PendingEntry {
 	clientMessageId?: string;
 	status?: QueuedMessage['status'];
 	unconfirmed?: boolean;
+	uploadPaths?: string[];
 }
 
 /** Legacy optimistic ids, retained for old snapshots/tests (new sends use client ids). */
@@ -185,10 +186,13 @@ export function restoredDraftFields(s: RestoreSlots, restore: WithdrawnRestore |
 // receipt, refusal, a frame that never left, the chat's deletion; see
 // forgetSendUploads, settleWithdrawalReceipt and forgetSession).
 const sendUploads = new Map<string, SendUploads>();
-function draftOf(key: string, content: string): WithdrawnDraft {
+function draftOf(key: string, content: string, recordedPaths: string[] = []): WithdrawnDraft {
 	const uploads = sendUploads.get(key);
 	sendUploads.delete(key);
-	return uploads ? { content, uploads } : { content };
+	if (uploads) return { content, uploads };
+	// A row this page did not send (reload, another device) still names the
+	// paths its send recorded, so they come back as chips, not raw @paths.
+	return recordedPaths.length ? { content, uploads: { sessionId: null, paths: [...recordedPaths], references: [] } } : { content };
 }
 // Idle transcript echoes are recoverable drafts, not queue authority. The
 // command survives null -> assigned-session adoption; receipts clear it by id.
@@ -337,6 +341,12 @@ export const pendingQueue = {
 		sendUploads.delete(key);
 		if (!paths.length && !references.length) return;
 		sendUploads.set(key, { sessionId: id, paths: [...paths], references: [...references] });
+	},
+
+	/** The upload paths this page recorded for its own send, for its chips. */
+	sendUploadPaths(key: string | undefined): string[] {
+		const uploads = key ? sendUploads.get(key) : undefined;
+		return uploads ? [...uploads.paths, ...uploads.references.map(reference => reference.path)] : [];
 	},
 
 	/** Test/diagnostic hook: whether a send's attachments are still kept. */
@@ -577,7 +587,7 @@ export const pendingQueue = {
 			withdrawn.add(key);
 			if (entry) {
 				withdrawn.add(entry.id);
-				drafts.push(draftOf(key, entry.content));
+				drafts.push(draftOf(key, entry.content, entry.uploadPaths));
 			}
 			sendUploads.delete(key);
 			this.removalFailed(id, key, true);

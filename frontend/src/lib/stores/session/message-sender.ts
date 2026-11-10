@@ -714,6 +714,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							clientMessageId,
 							content: prompt,
 							queuedAt: Date.now(),
+							// The bubble shows its chips before the queue snapshot arrives.
+							...(uploadsMetadata(options?.pendingUploadPaths, options?.pendingUploadReferences).metadata
+								? { uploadPaths: pendingQueue.sendUploadPaths(clientMessageId) } : {}),
 						}],
 						error: null,
 						localSendIntent: localSendIntent(s),

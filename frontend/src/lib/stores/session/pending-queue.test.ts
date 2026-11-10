@@ -501,6 +501,20 @@ describe('pendingQueue — a send\'s attachments', () => {
 		expect(pendingQueue.takeWithdrawnRestore('s1')).toEqual({ prompt: 'Read client-y', uploadPaths: ['/uploads/client-y.pdf'], uploadReferences: [] });
 	});
 
+	it('hands back a server row\'s recorded paths when this page never sent it (#1313)', () => {
+		pendingQueue.reset('s1');
+		pendingQueue.requestRemoval('s1', { ...queued('client-z'), uploadPaths: ['/uploads/z.txt'] });
+		pendingQueue.applyRemovalVerdict('s1', 'client-z', 'withdrawn');
+		expect(pendingQueue.takeWithdrawnRestore('s1')).toEqual({ prompt: 'Read client-z', uploadPaths: ['/uploads/z.txt'], uploadReferences: [] });
+	});
+
+	it('gives the queue snapshot this page\'s own recorded paths (#1313)', () => {
+		pendingQueue.reset('s1');
+		uploads('client-w');
+		expect(pendingQueue.sendUploadPaths('client-w')).toEqual(['/uploads/client-w.pdf']);
+		expect(pendingQueue.sendUploadPaths(undefined)).toEqual([]);
+	});
+
 	// Unsend timed out and the socket verdict was lost; the durable receipt still came.
 	describe('when the verdict of a timed-out Unsend is lost', () => {
 		const restore = { prompt: 'Read client-z', uploadPaths: ['/uploads/client-z.pdf'], uploadReferences: [] };
