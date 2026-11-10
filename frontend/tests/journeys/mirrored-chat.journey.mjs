@@ -249,9 +249,20 @@ await runJourney({
 				await notice.waitFor({ timeout: 5_000 });
 				const polls = await syncPolls(page);
 				expect(polls >= 3 && polls <= 4, `the chat opened after a bounded number of failed checks (${polls} polls)`);
-				await page.evaluate(() => { window.__mirrorSyncHealthy = true; });
+				// The owner answers from the Retry press on. The chat keeps re-checking
+				// in the background (4s, then 8s, ...); those checks still fail until
+				// the press, so only Retry can clear the notice, and a background
+				// check cannot clear it from under the click.
+				await page.evaluate(() => {
+					document.addEventListener('click', (event) => {
+						if (event.target instanceof Element && event.target.closest('.mirror-pill.offline .mirror-retry')) window.__mirrorSyncHealthy = true;
+					}, { capture: true });
+				});
+				const beforeRetry = await syncPolls(page);
 				await notice.getByRole('button', { name: 'Retry' }).click();
 				await notice.waitFor({ state: 'detached', timeout: 5_000 });
+				const afterRetry = await syncPolls(page);
+				expect(afterRetry > beforeRetry, `Retry checked the owner again (${beforeRetry} polls before, ${afterRetry} after)`);
 			},
 			verify({ recording }) {
 				expectComposerPositions(recording, ['centre', 'bottom']);
