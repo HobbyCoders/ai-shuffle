@@ -25,6 +25,38 @@ pytestmark = requires_real_pg
 REAL_VOLUMES = hi._volumes
 
 
+def hold_autovacuum(enabled: bool = False) -> None:
+    """Keep autovacuum off the history tables while these tests drive migrate().
+
+    The suite's tables collect rows from every module that shares the database,
+    so autovacuum visits them mid-test. It holds SHARE UPDATE EXCLUSIVE and only
+    yields to a waiter after deadlock_timeout (1 s), longer than the migration's
+    250 ms metadata-lock check, so a migrate() that met it failed (#1434).
+    Production's run_pass defers that pass and retries; these tests call
+    migrate() directly and expect progress. Taking the ALTER's lock waits out a
+    running autovacuum, and a new one re-reads the option before it starts.
+    """
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SET LOCAL lock_timeout = '30s'")
+        for table in hi.TABLES:
+            cur.execute("SELECT to_regclass(%s) AS oid", (table,))
+            if cur.fetchone()["oid"]:
+                option = "RESET (autovacuum_enabled)" if enabled else "SET (autovacuum_enabled = false)"
+                cur.execute(f"ALTER TABLE {table} {option}")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_autovacuum(pg_schema):  # noqa: F811 - runs inside the module's schema
+    yield
+    hold_autovacuum(enabled=True)
+
+
+@pytest.fixture(autouse=True)
+def _no_autovacuum(_restore_autovacuum) -> None:
+    hold_autovacuum()
+
+
 def finish_migration() -> None:
     for _ in range(15):
         if hi.migrate():
@@ -442,6 +474,7 @@ def test_projection_rebuild_preserves_opt_in_and_resumes_pending_imports(
             break
     else:
         pytest.fail("projection repair did not finish")
+    hold_autovacuum()  # The repair recreated session_recall_text.
     with base.get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT value FROM system_settings WHERE key=%s", (hi.KEY,))
