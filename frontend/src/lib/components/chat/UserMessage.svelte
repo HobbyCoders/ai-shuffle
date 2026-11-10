@@ -9,7 +9,8 @@
 	 */
 	import MessageActions from './MessageActions.svelte';
 	import { formatMessageTime, formatMessageTimeFull, messageTimeISO } from '$lib/utils/message-time';
-	import { shouldCollapseUserMessage, uploadFileName, userBubbleParts } from '$lib/utils/message-presentation';
+	import { shouldCollapseUserMessage, userBubbleParts } from '$lib/utils/message-presentation';
+	import AttachmentChip from './AttachmentChip.svelte';
 
 	interface Props {
 		content: string;
@@ -49,7 +50,7 @@
 	<div class="usercol">
 		<div class="bubble" title={formatMessageTimeFull(timestamp)}>
 			{#if notSent}<div class="not-sent-label">Not sent (stopped)</div>{/if}
-			<div class="bubble-text" class:is-collapsed={collapsed}>{#each parts as part}{#if typeof part === 'string'}{part}{:else}<span class="attachment-chip" title={uploadFileName(part.path)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><polyline points="13,2 13,9 20,9" /></svg><span class="attachment-chip-name">{uploadFileName(part.path)}</span></span>{/if}{/each}</div>
+			<div class="bubble-text" class:is-collapsed={collapsed}>{#each parts as part}{#if typeof part === 'string'}{part}{:else}<AttachmentChip path={part.path} />{/if}{/each}</div>
 			{#if collapsible}
 				<button
 					type="button"
@@ -143,35 +144,6 @@
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 		word-break: break-word;
-	}
-
-	/* Matches the composer's file chip (TiptapEditor's .file-chip-node). */
-	.attachment-chip {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.375rem;
-		max-width: 100%;
-		padding: 0.125rem 0.5rem;
-		margin: 0 0.125rem;
-		background: var(--chip-primary-bg);
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		font-size: 0.75rem;
-		line-height: 1.4;
-		vertical-align: middle;
-	}
-
-	.attachment-chip svg {
-		flex-shrink: 0;
-		width: 12px;
-		height: 12px;
-		opacity: 0.7;
-	}
-
-	.attachment-chip-name {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
 
 	.bubble-text.is-collapsed {
