@@ -733,7 +733,7 @@ async def _report_revoked_source(session_id, label):
 
 
 async def _finalize_moved_wakes(session_id: str, target_id: str, *, release: bool) -> None:
-    from app.network import control
+    from app.network import control, handoff as network_handoff
     from app.db import session_moves
 
     # Keep the durable human-message evidence until the receiver finalizes its
@@ -750,6 +750,7 @@ async def _finalize_moved_wakes(session_id: str, target_id: str, *, release: boo
             result = await control.call(row["target_id"], "handoff", {
                 "session_id": session_id, "phase": "finalize-wakes",
                 "token": row["wake_token"], "superseded": bool(row.get("wakes_superseded")), "release": release,
+                "clock": await asyncio.to_thread(network_handoff.network_clock),  # after the commit (#1308)
             })
             if result.get("finalized" if release else "accepted"):
                 break

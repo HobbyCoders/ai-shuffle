@@ -1076,14 +1076,24 @@ def _network_clock(cur):
     return int(row["clock"]) if row else 0
 
 
+def network_clock():
+    """This worker's sync clock; finalize-wakes carries it like the commit reply."""
+    with get_db() as conn:
+        return _network_clock(conn.cursor())
+
+
 def _observe_commit_clock(clock):
     """Order the receiver's next writes after the source's commit record (#1308).
 
-    The commit reply reaches the receiver before the source's sync op does.
-    Without this, a delete the new owner makes right away is signed with an
-    older clock than the commit record, which then wins on both workers and
-    brings the chat back. Its own transaction: N alone (app/db/session_locks.py).
+    The commit reply, or a source's later finalize-wakes when every reply was
+    lost, reaches the receiver before the source's sync op does. Without this,
+    a delete the new owner makes right away is signed with an older clock than
+    the commit record, which then wins on both workers and brings the chat
+    back. Its own transaction, before the acceptance: N alone
+    (app/db/session_locks.py). An older source sends no clock.
     """
+    if not isinstance(clock, int) or isinstance(clock, bool) or clock <= 0:
+        return
     with get_db() as conn:
         cur = conn.cursor()
         network_store.lock_state(cur)
@@ -1204,6 +1214,7 @@ async def _handle(payload, peer_device_id):
 async def _handle_phase(payload, peer_device_id):
     sid = str(payload.get("session_id") or "")
     if payload.get("phase") == "finalize-wakes":
+        await run_sync(_observe_commit_clock, payload.get("clock"))
         rows = await run_sync(_finalize_wakes, sid, peer_device_id, payload)
         from app.core import wakeup_service
 
@@ -2122,9 +2133,7 @@ async def _owner_commit(owner, payload):
         if payload.get("token"):
             await run_sync(_discard_history, payload["session_id"], payload["token"])
         raise ValueError(reason)
-    clock = result.get("clock")
-    if isinstance(clock, int) and not isinstance(clock, bool) and clock > 0:
-        await run_sync(_observe_commit_clock, clock)  # an older source sends none
+    await run_sync(_observe_commit_clock, result.get("clock"))
     return result
 
 
