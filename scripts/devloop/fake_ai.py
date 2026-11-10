@@ -683,14 +683,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.port in (8000, 8001):
         parser.error("8000/8001 belong to the live worker")
     log_path = args.log or default_log_path()
-    stopped = threading.Event()
+    # The handler only appends: an Event's set() could wait on the lock its own
+    # thread holds inside wait() (#1317).
+    stopped: list[int] = []
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: stopped.set())
+        signal.signal(sig, lambda signum, _frame: stopped.append(signum))
     with FakeAI(args.scenarios, log_path=log_path, latency_ms=args.latency_ms, tps=args.tps,
                 host=args.host, port=args.port) as fake:
         print(f"Fake AI listening on {fake.url} (scenarios: "
               f"{', '.join(sorted(fake.scenarios.load()))}); request log: {log_path}", flush=True)
-        stopped.wait()
+        while not stopped:
+            time.sleep(0.2)
     return 0
 
 
