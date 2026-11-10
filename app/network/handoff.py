@@ -39,7 +39,10 @@ JSON_COLUMNS = {"tool_input", "metadata", "message", "event", "entry", "payload"
 APP_TABLES = {"session_messages", "session_events", "pending_interactions", "turns", "session_plans"}
 # Only settled model receipts and relay-free question cards move. A question
 # answer queues a fresh turn; permission callbacks and private grants stay local.
+# A started chat's delivered report (session_orchestration.REPORT_RECEIPT_KIND)
+# moves too, so the chat's new worker never admits that report again (#1443).
 _RECEIPTS_SQL = (" AND ((kind IN ('model_switch_approval', 'model_switch_named') AND state='answered')"
+                 " OR (kind='orchestration_report' AND state='answered')"
                  " OR (kind='question' AND state='pending' AND payload->'nonblocking'='true'))")
 _LAUNCH_SQL = (" AND command_id LIKE 'orchestration:start:%%' AND source='agent_message' "
                "AND state NOT IN ('queued','running','interrupting','draining')")
@@ -191,13 +194,17 @@ def check_unfinished_wakes(sid):
         _check_unfinished_wakes(conn.cursor(), sid)
 
 
+def _check_open_turns(cursor, sid):
+    cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('queued','running','interrupting','draining') LIMIT 1", (sid,))
+    if cursor.fetchone():
+        raise ValueError("Wait for this session's queued or active turn to finish before resuming here.")
+
+
 def _idle(cursor, sid):
     _check_unfinished_wakes(cursor, sid)
     if _has_live_tasks(cursor, sid):
         raise ValueError("Wait for this session's background work to finish before resuming here.")
-    cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('queued','running','interrupting','draining') LIMIT 1", (sid,))
-    if cursor.fetchone():
-        raise ValueError("Wait for this session's queued or active turn to finish before resuming here.")
+    _check_open_turns(cursor, sid)
     if open_prompt(cursor, sid):
         raise ValueError(OPEN_PROMPT)
 
@@ -336,11 +343,17 @@ def uncarried_wakes(sid, target):
 
 
 def _moving_wakes(data):
-    """Commit field naming the wakes this receiver installs (begin's snapshot)."""
+    """Commit fields naming the wakes and report receipts this receiver installs
+    (begin's snapshot)."""
+    from app.core.session_orchestration import REPORT_RECEIPT_KIND
+
+    receipts = {"report_receipts": sorted(
+        str(row.get("id")) for row in (data.get("history") or {}).get("pending_interactions") or []
+        if row.get("kind") == REPORT_RECEIPT_KIND and row.get("state") == "answered" and row.get("id"))}
     if "wakes" not in data:
-        return {}
-    return {"wake_ids": [str(w.get("id")) for w in data.get("wakes") or []
-                         if w.get("id") and w.get("id") != data.get("resume_wake_id")]}
+        return receipts
+    return {**receipts, "wake_ids": [str(w.get("id")) for w in data.get("wakes") or []
+                                     if w.get("id") and w.get("id") != data.get("resume_wake_id")]}
 
 
 def install_wakes(sid, wakes):
@@ -1036,6 +1049,26 @@ def _commit(sid, target, payload, token):
                      "handoff": {"token": token, "held_messages": held_messages}}
         cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
                     (target, target, json.dumps(placement), session_branch, sid))
+        # _idle above ran before this UPDATE locked the session row. Turn
+        # admission queues under that lock, so a turn admitted in between (a
+        # started chat's report, #1443) is visible only now: refuse as _idle
+        # does, rolling the flip back, so it runs here and the move is retried.
+        _check_open_turns(cur, sid)
+        # Report receipts are written under this row lock too. One the receiver
+        # does not install would stay behind, and the chat's new worker would
+        # admit that report again (#1443): one written since begin's export, or
+        # any, for a receiver too old to carry them (it names none).
+        from app.core.session_orchestration import REPORT_RECEIPT_KIND
+
+        carried = payload.get("report_receipts")
+        cur.execute("SELECT id FROM pending_interactions WHERE session_id=%s AND kind=%s AND state='answered'",
+                    (sid, REPORT_RECEIPT_KIND))
+        left = {row["id"] for row in cur.fetchall()} - set(carried or [])
+        if left and carried is None:
+            raise ValueError("This chat has delivered reports the target worker cannot carry yet; "
+                             "update that worker, then try again. Ownership was not moved.")
+        if left:
+            raise ValueError("A report reached this chat during the move; ownership was not moved. Try again.")
         if session_branch is None:
             cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
         cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
@@ -1711,7 +1744,9 @@ def install_history(sid, data, cwd):
                         payload = json.loads(payload)
                     question = (row.get("kind") == "question" and row.get("state") == "pending"
                                 and payload.get("nonblocking") is True and payload.get("questions"))
-                    if not question and (row.get("kind") not in RECEIPT_KINDS or row.get("state") != "answered"):
+                    from app.core.session_orchestration import REPORT_RECEIPT_KIND
+                    receipt = row.get("kind") in (*RECEIPT_KINDS, REPORT_RECEIPT_KIND) and row.get("state") == "answered"
+                    if not question and not receipt:
                         continue
                 if table == "turns" and (
                         row.get("source") != "agent_message"

@@ -328,6 +328,50 @@ async def test_deleted_starter_keeps_report_on_child(owner, monkeypatch):
     assert sum(e["event_type"] == "orchestration.report_deferred" for e in events) == 1
 
 
+@pytest.mark.parametrize("lost", ["evicted", "restarted"])
+async def test_deleted_starter_is_known_after_its_deletion_mark_is_lost(owner, monkeypatch, lost):
+    """#1443 S14: on a worker with no network, the delete's own durable record
+    still tells a deleted starter from one not here yet once the process-local
+    mark is gone (evicted by later deletes, or a crash and boot recovery)."""
+    from app.core import startup_reconcile, turn_scheduler
+    from app.db import session_locks, sessions, turns, session_events
+    from app.services import notification_service
+    bells = []
+
+    async def bell(*args, **kwargs):
+        bells.append(kwargs)
+    monkeypatch.setattr(notification_service, "emit_notification", bell)
+    monkeypatch.setattr(turn_scheduler, "note_wake_pending", lambda sid: None)
+    monkeypatch.setattr(session_locks, "_DELETED", {})
+    chat("starter", mode="chat")
+    outcome = await orch.make_handler(lambda: "starter")(
+        "start", {"title": "Child", "prompt": "work", "request_id": "lost-mark"}, ToolCtx())
+    assert not outcome.is_error, outcome.text
+    receipt = json.loads(outcome.text)
+    child, turn_id = receipt["session_id"], receipt["turn_id"]
+    assert turns.start_turn(turn_id)
+    assert sessions.delete_session("starter")
+    if lost == "evicted":
+        session_locks.mark_sessions_deleted(f"later-{n}" for n in range(session_locks._DELETED_MAX))
+    else:
+        # A new process: no marks, and boot recovery requeues the child's turn.
+        monkeypatch.setattr(session_locks, "_DELETED", {})
+        assert await startup_reconcile._boot_reap_and_kick_turns() == 1
+        assert turns.get_turn(turn_id)["state"] == "queued"
+        assert turns.start_turn(turn_id)
+    assert not session_locks.deleted_sessions(["starter"])
+    session_events.append_events(child, [{"type": "assistant.text_delta", "turn_id": turn_id,
+                                          "payload": {"text": "Report after deletion"}}])
+    assert turns.settle_turn(turn_id, "completed")
+    await turn_scheduler.on_turn_settled(child, turn_id, "completed")
+    await turn_scheduler.on_turn_settled(child, turn_id, "completed")
+    await orch.deliver_forwarded_reports(force=True)
+    events = session_events.get_events(child)
+    assert sum(e["event_type"] == "orchestration.report_deferred" for e in events) == 1
+    assert [b["title"] for b in bells] == ["Session work finished"]
+    assert orch.pending_forwarded_reports() == []
+
+
 def test_coordination_prompt_is_static_across_checkout_registry_changes(owner, monkeypatch):
     from app.core import query_options, coordinator_files
     chat("coordinator", mode="chat")

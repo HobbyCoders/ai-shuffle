@@ -5,6 +5,14 @@ executed by B's copy of this loop: nothing on A executes it — B sees the
 durable ``queued`` row and kicks B's own scheduler, which claims the session's
 run lease and executes exactly as if the turn had been submitted locally.
 
+This only works when A and B share ONE database (installs placed as runners
+of the same deployment). Paired network workers each have their own database
+and ``turns`` is not synced, so a row queued on A for a chat that worker B
+runs is never seen by B and never runs (#1443). Work for such a chat must be
+sent to its owner instead: forwarded turns (``control`` ``turns``), relayed
+MessageSession, and started-chat reports (``session_orchestration``
+``deliver_started_report``).
+
 Two passes per tick, both cheap indexed reads against shared tables:
 
 * **Claim pass** — ``turns.list_claimable_sessions()`` (queued turns with no

@@ -1408,6 +1408,13 @@ async def sweep() -> int:
         except Exception:  # noqa: BLE001 — one child never blocks the others
             logger.warning("remote_task: could not settle the report of %s", worker_id,
                            exc_info=True)
+    try:
+        # Started chats' reports for a chat another worker runs now (#1443).
+        from app.core.session_orchestration import deliver_forwarded_reports
+
+        await deliver_forwarded_reports()
+    except Exception:  # noqa: BLE001 — never blocks the Task reports below
+        logger.warning("remote_task: forwarded started-chat reports failed", exc_info=True)
     return await deliver_due()
 
 

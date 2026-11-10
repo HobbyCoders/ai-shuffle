@@ -440,7 +440,7 @@ async def test_git_project_protocol_is_unchanged(pair: Pair,  # noqa: F811
     assert [body["phase"] for body in bodies] == ["begin", "commit"]
     assert set(bodies[0]) == {"session_id", "phase", "remote", "wake_barrier"}
     assert set(bodies[1]) == {"session_id", "phase", "token", "fingerprint", "branch",
-                              "session_branch", "wake_ids"}
+                              "session_branch", "wake_ids", "report_receipts"}
     assert bodies[1]["fingerprint"] and bodies[1]["branch"] == "feature/only-on-worker"
     assert "plain_folder" not in exported[0]
     assert exported[0]["checkout"]["branch"] == "feature/only-on-worker"

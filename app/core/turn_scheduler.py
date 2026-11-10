@@ -58,12 +58,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import time
 from contextlib import nullcontext
 from weakref import WeakValueDictionary
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import uuid4
 
 from app.db import turns as turns_db
@@ -2019,6 +2020,7 @@ async def _enqueue_context_wake(
     task_ids: List[str],
     prompt: str,
     *, extra_payload: Dict[str, Any] | None = None,
+    admit: Optional[Callable[..., Any]] = None,
 ) -> Dict[str, Any]:
     """Enqueue a fresh context-carrying wake turn for the OWN lane's fall-through
     enqueue. Reads the session's latest context turn for
@@ -2029,7 +2031,9 @@ async def _enqueue_context_wake(
     reach here for a user-stopped session, and this is the last gate before a
     row is actually written, so it refuses too. Answers a turn-shaped dict with
     ``id=None`` — the caller only logs the id and kicks — so a refusal enqueues
-    nothing and starts nothing."""
+    nothing and starts nothing. With ``admit`` (``_on_task_terminal_locked``)
+    the insert runs inside it, and its ``moved`` or ``duplicate`` comes back
+    as ``admit_verdict`` on an ``id=None`` answer."""
     from app.core.task_registry import task_registry
 
     generation = task_registry.stop_generation(session_id)
@@ -2114,24 +2118,28 @@ async def _enqueue_context_wake(
         if held:
             payload["held_peer_messages"] = held
             prompt = f"{prompt}\n\n{_held_peer_block(held)}"
+    enqueue_kwargs = dict(
+        prompt=prompt,
+        profile_id=profile_id,
+        project_id=context.get("project_id"),
+        worktree_id=context.get("worktree_id"),
+        # The wake continues the context turn's work, so it runs under the same
+        # per-turn settings (model/provider leg, effort, permission mode) —
+        # exactly as a failover retry already does. Without this, a session
+        # whose binding lives only in its turns' overrides woke on the
+        # profile/global default leg with the wrong credentials.
+        overrides=context.get("overrides") or None,
+        payload=payload,
+        parent_turn_id=context.get("id"),
+    )
     try:
-        turn = await asyncio.to_thread(
-            _enqueue,
-            session_id,
-            source,
-            prompt=prompt,
-            profile_id=profile_id,
-            project_id=context.get("project_id"),
-            worktree_id=context.get("worktree_id"),
-            # The wake continues the context turn's work, so it runs under the same
-            # per-turn settings (model/provider leg, effort, permission mode) —
-            # exactly as a failover retry already does. Without this, a session
-            # whose binding lives only in its turns' overrides woke on the
-            # profile/global default leg with the wrong credentials.
-            overrides=context.get("overrides") or None,
-            payload=payload,
-            parent_turn_id=context.get("id"),
-        )
+        if admit is None:
+            turn = await asyncio.to_thread(_enqueue, session_id, source, **enqueue_kwargs)
+        else:
+            verdict, turn = await asyncio.to_thread(
+                admit, lambda conn: _enqueue(session_id, source, _conn=conn, **enqueue_kwargs))
+            if verdict != "written":
+                turn = {"id": None, "session_id": session_id, "source": source, "admit_verdict": verdict}
     except Exception:
         # The held messages taken above exist nowhere else.
         if source == "unpark":
@@ -2492,7 +2500,7 @@ async def on_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
         frame.setdefault("task_incarnation", incarnation)
     await _record_swarm_worker_completion(session_id, frame)
     async with _terminal_delivery_lock(session_id):
-        return await _on_task_terminal_locked(session_id, frame)
+        await _on_task_terminal_locked(session_id, frame)
 
 
 async def _record_swarm_worker_completion(session_id: str, frame: Dict[str, Any]) -> None:
@@ -2504,7 +2512,9 @@ async def _record_swarm_worker_completion(session_id: str, frame: Dict[str, Any]
     await record_worker_completion(session_id, str(frame["task_id"]))
 
 
-async def on_started_session_terminal(session_id: str, frame: Dict[str, Any]) -> None:
+async def on_started_session_terminal(
+    session_id: str, frame: Dict[str, Any], *, steer: bool = True, admit: Optional[Callable[..., Any]] = None,
+) -> str:
     """A chat an owner chat started came to rest: wake the starter.
 
     ``session_id`` is the starting chat and ``frame`` the report
@@ -2512,13 +2522,31 @@ async def on_started_session_terminal(session_id: str, frame: Dict[str, Any]) ->
     registry task of the home, so it is admitted to the OWN lane here; the
     merge, mid-turn steer, Stop latch and one-wake-per-completion latch are the
     ones Task completions use.
+
+    Returns the outcome (see ``_on_task_terminal_locked``), or ``deferred``
+    when the starter is at rest and keeps the report on the child. Every
+    report passes an ``admit`` guard (``session_orchestration.admit_report``)
+    with its durable id: the wake and the deferral are admitted once, on the
+    worker that runs the starter, else ``moved`` (#1443). ``steer`` is only
+    for a first delivery nothing retries (a settled chat of this worker): a
+    steer is held in memory and writes no receipt, as before #1443. A report
+    something may deliver again passes ``steer=False``, so its wake is queued
+    in the same transaction as its receipt. A steer the live turn does not
+    take falls through to that queued wake.
     """
     async with _terminal_delivery_lock(session_id):
         from app.core.session_orchestration import defer_started_report, record_started_report
-        await record_started_report(session_id, frame)
-        if await defer_started_report(session_id, frame):
-            return
-        return await _on_task_terminal_locked(session_id, frame, started_session=True)
+        try:
+            await record_started_report(session_id, frame)
+            deferred = await defer_started_report(session_id, frame, admit=admit)
+            if deferred:
+                return "moved" if deferred == "moved" else "deferred"
+        except Exception:  # noqa: BLE001 — retried by a durable caller
+            logger.warning("turn_scheduler: started report for %s not admitted", session_id, exc_info=True)
+            return "failed"
+        return await _on_task_terminal_locked(
+            session_id, frame, started_session=True, steer=steer, admit=admit,
+        )
 
 
 async def on_remote_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
@@ -2532,7 +2560,7 @@ async def on_remote_task_terminal(session_id: str, frame: Dict[str, Any]) -> Non
     """
     await _record_swarm_worker_completion(session_id, frame)
     async with _terminal_delivery_lock(session_id):
-        return await _on_task_terminal_locked(session_id, frame, started_session=True)
+        await _on_task_terminal_locked(session_id, frame, started_session=True)
 
 
 async def on_access_outcome(session_id: str, frame: Dict[str, Any]) -> None:
@@ -2543,12 +2571,13 @@ async def on_access_outcome(session_id: str, frame: Dict[str, Any]) -> None:
     steer, Stop latch, archive refusal and one-wake-per-id latch.
     """
     async with _terminal_delivery_lock(session_id):
-        return await _on_task_terminal_locked(session_id, frame, started_session=True)
+        await _on_task_terminal_locked(session_id, frame, started_session=True)
 
 
 async def _on_task_terminal_locked(
     session_id: str, frame: Dict[str, Any], *, started_session: bool = False,
-) -> None:
+    steer: bool = True, admit: Optional[Callable[..., Any]] = None,
+) -> str:
     """A background task reached a terminal state between turns. Fold the
     terminal task into ONE consolidated ``source=unpark`` wake.
 
@@ -2585,13 +2614,24 @@ async def _on_task_terminal_locked(
 
     A wholly-contentless frame (no ``task_id``/``tool_use_id``/``summary``/
     ``output_file``) is dropped at the choke point below with a DEBUG log — an
-    empty notification is never enqueued."""
+    empty notification is never enqueued.
+
+    Returns ``admitted`` (a queued wake carries the frame, or this completion
+    already woke), ``steered`` (into the live turn), ``suppressed`` (policy:
+    Stop, archive, not this session's work), ``refused`` (the queue refused
+    the row) or ``failed`` (an error; nothing may have been admitted).
+    ``steer=False`` skips mid-turn delivery. ``admit(write)`` wraps the write
+    that admits the frame (``session_orchestration.admit_report``): it runs
+    ``write(conn)`` in one transaction with its own checks and answers
+    ``(outcome, row)``; its ``moved`` (another worker runs the session now) is
+    returned as is and ``duplicate`` as ``admitted``. Callers that ignore the
+    outcome behave as before."""
     try:
         task_id = frame.get("task_id")
         if not current_task_frames(session_id, [frame]):
-            return
+            return "suppressed"
         if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
-            return
+            return "refused"
         # Suppress the failed wake's fanout, not distinct successful reports
         # or an older continuation whose terminal delivery raced this failure.
         if task_id and frame.get("status") == "error":
@@ -2601,14 +2641,14 @@ async def _on_task_terminal_locked(
                 from app.db import sessions
                 child = await asyncio.to_thread(sessions.get_session, task_id) or {}
                 if child.get("parent_session_id") != session_id:
-                    return  # siblings do not need an auto-wake to report this
+                    return "suppressed"  # siblings do not need an auto-wake to report this
                 # The actual parent still owns a failure report. Its existing
                 # per-task/continuation latch delivers that report only once.
         from app.core.swarm import workers as swarm_workers
         launch = swarm_workers.get(task_id)
         if (launch is not None and launch.coordinator.session_id == session_id
                 and not frame.get("agent_message_turn_id")):
-            return  # Only the aggregate owns the original task's wake.
+            return "suppressed"  # Only the aggregate owns the original task's wake.
         # An explicitly admitted follow-up has its own report; the old completed
         # Swarm must neither swallow it nor rerun its already-finished successors.
         from app.core.task_registry import task_registry
@@ -2631,7 +2671,7 @@ async def _on_task_terminal_locked(
                 "session (task %s, status %s)",
                 session_id, task_id, frame.get("status"),
             )
-            return
+            return "suppressed"
         # An explicit Stop suppresses the canceled task before issuing provider
         # cancellation. Check at the entry point, ahead of every wake path, so
         # every terminal-frame race is a no-op.
@@ -2640,7 +2680,7 @@ async def _on_task_terminal_locked(
                 "turn_scheduler: wake suppressed for user-canceled task %s/%s",
                 session_id, task_id,
             )
-            return
+            return "suppressed"
         # Content-empty guard: the single enqueue choke point. A frame that
         # carries nothing renderable can only produce an empty <task-notification>
         # turn — drop it (DEBUG) before any lane decides to enqueue.
@@ -2649,7 +2689,7 @@ async def _on_task_terminal_locked(
                 "turn_scheduler: dropping contentless task frame for %s (frame=%r)",
                 session_id, frame,
             )
-            return
+            return "suppressed"
         if started_session or task_registry.is_own_background_task(session_id, task_id):
             # Explicit Stop is suppressed above; an unattributed kill is news.
             # ── OWN lane — rich consolidated source=unpark wake ──
@@ -2661,7 +2701,7 @@ async def _on_task_terminal_locked(
                 archive_guard.log_dropped(
                     session_id, "unpark", f"task {task_id} {frame.get('status')}",
                 )
-                return
+                return "suppressed"
             existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
             if existing is not None:
                 existing_payload = dict(existing.get("payload") or {})
@@ -2691,10 +2731,11 @@ async def _on_task_terminal_locked(
                         prompt = await asyncio.to_thread(
                             _unpark_prompt, existing_pending, upgraded_payload
                         )
-                        updated = await asyncio.to_thread(
-                            turns_db.update_queued_turn_prompt,
-                            existing["id"], prompt, upgraded_payload,
+                        verdict, updated = await _rewrite_queued_wake(
+                            admit, existing["id"], prompt, upgraded_payload,
                         )
+                        if verdict in ("moved", "duplicate"):
+                            return _admit_verdict(verdict)
                         if updated is not None:
                             logger.info(
                                 "turn_scheduler: unpark for %s — task %s rich frame "
@@ -2702,7 +2743,7 @@ async def _on_task_terminal_locked(
                                 session_id, task_id, updated["id"],
                             )
                             _kick_after_batch_window(session_id)
-                            return
+                            return "admitted"
                         # The guarded UPDATE lost (the wake left the queue) — the
                         # task already woke, so fall through to the late-frame latch below.
                     else:
@@ -2711,12 +2752,12 @@ async def _on_task_terminal_locked(
                             "wake turn %s, no-op",
                             session_id, task_id, existing.get("id"),
                         )
-                        return
+                        return await _admit_latched(admit, existing.get("id"))
                 else:
                     if task_id and task_registry.is_woken(
                         session_id, task_id, completion_id=frame.get("agent_message_turn_id")
                     ):
-                        return
+                        return await _admit_latched(admit, existing.get("id"))
                     # (b) merge this frame into the pending wake and rebuild its
                     # prompt.
                     # Dedupe on the way in: branch (a) already covers the common
@@ -2734,10 +2775,11 @@ async def _on_task_terminal_locked(
                     prompt = await asyncio.to_thread(
                         _unpark_prompt, pending, merged_payload
                     )
-                    updated = await asyncio.to_thread(
-                        turns_db.update_queued_turn_prompt,
-                        existing["id"], prompt, merged_payload,
+                    verdict, updated = await _rewrite_queued_wake(
+                        admit, existing["id"], prompt, merged_payload,
                     )
+                    if verdict in ("moved", "duplicate"):
+                        return _admit_verdict(verdict)
                     if updated is not None:
                         # Record the merged task woke so a later late frame
                         # for it can't re-enqueue.
@@ -2750,7 +2792,7 @@ async def _on_task_terminal_locked(
                             updated["id"], len(pending),
                         )
                         _kick_after_batch_window(session_id)
-                        return
+                        return "admitted"
                     # The guarded UPDATE lost (the wake left the queue) — enqueue
                     # fresh (guarded by the late-frame latch below).
 
@@ -2765,7 +2807,7 @@ async def _on_task_terminal_locked(
                     "already produced, no re-enqueue",
                     session_id, task_id,
                 )
-                return
+                return await _admit_latched(admit, None)
             wake_task_ids = [task_id] if task_id else []
             prompt = await asyncio.to_thread(_build_task_notification_prompt, [frame])
             # MID-TURN DELIVERY: a wake enqueued while the parent is inside a
@@ -2775,7 +2817,7 @@ async def _on_task_terminal_locked(
             # session is genuinely at rest (or unsteerable), which falls through
             # to the queued wake below. Latch only after acceptance; the
             # session delivery lock prevents concurrent duplicate submissions.
-            if await _try_steer_terminal_notification(
+            if steer and await _try_steer_terminal_notification(
                 session_id, prompt, [frame], wake_task_ids, carry_held=True,
             ):
                 task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"),
@@ -2785,12 +2827,15 @@ async def _on_task_terminal_locked(
                     "steered into the live turn",
                     session_id, task_id, frame.get("status"),
                 )
-                return
+                return "steered"
             turn = await _enqueue_context_wake(
-                session_id, "unpark", [frame], wake_task_ids, prompt
+                session_id, "unpark", [frame], wake_task_ids, prompt,
+                **({"admit": admit} if admit is not None else {}),
             )
+            if turn.get("admit_verdict") in ("moved", "duplicate"):
+                return _admit_verdict(turn["admit_verdict"])
             if not turn.get("id"):
-                return  # no delivery identity is spent on a refused enqueue
+                return "refused"  # no delivery identity is spent on a refused enqueue
             task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"),
                                                  incarnation=frame.get("task_incarnation"))
             logger.info(
@@ -2798,7 +2843,7 @@ async def _on_task_terminal_locked(
                 session_id, task_id, frame.get("status"), turn["id"],
             )
             _kick_after_batch_window(session_id)
-            return
+            return "admitted"
 
         # ── else — NOT the parent's own background work → suppress ──
         # A child/grandchild step of a still-running sub-agent, an orphan, or a
@@ -2809,11 +2854,47 @@ async def _on_task_terminal_locked(
             "not the parent's background work (pump lane retired, #690)",
             session_id, task_id,
         )
+        return "suppressed"
     except Exception:  # noqa: BLE001 — a wake failure must never kill the reader.
         logger.warning(
             "turn_scheduler: on_task_terminal failed for %s", session_id,
             exc_info=True,
         )
+        return "failed"
+
+
+def _admit_verdict(verdict: str) -> str:
+    return "moved" if verdict == "moved" else "admitted"
+
+
+def _update_queued_wake(conn: Any, turn_id: str, prompt: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``turns.update_queued_turn_prompt`` on the caller's connection."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE turns SET prompt=%s, payload=%s WHERE id=%s AND state='queued' RETURNING *",
+        (prompt, json.dumps(payload or {}), turn_id),
+    )
+    return turns_db._row(cursor.fetchone())
+
+
+async def _rewrite_queued_wake(
+    admit: Optional[Callable[..., Any]], turn_id: str, prompt: str, payload: Dict[str, Any],
+) -> Any:
+    """Rewrite a queued wake, through ``admit`` when given. ``(verdict, row)``."""
+    if admit is None:
+        row = await asyncio.to_thread(turns_db.update_queued_turn_prompt, turn_id, prompt, payload)
+        return ("written" if row is not None else "unwritten"), row
+    verdict, row = await asyncio.to_thread(
+        admit, lambda conn: _update_queued_wake(conn, turn_id, prompt, payload))
+    return verdict, (row if verdict == "written" else None)
+
+
+async def _admit_latched(admit: Optional[Callable[..., Any]], turn_id: Optional[str]) -> str:
+    """This completion already woke the session: still record it through ``admit``."""
+    if admit is None:
+        return "admitted"
+    verdict, _row = await asyncio.to_thread(admit, lambda conn: {"id": turn_id or "woken"})
+    return "moved" if verdict == "moved" else "admitted" if verdict in ("written", "duplicate") else "refused"
 
 
 async def on_tasks_interrupted_by_restart(
