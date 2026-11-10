@@ -38,6 +38,17 @@ describe('MessageArea error banner', () => {
 		expect(source).not.toContain('&times;</button>');
 	});
 
+	it('leaves Stop following the failure, not its banner (#1341)', () => {
+		// A banner that stepped aside for its turn's Error row still owns the held
+		// queue slot; keying these on the banner let Stop's rows push that slot
+		// down on phone (long-cli-error-stop journey).
+		const follow = source.slice(source.indexOf('function followGrowthNow()'), source.indexOf('async function pinBelowCurrentReserve()'));
+		expect(follow).toContain('restingOnNotSentRows(notSentHold.messages) && !$activeSession.error) return;');
+		const stay = source.slice(source.indexOf('async function stayWhereNotSentRowsLeftTheReader()'), source.indexOf('const notSentRowsArrival'));
+		expect(stay).toContain('if ($activeSession.error && shouldAutoScroll && !pendingScrollToBottom)');
+		expect(`${follow}${stay}`).not.toContain('bannerError');
+	});
+
 	it('is announced as an alert, with a named dismiss button', () => {
 		expect(banner).toContain('role="alert"');
 		expect(banner).toMatch(/<button type="button" onclick=\{dismissTailError\}[^>]*aria-label="Dismiss error"/);

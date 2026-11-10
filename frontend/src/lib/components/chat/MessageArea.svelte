@@ -1432,8 +1432,10 @@
 	function followGrowthNow() {
 		if (!containerRef || !tailSpacerRef || selectionBlocksNavigation) return;
 		// Not-sent rows preserve the stopped reader (#1066), unless an error
-		// below them is already the visible tail being followed.
-		if (restingOnNotSentRows(notSentHold.messages) && !bannerError) return;
+		// below them is already the visible tail being followed. Keyed on the
+		// failure, like its held slot: a banner that stepped aside for its turn's
+		// Error row (#1341) still leaves that slot docked at the bottom.
+		if (restingOnNotSentRows(notSentHold.messages) && !$activeSession.error) return;
 		if (!currentTurnAnchorId && !shouldAutoScroll) return;
 		const contentEnd = renderedFollowEnd();
 		const delta = resolveAnchoredRevealDelta(containerRef.scrollTop, containerRef.clientHeight, contentEnd);
@@ -1534,7 +1536,8 @@
 		// An already-visible error is the followed reading surface, after the
 		// queued rows. Keep that banner in place as Stop returns their words;
 		// ordinary Stop still preserves the transcript exactly as in #1066.
-		if (bannerError && shouldAutoScroll && !pendingScrollToBottom) {
+		// The failure, not its banner, owns that surface (#1341).
+		if ($activeSession.error && shouldAutoScroll && !pendingScrollToBottom) {
 			followGrowthNow();
 			updateJumpToLatestVisibility();
 			updateCurrentTurnIndex();

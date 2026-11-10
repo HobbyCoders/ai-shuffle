@@ -386,7 +386,10 @@ const cases = [{
 		// row is transcript: once the first queued message leaves the pending list
 		// a follower rightly scrolls to that new turn. The row holds still until
 		// then; the held slot checks below still run through the handoff (#1341).
-		const handoff = frames.findIndex(f => f.errorRow && !f.rows.some(row => row.pending && row.text.startsWith('waiting-0 ')));
+		// Read the painted frame: row membership is sampled in rAF, before the
+		// app's own rAF commit in that frame, so a bubble that left in this paint
+		// is still listed but has no painted rect.
+		const handoff = frames.findIndex(f => f.errorRow && !f.rows.some(row => row.pending && row.rect && row.text.startsWith('waiting-0 ')));
 		const resting = (handoff < 0 ? frames : frames.slice(0, handoff)).filter(f => f.errorRow);
 		if (scrolledUp) expect(travel(frames, 'anchor') <= 2, 'error and Stop leave the older row being read alone');
 		else {
@@ -395,9 +398,6 @@ const cases = [{
 			// Both flex boxes must retain the already-presented queue slot.
 			// Shrinking either during follow-scroll was the pre-Stop 0.082
 			// CLS; separate paints could hide it below 0.05.
-			// #1341: on phone the held slot holds through the queue handoff but moves
-			// down 52-96px when Stop drains the last queued message (no banner keeps
-			// it). Desktop holds. Open finding; not loosened.
 			expect(travel(banners, 'tailControls') <= 2, `the error's queue slot stays still through handoff (${travel(banners, 'tailControls').toFixed(1)}px)`);
 			expect(travel(banners, 'pendingList') <= 2, `the pending list shares the held slot (${travel(banners, 'pendingList').toFixed(1)}px)`);
 			const retained = banners.map(frame => ({ pending: frame.rows.find(row => row.pending && row.text.startsWith('waiting-1 '))?.bubble })).filter(frame => frame.pending);
