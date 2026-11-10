@@ -2203,7 +2203,8 @@ def create_postgres_schema(cursor: Any) -> None:
             handoff_id TEXT,
             wake_token TEXT,
             resume_exported BOOLEAN NOT NULL DEFAULT FALSE,
-            wakes_superseded BOOLEAN NOT NULL DEFAULT FALSE
+            wakes_superseded BOOLEAN NOT NULL DEFAULT FALSE,
+            stop_seq BIGINT
         )
     """)
 

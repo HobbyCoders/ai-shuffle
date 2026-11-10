@@ -915,7 +915,7 @@ def enqueue_turn(
         if command_id and (
             source == "watch"
             or (payload or {}).get("compact_first")
-            or (source == "wakeup" and str(command_id).startswith("handoff-resume-"))
+            or (source == "wakeup" and str(command_id).startswith(("handoff-resume-", "handoff-failed-")))
         ):
             existing = get_turn_by_command(session_id, command_id, _conn=conn)
             if existing is not None:
