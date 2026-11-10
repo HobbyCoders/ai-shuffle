@@ -473,12 +473,14 @@
 	</RowGroup>
 	{#if memoryWarning && !memoryOpen}
 		<!-- A warning is read without opening the row; healthy stays quiet (#1042). -->
-		<InlineBanner tone="warn">
-			{memoryWarning}
-			{#snippet actions()}
-				<button type="button" class="st-btn sm" onclick={openMemoryDetails}>Details</button>
-			{/snippet}
-		</InlineBanner>
+		<div class="mh-notice">
+			<InlineBanner tone="warn">
+				{memoryWarning}
+				{#snippet actions()}
+					<button type="button" class="st-btn sm" onclick={openMemoryDetails}>Details</button>
+				{/snippet}
+			</InlineBanner>
+		</div>
 	{/if}
 	{#if memoryError}<p class="st-msg err" role="alert">{memoryError}</p>{/if}
 
@@ -548,5 +550,16 @@
 		flex-wrap: wrap;
 		/* Only the sentence takes the error colour, not the actions. */
 		color: var(--st-fg);
+	}
+	/* The memory warning belongs to the Memory card: just under it, with the
+	   section gap after it rather than halfway to the Help heading. */
+	:global(.st-grp:has(+ .mh-notice)) {
+		margin-bottom: 0;
+	}
+	.mh-notice {
+		margin: 10px 0 40px;
+	}
+	.mh-notice :global(.st-banner) {
+		margin: 0;
 	}
 </style>

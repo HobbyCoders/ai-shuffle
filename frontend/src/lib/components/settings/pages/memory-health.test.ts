@@ -69,6 +69,8 @@ describe('memory health', () => {
 		expect(memoryChecked(health, (now + 12 * 60) * 1000)).toBe('Checked 12m ago');
 		expect(memoryChecked(health, (now + 3 * 86400) * 1000)).toBe('Checked 3d ago');
 		expect(memoryChecked({ ...health, checked_at: null })).toBe('Not checked yet');
+		// A value the page cannot read as seconds does not stop the row loading.
+		expect(memoryChecked({ ...health, checked_at: '2026-11-10T02:20:00Z' as unknown as number })).toBe('Not checked yet');
 		const full = new Date(now * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 		expect(memoryCheckedAt(health)).toBe(`Last checked ${full}`);
 		expect(memoryCheckedAt({ ...health, checked_at: null })).toBe('');
@@ -89,6 +91,13 @@ describe('memory health', () => {
 			/ 2 more checks need attention\.$/
 		);
 		expect(memoryAlert({ ...health, signals: [] })).toBe('Memory needs attention.');
+		// An abbreviation does not end the sentence; a very long one is cut at a word.
+		expect(memoryAlert({ ...health, signals: [{ ...capacity, reason: 'Cleanup removed approx. 3 facts. Later text.' }] })).toBe(
+			'Capacity: Cleanup removed approx. 3 facts.'
+		);
+		const long = memoryAlert({ ...health, signals: [{ ...capacity, reason: 'word '.repeat(80).trim() }] });
+		expect(long.endsWith('word…')).toBe(true);
+		expect(long.length).toBeLessThan(200);
 		// A healthy store, even one with a quiet note about past deletions, shows nothing.
 		expect(memoryAlert({ ...health, state: 'healthy', signals: [{ ...capacity, state: 'healthy', note: true }] })).toBe('');
 	});
