@@ -1241,6 +1241,31 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
       await page.waitForURL(/\/review\/stalledreload$/, { timeout: 5000 });
     }, 10000);
+    it("reports typing the words of an input error into a page that blocked as outcome_unknown", async () => {
+      // Playwright quotes the typed text back in its failure. Those words are
+      // the caller's, and the first character did reach the field.
+      const page = await load(`<input aria-label="Slow" oninput="${stall}window.state=this.value">`);
+      const result = await runAct(session, { kind: "type", value: "Unknown key", ref: await ref("Slow") });
+      expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+      await expect.poll(() => state(page), { timeout: 5000 }).toMatch(/^U/);
+    }, 10000);
+    it("reports an unknown key pressed after a modifier as outcome_unknown, and one pressed first as not executed", async () => {
+      const page = await load(`<input aria-label="Entry" onkeydown="window.state=(window.state||'')+event.key+' '">`);
+      const entry = await ref("Entry");
+      // Nothing is down when the first key of the chord is the unknown one.
+      expect(body(await runAct(session, { kind: "key", ref: entry, key: "NoSuchKey+a" }))).toMatchObject({ code: "invalid_input", outcome: "not_executed" });
+      expect(await state(page)).toBe(0);
+      // Playwright pressed Control before it reached the key it does not know.
+      const result = await runAct(session, { kind: "key", ref: entry, key: "NoSuchKey", modifiers: ["Control"] });
+      try {
+        expect(body(result)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+        expect(firstText(result)).toContain("Unknown key");
+        expect(await state(page)).toBe("Control ");
+      } finally {
+        // Playwright leaves Control down (issue #1423); release it for the tests that follow.
+        await page.keyboard.up("Control");
+      }
+    });
     it("does not count a click as done when the page blocked before Playwright could check it", async () => {
       // The cover appears as the pointer arrives and the page then blocks, so
       // Playwright sent the click but never learned that the cover took it.

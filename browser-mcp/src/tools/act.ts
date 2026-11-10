@@ -75,44 +75,114 @@ async function refStillResolves(locator: Locator): Promise<boolean> {
 
 // Playwright colours its call log with ANSI escapes.
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
-/** Call-log lines that name why an action could not proceed. */
-const BLOCKER_RE = /intercepts pointer events|element is not |element is outside of the viewport|not attached|is disabled/i;
+/**
+ * A line of Playwright's that names why an action could not proceed. The reason
+ * ends the line: a line that only quotes the page ends in a tag, so an element
+ * whose label reads like a reason does not count.
+ */
+const BLOCKER_RE = /(?:intercepts pointer events|element is not \w+|element is outside of the viewport|not attached to the DOM)$/i;
 const MAX_REASON_CHARS = 240;
 /** Call-log line Playwright writes just before it sends a pointer gesture's events. */
-const PERFORMING_RE = /^\s*-\s*performing \S+(?: and \S+)? action$/m;
+const PERFORMING_RE = /^\s*-\s*performing \S+(?: and \S+)? action$/;
 /**
  * Call-log lines for the actions that have no "about to send" line: a key
  * press on the resolved element, and fill and select, which check the element
  * and set its value in one page call. Each marks the call as started, so it
  * says the input went out only when the call then got no answer.
  */
-const STARTED_RE = /^\s*-\s*(?:elementHandle\.press\(.*|waiting for element to be visible(?:, enabled and editable| and enabled))$/m;
+const STARTED_RE = /^\s*-\s*(?:elementHandle\.press\(|waiting for element to be visible(?:, enabled and editable| and enabled)$)/;
 /** Playwright's own budget ran out: the call got no answer. Only its headline says so. */
 const TIMEOUT_RE = /^\S+: Timeout \d+ms exceeded\./;
 /** Call-log line Playwright writes once the page took a pointer gesture on its target. */
-const GESTURE_DONE_RE = /^\s*-\s*\S+(?: and \S+)? action done$/m;
+const GESTURE_DONE_RE = /^\s*-\s*\S+(?: and \S+)? action done$/;
+/** Call-log line that opens another attempt. A repeated one carries a count in place of the dash. */
+const RETRYING_RE = /^\s*(?:-|\d+ ×)\s*retrying /;
 
-/**
- * The failure text as the step patterns read it: without the value or key the
- * caller sent and without colour codes. Playwright quotes that text back
- * (`fill("…")`, `type("…")`, `press("…")`, `Unknown key: "…"`), and its lines
- * could read like steps Playwright took. The whole key goes before its parts,
- * and both go before the colour codes, which the caller's text may hold too.
- * Each cut ends at the closing quote, which stays, so a line it touches still
- * holds a quote and matches no pattern.
- */
-function stepLog(message: string, input: ActInput): string {
-  let text = message;
-  for (const echoed of [input.value, input.key, ...(input.key?.split("+") ?? [])]) {
-    if (echoed) text = text.split(`${echoed}"`).join('"');
-  }
-  return text.replace(ANSI_RE, "");
+/** Text of the caller's that Playwright quotes back: what it writes before the text, the text, and after it. */
+type Echo = readonly [before: string, text: string, after: string];
+
+/** The chord a key action presses, as Playwright receives it. */
+function keyChord(input: ActInput): string {
+  return [...(input.modifiers ?? []), input.key ?? ""].join("+");
 }
 
-/** The call log of the attempt Playwright was on when it failed. */
-function lastAttempt(message: string): string {
-  const log = message.replace(ANSI_RE, "");
-  return log.slice(log.lastIndexOf("retrying ") + 1);
+/** The keys of a chord, split as Playwright splits it: a "+" that begins a key is part of that key. */
+function chordKeys(chord: string): string[] {
+  const keys: string[] = [];
+  let key = "";
+  for (const char of chord) {
+    if (char === "+" && key) { keys.push(key); key = ""; }
+    else key += char;
+  }
+  return [...keys, key];
+}
+
+/** Does this failure open with Playwright refusing `key`? */
+function refusesKey(message: string, key: string): boolean {
+  const at = message.indexOf(": ");
+  return at >= 0 && message.startsWith(`Unknown key: "${key}"`, at + 2);
+}
+
+/**
+ * Did a chord Playwright refused already press some of its keys? Playwright
+ * presses a chord key by key and stops at the first key it does not know, with
+ * the keys before that one down. Nothing went out only when the failure names
+ * the chord's first key and can be naming no other.
+ */
+function chordPartlyPressed(message: string, chord: string): boolean {
+  const [first, ...rest] = chordKeys(chord);
+  return !refusesKey(message, first) || rest.some(key => key !== first && refusesKey(message, key));
+}
+
+/**
+ * Where Playwright quotes this action's text back in a failure: the value of a
+ * type or a fill, the chord of a key press, and the key of that chord it does
+ * not know. Only the field the action sent is listed. The other kinds send
+ * Playwright no text of the caller's, and an option label reaches it only
+ * inside a locator, which it writes with line breaks escaped.
+ */
+function echoedText(input: ActInput): Echo[] {
+  if (input.kind === "type") return [['elementHandle.type("', input.value ?? "", '")']];
+  if (input.kind === "fill") return [['fill("', input.value ?? "", '")']];
+  if (input.kind !== "key") return [];
+  const chord = keyChord(input);
+  return [['elementHandle.press("', chord, '")'], ...chordKeys(chord).map((key): Echo => ['Unknown key: "', key, '"'])];
+}
+
+/**
+ * A failure as its classifiers read it: Playwright's own words, one call-log
+ * line each.
+ *
+ * The caller's text is cut from every place the message quotes it, found in the
+ * message as it arrived and cut together, so one cut cannot hide another and
+ * none of that text is left to read like a step. Its lines end at "\n" alone:
+ * Playwright joins its log with "\n" and escapes that character in the text it
+ * quotes from the page, but leaves "\r" and U+2028 in it.
+ */
+function failureLines(message: string, echoes: Echo[] = []): string[] {
+  const cuts: Array<[start: number, end: number]> = [];
+  for (const [before, text, after] of echoes) {
+    if (!text) continue;
+    const quoted = before + text + after;
+    for (let at = message.indexOf(quoted); at >= 0; at = message.indexOf(quoted, at + 1)) {
+      cuts.push([at + before.length, at + before.length + text.length]);
+    }
+  }
+  cuts.sort((a, b) => a[0] - b[0]);
+  let kept = "";
+  let from = 0;
+  for (const [start, end] of cuts) {
+    if (start > from) kept += message.slice(from, start);
+    from = Math.max(from, end);
+  }
+  return (kept + message.slice(from)).replace(ANSI_RE, "").split("\n");
+}
+
+/** The lines of the attempt Playwright was on when it failed. */
+function lastAttempt(lines: string[]): string[] {
+  let from = 0;
+  lines.forEach((line, at) => { if (RETRYING_RE.test(line)) from = at + 1; });
+  return lines.slice(from);
 }
 
 /**
@@ -131,17 +201,18 @@ function lastAttempt(message: string): string {
  * unknown key, a malformed date, an element that is not a select) means
  * nothing was sent.
  */
-function inputMayHaveGoneOut(message: string): boolean {
-  const attempt = lastAttempt(message);
-  return PERFORMING_RE.test(attempt) || (TIMEOUT_RE.test(message) && STARTED_RE.test(attempt));
+function inputMayHaveGoneOut(lines: string[]): boolean {
+  const attempt = lastAttempt(lines);
+  return attempt.some(line => PERFORMING_RE.test(line))
+    || (TIMEOUT_RE.test(lines[0] ?? "") && attempt.some(line => STARTED_RE.test(line)));
 }
 
 /**
  * Did Playwright confirm that a pointer gesture reached its target? It writes
  * "action done" only after its own check that nothing else took the events.
  */
-function gestureConfirmed(message: string): boolean {
-  return GESTURE_DONE_RE.test(lastAttempt(message));
+function gestureConfirmed(lines: string[]): boolean {
+  return lastAttempt(lines).some(line => GESTURE_DONE_RE.test(line));
 }
 
 /**
@@ -149,13 +220,11 @@ function gestureConfirmed(message: string): boolean {
  * last call-log line naming the blocker (e.g. "<div></div> intercepts pointer
  * events", "element is not stable"), else the error's headline.
  */
-export function actionFailureReason(message: string): string {
-  const lines = message.replace(ANSI_RE, "").split("\n").map((line) => line.trim().replace(/^-\s*/, ""));
-  let reason = "";
+export function actionFailureReason(lines: string[]): string {
+  let reason = lines[0] ?? "";
   for (const line of lines) if (BLOCKER_RE.test(line)) reason = line;
-  if (!reason) reason = lines[0] ?? "";
-  // Drop Playwright's "locator.click: Error: " framing.
-  reason = reason.replace(/^locator\.\w+:\s*/, "").replace(/^Error:\s*/, "").trim();
+  // Drop the call-log dash and Playwright's "locator.click: Error: " framing.
+  reason = reason.trim().replace(/^-\s*/, "").replace(/^locator\.\w+:\s*/, "").replace(/^Error:\s*/, "").trim();
   if (!reason) reason = "the element did not become actionable";
   return reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS - 1)}…` : reason;
 }
@@ -186,12 +255,17 @@ export function normalizeModifiers(modifiers: string[] = []): Modifier[] {
     return normalized as Modifier;
   });
 }
-/** Input errors must win over Playwright's aria-ref/actionability call log. */
+/**
+ * Input errors must win over Playwright's aria-ref/actionability call log.
+ * Playwright names one at the start of the failure, before any text it quotes,
+ * so the same words in a typed value or an element's label are not one.
+ */
 export function invalidInputRemedy(message: string): string | undefined {
   if (message.startsWith("invalid_input:")) return message;
-  if (/Unknown key|Unknown modifier/i.test(message)) return `invalid_input: ${actionFailureReason(message)}. Use a Playwright key such as Enter, Escape, ArrowDown or Control+A (Return/Esc/Ctrl aliases are accepted).`;
-  if (/Malformed value/i.test(message)) return "invalid_input: malformed input value; use the native format (date YYYY-MM-DD, time HH:mm, datetime-local YYYY-MM-DDTHH:mm).";
-  if (/not (?:a |an )?(?:<select>|select element)/i.test(message)) return "invalid_input: select needs a native select or ARIA combobox/listbox ref; for other widgets open it and click an option.";
+  const headline = message.split("\n", 1)[0];
+  if (/^\S+: (?:Error: )?Unknown (?:key|modifier)/.test(headline)) return `invalid_input: ${actionFailureReason([headline])}. Use a Playwright key such as Enter, Escape, ArrowDown or Control+A (Return/Esc/Ctrl aliases are accepted).`;
+  if (/^\S+: (?:Error: )?Malformed value/.test(headline)) return "invalid_input: malformed input value; use the native format (date YYYY-MM-DD, time HH:mm, datetime-local YYYY-MM-DDTHH:mm).";
+  if (/^\S+: (?:Error: )?Element is not a <select> element/.test(headline)) return "invalid_input: select needs a native select or ARIA combobox/listbox ref; for other widgets open it and click an option.";
   return undefined;
 }
 
@@ -248,8 +322,8 @@ export function validateTarget(input: ActInput): string | null {
  * Error for an action that may have run before it failed. Never auto-retried:
  * typing or submitting twice is worse than one extra observation.
  */
-export function outcomeUnknownMessage(kind: string, detail: string): string {
-  const reason = actionFailureReason(detail);
+export function outcomeUnknownMessage(kind: string, lines: string[]): string {
+  const reason = actionFailureReason(lines);
   return (
     `outcome_unknown: ${kind} may have taken effect before it failed (${reason}). ` +
     "Observe the page (browser_snapshot or browser_screenshot) before doing anything else; do not repeat it blindly."
@@ -348,33 +422,36 @@ export async function runAct(session: Session, input: ActInput): Promise<McpTool
     // Playwright's call log names the step it reached. Once it started to
     // change the page the outcome is no longer not_executed. An error this
     // tool raised itself has no call log, and markSent already covers it.
-    const steps = stepLog(msg, input);
-    if (input.ref !== undefined && !errorCode(msg) && inputMayHaveGoneOut(steps)) sent = true;
+    const own = errorCode(msg) !== undefined;
+    const log = failureLines(msg, own ? [] : echoedText(input));
+    const text = log.join("\n");
+    if (input.ref !== undefined && !own && inputMayHaveGoneOut(log)) sent = true;
     const remedy = invalidInputRemedy(msg);
+    if (remedy && !own && input.kind === "key") sent = chordPartlyPressed(msg, keyChord(input));
     if (remedy) return sent
-      ? errorResult(outcomeUnknownMessage(input.kind, remedy), { outcome: "unknown" })
+      ? errorResult(outcomeUnknownMessage(input.kind, [remedy]), { outcome: "unknown" })
       : errorResult(remedy, NOT_EXECUTED);
     // Already a clean stale_ref / stale_screenshot: rejected before input.
     if (msg.startsWith("stale_ref") || msg.startsWith("stale_screenshot")) return errorResult(msg, NOT_EXECUTED);
-    if (sent) return errorResult(outcomeUnknownMessage(input.kind, msg), { outcome: "unknown" });
+    if (sent) return errorResult(outcomeUnknownMessage(input.kind, log), { outcome: "unknown" });
     // A ref whose element has since detached times out in the actionability
     // wait. So does one whose element is still there but covered, animating or
     // otherwise not actionable, and calling THAT stale_ref sends the model to
     // re-snapshot, get the same ref back, and fail again. Ask the ref engine:
     // only a ref that no longer resolves is stale.
-    if (input.ref !== undefined && locator && isRefResolutionFailure(msg)) {
+    if (input.ref !== undefined && locator && isRefResolutionFailure(text)) {
       // Typing is the one ref action that can stop half way: a timeout that
       // does not name a blocker may have left part of the text behind.
-      if (input.kind === "type" && !BLOCKER_RE.test(steps)) {
-        return errorResult(outcomeUnknownMessage("type", msg), { outcome: "unknown" });
+      if (input.kind === "type" && !log.some(line => BLOCKER_RE.test(line))) {
+        return errorResult(outcomeUnknownMessage("type", log), { outcome: "unknown" });
       }
       if (!(await refStillResolves(locator))) return errorResult(new StaleRefError(input.ref).message, NOT_EXECUTED);
-      return errorResult(notActionableMessage(input.ref, input.kind, actionFailureReason(msg)), NOT_EXECUTED);
+      return errorResult(notActionableMessage(input.ref, input.kind, actionFailureReason(log)), NOT_EXECUTED);
     }
-    if (sent || PAGE_GONE_RE.test(msg)) {
-      return errorResult(outcomeUnknownMessage(input.kind, msg), { outcome: "unknown" });
+    if (sent || PAGE_GONE_RE.test(text)) {
+      return errorResult(outcomeUnknownMessage(input.kind, log), { outcome: "unknown" });
     }
-    return errorResult(errorCode(msg) ? msg : `action_failed: ${msg}`, NOT_EXECUTED);
+    return errorResult(own ? msg : `action_failed: ${msg}`, NOT_EXECUTED);
   }
 
   const dispatchMs = performance.now() - dispatchStart;
@@ -505,8 +582,8 @@ async function landedGesture(gesture: Promise<void>, markSent: () => void): Prom
   try {
     await gesture;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!TIMEOUT_RE.test(msg) || !gestureConfirmed(msg)) throw err;
+    const lines = failureLines(err instanceof Error ? err.message : String(err));
+    if (!TIMEOUT_RE.test(lines[0]) || !gestureConfirmed(lines)) throw err;
     markSent();
   }
 }
@@ -588,7 +665,7 @@ async function performAction(
 
     case "key": {
       if (!input.key) throw new Error("invalid_input: `key` requires `key`");
-      const combo = [...(input.modifiers ?? []), input.key].join("+");
+      const combo = keyChord(input);
       if (locator) await locator.press(combo, refTimeout);
       else { markSent(); await page.keyboard.press(combo); }
       return;

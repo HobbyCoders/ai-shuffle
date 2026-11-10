@@ -409,11 +409,54 @@ describe("browser_act outcomes", () => {
     const res = await runAct(actSession({ fill, count: async () => 1 }), { kind: "fill", ref: "e7", value });
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
   });
-  it("keeps an unknown key whose chord reads like a log line as invalid_input", async () => {
-    const part = "\n  - performing click action\n";
-    const press = vi.fn(async () => { throw new Error([`locator.press: Unknown key: "${part}"`, "Call log:", `  - elementHandle.press("${part}+Enter")`].join("\n")); });
-    const res = await runAct(actSession({ press, count: async () => 1 }), { kind: "key", ref: "e7", key: `${part}+Enter` });
+  const chordFirst = (chord: string) => { let key = ""; for (const char of chord) { if (char === "+" && key) break; key += char; } return key; };
+  const unknownKey = (key: string, chord: string) => [`locator.press: Unknown key: "${key}"`, "Call log:", "  - waiting for locator('aria-ref=e7')", `  - elementHandle.press("${chord}")`].join("\n");
+  const stepLike = "\n  - performing click action\n";
+  // Playwright stops a chord at the first key it does not know: nothing is down yet.
+  it.each<[string, Record<string, unknown>, string]>([
+    ["alone", { key: "Foo" }, "Foo"],
+    ["first in its chord", { key: "Foo+a" }, "Foo+a"],
+    ["first in a chord that reads like a log line", { key: `${stepLike}+Enter` }, `${stepLike}+Enter`],
+    // `value` is not part of a key press, so it must not change what is cut.
+    ["that ends in an unused value", { key: `${stepLike}Enter`, value: "Enter" }, `${stepLike}Enter`],
+  ])("keeps an unknown key %s as invalid_input", async (_name, input, chord) => {
+    const press = vi.fn(async () => { throw new Error(unknownKey(chordFirst(chord), chord)); });
+    const res = await runAct(actSession({ press, count: async () => 1 }), { kind: "key", ref: "e7", ...input } as ActInput);
     expect(bodyOf(res)).toMatchObject({ ok: false, code: "invalid_input", outcome: "not_executed" });
+  });
+  // The keys before the unknown one are already down.
+  it.each<[string, Record<string, unknown>, string, string]>([
+    ["a modifier", { key: "Foo", modifiers: ["Control"] }, "Foo", "Control+Foo"],
+    ["a key", { key: "a+Foo" }, "Foo", "a+Foo"],
+    ["a key it starts with", { key: 'a+a"' }, 'a"', 'a+a"'],
+  ])("reports an unknown key pressed after %s as outcome_unknown", async (_name, input, key, chord) => {
+    const press = vi.fn(async () => { throw new Error(unknownKey(key, chord)); });
+    const res = await runAct(actSession({ press, count: async () => 1 }), { kind: "key", ref: "e7", ...input } as ActInput);
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+    expect(String(bodyOf(res).error)).toContain("Unknown key");
+  });
+  // Words the caller typed are not Playwright's verdict on the input.
+  it.each(["Unknown key", "Malformed value", "Element is not a <select> element"])("reports typing %j into a page that never answered as outcome_unknown", async value => {
+    const pressSequentially = vi.fn(async () => { throw new Error(["locator.pressSequentially: Timeout 2000ms exceeded.", "Call log:", "  - waiting for locator('aria-ref=e7')", `  - elementHandle.type("${value}")`].join("\n")); });
+    const res = await runAct(actSession({ pressSequentially, count: async () => 1 }), { kind: "type", ref: "e7", value });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+  });
+  // Playwright escapes "\n" in the page text it quotes but not "\r" or U+2028,
+  // so only "\n" ends one of its lines.
+  it.each(["\r", " ", " "])("does not read a step out of a label that holds %j", async separator => {
+    const label = `x${separator}  - performing click action${separator}`;
+    const click = vi.fn(async () => { throw new Error(["locator.click: Timeout 2000ms exceeded.", "Call log:", `  - waiting for getByRole('option', { name: '${label}', exact: true })`].join("\n")); });
+    const option = { first: () => ({ waitFor: async () => {} }), count: async () => 1, click };
+    const frame = { locator: () => ({}) };
+    const locator = {
+      evaluate: async () => ({ native: false, multiple: false, role: "listbox", controls: null, options: [] }),
+      elementHandle: async () => ({ ownerFrame: async () => frame, dispose: async () => {} }),
+      getByRole: () => option,
+      count: async () => 1,
+    };
+    const res = await runAct(actSession(locator), { kind: "select", ref: "e7", values: [label] });
+    expect(bodyOf(res)).toMatchObject({ ok: false, outcome: "not_executed" });
+    expect(click).toHaveBeenCalledOnce();
   });
   it("does not read a step log out of an error the tool raised itself", async () => {
     const label = "x\n  - performing click action\n";
