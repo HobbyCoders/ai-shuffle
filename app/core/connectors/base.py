@@ -196,6 +196,58 @@ TriggerCallback = Callable[[str, str, Dict[str, Any]], Coroutine[Any, Any, None]
 # Signature: (connector_id, trigger_id, payload) -> None
 
 
+class ArrivalPlace:
+    """One message's place in its chat's arrival order on this connector.
+
+    Take it before the first await on a message, do the slow steps (a name
+    lookup, an acknowledgement), then ``hand_off``. A message reaches the
+    manager only after every earlier message of the same chat has, so a slow
+    step for one cannot let a later one overtake it. The order ends at the
+    hand-off: from there the manager's per-chat queue keeps it, and a turn
+    waiting on the owner's answer never blocks that answer here. Other chats
+    never wait. Leaving the ``with`` block without a hand-off (a filtered or
+    failed message) gives the place up.
+    """
+
+    def __init__(self, tails: Dict[str, "asyncio.Future[None]"], key: str,
+                 deliver: "IncomingMessageCallback"):
+        self._tails, self._key, self._deliver = tails, key, deliver
+        self._previous = tails.get(key)
+        self._mine: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        tails[key] = self._mine
+
+    def __enter__(self) -> "ArrivalPlace":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._release()
+
+    async def hand_off(self, message: "IncomingMessage") -> None:
+        try:
+            if self._previous is not None:
+                await asyncio.shield(self._previous)
+            # Tasks start in creation order, so this message takes its place in
+            # the manager's queue (or the worker's pipe) before the next one
+            # here is released.
+            delivery = asyncio.ensure_future(self._deliver(message))
+        finally:
+            self._release()
+        await delivery
+
+    def _release(self) -> None:
+        previous = self._previous
+        if previous is not None and not previous.done():
+            previous.add_done_callback(lambda _done: self._settle())
+        else:
+            self._settle()
+
+    def _settle(self) -> None:
+        if not self._mine.done():
+            self._mine.set_result(None)
+        if self._tails.get(self._key) is self._mine:
+            del self._tails[self._key]
+
+
 class BaseConnector(ABC):
     """
     Abstract base class for all connectors.
@@ -235,6 +287,11 @@ class BaseConnector(ABC):
         self._status = ConnectorStatus.DISCONNECTED
         self._status_message: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
+        self._arrival_tails: Dict[str, asyncio.Future[None]] = {}
+
+    def arrival_place(self, platform_chat_id: str) -> ArrivalPlace:
+        """Reserve a message's turn in its chat now; see ``ArrivalPlace``."""
+        return ArrivalPlace(self._arrival_tails, str(platform_chat_id), self._on_incoming_message)
 
     @property
     def status(self) -> ConnectorStatus:

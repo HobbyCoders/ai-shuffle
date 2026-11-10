@@ -34,12 +34,26 @@ def emit(value):
 
 
 def host_call(method, args):
+    return host_reply(host_request(method, args))
+
+
+def host_request(method, args):
     key = str(uuid.uuid4())
     event, result = threading.Event(), []
     with _REPLY_LOCK:
         _REPLIES[key] = (event, result)
     try:
         emit({"host_id": key, "method": method, "args": args})
+    except BaseException:
+        with _REPLY_LOCK:
+            _REPLIES.pop(key, None)
+        raise
+    return key, event, result
+
+
+def host_reply(request):
+    key, event, result = request
+    try:
         if not event.wait(180):
             raise TimeoutError("Host callback timed out")
         if result[0].get("error"):
@@ -97,7 +111,10 @@ async def serve(cls, base):
     instance = None
     tasks = set()
     async def callback(method, *args):
-        return await asyncio.to_thread(host_call, method, args)
+        # Write on the loop thread, in call order: two threads racing to write
+        # could hand the host a chat's messages out of order (#1324).
+        request = host_request(method, args)
+        return await asyncio.to_thread(host_reply, request)
     async def dispatch(request):
         nonlocal instance
         key = request["id"]

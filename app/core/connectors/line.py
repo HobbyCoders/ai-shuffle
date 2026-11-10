@@ -413,34 +413,37 @@ class LINEConnector(BaseConnector):
         else:
             text = f"[{msg_type}]"
 
-        # Try to get user display name
-        user_name = user_id
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                if source_type == "group":
-                    url = f"{LINE_API_BASE}/bot/group/{source.get('groupId')}/member/{user_id}"
-                else:
-                    url = f"{LINE_API_BASE}/bot/profile/{user_id}"
-                resp = await client.get(url, headers=self._headers())
-                if resp.status_code == 200:
-                    user_name = resp.json().get("displayName", user_id)
-        except Exception:
-            logger.debug("Failed to resolve LINE user name for %s", user_id, exc_info=True)
+        # Take the chat's place before the name lookup, so a slow lookup cannot
+        # let a later message from an overlapping webhook overtake this one (#1324).
+        with self.arrival_place(chat_id) as place:
+            # Try to get user display name
+            user_name = user_id
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    if source_type == "group":
+                        url = f"{LINE_API_BASE}/bot/group/{source.get('groupId')}/member/{user_id}"
+                    else:
+                        url = f"{LINE_API_BASE}/bot/profile/{user_id}"
+                    resp = await client.get(url, headers=self._headers())
+                    if resp.status_code == 200:
+                        user_name = resp.json().get("displayName", user_id)
+            except Exception:
+                logger.debug("Failed to resolve LINE user name for %s", user_id, exc_info=True)
 
-        msg = IncomingMessage(
-            connector_id=self.connector_id,
-            platform_chat_id=chat_id,
-            platform_user_id=user_id,
-            platform_user_name=user_name,
-            text=text,
-            platform_message_id=message.get("id"),
-            metadata={
-                "source_type": source_type,
-                "message_type": msg_type,
-                "reply_token": event.get("replyToken"),
-            },
-        )
-        await self._on_incoming_message(msg)
+            msg = IncomingMessage(
+                connector_id=self.connector_id,
+                platform_chat_id=chat_id,
+                platform_user_id=user_id,
+                platform_user_name=user_name,
+                text=text,
+                platform_message_id=message.get("id"),
+                metadata={
+                    "source_type": source_type,
+                    "message_type": msg_type,
+                    "reply_token": event.get("replyToken"),
+                },
+            )
+            await place.hand_off(msg)
 
     async def _process_postback_event(self, event: Dict[str, Any]) -> None:
         """Process a postback event (button clicks) from LINE."""
