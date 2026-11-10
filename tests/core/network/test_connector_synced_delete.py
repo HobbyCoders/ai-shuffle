@@ -7,7 +7,7 @@ after the apply, B must hold what a local delete on B would have left.
 """
 import pytest
 
-from app.db import database, watch_journal
+from app.db import database
 from app.db import watches as watch_store
 from app.db.base import get_db, parse_jsonb
 from app.network import engine, policy
