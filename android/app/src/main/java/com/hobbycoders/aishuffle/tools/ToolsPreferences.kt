@@ -14,7 +14,20 @@ class ToolsPreferences(context: Context) {
         return Settings.Secure.getString(app.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
             .orEmpty().split(':').any { ComponentName.unflattenFromString(it) == expected }
     }
-    companion object { @Volatile private var crossAppSession = false }
+    companion object {
+        @Volatile private var crossAppSession = false
+        /** Debug builds only: what last ended an app-control session or kept one from starting, for a test that finds it off. */
+        @androidx.annotation.VisibleForTesting @Volatile internal var lastDisarm: String? = null
+        private fun noteSession(was: Boolean, wanted: Boolean, refusal: () -> String) {
+            if (!com.hobbycoders.aishuffle.BuildConfig.DEBUG) return
+            lastDisarm = when {
+                crossAppSession -> null
+                wanted -> "not started: ${refusal()}"
+                was -> Throwable().stackTrace.drop(1).take(6).joinToString(" < ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }
+                else -> lastDisarm
+            }
+        }
+    }
     val crossAppEnabled: Boolean get() = enabled && crossAppSession
     val allowedApps: Set<String> get() = prefs.getStringSet("allowed_apps", emptySet()).orEmpty().toSet()
     fun setAllowedApps(packages: Set<String>) {
@@ -23,13 +36,15 @@ class ToolsPreferences(context: Context) {
         DeviceToolsRuntime.preferencesChanged()
     }
     fun setCrossAppEnabled(value: Boolean) {
+        val was = crossAppSession
         crossAppSession = value && enabled && ShuffleAccessibilityService.current != null
+        noteSession(was, value) { "enabled=$enabled service=${ShuffleAccessibilityService.current != null}" }
         ShuffleAccessibilityService.current?.cancelConsent()
         DeviceToolsRuntime.preferencesChanged()
     }
     fun setEnabled(value: Boolean) {
         prefs.edit().putBoolean("enabled", value).commit()
-        if (!value) { crossAppSession = false; ToolApprovals.cancelAll(); ShuffleAccessibilityService.current?.cancelConsent() }
+        if (!value) { val was = crossAppSession; crossAppSession = false; noteSession(was, false) { "" }; ToolApprovals.cancelAll(); ShuffleAccessibilityService.current?.cancelConsent() }
         DeviceToolsRuntime.preferencesChanged()
     }
 }
