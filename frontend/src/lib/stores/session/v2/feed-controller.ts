@@ -1178,7 +1178,6 @@ export const feedController: FeedController = {
 				// by turn id for a drained queue row (#588), by text for one steered
 				// into the running turn (whose event carries the LIVE turn's id).
 				// Reported in both phases; only live events count as a delivery.
-				if (ev.type === 'message.user' && caughtUp) console.warn(`[1052] ${Math.round(performance.now())} message.user ${String(ev.content).slice(-14)}`); // TEMP-1052
 				if (ev.type === 'message.user') {
 					pendingQueue.noteDelivered(
 						currentSessionId,
