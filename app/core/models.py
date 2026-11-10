@@ -102,7 +102,11 @@ class ProfileConfig(BaseModel):
     system_prompt: Optional[SystemPromptConfig] = None
 
     # Streaming behavior
-    include_partial_messages: bool = False  # Enable streaming partial messages
+    # Live (streamed) replies. On unless an agent turned it off: this default
+    # must match the run path (``query_options``: ``config.get(..., True)``),
+    # because the read API fills a missing key from here and an editor that
+    # saves what it read would otherwise store an explicit off.
+    include_partial_messages: bool = True
 
     # Session behavior
     continue_conversation: bool = False  # Continue most recent conversation
