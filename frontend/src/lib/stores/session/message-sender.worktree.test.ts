@@ -55,7 +55,7 @@ function setup(overrides: Partial<ActiveSessionState> = {}, options: { realActiv
 		pendingTools: new Set(), awaitingNewSession: false, pendingRequestId: null,
 		stopRequestedBeforeSession: false, worktreeCreationGeneration: 0, worktreeCreateAbort: null,
 	};
-	const wsConn = { isConnected: vi.fn(() => true), connect: vi.fn(), send: vi.fn(() => true), resetReconnectAttempts: vi.fn() };
+	const wsConn = { isConnected: vi.fn(() => true), connect: vi.fn(), send: vi.fn((_frame: Record<string, unknown>) => true), resetReconnectAttempts: vi.fn() };
 	const sendMessage = vi.fn<ReturnType<typeof createMessageSender>['sendMessage']>(async () => true);
 	const deps: MessageSenderDeps = {
 		update: (fn) => { state = fn(state); },
@@ -485,7 +485,7 @@ describe('a second send while the first send creates the worktree (#1444)', () =
 		expect(await first).toBe(true);
 		expect(await second).toBe(true);
 		expect(post.mock.calls.filter(([path]) => path === '/sessions/with-worktree')).toHaveLength(1);
-		const queries = wsConn.send.mock.calls.map(([frame]) => frame as Record<string, unknown>).filter(frame => frame.type === 'query');
+		const queries = wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query');
 		expect(queries.map(frame => [frame.prompt, frame.session_id])).toEqual([['first', 'wt-c'], ['second', 'wt-c']]);
 	});
 
@@ -500,6 +500,6 @@ describe('a second send while the first send creates the worktree (#1444)', () =
 		expect(await first).toBe(false);
 		expect(await second).toBe(false);
 		expect(post).toHaveBeenCalledTimes(1);
-		expect(wsConn.send.mock.calls.filter(([frame]) => (frame as { type?: string }).type === 'query')).toEqual([]);
+		expect(wsConn.send.mock.calls.filter(([frame]) => frame.type === 'query')).toEqual([]);
 	});
 });
