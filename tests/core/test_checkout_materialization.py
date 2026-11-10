@@ -1861,3 +1861,28 @@ def test_turn_start_keeps_refusing_while_a_serving_monitor_runs(turn_start, clea
     assert resolve.refused() is None
     _assert_still_detached(path)
     assert _out(path, "rev-parse", "HEAD") == main_sha
+
+
+def test_turn_start_keeps_refusing_while_another_sessions_serving_monitor_runs(
+    turn_start, project, clean_task_registry
+):
+    """Another session on the same branch left a dev server running in the
+    detached tree, with no durable task row yet: the switch would move the
+    files under it."""
+    from app.core.session_reservations import holds_resources
+    from app.core.task_registry import task_registry
+    from app.db import database
+
+    path, branch, tip, main_sha, resolve = turn_start
+    _git(path, "checkout", "--detach", main_sha)
+    database.create_session(
+        "sess-1437-b", None, project_v2_id=project["id"], worktree_branch=branch,
+        derive_provider_from_profile=False,
+    )
+    task_registry.start_task("sess-1437-b", "server", "shell", "dev server")
+    task_registry.mark_monitor_shell_task("sess-1437-b", "server", serves=True)
+    assert holds_resources("sess-1437-b") is False
+
+    assert resolve.refused() is None
+    _assert_still_detached(path)
+    assert _out(path, "rev-parse", "HEAD") == main_sha

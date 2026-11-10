@@ -460,8 +460,11 @@ def reattach_own_detached_checkout(session_row: Dict[str, Any]) -> bool:
             return False
         # Unlike the end-of-turn resync, the session's own workers count too:
         # one sharing this folder may be working in the detached tree.
+        # holds_resources skips serving Monitors, so check those here too.
         if any(
-            other.get("id") != session_id and holds_resources(other["id"])
+            other.get("id") != session_id and (
+                holds_resources(other["id"])
+                or task_registry.has_running_monitor_shell(other["id"]))
             for other in database.list_sessions_for_v2_branch(project["id"], branch)
         ):
             logger.info(
