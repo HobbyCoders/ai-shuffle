@@ -12,9 +12,11 @@
 //
 // Use: `await page.addInitScript(fakeTerminals)` before the page loads, or
 // paste `fakeTerminals.toString()` into a page and call it (manual checks).
+// `page.addInitScript(fakeTerminals, { defaultShell: 'powershell' })` makes
+// that the picker's default shell (a long name, as on Windows without pwsh).
 
 /** Runs inside the page. Self-contained: no closure over module scope. */
-export function fakeTerminals() {
+export function fakeTerminals({ defaultShell = 'bash' } = {}) {
 	if (window.__fakeTerminals) return;
 	const worker = { id: 'dev-worker', name: 'Dev worker', platform: 'linux' };
 	const peer = { kind: 'worker', worker_id: 'peer', name: 'Build box', available: true };
@@ -46,7 +48,7 @@ export function fakeTerminals() {
 			return json({
 				worker, supported: true, unsupported_reason: null,
 				targets: [{ kind: 'worker', worker_id: worker.id, name: worker.name, available: true }, peer],
-				shells: [{ name: 'bash', default: true }, { name: 'sh', default: false }], default_shell: 'bash',
+				shells: [...new Set([defaultShell, 'bash', 'sh'])].map((name) => ({ name, default: name === defaultShell })), default_shell: defaultShell,
 				default_folder: { path: '/workspace/dev-sandbox', source: 'project' },
 				chat_worker_id: null, limit: state.limit, open: state.terminals.size
 			});
@@ -60,7 +62,7 @@ export function fakeTerminals() {
 			const id = `fake-${++state.next}`;
 			const terminal = {
 				id, target: body.target?.worker_id === peer.worker_id ? { kind: 'worker', worker_id: peer.worker_id } : { kind: 'worker', worker_id: worker.id },
-				shell: body.shell || 'bash', cwd: body.cwd || '/workspace/dev-sandbox', folder_source: 'project',
+				shell: body.shell || defaultShell, cwd: body.cwd || '/workspace/dev-sandbox', folder_source: 'project',
 				session_id: body.session_id ?? null, state: 'live', exit_code: null, created_at: new Date().toISOString(),
 				exited_at: null, busy: false, cols: body.cols ?? 80, rows: body.rows ?? 24, attached: 0, line: ''
 			};

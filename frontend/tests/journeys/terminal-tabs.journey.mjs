@@ -12,11 +12,12 @@
 // The panel, its stores and xterm are the real ones.
 //
 // Cases:
-//   header   open the panel, open one terminal, then two more, switch tabs,
+//   header   (powershell shells) open the panel, open one terminal, then two more, switch tabs,
 //            search, copy, clear, run and stop a command, close a terminal
 //            from its tab, Watch command and back, close the panel
 //   resize   seven terminals, the last selected, then 390 -> 360 -> 500 -> 390:
 //            the selected tab and its close button stay in the strip (#1394)
+// In both, the selected tab's name never runs under its close button.
 import { DEFAULT_VIEWPORTS, runJourney } from './runner.mjs';
 import { composerControl, expect, gotoApp, seededChatId, waitChatOpen } from './lib/app.mjs';
 import { fakeTerminals } from './lib/fake-terminals.mjs';
@@ -44,6 +45,7 @@ async function headerGeometry(page) {
 			tabCount: tabs ? tabs.querySelectorAll('.tab').length : 0,
 			current: box(current),
 			currentName: box(current?.querySelector('.tab-host') ?? current?.querySelector('.tab-shell')),
+			currentNameCut: (() => { const el = current?.querySelector('.tab-host') ?? current?.querySelector('.tab-shell'); return el ? el.scrollWidth - el.clientWidth : null; })(),
 			currentClose: box(current?.querySelector('.tab-close')),
 			tools: box(bar?.querySelector('.tools')),
 			controls: bar ? [...bar.querySelectorAll('button:not([role="tab"]):not(.tab-close)')]
@@ -68,18 +70,26 @@ async function expectUsableHeader(page, variant, what) {
 	expect(g.tabs.width >= g.current.width, `${where}: the strip (${g.tabs.width}px) is at least as wide as the selected tab (${g.current.width}px)`);
 	expect(inside(g.currentName, g.tabs) && inside(g.currentName, g.panel), `${where}: the selected tab's name is in view (${JSON.stringify(g.currentName)}, strip ${JSON.stringify(g.tabs)})`);
 	expect(inside(g.currentClose, g.tabs) && inside(g.currentClose, g.panel), `${where}: the selected tab's close button is in view (${JSON.stringify(g.currentClose)}, strip ${JSON.stringify(g.tabs)})`);
+	expectNameClearOfClose(g, where);
 	const phone = variant.viewport !== 'desktop';
 	if (phone) {
 		// Touch-size targets: the terminal's tools and + are 40 px on a phone, a tab's close 28 px.
 		for (const control of g.controls.filter((c) => /^(New terminal|Search output|Copy output|Clear|Stop)$/.test(c.name))) {
 			expect(control.width >= 40 && control.height >= 40, `${where}: "${control.name}" keeps a touch-size target (${control.width}x${control.height})`);
 		}
+		// A phone sizes each tab to its name, so even "powershell" reads in full.
+		expect(g.currentNameCut <= 0, `${where}: the selected tab's name is not cut off (${g.currentNameCut}px hidden)`);
 		expect(g.currentClose.width >= 28 && g.currentClose.height >= 28, `${where}: the tab's close button keeps its touch size (${g.currentClose.width}x${g.currentClose.height})`);
 		expect(g.tabs.top >= g.tools.bottom - 1, `${where}: the tabs have a row of their own under the tools (tabs ${JSON.stringify(g.tabs)}, tools ${JSON.stringify(g.tools)})`);
 	} else {
 		expect(g.tabs.top < g.tools.bottom && g.tools.top < g.tabs.bottom, `${where}: the default-width panel keeps tabs and tools on one row (tabs ${JSON.stringify(g.tabs)}, tools ${JSON.stringify(g.tools)})`);
 	}
 	return g;
+}
+
+/** The shell or host name ends before the close button: "powershell" ran under it in a 96 px tab. */
+function expectNameClearOfClose(g, where) {
+	expect(g.currentName.right <= g.currentClose.left + 1, `${where}: the selected tab's name (${JSON.stringify(g.currentName)}) does not run under its close button (${JSON.stringify(g.currentClose)})`);
 }
 
 /** The selected tab's name and close button sit inside the strip (#1394), whatever the header's layout. */
@@ -89,6 +99,7 @@ async function expectSelectedInView(page, what) {
 	expect(g.panelOverflow <= 1 && g.barOverflow <= 1, `${what}: nothing is wider than the panel (panel ${g.panelOverflow}px, header ${g.barOverflow}px)`);
 	expect(inside(g.currentName, g.tabs), `${what}: the selected tab's name is in view (${JSON.stringify(g.currentName)}, strip ${JSON.stringify(g.tabs)})`);
 	expect(inside(g.currentClose, g.tabs) && inside(g.currentClose, g.panel), `${what}: the selected tab's close button is in view (${JSON.stringify(g.currentClose)}, strip ${JSON.stringify(g.tabs)})`);
+	expectNameClearOfClose(g, what);
 	return g;
 }
 
@@ -104,7 +115,8 @@ await runJourney({
 			name: 'header',
 			async setup(ctx) {
 				const { page, status } = ctx;
-				await page.addInitScript(fakeTerminals);
+				// The longest local shell name (Windows without PowerShell 7).
+				await page.addInitScript(fakeTerminals, { defaultShell: 'powershell' });
 				await gotoApp(page, status, `/?session=${encodeURIComponent(seededChatId(status, 'worktree'))}`);
 				await waitChatOpen(page, { messagesAtLeast: 2, hold: 1000 });
 			},

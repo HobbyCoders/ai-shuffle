@@ -631,7 +631,10 @@
 	.tab-select { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 100%; padding: 0 22px 0 10px; border: 0; background: transparent; color: var(--muted-foreground); font: 500 12px var(--font-sans); cursor: pointer; text-align: left; }
 	.tab.current .tab-select { color: var(--foreground); }
 	.tab-select:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; border-radius: 6px; }
-	.tab-shell { flex-shrink: 0; }
+	/* Cut with an ellipsis rather than run under the close button when the
+	   tab is narrower than the name ("powershell" in a 96 px tab). The folder
+	   gives way first. */
+	.tab-shell { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	/* One line, cut with an ellipsis (the full name is its title). It may
 	   shrink, so it never runs under the close button; the folder gives way first. */
 	.tab-host { flex: 0 1 auto; min-width: 0; max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 5px; border-radius: 4px; font: 600 10.5px var(--font-sans);
@@ -706,7 +709,9 @@
 	.mobile .tab-select { padding-right: 32px; }
 	@container (max-width: 420px) {
 		.tab-folder { display: none; }
-		.tab { flex-basis: 96px; min-width: 76px; }
+		/* Each tab as wide as its shell name and close button (up to 168 px),
+		   never squeezed below them: the strip scrolls instead. */
+		.tab { flex: 0 0 auto; min-width: 76px; }
 		/* A shell on another worker: the worker matters more than the shell
 		   name here (the status bar still shows both), so the badge gets the room. */
 		.tab:has(.tab-host) { flex-basis: 156px; min-width: 112px; max-width: 156px; }
