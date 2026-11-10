@@ -12,7 +12,13 @@ class allowlist (`ToolArgsDelta`, `TextDelta`, `ThinkingDelta`, `ProviderAlive`)
 It dates sessions first, then walks at most 5,000 existing primary-key entries
 per transaction, including nonmatching entries. Each delete has that same bounded
 sequence range and rechecks idleness. No new index or startup migration is needed.
-A failed session is logged, other sessions continue, and maintenance receives an
+If a range's delete fails after its selection completed (a held row lock or a
+spent statement budget), that range is rolled back and skipped, and the same
+session continues after it; each pass restarts every session from its beginning,
+so skipped rows are retried next pass without a stored cursor. A failed selection,
+or three failed ranges in a row, stops that session for the pass, which bounds a
+fully blocked session to about three statement timeouts. Any session with a
+failed range is logged, other sessions continue, and maintenance receives an
 explicit error with the committed row count; the next pass retries it. A supplied
 cursor retains the caller's transaction and error/rollback ownership. Stop requests
 are checked between ranges. Orphaned sessions and all other event classes remain.
