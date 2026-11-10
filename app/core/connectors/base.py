@@ -11,7 +11,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -297,10 +297,43 @@ class BaseConnector(ABC):
         self._status_message: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
         self._arrival_tails: Dict[str, asyncio.Future[None]] = {}
+        self._reply_tasks: Set[asyncio.Task[None]] = set()
 
     def arrival_place(self, platform_chat_id: str) -> ArrivalPlace:
         """Reserve a message's turn in its chat now; see ``ArrivalPlace``."""
         return ArrivalPlace(self._arrival_tails, str(platform_chat_id), self._on_incoming_message)
+
+    def queue_reply_message(self, message: "IncomingMessage") -> None:
+        """Hand a connector-made message, such as a command's result, to its chat later.
+
+        Commands run inside ``send_message``, while the manager still holds the
+        chat for the turn that sent them, so awaiting the result's turn there
+        would wait on that chat forever (#1400). The message takes its chat place
+        now, so a command's results reach the chat in the order they were made,
+        and runs once the current turn ends. ``disconnect`` must call
+        ``cancel_reply_messages``.
+        """
+        # Imported here: the isolated connector worker loads base.py before it.
+        from app.core.detached_tasks import spawn_detached
+
+        place = self.arrival_place(message.platform_chat_id)
+
+        async def deliver() -> None:
+            with place:
+                await place.hand_off(message)
+
+        task = spawn_detached(deliver(), name=f"{self.connector_type}-reply")
+        if task is not None:
+            self._reply_tasks.add(task)
+            task.add_done_callback(self._reply_tasks.discard)
+
+    async def cancel_reply_messages(self) -> None:
+        """Cancel every ``queue_reply_message`` still waiting or running."""
+        tasks = tuple(self._reply_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def handle_delivery(
         self,

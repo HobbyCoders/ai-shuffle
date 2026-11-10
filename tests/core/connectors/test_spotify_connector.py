@@ -98,6 +98,20 @@ class FakeSpotify:
         return [(m, p, q, b) for m, p, q, b in self.requests if method is None or m == method]
 
 
+def deliver_queued_replies(conn):
+    """Command results are queued for their chat (#1400); deliver them before asserting."""
+    send = conn.send_message
+
+    async def send_and_deliver(message):
+        ok = await send(message)
+        while conn._reply_tasks:
+            await asyncio.gather(*tuple(conn._reply_tasks))
+        return ok
+
+    conn.send_message = send_and_deliver
+    return conn
+
+
 def make_spotify(api=None, *, config=None, on_trigger=None):
     conn = SpotifyConnector(
         connector_id="sp-1", connector_type="spotify",
@@ -107,7 +121,7 @@ def make_spotify(api=None, *, config=None, on_trigger=None):
     )
     if api is not None:
         conn._http_client = mock_transport_client(api)
-    return conn
+    return deliver_queued_replies(conn)
 
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient

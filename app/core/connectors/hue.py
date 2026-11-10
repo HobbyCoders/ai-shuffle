@@ -206,6 +206,7 @@ class HueConnector(BaseConnector):
     async def disconnect(self) -> None:
         """Cancel the poll task and close the HTTP client."""
         try:
+            await self.cancel_reply_messages()
             if self._poll_task is not None and not self._poll_task.done():
                 self._poll_task.cancel()
                 try:
@@ -691,8 +692,13 @@ class HueConnector(BaseConnector):
     # Reply helper
     # ------------------------------------------------------------------
 
-    async def _emit_reply(self, text: str) -> None:
-        """Send a synthetic IncomingMessage back with the command result."""
+    async def _emit_reply(self, text: str, *, queue: bool = True) -> None:
+        """Send a synthetic IncomingMessage back with the command result.
+
+        A command's result is queued: it runs inside the turn that holds the
+        chat (#1400). A notification (``queue=False``) is not, so its caller
+        still learns whether it was delivered.
+        """
         for chunk in chunk_text(text, self.MAX_MESSAGE_LENGTH):
             msg = IncomingMessage(
                 connector_id=self.connector_id,
@@ -702,7 +708,10 @@ class HueConnector(BaseConnector):
                 text=chunk,
                 metadata={"synthetic": True},
             )
-            await self._on_incoming_message(msg)
+            if queue:
+                self.queue_reply_message(msg)
+            else:
+                await self._on_incoming_message(msg)
 
     # ------------------------------------------------------------------
     # Permission prompt (not supported)
@@ -743,7 +752,7 @@ class HueConnector(BaseConnector):
         else:
             text = f"{icon} {event_type}\n\n{data}"
 
-        await self._emit_reply(text)
+        await self._emit_reply(text, queue=False)
         return True
 
     # ------------------------------------------------------------------

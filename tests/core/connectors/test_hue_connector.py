@@ -75,6 +75,24 @@ class Bridge:
         return [(p, b) for m, p, b in self.requests if m == "PUT"]
 
 
+async def settle_replies(conn):
+    while conn._reply_tasks:
+        await asyncio.gather(*tuple(conn._reply_tasks))
+
+
+def deliver_queued_replies(conn):
+    """Command results are queued for their chat (#1400); deliver them before asserting."""
+    send = conn.send_message
+
+    async def send_and_deliver(message):
+        ok = await send(message)
+        await settle_replies(conn)
+        return ok
+
+    conn.send_message = send_and_deliver
+    return conn
+
+
 def make_hue(bridge=None, *, config=None, on_trigger=None):
     conn = HueConnector(
         connector_id="hue-1",
@@ -87,7 +105,7 @@ def make_hue(bridge=None, *, config=None, on_trigger=None):
     if bridge is not None:
         conn._http_client = mock_transport_client(bridge)
         conn._lights = {lid: info["name"] for lid, info in LIGHTS.items()}
-    return conn
+    return deliver_queued_replies(conn)
 
 
 def replies(conn):
@@ -235,6 +253,7 @@ class TestCommands:
     async def test_color_temp_unknown_preset_direct(self):
         conn = make_hue(Bridge())
         assert await conn._cmd_set_color_temp("desk", "sunset") is True
+        await settle_replies(conn)
         assert "Unknown color temperature preset" in replies(conn)[0]
 
     async def test_activate_scene_partial_match(self):
@@ -412,6 +431,7 @@ class TestMisc:
     async def test_long_reply_is_chunked(self):
         conn = make_hue()
         await conn._emit_reply("x" * 9000)
+        await settle_replies(conn)
         assert len(replies(conn)) == 3
 
     async def test_execute_tool_routes_to_actions(self):

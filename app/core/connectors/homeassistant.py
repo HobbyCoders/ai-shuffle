@@ -238,6 +238,7 @@ class HomeAssistantConnector(BaseConnector):
     async def disconnect(self) -> None:
         """Stop polling and close the HTTP client."""
         try:
+            await self.cancel_reply_messages()
             if self._poll_task is not None and not self._poll_task.done():
                 self._poll_task.cancel()
                 try:
@@ -663,7 +664,8 @@ class HomeAssistantConnector(BaseConnector):
             platform_message_id=f"ha-reply-{int(time.time() * 1000)}",
             metadata={"synthetic": True},
         )
-        await self._on_incoming_message(msg)
+        # Never await it: this runs inside the turn that holds the chat (#1400).
+        self.queue_reply_message(msg)
 
     # ------------------------------------------------------------------
     # Permission prompt (not supported)

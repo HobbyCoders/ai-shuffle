@@ -89,7 +89,7 @@
       "module": "spotify",
       "class": "SpotifyConnector",
       "files": {
-        "spotify.py": "ccc379986606e06fe8891b68e951ed8957484a6cf64fc3f4bb84347705fe57b0",
+        "spotify.py": "df87044bb67a6b44a2a89223823714640a493f5a9cdcf9f696540eafa39328be",
         "spotify_actions.py": "dc1fec93bf67e38669ff4ea4997a755332de148c7395fc0860ac9648721f0a3b"
       }
     },
@@ -97,7 +97,7 @@
       "module": "hue",
       "class": "HueConnector",
       "files": {
-        "hue.py": "431d37275bcbd82dc2b7380db0e15898b9bc65e835cd2ac81bcde42d09e59395",
+        "hue.py": "549154e68c1db753c8e3e502f83f1810b9cf21ac8abe881ba465cb2342e272df",
         "hue_actions.py": "6717bb5132be4b61ff7b8616e9cddbcbed64db4e7155d939ce8ab7574f6c1c96"
       }
     },
@@ -105,7 +105,7 @@
       "module": "homeassistant",
       "class": "HomeAssistantConnector",
       "files": {
-        "homeassistant.py": "4b165b1f4283d0b82df720ca93979d18fc3f23945d41c4e3f873dbbf3fa6f047",
+        "homeassistant.py": "dc65e1684bcde040665acd47b25ab24625847c33c30769a8581e987b31e70a27",
         "homeassistant_actions.py": "f454dd24da591244bd87e8c869229f75fc394135df3376b1d342864b73bfd3e8"
       }
     },
@@ -145,5 +145,5 @@
     ]
   },
   "sdk": 1,
-  "release": "8b2cb90e2bc3e55a"
+  "release": "a7c176e8c9c70f35"
 }
