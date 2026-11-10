@@ -165,15 +165,22 @@ async def test_receiver_delete_of_a_chat_moved_from_an_unsynced_mirror(pair, mon
     _assert_deleted_everywhere(a, b)
 
 
-def test_a_chat_the_network_never_knew_gets_no_tombstone(pair):  # noqa: F811
-    _, b, _, _ = pair
+def test_a_chat_the_network_never_knew_gets_one_harmless_tombstone(pair):  # noqa: F811
+    """Review S9: no record here is no proof no peer holds it, so the owner scan publishes one tombstone."""
+    a, b, _, _ = pair
     with b.active():
         database.create_session("local-only", "default", title="Local")
         assert _record(b, "local-only") is None
         assert database.delete_session("local-only")
+        assert not _fact(b, "local-only")["pending"]  # nothing to publish at once
         catalog.publish_owned()
-    assert _record(b, "local-only") is None
-    assert not _fact(b, "local-only")["pending"]  # nothing to publish unless a record arrives
+    assert _record(b, "local-only")["deleted"] and not _fact(b, "local-only")["pending"]
+    with b.active():
+        assert engine.publish_session_deletions() == 0, "published once, not on every scan"
+    converge([a, b])
+    with a.active():
+        assert database.get_session("local-only") is None
+    assert _record(a, "local-only")["deleted"]
 
 
 @pytest.mark.asyncio
@@ -229,7 +236,9 @@ async def test_receiver_delete_of_an_unsynced_mirror_moved_then_unpinned(pair, m
         sessions_db.unpin_session(SID, "")  # placement (and its hand-off receipt) is gone
         assert database.get_session(SID)["placement"] in (None, {}, "null")
     await _delete_on_receiver(b)
-    assert _record(b) is None and not _fact(b)["pending"]
+    # No record here: the owner scan publishes the tombstone anyway (review S9).
+    assert _record(b)["deleted"] and _record(b)["origin_device_id"] == b.device_id
+    assert not _fact(b)["pending"]
     _assert_deleted_everywhere(a, b)
 
 
