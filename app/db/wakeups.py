@@ -131,6 +131,16 @@ def current_stop_seq(session_id: str) -> int:
         return int(cursor.fetchone()["stop_seq"])
 
 
+def pending_not_stopped(wakeup_id: str) -> bool:
+    """Whether the wake is still pending and no Stop since it was armed cancelled it.
+
+    Read without claiming, for a wake that keeps its row until its turn exists."""
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(f"SELECT 1 FROM pending_wakeups WHERE id = {ph()} AND {_NOT_STOPPED}", (wakeup_id,))
+        return cursor.fetchone() is not None
+
+
 def _cancelled_by_stop(cursor: Any, row: Dict[str, Any]) -> bool:
     """Whether a user Stop came after this wake was armed, and so cancelled it.
 

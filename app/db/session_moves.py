@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.db.base import get_cursor, get_db, parse_jsonb, rows_to_list
 from app.db.compat import ph, phs
 
-_COLUMNS = ("session_id", "target_id", "label", "note", "requested_by", "requested_at", "expires_at", "handoff_id")
+_COLUMNS = ("session_id", "target_id", "label", "note", "requested_by", "requested_at", "expires_at", "handoff_id",
+            "stop_seq")
 
 
 def _parse(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -30,8 +31,12 @@ def _parse(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def save(session_id: str, *, target_id: str, label: str, note: str, requested_by: str,
-         requested_at: float, expires_at: float, handoff_id: Optional[str] = None) -> None:
-    """Insert or replace the queued move of ``session_id``; held messages are kept."""
+         requested_at: float, expires_at: float, handoff_id: Optional[str] = None,
+         stop_seq: Optional[int] = None) -> None:
+    """Insert or replace the queued move of ``session_id``; held messages are kept.
+
+    ``stop_seq`` is the chat's Stop sequence when the agent asked for the move:
+    the notice of its failure is stamped with it, so a later Stop cancels it."""
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
@@ -41,9 +46,10 @@ def save(session_id: str, *, target_id: str, label: str, note: str, requested_by
             "label=EXCLUDED.label, note=EXCLUDED.note, requested_by=EXCLUDED.requested_by, "
             "requested_at=EXCLUDED.requested_at, expires_at=EXCLUDED.expires_at, "
             "resume_exported=CASE WHEN session_moves.handoff_id=EXCLUDED.handoff_id "
-            "THEN session_moves.resume_exported ELSE FALSE END, handoff_id=EXCLUDED.handoff_id",
+            "THEN session_moves.resume_exported ELSE FALSE END, handoff_id=EXCLUDED.handoff_id, "
+            "stop_seq=EXCLUDED.stop_seq",
             (session_id, target_id, label, note or "", requested_by,
-             float(requested_at), float(expires_at), handoff_id or str(uuid.uuid4())),
+             float(requested_at), float(expires_at), handoff_id or str(uuid.uuid4()), stop_seq),
         )
 
 
@@ -165,20 +171,31 @@ def _take(cursor: Any, session_id: str) -> Optional[Dict[str, Any]]:
     return _parse(dict(row))
 
 
-def take_ended(session_id: str, *, take: bool,
-               wake: Optional[Dict[str, Any]]) -> "tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]":
-    """End the queued move of ``session_id`` here in one transaction: take its
-    row when ``take`` and write ``wake``, the ordinary persisted wake-up that
-    tells an agent its move ended (#1419), unless a retry finds it written.
-    Returns (the taken row, the written wake)."""
+def take_ended(session_id: str, handoff_id: str, *, take: bool, wake: Optional[Dict[str, Any]],
+               still_here: Callable[[Dict[str, Any]], bool]) -> "tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]":
+    """End the move ``handoff_id`` of ``session_id`` here in one transaction:
+    take its row when ``take`` and write ``wake``, the ordinary persisted
+    wake-up that tells an agent its move ended (#1419). A newer move's row is
+    never taken and gets no notice. No notice either when the chat is gone or
+    ``still_here(session row)`` is False. Returns (the taken row, the notice
+    wake, also when a retry finds it already written)."""
     from app.db import wakeups
 
-    row = written = None
+    row = notice = None
     with get_db() as conn:
         cursor = get_cursor(conn)
+        cursor.execute(f"SELECT handoff_id FROM session_moves WHERE session_id={ph()}", (session_id,))
+        queued = cursor.fetchone()
+        if queued and queued["handoff_id"] != handoff_id:
+            return None, None
         row = _take(cursor, session_id) if take else None
         if wake:
-            cursor.execute(f"SELECT 1 FROM pending_wakeups WHERE id={ph()}", (wake["id"],))
-            if cursor.fetchone() is None:
-                written = wakeups.create_wakeup(**wake, _conn=conn)
-    return row, written
+            # Row-locked, as turn admission locks it: a delete or an ownership
+            # change of the chat commits before this read or waits for this commit.
+            cursor.execute(f"SELECT * FROM sessions WHERE id={ph()} FOR UPDATE", (session_id,))
+            session = cursor.fetchone()
+            if session and still_here(dict(session)):
+                cursor.execute(f"SELECT * FROM pending_wakeups WHERE id={ph()}", (wake["id"],))
+                existing = cursor.fetchone()
+                notice = dict(existing) if existing else wakeups.create_wakeup(**wake, _conn=conn)
+    return row, notice

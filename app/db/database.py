@@ -2678,7 +2678,8 @@ def _run_column_migrations(cursor: Any) -> None:
         migrations_applied.append("session_moves")
     for column, definition in (("handoff_id", "TEXT"), ("wake_token", "TEXT"),
                                ("resume_exported", "BOOLEAN NOT NULL DEFAULT FALSE"),
-                               ("wakes_superseded", "BOOLEAN NOT NULL DEFAULT FALSE")):
+                               ("wakes_superseded", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                               ("stop_seq", "BIGINT")):
         if not column_exists(cursor, "session_moves", column):
             cursor.execute(f"ALTER TABLE session_moves ADD COLUMN {column} {definition}")
             migrations_applied.append(f"session_moves.{column}")

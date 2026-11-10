@@ -2982,7 +2982,7 @@ def create_builtin_tools_server(
         "end the turn with a short summary; restart that work on the target. The "
         "app pushes the branch, syncs the target and moves the session; the chat "
         "resumes there with your note as its prompt, and a failed move is reported "
-        "back to you. Pass the worker's name as shown in the app (or its device "
+        "back to you unless the chat is stopped. Pass the worker's name as shown in the app (or its device "
         "id) and an optional one-line note on what to continue; use absolute dates.",
         {
             "type": "object",

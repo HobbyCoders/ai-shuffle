@@ -246,6 +246,16 @@ async def _rearm_after_failed_submit(row: Dict[str, Any], reason: str) -> None:
     wakeup_id = row.get("id")
     session_id = row.get("session_id")
     attempt = _retry_attempts.get(str(wakeup_id), 0) + 1 if wakeup_id else 1
+    if _keeps_row(row):
+        # A hand-off failure notice (#1419) kept its row: re-arm the timer only,
+        # at the backoff's last step once there, until admission takes it or a
+        # Stop, delete, archive or the chat moving away retires it at the next fire.
+        delay = min(_RETRY_BASE_SECONDS * (2 ** min(attempt - 1, 8)), _RETRY_MAX_SECONDS)
+        _retry_attempts[str(wakeup_id)] = attempt
+        logger.warning("wakeup %s (session %s, source %s) submit failed (%s) — re-armed in %.0fs "
+                       "(attempt %d)", wakeup_id, session_id, row.get("source"), reason, delay, attempt)
+        _arm(row, delay)
+        return
     if attempt > _RETRY_MAX_ATTEMPTS:
         if wakeup_id:
             _retry_attempts.pop(str(wakeup_id), None)
@@ -298,6 +308,12 @@ async def _rearm_after_failed_submit(row: Dict[str, Any], reason: str) -> None:
         _RETRY_MAX_ATTEMPTS,
     )
     _arm(replacement, delay)
+
+
+def _keeps_row(row: Dict[str, Any]) -> bool:
+    """A hand-off failure notice keeps its row until its turn is admitted: its
+    stable command id makes a second firing a dropped duplicate (#1419)."""
+    return row.get("source") == "handoff_failed"
 
 
 def _session_user_stopped(session_id: Optional[str]) -> bool:
@@ -406,7 +422,18 @@ async def _fire(row: Dict[str, Any]) -> None:
             _retry_attempts.pop(str(wakeup_id), None)
         return
 
-    claimed = await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
+    from app.core import session_handoff, turn_manager
+
+    if _keeps_row(row):
+        if not await asyncio.to_thread(session_handoff.notice_owed, row):
+            logger.info("wakeup %s (session %s): the hand-off notice is no longer owed", wakeup_id, session_id)
+            await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
+            _retry_attempts.pop(str(wakeup_id), None)
+            return
+        await asyncio.to_thread(session_handoff.wait_released)  # after its move's held messages
+        claimed = True
+    else:
+        claimed = await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
     if not claimed:
         logger.info(
             "wakeup %s (session %s) already claimed/fired — skipping",
@@ -428,6 +455,8 @@ async def _fire(row: Dict[str, Any]) -> None:
             wakeup_id, session_id, row.get("profile_id"),
         )
         _retry_attempts.pop(str(wakeup_id), None)
+        if _keeps_row(row):
+            await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
         await _announce_dropped_wake(
             row, f"agent profile no longer exists or could not be resolved: {row.get('profile_id') or session_id}"
         )
@@ -449,8 +478,6 @@ async def _fire(row: Dict[str, Any]) -> None:
     # model. Rows without a model keep the default path.
     model = row.get("model")
     overrides = {"model": model} if model else None
-
-    from app.core import session_handoff, turn_manager
 
     try:
         if row.get("source") == HELD_PEER_SOURCE:
@@ -483,6 +510,8 @@ async def _fire(row: Dict[str, Any]) -> None:
         raise
     except archive_guard.SessionArchived:
         # Archived between the check above and the submit: drop, never re-arm.
+        if _keeps_row(row):
+            await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
         if wakeup_id:
             _retry_attempts.pop(str(wakeup_id), None)
         return
@@ -499,6 +528,8 @@ async def _fire(row: Dict[str, Any]) -> None:
         )
         return
 
+    if _keeps_row(row):
+        await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)  # retired once its turn exists
     if wakeup_id:
         _retry_attempts.pop(str(wakeup_id), None)
     logger.info(

@@ -1,4 +1,5 @@
 """Agent-queued hand-off to another worker, run when the session is idle."""
+import asyncio
 import sqlite3
 import threading
 import time
@@ -1658,9 +1659,11 @@ async def _notice_runs():
     return _notices()[0]
 
 
-async def _agent_move_ends(failure, *, owner=None, archived=False):
-    """Queue an agent hand-off of s1 and let it end by ``failure``."""
+async def _agent_move_ends(failure, *, owner=None, archived=False, queued=None):
+    """Queue an agent hand-off of s1, call ``queued()``, and let it end by ``failure``."""
     result = sh.request("s1", "DesktopWorker", "halfway")
+    if queued:
+        queued()
     if failure == "timeout":
         sh.pending_for("s1").expires_at = 1
     with patch.object(sh, "busy_state", return_value={"running": False, "tasks": [], "queued": 0, "wake": False}), \
@@ -1705,6 +1708,8 @@ def _submit_for_notice(decide):
         verdict = decide()
         if verdict == "raise":
             raise RuntimeError("database unavailable")
+        if verdict == "cancel":  # the process stops while the notice is being submitted
+            raise asyncio.CancelledError()
         return verdict
 
     def _sync(session_id, source, **kwargs):
@@ -1776,15 +1781,21 @@ async def test_1419_the_notice_runs_after_the_held_messages_and_only_once():
     assert prompts[0] == "one" and len(prompts) == 2 and "still busy" in prompts[1]
 
 
-async def test_1419_an_expired_agent_move_found_at_restart_tells_the_agent_once():
-    from app.db import session_moves
+@pytest.mark.parametrize("stop_seq", [0, None])  # None: a row an older build queued
+async def test_1419_an_expired_agent_move_found_at_restart_tells_the_agent_once(stop_seq):
+    from app.db import session_moves, wakeups
     _chat()
     session_moves.save("s1", target_id="dev-gaming", label="DesktopWorker", note="", requested_by="agent",
-                       requested_at=time.time() - 700, expires_at=time.time() - 100, handoff_id="move-1")
+                       requested_at=time.time() - 700, expires_at=time.time() - 100, handoff_id="move-1",
+                       stop_seq=stop_seq)
     with patch.object(sh, "busy_state", return_value={"running": False, "tasks": [], "queued": 0, "wake": False}), \
             patch.object(sh, "_record", AsyncMock()):
         await sh.resume_queued()
         await sh.resume_queued()
+    if stop_seq is None:  # no Stop boundary to place a notice against: none, as before #1419
+        await _settle(lambda: False, rounds=20)
+        assert _notices() == [] and wakeups.get_session_wakeups("s1") == [] and session_moves.get("s1") is None
+        return
     notice = await _notice_runs()
     assert notice["command_id"] == sh.FAILED_COMMAND_PREFIX + "move-1"
 
@@ -1803,9 +1814,13 @@ async def test_1419_no_notice_for_an_owner_move_a_stopped_or_archived_chat_or_a_
             await sh.queue_move("s1", "DesktopWorker")
             assert await _settle(lambda: sh.pending_for("s1") is None and "s1" not in sh._running)
     elif case == "stopped":
-        task_registry.mark_user_stopped("s1")
+        from app.db import turns
+
+        def _stop():  # the owner presses Stop after the agent asked for the move
+            turns.read_stop_receipt("s1")
+            task_registry.mark_user_stopped("s1")
         try:
-            await _agent_move_ends("move")
+            await _agent_move_ends("move", queued=_stop)
         finally:
             task_registry.clear_user_stop("s1")
     elif case == "archived":
@@ -1961,3 +1976,183 @@ async def test_1419_deleting_the_chat_with_the_notice_pending_leaves_nothing():
     await _restart()
     await _settle(lambda: False, rounds=30)
     assert _rows_of("s1") == []
+
+
+# Review round 4 of #1419: the notice survives every interruption until its
+# turn exists, and is placed against the Stop at the time of the request.
+
+_IDLE = {"running": False, "tasks": [], "queued": 0, "wake": False}
+
+
+def _expire_queued_move():
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE session_moves SET expires_at=1 WHERE session_id=%s", ("s1",))
+
+
+async def test_1419_a_notice_interrupted_before_its_turn_exists_is_delivered_once():
+    from app.core import wakeup_service
+    from app.db import wakeups
+    _chat()
+    verdicts = iter(["cancel"])
+    with _submit_for_notice(lambda: next(verdicts, "real")):
+        await _agent_move_ends("move")
+        await _settle(lambda: False, rounds=20)
+        assert _notices() == []
+        await _restart()
+        notice = await _notice_runs()
+        # Two firers at once (a timer and a rehydration), and a firer that
+        # finds the row its admitted turn did not retire: still one turn.
+        wake = wakeups.create_wakeup(id=notice["command_id"], session_id="s1", prompt=notice["prompt"],
+                                     fire_at=time.time(), source=sh.FAILED_PAYLOAD, stop_seq=0)
+        await asyncio.gather(wakeup_service._fire(wake), wakeup_service._fire(wake))
+        await _settle(lambda: False, rounds=20)
+    assert len(_notices()) == 1 and wakeups.get_session_wakeups("s1") == []
+
+
+async def test_1419_a_notice_refused_more_than_five_times_is_still_delivered():
+    from app.core import wakeup_service
+    from app.db import wakeups
+    _chat()
+    refusals = []
+
+    def _refused_seven_times():
+        refusals.append(1)
+        return "none" if len(refusals) <= 7 else "real"
+
+    with _submit_for_notice(_refused_seven_times), patch.object(wakeup_service, "_RETRY_BASE_SECONDS", 0.01), \
+            patch.object(wakeup_service, "_RETRY_MAX_SECONDS", 0.02):
+        await _agent_move_ends("move")
+        await _notice_runs()
+        await _settle(lambda: False, rounds=20)
+    assert len(refusals) == 8 and len(_notices()) == 1 and wakeups.get_session_wakeups("s1") == []
+
+
+async def test_1419_a_stop_after_the_request_holds_across_a_restart_and_one_before_it_does_not():
+    from app.core.task_registry import task_registry
+    from app.db import session_moves, turns, wakeups
+    _chat()
+    sh.request("s1", "DesktopWorker")
+    turns.read_stop_receipt("s1")  # Stop after the request, then shut down before the move ended
+    task_registry.mark_user_stopped("s1")
+    with patch.object(sh, "busy_state", return_value={"running": True, "tasks": [], "queued": 0, "wake": False}), \
+            patch.object(sh, "POLL_S", 0.01), patch.object(sh, "_record", AsyncMock()):
+        await _restart()  # the Stop latch is memory: gone; the move is queued again
+        sh.pending_for("s1").expires_at = 1  # and runs out of time on this run
+        assert await _settle(lambda: sh.pending_for("s1") is None and session_moves.get("s1") is None
+                             and not wakeups.get_session_wakeups("s1"))
+        await _settle(lambda: _notices(), rounds=100)  # an old-style claim deletes before it submits
+    assert _notices() == []
+    # A Stop before the agent asked (it asked from a later turn) does not cancel it.
+    await _agent_move_ends("move")
+    await _notice_runs()
+
+
+async def test_1419_an_end_committed_with_its_reply_lost_still_arms_the_notice():
+    from app.db import session_moves
+    _chat()
+    real, calls = session_moves.take_ended, []
+
+    def _committed_then_raised(*args, **kwargs):
+        calls.append(1)
+        result = real(*args, **kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("connection lost after commit")
+        return result
+
+    with patch.object(session_moves, "take_ended", side_effect=_committed_then_raised), \
+            patch.object(sh, "END_RETRY_DELAYS", (0,)):
+        await _agent_move_ends("move")
+        await _notice_runs()
+        await _settle(lambda: False, rounds=20)
+    assert len(calls) == 2 and len(_notices()) == 1
+
+
+async def test_1419_a_rehydration_between_the_end_and_the_held_release_queues_the_notice_last():
+    from app.core import wakeup_service
+    from app.db import session_moves
+    _chat()
+    loop = asyncio.get_running_loop()
+    real = session_moves.take_ended
+
+    def _rehydrate_after_commit(*args, **kwargs):
+        result = real(*args, **kwargs)
+        asyncio.run_coroutine_threadsafe(wakeup_service.rehydrate_pending(), loop).result(5)
+        deadline = time.time() + 0.5
+        while time.time() < deadline and not _notices():
+            time.sleep(0.01)  # a firer that does not wait would queue the notice now
+        return result
+
+    sh.request("s1", "DesktopWorker")
+    session_moves.append_held("s1", {"id": "held-1", "source": "user", "prompt": "one", "profile_id": "default"})
+    with patch.object(session_moves, "take_ended", side_effect=_rehydrate_after_commit):
+        sh.pending_for("s1").expires_at = 1
+        with patch.object(sh, "busy_state", return_value=_IDLE), patch.object(sh, "_record", AsyncMock()):
+            await sh.run_pending("s1")
+        await _notice_runs()
+    prompts = _queued_prompts()
+    assert prompts[0] == "one" and len(prompts) == 2 and "still busy" in prompts[1]
+
+
+async def test_1419_no_notice_unless_this_worker_still_owns_the_chat():
+    from app.db import session_moves, sessions, wakeups
+    _chat()
+    # The move landed but raised, and the first ownership read failed.
+    sh.request("s1", "DesktopWorker")
+    moved = AsyncMock(return_value="Handed off")
+    with patch.object(sh, "_owner_now", side_effect=[RuntimeError("database unavailable"), "dev-gaming"]), \
+            patch.object(sh, "_moved", moved), patch.object(sh, "END_RETRY_DELAYS", (0,)), \
+            patch.object(sh, "busy_state", return_value=_IDLE), patch.object(sh, "_open_prompt", return_value=False), \
+            patch.object(sh, "_record", AsyncMock()), \
+            patch("app.api.sessions.move_session_to", AsyncMock(side_effect=HTTPException(502, "no reply"))):
+        await sh.run_pending("s1")
+    moved.assert_awaited_once()
+    assert sh.pending_for("s1") is None and _notices() == [] and wakeups.get_session_wakeups("s1") == []
+    # The end transaction itself finds the chat owned elsewhere: no notice.
+    session_moves.take("s1")
+    with patch("app.network.control.owner_of", return_value="dev-gaming"):
+        await _agent_move_ends("move")
+    await _settle(lambda: False, rounds=20)
+    assert _notices() == [] and wakeups.get_session_wakeups("s1") == []
+    # The chat is deleted just before the end transaction: nothing is left.
+    real = session_moves.take_ended
+
+    def _deleted_first(*args, **kwargs):
+        sessions.delete_session("s1")
+        return real(*args, **kwargs)
+
+    with patch.object(session_moves, "take_ended", side_effect=_deleted_first):
+        await _agent_move_ends("move")
+    await _settle(lambda: False, rounds=20)
+    assert _rows_of("s1") == []
+
+
+async def test_1419_a_boot_expiry_still_closing_refuses_a_new_hand_off_and_never_takes_a_newer_move():
+    import threading
+    from app.db import session_moves
+    _chat()
+    session_moves.save("s1", target_id="dev-gaming", label="DesktopWorker", note="", requested_by="agent",
+                       requested_at=time.time() - 700, expires_at=time.time() - 100, handoff_id="move-1")
+    _expire_queued_move()
+    real, calls, go = session_moves.take_ended, [], threading.Event()
+
+    def _fails_until_go(*args, **kwargs):
+        calls.append(1)
+        if not go.is_set():
+            raise RuntimeError("database unavailable")
+        return real(*args, **kwargs)
+
+    with patch.object(session_moves, "take_ended", side_effect=_fails_until_go), \
+            patch.object(sh, "END_RETRY_DELAYS", (0.02,)), patch.object(sh, "busy_state", return_value=_IDLE), \
+            patch.object(sh, "_record", AsyncMock()):
+        boot = asyncio.ensure_future(sh.resume_queued())
+        assert await _settle(lambda: calls)
+        with pytest.raises(ValueError, match="still being closed"):
+            sh.request("s1", "DesktopWorker")
+        # A newer move's row (another path saved it): the old end must not take it.
+        session_moves.save("s1", target_id="dev-gaming", label="DesktopWorker", note="", requested_by="agent",
+                           requested_at=time.time(), expires_at=time.time() + 600, handoff_id="move-2")
+        go.set()
+        await asyncio.wait_for(boot, timeout=5)
+    await _settle(lambda: False, rounds=20)
+    assert session_moves.get("s1")["handoff_id"] == "move-2" and _notices() == []

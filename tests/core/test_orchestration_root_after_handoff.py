@@ -100,7 +100,7 @@ def _notice_after(session_id, payload):
     from app.core import wakeup_service
     from app.db import wakeups
 
-    pending = sh.PendingHandoff("dev-b", "Worker B", "", time.time())
+    pending = sh.PendingHandoff("dev-b", "Worker B", "", time.time(), stop_seq=0)
     wake = wakeups.create_wakeup(**sh._notice_wake(session_id, pending, "Hand-off to Worker B failed: offline."))
     asyncio.run(wakeup_service._fire(wake))
     [notice] = [row for row in turns.get_queued_turns(session_id) if (row.get("payload") or {}).get(sh.FAILED_PAYLOAD)]
