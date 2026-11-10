@@ -24,6 +24,7 @@ import concurrent.futures
 import contextvars
 import hmac
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -575,6 +576,36 @@ def grant_failure(exc: BaseException) -> tuple[int, str]:
     return 500, "Private access is unavailable on this worker. Check the worker log before retrying."
 
 
+def outcome_frame(request: AccessRequest, grant: Grant | None) -> dict:
+    """The notice for a service card the owner answered (#1420).
+
+    Names only what ``Grant.model_public`` exposes: no address, label or credential.
+    """
+    if grant is None:
+        status, summary = "declined", (
+            f"The user declined private {request.kind} access request {request.id}. "
+            "Do not request it again without the user's consent.")
+    else:
+        status, summary = "granted", (
+            f"The user approved private {request.kind} access request {request.id}. "
+            f"Usable handle: {json.dumps(grant.model_public())}")
+    return {"task_id": f"access-{request.id}", "kind": "access", "status": status, "summary": summary}
+
+
+async def deliver_outcome(session_id: str, frame: dict, *, subagent: bool) -> None:
+    """Steer the notice into a running turn, else queue a wake (turn_scheduler).
+
+    A local Task child gets it only while its own turn runs: a wake would
+    start a turn its parent never collects. An ended child's grant stays
+    usable if the child is resumed.
+    """
+    from app.core import session_runtime, turn_scheduler
+    if subagent and session_runtime.get_live_runtime(session_id) is None:
+        logger.info("Private access outcome for ended subagent %s not delivered", session_id)
+        return
+    await turn_scheduler.on_access_outcome(session_id, frame)
+
+
 class Broker:
     def __init__(self):
         self.grants: dict[str, Grant] = {}
@@ -666,6 +697,23 @@ class Broker:
             task.add_done_callback(self._notifications.discard)
             # Devices showing this session as a mirror refresh through their own worker.
             chat_access_routing.notify_watchers(target, saved=saved)
+
+    def _deliver_outcome(self, request: AccessRequest, grant: Grant | None) -> None:
+        """Tell the requesting chat the owner answered its service card.
+
+        Machine and folder requests are answered by their waiting tool call, so
+        they never get a second notice. The scheduler latches one per request.
+        """
+        if request.kind != "service":
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(deliver_outcome(request.session_id, outcome_frame(request, grant),
+                                                subagent=request.session_id in self._main))
+        self._notifications.add(task)
+        task.add_done_callback(self._notifications.discard)
 
     def pending_count(self, session_id: str) -> int:
         """Requests and one-shot approvals waiting for the owner in this chat's panel.
@@ -915,6 +963,7 @@ class Broker:
                 except Exception as exc:  # noqa: BLE001 — the grant stands; the next use pins again
                     logger.warning("Saved connection host key not recorded: %s", type(exc).__name__)
             if request.kind == "service":
+                self._deliver_outcome(request, current)
                 self._finish_request(request)
             return {"granted": True, "saved": bool(saved_id)}
         except BaseException:
@@ -1035,6 +1084,7 @@ class Broker:
         await self._check_request(request)
         request.result.set_result(None)
         if request.kind == "service":
+            self._deliver_outcome(request, None)
             self._finish_request(request)
 
     async def host_key(self, host: str, port: int, alg: str) -> str | None:
