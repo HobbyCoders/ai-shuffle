@@ -42,6 +42,7 @@ async def test_real_message_producer_bootstrap_and_single_delivery(
     from app.api.chat_ws_handler import ChatWebSocketHandler, _v2_queue_view, _v2_peer_queue_view
     from app.db import session_events
     from app.core.turn_recorder import TurnRecorder
+    from tests.api.test_chat_ws_handler_watch import _await_queue_hydration
 
     monkeypatch.setattr(turn_scheduler, "kick", lambda sid: None)
     monkeypatch.setattr(turn_scheduler, "note_wake_pending", lambda sid: None)
@@ -69,7 +70,7 @@ async def test_real_message_producer_bootstrap_and_single_delivery(
     handler.send_json = AsyncMock()
     await handler.handle_watch_session({"session_id": "peer"})
     assert handler._queue_watch_task is not None
-    await asyncio.wait_for(handler._queue_watch_task, 1)
+    await _await_queue_hydration(handler)
     assert handler.send_json.await_args.args[0]["data"]["pending_peer_messages"] == view
     if busy:
         assert turns.start_turn(row["id"]) is None

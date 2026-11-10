@@ -192,6 +192,88 @@ def test_live_isolated_preview_from_other_checkout_allows_cleanup_and_protects_r
     assert "preview_exemptions=1" in caplog.text
 
 
+@pytest.mark.parametrize("bare", [False, True])
+def test_preview_exemption_works_without_the_scripts_package(processes, tmp_path, monkeypatch, bare):
+    """The installed app ships ``app`` and ``fluid`` only. Importing the dev
+    loop's status helper from ``scripts`` failed there, so one running dev
+    instance disabled every scratch pass on the worker."""
+    for name in [name for name in sys.modules if name == "scripts" or name.startswith("scripts.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setitem(sys.modules, "scripts", None)  # ``import scripts...`` now raises ImportError
+    with pytest.raises(ImportError):
+        __import__("scripts.devloop.__main__")
+    proc, _, root = processes
+    preview(processes, tmp_path, monkeypatch, bare=bare)
+    refs = sr._references(proc, time.monotonic() + 2, strict=True)
+    assert refs is not None and refs.preview_exemptions == 1
+    path = session(root)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 1 and not path.exists()
+        assert sweep.disabled_reason == "none"
+    finally:
+        sweep.close()
+
+
+def test_devloop_status_path_is_the_one_the_reaper_reads(tmp_path, monkeypatch):
+    from app.core import temp_scratch
+    from scripts.devloop import __main__ as devloop
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert devloop.default_status_path(tmp_path) == temp_scratch.devloop_status_path(tmp_path)
+    assert devloop.status_directory() == temp_scratch.devloop_status_directory() == tmp_path / "ai-shuffle-devloop"
+
+
+def test_shipped_packages_never_import_scripts_at_runtime():
+    """``scripts`` is a repository tool, absent from an installed app."""
+    import ast
+
+    root = Path(__file__).resolve().parents[2]
+    # Dev-only launchers that run from a checkout, and test code.
+    allowed = {"app/preview_run.py"}
+    offenders = []
+    for package in ("app", "fluid"):
+        for path in (root / package).rglob("*.py"):
+            relative = path.relative_to(root).as_posix()
+            if relative in allowed or "/tests/" in relative or path.name in ("conftest.py",):
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                         else [node.module or ""] if isinstance(node, ast.ImportFrom) and not node.level else [])
+                if any(name == "scripts" or name.startswith("scripts.") for name in names):
+                    offenders.append(f"{relative}:{node.lineno}")
+    assert offenders == []
+
+
+def test_process_check_has_its_own_budget_after_a_long_walk(processes, monkeypatch):
+    """A walk that used the whole pass budget must not fail the process check
+    (and discard the walk): the check gets its own bounded time."""
+    _, _, root = processes
+    path = session(root)
+    deadlines = []
+    inspect = ss._process_references
+
+    def recording(deadline, diagnostics=None):
+        deadlines.append(deadline - time.monotonic())
+        return inspect(deadline, diagnostics)
+
+    monkeypatch.setattr(ss, "_process_references", recording)
+    sweep = ss.ScratchSweep(root)
+    try:
+        sweep._start(path)
+        sweep.retained, sweep.reasons, sweep.process_notes = 0, ss.Counter(), set()
+        sweep.preview_exemptions = 0
+        # The pass deadline has already passed when the check begins.
+        assert sweep._guard(sweep.job, time.monotonic() - 1) is True
+        assert sweep.retained == 0
+        assert ss.PROCESS_SCAN_SECONDS - 0.5 < deadlines[0] <= ss.PROCESS_SCAN_SECONDS
+        # A pass with more time left than that keeps its own deadline.
+        assert sweep._guard(sweep.job, time.monotonic() + 30) is True
+        assert deadlines[1] > 29
+    finally:
+        sweep.close()
+
+
 @pytest.mark.parametrize("broken", ["owner_start", "child_start", "stale_activity", "missing_marker", "symlink_home", "forged_uid", "forged_launcher"])
 def test_stale_reused_or_unsafe_preview_receipts_retain(processes, tmp_path, monkeypatch, broken):
     proc, _, root = processes

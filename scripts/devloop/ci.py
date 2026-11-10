@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import hashlib
 import json
 import math
 import os
@@ -231,34 +232,65 @@ def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS,
 # ─── which journeys a run needs ────────────────────────────────────────────
 
 
-def pull_request_files(root: Path = ROOT) -> list[str] | None:
-    """Files a pull request changes, read from its merge commit; None if unreadable.
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
+                          timeout=60, check=True).stdout
 
-    ``pull_request`` runs check out GitHub's merge of the branch into its base:
-    the first parent is the base, so that diff is exactly what merging adds.
-    Renames list both paths. Needs the parents fetched (``fetch-depth: 2``).
-    """
-    def git(*args: str) -> str:
-        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
-                              timeout=60, check=True).stdout
+
+def files_since(base: str, root: Path = ROOT) -> list[str] | None:
+    """Files that differ between ``base`` and HEAD (a rename lists both paths); None if unreadable."""
     try:
-        if len(git("rev-list", "--parents", "-n", "1", "HEAD").split()) != 3:
-            return None  # not a two-parent merge commit
-        listed = git("diff", "--name-only", "--no-renames", "-z", "HEAD^1", "HEAD")
+        listed = _git(root, "diff", "--name-only", "--no-renames", "-z", base, "HEAD")
     except (OSError, subprocess.SubprocessError):
         return None
     return sorted({name for name in listed.split("\0") if name})
 
 
-def base_journey_map(root: Path = ROOT) -> str | None:
-    """The base branch's map.json (the merge commit's first parent); None if unreadable."""
+def pull_request_files(root: Path = ROOT) -> list[str] | None:
+    """Files a pull request changes, read from its merge commit; None if unreadable.
+
+    ``pull_request`` runs check out GitHub's merge of the branch into its base:
+    the first parent is the base, so that diff is exactly what merging adds.
+    Needs the parents fetched (``fetch-depth: 2``).
+    """
     try:
-        text = subprocess.run(["git", "show", f"HEAD^1:{JOURNEY_MAP}"], cwd=root, capture_output=True,
-                              text=True, timeout=60, check=True).stdout
+        if len(_git(root, "rev-list", "--parents", "-n", "1", "HEAD").split()) != 3:
+            return None  # not a two-parent merge commit
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return files_since("HEAD^1", root)
+
+
+def base_journey_map(root: Path = ROOT, base: str = "HEAD^1") -> str | None:
+    """``base``'s map.json (by default the merge commit's first parent); None if unreadable."""
+    try:
+        text = _git(root, "show", f"{base}:{JOURNEY_MAP}")
         json.loads(text)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     return text
+
+
+def last_green_main(root: Path = ROOT) -> str | None:
+    """The newest ancestor of HEAD that main-suite passed on; None if unknown.
+
+    Every journey held there: by running, or because that run narrowed the same
+    way from an older green commit. Needs main's history fetched.
+    """
+    from scripts.ci import proven
+
+    where = proven.environment()
+    if where is None:
+        return None
+    try:
+        head = _git(root, "rev-parse", "HEAD").strip()
+        for commit in proven.green_main_commits(*where):
+            if commit != head and subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+                                                 cwd=root, capture_output=True, timeout=60).returncode == 0:
+                return commit
+    except Exception as error:  # noqa: BLE001 - not knowing means running every journey
+        print(f"[ci] last green main commit unknown: {error}", file=sys.stderr)
+    return None
 
 
 def select_journeys(files: list[str], selector: Path = SELECTOR, directory: Path = JOURNEYS,
@@ -295,29 +327,63 @@ def select_journeys(files: list[str], selector: Path = SELECTOR, directory: Path
 def selection_for_event(event: str | None, root: Path = ROOT) -> tuple[list[str] | None, str]:
     """(journey files or None for all, why) for a workflow event.
 
-    Only a pull request is narrowed, and only when both its diff and the
-    selection are readable: pushes to main, dispatches and callers run all.
+    A pull request runs what its merge changes. A push to main runs what
+    changed since the last commit main-suite passed on. Both narrow only when
+    the diff and the selection are readable; schedules, dispatches and other
+    callers run all.
     """
-    if event != "pull_request":
+    if event == "pull_request":
+        base, files, what = "HEAD^1", pull_request_files(root), "the pull request's merge diff"
+    elif event == "push":
+        base = last_green_main(root)
+        if base is None:
+            return None, "every journey: no earlier commit that main-suite passed on was found"
+        files, what = files_since(base, root), f"the changes since {base[:12]}, which main-suite passed on"
+    else:
         return None, f"every journey: a {event or 'local'} run is not narrowed"
-    files = pull_request_files(root)
     if files is None:
-        return None, "every journey: the pull request's merge diff could not be read"
-    only = select_journeys(files, previous_map=base_journey_map(root) if JOURNEY_MAP in files else None)
+        return None, f"every journey: {what} could not be read"
+    only = select_journeys(files, previous_map=base_journey_map(root, base) if JOURNEY_MAP in files else None)
     if only is None:
         return None, f"every journey: {len(files)} changed files need the whole suite, or selection failed"
-    return only, f"{len(only)} of the journeys cover the {len(files)} changed files"
+    return only, f"{len(only)} of the journeys cover the {len(files)} files in {what}"
+
+
+def selection_key(only: list[str] | None) -> str:
+    """Names a selection in a pass record: which journeys a run proved."""
+    if only is None:
+        return "all"
+    return hashlib.sha256("\n".join(sorted(only)).encode()).hexdigest()[:16]
+
+
+def already_proven(key: str, root: Path = ROOT) -> bool:
+    """True on a push to main when a pull request passed this selection on these exact files."""
+    from scripts.ci import proven
+
+    where = proven.environment()
+    if where is None:
+        return False
+    try:
+        tree = proven.head_tree(root)
+        return any(proven.exists(proven.record_name("journeys", tree, name), *where, area="journeys", tree=tree) for name in dict.fromkeys((key, "all")))
+    except Exception as error:  # noqa: BLE001 - a failed lookup means running the journeys
+        print(f"[ci] pass-record lookup failed: {error}", file=sys.stderr)
+        return False
 
 
 def matrix(shards: int) -> int:
     only, why = selection_for_event(os.environ.get("GITHUB_EVENT_NAME"))
+    key = selection_key(only)
     buckets = plan(shards) if only is None else plan(shards, only=only)
     numbers = [index for index, bucket in enumerate(buckets, 1) if bucket]
+    if numbers and already_proven(key):
+        numbers, why = [], f"none: a pull request already passed them on these exact files ({why})"
     print(f"[ci] UI journeys: {why}", file=sys.stderr, flush=True)
     _write_summary(f"\n**UI journeys for this run:** {why}.\n")
-    # stdout is the step's output file: exactly these two lines.
+    # stdout is the step's output file: exactly these three lines.
     print(f"only={EVERY_JOURNEY if only is None else ','.join(name.removesuffix(SUFFIX) for name in only)}")
     print(f"shards={json.dumps(numbers, separators=(',', ':'))}")
+    print(f"key={key}")
     return 0
 
 

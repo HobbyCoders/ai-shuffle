@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.connectors.base import (
     ActionDef,
+    ArrivalPlace,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
@@ -184,27 +185,34 @@ class SlackConnector(BaseConnector):
         try:
             from slack_sdk.socket_mode.response import SocketModeResponse
 
-            # Acknowledge the event
             response = SocketModeResponse(envelope_id=req.envelope_id)
+            event = req.payload.get("event", {}) if req.type == "events_api" else {}
+            if event.get("type") in ("message", "app_mention"):
+                # The client runs each event as its own task. Take the channel's
+                # place before the ack or the name lookup can let a later
+                # message overtake this one (#1324).
+                with self.arrival_place(event.get("channel", "")) as place:
+                    await client.send_socket_mode_response(response)
+                    await self._handle_message_event(event, place)
+                return
+
+            # Acknowledge the event
             await client.send_socket_mode_response(response)
 
-            if req.type == "events_api":
-                event = req.payload.get("event", {})
-                event_type = event.get("type", "")
-
-                if event_type == "message":
-                    await self._handle_message_event(event)
-                elif event_type == "app_mention":
-                    await self._handle_message_event(event)
-
-            elif req.type == "interactive":
+            if req.type == "interactive":
                 await self._handle_interactive(req.payload)
 
         except Exception as exc:
             logger.exception("Error handling Slack socket event: %s", exc)
 
-    async def _handle_message_event(self, event: Dict[str, Any]) -> None:
-        """Process an incoming Slack message event."""
+    async def _handle_message_event(
+        self, event: Dict[str, Any], place: Optional[ArrivalPlace] = None
+    ) -> None:
+        """Process an incoming Slack message event in its channel's arrival order."""
+        with place or self.arrival_place(event.get("channel", "")) as place:
+            await self._process_message_event(event, place)
+
+    async def _process_message_event(self, event: Dict[str, Any], place: ArrivalPlace) -> None:
         try:
             # Skip bot messages (including self)
             if event.get("bot_id") or event.get("subtype") == "bot_message":
@@ -257,7 +265,7 @@ class SlackConnector(BaseConnector):
                     "channel_type": event.get("channel_type"),
                 },
             )
-            await self._on_incoming_message(msg)
+            await place.hand_off(msg)
 
         except Exception as exc:
             logger.exception("Error handling Slack message: %s", exc)

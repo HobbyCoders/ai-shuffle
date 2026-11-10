@@ -286,6 +286,11 @@
     "reason": "CI-only opt-in guard for synthetic signed updater fixtures on disposable candidate-container volumes; not worker configuration, a signing key or an access grant.",
     "base_settings": false
   },
+  "AI_SHUFFLE_UPDATE_RESTORE_POINT": {
+    "kind": "internal",
+    "reason": "Supervisor switch for the database copy an update takes. Unset: a copy only when the update's database level differs from the running version's (app/db/compatibility.json). 'always' copies before every update, as before levels.",
+    "base_settings": false
+  },
   "AI_SHUFFLE_VERSION": {
     "kind": "internal",
     "reason": "Existing internal build/test protocol or source identifier (not a deployment option); conservative literal scan baseline.",

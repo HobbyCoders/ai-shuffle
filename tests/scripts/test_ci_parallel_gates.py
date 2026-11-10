@@ -85,7 +85,8 @@ def test_javascript_gate_accepts_skipped_journeys_only_for_a_successful_empty_se
 
 def test_all_parallel_branches_remain_unconditional_and_required():
     js = workflow("ci-frontend.yml")["jobs"]
-    assert set(js["javascript"]["needs"]) == set(js) - {"javascript"}
+    # The two record jobs only leave a pass record after the checks passed.
+    assert set(js["javascript"]["needs"]) == set(js) - {"javascript", "record-checks", "record-journeys"}
     assert js["frontend"]["strategy"]["matrix"]["shard"] == ["1", "2", "3", "4"]
     browser = workflow("ci-browser-workspace.yml")["jobs"]
     assert browser["workspace"]["strategy"]["matrix"]["chrome-mode"] == ["external", "panel-demand", "direct-page-demand"]
@@ -96,6 +97,8 @@ def test_all_parallel_branches_remain_unconditional_and_required():
         assert not config["on"]["pull_request"]
         assert config["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
         for key, job in config["jobs"].items():
+            if job.get("uses") == "./.github/workflows/record-pass.yml":
+                continue
             assert job["runs-on"] in ["ubuntu-latest", "windows-latest"]
             assert "continue-on-error" not in job
             for step in job["steps"]:

@@ -4,6 +4,11 @@ name: CI JavaScript
 on:
   pull_request:
   workflow_call:
+    inputs:
+      checks_proven:
+        description: main-suite found a pull request's record for every check here but the journeys
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -12,12 +17,14 @@ permissions:
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  group: ci-frontend-${{ github.event.pull_request.number || github.ref }}
+  # main-suite's daily run gets its own group so it never queues with a push run.
+  group: ci-frontend-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   frontend:
     name: Frontend tests (${{ matrix.shard }}/4)
+    if: inputs.checks_proven != true
     strategy:
       fail-fast: false
       matrix:
@@ -68,6 +75,7 @@ jobs:
 
   contracts:
     name: JavaScript contracts, docs and frontend audit
+    if: inputs.checks_proven != true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -101,6 +109,7 @@ jobs:
 
   build:
     name: Frontend and mobile production build
+    if: inputs.checks_proven != true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -120,6 +129,7 @@ jobs:
 
   typechecks:
     name: Frontend and mobile typechecks
+    if: inputs.checks_proven != true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -142,6 +152,7 @@ jobs:
 
   mobile:
     name: Mobile tests
+    if: inputs.checks_proven != true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -161,6 +172,7 @@ jobs:
 
   tools:
     name: Tools tests and WebCrypto vectors
+    if: inputs.checks_proven != true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -178,6 +190,7 @@ jobs:
 
   browser-mcp:
     name: Browser MCP build and tests
+    if: inputs.checks_proven != true
     # Run independently: frontend checks took 14m on a standard runner, while
     # the real browser suite needs about 5m. Neither should consume the other's
     # budget or hide a hang behind the overall JavaScript deadline.
@@ -255,19 +268,30 @@ jobs:
     name: Select UI journeys
     # A pull request runs the journeys its changed files need
     # (frontend/tests/journeys/map.json; an uncovered UI source file, or a diff
-    # that cannot be read, runs them all). A push to main, a dispatch and a
-    # caller always run every journey. Needs the merge commit's parents.
+    # that cannot be read, runs them all). A push to main runs what changed
+    # since the last commit main-suite passed on, and nothing when a pull
+    # request already passed those journeys on these exact files. A scheduled
+    # or dispatched run always runs every journey.
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       only: ${{ steps.select.outputs.only }}
       shards: ${{ steps.select.outputs.shards }}
+      key: ${{ steps.select.outputs.key }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          # A pull request needs its merge commit's parents; a push needs the
+          # history back to the last commit main-suite passed on.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
       - name: Select the journeys and their shards
         id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python3 -m scripts.devloop.ci matrix --shards 16 >> "$GITHUB_OUTPUT"
 
   journeys:
@@ -373,6 +397,7 @@ jobs:
 
   visual:
     name: Visual regression (4 viewports)
+    if: inputs.checks_proven != true
     # The Playwright image of browser-mcp's playwright-core version pins the
     # Chromium build, the OS and its fonts, so renders are identical run to
     # run. The committed baselines are this image's renders: when the
@@ -429,6 +454,7 @@ jobs:
       - name: Require every branch to succeed
         env:
           RESULTS: ${{ toJSON(needs) }}
+          CHECKS_PROVEN: ${{ inputs.checks_proven }}
         run: |
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict';
@@ -438,7 +464,29 @@ jobs:
           // The journeys are skipped only when the selection succeeded and chose none.
           const plan = results['journey-plan'];
           const noJourneys = plan.result === 'success' && plan.outputs?.shards === '[]';
+          // main-suite skips the other checks only on a pull request's record for these files.
+          const proven = process.env.CHECKS_PROVEN === 'true';
           for (const name of expected) {
-            assert.equal(results[name].result, name === 'journeys' && noJourneys ? 'skipped' : 'success', name);
+            const skipped = name === 'journeys' ? noJourneys : name !== 'journey-plan' && proven;
+            assert.equal(results[name].result, skipped ? 'skipped' : 'success', name);
           }
           JS
+
+  # Leave a record that these checks passed on exactly these files, so
+  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
+  record-checks:
+    needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp, visual]
+    if: needs.frontend.result == 'success' && needs.contracts.result == 'success' && needs.build.result == 'success' && needs.typechecks.result == 'success' && needs.mobile.result == 'success' && needs.tools.result == 'success' && needs.browser-mcp.result == 'success' && needs.visual.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/record-pass.yml
+    with:
+      area: javascript-checks
+
+  # Leave a record that these checks passed on exactly these files, so
+  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
+  record-journeys:
+    needs: [journey-plan, journeys]
+    if: needs.journey-plan.result == 'success' && needs.journeys.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/record-pass.yml
+    with:
+      area: journeys
+      key: ${{ needs.journey-plan.outputs.key }}

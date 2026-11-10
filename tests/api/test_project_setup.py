@@ -261,6 +261,29 @@ def test_folder_project_creates_an_empty_linked_folder(client, ws, test_db):
     assert pv2["id"] in checkouts_db.eligible_base_project_ids(ME)
 
 
+@pytest.mark.parametrize("length", [100, 150], ids=["at-the-limit", "over-the-limit"])
+def test_setup_registers_a_project_whose_name_would_not_fit(client, ws, test_db, length):
+    """#1359: the name this worker registers must fit the project-name limit.
+
+    A name at the limit (a peer's over-long name is cut to it) that needs a
+    number to stay unique here used to grow past the limit and be refused at
+    registration, after the folder had been created.
+    """
+    name = "n" * length
+    pv2 = _peer_project(test_db, "longname", name)
+    # This worker already has another project under the name it would take.
+    database.create_project(project_id="mine", name=name[:100], description=None, path="mine")
+
+    op_id = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME}).json()["op_id"]
+    _run_setups()
+
+    op = git_ops_db.get_op(op_id)
+    assert op["status"] == "done", op
+    row = database.get_project(op["result"]["project_id"])
+    assert row["instance_id"] == ME and row["link_group_id"] == "local:longname"
+    assert row["name"] == "n" * 98 + " 2"
+
+
 def test_invalid_folder_is_refused_before_queueing(client, ws, test_db):
     pv2 = _peer_project(test_db, "demo", "Demo", remote=_bare_remote(ws))
     resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME,

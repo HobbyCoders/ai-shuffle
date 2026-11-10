@@ -1,9 +1,15 @@
 name: main-suite
 
-# One full hosted proof per main commit. Dispatches on any other ref fail closed.
+# One hosted proof per main commit. Dispatches on any other ref fail closed.
+# A push skips what a pull request already passed on exactly these files
+# (scripts/ci/proven.py); the daily run and a dispatch run everything.
 on:
   push:
     branches: [main]
+  schedule:
+    # Everything, nothing skipped, on whatever main is at 08:00 UTC. It never
+    # publishes: the nightly follows push and dispatch runs only.
+    - cron: '0 8 * * *'
   workflow_dispatch:
 
 permissions:
@@ -12,8 +18,9 @@ permissions:
 # A started run always finishes; GitHub keeps only the newest waiting run and
 # drops older waiting ones. Cancelling in progress let a burst of merges cancel
 # every run, so nothing was proven and the nightly stalled until main went quiet.
+# The daily run has its own group so it can never displace a waiting push run.
 concurrency:
-  group: main-suite-${{ github.ref }}
+  group: main-suite-${{ github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -27,34 +34,80 @@ jobs:
       artifact-name: source-ui-${{ github.sha }}-${{ github.run_attempt }}
       optional: true
 
-  backend:
+  # Which areas a pull request already passed on exactly these files. Only a
+  # push looks; any doubt or error answers "run it".
+  proven:
+    name: Find what a pull request already proved
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only a shortcut: if this job fails, every area runs and the run can still pass.
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.check.outputs.backend }}
+      fluid: ${{ steps.check.outputs.fluid }}
+      windows: ${{ steps.check.outputs.windows }}
+      browser-workspace: ${{ steps.check.outputs.browser-workspace }}
+      container: ${{ steps.check.outputs.container }}
+      identity: ${{ steps.check.outputs.identity }}
+      desktop-source: ${{ steps.check.outputs.desktop-source }}
+      javascript-checks: ${{ steps.check.outputs.javascript-checks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for pass records of these exact files
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/proven.py check --areas backend,fluid,windows,browser-workspace,container,identity,desktop-source,javascript-checks >> "$GITHUB_OUTPUT"
+
+  backend:
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.backend != 'true' }}
     uses: ./.github/workflows/ci-backend.yml
 
   javascript:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') }}
+    # The journey selection reads earlier runs and pass records.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     uses: ./.github/workflows/ci-frontend.yml
+    with:
+      checks_proven: ${{ needs.proven.outputs.javascript-checks == 'true' }}
 
   fluid:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.fluid != 'true' }}
     uses: ./.github/workflows/ci-fluid.yml
 
   windows:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.windows != 'true' }}
     uses: ./.github/workflows/windows-suite.yml
     with:
       main_suite: true
 
   browser-workspace:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.browser-workspace != 'true' }}
     uses: ./.github/workflows/ci-browser-workspace.yml
 
   container:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.container != 'true' }}
     uses: ./.github/workflows/container-postgres.yml
 
   identity:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.identity != 'true' }}
     uses: ./.github/workflows/ci-instance-identity.yml
     with:
       main_suite: true
@@ -66,7 +119,8 @@ jobs:
       main_suite: true
 
   desktop-source:
-    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    needs: [proven]
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.ref == 'refs/heads/main') && needs.proven.outputs.desktop-source != 'true' }}
     uses: ./.github/workflows/desktop-source-checks.yml
 
   desktop:
@@ -93,12 +147,13 @@ jobs:
   supply-chain:
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -106,6 +161,25 @@ jobs:
       # Identical report-only audit semantics to local/full (all locked packages,
       # including source-publisher). Existing hosted audits remain blocking too.
       - run: python scripts/dependency_audit.py
+      # The advisory lists change without any file changing, so a pull request's
+      # pass record cannot stand for them: the blocking audits of the backend
+      # and JavaScript checks always run here, with the same commands.
+      - name: Install what the Python audit inspects
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ./fluid
+      - name: Audit public Python dependencies
+        timeout-minutes: 8
+        run: |
+          python -m pip install pip-audit==2.10.1
+          python scripts/pip_audit_retry.py --skip-editable
+          python scripts/pip_audit_retry.py -r requirements-voice.lock
+      - name: Audit JavaScript dependencies
+        run: |
+          for package in frontend tools browser-mcp; do
+            (cd "$package" && npx -y npm@11 audit --audit-level=high)
+          done
 
   update-reach:
     if: github.event_name == 'push' || github.ref == 'refs/heads/main'
@@ -184,7 +258,7 @@ jobs:
   main-suite:
     name: Main suite
     if: always()
-    needs: [backend, javascript, fluid, windows, browser-workspace, container, identity, policy, desktop-source, desktop, android-and-docs, supply-chain, update-reach]
+    needs: [proven, backend, javascript, fluid, windows, browser-workspace, container, identity, policy, desktop-source, desktop, android-and-docs, supply-chain, update-reach]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

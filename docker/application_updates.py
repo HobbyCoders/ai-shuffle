@@ -2,10 +2,13 @@
 
 Never edits /app, installs OS packages, or opens the Docker socket. Builds run
 unprivileged with a credential-free environment. State and versions live on the
-existing data volume. Before an update first starts, the stopped application's
-database is copied; if that first start fails, the copy is put back and the
-previous version runs again. Without a copy, a failed first boot blocks
-rollback over migrated data.
+existing data volume. An update that declares the same database level as the
+version it replaces (app/db/compatibility.json) takes no database copy: if its
+first start fails, the previous version starts again over the same database.
+Any other update copies the stopped application's database first; if that
+first start fails, the copy is put back and the previous version runs again.
+Without a copy or a matching level, a failed first boot blocks rollback over
+migrated data.
 """
 from __future__ import annotations
 
@@ -666,6 +669,30 @@ HANDOVER_FILES = ("docker/container_runtime.py", "docker/application_updates.py"
                   "docker/chrome-supervisor.sh", "docker/start-chrome.sh")
 
 
+# The database compatibility level a source tree declares (the file is part of
+# the signed tree). A release raises it when its migrations remove, rename or
+# retype something older code reads (scripts/ci/database_compatibility.py).
+DATABASE_COMPATIBILITY = "app/db/compatibility.json"
+# The image capability (docker/update_contract.py) that says the image's own
+# supervisor understands state["compatible"]. A container restart during an
+# update's first start is handled by the image's code, not the update's.
+LEVEL_CAPABILITY = "database-level-v1"
+
+
+def database_level(source):
+    """The level ``source`` declares, or None when it declares none (code from
+    before levels) or the file cannot be read."""
+    path = Path(source) / DATABASE_COMPATIBILITY
+    try:
+        if path.is_symlink() or path.stat().st_size > 4096:
+            return None
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    level = data.get("level") if isinstance(data, dict) and data.get("format") == 1 else None
+    return level if type(level) is int and 0 < level < 2**31 else None
+
+
 def discard_name(snapshot):
     """What the database an update left behind is renamed to on rollback."""
     return snapshot.replace("_rollback_", "_failed_", 1)
@@ -778,7 +805,8 @@ CHECK_INTERVAL_SECONDS = 24 * 3600
 
 
 class ContainerUpdates:
-    def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable", database=None, *, refresh_mode="unknown"):
+    def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable", database=None, *,
+                 refresh_mode="unknown", image_root=None):
         if channel not in CHANNELS:
             raise UpdateError("Unknown update channel")
         global _alias_logged
@@ -790,6 +818,8 @@ class ContainerUpdates:
         # the copy taken before an update's first start. None keeps the
         # original contract: a failed first boot blocks.
         self.database = database
+        # The image's own code (/app), for the database level it declares.
+        self.image_root = Path(image_root) if image_root else None
         self.offer = {}
         # Set when the feed's release recommends a capability this image lacks.
         self.notice = None
@@ -841,6 +871,8 @@ class ContainerUpdates:
                     raise ValueError("failed revision")
             if "snapshot" in self.state and not SNAPSHOT.fullmatch(self.state["snapshot"]):
                 raise ValueError("snapshot")
+            if "compatible" in self.state and self.state["compatible"] is not True:
+                raise ValueError("compatible")
         except FileNotFoundError:
             pass
         except Exception as exc:
@@ -967,18 +999,22 @@ class ContainerUpdates:
             return revision[:12]
 
     def failed(self):
-        """An update's first start failed. Returns True when its database copy
-        was put back, so the previous version (state["active"], or the
-        image's own code) may run again; the update stays in state["failed"]
-        and is not offered automatically again. Without a copy, or when
-        putting it back fails, the worker is blocked as before: older code
-        never runs over a database the update may have migrated.
+        """An update's first start failed. Returns True when the previous
+        version (state["active"], or the image's own code) may run again:
+        the update's database copy was put back, or the update needed none
+        (state["compatible"]: both versions declare the same database level,
+        so the previous one reads whatever this one migrated). The update
+        stays in state["failed"] and is not offered automatically again.
+        Otherwise, or when putting the copy back fails, the worker is
+        blocked as before: older code never runs over a database a newer
+        level may have migrated.
 
         The caller has stopped the failed application first."""
         revision = self.state.get("booting")
         if not revision:
             return False
         snapshot = self.state.get("snapshot")
+        compatible = self.state.get("compatible") is True and not snapshot
         restored = False
         if snapshot and self.database is not None:
             try:
@@ -990,20 +1026,27 @@ class ContainerUpdates:
         self.state.pop("booting")
         self.state["failed"] = sorted({*self.state.get("failed", []), revision})
         self.state.pop("pending", None)
-        if not restored:
+        if not restored and not compatible:
             self.state["blocked"] = True
             self.save()
             return False
-        self.state.pop("snapshot")
+        self.state.pop("snapshot", None)
+        self.state.pop("compatible", None)
         self.save()
         self.rolled_back = revision
         self.running = None
-        _log(f"application update {revision[:12]} failed to start; restored the database copy "
-             "and starting the previous version")
-        self.drop_copy(discard_name(snapshot))
+        if restored:
+            _log(f"application update {revision[:12]} failed to start; restored the database copy "
+                 "and starting the previous version")
+            self.drop_copy(discard_name(snapshot))
+            kept = "Your data is as it was before the update."
+        else:
+            _log(f"application update {revision[:12]} failed to start; it needed no database copy, "
+                 "starting the previous version over the same database")
+            kept = "This update needed no copy of the database, so your data was kept as it is."
         self.publish("error", error=(
             f"Version {self.release_name(revision)} failed to start, so this worker went back to the "
-            "previous version. Your data is as it was before the update."), version=revision)
+            f"previous version. {kept}"), version=revision)
         return True
 
     def drop_copy(self, name):
@@ -1035,6 +1078,7 @@ class ContainerUpdates:
             self.state.pop("pending", None)
             self.state.pop("booting", None)
             snapshot = self.state.pop("snapshot", None)
+            self.state.pop("compatible", None)
             if self.running in self.state.get("failed", []):
                 # An earlier failed attempt of this revision, retried by request.
                 self.state["failed"] = [r for r in self.state["failed"] if r != self.running]
@@ -1150,10 +1194,35 @@ class ContainerUpdates:
                 "the existing data anyway, stop the container and delete application-updates/state.json "
                 "from the data volume; files retained.")
 
+    def restore_point_needed(self, revision):
+        """Whether installing ``revision`` takes a database copy first.
+
+        Not when it and the version running now declare the same database
+        level: its migrations then only add, the previous version runs over
+        the migrated database, and a failed first start goes back by starting
+        that version again. A level that differs or is unknown on either side
+        (code from before levels, an unreadable file) keeps the copy, as do
+        AI_SHUFFLE_UPDATE_RESTORE_POINT=always and an image built before
+        LEVEL_CAPABILITY: if the container restarts during the first start,
+        that image's own supervisor would find no copy and block."""
+        if os.environ.get("AI_SHUFFLE_UPDATE_RESTORE_POINT", "").strip().lower() == "always":
+            return True
+        if LEVEL_CAPABILITY not in (self.image.get("provides") or []):
+            return True
+        try:
+            active = self.state.get("active")
+            current = self.directory(active) / "source" if active else self.image_root
+            if not revision or current is None:
+                return True
+            level = database_level(current)
+            return level is None or level != database_level(self.directory(revision) / "source")
+        except UpdateError:
+            return True
+
     def snapshot_room(self):
         """Refuse an install before stopping anything when the database copy
         would not fit; the message says how much space is needed."""
-        if self.database is None:
+        if self.database is None or not self.restore_point_needed(self.state.get("pending")):
             return
         try:
             free, need = self.database.snapshot_space()
@@ -1167,18 +1236,25 @@ class ContainerUpdates:
 
     def activating(self):
         # After the old app stopped, before anything could migrate the DB: copy
-        # it, then record the first start. A failed copy raises before booting
-        # is saved, and the old version is started again over the same data.
+        # it when this update needs a copy (restore_point_needed), then record
+        # the first start. A failed copy raises before booting is saved, and
+        # the old version is started again over the same data.
         self.require_resolved_first_boot()
         revision = self.state["pending"]
+        needed = self.restore_point_needed(revision)
         snapshot = None
-        if self.database is not None:
+        if needed and self.database is not None:
             snapshot = f"ai_shuffle_rollback_{revision[:12]}"
             self.database.snapshot(snapshot)
         self.running = revision
         self.state["booting"] = revision
+        self.state.pop("compatible", None)
         if snapshot:
             self.state["snapshot"] = snapshot
+        elif not needed:
+            self.state["compatible"] = True
+            _log(f"application update {revision[:12]}: no database copy; it declares the same database "
+                 "level as the version it replaces")
         self.save()
 
     def fetch(self, endpoint, destination=None, manifest=None):

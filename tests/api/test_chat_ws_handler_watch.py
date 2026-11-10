@@ -188,11 +188,24 @@ def _queue_frames(ws):
     ]
 
 
+# A hang guard, not a latency budget: hydration must finish, and no test here
+# asserts how fast. The multi-worker tests answer the owner's peer request
+# in-process ON this event loop, so the limit also covers that whole request.
+# A loaded hosted runner spent over a second there and failed a 1s limit (#1295).
+QUEUE_HYDRATION_HANG_GUARD_SECONDS = 30
+
+
+async def _await_queue_hydration(handler: cwh.ChatWebSocketHandler) -> None:
+    """Let the current queue snapshot task finish (it is scheduled, not awaited)."""
+    task = handler._queue_watch_task
+    if task is not None:
+        await asyncio.wait_for(task, QUEUE_HYDRATION_HANG_GUARD_SECONDS)
+
+
 async def _watch_and_hydrate(handler: cwh.ChatWebSocketHandler, data: dict) -> None:
     """Wait for the independently scheduled snapshot in direct-handler tests."""
     await handler.handle_watch_session(data)
-    if handler._queue_watch_task is not None:
-        await asyncio.wait_for(handler._queue_watch_task, 1)
+    await _await_queue_hydration(handler)
 
 
 WATCH = {"type": "watch_session", "session_id": "sess-1"}
