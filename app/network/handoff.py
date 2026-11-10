@@ -191,13 +191,17 @@ def check_unfinished_wakes(sid):
         _check_unfinished_wakes(conn.cursor(), sid)
 
 
+def _check_open_turns(cursor, sid):
+    cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('queued','running','interrupting','draining') LIMIT 1", (sid,))
+    if cursor.fetchone():
+        raise ValueError("Wait for this session's queued or active turn to finish before resuming here.")
+
+
 def _idle(cursor, sid):
     _check_unfinished_wakes(cursor, sid)
     if _has_live_tasks(cursor, sid):
         raise ValueError("Wait for this session's background work to finish before resuming here.")
-    cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('queued','running','interrupting','draining') LIMIT 1", (sid,))
-    if cursor.fetchone():
-        raise ValueError("Wait for this session's queued or active turn to finish before resuming here.")
+    _check_open_turns(cursor, sid)
     if open_prompt(cursor, sid):
         raise ValueError(OPEN_PROMPT)
 
@@ -1036,6 +1040,11 @@ def _commit(sid, target, payload, token):
                      "handoff": {"token": token, "held_messages": held_messages}}
         cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
                     (target, target, json.dumps(placement), session_branch, sid))
+        # _idle above ran before this UPDATE locked the session row. Turn
+        # admission queues under that lock, so a turn admitted in between (a
+        # started chat's report, #1443) is visible only now: refuse as _idle
+        # does, rolling the flip back, so it runs here and the move is retried.
+        _check_open_turns(cur, sid)
         if session_branch is None:
             cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
         cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))

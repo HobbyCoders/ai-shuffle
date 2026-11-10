@@ -441,3 +441,48 @@ async def test_a_crash_while_admitting_never_runs_the_report_twice(pair, monkeyp
         assert orch.pending_forwarded_reports() == []
     with b.active():
         assert len(_all_reports(PARENT)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_report_queued_after_the_idle_check_refuses_the_commit(pair, monkeypatch):
+    """S2 on the hand-off side: the child settles while the parent's commit is
+    between its idle check and the ownership flip. The flip is refused and
+    rolled back, the report runs on A, and the move goes through once it ran."""
+    import asyncio
+
+    a, b, _, _ = pair
+    with a.active():
+        start = _start_child()
+        settled = _settle(start)
+    monkeypatch.setattr(control, "call", _route([a, b]))
+    real_lease, real_idle = handoff._lease, handoff._idle
+    committing = []
+
+    def lease(*args, **kwargs):
+        committing.append(True)  # only the commit calls _idle after _lease
+        return real_lease(*args, **kwargs)
+
+    def idle(cursor, sid):
+        real_idle(cursor, sid)
+        if committing and sid == PARENT:
+            committing.clear()
+            # The real report path, run in the commit's window on A.
+            asyncio.run(orch.report_settled_start(CHILD, settled, "completed"))
+    monkeypatch.setattr(handoff, "_lease", lease)
+    monkeypatch.setattr(handoff, "_idle", idle)
+    with b.active():
+        with pytest.raises(Exception, match="queued or active turn"):
+            await handoff.receive(database.get_session(PARENT))
+        assert control.owner_of(database.get_session(PARENT)) == a.device_id
+        assert _all_reports(PARENT) == []
+    with a.active():
+        assert control.owner_of(database.get_session(PARENT)) is None
+        assert orch.pending_forwarded_reports() == []
+        [report] = _reports(PARENT)
+        assert report["payload"]["pending_frames"][0]["task_id"] == CHILD
+        decision = placement.resolve_placement(database.get_session(PARENT))
+        assert decision.kind != "runner" or decision.runner_id == settings.effective_instance_id
+        assert turns.start_turn(report["id"])
+        turns.settle_turn(report["id"], "completed")
+    monkeypatch.setattr(handoff, "_idle", real_idle)
+    await _move_parent(a, b, monkeypatch)
