@@ -2261,11 +2261,15 @@ async def handle_remote_report(body, from_device):
 # Reports for an assistant another worker runs now (#1443)
 #
 # Each worker has its own database and ``turns`` is not synced, so a report
-# turn queued here for a chat that moved away would never run. The report is
-# kept in this worker's outbox (settled rows under REPORT_OUTBOX, never
-# runnable work) and sent to the worker that runs the chat until that worker
-# takes it. The receiver records the report's stable id in its inbox, so a
-# retry after a lost reply wakes the chat once.
+# turn queued here for a chat that moved away would never run. A report the
+# chat here cannot take now is kept in this worker's outbox (settled rows under
+# REPORT_OUTBOX, never runnable work) and sent to the worker that runs the chat
+# until that worker takes it or passes it on. Only the worker that runs the
+# chat admits the report: in one transaction it rechecks ownership under the
+# session row lock the hand-off flips it under, queues the wake, and records
+# the report's stable id in its inbox (REPORT_INBOX). A retry after a lost
+# reply finds that id and wakes nobody twice; a worker that only passes the
+# report on keeps no receipt, so a report that comes back is still admitted.
 # ---------------------------------------------------------------------------
 
 FORWARD_REPORT_ACTION = "orchestration-report-forward"
@@ -2274,6 +2278,10 @@ REPORT_INBOX = "orchestration-report-inbox"
 _FORWARD_PENDING = "report_forward_pending"
 _FORWARD_REFUSED = "report_forward_refused"
 _RECEIVED = "report_received"
+# Outcomes of a local admission: the report is taken (woken now or kept on
+# the started chat for a parent at rest), or refused by policy for good.
+_DELIVERED = ("admitted", "steered", "deferred")
+_FINAL = ("suppressed", "refused", "gone")
 # A chat that keeps moving is followed this many workers, then refused.
 MAX_FORWARD_HOPS = 4
 _FORWARD_RETRY_SECONDS = (5, 15, 30, 60, 120, 300)
@@ -2305,13 +2313,14 @@ def _report_owner(home):
 
 
 def _owe_forward(home, device, frame, hops):
-    """Keep the report in the outbox. One row per report id; True when new."""
+    """Keep the report in the outbox. One pending row per report id; True when new."""
     from app.db import turns
     from app.db.base import transaction
     event_id = report_event_id(home, frame)
     with transaction() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s", (REPORT_OUTBOX, event_id))
+        cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s AND stop_reason=%s",
+                       (REPORT_OUTBOX, event_id, _FORWARD_PENDING))
         if cursor.fetchone():
             return False
         row = turns.enqueue_turn(REPORT_OUTBOX, "agent_message", command_id=event_id, payload={
@@ -2360,24 +2369,91 @@ def _settle_forward(row_id, *, delivered=False, refused=None, attempts=None, dev
         cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row_id))
 
 
-async def deliver_started_report(home, frame, *, hops=0):
+def admit_report(home, event_id, write):
+    """Admit a report for ``home`` here, once: ``write(conn)`` queues its wake.
+
+    One transaction: the session row lock (the hand-off flips ownership under
+    it), the ownership recheck, the inbox lookup, the write and the receipt.
+    Answers ``(verdict, row)``: ``written``, ``duplicate`` (admitted before),
+    ``moved`` (another worker runs ``home`` now), ``gone`` or ``unwritten``.
+    Without ``event_id`` (a report made here, never retried) no receipt is kept.
+    """
+    from app.db import turns
+    from app.db.base import transaction
+    from app.network import control
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (home,))
+        row = cursor.fetchone()
+        if row is None:
+            return "gone", None
+        if control.owner_of(dict(row)) is not None:
+            return "moved", None
+        if event_id:
+            cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s", (REPORT_INBOX, event_id))
+            if cursor.fetchone():
+                return "duplicate", None
+        written = write(conn)
+        if not written or not written.get("id") or written.get("state") not in (None, "queued"):
+            return "unwritten", written
+        if not event_id:
+            return "written", written
+        receipt = turns.enqueue_turn(REPORT_INBOX, "agent_message", command_id=event_id,
+                                     payload={"home": home, "turn_id": written["id"]}, _conn=conn)
+        cursor.execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW(), "
+                       "stop_reason=%s WHERE id=%s", (_RECEIVED, receipt["id"]))
+        return "written", written
+
+
+async def _admit_here(home, frame, event_id, *, steer):
+    """Wake ``home`` here if this worker runs it. Answers the outcome:
+    ``_DELIVERED``, ``_FINAL``, or ``moved``/``moving``/``failed`` to retry."""
+    import functools
+    from app.core import session_handoff, turn_scheduler
+    if session_handoff.pending_for(home) is not None:
+        return "moving"  # a move of this chat is under way here: wait for its outcome
+    if await asyncio.to_thread(_report_owner, home) is not None:
+        return "moved"
+    if not await asyncio.to_thread(_has_session, home):
+        return "gone"
+    return await turn_scheduler.on_started_session_terminal(
+        home, frame, steer=steer, admit=functools.partial(admit_report, home, event_id))
+
+
+async def deliver_started_report(home, frame, *, hops=0, steer=True, event_id=None):
     """Wake ``home`` with a started chat's report on the worker that runs it.
 
-    Here when this worker runs it; otherwise the report goes to the outbox and
-    is sent to its owner, so nothing is queued on a worker that does not run
-    the chat (#1443). Also the path of the mirror case: a started chat that
-    moved away reports from its new worker to the one that still runs ``home``.
+    Here when this worker runs it; otherwise, or when it cannot take it now,
+    the report goes to the outbox and is sent to its owner, so nothing is
+    queued on a worker that does not run the chat (#1443). Also the path of
+    the mirror case: a started chat that moved away reports from its new
+    worker to the one that still runs ``home``. Answers the local outcome, or
+    ``forwarded`` once the outbox holds it; at the hop limit a report for a
+    chat that moved on is ``refused``. A report another worker sent here
+    (``hops``) goes to the outbox only when the chat moved on: otherwise the
+    sender keeps it and retries.
     """
-    from app.core import turn_scheduler
+    # A report that came from another worker may be sent again: keep its id.
+    receipt = event_id or (report_event_id(home, frame) if hops else None)
+    outcome = await _admit_here(home, frame, receipt, steer=steer)
+    if outcome in _DELIVERED or outcome in _FINAL:
+        return outcome
+    if outcome != "moved" and hops:
+        return outcome  # this worker runs the chat but cannot take it now: the sender retries
+    if outcome == "moved" and hops >= MAX_FORWARD_HOPS:
+        log.warning("Report of started chat %s for %s not delivered: the chat keeps moving between workers",
+                    frame.get("task_id"), home)
+        return "refused"
     owner = await asyncio.to_thread(_report_owner, home)
-    if owner is None:
-        await turn_scheduler.on_started_session_terminal(home, frame)
-        return
-    if hops >= MAX_FORWARD_HOPS:
-        raise ValueError("The chat this report is for keeps moving between workers; report not delivered.")
     await asyncio.to_thread(_owe_forward, home, owner, frame, hops)
-    log.info("Report from started chat %s is for %s, which runs on %s: sending it there",
-             frame.get("task_id"), home, owner)
+    log.info("Report from started chat %s for %s (%s) kept to send to %s",
+             frame.get("task_id"), home, outcome, owner or "the worker that runs it")
+    _start_delivery()
+    return "forwarded"
+
+
+def _start_delivery():
+    """Send the outbox now, without waiting for the next sweep."""
     task = asyncio.create_task(deliver_forwarded_reports())
     _delivery_tasks.add(task)
     task.add_done_callback(_delivery_tasks.discard)
@@ -2389,14 +2465,13 @@ async def deliver_forwarded_reports(*, force=False):
     Run after each new report and from the remote report sweep (boot, then
     every 30 s). An unreachable or older owner is retried with backoff; a
     refusal is final and kept as ``report_forward_refused``. Returns how many
-    were delivered."""
+    were delivered or passed on."""
     async with _report_lock("outbox"):
         return await _deliver_forwarded_locked(force)
 
 
 async def _deliver_forwarded_locked(force):
     import time
-    from app.core import turn_scheduler
     from app.network import control
     delivered = 0
     for row in await asyncio.to_thread(pending_forwarded_reports):
@@ -2409,12 +2484,17 @@ async def _deliver_forwarded_locked(force):
         try:
             # Follow the chat if it moved again; back here, it wakes here.
             owner = await asyncio.to_thread(_report_owner, home)
-            if owner is None and await asyncio.to_thread(_has_session, home):
-                await turn_scheduler.on_started_session_terminal(home, frame)
-                await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
-                delivered += 1
+            if owner is None:
+                outcome = await _admit_here(home, frame, row["command_id"], steer=False)
+                if outcome in _DELIVERED:
+                    await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
+                    delivered += 1
+                elif outcome in _FINAL:
+                    await asyncio.to_thread(_settle_forward, row["id"], refused=outcome)
+                else:
+                    await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts)
                 continue
-            device = owner or device
+            device = owner
             body = {"home": home, "event_id": row["command_id"], "report": frame,
                     "hops": int(payload.get("hops") or 0) + 1}
             answer = await asyncio.wait_for(
@@ -2434,9 +2514,15 @@ async def _deliver_forwarded_locked(force):
                      frame.get("task_id"), home, exc or type(exc).__name__)
             await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts, device=device)
             continue
-        if isinstance(answer, dict) and answer.get("delivered") is True:
+        answer = answer if isinstance(answer, dict) else {}
+        if answer.get("delivered") is True or answer.get("forwarded") is True:
+            # Admitted there, or that worker's outbox holds it now.
             await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
             delivered += 1
+        elif answer.get("final") is True:
+            log.warning("Worker did not take the report of started chat %s for %s: %s",
+                        frame.get("task_id"), home, answer.get("outcome"))
+            await asyncio.to_thread(_settle_forward, row["id"], refused=str(answer.get("outcome") or "refused"))
         else:
             await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts, device=device)
     return delivered
@@ -2445,28 +2531,6 @@ async def _deliver_forwarded_locked(force):
 def _has_session(session_id):
     from app.db import sessions
     return sessions.get_session(session_id) is not None
-
-
-def _received(event_id):
-    from app.db.base import get_db
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s", (REPORT_INBOX, event_id))
-        return cursor.fetchone() is not None
-
-
-def _record_received(event_id, home, from_device):
-    from app.db import turns
-    from app.db.base import transaction
-    with transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s", (REPORT_INBOX, event_id))
-        if cursor.fetchone():
-            return
-        row = turns.enqueue_turn(REPORT_INBOX, "agent_message", command_id=event_id,
-                                 payload={"home": home, "from_device": from_device}, _conn=conn)
-        cursor.execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW(), "
-                       "stop_reason=%s WHERE id=%s", (_RECEIVED, row["id"]))
 
 
 def accept_forwarded_report(body, from_device):
@@ -2515,16 +2579,23 @@ def accept_forwarded_report(body, from_device):
 
 
 async def handle_forwarded_report(body, from_device):
-    """``orchestration-report-forward``: wake the chat here once per report id,
-    or forward it on when the chat moved again."""
+    """``orchestration-report-forward``: admit the report here once per report
+    id, or keep it to pass on when the chat moved again.
+
+    ``delivered`` only when the report is admitted here (now or before);
+    ``forwarded`` once this worker's outbox holds it; ``final`` for a refusal
+    by policy. Anything else (``retry``) leaves the sender's copy pending."""
     from app.db.async_database import run_sync
     home, frame, event_id, hops, _ = await run_sync(accept_forwarded_report, body, from_device)
     async with _report_lock("inbox"):
-        if await run_sync(_received, event_id):
-            return {"delivered": True, "duplicate": True}
-        await deliver_started_report(home, frame, hops=hops)
-        await run_sync(_record_received, event_id, home, from_device)
-    return {"delivered": True, "duplicate": False}
+        outcome = await deliver_started_report(home, frame, hops=hops, steer=False, event_id=event_id)
+    if outcome in _DELIVERED:
+        return {"delivered": True, "outcome": outcome}
+    if outcome == "forwarded":
+        return {"delivered": False, "forwarded": True}
+    if outcome in _FINAL:
+        return {"delivered": False, "final": True, "outcome": outcome}
+    return {"delivered": False, "retry": True, "outcome": outcome}
 
 
 def make_handler(supplier):
