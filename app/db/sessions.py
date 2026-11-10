@@ -1895,15 +1895,36 @@ def delete_session(session_id: str, *, expected_project_id: Optional[str] = None
     if conditional and deleted:
         _cleanup_working_set_ref(session_id, row=deleted)
         _cleanup_pending_wakeups(session_id)
+    if deleted:
+        _publish_owner_tombstone(session_id, deleted)
     return bool(deleted)
+
+
+def _publish_owner_tombstone(session_id: str, row: dict) -> None:
+    """The owner publishes its delete now, whoever signed the chat's record (#1308).
+
+    The owner-only scan retracts only records this worker signed. A chat that
+    arrived by hand-off still carries the previous owner's record until this
+    worker republishes it, so a delete before that published nothing and the
+    chat stayed on the other workers. Its own short transaction after the
+    delete commits: the delete's lock order has no network_state (N) step
+    after S. A chat the network never knew gets no tombstone. Best-effort.
+    """
+    try:
+        from app.network import control, engine
+
+        if control.owner_of(row) is None:
+            engine.record_after_commit("sessions", session_id)
+    except Exception:  # noqa: BLE001 — the delete itself has committed
+        logger.warning("Could not publish the deletion of session %s", session_id, exc_info=True)
 
 
 def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
     """The transaction of :func:`delete_session`.
 
-    Unconditional: returns whether the row was deleted. Conditional: returns
-    the deleted row (for post-commit cleanup), or None when the chat is gone
-    or now belongs to another project.
+    Returns the deleted row (for post-commit cleanup and the owner's
+    tombstone), or None when the chat is gone or, conditional, now belongs to
+    another project.
     """
     _ph = ph()
     with get_db() as conn:
@@ -1956,9 +1977,7 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
                 f"DELETE FROM {table} WHERE session_id = {_ph}", (session_id,)
             )
         cursor.execute(f"DELETE FROM sessions WHERE id = {_ph}", (session_id,))
-        if expected_project_id is not None:
-            return dict(row) if cursor.rowcount > 0 else None
-        return cursor.rowcount > 0
+        return dict(row) if cursor.rowcount > 0 else None
 
 
 def _cleanup_pending_wakeups(session_id: str) -> None:
