@@ -30,6 +30,57 @@ import {
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { STOP_SELECTOR, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
 
+// #1052: count, in every painted frame, where each needle shows (a pending
+// bubble or a transcript row). From its first sighting until the watch ends a
+// message must show exactly once: never twice, and never nowhere.
+async function watchExactlyOnce(page, needles) {
+	await page.evaluate((needles) => {
+		const started = performance.now();
+		const state = (window.__journeyOnce = { running: true, frames: 0, seen: {}, gaps: {}, twice: {} });
+		const tick = () => {
+			if (!state.running) return;
+			state.frames++;
+			const rows = [...document.querySelectorAll('[data-user-turn-id], .pending-messages [role="article"]')];
+			const at = Math.round(performance.now() - started);
+			for (const needle of needles) {
+				const count = rows.filter((el) => (el.textContent || '').includes(needle)).length;
+				if (count > 0 && state.seen[needle] === undefined) state.seen[needle] = at;
+				if (count === 0 && state.seen[needle] !== undefined) (state.gaps[needle] ||= []).push(at);
+				if (count > 1) (state.twice[needle] ||= []).push(at);
+			}
+			requestAnimationFrame(tick);
+		};
+		requestAnimationFrame(tick);
+	}, needles);
+	return () => page.evaluate(() => {
+		const state = window.__journeyOnce;
+		state.running = false;
+		const span = (list) => list && { frames: list.length, first: list[0], last: list[list.length - 1] };
+		return { frames: state.frames, seen: state.seen,
+			gaps: Object.fromEntries(Object.entries(state.gaps).map(([k, v]) => [k, span(v)])),
+			twice: Object.fromEntries(Object.entries(state.twice).map(([k, v]) => [k, span(v)])) };
+	});
+}
+
+// Type and send without per-key round trips, so sends land tens of ms apart.
+async function quickSend(page, text) {
+	const box = page.getByRole('textbox', { name: 'Message' });
+	await box.click();
+	await page.keyboard.insertText(text);
+	await page.getByRole('button', { name: 'Send', exact: true }).click();
+}
+
+function expectEachOnce(result, needles, log) {
+	log(`per-frame: ${JSON.stringify(result)}`);
+	for (const needle of needles) {
+		expect(result.seen[needle] !== undefined, `${needle} never showed`);
+		const gap = result.gaps[needle];
+		expect(!gap, `${needle} showed nowhere for ${gap?.frames} frames (${gap?.first}..${gap?.last}ms)`);
+		const twice = result.twice[needle];
+		expect(!twice, `${needle} showed twice for ${twice?.frames} frames (${twice?.first}..${twice?.last}ms)`);
+	}
+}
+
 await runJourney({
 	name: 'queue-while-busy',
 	recorder: { selectors: [STOP_SELECTOR, 'pending=.pending-messages [role="article"]'] },
@@ -72,6 +123,66 @@ await runJourney({
 			},
 			verify({ recording }) {
 				expectStopFollowsStreaming(recording, { from: markTime(recording, 'send the first') });
+			}
+		},
+		{
+			// #1052: three messages sent tens of ms apart into a running turn. Each
+			// queue snapshot can predate a later send; none may drop its bubble.
+			name: 'rapid-sends-each-show-once',
+			knownBug: {
+				issue: 1052,
+				error: /showed nowhere/,
+				reason: 'at delivery the WebSocket queue snapshot drops the row before the SSE message.user row renders, so the bubble is absent for a few frames'
+			},
+			intermittent: true,
+			async setup(ctx) {
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				await mark('send the first');
+				await typeAndSend(page, `first tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 10 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+
+				await mark('send three at once');
+				const needles = [`tok-${uniq()}`, `tok-${uniq()}`, `tok-${uniq()}`];
+				const done = await watchExactlyOnce(page, needles);
+				for (const needle of needles) await quickSend(page, `queued ${needle}`);
+				await page.waitForFunction((needles) => needles.every((n) =>
+					[...document.querySelectorAll('[data-user-turn-id]')].some((el) => (el.textContent || '').includes(n)))
+					&& !document.querySelector('.pending-messages [role="article"]'), needles, { timeout: 120_000 });
+				await waitChat(page, { streaming: 'false' }, { timeout: 90_000 });
+				expectEachOnce(await done(), needles, log);
+			}
+		},
+		{
+			// #1052 "rapid start": the second message goes out the moment the first
+			// shows as streaming, before any reply prose (the turn is still starting).
+			name: 'rapid-start-each-shows-once',
+			knownBug: {
+				issue: 1052,
+				error: /showed nowhere/,
+				reason: 'at delivery the WebSocket queue snapshot drops the row before the SSE message.user row renders, so the bubble is absent for a few frames'
+			},
+			intermittent: true,
+			async setup(ctx) {
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const first = `tok-${uniq()}`;
+				const second = `tok-${uniq()}`;
+				const done = await watchExactlyOnce(page, [first, second]);
+				await mark('send two at start');
+				await quickSend(page, `first ${first} ${scriptTag(variant, 'slow', { tps: 10 })}`);
+				await waitChat(page, { streaming: 'true' }, { timeout: 10_000 });
+				await quickSend(page, `second ${second}`);
+				await page.waitForFunction((needles) => needles.every((n) =>
+					[...document.querySelectorAll('[data-user-turn-id]')].some((el) => (el.textContent || '').includes(n)))
+					&& !document.querySelector('.pending-messages [role="article"]'), [first, second], { timeout: 120_000 });
+				await waitChat(page, { streaming: 'false' }, { timeout: 90_000 });
+				expectEachOnce(await done(), [first, second], log);
 			}
 		},
 		{
