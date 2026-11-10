@@ -17,6 +17,7 @@ from app.api import git_helpers
 from app.api.common import require_origin_access
 from app.core import project_resolver
 from app.db import checkouts, database
+from app.db import git_ops as git_ops_db
 from tests.shared_fixtures import LOCAL_ME as ME, pin_runner  # noqa: F401  (autouse fixture)
 
 
@@ -110,3 +111,56 @@ def test_cleanup_busy_check_sees_chats_on_either_identity(repo, monkeypatch):
     database.create_session("busy", "default", project_v2_id=placeholder["id"])
     monkeypatch.setattr(git_operations, "_session_is_busy", lambda sid: sid == "busy")
     assert git_operations._checkout_busy_session_ids(remote["id"], str(repo)) == ["busy"]
+
+
+# A session checkout still being created answers a coded 409 (#1342). The
+# first git/status of a new worktree chat on another worker can arrive before
+# that worker's queued ``ensure_worktree`` op has created the checkout; that
+# 409 carries ``error_code: checkout_preparing`` so the UI waits instead of
+# showing "Git unavailable". With no such op it stays the plain 409.
+
+PREPARING_SESSION = {"id": "s1", "project_v2_id": "pv2", "branch": "feature/x"}
+
+
+@pytest.fixture
+def no_checkout(monkeypatch):
+    monkeypatch.setattr(git_helpers.database, "get_session", lambda sid: dict(PREPARING_SESSION))
+    monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda session: None)
+    calls = []
+
+    def find_matching(runner_id, project_v2_id, op, branch=None):
+        calls.append((project_v2_id, op, branch))
+        return find_matching.row
+
+    find_matching.row = None
+    monkeypatch.setattr(git_ops_db, "find_matching", find_matching)
+    return find_matching, calls
+
+
+def test_queued_ensure_worktree_answers_checkout_preparing(no_checkout):
+    find_matching, calls = no_checkout
+    find_matching.row = {"id": "op1", "status": "queued"}
+    with pytest.raises(git_helpers.SessionCheckoutUnavailable) as exc:
+        git_helpers._resolve_working_dir("p", session_id="s1")
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error_code"] == git_helpers.CHECKOUT_PREPARING
+    assert isinstance(exc.value.detail["error"], str)
+    assert calls == [("pv2", "ensure_worktree", "feature/x")]
+
+
+def test_no_pending_op_keeps_the_plain_409(no_checkout):
+    with pytest.raises(git_helpers.SessionCheckoutUnavailable) as exc:
+        git_helpers._resolve_working_dir("p", session_id="s1")
+    assert exc.value.status_code == 409
+    assert isinstance(exc.value.detail, str)
+    assert "not available on this device" in exc.value.detail
+
+
+def test_a_failed_lookup_keeps_the_plain_409(no_checkout, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(git_ops_db, "find_matching", broken)
+    with pytest.raises(git_helpers.SessionCheckoutUnavailable) as exc:
+        git_helpers._resolve_working_dir("p", session_id="s1")
+    assert isinstance(exc.value.detail, str)

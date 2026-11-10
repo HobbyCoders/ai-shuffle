@@ -391,6 +391,9 @@
 	const selectedWorkerTargetKey = $derived(workerGitTargetKey(activeTab));
 	const selectedWorkerTarget = $derived(workerGitTargetFromKey(selectedWorkerTargetKey));
 	const workerSetupPending = $derived(!!$newChatSetupNeed);
+	// A sent worktree draft whose chat is being created runs on a checkout that
+	// does not exist yet: the worker's main checkout is not its state (#1342).
+	const draftWorktreeCreating = $derived(!activeTab?.sessionId && $activeSession.isCreatingWorktree);
 	const activeWorktreeId = $derived(
 		!selectedWorkerTarget && (activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeWorktreeDeleted
 			? (activeTab.worktreeId ?? null)
@@ -461,7 +464,7 @@
 		const isRemote = activeIsRemote;
 		const workerTarget = selectedWorkerTarget;
 		const subagent = activeIsSubagent;
-		const setupPending = workerSetupPending;
+		const setupPending = workerSetupPending || draftWorktreeCreating;
 		// Track session ID so the effect re-fires on every tab switch,
 		// even when two sessions share the same project/worktree.
 		// This ensures git state is always fresh after a session change.
