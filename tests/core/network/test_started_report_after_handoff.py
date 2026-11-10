@@ -854,3 +854,87 @@ async def test_a_chat_without_report_receipts_still_moves_to_an_older_worker(pai
         assert _receipts() == []
     _as_older_receiver(monkeypatch)
     await _move_parent(a, b, monkeypatch)
+
+
+# ---------------------------------------------------------------------------
+# Review round 6: a starter absent here is not taken for a deleted one
+# ---------------------------------------------------------------------------
+
+def _mirror_child_on_b(a, b, monkeypatch):
+    """"boss" runs on A and started PARENT, which moved to B and settles there."""
+    with a.active():
+        database.create_session("boss", "default", title="Boss")
+        _working("boss")
+        start = turns.enqueue_turn(PARENT, "agent_message", prompt="do the work", profile_id="default",
+                                   command_id="orchestration:start:" + "d" * 64,
+                                   payload={"orchestration_sender": "boss", "orchestration_root": "root-turn",
+                                            "orchestration_depth": 1})
+        assert turns.start_turn(start["id"])
+        _settle(start)
+        engine.scan_all()
+    converge([a, b])
+    monkeypatch.setattr(control, "call", _route([a, b]))
+    return start
+
+
+@pytest.mark.asyncio
+async def test_a_starter_that_reaches_the_worker_late_is_not_woken_there(pair, monkeypatch):
+    """S12: B does not see "boss" when the moved chat settles, then sync
+    brings boss's row (A runs it). The report is never queued on B; it waits
+    in B's outbox and is admitted on A."""
+    a, b, _, _ = pair
+    _mirror_child_on_b(a, b, monkeypatch)
+    real_owner, real_has = orch._report_owner, orch._has_session
+    unseen = {"owner": True, "has": True}
+
+    def on_b(name):
+        # Only B's first look misses boss's row; sync lands it right after.
+        if engine.require_context().device_id == b.device_id and unseen[name]:
+            unseen[name] = False
+            return True
+        return False
+    monkeypatch.setattr(orch, "_report_owner",
+                        lambda sid: None if sid == "boss" and on_b("owner") else real_owner(sid))
+    monkeypatch.setattr(orch, "_has_session",
+                        lambda sid: False if sid == "boss" and on_b("has") else real_has(sid))
+    unreachable = set()
+    monkeypatch.setattr(control, "call", _route([a, b], unreachable=unreachable))
+    with b.active():
+        await handoff.receive(database.get_session(PARENT))
+        _working(PARENT)
+        work = turns.enqueue_turn(PARENT, "agent_message", prompt="more", profile_id="default",
+                                  payload={"orchestration_sender": "boss"})
+        assert turns.start_turn(work["id"])
+        unreachable.add(a.device_id)
+        await orch.report_settled_start(PARENT, _settle(work), "completed")
+        assert _all_reports("boss") == []
+        assert len(orch.pending_forwarded_reports()) == 1
+        unreachable.clear()
+        await orch.deliver_forwarded_reports(force=True)
+        assert _all_reports("boss") == []
+        assert orch.pending_forwarded_reports() == []
+    with a.active():
+        [wake] = _reports("boss")
+        assert wake["payload"]["pending_frames"][0]["task_id"] == PARENT
+
+
+@pytest.mark.asyncio
+async def test_a_report_for_a_starter_not_synced_here_waits_until_it_arrives(pair, monkeypatch):
+    """S12: a starter absent here and unknown to sync stays retryable; it is
+    neither woken here nor deferred as deleted."""
+    a, b, _, _ = pair
+    _mirror_child_on_b(a, b, monkeypatch)
+    with b.active():
+        await handoff.receive(database.get_session(PARENT))
+        _working(PARENT)
+        with get_db() as conn:  # B has not heard of boss yet
+            conn.cursor().execute("DELETE FROM sessions WHERE id='boss'")
+            conn.cursor().execute("DELETE FROM sync_records WHERE collection='sessions' AND record_id='boss'")
+        work = turns.enqueue_turn(PARENT, "agent_message", prompt="more", profile_id="default",
+                                  payload={"orchestration_sender": "boss"})
+        assert turns.start_turn(work["id"])
+        await orch.report_settled_start(PARENT, _settle(work), "completed")
+        await orch.deliver_forwarded_reports(force=True)
+        [kept] = orch.pending_forwarded_reports()
+        assert kept["payload"]["home"] == "boss"
+        assert _deferred_events("boss") == []

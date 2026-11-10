@@ -2475,10 +2475,7 @@ async def deliver_started_report(home, frame, *, hops=0, steer=False, event_id=N
     receipt = event_id or report_event_id(home, frame)
     outcome = await _admit_here(home, frame, receipt, steer=steer)
     if outcome == "gone" and not hops:
-        # A deleted starter keeps the report on its child, as before #1443:
-        # a deleted chat runs on no worker, so nothing guards its ownership.
-        from app.core import turn_scheduler
-        return await turn_scheduler.on_started_session_terminal(home, frame)
+        outcome = await _absent_starter(home, frame)
     if outcome in _DELIVERED or outcome in _FINAL:
         return outcome
     if outcome != "moved" and hops:
@@ -2529,6 +2526,8 @@ async def _deliver_forwarded_locked(force):
             owner = await asyncio.to_thread(_report_owner, home)
             if owner is None:
                 outcome = await _admit_here(home, frame, row["command_id"], steer=False)
+                if outcome == "gone" and not int(payload.get("hops") or 0):
+                    outcome = await _absent_starter(home, frame)
                 if outcome in _DELIVERED:
                     await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
                     delivered += 1
@@ -2574,6 +2573,41 @@ async def _deliver_forwarded_locked(force):
 def _has_session(session_id):
     from app.db import sessions
     return sessions.get_session(session_id) is not None
+
+
+def _starter_deleted(session_id):
+    """True when ``session_id``, absent here, was deleted, not merely not
+    synced here yet. The sync engine's rule (``engine`` event reservation):
+    a deletion mark, or ``sync_records`` knowing a chat whose row is gone
+    (sessions have no undelete). Without a network nothing can bring it."""
+    from app.db.base import get_db
+    from app.db.session_locks import deleted_sessions
+    from app.network import engine
+    if _has_session(session_id):
+        return False
+    if deleted_sessions([session_id]) or engine.context() is None:
+        return True
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM sync_records WHERE collection='sessions' AND record_id=%s", (session_id,))
+        return cursor.fetchone() is not None
+
+
+async def _absent_starter(home, frame):
+    """A report of a chat this worker holds for a starter absent here.
+
+    Deleted: the report stays on the child (``orchestration.report_deferred``),
+    as before #1443, and nothing is woken. Otherwise the starter has not
+    reached this worker yet, or came back: ``retry``, so the report waits in
+    the outbox and goes through guarded admission or forwarding later."""
+    from app.core import turn_scheduler
+    if not await asyncio.to_thread(_starter_deleted, home):
+        return "retry"
+    async with turn_scheduler._terminal_delivery_lock(home):
+        await record_started_report(home, frame)
+        if await defer_started_report(home, frame):
+            return "deferred"
+    return "retry"
 
 
 def accept_forwarded_report(body, from_device):
