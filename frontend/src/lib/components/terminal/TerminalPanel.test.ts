@@ -678,4 +678,17 @@ describe('peer workers', () => {
 		expect(tabs).toMatch(/overflow-x:\s*auto/);
 		expect(tabs).not.toMatch(/flex-shrink:\s*0/);
 	});
+
+	it('keeps a long shell name clear of the tab\'s close button', () => {
+		// "powershell" could not shrink and ran 23-29 px under the close button
+		// in a 96 px tab. The journey checks the real bounds with that name.
+		const source = readFileSync('src/lib/components/terminal/TerminalPanel.svelte', 'utf8');
+		const shell = source.match(/\n\t\.tab-shell\s*\{([^}]*)\}/)?.[1] ?? '';
+		expect(shell).toMatch(/min-width:\s*0/);
+		expect(shell).toMatch(/text-overflow:\s*ellipsis/);
+		expect(shell).not.toMatch(/flex-shrink:\s*0/);
+		// A narrow panel sizes each tab to its name rather than squeezing it.
+		const narrow = source.match(/@container \(max-width: 420px\) \{([\s\S]*?)\n\t\}/)?.[1] ?? '';
+		expect(narrow).toMatch(/\n\t\t\.tab\s*\{[^}]*flex:\s*0 0 auto/);
+	});
 });
