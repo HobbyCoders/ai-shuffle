@@ -37,37 +37,29 @@ import { openStopChat, watchStopFrames } from './lib/stop-queue.mjs';
 async function watchExactlyOnce(page, needles) {
 	await page.evaluate((needles) => {
 		const started = performance.now();
-		const state = (window.__journeyOnce = { running: true, frames: 0, seen: {}, gaps: {}, twice: {} });
-		const counts = () => {
-			const rows = [...document.querySelectorAll('[data-user-turn-id], .pending-messages [role="article"]')];
-			return needles.map((needle) => rows.filter((el) => (el.textContent || '').includes(needle)).length);
-		};
-		// A frame is judged on two reads: one in its animation-frame callback and one
-		// in a task right after its paint. The transcript publishes a delivered row in
-		// an animation-frame callback of its own, which can run after this one, so the
-		// first read alone can see a bubble gone and its row not yet there in a state
-		// that is never painted. Only a state both reads agree on counts.
-		let before = null;
-		let at = 0;
-		const painted = new MessageChannel();
-		painted.port1.onmessage = () => {
-			if (!state.running || !before) return;
-			const after = counts();
-			needles.forEach((needle, i) => {
-				const most = Math.max(before[i], after[i]);
-				const least = Math.min(before[i], after[i]);
-				if (most > 0 && state.seen[needle] === undefined) state.seen[needle] = at;
-				if (most === 0 && state.seen[needle] !== undefined) (state.gaps[needle] ||= []).push(at);
-				if (least > 1) (state.twice[needle] ||= []).push(at);
-			});
-			before = null;
-		};
+		const state = (window.__journeyOnce = { running: true, frames: 0, sampled: 0, seen: {}, gaps: {}, twice: {} });
+		// Each frame is judged on the state it paints. A ResizeObserver's first
+		// callback runs inside that frame's rendering step, after every animation
+		// frame callback (the transcript publishes rows from one of its own) and
+		// after layout, so a fresh observer per frame reads what is about to paint.
+		// Every sample is its own record; a frame without one fails the watch.
 		const tick = () => {
 			if (!state.running) return;
-			state.frames++;
-			before = counts();
-			at = Math.round(performance.now() - started);
-			painted.port2.postMessage(0);
+			const frame = state.frames++;
+			const at = Math.round(performance.now() - started);
+			const observer = new ResizeObserver(() => {
+				observer.disconnect();
+				if (!state.running) return;
+				state.sampled++;
+				const rows = [...document.querySelectorAll('[data-user-turn-id], .pending-messages [role="article"]')];
+				for (const needle of needles) {
+					const count = rows.filter((el) => (el.textContent || '').includes(needle)).length;
+					if (count > 0 && state.seen[needle] === undefined) state.seen[needle] = at;
+					if (count === 0 && state.seen[needle] !== undefined) (state.gaps[needle] ||= []).push(at);
+					if (count > 1) (state.twice[needle] ||= []).push(at);
+				}
+			});
+			observer.observe(document.documentElement);
 			requestAnimationFrame(tick);
 		};
 		requestAnimationFrame(tick);
@@ -76,10 +68,43 @@ async function watchExactlyOnce(page, needles) {
 		const state = window.__journeyOnce;
 		state.running = false;
 		const span = (list) => list && { frames: list.length, first: list[0], last: list[list.length - 1] };
-		return { frames: state.frames, seen: state.seen,
+		return { frames: state.frames, sampled: state.sampled, seen: state.seen,
 			gaps: Object.fromEntries(Object.entries(state.gaps).map(([k, v]) => [k, span(v)])),
 			twice: Object.fromEntries(Object.entries(state.twice).map(([k, v]) => [k, span(v)])) };
 	});
+}
+
+// The watcher must catch a one-frame gap and a one-frame duplicate however the
+// page orders its own animation frame callbacks around the watcher's. A probe
+// row goes missing for one frame, then shows twice for one frame, each change
+// made from an animation frame callback that runs after the watcher's.
+async function expectWatcherCatchesOneFrame(page, log) {
+	const needle = `probe-${uniq()}`;
+	const done = await watchExactlyOnce(page, [needle]);
+	await page.evaluate((needle) => new Promise((resolve) => {
+		const row = () => {
+			const el = document.createElement('div');
+			el.setAttribute('data-user-turn-id', 'journey-probe');
+			el.textContent = needle;
+			el.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;overflow:hidden';
+			return document.body.appendChild(el);
+		};
+		const first = row();
+		let extra = null;
+		const steps = [
+			() => {}, () => {}, () => first.remove(), () => document.body.appendChild(first),
+			() => {}, () => { extra = row(); }, () => extra.remove(), () => {}, () => {}, resolve
+		];
+		let i = 0;
+		const step = () => { steps[i++](); if (i < steps.length) requestAnimationFrame(step); };
+		// Started from a timer, so its callbacks queue after the watcher's in each frame.
+		setTimeout(() => requestAnimationFrame(step), 0);
+	}), needle);
+	const result = await done();
+	await page.evaluate(() => document.querySelectorAll('[data-user-turn-id="journey-probe"]').forEach((el) => el.remove()));
+	log(`watcher probe: ${JSON.stringify(result)}`);
+	expect(result.gaps[needle]?.frames === 1, `the watcher saw the probe's one-frame gap (${JSON.stringify(result.gaps)})`);
+	expect(result.twice[needle]?.frames === 1, `the watcher saw the probe's one-frame duplicate (${JSON.stringify(result.twice)})`);
 }
 
 // Type and send without per-key round trips, so sends land tens of ms apart.
@@ -92,6 +117,8 @@ async function quickSend(page, text) {
 
 function expectEachOnce(result, needles, log) {
 	log(`per-frame: ${JSON.stringify(result)}`);
+	// The last frame can end the watch before its sample runs; no other may.
+	expect(result.sampled >= result.frames - 1, `every watched frame was sampled (${result.sampled} of ${result.frames})`);
 	for (const needle of needles) {
 		expect(result.seen[needle] !== undefined, `${needle} never showed`);
 		const gap = result.gaps[needle];
@@ -159,6 +186,7 @@ export const journey = {
 				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
 				await waitChat(page, { streaming: 'true' });
 
+				await expectWatcherCatchesOneFrame(page, log);
 				await mark('send three at once');
 				const needles = [`tok-${uniq()}`, `tok-${uniq()}`, `tok-${uniq()}`];
 				const done = await watchExactlyOnce(page, needles);
