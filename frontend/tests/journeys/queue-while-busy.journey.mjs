@@ -29,6 +29,7 @@ import {
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { STOP_SELECTOR, expectStopFollowsStreaming, markTime } from './lib/timeline.mjs';
+import { openStopChat, watchStopFrames } from './lib/stop-queue.mjs';
 
 // #1052: count, in every painted frame, where each needle shows (a pending
 // bubble or a transcript row). From its first sighting until the watch ends a
@@ -183,6 +184,55 @@ await runJourney({
 					&& !document.querySelector('.pending-messages [role="article"]'), [first, second], { timeout: 120_000 });
 				await waitChat(page, { streaming: 'false' }, { timeout: 90_000 });
 				expectEachOnce(await done(), [first, second], log);
+			}
+		},
+		{
+			// #1110: messages queued before the reply's first text. That text arrives
+			// above the bubbles; they must not be pushed down by it with no input.
+			name: 'queue-before-the-first-text-keeps-the-bubbles-still',
+			async setup(ctx) {
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				await mark('send the first');
+				await typeAndSend(page, `first tok-${uniq()} [script:slow latency_ms=4000 tps=300]`);
+				await waitChat(page, { streaming: 'true' });
+				// Watch from before the queue: the first text can come while the second is typed.
+				// Frames count once both bubbles show; typing's own shifts have recent input.
+				await page.evaluate(() => {
+					const scores = (window.__bubbleShifts = []);
+					new PerformanceObserver((list) => {
+						for (const entry of list.getEntries()) {
+							if (entry.hadRecentInput) continue;
+							if (entry.sources.some((s) => s.node?.closest?.('.pending-messages'))) scores.push(Math.round(entry.value * 1000) / 1000);
+						}
+					}).observe({ type: 'layout-shift' });
+				});
+				const texts = [`tok-${uniq()}`, `tok-${uniq()}`];
+				const collect = await watchStopFrames(page, texts);
+				await mark('queue before the text');
+				for (const text of texts) {
+					await typeAndSend(page, `queued ${text}`);
+					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
+				}
+				expect((await page.getByText(SLOW_REPLY.start, { exact: false }).count()) === 0, 'both were queued before the first text');
+				await mark('the first text arrives');
+				await page.getByText(SLOW_REPLY.end, { exact: false }).first().waitFor({ timeout: 60_000 });
+				const frames = (await collect()).filter((f) => f.messages.every((m) => m.bubbles === 1));
+				expect(new Set(frames.map((f) => f.replyHeight)).size > 1, `the reply started while both bubbles were watched (${frames.length} frames)`);
+				const scores = await page.evaluate(() => window.__bubbleShifts);
+				const steps = frames.filter((f, i) => i === 0 || f.messages[0].top !== frames[i - 1].messages[0].top);
+				log(`bubble top by time: ${steps.map((f) => `${f.at}ms ${f.messages[0].top} (scrollTop ${f.scrollTop}, reply ${f.replyHeight})`).join(', ')}`);
+				log(`bubble shift scores: ${JSON.stringify(scores)}`);
+				expect(frames.length > 5, `watched the bubbles while the reply started (${frames.length} frames)`);
+				frames.forEach((frame, i) => frame.messages.forEach((message, m) => {
+					const previous = frames[i - 1]?.messages[m];
+					if (!previous || Math.abs(frame.composerTop - frames[i - 1].composerTop) >= 1) return;
+					const moved = Math.abs(message.top - previous.top);
+					expect(moved <= 1, `queued message ${m} stayed put as the reply started: moved ${moved}px in frame ${i} (${frame.at}ms)`);
+				}));
+				expect(scores.length === 0, `the reply's first text did not shift the bubbles: ${JSON.stringify(scores)}`);
 			}
 		},
 		{
