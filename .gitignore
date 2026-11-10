@@ -62,6 +62,10 @@ logs/
 docker-compose.override.yml
 /.claude/*
 !/.claude/.progress
+# The repair skill ships for Claude Code; .agents/skills holds the same file for Codex.
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/fix-ai-shuffle/
 /.remember
 Claude Code.bat
 

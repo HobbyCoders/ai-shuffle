@@ -102,7 +102,11 @@ class ProfileConfig(BaseModel):
     system_prompt: Optional[SystemPromptConfig] = None
 
     # Streaming behavior
-    include_partial_messages: bool = False  # Enable streaming partial messages
+    # Live (streamed) replies. On unless an agent turned it off: this default
+    # must match the run path (``query_options``: ``config.get(..., True)``),
+    # because the read API fills a missing key from here and an editor that
+    # saves what it read would otherwise store an explicit off.
+    include_partial_messages: bool = True
 
     # Session behavior
     continue_conversation: bool = False  # Continue most recent conversation
@@ -274,7 +278,9 @@ class ProjectCreate(ProjectBase):
 
 class ProjectUpdate(BaseModel):
     """Project update request"""
-    name: Optional[str] = None
+    # Same limits as ``ProjectBase.name``: a name the create route would refuse
+    # must not be storable through an update either. ``None`` leaves it alone.
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = None
     path: Optional[str] = None
     settings: Optional[ProjectSettings] = None
@@ -282,6 +288,11 @@ class ProjectUpdate(BaseModel):
 
 class Project(ProjectBase):
     """Full project response"""
+    # A response reports what is stored. The length limits belong to the
+    # requests that write a name; enforcing them here turned one out-of-range
+    # row (an older build, or a peer's row arriving through sync) into a 500
+    # for the whole project list.
+    name: str
     id: str
     path: str
     settings: ProjectSettings

@@ -147,6 +147,10 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert jobs["backend"]["name"] == "Backend tests"
     assert jobs["backend"]["if"] == "always()"
     assert set(jobs["backend"]["needs"]) == {"backend-shard", "backend-contracts", "backend-security"}
+    # After the gate passes on a pull request, "record" leaves a pass record for main-suite.
+    record = jobs.pop("record")
+    assert record["needs"] == ["backend"] and record["uses"] == "./.github/workflows/record-pass.yml"
+    assert record["if"].startswith("needs.backend.result == 'success' && github.event_name == 'pull_request'")
     assert set(jobs) == {"backend", "backend-shard", "backend-contracts", "backend-security"}
     assert all(job["runs-on"] == "ubuntu-latest" for job in jobs.values())
     assert all("continue-on-error" not in json.dumps(job) for job in jobs.values())
@@ -194,12 +198,13 @@ def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional()
         assert len(uploads) == 1 and uploads[0]["if"] == "always()"
 
 
-def test_large_fold_ratchets_repeat_on_main_but_controls_run_once():
+def test_large_fold_ratchets_repeat_everywhere_but_controls_run_once():
     steps = workflow()["jobs"]["backend-security"]["steps"]
     step = next(s for s in steps if s.get("name") == "Measure large-fold contention on both databases")
     assert "if" not in step and "continue-on-error" not in step
     assert step["env"]["AI_SHUFFLE_TRANSCRIPT_PRODUCER"] == "1"
-    assert step["env"]["CONTENTION_ATTEMPTS"] == "${{ github.ref == 'refs/heads/main' && '5' || '1' }}"
+    # The same on a pull request and on main: main may skip backend on a pull request's record.
+    assert step["env"]["CONTENTION_ATTEMPTS"] == "5"
     run = step["run"]
     assert 'for attempt in $(seq 1 "$CONTENTION_ATTEMPTS"); do' in run
     assert 'selection=()' in run

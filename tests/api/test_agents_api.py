@@ -2283,6 +2283,76 @@ class TestNewAgentsStreamByDefault:
         # Same contract on the way out: absent means on, not off.
         assert AgentExportData(name="Mine").include_partial_messages is True
 
+    @staticmethod
+    def _runs_streaming(agent_id):
+        """What a turn does: the run path (``app.core.query_options``) reads the
+        stored config with a default of on."""
+        from app.db import database
+
+        return database.get_profile(agent_id)["config"].get("include_partial_messages", True)
+
+    def test_an_agent_with_no_saved_setting_reads_as_it_runs(self, authenticated_client):
+        """#1314: the read API reported such an agent as not streaming while
+        it ran streaming, so the editor showed the switch off."""
+        from app.db import database
+
+        database.create_profile("no-setting", "No setting", None, {"model": "opus"})
+        assert self._runs_streaming("no-setting") is True
+
+        detail = authenticated_client.get("/api/v1/agents/no-setting")
+        assert detail.status_code == 200
+        assert detail.json()["config"]["include_partial_messages"] is True
+        listed = {row["id"]: row for row in authenticated_client.get("/api/v1/agents").json()}
+        assert listed["no-setting"]["config"]["include_partial_messages"] is True
+
+    def test_reading_then_saving_an_agent_keeps_live_replies_on(self, authenticated_client):
+        """#1314: writing back what the read API returned stored an explicit
+        off, and the agent's replies stopped arriving until the turn ended."""
+        from app.db import database
+
+        database.create_profile("round-trip", "Round trip", None, {"model": "opus"})
+        read = authenticated_client.get("/api/v1/agents/round-trip").json()
+
+        saved = authenticated_client.put("/api/v1/agents/round-trip", json={
+            "name": read["name"], "description": read["description"], "config": read["config"],
+        })
+
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["config"]["include_partial_messages"] is True
+        assert self._runs_streaming("round-trip") is True
+
+    def test_saving_an_agent_without_the_setting_keeps_live_replies_on(self, authenticated_client):
+        """A create or update that never mentions the setting must not store
+        an explicit off either."""
+        created = authenticated_client.post("/api/v1/agents", json={
+            "id": "api-made", "name": "API made", "config": {"model": "opus"},
+        })
+        assert created.status_code == 201, created.text
+        assert created.json()["config"]["include_partial_messages"] is True
+        assert self._runs_streaming("api-made") is True
+
+        updated = authenticated_client.put("/api/v1/agents/api-made", json={
+            "config": {"model": "opus", "max_turns": 5},
+        })
+        assert updated.status_code == 200, updated.text
+        assert self._runs_streaming("api-made") is True
+
+    def test_an_agent_that_turned_live_replies_off_stays_off(self, authenticated_client):
+        """The default must not override a stated choice."""
+        from app.db import database
+
+        database.create_profile("opted-out", "Opted out", None, {
+            "model": "opus", "include_partial_messages": False,
+        })
+        read = authenticated_client.get("/api/v1/agents/opted-out").json()
+        assert read["config"]["include_partial_messages"] is False
+
+        saved = authenticated_client.put("/api/v1/agents/opted-out", json={"config": read["config"]})
+
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["config"]["include_partial_messages"] is False
+        assert self._runs_streaming("opted-out") is False
+
 
 # =============================================================================
 # Invoke-grant mode (agent_invoke_mode, ruling A10 addendum 2026-08-16)

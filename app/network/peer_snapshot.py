@@ -539,11 +539,14 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
     deferred = set(manifest.get("deferred") or ()) if manifest.get("format") == FORMAT_DEFERRED else set()
     pages = manifest["pages"]
     # Preflight every immutable page before touching records or watermarks.
-    offsets, finished = {}, set()
+    offsets, finished, deletes = {}, set(), {}
     for index, expected in enumerate(pages):
         chunk = _read_page(directory, index, expected)
         body = engine.open_snapshot_chunk(chunk, ctx=trusted)
         collection = body["collection"]
+        if collection == "connectors":
+            deletes[index] = [{**item, "collection": collection} for item in body["items"]
+                              if isinstance(item, dict) and item.get("deleted")]
         if (body["device_id"] != publisher or collection in finished or collection in deferred
                 or body["offset"] != offsets.get(collection, 0)
                 or any(chunk[key] != expected[key] for key in ("collection", "offset", "count", "more"))
@@ -574,14 +577,20 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
                 # Context mutations stay private until the copy is applied.
                 trusted.members = copy.deepcopy(current.members)
                 trusted.generation = current.generation
-            items = 0
-            while index < len(pages) and (items == 0 or items + int(pages[index]["count"]) <= APPLY_BATCH_ITEMS):
+            end, items = index, 0
+            while end < len(pages) and (items == 0 or items + int(pages[end]["count"]) <= APPLY_BATCH_ITEMS):
+                items += int(pages[end]["count"]) or 1
+                end += 1
+            # Before any page: an API key's delete on an earlier page writes its
+            # connector's row (ON DELETE SET NULL), and the connector's delete
+            # takes its lock after that otherwise (#1399).
+            engine._lock_deleted_connectors(cursor, (item for i in range(index, end) for item in deletes.get(i, ())))
+            while index < end:
                 chunk = _read_page(directory, index, pages[index])
                 page_touched = []
                 applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched)
                 touched.extend(t for t in page_touched if t[0] == "provider_billing" or
                                (t[0] == "system_settings" and t[1].startswith("provider_observation:")))
-                items += int(pages[index]["count"]) or 1
                 index += 1
             if index >= len(pages):
                 # Only once every page is in: the frontier, and what is still owed.
