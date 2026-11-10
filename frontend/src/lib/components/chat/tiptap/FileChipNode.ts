@@ -196,6 +196,7 @@ export const FileChipNode = Node.create({
 			dom.setAttribute('data-file-chip', '');
 			dom.setAttribute('data-path', attrs.path);
 			dom.setAttribute('data-type', attrs.type);
+			if (attrs.noteId) dom.setAttribute('data-note-id', attrs.noteId);
 			dom.contentEditable = 'false';
 
 			// Icon or thumbnail
@@ -247,7 +248,7 @@ export const FileChipNode = Node.create({
 					// Returning false forces ProseMirror to destroy and recreate the
 					// node view, preventing one chip from displaying another's data
 					// during editor reconciliation after rapid sequential insertions.
-					if (newAttrs.path !== attrs.path) {
+					if (newAttrs.path !== attrs.path || newAttrs.noteId !== attrs.noteId) {
 						return false;
 					}
 					nameSpan.textContent = newAttrs.filename;
