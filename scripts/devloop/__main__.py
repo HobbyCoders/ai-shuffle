@@ -587,7 +587,8 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
     if not args.no_vite:
         _ensure_frontend()
-    stopped, restart = threading.Event(), threading.Event()
+    # stopped is set from a signal handler: lock-free, not threading.Event (#1317).
+    stopped, restart = runtime.StopFlag(), threading.Event()
     gate = RestartGate(restart)
     holder: dict[str, Instance] = {}
 

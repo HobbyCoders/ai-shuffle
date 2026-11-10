@@ -140,7 +140,9 @@ class Benchmark:
         self.lock = threading.Lock()
         self.sessions = set()
         self.rows = []
-        self.stopped = threading.Event()
+        # A list, not an Event: the signal handler only appends, so a second
+        # signal landing inside the first handler cannot wait on a lock (#1317).
+        self.stopped = []
         self.model = None
         self.revision = None
         self.capability = None
@@ -208,7 +210,7 @@ class Benchmark:
 
     def one(self, job):
         task, config, repetition = job
-        if self.stopped.is_set():
+        if self.stopped:
             return
         c = self.client()
         sid = None
@@ -239,7 +241,7 @@ class Benchmark:
                     self.sessions.add(sid)
                     self.write_journal()
                 deadline = time.monotonic() + self.args.timeout
-                while not self.stopped.is_set() and time.monotonic() < deadline:
+                while not self.stopped and time.monotonic() < deadline:
                     s = c.session(sid)
                     messages = s.get("messages") or []
                     replied = any(m.get("role") == "assistant" and m.get("content")
@@ -327,9 +329,9 @@ class Benchmark:
                 if (t["id"], c, r) not in completed]
         random.Random(self.args.seed).shuffle(jobs)
         def stop(*_):
-            self.stopped.set()
+            self.stopped.append(1)
         old = {s: signal.signal(s, stop) for s in (signal.SIGINT, signal.SIGTERM)}
-        timer = threading.Timer(self.args.max_seconds, self.stopped.set)
+        timer = threading.Timer(self.args.max_seconds, self.stopped.append, args=(1,))
         timer.daemon = True
         timer.start()
         try:
@@ -340,7 +342,7 @@ class Benchmark:
             self.cleanup()
             for s, handler in old.items():
                 signal.signal(s, handler)
-        return 1 if self.sessions or self.stopped.is_set() else 0
+        return 1 if self.sessions or self.stopped else 0
 
 
 def main():

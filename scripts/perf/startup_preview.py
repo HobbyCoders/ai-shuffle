@@ -21,7 +21,8 @@ def main() -> int:
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535 or args.port in (8000, 8001, 8002):
         parser.error("choose a private preview port, never the live worker")
-    stopped, restart = threading.Event(), threading.Event()
+    # stopped is set from a signal handler: lock-free, not threading.Event (#1317).
+    stopped, restart = runtime.StopFlag(), threading.Event()
 
     def stop(*_):
         stopped.set()
