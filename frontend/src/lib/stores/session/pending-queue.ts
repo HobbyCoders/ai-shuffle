@@ -119,7 +119,7 @@ interface Delivery {
 	seq: number;
 	/** The delivered command, when the receipt carries one: it then answers only its own bubble. */
 	commandId?: string;
-	/** The delivered turn: a drained row's id IS its turn id, so it answers that row only. */
+	/** Set on the message that opened this turn: a drained row's id IS its turn id, so it answers that row only. */
 	turnId?: string;
 	/** The entry this delivery retired — a delivery answers exactly one bubble. */
 	matchedEntryId: string | null;
@@ -462,6 +462,10 @@ export const pendingQueue = {
 		createdAt?: string
 	): void {
 		useSession(id);
+		// Only the message that OPENS a turn names a queue row by turn id. A later
+		// one with the same id was steered into that running turn: it names no row
+		// of its own, so it must stay free to retire its bubble by text.
+		const opensTurn = !!turnId && !deliveredTurnIds.has(turnId);
 		if (turnId) deliveredTurnIds.add(turnId);
 		if (commandId) {
 			this.acknowledgeSend(id, commandId);
@@ -481,7 +485,7 @@ export const pendingQueue = {
 		}
 		const text = normalize(content);
 		if (!text && !commandId) return;
-		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}), ...(turnId ? { turnId } : {}) });
+		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}), ...(opensTurn ? { turnId } : {}) });
 		// A long session delivers a lot of messages and only the recent ones can
 		// still be answering something pending. Forgetting the oldest only ever
 		// makes pruning more conservative.

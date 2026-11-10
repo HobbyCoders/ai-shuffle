@@ -699,8 +699,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					}));
 				} else if (optimisticQueuedId) {
 					pendingQueue.noteOptimistic(_state.sessionId, optimisticQueuedId);
-					pendingQueue.trackSend(_state.sessionId, { id: optimisticQueuedId, clientMessageId,
-						content: prompt, queuedAt: Date.now() }, () => {
+					// One entry for the bubble and for the copy a later snapshot rebuilds
+					// it from, so its chips show before and after an unrelated snapshot.
+					const sentPaths = pendingQueue.sendUploadPaths(clientMessageId);
+					const queuedEntry = { id: optimisticQueuedId, clientMessageId, content: prompt, queuedAt: Date.now(),
+						...(sentPaths.length ? { uploadPaths: sentPaths } : {}) };
+					pendingQueue.trackSend(_state.sessionId, queuedEntry, () => {
 						update(s => s.sessionId === _state.sessionId ? { ...s,
 							queuedMessages: s.queuedMessages.map(m => m.clientMessageId === clientMessageId ? { ...m, unconfirmed: true } : m),
 							error: 'Sending was not confirmed. Unsend this message to recover the text and try again.',
@@ -709,15 +713,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					update(s => ({
 						...s,
 						// A compact retry reuses the command id of a send still shown unconfirmed.
-						queuedMessages: [...s.queuedMessages.filter(m => m.id !== optimisticQueuedId), {
-							id: optimisticQueuedId,
-							clientMessageId,
-							content: prompt,
-							queuedAt: Date.now(),
-							// The bubble shows its chips before the queue snapshot arrives.
-							...(uploadsMetadata(options?.pendingUploadPaths, options?.pendingUploadReferences).metadata
-								? { uploadPaths: pendingQueue.sendUploadPaths(clientMessageId) } : {}),
-						}],
+						queuedMessages: [...s.queuedMessages.filter(m => m.id !== optimisticQueuedId), queuedEntry],
 						error: null,
 						localSendIntent: localSendIntent(s),
 					}));

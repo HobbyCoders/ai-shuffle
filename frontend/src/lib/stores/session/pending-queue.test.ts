@@ -720,6 +720,23 @@ describe('pendingQueue — a delivered row keeps its bubble until it renders (#1
 		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
 	});
 
+	it('retires a steer without a command id that carries the running queued turn\'s id', () => {
+		// Queued turn A starts: its bubble leaves with its own delivery.
+		const a = queued('turn-a', 'queued a');
+		let shown = snapshot(snapshot([], [a]), []);
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-a');
+		shown = pendingQueue.reconcile(SID, shown);
+		expect(shown).toEqual([]);
+		// B (an older client: no command id) is queued, then steered into A. Its
+		// delivered row carries A's turn id, which names A's row, not B's.
+		const b = queued('turn-b', 'steer b');
+		shown = snapshot(snapshot(shown, [b]), []);
+		expect(shown.map(e => e.id)).toEqual(['turn-b']);
+		pendingQueue.noteDelivered(SID, 'steer b', 'turn-a');
+		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
+		expect(pendingQueue.isHeld(SID, b)).toBe(false);
+	});
+
 	it('shows a server re-queue (same command, new row) once, not hidden and not doubled', () => {
 		const first = queued('turn-a', 'queued a', 'client-a', 1000);
 		let shown = snapshot(snapshot([], [first]), []);
