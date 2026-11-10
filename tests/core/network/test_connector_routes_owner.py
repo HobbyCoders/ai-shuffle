@@ -17,7 +17,7 @@ from app.core.connectors.base import ConnectorStatus
 from app.core.global_events import global_events
 from app.core.models import VALID_CONNECTOR_EVENTS, ConnectorCreate, ConnectorUpdate
 from app.db import database
-from app.network import engine, startup, transport
+from app.network import engine, ownership, startup, transport
 from tests.core.network.harness import _ACTIVE, converge, exchange, join
 
 HOOK = {"mode": "inbound", "inbound_path": "hook-1382"}
@@ -390,3 +390,54 @@ SINGLE_INSTALL_ANSWERS = [
       'status': 'disconnected',
       'status_message': None,
       'type': 'webhook'}]
+
+
+class _Body:
+    async def json(self):
+        return {}
+
+
+async def _execute(worker, cid):
+    from fastapi import HTTPException
+    with worker.active():
+        with pytest.raises(HTTPException) as raised:
+            await connectors_api.execute_connector_action(cid, "send_webhook", _Body(), "owner")
+    return raised.value
+
+
+async def test_an_action_on_a_non_owner_names_the_worker_that_runs_it(net):
+    """It answered "not running. Activate it first." although the connector ran on another worker."""
+    a, b, low, high, managers, scheduled = net
+    cid = await _owned_by(b, a, net)
+    with b.active():
+        await connectors_api.activate_connector(cid, "owner")
+    _sync(b, a)
+    await _drain(scheduled)
+    with b.active():
+        b_label = ownership.owner_label(b.device_id)
+    error = await _execute(a, cid)
+    assert error.status_code == 409
+    assert error.detail == f"Connector '{cid}' runs on worker {b_label}; run the action there."
+    assert error.headers == {"X-Connector-Applies-On": b.device_id}
+
+
+async def test_an_action_on_an_inactive_connector_still_says_activate_it(net):
+    a, b, low, high, managers, scheduled = net
+    cid = await _owned_by(b, a, net)
+    error = await _execute(a, cid)
+    assert (error.status_code, error.detail, error.headers) == (
+        409, f"Connector '{cid}' is not running. Activate it first.", None)
+
+
+async def test_single_install_action_answer_is_unchanged(workers, monkeypatch):
+    """No network: the 409 is the same, byte for byte, even for another install's connector."""
+    solo = workers("worker-solo")
+    monkeypatch.setattr(manager_mod, "connector_manager", manager_mod.ConnectorManager())
+    from app.core.config import settings
+    monkeypatch.setattr(type(settings), "effective_instance_id", property(lambda _s: "install-here"))
+    with solo.active():
+        database.create_connector("conn-elsewhere", "webhook", "Theirs", dict(HOOK), [], is_active=True,
+                                  runner_id="install-there")
+    error = await _execute(solo, "conn-elsewhere")
+    assert (error.status_code, error.detail, error.headers) == (
+        409, "Connector 'conn-elsewhere' is not running. Activate it first.", None)

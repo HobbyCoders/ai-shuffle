@@ -7,7 +7,7 @@ Also includes the WhatsApp webhook verification endpoint.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from fastapi.responses import PlainTextResponse
@@ -392,6 +392,19 @@ def _applies_on(connector: Dict[str, Any]):
     return applies_on(connector)
 
 
+def _runs_elsewhere(connector: Dict[str, Any]) -> Optional[str]:
+    """The device that runs an active *connector* on a worker network when this one does not.
+
+    None off a network, for an inactive connector, or when no worker owns it.
+    Blocking (``runs_here`` may claim); call it from a worker thread.
+    """
+    from app.core.connector_service import applies_on, runs_here
+    from app.network import ownership
+    if not ownership.enrolled() or not connector.get("is_active") or runs_here(connector):
+        return None
+    return applies_on(connector)
+
+
 @router.post("/{connector_id}/test", response_model=ConnectorTestResponse)
 async def test_connector_endpoint(connector_id: str, token: str = Depends(require_admin)):
     """Test a connector's connection."""
@@ -679,6 +692,16 @@ async def execute_connector_action(
     # Get the running connector instance
     instance = await connector_manager.get_running_connector(connector_id)
     if not instance:
+        owner = await run_sync(_runs_elsewhere, connector)
+        if owner:
+            # Active on another worker of the network (#1382): say where, not "activate it".
+            from app.network import ownership
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Connector '{connector_id}' runs on worker {ownership.owner_label(owner)}; "
+                       "run the action there.",
+                headers={"X-Connector-Applies-On": owner},
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Connector '{connector_id}' is not running. Activate it first.",

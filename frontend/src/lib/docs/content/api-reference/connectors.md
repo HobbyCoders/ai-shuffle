@@ -359,7 +359,7 @@ List the tools exposed by the connector's type.
 
 ### POST /api/v1/connectors/{connector_id}/actions/{action_id}/execute
 
-Execute a connector action directly against a running connector instance. The JSON request body is passed through as the action parameters. Returns `409` if the connector is not running and `400` for an unknown action.
+Execute a connector action directly against a running connector instance. The JSON request body is passed through as the action parameters. Returns `409` if the connector is not running and `400` for an unknown action. On a worker network, when the connector is active but runs on another worker, the `409` names that worker and its device id is in the `X-Connector-Applies-On` header; run the action there.
 
 **Auth:** Owner only
 
