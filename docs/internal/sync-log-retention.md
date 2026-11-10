@@ -4,7 +4,8 @@ For the current read-only measurements, remaining missing-materialization leak,
 and an approval-gated offline file-shrink runbook, see
 [database-retention.md](database-retention.md). Ordinary settled rows are still
 eligible; settling is not a retention pin. Do not infer a whole-table plateau
-from the bounded policy while compacted fragments still lack retirement evidence.
+from the bounded policy while fragments of runs merged before `merged_from_seq`
+existed still lack retirement evidence (rule 4).
 
 This changes the **duplicate operation log**, not chat retention. Maintenance
 never deletes `session_events`, Fluid stores, legacy transcripts, search text,
@@ -68,8 +69,16 @@ ids cannot starve it. For each origin/incarnation it deletes only operations:
    Damaged/incomplete materializations are kept, not assumed disposable.
    Idle delta compaction (`compact_session_deltas`) merges a run of delta rows
    into its last row and deletes the rest, so their `order_seq` points at a
-   missing row and their envelopes are never retired by this pass. That is a
-   known leak, left as it is: cleaning up merged fragments is separate work. A
+   missing row. Such a fragment also counts as materialized when the next row
+   of its session is a delta whose `merged_from_seq` reaches down to the
+   fragment and whose own live record is newer than the fragment's: the merged
+   row holds its text, and every peer that reaches the fragment is sent the
+   merged row too (#1328). A missing row alone is never proof.
+
+   Still kept, and not growing: fragments of runs merged before
+   `merged_from_seq` existed (their surviving row has no marker), and envelopes
+   of sessions that no longer exist. This is a fixed backlog, separate from the
+   bounded 30-day peer grace above. A
    worker that holds only the start of a merged run and later takes a state
    copy no longer sticks on it (see "A peer that holds part of a merged delta
    run" below). The shorter floor does not make that case more likely: an op a
@@ -308,7 +317,7 @@ both peers caught up, measured:
 
 The 22 left are the last hour of transcript ops plus the stream head, and one
 catalog and one runtime envelope per chat. The lab had no idle delta
-compaction; ops of merged runs stay as on main (see rule 4). This is a count lab, not a field
+compaction; for ops of merged runs see rule 4. This is a count lab, not a field
 measurement; the space already held on disk only returns after a one-time
 `VACUUM FULL sync_ops` with the app stopped (the daily `VACUUM ANALYZE` reuses
 freed space but does not shrink the file).
