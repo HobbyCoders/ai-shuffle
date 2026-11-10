@@ -239,7 +239,8 @@ jobs:
     needs: build
     continue-on-error: ${{ matrix.advisory }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # One emulator run takes about 17 minutes; leave room for the single retry after an emulator loss.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: android
@@ -296,8 +297,11 @@ jobs:
           printf '\ndisk.dataPartition.size=6144M\n' >> "$ANDROID_AVD_HOME/test.avd/config.ini"
           bash ci/emulator-diagnostics.sh before-boot
           bash ci/emulator-storage.sh check
+      # A vanished emulator process is retried once on a fresh emulator; app and
+      # test failures are never retried or excused. emulator_result is the gate.
       - name: Exercise native onboarding and tool permissions
         id: emulator_tests
+        continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         env:
           CI_WEBVIEW_APK: ${{ runner.temp }}/ci-webview.apk
@@ -319,14 +323,83 @@ jobs:
             -camera-back emulated -no-snapshot -memory ${{ matrix.memory }} -cores ${{ matrix.cores }}
             -logcat '*:I' > "$RUNNER_TEMP/android-emulator/emulator.log" 2>&1
           script: bash ci/run-android-ui-tests.sh
+      # run-android-ui-tests.sh writes the marker only when the emulator process
+      # vanished and no instrumentation result shows a test failure.
+      - name: Check whether the emulator process was lost
+        id: emulator_loss
+        if: always()
+        env:
+          FIRST: ${{ steps.emulator_tests.outcome }}
+        run: |
+          marker="$RUNNER_TEMP/android-emulator/emulator-lost"
+          if [[ "$FIRST" == failure && -f "$marker" ]]; then
+            echo "::warning::$(cat "$marker") Retrying once on a fresh emulator."
+            echo lost=true >> "$GITHUB_OUTPUT"
+          else
+            echo lost=false >> "$GITHUB_OUTPUT"
+          fi
+      # Keep the first attempt's evidence for the failure artifact, then rebuild
+      # the AVD exactly as the preflight did so the retry starts clean.
+      - name: Prepare a fresh emulator after emulator loss
+        if: steps.emulator_tests.outcome == 'failure' && steps.emulator_loss.outputs.lost == 'true'
+        run: |
+          root="$RUNNER_TEMP/android-emulator"
+          mkdir -p "$root/first-attempt"
+          find "$root" -mindepth 1 -maxdepth 1 ! -name first-attempt -exec mv -t "$root/first-attempt" {} +
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          avdmanager create avd --force --name test --package 'system-images;android-${{ matrix.api }};${{ matrix.target }};x86_64' --device pixel_6 <<< no
+          printf '\ndisk.dataPartition.size=6144M\n' >> "$ANDROID_AVD_HOME/test.avd/config.ini"
+          bash ci/emulator-storage.sh check
+      - name: Retry native onboarding and tool permissions after emulator loss
+        id: emulator_tests_retry
+        if: steps.emulator_tests.outcome == 'failure' && steps.emulator_loss.outputs.lost == 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          CI_WEBVIEW_APK: ${{ runner.temp }}/ci-webview.apk
+        with:
+          api-level: ${{ matrix.api }}
+          target: ${{ matrix.target }}
+          arch: x86_64
+          profile: pixel_6
+          working-directory: android
+          # Reuse the AVD whose filesystem passed the standalone preflight.
+          force-avd-creation: false
+          # API 24+ first boot enforces 6 GiB regardless of smaller requests.
+          disk-size: 6144M
+          disable-animations: true
+          pre-emulator-launch-script: bash ci/emulator-diagnostics.sh before-boot
+          # Persist startup errors and guest logcat even if boot fails before script runs.
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back emulated -no-snapshot -memory ${{ matrix.memory }} -cores ${{ matrix.cores }}
+            -logcat '*:I' > "$RUNNER_TEMP/android-emulator/emulator.log" 2>&1
+          script: bash ci/run-android-ui-tests.sh
+      - name: Require a passing emulator run
+        id: emulator_result
+        if: always()
+        env:
+          FIRST: ${{ steps.emulator_tests.outcome }}
+          LOST: ${{ steps.emulator_loss.outputs.lost }}
+          RETRY: ${{ steps.emulator_tests_retry.outcome }}
+        run: |
+          if [[ "$FIRST" == success ]]; then
+            echo "Emulator verification passed on the first attempt."
+          elif [[ "$LOST" == true && "$RETRY" == success ]]; then
+            echo "::warning::Emulator verification passed on its single retry after the first emulator process vanished."
+          else
+            echo "::error::Emulator verification failed (first attempt: $FIRST, emulator lost: ${LOST:-false}, retry: ${RETRY:-not run})."
+            exit 1
+          fi
       - name: Report emulator leg outcome
         if: always()
         env:
           RESULT: ${{ steps.emulator_tests.outcome }}
+          LOST: ${{ steps.emulator_loss.outputs.lost }}
+          RETRY: ${{ steps.emulator_tests_retry.outcome }}
           API: ${{ matrix.api }}
           ADVISORY: ${{ matrix.advisory }}
         run: |
-          printf '%s\n' "- API $API emulator step: $RESULT (release advisory: $ADVISORY). App failures are never retried or excused." >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "- API $API emulator step: $RESULT; emulator lost: ${LOST:-false}; retry: ${RETRY:-not run} (release advisory: $ADVISORY). A vanished emulator process is retried once on a fresh emulator; app and test failures are never retried or excused." >> "$GITHUB_STEP_SUMMARY"
       - name: Collect emulator host diagnostics
         if: always()
         run: bash ci/emulator-diagnostics.sh after-emulator
@@ -343,8 +416,9 @@ jobs:
             ${{ runner.temp }}/android-emulator/launcher-recovery*/
           if-no-files-found: warn
       # Full reports, logcat and screenshots remain failure-only diagnostics.
+      # A recovered emulator loss keeps them too, under first-attempt/.
       - name: Upload test reports
-        if: failure()
+        if: failure() || steps.emulator_tests.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           retention-days: 3

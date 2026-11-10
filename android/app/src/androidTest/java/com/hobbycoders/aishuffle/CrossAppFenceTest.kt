@@ -49,6 +49,7 @@ class CrossAppFenceTest {
     private var oldServices: String? = null
     private var oldEnabled = 0
     private val server = Server.create("Fence test server", "https://instrumentation.invalid", "test-only")
+    private val requests = java.util.concurrent.CopyOnWriteArrayList<Pair<CountDownLatch, AtomicReference<JSONObject>>>()
 
     private fun await(message: String, timeoutMs: Long = 8_000, predicate: () -> Boolean) {
         val end = System.currentTimeMillis() + timeoutMs
@@ -91,8 +92,54 @@ class CrossAppFenceTest {
         down.recycle(); up.recycle()
         return injected
     }
-    private fun panelUp() = await("Consent panel never appeared") { panelButton("Allow once") != null }
+    /** What the app itself says about app control, for a failure that would otherwise only say a panel is missing. */
+    private fun fenceState(): String {
+        val prefs = ToolsPreferences(context)
+        fun overlays(windows: () -> List<AccessibilityWindowInfo>?) = runCatching {
+            windows().orEmpty().filter { it.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY }.map { it.id }.toString()
+        }.getOrElse { it.javaClass.simpleName }
+        val showing = runCatching { ShuffleAccessibilityService.current?.consentShowing() == true }.getOrDefault(false)
+        return "service=${ShuffleAccessibilityService.current != null} appControl=${prefs.crossAppEnabled} accessibility=${prefs.accessibilityEnabled} " +
+            "availability=${DeviceToolsRuntime.availability.value} lastDisarm=${ToolsPreferences.lastDisarm} panelShowing=$showing " +
+            "overlaysListedToTest=${overlays { automation.windows }} overlaysListedToService=${overlays { ShuffleAccessibilityService.current?.windows }} " +
+            "requests=${requests.map { it.second.get()?.toString() ?: if (it.first.count == 0L) "ended" else "pending" }}"
+    }
+    private fun panelUp() {
+        var refreshAt = System.currentTimeMillis() + 1_000
+        try {
+            await("Consent panel never appeared") {
+                if (panelButton("Allow once") != null) return@await true
+                // Nothing left that could still raise a panel: say why now, not after the full wait.
+                if (requests.isNotEmpty() && requests.all { it.first.count == 0L }) throw AssertionError("Every request ended without a consent panel")
+                if (System.currentTimeMillis() > refreshAt) {
+                    // UiAutomation answers from a cached window list until an event tells it the windows changed, and a list
+                    // fetched just before the panel was added can be cached after that event. Setting its service info
+                    // drops the cache, so the next lookup asks Android again. Well inside the shortest command deadline (4 s).
+                    refreshAt = System.currentTimeMillis() + 1_000
+                    android.util.Log.w("CrossAppFenceTest", "No consent panel listed, asking Android for its windows again: ${fenceState()}")
+                    automation.serviceInfo = automation.serviceInfo
+                }
+                false
+            }
+        } catch (failure: AssertionError) { throw AssertionError("${failure.message}: ${fenceState()}", failure) }
+    }
     private fun allow() { panelUp(); assertTrue(touch("Allow once")) }
+    /**
+     * Android can reconnect the service while a test is still setting up, and a fresh connection
+     * always starts with app control off. Only that is opted in again; anything else that ended it
+     * fails here, by name, instead of later as a panel that never appears.
+     */
+    private fun ensureArmed(stage: String) {
+        repeat(3) {
+            if (ToolsPreferences(context).crossAppEnabled) return
+            val cause = ToolsPreferences.lastDisarm.orEmpty()
+            if (listOf("onServiceConnected", "shutdown", "service=false").none { it in cause }) throw AssertionError("App control was off $stage: ${fenceState()}")
+            android.util.Log.w("CrossAppFenceTest", "Opting in again $stage: ${fenceState()}")
+            await("OS never reconnected ShuffleAccessibilityService") { ShuffleAccessibilityService.current != null }
+            instrumentation.runOnMainSync { ToolsPreferences(context).setCrossAppEnabled(true) }
+        }
+        assertTrue("App control would not stay on $stage: ${fenceState()}", ToolsPreferences(context).crossAppEnabled)
+    }
     /** Blocks until the fixture has laid out the change. Safe off the main thread only. */
     private fun fixture(command: String) {
         val replied = CountDownLatch(1)
@@ -141,7 +188,7 @@ class CrossAppFenceTest {
         CoroutineScope(Dispatchers.Main).launch {
             try { result.set(DeviceToolExecutor(context).execute(name, args, System.currentTimeMillis() + deadlineMs)) } finally { done.countDown() }
         }
-        return done to result
+        return (done to result).also { requests += it }
     }
     /** Well inside the 20 s approval window, so a refusal here is the fence and not the expiry. */
     private fun status(request: Pair<CountDownLatch, AtomicReference<JSONObject>>, waitSeconds: Long = 7): JSONObject {
@@ -179,6 +226,7 @@ class CrossAppFenceTest {
             prefs.setEnabled(true); DeviceToolsRuntime.attach(it, server)
             prefs.setAllowedApps(setOf(fixturePackage)); prefs.setCrossAppEnabled(true)
         }
+        ensureArmed("after opting in")
         context.startActivity(Intent().setComponent(ComponentName(fixturePackage, CoveredTargetActivity::class.java.name))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         await("Fixture did not become the active application") { automation.windows.any { it.isActive && it.root?.packageName?.toString() == fixturePackage } }
@@ -189,6 +237,7 @@ class CrossAppFenceTest {
             val root = windows.singleOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }?.root
             root?.findAccessibilityNodeInfosByText(CoveredTargetActivity.RESTING)?.isNotEmpty() == true
         }
+        ensureArmed("once the fixture was ready")
     }
     @After fun disarm() {
         ShuffleAccessibilityService.afterConsentClosed = null

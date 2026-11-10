@@ -62,7 +62,10 @@ class ShuffleAccessibilityService : AccessibilityService() {
         @androidx.annotation.VisibleForTesting @Volatile internal var afterEventCheckRead: ((Boolean, Reading) -> Unit)? = null
         internal val sensitive = Regex("password|passcode|sign.?in|log.?in|permission|allow access|credential|payment|purchase|checkout|credit card|verify|verification|one.time|security|pin code|unlock|biometric|fingerprint|account number|routing number|card number|cvv|cvc|send money|transfer money|pay now", RegexOption.IGNORE_CASE)
     }
-    override fun onServiceConnected() { current = this; ToolsPreferences(this).setCrossAppEnabled(false) }
+    override fun onServiceConnected() {
+        fenceTrace("service connected replacing=${current != null}")
+        current = this; ToolsPreferences(this).setCrossAppEnabled(false)
+    }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         events++
@@ -117,12 +120,15 @@ class ShuffleAccessibilityService : AccessibilityService() {
         fenceTrace("$cause revision=$revision pending=${consentTargetValid != null} snapshot=${snapshot != null}")
         revision++; clearSnapshot(); cancelConsent()
     }
-    override fun onInterrupt() { cancelConsent(); clearSnapshot(); ToolsPreferences(this).setCrossAppEnabled(false) }
+    override fun onInterrupt() { fenceTrace("service interrupted"); cancelConsent(); clearSnapshot(); ToolsPreferences(this).setCrossAppEnabled(false) }
     override fun onUnbind(intent: android.content.Intent?): Boolean { shutdown(); return super.onUnbind(intent) }
     override fun onDestroy() { shutdown(); scope.cancel(); super.onDestroy() }
     private fun shutdown() {
         cancelConsent(); clearSnapshot(); removeOverlay()
-        if (current === this) current = null
+        // Android may destroy a replaced instance after its successor connected: the session and runtime are no longer its to end.
+        if (current !== this) return
+        fenceTrace("service shut down")
+        current = null
         ToolsPreferences(this).setCrossAppEnabled(false)
         DeviceToolsRuntime.stop()
     }
@@ -189,6 +195,9 @@ class ShuffleAccessibilityService : AccessibilityService() {
             if (withTimeoutOrNull((expires - System.currentTimeMillis()).coerceAtLeast(1)) { reply.await() } == true && confirmed()) expires else null
         } finally { countdown.cancel(); consent = null; consentId = null; consentTargetValid = null; removeOverlay(); updateIndicator() }
     }
+    /** Whether a consent panel is really on screen, for a test whose accessibility window list does not show one. Read off the main thread, so only fit for a failure message. */
+    @androidx.annotation.VisibleForTesting internal fun consentShowing(): Boolean =
+        consent != null && overlay?.let { it.isAttachedToWindow && it.isShown } == true
     private fun fenceTrace(detail: String) {
         if (com.hobbycoders.aishuffle.BuildConfig.DEBUG) android.util.Log.i("AppControlFence", detail)
     }

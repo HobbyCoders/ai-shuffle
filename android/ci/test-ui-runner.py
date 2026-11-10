@@ -12,10 +12,31 @@ import unittest
 CI = Path(__file__).resolve().parent
 # Match test-publish-apk.py: PATH's bash.exe can be the unconfigured WSL launcher.
 BASH = str(Path(os.environ["ProgramFiles"]) / "Git/bin/bash.exe") if os.name == "nt" else "bash"
+ROOT = CI.parents[1]
+
+
+def fake_proc(proc, qemu):
+    """A minimal /proc: a shell, a zombie (empty cmdline) and optionally the emulator."""
+    for pid, cmdline in (("1", b"/bin/bash\0-l\0"), ("2", b""), ("3", b"python3\0qemu-system-x86_64\0")):
+        (proc / pid).mkdir(parents=True)
+        (proc / pid / "cmdline").write_bytes(cmdline)
+    if qemu:
+        (proc / "40").mkdir()
+        (proc / "40/cmdline").write_bytes(b"/sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64\0-avd\0test\0")
+    (proc / "self").mkdir()
+
+
+def passing(name="fixture"):
+    return (f"INSTRUMENTATION_STATUS: class=fixture.SmokeTest\nINSTRUMENTATION_STATUS: test={name}\n"
+            "INSTRUMENTATION_STATUS: numtests=1\nINSTRUMENTATION_STATUS_CODE: 1\n"
+            f"INSTRUMENTATION_STATUS: class=fixture.SmokeTest\nINSTRUMENTATION_STATUS: test={name}\n"
+            "INSTRUMENTATION_STATUS: numtests=1\nINSTRUMENTATION_STATUS_CODE: 0\n"
+            "OK (1 test)\nINSTRUMENTATION_CODE: -1\n")
 
 
 class UiRunnerTest(unittest.TestCase):
-    def run_runner(self, mode="pass", phase="suite", runner="run-android-ui-tests.sh", api=34):
+    def run_runner(self, mode="pass", phase="suite", runner="run-android-ui-tests.sh", api=34,
+                   qemu=True, adb_state=None):
         with tempfile.TemporaryDirectory(prefix="ui runner ") as directory:
             root = Path(directory)
             (root / "ci").mkdir()
@@ -23,6 +44,8 @@ class UiRunnerTest(unittest.TestCase):
             # Even failing evidence collection must not mask the test's status.
             (root / "ci/emulator-diagnostics.sh").write_text('printf "%s" "$1" > "$DIAGNOSTIC_PHASE"\nexit 7\n')
             shutil.copy(CI / "check-instrumentation.py", root / "ci")
+            shutil.copy(CI / "emulator-loss.py", root / "ci")
+            fake_proc(root / "proc", qemu)
             fake = r'''
 import json, os, subprocess, sys
 name, *args = sys.argv[1:]
@@ -36,7 +59,9 @@ if name == "timeout":
     # Run the requested fake command with this interpreter, not Windows execvp
     # (which cannot execute an extensionless POSIX shebang script).
     sys.exit(subprocess.call([sys.executable, __file__, *args]))
-if args == ["-s", "emulator-5554", "shell", "getprop", "ro.build.version.sdk"]:
+if args == ["-s", "emulator-5554", "get-state"]:
+    print(os.environ["ADB_STATE"])
+if args ==["-s", "emulator-5554", "shell", "getprop", "ro.build.version.sdk"]:
     if os.environ["MODE"] == "sdk-error":
         sys.exit(19)
     print(os.environ["API_LEVEL"] + "\r")
@@ -83,12 +108,16 @@ if "instrument" in args:
                        RUNNER_TEMP=str(root / "output"), CALLS=str(root / "calls"), MODE=mode, PHASE=phase,
                        API_LEVEL=str(api), DIAGNOSTIC_PHASE=str(root / "diagnostic-phase"),
                        GITHUB_STEP_SUMMARY=str(root / "summary"),
+                       EMULATOR_LOSS_PROC=str(root / "proc"),
+                       ADB_STATE=("device" if qemu else "") if adb_state is None else adb_state,
                        UI_RUNNER_TEST_PYTHON=Path(sys.executable).as_posix(),
                        UI_RUNNER_TEST_FAKE=(root / "fake.py").as_posix())
             result = subprocess.run([BASH, str(CI / runner)], cwd=root,
                                     env=env, text=True, capture_output=True, timeout=10)
             self.assertTrue((root / "calls").exists(), result.stdout + result.stderr)
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
+            marker = root / "output/android-emulator/emulator-lost"
+            self.marker = marker.read_text() if marker.exists() else None
             self.summary = (root / "summary").read_text() if runner == "run-android-ui-tests.sh" else ""
             self.diagnostic_phase = (root / "diagnostic-phase").read_text() if (root / "diagnostic-phase").exists() else ""
             return result, calls
@@ -172,6 +201,8 @@ if "instrument" in args:
                     self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
                     self.assertIn(f"Android emulator verification: FAILED (exit {result.returncode})", self.summary)
                     self.assertIn("No app failure was retried or excused", self.summary)
+                    # The emulator is still running: never a retryable emulator loss.
+                    self.assertIsNone(self.marker)
                     runs = [call for call in calls if call[0] == "adb" and "instrument" in call]
                     self.assertEqual({"cold": 1, "suite": 2, "allowing": 3, "denying": 4,
                                       "allowing-launcher": 5, "denying-launcher": 6}[phase], len(runs))
@@ -200,12 +231,220 @@ if "instrument" in args:
         result, _ = self.run_runner("timeout")
         self.assertEqual(124, result.returncode)
 
+    def test_vanished_emulator_after_a_passing_run_is_marked_for_one_workflow_retry(self):
+        # Runs 42746205944 and 42737300656: adb loses the device right after "OK".
+        for phase, after in (("cold", "before any instrumentation result passed"),
+                             ("suite", "after cold-chat.txt passed"), ("allowing", "after runner.txt passed")):
+            with self.subTest(phase=phase):
+                result, calls = self.run_runner("adb-error", phase, qemu=False)
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertIsNotNone(self.marker, result.stdout + result.stderr)
+                self.assertIn(f"Emulator process disappeared {after}", self.marker)
+                self.assertIn("not an app failure", self.marker)
+                self.assertIn("::warning::Emulator process disappeared", result.stdout)
+                # The script itself never re-runs anything.
+                self.assertEqual({"cold": 1, "suite": 2, "allowing": 3}[phase],
+                                 sum(call[0] == "adb" and "instrument" in call for call in calls))
+                self.assertIn("No app failure was retried or excused", self.summary)
+                # Loss is decided before the slower evidence pulls.
+                get_state = calls.index(["timeout", "10", "adb", "-s", "emulator-5554", "get-state"])
+                logcat = next(i for i, call in enumerate(calls) if "logcat" in call)
+                self.assertLess(get_state, logcat)
+
+    def test_app_failures_are_never_marked_even_when_the_emulator_is_gone(self):
+        for mode in ("failure", "app-crash", "app-anr", "webview-sigtrap"):
+            with self.subTest(mode=mode):
+                result, _ = self.run_runner(mode, "suite", qemu=False)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIsNone(self.marker, result.stdout)
+                self.assertIn("runner.txt shows a test failure", result.stdout)
+
+    def test_live_or_still_attached_emulator_is_never_marked(self):
+        for mode in ("adb-error", "timeout"):
+            for qemu, state in ((True, "device"), (True, "offline"), (True, ""), (False, "device")):
+                with self.subTest(mode=mode, qemu=qemu, state=state):
+                    result, _ = self.run_runner(mode, "suite", qemu=qemu, adb_state=state)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIsNone(self.marker, result.stdout)
+
+    def test_success_does_not_probe_for_emulator_loss(self):
+        result, calls = self.run_runner(qemu=False)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIsNone(self.marker)
+        self.assertFalse(any("get-state" in call for call in calls))
+
     def test_minified_failures_request_a_supported_diagnostic_phase(self):
         result, calls = self.run_runner("app-crash", phase="minified", runner="run-minified-smoke.sh")
         self.assertNotEqual(0, result.returncode)
         self.assertEqual("test-failure", self.diagnostic_phase)
         self.assertEqual(1, sum(call[0] == "adb" and "instrument" in call for call in calls))
         self.assertIn("Incomplete or unsuccessful instrumentation run", result.stderr)
+
+
+class EmulatorLossTest(unittest.TestCase):
+    """The marker decides the workflow's only retry; it must fail closed."""
+
+    def setUp(self):
+        import runpy
+        self.loss = runpy.run_path(str(CI / "emulator-loss.py"))
+        directory = tempfile.TemporaryDirectory(prefix="emulator loss ")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name) / "android-emulator"
+        (self.root / "instrumentation").mkdir(parents=True)
+        self.proc = Path(directory.name) / "proc"
+
+    def decide(self, qemu=False, state="", **results):
+        fake_proc(self.proc, qemu)
+        for index, (name, text) in enumerate(results.items()):
+            path = self.root / "instrumentation" / f"{name}.txt"
+            path.write_text(text)
+            os.utime(path, ns=(index * 10**9, index * 10**9))
+        return self.loss["decide"](self.root, self.proc, state)
+
+    def test_running_emulator_is_never_lost(self):
+        for state in ("device", "offline", ""):
+            with self.subTest(state=state):
+                shutil.rmtree(self.proc, ignore_errors=True)
+                self.assertEqual((False, "emulator process is still running"), self.decide(True, state))
+
+    def test_missing_process_table_is_never_lost(self):
+        self.assertFalse(self.loss["decide"](self.root, self.proc / "absent", "")[0])
+
+    def test_adb_device_without_a_visible_emulator_process_is_not_lost(self):
+        self.assertFalse(self.decide(state="device")[0])
+
+    def test_gone_emulator_after_passing_and_cut_off_results_is_lost(self):
+        cut = passing("second").split("OK (1 test)")[0]
+        lost, reason = self.decide(**{"cold-chat": passing(), "runner": cut})
+        self.assertTrue(lost)
+        self.assertEqual("Emulator process disappeared after cold-chat.txt passed; "
+                         "this is a virtual-device failure, not an app failure.", reason)
+
+    def test_any_reported_test_failure_is_an_app_failure(self):
+        good = passing()
+        failures = {
+            "failed status": good.replace("STATUS_CODE: 0", "STATUS_CODE: -2"),
+            "skipped status": good.replace("STATUS_CODE: 0", "STATUS_CODE: -3"),
+            "failures": good + "FAILURES!!!\n",
+            "crash": "INSTRUMENTATION_RESULT: shortMsg=Process crashed.\nINSTRUMENTATION_CODE: 0\n",
+            "anr": "INSTRUMENTATION_RESULT: shortMsg=Application Not Responding\n",
+            "failed instrumentation": "INSTRUMENTATION_FAILED: com.hobbycoders.aishuffle.test\n",
+            # Finished but rejected by the strict parser (wrong count, no OK line).
+            "short result": good.replace("numtests=1", "numtests=2"),
+            "terminal without summary": good.replace("OK (1 test)\n", ""),
+        }
+        for label, text in failures.items():
+            with self.subTest(label=label):
+                shutil.rmtree(self.proc, ignore_errors=True)
+                lost, reason = self.decide(**{"cold-chat": good, "runner": text})
+                self.assertFalse(lost)
+                self.assertEqual("runner.txt shows a test failure", reason)
+
+    def test_timing_logcat_is_not_an_instrumentation_result(self):
+        lost, _ = self.decide(**{"cold-chat": passing(), "timing": "W Process crashed in some other log"})
+        self.assertTrue(lost)
+
+    def test_cli_writes_and_clears_the_marker(self):
+        marker = self.root / "emulator-lost"
+        fake_proc(self.proc, qemu=False)
+        argv = ["--root", str(self.root), "--proc", str(self.proc), "--adb-state", ""]
+        self.assertEqual(0, self.loss["main"](argv))
+        self.assertIn("virtual-device failure", marker.read_text())
+        (self.proc / "40").mkdir()
+        (self.proc / "40/cmdline").write_bytes(b"qemu-system-x86_64-headless\0")
+        self.assertEqual(0, self.loss["main"](argv))
+        self.assertFalse(marker.exists())
+
+
+class EmulatorRetryWorkflowTest(unittest.TestCase):
+    """android.yml retries only a marked emulator loss, once, and gates on the result."""
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml
+        workflow = yaml.load((ROOT / ".github/workflows/android.yml").read_text(), Loader=yaml.BaseLoader)
+        cls.steps = workflow["jobs"]["android-ui"]["steps"]
+        cls.by_id = {step["id"]: step for step in cls.steps if "id" in step}
+
+    def bash(self, script, **env):
+        return subprocess.run([BASH, "-e", "-c", script], env=dict(os.environ, **env),
+                              text=True, capture_output=True, timeout=10)
+
+    def test_exactly_one_identical_retry_only_after_a_marked_loss(self):
+        runners = [step for step in self.steps if step.get("uses", "").startswith("reactivecircus/android-emulator-runner@")]
+        self.assertEqual(["emulator_tests", "emulator_tests_retry"], [step["id"] for step in runners])
+        first, retry = runners
+        self.assertEqual(first["uses"], retry["uses"])
+        self.assertEqual(first["with"], retry["with"])
+        self.assertEqual(first["env"], retry["env"])
+        self.assertEqual("true", first["continue-on-error"])
+        self.assertNotIn("continue-on-error", retry)
+        condition = "steps.emulator_tests.outcome == 'failure' && steps.emulator_loss.outputs.lost == 'true'"
+        self.assertEqual(condition, retry["if"])
+        prepare = self.steps[self.steps.index(retry) - 1]
+        self.assertEqual(condition, prepare["if"])
+        order = [self.steps.index(self.by_id[name]) for name in
+                 ("emulator_tests", "emulator_loss", "emulator_tests_retry", "emulator_result")]
+        self.assertEqual(sorted(order), order)
+        self.assertEqual("always()", self.by_id["emulator_loss"]["if"])
+        self.assertEqual("always()", self.by_id["emulator_result"]["if"])
+        # Nothing re-runs the retry.
+        self.assertFalse(any("emulator_tests_retry" in step.get("if", "") for step in self.steps))
+
+    def test_retry_rebuilds_the_preflight_avd_and_keeps_first_attempt_evidence(self):
+        prepare = self.steps[self.steps.index(self.by_id["emulator_tests_retry"]) - 1]["run"]
+        preflight = next(step["run"] for step in self.steps
+                         if step.get("name") == "Prepare AVD and check disk space before emulator startup")
+        for line in ("avdmanager create avd", "disk.dataPartition.size", "emulator-storage.sh check"):
+            ours = [entry for entry in prepare.splitlines() if line in entry]
+            self.assertEqual([entry for entry in preflight.splitlines() if line in entry], ours)
+        with tempfile.TemporaryDirectory(prefix="retry evidence ") as directory:
+            root = Path(directory) / "android-emulator"
+            for name in ("emulator.log", "emulator-lost", "instrumentation/runner.txt", "before-boot/disk.txt"):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text(name)
+            # Run the step's own evidence lines (the AVD lines need an SDK).
+            lines = [line for line in prepare.splitlines() if line.startswith("root=") or "first-attempt" in line]
+            self.assertEqual(3, len(lines))
+            result = self.bash("\n".join(lines), RUNNER_TEMP=directory)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(["first-attempt"], sorted(path.name for path in root.iterdir()))
+            for name in ("emulator.log", "emulator-lost", "instrumentation/runner.txt", "before-boot/disk.txt"):
+                self.assertEqual(name, (root / "first-attempt" / name).read_text())
+
+    def test_loss_output_requires_a_failed_first_attempt_and_the_marker(self):
+        run = self.by_id["emulator_loss"]["run"]
+        for first in ("success", "failure", "cancelled", "skipped"):
+            for marked in (False, True):
+                with self.subTest(first=first, marked=marked), tempfile.TemporaryDirectory() as directory:
+                    (Path(directory) / "android-emulator").mkdir()
+                    if marked:
+                        (Path(directory) / "android-emulator/emulator-lost").write_text("gone\n")
+                    output = Path(directory) / "output"
+                    result = self.bash(run, FIRST=first, RUNNER_TEMP=directory, GITHUB_OUTPUT=str(output))
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    expected = "true" if first == "failure" and marked else "false"
+                    self.assertEqual(f"lost={expected}\n", output.read_text())
+
+    def test_gate_passes_only_on_first_success_or_a_successful_retry_after_loss(self):
+        run = self.by_id["emulator_result"]["run"]
+        outcomes = ("success", "failure", "cancelled", "skipped", "")
+        for first in outcomes:
+            for lost in ("true", "false", ""):
+                for retry in outcomes:
+                    with self.subTest(first=first, lost=lost, retry=retry):
+                        result = self.bash(run, FIRST=first, LOST=lost, RETRY=retry)
+                        passed = first == "success" or (lost == "true" and retry == "success")
+                        self.assertEqual(0 if passed else 1, result.returncode, result.stdout + result.stderr)
+
+    def test_failure_evidence_and_summary_cover_a_recovered_loss(self):
+        reports = next(step for step in self.steps if step.get("name") == "Upload test reports")
+        self.assertEqual("failure() || steps.emulator_tests.outcome == 'failure'", reports["if"])
+        summary = next(step for step in self.steps if step.get("name") == "Report emulator leg outcome")
+        self.assertEqual("${{ steps.emulator_loss.outputs.lost }}", summary["env"]["LOST"])
+        self.assertEqual("${{ steps.emulator_tests_retry.outcome }}", summary["env"]["RETRY"])
+        self.assertIn("A vanished emulator process is retried once on a fresh emulator; "
+                      "app and test failures are never retried or excused.", summary["run"])
 
 
 if __name__ == "__main__":
