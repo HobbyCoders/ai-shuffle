@@ -18,7 +18,7 @@ from app.api import sessions as sessions_api
 from app.db import database
 from app.db import network as store
 from app.db.base import get_db
-from app.network import catalog, control, engine, handoff
+from app.network import catalog, control, handoff
 from tests.core.network.harness import converge, exchange
 from tests.core.network.test_handoff import pair, repositories  # noqa: F401 - fixtures
 
@@ -51,7 +51,7 @@ async def _move_to_receiver(a, b, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("commit_arrived", [True, False])
-async def test_receiver_delete_right_after_handoff_reaches_the_source(pair, monkeypatch, commit_arrived):
+async def test_receiver_delete_right_after_handoff_reaches_the_source(pair, monkeypatch, commit_arrived):  # noqa: F811
     a, b, _, _ = pair
     await _move_to_receiver(a, b, monkeypatch)
     if commit_arrived:
