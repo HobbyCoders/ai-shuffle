@@ -356,22 +356,33 @@
 	async function retryFailed(event: MouseEvent) {
 		if (retrying) return;
 		const button = event.currentTarget as HTMLElement;
-		const row = button.closest('.st-row');
-		let hadFocus = document.activeElement === button;
+		const page = button.closest('.st-page');
 		// The button stays focused (aria-disabled, not disabled) while it runs.
-		// When its row recovers it goes away, maybe before the other load ends:
-		// keep the keyboard in that row (or on the Try again that is left).
+		// A Try again goes away when its row loads or is refused, maybe before
+		// the other load ends: follow focus on it (and its row) to the end, so it
+		// lands on that row's value, else on the Try again that is left.
+		let held: HTMLElement | null = document.activeElement === button ? button : null;
+		let row = button.closest('.st-row');
 		const keepFocus = async () => {
 			await tick();
-			if (!hadFocus || button.isConnected) return;
-			hadFocus = false;
+			const active = document.activeElement;
+			if (active instanceof HTMLElement && active.matches('[data-retry-load]')) {
+				held = active;
+				row = active.closest('.st-row');
+				return;
+			}
 			// Only when focus went with the button, not if the reader moved on.
-			if (document.activeElement && document.activeElement !== document.body) return;
-			const next =
+			if (!held || held.isConnected || (active && active !== document.body)) {
+				held = null;
+				return;
+			}
+			held =
 				row?.querySelector<HTMLElement>('.st-vbtn:not(:disabled)') ??
 				row?.querySelector<HTMLElement>('button:not(:disabled)') ??
-				document.querySelector<HTMLElement>('[data-retry-load]');
-			next?.focus();
+				page?.querySelector<HTMLElement>('[data-retry-load]') ??
+				null;
+			row = held?.closest('.st-row') ?? null;
+			held?.focus();
 		};
 		retrying = true;
 		try {

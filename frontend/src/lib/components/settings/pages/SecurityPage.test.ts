@@ -458,6 +458,80 @@ describe('Try again after a failed load', () => {
 		expect(await screen.findByRole('button', { name: 'Chat instructions Customized' })).toBeTruthy();
 		expect(document.activeElement).toBe(value);
 	});
+
+	// Both rows fail; the retry runs with each answer held until the test sends it.
+	async function retryBothFrom(start: 'owner' | 'instructions') {
+		owner.fetchOwnerStatus.mockResolvedValueOnce({ ok: false, reason: 'error', code: 500 });
+		failInstructions({ fail: true });
+		render(SecurityPage);
+		const password = await screen.findByRole('button', { name: 'Owner password Unavailable' });
+		const chat = await screen.findByRole('button', { name: 'Chat instructions Unavailable' });
+		let ownerAnswer!: (value: unknown) => void;
+		let instrAnswer!: (value: unknown) => void;
+		let instrFail!: (error: unknown) => void;
+		owner.fetchOwnerStatus.mockReturnValueOnce(new Promise((done) => (ownerAnswer = done)));
+		transport.get.mockImplementation((path: string) =>
+			path === '/settings/security-instructions'
+				? new Promise((done, fail) => ((instrAnswer = done), (instrFail = fail)))
+				: Promise.resolve({})
+		);
+		const retry = within(rowOf(start === 'owner' ? password : chat)).getByRole('button', { name: 'Try again' });
+		const other = within(rowOf(start === 'owner' ? chat : password)).getByRole('button', { name: 'Try again' });
+		retry.focus();
+		await fireEvent.click(retry);
+		const settle = () => new Promise((done) => setTimeout(done, 0));
+		return { ownerAnswer, instrAnswer: (v: unknown) => instrAnswer(v), instrFail: (e: unknown) => instrFail(e), other, settle };
+	}
+
+	it('follows focus to the other Try again and on to its row when that row recovers', async () => {
+		const run = await retryBothFrom('owner');
+		run.ownerAnswer({ ok: false, reason: 'unsupported' });
+		await waitFor(() => expect(document.activeElement).toBe(run.other));
+		run.instrAnswer({ ...instructions });
+		const value = await loadedButton(/^Chat instructions Customized/);
+		await waitFor(() => expect(document.activeElement).toBe(value));
+	});
+
+	it('does the same the other way round, from the instructions row', async () => {
+		const run = await retryBothFrom('instructions');
+		run.instrFail({ status: 403, detail: 'Forbidden' });
+		await waitFor(() => expect(document.activeElement).toBe(run.other));
+		run.ownerAnswer(loaded());
+		const value = await loadedButton(/^Owner password Set/);
+		await waitFor(() => expect(document.activeElement).toBe(value));
+	});
+
+	it('stays on the other Try again when that load fails again, and says so again', async () => {
+		const run = await retryBothFrom('owner');
+		run.ownerAnswer({ ok: false, reason: 'unsupported' });
+		await waitFor(() => expect(document.activeElement).toBe(run.other));
+		expect(screen.queryByRole('alert')).toBeNull();
+		run.instrFail(new Error('Failed to fetch'));
+		expect((await screen.findByRole('alert')).textContent).toBe('Could not load the chat instructions. The worker did not answer.');
+		expect(run.other.isConnected).toBe(true);
+		expect(document.activeElement).toBe(run.other);
+	});
+
+	it('moves no focus once the page is gone', async () => {
+		const run = await retryBothFrom('owner');
+		cleanup();
+		run.ownerAnswer(loaded());
+		run.instrAnswer({ ...instructions });
+		await run.settle();
+		expect(document.activeElement).toBe(document.body);
+	});
+
+	it('leaves focus where the reader moved it', async () => {
+		const run = await retryBothFrom('owner');
+		const elsewhere = screen.getByRole('button', { name: 'About Computer use' });
+		elsewhere.focus();
+		run.ownerAnswer(loaded());
+		await loadedButton(/^Owner password Set/);
+		run.instrAnswer({ ...instructions });
+		await loadedButton(/^Chat instructions Customized/);
+		await run.settle();
+		expect(document.activeElement).toBe(elsewhere);
+	});
 });
 
 describe('trusted LAN', () => {
