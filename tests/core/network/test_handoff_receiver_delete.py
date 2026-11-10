@@ -294,3 +294,90 @@ async def test_a_fact_of_a_network_this_worker_left_never_refuses_its_new_networ
         cur = conn.cursor()
         cur.execute("SELECT session_id FROM network_session_deletions")
         assert cur.fetchall() == [], "another network's fact must be pruned"
+
+
+def _snapshot(worker, *collections):
+    with worker.active():
+        return [engine.snapshot_chunk(name, 0) for name in collections]
+
+
+def _copy_state(worker, chunks):
+    """Apply peer pages in one transaction, the way the state copy does (peer_snapshot)."""
+    with worker.active():
+        ctx = engine.require_context()
+        with get_db() as conn:
+            store.lock_state(conn.cursor())
+            for chunk in chunks:
+                engine.apply_snapshot_chunk(chunk, ctx=ctx, _conn=conn)
+
+
+async def _delete_unsynced_on_receiver(a, b, monkeypatch):
+    """B owns the chat, holds no record of it, and deletes it: a fact with nothing to publish yet."""
+    await _move_to_receiver(a, b, monkeypatch)
+    with b.active(), get_db() as conn:
+        conn.cursor().execute("DELETE FROM sync_records WHERE collection='sessions' AND record_id=%s", (SID,))
+    with b.active():
+        assert database.delete_session(SID)
+    assert not _fact(b)["pending"]
+
+
+@pytest.mark.asyncio
+async def test_a_state_copy_carrying_a_deleted_chat_and_its_tag_completes_and_owes_the_tombstone(pair, monkeypatch):  # noqa: F811
+    """Review S7: the refused chat's tag would fail its session foreign key and roll the whole copy back."""
+    a, b, _, _ = pair
+    with a.active():
+        database.create_tag("copy-tag", "Tag")
+        assert database.add_session_tag(SID, "copy-tag")
+        engine.scan_all()
+    exchange(a, b)
+    await _delete_unsynced_on_receiver(a, b, monkeypatch)
+    chunks = _snapshot(a, "tags", "sessions", "session_tags")
+    assert any(item["record_id"].startswith(SID + "|") for item in
+               engine.open_snapshot_chunk(chunks[2], ctx=a_ctx(a))["items"])
+    _copy_state(b, chunks)
+    with b.active():
+        assert database.get_session(SID) is None
+        assert _rows("SELECT * FROM session_tags WHERE session_id=%s") == []
+        assert _fact(b)["pending"], "the copy committed, and with it the tombstone it owes"
+        monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)  # a restart forgets it
+        assert engine.publish_session_deletions() == 1
+    converge([a, b])
+    _assert_deleted_everywhere(a, b)
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_after_restart_stores_no_events_of_a_deleted_chat(pair, monkeypatch):  # noqa: F811
+    """Review S7: with no session record and no in-memory marks, events were taken as 'parent not arrived'."""
+    from app.db import session_events, session_locks
+
+    a, b, _, _ = pair
+    with a.active():
+        session_events.append_events(SID, [{"type": "user_message", "payload": {"text": "hi"}}])
+        engine.scan_all()
+    await _delete_unsynced_on_receiver(a, b, monkeypatch)
+    chunks = _snapshot(a, "sessions", "session_events")
+    assert engine.open_snapshot_chunk(chunks[1], ctx=a_ctx(a))["items"], "the snapshot carries the events"
+    with session_locks._deleted_lock:
+        session_locks._DELETED.clear()  # a restart
+    monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)
+    _copy_state(b, chunks[1:])  # the events page alone first: the parent is refused, not late
+    _copy_state(b, chunks)
+    with b.active():
+        assert database.get_session(SID) is None
+        assert _rows("SELECT seq FROM session_events WHERE session_id=%s") == []
+        assert engine.publish_session_deletions() == 1
+    converge([a, b])
+    _assert_deleted_everywhere(a, b)
+
+
+def _rows(query):
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(query, (SID,))
+        return cur.fetchall()
+
+
+def a_ctx(worker):
+    with worker.active():
+        return engine.require_context()
+

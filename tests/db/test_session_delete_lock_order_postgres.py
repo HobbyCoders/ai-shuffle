@@ -2194,3 +2194,54 @@ def test_a_failed_fact_statement_leaves_the_delete_committable(private_pool, mon
     assert _session_row(sid) is None
     _assert_deleted(sid)
     assert "Could not remember the deletion" in caplog.text
+
+
+def _snapshot_item(coll_name, record_id, record, *, clock, origin):
+    from app.network import engine, policy
+
+    return {"record_id": record_id, "clock": clock, "origin_device_id": origin, "deleted": False,
+            "record": engine.serialize_row(policy.collection(coll_name), record)}
+
+
+def test_a_state_copy_with_a_deleted_chat_and_its_tag_commits_and_owes_the_tombstone(private_pool, monkeypatch):
+    """#1308 review S7: the refused chat's tag hit its session foreign key and rolled the copy back."""
+    from app.db import network as store
+    from app.network import engine, policy
+
+    ctx, remote = _remote_network("tagged-copy-")
+    monkeypatch.setattr(engine, "_context", ctx)
+    sid = _owned_chat(ctx, remote, "tagged-copy-", record_clock=None)  # never synced here
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
+        session_row = dict(cur.fetchone())
+    assert sessions.delete_session(sid) is True
+    with base.get_db() as conn:
+        assert store.session_deletion(conn.cursor(), sid)["pending"] is False
+    tag = {"id": "tag-" + sid, "name": "Tagged", "color": "#888888", "created_at": "2026-01-01T00:00:00+00:00",
+           "updated_at": "2026-01-01T00:00:00+00:00"}
+    pages = [
+        ("tags", [_snapshot_item("tags", tag["id"], tag, clock=40, origin=remote.device_id)]),
+        ("sessions", [_snapshot_item("sessions", sid, {**session_row, "owner_device_id": remote.device_id},
+                                     clock=41, origin=remote.device_id)]),
+        ("session_tags", [_snapshot_item("session_tags", f"{sid}|{tag['id']}",
+                                         {"session_id": sid, "tag_id": tag["id"], "created_at": tag["created_at"]},
+                                         clock=42, origin=remote.device_id)]),
+    ]
+    monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)
+    with base.get_db() as conn:  # one copy transaction, as peer_snapshot applies its pages
+        cur = conn.cursor()
+        store.lock_state(cur)
+        for name, items in pages:
+            engine.apply_snapshot_items(cur, policy.collection(name), items, ctx=ctx)
+    assert _session_row(sid) is None
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM session_tags WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+        assert store.session_deletion(cur, sid)["pending"] is True, "the copy committed the owed tombstone"
+    monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)  # a restart
+    monkeypatch.setattr(engine, "kick", lambda: None)
+    assert engine.publish_session_deletions(ctx=ctx) == 1
+    record = _session_record(sid)
+    assert record["deleted"] and record["origin_device_id"] == ctx.device_id and record["clock"] > 42
