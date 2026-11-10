@@ -182,6 +182,33 @@ class SessionCheckoutUnavailable(HTTPException):
     """The session has no existing local checkout; writes must remain blocked."""
 
 
+#: ``error_code`` of the 409 for a session checkout this worker is still
+#: creating (#1342). A plain 409 (no code) still means unavailable.
+CHECKOUT_PREPARING = "checkout_preparing"
+
+
+def _checkout_being_prepared(session: dict) -> bool:
+    """Whether a live ``ensure_worktree`` op on this worker targets the
+    session's project and branch: its checkout is coming, not missing.
+
+    Never raises: a failed lookup answers "no", the plain unavailable 409.
+    """
+    try:
+        from app.core.config import settings
+        from app.core.project_resolver import _effective_branch
+        from app.db import git_ops as git_ops_db
+
+        branch = _effective_branch(session)
+        if not branch:
+            return False
+        return git_ops_db.find_matching(
+            settings.effective_instance_id, session.get("project_v2_id"), "ensure_worktree", branch
+        ) is not None
+    except Exception:  # noqa: BLE001
+        logger.debug("ensure_worktree lookup failed for session %s", session.get("id"), exc_info=True)
+        return False
+
+
 def _resolve_working_dir(
     project_id: str,
     worktree_id: Optional[str] = None,
@@ -220,6 +247,17 @@ def _resolve_working_dir(
             if cwd:
                 return cwd, True
             if session.get("project_v2_id"):
+                if _checkout_being_prepared(session):
+                    # Not a failure yet (#1342): this worker's queued
+                    # ensure_worktree op will create it. The code tells the UI
+                    # to wait; ``error`` keeps the shown text a string.
+                    raise SessionCheckoutUnavailable(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "error_code": CHECKOUT_PREPARING,
+                            "error": "This session's checkout is still being set up on this device.",
+                        },
+                    )
                 raise SessionCheckoutUnavailable(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(

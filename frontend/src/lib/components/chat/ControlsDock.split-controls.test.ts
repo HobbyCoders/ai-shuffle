@@ -466,6 +466,22 @@ describe('ControlsDock split controls', () => {
 		expect(document.activeElement).toBe(chip);
 	});
 
+	it('returns focus to the Tool access chip after an option is picked (#1415)', async () => {
+		renderDock();
+		const chip = screen.getByRole('button', { name: /^permission mode:/i });
+		chip.focus();
+		await fireEvent.click(chip);
+		const option = screen.getByRole('menuitemradio', { name: /bypass/i });
+		option.focus();
+		expect(document.activeElement).toBe(option);
+
+		await fireEvent.click(option);
+
+		await waitFor(() => expect(screen.queryByRole('menu', { name: /tool access/i })).toBeNull());
+		expect(get(activeSession).permissionModeOverride).toBe('bypassPermissions');
+		expect(document.activeElement).toBe(chip);
+	});
+
 	it('closes the tool-access menu and effort card when focus Tabs out of them (#1407)', async () => {
 		renderDock();
 		const access = screen.getByRole('button', { name: /^permission mode:/i });
