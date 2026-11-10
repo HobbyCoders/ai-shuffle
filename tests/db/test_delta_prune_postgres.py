@@ -76,12 +76,132 @@ def test_timeout_commits_progress_continues_other_sessions_and_retries(pg, monke
             cur = conn.cursor()
             cur.execute("SELECT session_id,seq FROM fluid_session_events ORDER BY session_id,seq")
             assert [(r["session_id"], r["seq"]) for r in cur.fetchall()] == [("a", 2), ("a", 3)]
-        assert "other sessions will continue" in caplog.text
+        # The SELECT completed, so the blocked range is skipped, not the session.
+        assert "skipping to the next range" in caplog.text
     finally:
         blocker.rollback()
         blocker.close()
     assert fluid_events.prune_fluid_delta_events() == 2
     assert fluid_events.prune_fluid_delta_events() == 0
+
+
+def remaining(connect):
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT session_id,seq FROM fluid_session_events ORDER BY session_id,seq")
+        return [(r["session_id"], r["seq"]) for r in cur.fetchall()]
+
+
+def short_timeout(cur):
+    cur.execute("SET LOCAL statement_timeout = '100ms'")
+    cur.execute("SET LOCAL lock_timeout = 0")
+
+
+def counting_get_db(open_connection, counts, fail=None):
+    """A checkout whose cursor counts SELECT/DELETE range statements and can
+    inject a failure into a chosen one (``fail(kind, n) -> bool``)."""
+    class Cursor(RealDictCursor):
+        def execute(self, query, params=None):
+            text = str(query)
+            kind = ("select" if text.startswith("SELECT seq FROM fluid_session_events")
+                    else "delete" if text.startswith("DELETE ") else None)
+            if kind:
+                counts[kind] += 1
+                if fail is not None and fail(kind, counts[kind]):
+                    raise psycopg2.OperationalError(f"injected {kind} failure")
+            return super().execute(query, params)
+
+    @contextmanager
+    def connect():
+        conn = open_connection()
+        conn.cursor_factory = Cursor
+        try:
+            with conn:
+                yield conn
+            # The connection must be usable (not in an aborted transaction).
+            check = conn.cursor()
+            check.execute("SELECT 1 AS ok")
+            assert check.fetchone()["ok"] == 1
+            conn.rollback()
+        finally:
+            conn.close()
+    return connect
+
+
+def test_blocked_middle_range_lets_later_ranges_progress_and_retries(pg, monkeypatch, caplog):
+    """#1335: a range whose DELETE always times out must not stall the rest of its session."""
+    connect, open_connection = pg
+    seed(connect, "a", 8)
+    seed(connect, "b", 2)
+    monkeypatch.setattr(fluid_events, "set_timeout", short_timeout)
+    blocker = open_connection()
+    try:
+        blocker.cursor().execute("SELECT seq FROM fluid_session_events WHERE session_id='a' AND seq=2 FOR UPDATE")
+        # Ranges [0,1], [4,5], [6,7] of "a" and all of "b" commit; [2,3] is skipped.
+        with pytest.raises(RuntimeError, match=r"1 session.*pruned 8 rows.*will retry"):
+            fluid_events.prune_fluid_delta_events()
+        assert remaining(connect) == [("a", 2), ("a", 3)]
+        assert "skipping to the next range" in caplog.text
+        # The lock persists across passes: the same range is retried, reported, kept.
+        with pytest.raises(RuntimeError, match=r"1 session.*pruned 0 rows"):
+            fluid_events.prune_fluid_delta_events()
+        assert remaining(connect) == [("a", 2), ("a", 3)]
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert fluid_events.prune_fluid_delta_events() == 2
+    assert remaining(connect) == []
+
+
+def test_failed_range_select_stops_session_without_reusing_stale_high_key(pg, monkeypatch):
+    connect, open_connection = pg
+    seed(connect, "a", 6)
+    counts = {"select": 0, "delete": 0}
+    # The first range of "a" commits (high key 1); its second SELECT fails.
+    monkeypatch.setattr(retention, "get_db", counting_get_db(
+        open_connection, counts, fail=lambda kind, n: kind == "select" and n == 2))
+    with pytest.raises(RuntimeError, match=r"1 session.*pruned 2 rows"):
+        fluid_events.prune_fluid_delta_events()
+    # No guess past the failed selection: nothing after it was touched this pass.
+    assert counts == {"select": 2, "delete": 1}
+    assert remaining(connect) == [("a", s) for s in range(2, 6)]
+    monkeypatch.setattr(retention, "get_db", connect)
+    assert fluid_events.prune_fluid_delta_events() == 4
+
+
+def test_every_delete_failing_is_bounded_per_session(pg, monkeypatch):
+    connect, open_connection = pg
+    seed(connect, "a", 40)
+    seed(connect, "b", 2)
+    counts = {"select": 0, "delete": 0}
+    monkeypatch.setattr(retention, "get_db", counting_get_db(
+        open_connection, counts, fail=lambda kind, n: kind == "delete" and n <= 100))
+    with pytest.raises(RuntimeError, match=r"2 session.*pruned 0 rows"):
+        fluid_events.prune_fluid_delta_events()
+    # Each session stops after the consecutive-failure bound, not 20 timeouts.
+    bound = fluid_events.MAX_CONSECUTIVE_FAILED_RANGES
+    assert counts["delete"] == bound + 1  # "a" hits the bound; "b" has one range.
+    assert len(remaining(connect)) == 42
+
+
+def test_stop_after_skipped_range_still_reports_the_session_failed(pg, monkeypatch):
+    connect, open_connection = pg
+    seed(connect, "a", 6)
+    counts = {"select": 0, "delete": 0}
+    stopped = threading.Event()
+
+    def fail_second_delete_then_stop(kind, n):
+        if kind == "delete" and n == 2:
+            stopped.set()
+            return True
+        return False
+
+    monkeypatch.setattr(retention, "get_db", counting_get_db(
+        open_connection, counts, fail=fail_second_delete_then_stop))
+    with pytest.raises(RuntimeError, match=r"1 session.*pruned 2 rows"):
+        fluid_events.prune_fluid_delta_events(stop=stopped)
+    assert counts == {"select": 2, "delete": 2}  # Nothing ran after the stop.
+    assert remaining(connect) == [("a", s) for s in range(2, 6)]
 
 
 def test_delete_rechecks_idle_and_stop_is_immediate(pg, monkeypatch):

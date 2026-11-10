@@ -58,6 +58,11 @@ PRUNABLE_EVENT_CLASSES: Tuple[str, ...] = (
     "ProviderAlive",
 )
 
+# A session whose range DELETE fails skips that range and continues; this many
+# failures in a row stop it for the pass, so a session where every statement
+# times out costs a few statement timeouts, not one per range.
+MAX_CONSECUTIVE_FAILED_RANGES = 3
+
 
 def prune_fluid_delta_events(
     older_than_days: int = 7,
@@ -76,6 +81,8 @@ def prune_fluid_delta_events(
 
     Pass ``cursor`` to retain a caller's transaction; otherwise each bounded
     batch commits and releases its connection (including the maintenance job).
+    Without a cursor, a range whose DELETE fails after its SELECT is skipped for
+    this pass; any failure still ends in a RuntimeError with the committed count.
 
     Returns the number of rows deleted.
     """
@@ -111,7 +118,12 @@ def prune_fluid_delta_events(
         for session in sessions:
             after_session = session["sdk_session_id"]
             after_seq = None
+            session_failed = False
+            consecutive_failed = 0
             while stop is None or not stop.is_set():
+                # Set only once this attempt's SELECT completes; never carried over.
+                high = None
+                full = False
                 try:
                     with nullcontext(None) if cursor is not None else retention.get_db() as conn:
                         cur = cursor if cursor is not None else conn.cursor()
@@ -130,6 +142,7 @@ def prune_fluid_delta_events(
                         if not keys:
                             break
                         high = keys[-1]["seq"]
+                        full = len(keys) >= BATCH_SIZE
                         cur.execute(
                             "DELETE FROM fluid_session_events WHERE session_id = %s "
                             "AND seq >= %s AND seq <= %s "
@@ -142,16 +155,30 @@ def prune_fluid_delta_events(
                         )
                         changed = cur.rowcount or 0
                     total += changed
+                    consecutive_failed = 0
                     after_seq = high
-                    if len(keys) < BATCH_SIZE:
+                    if not full:
                         break
                 except Exception:
                     if cursor is not None:
                         raise  # The caller owns rollback of its transaction.
-                    failures += 1
+                    # get_db has rolled this range back and released its connection.
+                    session_failed = True
+                    consecutive_failed += 1
+                    if high is not None and full and consecutive_failed < MAX_CONSECUTIVE_FAILED_RANGES:
+                        # The range is known: leave it for the next pass (which
+                        # restarts the session) and try the rest of this session now.
+                        logger.exception("fluid_events: delta pruning failed for one range; "
+                                         "skipping to the next range, the next pass retries it")
+                        after_seq = high
+                        continue
+                    # No completed SELECT (no safe high key), the last range, or
+                    # too many failures in a row: stop this session for this pass.
                     logger.exception("fluid_events: delta pruning failed for one session; "
                                      "committed batches survive and other sessions will continue")
                     break
+            if session_failed:
+                failures += 1
         if len(sessions) < BATCH_SIZE:
             break
     if failures:
