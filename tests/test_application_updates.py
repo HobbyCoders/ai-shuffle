@@ -1514,7 +1514,14 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
             if action == "update-policy":
                 internal.require_desktop(local_request)
                 return httpx.Response(200, json={"allow_updates": enabled[0]})
-            if action == "active-sessions":
+            if action in ("restart-reserve", "restart-release"):
+                # The idle-restart fence (#1121): real routes, caller-chosen token.
+                if failure == "preflight-timeout" and action == "restart-reserve":
+                    raise httpx.ReadTimeout("synthetic preflight timeout", request=request)
+                route = (internal.desktop_restart_reserve if action == "restart-reserve"
+                         else internal.desktop_restart_release)
+                result = runner.run(route(local_request, request.url.params["token"]))
+            elif action == "active-sessions":
                 if failure == "preflight-timeout":
                     raise httpx.ReadTimeout("synthetic preflight timeout", request=request)
                 result = runner.run(internal.desktop_active_sessions(local_request))

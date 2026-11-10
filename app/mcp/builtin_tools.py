@@ -24,6 +24,9 @@ from collections.abc import Callable
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
+# Module level, not inside _spawn_background: that function also runs after the
+# process dropped to an account that cannot read the application's own files.
+from app.core import restart_fence
 from app.core.monitor_spawn import MAX_WAIT_SECONDS, WAIT_SECONDS_PARAM
 from app.mcp.config_helpers import _json_default
 
@@ -1294,6 +1297,19 @@ def sh_fallback_command(command: str, cwd: Optional[str]) -> str:
     return f"sh {shlex.quote(path)}"
 
 
+async def _end_unregistered_shell(creation: "asyncio.Future[Any]") -> None:
+    """End a shell whose start was abandoned before it was registered."""
+    try:
+        proc = await creation
+    except BaseException:  # noqa: BLE001 — no child was created
+        return
+    from app.core.process_tree import kill_process_tree
+    try:
+        await kill_process_tree(proc, own_process_group=True)
+    except Exception:  # noqa: BLE001 — best effort; the restart ends it anyway
+        logger.warning("Could not end an abandoned background shell", exc_info=True)
+
+
 async def _spawn_background(
     command: str,
     cwd: Optional[str],
@@ -1322,37 +1338,57 @@ async def _spawn_background(
     from fluid.tools import agent_runner
 
     argv, spawn_cwd, env = agent_runner.wrap([*resolve_shell().argv_prefix, command], cwd, child_env())
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=spawn_cwd,
-        env=env,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        **spawn_kwargs(),
-    )
-    lower_priority(proc)
-    prefer_for_oom_kill(proc)
-    task.process = proc
-    task.own_process_group = True
-    # On disk, so a restart after an abrupt server death can find this shell
-    # (and the dev server it may start) again instead of leaving it orphaned.
-    from app.core import process_ledger
-    await asyncio.to_thread(
-        process_ledger.record_process, proc.pid, "monitor",
-        session_id=session_id, task_id=task_id,
-    )
-
-    # Register the shell task so TaskList / /live can surface it. Keyed by the
-    # AI Shuffle session that spawned it; module-level spawns (no session) skip
-    # registration.
-    if session_id:
-        from app.core.task_registry import task_registry
-        _registry_safe(
-            lambda: task_registry.start_task(
-                session_id, task_id, "shell", command, tool_use_id=tool_use_id,
-            )
+    # An idle update restart must see this shell from before the process
+    # exists until it is registered; refused while one is prepared (#1121).
+    admission = restart_fence.admit("background shell") if session_id else None
+    creation = None
+    registered = False
+    try:
+        creation = asyncio.ensure_future(asyncio.create_subprocess_exec(
+            *argv,
+            cwd=spawn_cwd,
+            env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            **spawn_kwargs(),
+        ))
+        if admission is not None:
+            admission.hold_until(creation)
+        # Shielded: a cancelled caller cannot prove no child was created.
+        proc = await asyncio.shield(creation)
+        lower_priority(proc)
+        prefer_for_oom_kill(proc)
+        task.process = proc
+        task.own_process_group = True
+        # On disk, so a restart after an abrupt server death can find this shell
+        # (and the dev server it may start) again instead of leaving it orphaned.
+        from app.core import process_ledger
+        await (admission.to_thread if admission is not None else asyncio.to_thread)(
+            process_ledger.record_process, proc.pid, "monitor",
+            session_id=session_id, task_id=task_id,
         )
+
+        # Register the shell task so TaskList / /live can surface it. Keyed by the
+        # AI Shuffle session that spawned it; module-level spawns (no session) skip
+        # registration.
+        if session_id:
+            from app.core.task_registry import task_registry
+            _registry_safe(
+                lambda: task_registry.start_task(
+                    session_id, task_id, "shell", command, tool_use_id=tool_use_id,
+                )
+            )
+            registered = True
+    except BaseException:
+        if admission is not None and creation is not None and not registered:
+            # Roll the unregistered child back; busy until it has ended.
+            admission.hold_until(asyncio.ensure_future(_end_unregistered_shell(creation)))
+        raise
+    finally:
+        if admission is not None:
+            admission.release()
+    if session_id:
         # Durable RUNNING chip. Awaited (not fire-and-forget) so the row is in
         # the log before the spawner hands its receipt back to the model — a
         # turn that ends immediately after must not race the frame that makes

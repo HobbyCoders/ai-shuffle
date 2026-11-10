@@ -154,6 +154,28 @@ async def desktop_update_action(body: DesktopUpdateAction, request: Request):
         raise HTTPException(409, str(exc)) from exc
 
 
+@router.post("/desktop/restart-reserve")
+async def desktop_restart_reserve(request: Request, token: str):
+    """Close admission for an idle update restart, or refuse without stopping
+    anything (#1121). The caller picks ``token`` so it can release a
+    reservation whose answer it never received. Older supervisors keep using
+    active-sessions; this route is only additive."""
+    require_desktop(request)
+    from fastapi import HTTPException
+    from app.core import restart_fence
+    try:
+        return await restart_fence.reserve(token)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/desktop/restart-release")
+async def desktop_restart_release(request: Request, token: str):
+    require_desktop(request)
+    from app.core import restart_fence
+    return {"released": restart_fence.release(token)}
+
+
 _shutdown_task = None
 
 
@@ -168,11 +190,25 @@ async def desktop_active_sessions(request: Request):
 
 
 @router.post("/desktop/stop-sessions")
-async def desktop_stop_sessions(request: Request):
+async def desktop_stop_sessions(request: Request, token: str | None = None):
     import asyncio
     from app.core.desktop_lifecycle import stop_running_sessions
 
     require_desktop(request)
+    if token is not None:
+        # An idle restart's quiesce (#1121). Whether its reservation still
+        # holds is decided here, in the same step that latches admission for
+        # good, so no caller-side gap can let work start and then be stopped.
+        # Refused: nothing is stopped. Without a token this route stops work,
+        # as the explicit stop-then-restart path and the desktop app expect.
+        from fastapi import HTTPException
+        from app.core import restart_fence
+        try:
+            answer = await restart_fence.reserve(token, final=True)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if answer["reserved"] is not True:
+            raise HTTPException(409, str(answer.get("reason") or "Finish active sessions before restarting"))
     global _shutdown_task
     if _shutdown_task is None or _shutdown_task.cancelled() or (
         _shutdown_task.done() and _shutdown_task.exception() is not None

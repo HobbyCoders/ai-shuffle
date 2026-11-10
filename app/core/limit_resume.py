@@ -1107,6 +1107,16 @@ async def _fire(row: Dict[str, Any]) -> Optional[str]:
         return None
 
     if owner:
+        from app.core import restart_fence
+
+        if restart_fence.is_closed():
+            # An idle restart is being prepared (#1121): the worker resume
+            # would be refused and dropped; try again after it instead. No
+            # await between this check and the resume's own admission.
+            from app.core import wakeup_service
+
+            await wakeup_service._rearm_after_failed_submit(row, restart_fence.RETRY_MESSAGE)
+            return None
         return await _resume_worker(session_id, owner, meta, wake_stop_seq=row.get("stop_seq"))
     return await _resume_chat(row, meta)
 

@@ -289,6 +289,12 @@ def kick(session_id: str) -> None:
             "(queued turns stay durable)", session_id,
         )
         return
+    from app.core import restart_fence
+    if restart_fence.is_closed():
+        # An idle update restart is being prepared: the row stays queued and
+        # is kicked again when admission reopens (#1121).
+        restart_fence.defer_kick(session_id)
+        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -1831,6 +1837,30 @@ async def on_agent_message(
     rides a worker continuation's turn (``reply_to`` set): a usage-limit
     resume marks its continuation with it (#1831).
     """
+    from app.core import restart_fence
+    from app.core.worker_checkout import WorkerCheckoutError
+
+    # Admitted before the first await (#1121): a resume restores a checkout
+    # and re-registers the worker, which an idle restart must not cut short.
+    # Refused like a checkout that cannot be restored, so every caller already
+    # turns it into a retryable refusal without enqueuing anything.
+    try:
+        admission = restart_fence.admit("agent message")
+    except restart_fence.AdmissionClosed as exc:
+        raise WorkerCheckoutError(str(exc)) from None
+    try:
+        return await _on_agent_message_admitted(
+            session_id, sender, text, reply_to=reply_to, urgent=urgent,
+            extra_payload=extra_payload, kind=kind, admission=admission)
+    finally:
+        admission.release()
+
+
+async def _on_agent_message_admitted(
+    session_id: str, sender: str, text: str, *, reply_to: str | None,
+    urgent: bool, extra_payload: Dict[str, Any] | None, kind: str | None,
+    admission: Any,
+) -> str | None:
     from app.core import archive_guard
     from app.core.task_registry import task_registry
 
@@ -1856,7 +1886,10 @@ async def on_agent_message(
         held_progress = (message_kind(kind, urgent) == PROGRESS_KIND
                          and await asyncio.to_thread(turns_db.get_live_turn, session_id) is None)
         if not held_progress:
-            restored, note = await restore_worker_checkout_async(session_id)
+            # Its Git work runs on in a thread if this awaiter is cancelled;
+            # the admission stays held until it has finished (#1121).
+            restore = admission.hold_until(asyncio.ensure_future(restore_worker_checkout_async(session_id)))
+            restored, note = await asyncio.shield(restore)
             if not restored:
                 raise WorkerCheckoutError(note or "Its dedicated checkout could not be restored; dispatch a new Task instead")
         return await _on_agent_message_locked(

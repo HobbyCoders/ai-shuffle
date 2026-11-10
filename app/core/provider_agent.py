@@ -2392,8 +2392,29 @@ async def announce_abandoned_retry(
     )
 
 
-async def dispatch_worker(
+async def dispatch_worker(**kwargs: Any) -> WorkerOutcome:
+    """Admit a Task worker start, then run :func:`_dispatch_worker`.
+
+    The admission covers the asynchronous setup (checkout, session, turn
+    overrides) until the worker's registry rows exist, so an idle update
+    restart cannot slip in between (#1121). While one is being prepared the
+    dispatch fails with a retryable message and nothing is created.
+    """
+    from app.core import restart_fence
+
+    try:
+        admission = restart_fence.admit("Task worker")
+    except restart_fence.AdmissionClosed as exc:
+        return WorkerOutcome(ok=False, session_id=kwargs.get("worker_session_id") or "", error=str(exc))
+    try:
+        return await _dispatch_worker(_admission=admission, **kwargs)
+    finally:
+        admission.release()
+
+
+async def _dispatch_worker(
     *,
+    _admission: Any = None,
     parent_session_id: str,
     profile_id: str,
     provider_id: Optional[str] = None,
@@ -2812,6 +2833,8 @@ async def dispatch_worker(
             agent=agent_name,
             name=roster_name,
         )
+    if _admission is not None:
+        _admission.release()  # registered: active_session_ids() counts it now
 
     # Ownership of this worker's terminal, for the parent's notification lanes.
     # ``is_own_background_task`` — the gate on BOTH the terminal chip

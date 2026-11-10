@@ -387,3 +387,102 @@ def test_a_refused_report_is_not_retried(workers, monkeypatch, kicks):
         row = remote_tasks.get_child(child)
         assert row["state"] == remote_tasks.REFUSED and "No subagent with this id" in row["last_error"]
         assert remote_tasks.due_reports() == []
+
+
+# --- idle-restart admission fence (#1121) ---------------------------------------
+
+def _captured_start(a, b, monkeypatch):
+    """Start one child for real and return the task-start body that was sent."""
+    sent = []
+    real_call = control.call
+
+    async def call(device_id, action, body, **kwargs):
+        if action == remote_task.TASK_START_ACTION:
+            sent.append(body)
+        return await real_call(device_id, action, body, **kwargs)
+
+    monkeypatch.setattr(control, "call", call)
+    started_child(a, b)
+    monkeypatch.setattr(control, "call", real_call)
+    return sent[0]
+
+
+def _fresh(body):
+    import uuid
+    new_id = str(uuid.uuid4())
+    return {**body, "worker_session_id": new_id, "parent": {**body["parent"], "task_id": new_id}}
+
+
+@pytest.fixture
+def fence(monkeypatch):
+    from app.core import desktop_lifecycle, restart_fence
+    # Both workers share this process; only the fence itself decides here.
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: set())
+    yield restart_fence
+    restart_fence._reset_for_tests()
+
+
+def test_a_remote_dispatch_is_refused_before_sending_while_a_restart_is_reserved(
+        workers, monkeypatch, kicks, fence):
+    a, b, router = network(workers, monkeypatch)
+    assert asyncio.run(fence.reserve("r" * 32))["reserved"] is True
+    with b.active():
+        result = dispatch(a, b)
+        assert remote_tasks.tracked_dispatches() == []
+    assert result == {"ok": False, "error": fence.RETRY_MESSAGE}
+    assert ("POST", "/api/v1/network/peer/control/task-start") not in router.requests(UNRAID_URL)
+    assert kicks == []
+
+
+def test_a_fenced_target_refuses_new_children_but_answers_a_retry(workers, monkeypatch, kicks, fence):
+    a, b, _ = network(workers, monkeypatch)
+    body = _captured_start(a, b, monkeypatch)
+    assert asyncio.run(fence.reserve("r" * 32))["reserved"] is True
+    with a.active():
+        retry = asyncio.run(remote_task.handle_task_start(body, b.device_id))
+        assert retry["created"] is False and retry["worker_session_id"] == body["worker_session_id"]
+        new = _fresh(body)
+        with pytest.raises(ValueError, match="about to restart"):
+            asyncio.run(remote_task.handle_task_start(new, b.device_id))
+        assert database.get_session(new["worker_session_id"]) is None
+    assert kicks == [body["worker_session_id"]]  # only the first, unfenced start
+
+
+def test_a_target_start_in_flight_holds_the_fence_past_a_cancelled_awaiter(
+        workers, monkeypatch, kicks, fence):
+    import threading
+    a, b, _ = network(workers, monkeypatch)
+    body = _fresh(_captured_start(a, b, monkeypatch))
+    entered, finish = threading.Event(), threading.Event()
+    real_prepare = remote_task.prepare_task_start
+
+    def slow_prepare(body, from_device):
+        entered.set()
+        assert finish.wait(10)
+        return real_prepare(body, from_device)
+
+    monkeypatch.setattr(remote_task, "prepare_task_start", slow_prepare)
+
+    async def scenario():
+        start = asyncio.create_task(remote_task.handle_task_start(body, b.device_id))
+        await asyncio.to_thread(entered.wait, 10)
+        in_flight = await fence.reserve("r" * 32)
+        start.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start
+        after_cancel = await fence.reserve("r" * 32)
+        finish.set()
+        for _ in range(500):
+            if not fence.in_flight():
+                break
+            await asyncio.sleep(0.01)
+        return in_flight, after_cancel, await fence.reserve("r" * 32)
+
+    with a.active():
+        in_flight, after_cancel, settled = asyncio.run(scenario())
+        # The thread committed after its awaiter was cancelled: a durable
+        # queued child, never a running one the restart could stop.
+        assert database.get_session(body["worker_session_id"]) is not None
+    assert in_flight["reserved"] is False and in_flight["admissions"] == 1
+    assert after_cancel["reserved"] is False, "the provisioning thread may still commit"
+    assert settled["reserved"] is True
