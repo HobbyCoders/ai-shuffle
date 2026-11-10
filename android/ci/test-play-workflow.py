@@ -165,8 +165,8 @@ class PlayWorkflowTests(unittest.TestCase):
             self.assertNotRegex(text.lower(), r"claude|anthropic|openai|chatgpt|openrouter|gemini|grok")
         full = (listing / "full-description.txt").read_text()
         self.assertIn("Local use stays free", full)
-        self.assertIn("two remote workers", full)
-        self.assertIn("four remote-worker seats", full)
+        self.assertIn("three remote workers", full)
+        self.assertIn("10 remote workers on Pro or 30 on Ultimate", full)
         self.assertNotIn("sold separately", full)
         self.assertIn("https://hobbycoders.com/delete-account", full)
 
