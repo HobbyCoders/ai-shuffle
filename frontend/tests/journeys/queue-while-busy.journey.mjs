@@ -130,12 +130,6 @@ await runJourney({
 			// #1052: three messages sent tens of ms apart into a running turn. Each
 			// queue snapshot can predate a later send; none may drop its bubble.
 			name: 'rapid-sends-each-show-once',
-			knownBug: {
-				issue: 1052,
-				error: /showed nowhere/,
-				reason: 'at delivery the WebSocket queue snapshot drops the row before the SSE message.user row renders, so the bubble is absent for a few frames'
-			},
-			intermittent: true,
 			async setup(ctx) {
 				await openNewChat(ctx);
 				await ctx.page.waitForTimeout(800);
@@ -161,12 +155,6 @@ await runJourney({
 			// #1052 "rapid start": the second message goes out the moment the first
 			// shows as streaming, before any reply prose (the turn is still starting).
 			name: 'rapid-start-each-shows-once',
-			knownBug: {
-				issue: 1052,
-				error: /showed nowhere/,
-				reason: 'at delivery the WebSocket queue snapshot drops the row before the SSE message.user row renders, so the bubble is absent for a few frames'
-			},
-			intermittent: true,
 			async setup(ctx) {
 				await openNewChat(ctx);
 				await ctx.page.waitForTimeout(800);

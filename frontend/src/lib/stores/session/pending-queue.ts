@@ -119,6 +119,8 @@ interface Delivery {
 	seq: number;
 	/** The delivered command, when the receipt carries one: it then answers only its own bubble. */
 	commandId?: string;
+	/** The delivered turn: a drained row's id IS its turn id, so it answers that row only. */
+	turnId?: string;
 	/** The entry this delivery retired — a delivery answers exactly one bubble. */
 	matchedEntryId: string | null;
 	createdAt?: number;
@@ -159,6 +161,10 @@ interface CancellationState {
 	sends: Map<string, PendingEntry>;
 	/** Command id → marks its send unconfirmed now (the admission timeout, run early). */
 	unconfirm: Map<string, () => void>;
+	/** Confirmed rows a snapshot dropped, still on screen until their own delivery (#1052). */
+	delivering: Map<string, PendingEntry>;
+	/** Row ids whose delivery hold timed out or was withdrawn: gone until a snapshot lists them. */
+	releasedRows: Set<string>;
 }
 // Cancellation transactions belong to a session, not its currently mounted
 // feed. A socket verdict can arrive after that feed has been torn down.
@@ -211,12 +217,19 @@ function recoverySend(id: string | null, key: string) {
 function cancellationState(id: string | null): CancellationState {
 	let state = cancellations.get(id);
 	if (!state) {
-		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), terminalVerdicts: new Map(), drafts: [], timers: new Map(), sends: new Map(), unconfirm: new Map() };
+		state = { removals: new Map(), withdrawn: new Set(), deliveredRows: new Set(), terminalVerdicts: new Map(), drafts: [], timers: new Map(), sends: new Map(), unconfirm: new Map(), delivering: new Map(), releasedRows: new Set() };
 		cancellations.set(id, state);
 	}
 	return state;
 }
 const removalKey = (entry: PendingEntry) => entry.clientMessageId ?? entry.id;
+/**
+ * How long a confirmed row a snapshot dropped stays up waiting for its delivery
+ * (#1052). The snapshot (WebSocket) and the delivered row (events feed) take
+ * separate routes; the row usually lands 50-170 ms later, but a failing feed
+ * retry once took 9.7 s. Same bound as admission and cancellation.
+ */
+export const DELIVERY_HOLD_MS = 10_000;
 
 function normalize(content: string): string {
 	return content.trim();
@@ -374,6 +387,8 @@ export const pendingQueue = {
 	 * server re-queue of the same command; it leaves that attempt's files alone.
 	 */
 	settleWithdrawalReceipt(key: string, createdAt: string | undefined, live: boolean): boolean {
+		// Withdrawn anywhere (another tab or device too): never hold it for a delivery.
+		for (const id of [...cancellations.keys()]) this.releaseHeld(id, key);
 		for (const [id, state] of cancellations) {
 			const removal = state.removals.get(key);
 			if (!removal) continue;
@@ -420,8 +435,12 @@ export const pendingQueue = {
 	noteAuthoritative(id: string | null, rows: PendingEntry[]): void {
 		useSession(id);
 		lastAuthorityAt = Date.now();
+		const state = cancellations.get(id);
 		for (const row of rows) {
 			stamp(row.id);
+			// Listed again: the server says it exists, so it is neither held nor released.
+			state?.releasedRows.delete(row.id);
+			if (state?.delivering.has(removalKey(row))) this.endHold(id, removalKey(row));
 			if (row.clientMessageId) this.acknowledgeSend(id, row.clientMessageId);
 		}
 	},
@@ -462,7 +481,7 @@ export const pendingQueue = {
 		}
 		const text = normalize(content);
 		if (!text && !commandId) return;
-		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}) });
+		deliveries.push({ content: text, seq: ++seq, matchedEntryId: null, createdAt: createdAt ? Date.parse(createdAt) : NaN, ...(commandId ? { commandId } : {}), ...(turnId ? { turnId } : {}) });
 		// A long session delivers a lot of messages and only the recent ones can
 		// still be answering something pending. Forgetting the oldest only ever
 		// makes pruning more conservative.
@@ -494,6 +513,59 @@ export const pendingQueue = {
 		else if (entry) state!.removals.set(key, { ...entry, status: undefined });
 		const rows = parked.get(id ?? '');
 		if (rows) parked.set(id!, rows.map(e => removalKey(e) === key ? { ...e, status: undefined } : e));
+	},
+
+	/**
+	 * #1052: an authoritative snapshot no longer lists a confirmed bubble that was
+	 * on screen. The server took it out of the queue to run it, but its delivered
+	 * `message.user` row comes on the events feed, a separate route that usually
+	 * lands later. Keep the bubble until that row retires it in `reconcile` (by
+	 * command id, turn id, or the existing text rule for rows without ids) or
+	 * DELIVERY_HOLD_MS passes; `onRelease` then re-folds the queue.
+	 *
+	 * Only rows already confirmed and waiting are held: an echo still awaiting
+	 * admission (or unconfirmed) is kept by `sends`, a cancelling row by
+	 * `removals`, and a withdrawn, delivered or pruned row is gone for good.
+	 */
+	holdDelivering(id: string | null, previous: PendingEntry[], rows: PendingEntry[], onRelease: () => void): void {
+		const state = cancellationState(id);
+		const listed = new Set(rows.map(removalKey));
+		for (const entry of previous) {
+			const key = removalKey(entry);
+			if (listed.has(key) || entry.status || entry.unconfirmed || state.delivering.has(key)
+				|| state.sends.has(key) || state.removals.has(key)
+				|| state.withdrawn.has(key) || state.withdrawn.has(entry.id) || state.releasedRows.has(entry.id)
+				|| state.deliveredRows.has(entry.id) || prunedIds.has(entry.id)) continue;
+			state.delivering.set(key, { ...entry });
+			state.timers.set(`deliver:${key}`, setTimeout(() => {
+				if (this.releaseHeld(id, key)) onRelease();
+			}, DELIVERY_HOLD_MS));
+		}
+	},
+
+	/** Whether this bubble is held for its delivery: the server no longer has it to withdraw. */
+	isHeld(id: string | null, entry: PendingEntry): boolean {
+		return cancellations.get(id)?.delivering.has(removalKey(entry)) ?? false;
+	},
+
+	/** End a hold without hiding the row (its delivery or a snapshot now speaks for it). */
+	endHold(id: string | null, key: string): void {
+		const state = cancellations.get(id);
+		clearTimeout(state?.timers.get(`deliver:${key}`));
+		state?.timers.delete(`deliver:${key}`);
+		state?.delivering.delete(key);
+	},
+
+	/**
+	 * Take a held bubble down: its delivery did not show in time, or it was
+	 * withdrawn elsewhere. True when one was held, so the caller re-folds.
+	 */
+	releaseHeld(id: string | null, key: string): boolean {
+		const entry = cancellations.get(id)?.delivering.get(key);
+		if (!entry) return false;
+		this.endHold(id, key);
+		cancellations.get(id)!.releasedRows.add(entry.id);
+		return true;
 	},
 
 	/** Keep recoverable words until admission/refusal/receipt. Without a timeout
@@ -592,6 +664,7 @@ export const pendingQueue = {
 			sendUploads.delete(key);
 			this.removalFailed(id, key, true);
 			this.acknowledgeSend(id, key);
+			this.endHold(id, key);
 		} else if (verdict === 'already_delivered') {
 			// Retire both names of this attempt, not future rows for the command.
 			// The durable id can arrive in a verdict before its queue snapshot.
@@ -614,10 +687,19 @@ export const pendingQueue = {
 	 */
 	reconcile(id: string | null, entries: PendingEntry[]): PendingEntry[] {
 		useSession(id);
-		const { removals, withdrawn, deliveredRows, sends } = cancellationState(id);
+		const { removals, withdrawn, deliveredRows, sends, delivering, releasedRows } = cancellationState(id);
 		const keys = new Set(entries.map(removalKey));
 		const unresolved = new Map([...sends, ...removals]);
-		const candidates = [...entries, ...[...unresolved].filter(([key]) => !keys.has(key)).map(([, entry]) => entry)];
+		const missing = (map: Map<string, PendingEntry>) => [...map].filter(([key]) => !keys.has(key)).map(([, entry]) => entry);
+		// A held row left the queue's front to run: it stays where it was, first.
+		const held = missing(delivering);
+		const candidates = [...held, ...entries, ...missing(unresolved).filter(e => !delivering.has(removalKey(e)))];
+		// A delivery that names a bubble by turn id answers that bubble, so its text
+		// must not also retire another bubble with the same words.
+		for (const d of deliveries) {
+			if (d.matchedEntryId === null && d.turnId
+				&& (prunedIds.has(d.turnId) || candidates.some(e => e.id === d.turnId))) d.matchedEntryId = d.turnId;
+		}
 		const kept: PendingEntry[] = [];
 		for (const entry of candidates) {
 			const key = removalKey(entry);
@@ -634,8 +716,11 @@ export const pendingQueue = {
 				if (delivery) delivery.matchedEntryId = entry.id;
 				prunedIds.add(entry.id);
 				this.removalFailed(id, key, true);
+				if (delivering.get(key)?.id === entry.id) this.endHold(id, key);
 				continue;
 			}
+			// A hold that ran out (or was withdrawn) leaves; a snapshot listing it again brings it back.
+			if (releasedRows.has(entry.id) && !delivering.has(key)) continue;
 			const removal = removals.get(key);
 			if (removal) {
 				const retained = { ...entry, status: removal.status };

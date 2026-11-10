@@ -1442,6 +1442,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const entry = _state.queuedMessages.find(m => m.id === id);
 			if (!entry) return null;
 			if (entry.status) return null;
+			// Already taken to run (#1052): the queue no longer has it to withdraw.
+			if (pendingQueue.isHeld(_state.sessionId, entry)) return null;
 			const key = pendingQueue.requestRemoval(_state.sessionId, entry, () => {
 				update(s => s.sessionId === _state.sessionId ? { ...s,
 					queuedMessages: s.queuedMessages.map(m => (m.clientMessageId ?? m.id) === (entry.clientMessageId ?? entry.id) ? { ...m, status: undefined } : m),

@@ -568,7 +568,15 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				if (sid) for (const row of rows) {
 					if (row.clientMessageId) clearCompactRetry(sid, row.clientMessageId);
 				}
+				console.warn(`[1052] ${Math.round(performance.now())} queue_updated rows=${rows.map(r => r.content.slice(-14)).join('|') || 'none'}`); // TEMP-1052
 				pendingQueue.noteAuthoritative(sid, rows);
+				// #1052: the snapshot drops a row the moment it is taken to run, but
+				// the delivered row comes on the events feed, usually later. Keep the
+				// bubble until that row shows (or a bounded wait). Not after Stop:
+				// its rows become "Not sent" rows, which the Stop hold covers.
+				if (!state.stopRequestedTurnId) pendingQueue.holdDelivering(sid, state.queuedMessages, rows, () => {
+					update(s => s.sessionId === sid ? { ...s, queuedMessages: pendingQueue.reconcile(sid, s.queuedMessages) } : s);
+				});
 				const reconciled = pendingQueue.reconcile(sid, rows);
 				const peers = (syncData?.pending_peer_messages ?? []) as Array<{
 					id: string; content: string; sender_label: string; sender_session_id?: string; created_at: string;

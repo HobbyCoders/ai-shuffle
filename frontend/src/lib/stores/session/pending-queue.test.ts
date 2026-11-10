@@ -606,3 +606,147 @@ describe('pendingQueue — a send\'s attachments', () => {
 		});
 	});
 });
+
+describe('pendingQueue — a delivered row keeps its bubble until it renders (#1052)', () => {
+	/** A `queue_updated` as ws-message-handlers applies it, against what was on screen. */
+	function snapshot(shown: PendingEntry[], rows: PendingEntry[], onRelease = () => {}): PendingEntry[] {
+		pendingQueue.noteAuthoritative(SID, rows);
+		pendingQueue.holdDelivering(SID, shown, rows, onRelease);
+		return pendingQueue.reconcile(SID, rows);
+	}
+	const queued = (id: string, content: string, clientMessageId?: string, queuedAt = 1000): PendingEntry =>
+		({ id, content, queuedAt, ...(clientMessageId ? { clientMessageId } : {}) });
+
+	afterEach(() => vi.useRealTimers());
+
+	it('keeps a confirmed row the snapshot dropped until its own delivery, then shows it once', () => {
+		const a = queued('turn-a', 'queued a', 'client-a');
+		let shown = snapshot([], [a]);
+		shown = snapshot(shown, []);
+		expect(shown.map(e => e.id)).toEqual(['turn-a']);
+		expect(pendingQueue.isHeld(SID, a)).toBe(true);
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-a', true, 'client-a', new Date(2000).toISOString());
+		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
+		expect(pendingQueue.isHeld(SID, a)).toBe(false);
+		// A late stale snapshot still listing it cannot bring it back.
+		expect(snapshot([], [a])).toEqual([]);
+	});
+
+	it('releases the bubble after the bounded wait, and a late delivery adds no second copy', () => {
+		vi.useFakeTimers();
+		const onRelease = vi.fn();
+		const a = queued('turn-a', 'queued a', 'client-a');
+		let shown = snapshot([], [a]);
+		shown = snapshot(shown, [], onRelease);
+		vi.advanceTimersByTime(9_999);
+		expect(onRelease).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(onRelease).toHaveBeenCalledTimes(1);
+		shown = pendingQueue.reconcile(SID, shown);
+		expect(shown).toEqual([]);
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-a', true, 'client-a');
+		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
+		expect(snapshot(shown, [])).toEqual([]);
+	});
+
+	it('shows a released row again when a snapshot lists it (the server still has it)', () => {
+		vi.useFakeTimers();
+		const a = queued('turn-a', 'queued a', 'client-a');
+		snapshot(snapshot([], [a]), []);
+		vi.advanceTimersByTime(10_000);
+		expect(pendingQueue.reconcile(SID, [a])).toEqual([]);
+		expect(snapshot([], [a]).map(e => e.id)).toEqual(['turn-a']);
+	});
+
+	it('does not hold a row withdrawn through Unsend', () => {
+		const a = queued('turn-a', 'queued a', 'client-a');
+		let shown = snapshot([], [a]);
+		pendingQueue.requestRemoval(SID, a);
+		shown = pendingQueue.reconcile(SID, shown);
+		shown = snapshot(shown, []);
+		expect(pendingQueue.isHeld(SID, a)).toBe(false);
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'withdrawn');
+		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
+	});
+
+	it('ends a hold at once when the row was withdrawn from another device', () => {
+		const a = queued('turn-a', 'queued a', 'client-a');
+		let shown = snapshot(snapshot([], [a]), []);
+		expect(shown).toHaveLength(1);
+		pendingQueue.settleWithdrawalReceipt('client-a', new Date(2000).toISOString(), true);
+		shown = pendingQueue.reconcile(SID, shown);
+		expect(shown).toEqual([]);
+	});
+
+	it('retires exactly one of two identical texts per delivery', () => {
+		const one = queued('turn-1', 'same words'), two = queued('turn-2', 'same words');
+		let shown = snapshot([], [one, two]);
+		shown = snapshot(shown, [two]);
+		expect(shown.map(e => e.id)).toEqual(['turn-1', 'turn-2']);
+		pendingQueue.noteDelivered(SID, 'same words', 'turn-1');
+		shown = pendingQueue.reconcile(SID, shown);
+		expect(shown.map(e => e.id)).toEqual(['turn-2']);
+	});
+
+	it('keeps a held row first, where it was, not after the rows still queued', () => {
+		const a = queued('turn-a', 'queued a', 'client-a'), b = queued('turn-b', 'queued b', 'client-b');
+		const shown = snapshot(snapshot([], [a, b]), [b]);
+		expect(shown.map(e => e.id)).toEqual(['turn-a', 'turn-b']);
+		// The fold re-reconciles what is on screen without moving it.
+		expect(pendingQueue.reconcile(SID, shown)).toBe(shown);
+	});
+
+	it('retires a row without a command id by its turn id', () => {
+		const a = queued('turn-a', 'from another device');
+		let shown = snapshot(snapshot([], [a]), []);
+		expect(shown.map(e => e.id)).toEqual(['turn-a']);
+		pendingQueue.noteDelivered(SID, 'from another device', 'turn-a');
+		expect(pendingQueue.reconcile(SID, shown)).toEqual([]);
+	});
+
+	it('shows a server re-queue (same command, new row) once, not hidden and not doubled', () => {
+		const first = queued('turn-a', 'queued a', 'client-a', 1000);
+		let shown = snapshot(snapshot([], [first]), []);
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-live', true, 'client-a', new Date(2000).toISOString());
+		shown = pendingQueue.reconcile(SID, shown);
+		expect(shown).toEqual([]);
+		const again = queued('turn-b', 'queued a', 'client-a', 3000);
+		shown = snapshot(shown, [again]);
+		expect(shown.map(e => e.id)).toEqual(['turn-b']);
+	});
+
+	it('ends the hold when a snapshot re-queues the held command under a new row', () => {
+		const first = queued('turn-a', 'queued a', 'client-a', 1000);
+		let shown = snapshot(snapshot([], [first]), []);
+		const again = queued('turn-b', 'queued a', 'client-a', 3000);
+		shown = snapshot(shown, [again]);
+		expect(shown.map(e => e.id)).toEqual(['turn-b']);
+		expect(pendingQueue.isHeld(SID, again)).toBe(false);
+	});
+
+	it('does not hold a send still awaiting admission or an unconfirmed one', () => {
+		const echo = { id: 'client-x', clientMessageId: 'client-x', content: 'x', queuedAt: 1 };
+		pendingQueue.noteOptimistic(SID, echo.id);
+		pendingQueue.trackSend(SID, echo, () => {});
+		snapshot([echo], []);
+		expect(pendingQueue.isHeld(SID, echo)).toBe(false);
+		expect(snapshot([{ ...echo, unconfirmed: true }], []).map(e => e.id)).toEqual(['client-x']);
+		expect(pendingQueue.isHeld(SID, echo)).toBe(false);
+	});
+
+	it("keeps a send not yet admitted across Stop's empty snapshot", () => {
+		const echo = { id: 'client-y', clientMessageId: 'client-y', content: 'after stop', queuedAt: 1 };
+		pendingQueue.noteOptimistic(SID, echo.id);
+		pendingQueue.trackSend(SID, echo, () => {});
+		expect(authoritative([]).map(e => e.id)).toEqual(['client-y']);
+	});
+
+	it('keeps holds per chat, so a delivery noted in another chat retires nothing here', () => {
+		const a = queued('turn-a', 'queued a', 'client-a');
+		const shown = snapshot(snapshot([], [a]), []);
+		pendingQueue.park(SID, shown);
+		pendingQueue.noteDelivered('other', 'queued a', 'turn-x', true, 'client-other');
+		expect(pendingQueue.unpark(SID).map(e => e.id)).toEqual(['turn-a']);
+		expect(pendingQueue.reconcile(SID, shown).map(e => e.id)).toEqual(['turn-a']);
+	});
+});
