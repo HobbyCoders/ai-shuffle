@@ -43,10 +43,19 @@ export function pickerHoldsFocus(...roots: (Node | null | undefined)[]): boolean
  * padding, the context limit's text). Otherwise the browser moves focus to the
  * page while the panel stays open, and the arrows and Escape stop working.
  * Fields, buttons and rows take focus as usual, so the caret and text
- * selection in the search box are untouched.
+ * selection in the search box are untouched. Every mouse button counts: a
+ * middle or right press moves focus too (the context menu still opens).
+ * Touch is left alone: there a tap on plain text should still drop focus and
+ * close the on-screen keyboard. The browser's mousedown after a tap does not
+ * say it came from touch, so `notePanelPointer` (on pointerdown) records the
+ * input type first.
  */
+let lastPanelPointer = 'mouse';
+export function notePanelPointer(event: PointerEvent) {
+	lastPanelPointer = event.pointerType;
+}
 export function keepFocusOnPanelPress(event: MouseEvent) {
-	if (event.button !== 0) return;
+	if (lastPanelPointer === 'touch') return;
 	const panel = event.currentTarget;
 	const target = event.target;
 	if (!(panel instanceof Element) || !(target instanceof Element)) return;

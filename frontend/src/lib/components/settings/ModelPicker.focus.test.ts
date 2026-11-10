@@ -162,9 +162,23 @@ describe('ModelPicker keeps the keyboard after a press inside the panel', () => 
 		expect(press(getByLabelText('Search models'))).toBe(false);
 		expect(press(panel.querySelector('.mpp-row .mpp-fav')!)).toBe(false);
 		expect(press(panel.querySelector('.mpp-row .mpp-row-label')!)).toBe(false);
-		// Only the main button; a right-click keeps its menu.
-		expect(press(panel.querySelector('.mpp-group-name')!, 2)).toBe(false);
+		// Middle and right presses move focus too; cancelling the press does not
+		// stop the context menu, which has its own event.
+		expect(press(panel.querySelector('.mpp-group-name')!, 1)).toBe(true);
+		expect(press(panel.querySelector('.mpp-group-name')!, 2)).toBe(true);
 		expect(container.querySelector('.mpk-panel')).not.toBeNull();
+	});
+
+	it('leaves a touch tap alone, so a tap on plain text still closes the on-screen keyboard', async () => {
+		pointer('fine');
+		const { container } = await openPicker();
+		const label = container.querySelector('.mpk-panel .mpp-group-name')!;
+		const pointerDown = (pointerType: string) =>
+			label.dispatchEvent(new PointerEvent('pointerdown', { pointerType, bubbles: true }));
+		pointerDown('touch');
+		expect(press(label)).toBe(false);
+		pointerDown('mouse');
+		expect(press(label)).toBe(true);
 	});
 
 	it('Escape returns focus to the trigger even after focus was lost to the page', async () => {
