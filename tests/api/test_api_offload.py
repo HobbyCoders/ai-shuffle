@@ -193,6 +193,7 @@ async def test_activate_connector_claims_the_runner_in_one_hop(loop_thread):
     manager = SimpleNamespace(start_connector=AsyncMock(return_value=True))
 
     with patch.object(connectors_api, "database", db), \
+         patch("app.core.connector_service.database", db), \
          patch("app.core.connectors.manager.connector_manager", manager), \
          patch("app.core.connector_service.mask_config", lambda c, t: c), \
          _HopCounter(connectors_api) as hops:
@@ -201,7 +202,7 @@ async def test_activate_connector_claims_the_runner_in_one_hop(loop_thread):
     assert db.calls == [
         "get_connector",
         "update_connector",
-        "claim_connector_runner",  # inside _owns_local_runner, same hop
+        "claim_connector_runner",  # inside _owns_local_runner (connector_service.runs_here), same hop
         "get_connector",           # after the start await
     ]
     assert loop_thread not in db.threads

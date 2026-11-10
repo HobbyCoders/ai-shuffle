@@ -46,6 +46,9 @@ class ConnectorManager:
     def __init__(self):
         self._connectors: Dict[str, BaseConnector] = {}
         self._registered_at: Dict[str, float] = {}  # connector_id -> time.monotonic()
+        # Live clients whose synced row now carries a different config than
+        # they started with (#1382); the next start replaces them.
+        self._outdated: set[str] = set()
         self._lock = asyncio.Lock()
         self._receiver_locks: dict[str, asyncio.Lock] = {}
         self._event_relay = None
@@ -174,7 +177,9 @@ class ConnectorManager:
         """
         async with self._lock:
             existing = self._connectors.get(connector_id)
-            if existing is not None and self._is_live(connector_id, existing):
+            outdated = connector_id in self._outdated
+            self._outdated.discard(connector_id)
+            if existing is not None and not outdated and self._is_live(connector_id, existing):
                 logger.info(f"Connector already running: {connector_id}")
                 return True
             if existing is not None:
@@ -217,6 +222,7 @@ class ConnectorManager:
 
             # Decrypt sensitive configuration fields
             config = self._decrypt_config(config, connector_type)
+            fingerprint = self._config_fingerprint(config)
             if connector_type == "msteams":
                 from app.core.connector_service import teams_runtime_config
                 config = teams_runtime_config(connector_id, config)
@@ -232,7 +238,7 @@ class ConnectorManager:
                 database.update_connector_status(connector_id, "error", error=str(e))
                 return None
             return {"row": connector_row, "type": connector_type,
-                    "config": config, "cls": cls}
+                    "config": config, "cls": cls, "fingerprint": fingerprint}
 
         prepared = await run_sync(_prepare_blocking)
         if prepared is None:
@@ -270,6 +276,7 @@ class ConnectorManager:
             on_permission_response=self.handle_permission_response,
             on_trigger=self._handle_trigger,
         )
+        instance._started_config_fingerprint = prepared["fingerprint"]
 
         # Attempt to connect
         try:
@@ -318,6 +325,38 @@ class ConnectorManager:
                 connector_id, "error", error="connect() returned False",
             )
             return False
+
+    @staticmethod
+    def _config_fingerprint(decrypted_config: Dict[str, Any]) -> str:
+        """What a client depends on: the decrypted config, minus the owner's
+        sender ids (read per message, so changing them needs no reconnect)."""
+        import hashlib
+        import json
+
+        from app.core.connector_service import _without_owner_ids
+        body = json.dumps(_without_owner_ids(dict(decrypted_config or {})), sort_keys=True, default=str)
+        return hashlib.sha256(body.encode()).hexdigest()
+
+    def note_synced_row(self, connector_id: str) -> None:
+        """A synced ``connectors`` record landed: mark a live client outdated if its config changed.
+
+        Called from the sync apply (blocking, off the loop) before the
+        reconcile is scheduled, which then calls ``start_connector`` and so
+        replaces an outdated client. Only the decrypted config counts: a
+        rename, an events edit, an owner or switch change (the reconcile
+        handles those) and every local status write leave a live client alone.
+        """
+        instance = self._connectors.get(connector_id)
+        started = getattr(instance, "_started_config_fingerprint", None)
+        if started is None:
+            return
+        row = database.get_connector(connector_id)
+        if not row:
+            return
+        current = self._config_fingerprint(self._decrypt_config(row.get("config") or {}, row["type"]))
+        if current != started:
+            logger.info(f"Connector {connector_id}: config changed on another worker; restarting its client")
+            self._outdated.add(connector_id)
 
     @staticmethod
     def _still_eligible(connector_id: str) -> bool:

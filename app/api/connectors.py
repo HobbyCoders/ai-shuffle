@@ -344,12 +344,11 @@ async def update_connector_endpoint(
     # ``is_active`` is the same switch as activate/deactivate, so apply it to
     # the live client too; otherwise a disabled connector keeps answering.
     # update_connector has already claimed an unowned row, so the re-read
-    # runner_id says whether this install runs it.
-    from app.core.config import settings
-    from app.core.connector_service import mask_config
+    # row says whether this worker runs it.
+    from app.core.connector_service import applies_on, mask_config, runs_here
 
     row = await run_sync(database.get_connector, connector_id)
-    owns_locally = row.get("runner_id") == settings.effective_instance_id
+    owns_locally = await run_sync(runs_here, row)
     if owns_locally:
         from app.core.connectors.manager import connector_manager
         if kwargs["is_active"]:
@@ -358,7 +357,7 @@ async def update_connector_endpoint(
             await connector_manager.stop_connector(connector_id)
         row = await run_sync(database.get_connector, connector_id)
     else:
-        row["applies_on"] = row.get("runner_id")
+        row["applies_on"] = applies_on(row)
     row["config"] = mask_config(row.get("config", {}), row.get("type", ""))
     return row
 
@@ -378,23 +377,19 @@ async def delete_connector_endpoint(connector_id: str, token: str = Depends(requ
 # ---- Actions ----
 
 def _owns_local_runner(connector: Dict[str, Any]) -> bool:
-    """Whether THIS install may operate *connector*'s live client instance.
+    """Whether THIS worker may operate *connector*'s live client instance.
 
-    Multi-install affinity: two installs can share one Postgres, so only the
-    owning install may start/stop the live connector. Returns True when the
-    connector is already pinned to us, or when it is unowned (runner_id NULL)
-    and we win the atomic claim. Returns False when it is pinned to a different
-    install — the caller must then persist the is_active change but NOT touch a
-    local instance.
+    ``connector_service.runs_here``: the network owner on a worker network,
+    the install runner otherwise. False means the caller persists the change
+    but does NOT touch a local instance, and reports ``applies_on``.
     """
-    from app.core.config import settings
-    me = settings.effective_instance_id
-    runner_id = connector.get("runner_id")
-    if runner_id == me:
-        return True
-    if runner_id is None:
-        return database.claim_connector_runner(connector["id"], me)
-    return False
+    from app.core.connector_service import runs_here
+    return runs_here(connector)
+
+
+def _applies_on(connector: Dict[str, Any]):
+    from app.core.connector_service import applies_on
+    return applies_on(connector)
 
 
 @router.post("/{connector_id}/test", response_model=ConnectorTestResponse)
@@ -433,13 +428,14 @@ async def activate_connector(connector_id: str, token: str = Depends(require_adm
         # Persist the enabled flag regardless of which install runs the live client.
         database.update_connector(connector_id, is_active=True)
 
-        # Only start the live client here if this install owns the connector (or
-        # claims an unowned one). If it is pinned to a DIFFERENT install, the flag is
-        # still persisted above; the owning install starts it on its next restart
-        # (KNOWN LIMITATION: no cross-install watcher yet).
+        # Only start the live client here if this worker runs the connector (or
+        # claims an unowned one). Otherwise the flag is still persisted above: on
+        # a worker network the owner starts it when the synced record lands; two
+        # installs sharing one database start it on the owning install's next
+        # restart (KNOWN LIMITATION: no cross-install watcher there).
         if not _owns_local_runner(connector):
             updated = _read_masked()
-            updated["applies_on"] = updated.get("runner_id")
+            updated["applies_on"] = _applies_on(updated)
             return False, updated
         return True, None
 
@@ -488,10 +484,10 @@ async def deactivate_connector(connector_id: str, token: str = Depends(require_a
         except ValueError as e:
             raise HTTPException(status_code=409, detail=str(e))
 
-        # Only stop the live client here if this install owns the connector. If it is
-        # pinned to a DIFFERENT install we still persist is_active=False below; the
-        # owning install stops it on its next restart (KNOWN LIMITATION: no
-        # cross-install watcher yet).
+        # Only stop the live client here if this worker runs the connector. Otherwise
+        # we still persist is_active=False below: a network owner stops it when the
+        # synced record lands; an install sharing one database stops it on its next
+        # restart (KNOWN LIMITATION: no cross-install watcher there).
         return _owns_local_runner(connector)
 
     owns_locally = await run_sync(_check_and_claim)
@@ -510,7 +506,7 @@ async def deactivate_connector(connector_id: str, token: str = Depends(require_a
 
     updated = await run_sync(_disable)
     if not owns_locally:
-        updated["applies_on"] = updated.get("runner_id")
+        updated["applies_on"] = _applies_on(updated)
     return updated
 
 
@@ -525,9 +521,9 @@ async def restart_connector(connector_id: str, token: str = Depends(require_admi
         if not connector:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
 
-        # Only restart the live client here if this install owns the connector. If it
-        # is pinned to a DIFFERENT install, do nothing locally (KNOWN LIMITATION: no
-        # cross-install watcher yet — the owning install controls its own client).
+        # Only restart the live client here if this worker runs the connector.
+        # Otherwise do nothing locally and report who runs it: a restart changes
+        # no synced field, so it is made on that worker.
         return _owns_local_runner(connector)
 
     owns_locally = await run_sync(_check_and_claim)
@@ -544,7 +540,7 @@ async def restart_connector(connector_id: str, token: str = Depends(require_admi
 
     updated = await run_sync(_read_masked)
     if not owns_locally:
-        updated["applies_on"] = updated.get("runner_id")
+        updated["applies_on"] = _applies_on(updated)
     return updated
 
 

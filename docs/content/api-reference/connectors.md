@@ -140,7 +140,9 @@ curl http://localhost:8000/api/v1/connectors \
 
 Note: Sensitive config fields (tokens, secrets, passwords) are stored encrypted and returned as `****`; no characters of the secret are shown.
 
-`runner_id` is the install that runs the connector's live client. When another install runs it, the responses of `PATCH` (with `is_active`), `activate`, `deactivate` and `restart` add `applies_on` with that install's id: the change is saved here, and that install applies it when it next restarts.
+On a worker network the connector's owner (`owner_device_id`) runs its live client, and a connector created on a worker is owned by that worker. When another worker owns it, the responses of `PATCH` (with `is_active`), `activate`, `deactivate` and `restart` add `applies_on` with the owner's device id: the change is saved here and reaches the owner when the change syncs. Switching it on or off, or changing its config, takes effect on the owner then; `restart` has nothing to sync, so restart it on the owner.
+
+Without a network, `runner_id` is the install that runs the connector's live client. When another install runs it, those responses add `applies_on` with that install's id: the change is saved here, and that install applies it when it next restarts.
 
 ### POST /api/v1/connectors
 
