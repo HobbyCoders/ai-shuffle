@@ -311,6 +311,10 @@ It is chosen by the request alone, so it behaves the same after restarts:
   for voice calls `voice-reply` (a three-paragraph reply) and `voice-wait`
   (an update, a background job and a wait; the job's output tags its wake
   turn `voice-wait-done`). Unknown names reply with the list.
+* `[script:tool-background-long]` starts the same `Monitor` shell under a reply
+  taller than the screen, then waits on a 60-second foreground `Bash`: the
+  turn stays open with still content and the running-task row under it, for
+  Stop with a running task (#1147). Same project and access needs as below.
 * `[script:tool-background-stream]` starts a real session-owned `Monitor` shell
   (`sleep 120`, no inline wait), then streams a reply at six words per second
   while the task remains in `/live`'s `activeTasks` and the running-tasks list.

@@ -769,6 +769,93 @@ async function missingWorktreeUpload(ctx, created) {
 	}
 }
 
+/**
+ * Count, in every painted frame, the user rows (transcript or pending bubble)
+ * showing `needle`. Once it first shows it must show exactly once until the
+ * watch ends: never twice, never nowhere (#1351).
+ */
+async function watchRowsOnce(page, needle) {
+	await page.evaluate((needle) => {
+		const started = performance.now();
+		const state = (window.__rowsOnce = { running: true, frames: 0, seen: null, max: 0, twice: [], gaps: [] });
+		const tick = () => {
+			if (!state.running) return;
+			state.frames++;
+			const at = Math.round(performance.now() - started);
+			const count = [...document.querySelectorAll('[data-user-turn-id], .pending-messages [role="article"]')]
+				.filter((el) => (el.textContent || '').includes(needle)).length;
+			if (count > 0 && state.seen === null) state.seen = at;
+			if (count > 1) state.twice.push(at);
+			if (count === 0 && state.seen !== null) state.gaps.push(at);
+			state.max = Math.max(state.max, count);
+			requestAnimationFrame(tick);
+		};
+		requestAnimationFrame(tick);
+	}, needle);
+	return async (label) => {
+		const s = await page.evaluate(() => { window.__rowsOnce.running = false; return window.__rowsOnce; });
+		const span = (list) => (list.length ? `${list.length} frames (${list[0]}-${list[list.length - 1]}ms)` : '0 frames');
+		const summary = `${label}: ${s.frames} frames, first seen ${s.seen}ms, peak ${s.max}, twice ${span(s.twice)}, missing ${span(s.gaps)}`;
+		console.log(summary);
+		if (s.seen === null) throw new Error(`${label}: the message never showed`);
+		if (s.twice.length) throw new Error(`${label}: the message showed twice in ${span(s.twice)} (#1351)`);
+		if (s.gaps.length) throw new Error(`${label}: the message disappeared in ${span(s.gaps)}`);
+		return summary;
+	};
+}
+
+/**
+ * #1351: the first message of a new chat, with `files` attached, shows as
+ * exactly one user row in every frame from Send to the settled reply — with
+ * Worktree (the server moves the upload into the checkout and rewrites the
+ * path in the message) and without it. A second message in the same chat
+ * must show once too.
+ */
+function firstSendShowsOnce({ name, worktree, files, viewports }) {
+	return {
+		name,
+		viewports,
+		setup: settled(async (ctx) => {
+			const hero = await openNewChat(ctx);
+			await pickProject(ctx.page, hero);
+			if (worktree) {
+				await worktreeOn(ctx.page, hero);
+				await expectBranch(ctx.page, hero, /^Worktree branch: (a new branch from|Auto from)/);
+			}
+		}),
+		act: async (ctx) => {
+			const { page, variant, mark, log } = ctx;
+			const words = `${name}-${uniq()}`;
+			const box = page.getByRole('textbox', { name: 'Message' });
+			await mark('type the first message');
+			await box.click();
+			await box.pressSequentially(`${words} ${fakeAiTag(variant)} `.trimStart());
+			await mark('attach');
+			await page.locator('input[type="file"]').first().setInputFiles(Array.from({ length: files }, (_, i) => ({
+				name: `once-${i}-${uniq()}.txt`, mimeType: 'text/plain', buffer: Buffer.from(`once ${i}\n`)
+			})));
+			await page.waitForFunction((n) => document.querySelectorAll('[data-file-chip]').length >= n, files, { timeout: 20_000 });
+			const done = await watchRowsOnce(page, words);
+			await mark('send');
+			const t0 = Date.now();
+			await page.getByRole('button', { name: 'Send', exact: true }).click();
+			await awaitReply(ctx, name, t0);
+			log(await done('first message'));
+
+			const second = `${name}-second-${uniq()}`;
+			const doneSecond = await watchRowsOnce(page, second);
+			await mark('send a second message');
+			await box.click();
+			await page.keyboard.insertText(`${second} ${fakeAiTag(variant)}`.trim());
+			await page.getByRole('button', { name: 'Send', exact: true }).click();
+			await page.waitForFunction(() => Number(document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-messages')) >= 4
+				&& document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-streaming') === 'false', null, { timeout: 60_000 });
+			await page.waitForTimeout(1000);
+			log(await doneSecond('second message'));
+		}
+	};
+}
+
 const settled = (setup) => async (ctx) => {
 	await setup(ctx);
 	await ctx.page.waitForTimeout(1000);
@@ -888,6 +975,11 @@ await runJourney({
 			}),
 			act: (ctx) => sendWithAttachmentThenRewind(ctx, 'new-branch-attachment')
 		},
+		// #1351: the first worktree send with an attachment shows one user row in
+		// every frame (the server rewrites its upload path), plus the controls.
+		firstSendShowsOnce({ name: 'attachment-shows-once', worktree: true, files: 1, viewports: ['desktop', 'phone'] }),
+		firstSendShowsOnce({ name: 'two-attachments-show-once', worktree: true, files: 2, viewports: ['desktop'] }),
+		firstSendShowsOnce({ name: 'main-attachment-shows-once', worktree: false, files: 1, viewports: ['desktop'] }),
 		{
 			name: 'existing-branch',
 			setup: settled(async (ctx) => {

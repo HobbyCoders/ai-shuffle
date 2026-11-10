@@ -416,6 +416,76 @@ def follow_own_branch_switch(session_row: Dict[str, Any]) -> bool:
     return True
 
 
+def reattach_own_detached_checkout(session_row: Dict[str, Any]) -> bool:
+    """At this session's turn start, put its detached checkout back on its branch (#1437).
+
+    An agent that ran ``git checkout origin/main`` in its own checkout for a
+    baseline run, then parked, could never start another turn: every wake
+    was refused before the model ran, and the checkout guard stops other
+    sessions from switching the folder. Only the turn-start path and an idle
+    Task worker's follow-up admission call this, never a mid-turn tool
+    resolve, so a deliberate detach is never undone under a running agent.
+    It also leaves the folder alone while this
+    session still has background work running (it may be running in the
+    detached tree) or another live session is bound to the same checkout.
+    The git-level rules (clean, nothing unreachable, nothing forced) are
+    :func:`checkout_manager.switch_detached_checkout_to_branch`.
+
+    Never raises; returns True when it switched the working tree.
+    """
+    session_id = session_row.get("id") if session_row else None
+    branch = _effective_branch(session_row) if session_row else None
+    if not session_id or not branch:
+        return False
+    try:
+        path = existing_checkout_path(session_row)
+        if not path or checkout_manager.git_service.get_current_branch(path) is not None:
+            return False  # on a branch: bound, or a real mismatch that stays refused
+        project = resolve_project_v2(session_row)
+        if not project:
+            return False
+        from app.core.session_reservations import holds_resources
+        from app.core.task_registry import task_registry
+        from app.db import database
+
+        # Serving Monitors (a dev server, a watcher) never park a turn, so the
+        # parking view skips them; they still run in this tree.
+        if (task_registry.get_parking_background_work(session_id)
+                or task_registry.has_running_monitor_shell(session_id)
+                or task_registry.has_unresolved_background_launches(session_id)):
+            logger.info(
+                "project_resolver: not switching detached checkout %s of %s back to %r — "
+                "the session still has background work running", path, session_id, branch,
+            )
+            return False
+        # Unlike the end-of-turn resync, the session's own workers count too:
+        # one sharing this folder may be working in the detached tree.
+        # holds_resources skips serving Monitors, so check those here too.
+        if any(
+            other.get("id") != session_id and (
+                holds_resources(other["id"])
+                or task_registry.has_running_monitor_shell(other["id"]))
+            for other in database.list_sessions_for_v2_branch(project["id"], branch)
+        ):
+            logger.info(
+                "project_resolver: not switching detached checkout %s of %s back to %r — "
+                "another live session is bound to it", path, session_id, branch,
+            )
+            return False
+        old_head = checkout_manager.switch_detached_checkout_to_branch(path, branch)
+    except Exception:  # noqa: BLE001 — the binding check still refuses on its own
+        logger.warning("project_resolver: detached-checkout reattach failed for %s",
+                       session_id, exc_info=True)
+        return False
+    if not old_head:
+        return False
+    logger.info(
+        "project_resolver: session %s switched its checkout %s from detached "
+        "%s back to its branch %r", session_id, path, old_head[:12], branch,
+    )
+    return True
+
+
 def describe_checkout_mismatch(session_row: Dict[str, Any]) -> Optional[str]:
     """Why a bound checkout that IS on disk was refused, else ``None``.
 

@@ -6,6 +6,7 @@ import type { ActiveSessionState } from '$lib/stores/active-session';
 import { pendingQueue } from '$lib/stores/session/pending-queue';
 import { isUserScrollUpGesture } from '$lib/stores/session/auto-scroll';
 import { createTranscriptWindow } from './transcript-window';
+import { landedFromQueue } from '$lib/utils/queue-handoff';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -27,7 +28,7 @@ function between(start: string, end: string) {
 	if (from < 0 || to <= from) throw new Error(`Missing floor transaction: ${start}`);
 	return source.slice(from, to);
 }
-const transaction = between("let layoutBoundary = '';", '// Rendered geometry has one lifecycle');
+const transaction = between("let layoutBoundary = '';", '// Rendered geometry has one lifecycle').replace(': QueueHandoffMark | null', '');
 const reserve = between('function readingFloorReserve()', 'async function maintainCurrentTurnAnchor').replace('(): number', '()');
 const beginShift = between('windowShifting = true;', 'mountedRange = next;');
 const beginTurn = between('function startCurrentTurnAnchor(', '/**\n\t * Where a stopped turn').replace('messageId: string', 'messageId');
@@ -43,7 +44,8 @@ function probe() {
 	const tail = slot.firstElementChild as HTMLElement;
 	const env = {
 		session: session('long'), scrollTop: 5000, proseEnd: 200,
-		follows: true, pendingHeight: 0, gap: 18, calls: [] as string[], ticks: [] as (() => void)[]
+		follows: true, pendingHeight: 0, gap: 18, calls: [] as string[], ticks: [] as (() => void)[],
+		landedFromQueue
 	};
 	const create = new Function('env', `
 		let $activeSession = env.session, lastKnownScrollTop = env.scrollTop;
@@ -64,6 +66,7 @@ function probe() {
 		const requestAnimationFrame = fn => { fn(); return 0; };
 		const maintainCurrentTurnAnchor = () => env.calls.push('anchor');
 		const followGrowthNow = () => env.calls.push('follow');
+		const landedFromQueue = env.landedFromQueue;
 		let effect;
 		const $effect = { pre: fn => { effect = fn; } };
 		${reserve}

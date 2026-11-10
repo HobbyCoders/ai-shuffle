@@ -1177,7 +1177,10 @@ filled a shard by itself. Those two and `sidebar-truth` now run as two journey
 files each: the cases live in `<name>.cases.mjs`, `<name>.journey.mjs` runs the
 cases its `FIRST_HALF` names and `<name>-2.journey.mjs` runs every other one
 (`lib/split.mjs`). A regression test refuses any file estimated above 600
-seconds: split it the same way. The one-percent-refresh regression also
+seconds: split it the same way. `queue-while-busy` was split like that when
+three cases joined it: its first half keeps the seven cases the hosted
+measurement timed, so that measurement still applies, and the new cases run in
+`queue-while-busy-2`. The one-percent-refresh regression also
 preserves the uncertainty reserve when it adds two new journeys.
 
 The Nov 10 refresh from green main runs `42759196182` and `42761789009` gave the
@@ -1187,8 +1190,10 @@ guessed budgets) and caught journeys that had grown well past their old weights:
 `shell-geometry` 75 → 124. On those runs the slowest of sixteen shards ran 76–117
 seconds over its plan, and about 12,570 seconds of journeys over sixteen shards
 is at least 786 seconds each before about 150 seconds of setup, so the slowest
-job took about 19.5 minutes. Eighteen shards plan at about 12.8 step minutes
-(about 738 seconds of journeys at most) with about 250 seconds of headroom.
+job took about 19.5 minutes. Eighteen shards plan at about 13.1 step minutes
+(about 756 seconds of journeys at most) with about 234 seconds of headroom; that
+includes `queue-while-busy-2` and the grown `new-worktree-session` and
+`stop-holds-the-reader`, which use the case-count fallback until refreshed.
 Runner minutes stay about flat: 16 jobs of about 17.4 minutes before, 18 of
 about 15.2 after, since the journey work is the same and setup is a small share
 of each job. Those two runs' shared runtime differs slightly (one backend module

@@ -25,6 +25,11 @@ export interface NotSentHold {
 
 const NOTHING_HELD: QueuedMessage[] = [];
 
+function recordedUploadPaths(m: ChatMessage): string[] {
+	const paths = m.metadata?.upload_paths;
+	return Array.isArray(paths) ? paths.filter((path): path is string => typeof path === 'string' && path.length > 0) : [];
+}
+
 export function holdNotSentRows(messages: ChatMessage[], liveTurnId: string | null | undefined): NotSentHold {
 	if (!liveTurnId) return { messages, bubbles: NOTHING_HELD };
 	const isHeld = (m: ChatMessage) => m.metadata?.not_sent === true && m.metadata.not_sent_during_turn === liveTurnId;
@@ -37,6 +42,8 @@ export function holdNotSentRows(messages: ChatMessage[], liveTurnId: string | nu
 			content: m.content,
 			queuedAt: 0,
 			status: 'stopped' as const,
+			// Same chips as the queued bubble it replaces, so it keeps its size.
+			...(recordedUploadPaths(m).length ? { uploadPaths: recordedUploadPaths(m) } : {}),
 		})),
 	};
 }
