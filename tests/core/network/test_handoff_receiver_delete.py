@@ -10,9 +10,12 @@ previous owner kept the chat for good.
 When the source's commit record reaches the receiver only after that delete,
 it must not outrank the tombstone and bring the chat back on both workers:
 the receiver observes the commit's clock from the commit reply, or from the
-source's finalize-wakes when every reply was lost. The delete and its
-tombstone commit together, so the commit record cannot land in between, and
-a chat moved from a local mirror with no sync record is still retracted.
+source's finalize-wakes when every reply was lost.
+
+Whatever the route, the owner's delete writes a durable fact in its own
+transaction: incoming sync never recreates that chat, and its tombstone is
+published, over whichever worker signed the chat's record, once it can be
+(outbox held, no local record yet, ownership taken by abandoning a transfer).
 """
 import time
 
@@ -25,7 +28,7 @@ from app.db import database, session_moves, wakeups
 from app.db import network as store
 from app.db import sessions as sessions_db
 from app.db.base import get_db
-from app.network import catalog, control, handoff
+from app.network import catalog, control, engine, handoff, transport
 from tests.core.network.harness import converge, exchange
 from tests.core.network.test_handoff import pair, repositories  # noqa: F401 - fixtures
 
@@ -76,12 +79,18 @@ async def _delete_on_receiver(b):
         catalog.publish_owned()
 
 
+def _fact(worker, sid=SID):
+    with worker.active(), get_db() as conn:
+        return store.session_deletion(conn.cursor(), sid)
+
+
 def _assert_deleted_everywhere(a, b):
     converge([a, b])
     for worker in (a, b):
         with worker.active():
             assert database.get_session(SID) is None, worker.name
         assert _record(worker)["deleted"], worker.name
+    assert _fact(a) is None  # the previous owner only applied the tombstone
 
 
 @pytest.mark.asyncio
@@ -162,4 +171,80 @@ def test_a_chat_the_network_never_knew_gets_no_tombstone(pair):  # noqa: F811
         database.create_session("local-only", "default", title="Local")
         assert _record(b, "local-only") is None
         assert database.delete_session("local-only")
+        catalog.publish_owned()
     assert _record(b, "local-only") is None
+    assert not _fact(b, "local-only")["pending"]  # nothing to publish unless a record arrives
+
+
+@pytest.mark.asyncio
+async def test_receiver_delete_while_the_outbox_is_held_is_published_later(pair, monkeypatch):  # noqa: F811
+    a, b, _, _ = pair
+    await _move_to_receiver(a, b, monkeypatch)
+    exchange(a, b)  # B holds A's record of the chat
+    with b.active():
+        engine.hold_outbox(True)  # startup: nothing is signed until streams are compared
+        try:
+            await _delete_on_receiver(b)
+            assert _record(b)["origin_device_id"] == a.device_id and not _record(b)["deleted"]
+            assert _fact(b)["pending"]
+        finally:
+            engine.hold_outbox(False)
+        catalog.publish_owned()
+    assert not _fact(b)["pending"]
+    _assert_deleted_everywhere(a, b)
+
+
+@pytest.mark.asyncio
+async def test_receiver_delete_after_abandoning_a_transfer_outlives_the_delayed_commit(pair, monkeypatch):  # noqa: F811
+    a, b, _, _ = pair
+    _prepare(a, b)
+    with a.active():
+        session_moves.save(SID, target_id=b.device_id, label="B", note="", requested_by="owner",
+                           requested_at=time.time(), expires_at=time.time() + 600)
+        wakeups.create_wakeup(id="wake-moved", session_id=SID, prompt="later",
+                              profile_id="default", fire_at=time.time() + 3600)
+    _route(a, b, monkeypatch, lost_commit_replies=True)
+    with b.active():
+        with pytest.raises(TimeoutError):
+            await handoff.receive(database.get_session(SID))
+        # The source stays offline past the threshold: the owner abandons.
+        monkeypatch.setattr(transport, "online_devices", list)
+        monkeypatch.setattr(handoff, "ABANDON_AFTER_S", 0)
+        token = next(row["token"] for row in handoff.transfer_recovery_status()["pending"])
+        handoff.abandon_transfer(token)
+        assert database.get_session(SID)["owner_device_id"] == b.device_id
+    await _delete_on_receiver(b)
+    # A comes back: its commit record (a higher clock than B's tombstone)
+    # reaches B, which refuses it and signs a tombstone that outranks it.
+    _assert_deleted_everywhere(a, b)
+
+
+@pytest.mark.asyncio
+async def test_receiver_delete_of_an_unsynced_mirror_moved_then_unpinned(pair, monkeypatch):  # noqa: F811
+    a, b, _, _ = pair
+    with b.active(), get_db() as conn:
+        conn.cursor().execute("DELETE FROM sync_records WHERE collection='sessions' AND record_id=%s", (SID,))
+    await _move_to_receiver(a, b, monkeypatch)
+    with b.active():
+        sessions_db.unpin_session(SID, "")  # placement (and its hand-off receipt) is gone
+        assert database.get_session(SID)["placement"] in (None, {}, "null")
+    await _delete_on_receiver(b)
+    assert _record(b) is None and not _fact(b)["pending"]
+    _assert_deleted_everywhere(a, b)
+
+
+@pytest.mark.asyncio
+async def test_a_worker_that_does_not_own_the_chat_never_writes_the_fact(pair, monkeypatch):  # noqa: F811
+    a, b, _, _ = pair
+    await _move_to_receiver(a, b, monkeypatch)
+    exchange(a, b)
+    with a.active():
+        # The previous owner deletes its local mirror (a project or batch
+        # delete reaches mirrors through the same function).
+        assert database.delete_session(SID)
+    assert _fact(a) is None
+    exchange(a, b)
+    with b.active():
+        catalog.publish_owned()
+    exchange(a, b)
+    assert _fact(b) is None

@@ -288,6 +288,15 @@ def create_schema(cursor) -> None:
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
+    # A chat this worker deleted as its owner (#1308): incoming sync never
+    # recreates it, and ``pending`` marks a tombstone still to be published.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS network_session_deletions (
+            session_id TEXT PRIMARY KEY,
+            pending BOOLEAN NOT NULL DEFAULT FALSE,
+            deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS network_catalog_cursors (
             session_id TEXT PRIMARY KEY,
@@ -1442,6 +1451,51 @@ def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_de
                content_hash = EXCLUDED.content_hash, deleted = EXCLUDED.deleted,
                order_seq = EXCLUDED.order_seq, updated_at = EXCLUDED.updated_at""",
         (collection, record_id, clock, origin_device_id, content_hash, bool(deleted), order_seq, _now()))
+
+
+SESSION_DELETION_RETENTION_DAYS = 30  # like the op log (prune_ops)
+
+
+def remember_session_deletion(cursor, session_id: str, *, pending: bool) -> None:
+    """Record, in the owner's delete transaction, that it deleted this chat (#1308)."""
+    cursor.execute(
+        """INSERT INTO network_session_deletions (session_id, pending, deleted_at) VALUES (%s, %s, %s)
+           ON CONFLICT (session_id) DO UPDATE SET pending = EXCLUDED.pending, deleted_at = EXCLUDED.deleted_at""",
+        (session_id, bool(pending), _now()))
+
+
+def session_deletion(cursor, session_id: str) -> Optional[dict]:
+    cursor.execute("SELECT * FROM network_session_deletions WHERE session_id = %s", (session_id,))
+    row = cursor.fetchone()
+    return row_to_dict(row) if row else None
+
+
+def set_session_deletion_pending(cursor, session_id: str, pending: bool) -> None:
+    cursor.execute("UPDATE network_session_deletions SET pending = %s WHERE session_id = %s",
+                   (bool(pending), session_id))
+
+
+def forget_session_deletion(cursor, session_id: str) -> None:
+    cursor.execute("DELETE FROM network_session_deletions WHERE session_id = %s", (session_id,))
+
+
+def pending_session_deletions(cursor, session_ids: Optional[List[str]] = None, *, limit: int = 100) -> List[str]:
+    if session_ids is not None:
+        if not session_ids:
+            return []
+        cursor.execute("SELECT session_id FROM network_session_deletions WHERE pending AND session_id IN ("
+                       + ", ".join(["%s"] * len(session_ids)) + ") ORDER BY session_id", tuple(session_ids))
+    else:
+        cursor.execute("SELECT session_id FROM network_session_deletions WHERE pending "
+                       "ORDER BY session_id LIMIT %s", (limit,))
+    return [row["session_id"] for row in cursor.fetchall()]
+
+
+def prune_session_deletions(cursor, *, keep_days: int = SESSION_DELETION_RETENTION_DAYS) -> int:
+    """Forget published or never-networked deletions; a pending one waits for its tombstone."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
+    cursor.execute("DELETE FROM network_session_deletions WHERE NOT pending AND deleted_at < %s", (cutoff,))
+    return cursor.rowcount or 0
 
 
 def records_for_collection(cursor, collection: str) -> Dict[str, dict]:

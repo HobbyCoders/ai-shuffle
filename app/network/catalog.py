@@ -182,6 +182,9 @@ def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
     # and the held pass would publish it straight back: a delete and an upsert
     # on every scan, forever, while the owner stays silent.
     published += engine.scan_collection("sessions", ctx=ctx, owner_only=True, record_ids=ids, retain=held)
+    # The owner-only scan retracts only records this device signed; a chat it
+    # deleted as owner is retracted from its own durable fact (#1308).
+    published += engine.publish_session_deletions(ctx=ctx, session_ids=ids)
     if held:
         published += _publish_held_sessions(ctx, held)
     from app.network.session_runtime import publish_owned as publish_runtime

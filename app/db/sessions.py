@@ -1891,44 +1891,59 @@ def delete_session(session_id: str, *, expected_project_id: Optional[str] = None
         # commands, and any git failure never blocks the delete.
         _cleanup_working_set_ref(session_id)
         _cleanup_pending_wakeups(session_id)
-    deleted, tombstoned = _delete_session_rows(session_id, expected_project_id)
+    deleted, remembered = _delete_session_rows(session_id, expected_project_id)
     if conditional and deleted:
         _cleanup_working_set_ref(session_id, row=deleted)
         _cleanup_pending_wakeups(session_id)
-    if tombstoned:
-        from app.network import engine
-
-        engine.kick()
+    if remembered:
+        _publish_owner_deletion(session_id)
     return bool(deleted)
 
 
-def _record_owner_tombstone(cursor, session_id: str, row: dict) -> bool:
-    """The owner's delete and its tombstone commit together (#1308).
+def _remember_owner_deletion(cursor, session_id: str, row: dict) -> bool:
+    """Record, in the delete's transaction, that this worker deleted its own chat (#1308).
 
-    The owner-only scan retracts only records this worker signed. A chat that
-    arrived by hand-off still carries the previous owner's record, or none at
-    all when the hand-off used a local mirror the network had not synced yet.
-    The receipt the acceptance left in ``placement`` is that chat's evidence
-    that the network knows it, so its tombstone is forced. A chat the network
-    never knew has neither and gets no tombstone. The caller holds N, so no
-    incoming op can recreate the chat between the delete and this record.
+    Only the owner writes it: the locked row names this device (or, for a
+    legacy row, this instance), the catalog publisher's rule. A forwarded
+    delete runs on the owner; a mirror, a materialized tombstone or a stale row
+    of another owner writes nothing. Incoming sync never recreates a chat with
+    this fact (``engine._refuse_deleted_session``) and the tombstone stays
+    pending until it is recorded (``engine.publish_session_deletions``). It is
+    pending at once when the network already holds a record of the chat; a
+    chat it never knew has none, and gets a tombstone only if one arrives.
+    Off a network nothing is written.
     """
-    from app.db.base import parse_jsonb
-    from app.network import control, engine
+    from app.network import engine
 
-    if control.owner_of(row) is not None:
+    ctx = engine.context()
+    if ctx is None:
         return False
-    placement = parse_jsonb(row.get("placement")) or {}
-    received = isinstance(placement, dict) and bool(placement.get("handoff"))
-    return engine.record(cursor, "sessions", session_id, None, force=received) is not None
+    owner = row.get("owner_device_id")
+    if owner != ctx.device_id and (owner or (row.get("instance_id") or "") != engine._my_instance_id()):
+        return False
+    from app.db import network as network_store
+
+    known = network_store.get_record(cursor, "sessions", session_id) is not None
+    network_store.remember_session_deletion(cursor, session_id, pending=known)
+    return known
+
+
+def _publish_owner_deletion(session_id: str) -> None:
+    """Publish the owner's tombstone now; the owner scan retries what this cannot."""
+    try:
+        from app.network import engine
+
+        engine.publish_session_deletions(session_ids=[session_id])
+    except Exception:  # noqa: BLE001 — the delete has committed and the fact is durable
+        logger.warning("Could not publish the deletion of session %s yet", session_id, exc_info=True)
 
 
 def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
     """The transaction of :func:`delete_session`.
 
-    Returns ``(row, tombstoned)``: the deleted row (for post-commit cleanup),
+    Returns ``(row, pending)``: the deleted row (for post-commit cleanup),
     or None when the chat is gone or, conditional, now belongs to another
-    project; and whether the owner's tombstone was recorded.
+    project; and whether the owner's tombstone waits to be published.
     """
     _ph = ph()
     with get_db() as conn:
@@ -1945,11 +1960,6 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
                        (session_id, session_id))
         family = {session_id, *(row["id"] for row in cursor.fetchall())}
         lock_multi_session_mutation(cursor)
-        # N right after G (app/db/session_locks.py): the owner's tombstone is
-        # recorded in this transaction (#1308). Off a network there is no
-        # state row and this locks nothing.
-        from app.db import network as network_store
-        networked = network_store.lock_state(cursor) is not None
         cursor.execute("SELECT id FROM sessions WHERE parent_session_id=%s ORDER BY id", (session_id,))
         family.update(row["id"] for row in cursor.fetchall())
         # The cascade below deletes this chat's staged hand-off rows: take
@@ -1989,7 +1999,7 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
         if cursor.rowcount <= 0:
             return None, False
         deleted = dict(row)
-        return deleted, networked and _record_owner_tombstone(cursor, session_id, deleted)
+        return deleted, _remember_owner_deletion(cursor, session_id, deleted)
 
 
 def _cleanup_pending_wakeups(session_id: str) -> None:
