@@ -233,6 +233,18 @@ as an app speedup. Shared Linux runner unless stated; no network shaping.
 | Container update machine time | ~353 s | — | field, 1 |
 | Desktop update machine time | 272 s (105 s downtime) | — | field, 5; desktop OS worker |
 
+### Container update, 2026-11-10 (one btrfs worker, 59 GB database)
+
+Observations, not thresholds. Field: one update was down for 296 s from app
+stop to the new process logging, nearly all of it the `FILE_COPY` database
+copy. Lab, same machine: the supervisor's `_clone_tree` clones that live
+directory durably in 24 s (2,705 files, 62 GB; the clone needs one PostgreSQL
+stop and start around it, not measured at this size). Warm preparation with the
+current updater is about 11 s in a scratch root against 164 s cold (149 s of it
+Python dependencies); importing `app.main` as the app runs is 3.4 s without
+prepared bytecode and 2.0 s with the `bytecode` stage (about 2 s of
+preparation, 81 MB). The clone needs image capability `database-clone-v1`.
+
 Phase 1 found ~50k element nodes in real 120-row windows versus ~8.6k in the
 old synthetic fixture. Use the new rich fixture's measured DOM count alongside
 latency so a cheaper synthetic window cannot masquerade as a field win.

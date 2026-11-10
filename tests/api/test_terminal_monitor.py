@@ -14,6 +14,7 @@ from app.api import terminals as api
 from app.mcp import builtin_tools as bt
 from tests.api.test_terminals_api import (  # shared real-owner/PTY fixture
     ctx, owner, wsc, close_code, until, next_json, attach, read_until, strip,
+    client, OWNER_PAIRED,
 )
 
 
@@ -32,6 +33,16 @@ def test_files_relative_root_and_subfolder_open_in_real_shell(ctx):
                        else "pwd; echo FOLDER_$((6*7))\n")
             ws.send_json({"type": "input", "data": command})
             assert str(expected).encode() in strip(read_until(ws, b"FOLDER_42"))
+
+
+def test_files_terminal_records_who_opened_it(ctx):
+    """#1306: the Files route called the create route with ``who`` in the
+    ``request`` position, so the terminal's creator was FastAPI's ``Depends``
+    placeholder instead of the authenticated owner."""
+    for tc, who in ((owner(ctx), "owner"), (client(ctx, bearer=OWNER_PAIRED), "paired:pc-owner")):
+        response = tc.post("/api/v1/terminals/from-files", json={"path": "work"})
+        assert response.status_code == 201, response.text
+        assert ctx.reg.get(response.json()["terminal"]["id"]).created_by == who
 
 
 def directory_link(link, target):

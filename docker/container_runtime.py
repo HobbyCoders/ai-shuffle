@@ -7,6 +7,7 @@ The lifetime lock belongs to the supervisor, never to a daemonized child.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -78,6 +79,27 @@ _ISOLATION_FILE = Path(__file__).with_name("agent_isolation.py")
 ROLLBACK_PATTERN = r"^ai_shuffle_(rollback|failed)_[0-9a-f]{12}$"
 SNAPSHOT_MARGIN = 256 * 1024**2
 SNAPSHOT_TIMEOUT = 1800
+# Copy-on-write copies. Where the data volume can share file blocks (btrfs,
+# XFS reflink, ZFS block cloning), the copy is a clone of the stopped cluster
+# directory instead of CREATE DATABASE ... FILE_COPY: seconds and no extra
+# space for a database of any size. Field measurement, 59 GB database on
+# btrfs: one update was down for 296 s, nearly all of it FILE_COPY; cloning
+# the same directory durably (_clone_tree) takes 24 s.
+#
+# A first start that fails is put right by whichever supervisor starts next,
+# and during a first start that is the IMAGE's own copy of this file, never an
+# update's (application_updates.handover_target). A supervisor older than this
+# feature finds no database of the copy's name and blocks the worker. So a
+# clone is taken only on an image that names CLONE_CAPABILITY: its own
+# supervisor can put a clone back. Older images keep FILE_COPY.
+CLONE_CAPABILITY = "database-clone-v1"
+CLONE_DIRECTORY = "update-copies"  # beside the cluster: same filesystem
+# Written into a finished clone. After the swap it is in the live cluster and
+# says the swap happened, which makes an interrupted restore repeatable.
+CLONE_MARKER = "shuffle-update-copy.json"
+CLONE_WORKERS = 8
+_FICLONE = 0x40049409  # _IOW(0x94, 9, int): the same on x86_64 and aarch64
+_RENAME_EXCHANGE = 2
 # An application that exits or stops answering readiness is restarted in place,
 # without restarting the container, at most this often. Past that the
 # supervisor exits and the container's restart policy takes over (#2112).
@@ -236,6 +258,80 @@ def read_record(path):
         return result
     except (ValueError, UnicodeError):
         raise RuntimeFailure("unrecognized database lifecycle record; operator recovery required") from None
+
+
+def _sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _clone_file(source, target, mode):
+    """A new durable ``target`` sharing ``source``'s blocks; no data is copied.
+    OSError where the filesystem cannot do that."""
+    reader = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        writer = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+        try:
+            fcntl.ioctl(writer, _FICLONE, reader)
+            os.fchmod(writer, mode)
+            os.fsync(writer)
+        finally:
+            os.close(writer)
+    finally:
+        os.close(reader)
+
+
+def _exchange(first, second):
+    """Swap two paths in one step (renameat2 RENAME_EXCHANGE): at every moment,
+    also across a power loss, both names exist. OSError or AttributeError where
+    the C library or the filesystem cannot."""
+    import ctypes
+    rename = ctypes.CDLL(None, use_errno=True).renameat2
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(first), -100, os.fsencode(second), _RENAME_EXCHANGE) != 0:  # -100: AT_FDCWD
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def _clone_tree(source, target):
+    """Clone a stopped cluster directory into the new directory ``target``.
+
+    Directories and singly linked regular files of this account only: a link,
+    device or foreign file stops the clone (the caller then copies the usual
+    way) and nothing is ever followed. Returns (files, bytes)."""
+    uid, jobs, size = os.geteuid(), [], 0
+    os.mkdir(target, 0o700)
+    for directory, dirs, files in os.walk(source, followlinks=False):
+        relative = os.path.relpath(directory, source)
+        here = target if relative == "." else os.path.join(target, relative)
+        for name in dirs:
+            info = os.lstat(os.path.join(directory, name))
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:
+                raise RuntimeFailure("the database directory holds an entry that cannot be cloned")
+            os.mkdir(os.path.join(here, name), 0o700)
+            os.chmod(os.path.join(here, name), stat.S_IMODE(info.st_mode))
+        for name in files:
+            info = os.lstat(os.path.join(directory, name))
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1:
+                raise RuntimeFailure("the database directory holds an entry that cannot be cloned")
+            jobs.append((os.path.join(directory, name), os.path.join(here, name), stat.S_IMODE(info.st_mode)))
+            size += info.st_size
+
+    def clone(job):
+        if STOP.is_set():
+            raise RuntimeFailure("database clone interrupted")
+        _clone_file(*job)
+
+    # The ioctl and fsync release the GIL; large relation segments dominate.
+    with ThreadPoolExecutor(CLONE_WORKERS) as pool:
+        list(pool.map(clone, sorted(jobs)))
+    for directory, _, _ in os.walk(target):
+        _sync_directory(directory)
+    return len(jobs), size
 
 
 class ClusterLock:
@@ -410,6 +506,8 @@ class Database:
         self.password = None
         self.identifier = None
         self.url = None
+        # Set by run() from the image's capabilities; see CLONE_CAPABILITY.
+        self.clone_copies = False
 
     def command(self, args, *, env=None, text=None, source=None, output=None, timeout=30, reject_stderr=False):
         process = subprocess.Popen(args, env=env or client_env(""),
@@ -457,10 +555,21 @@ class Database:
     # APP_DB alone, so nothing but the admin socket can reach a copy.
     def update_databases(self):
         listed = self.query(f"SELECT datname FROM pg_database WHERE datname ~ '{ROLLBACK_PATTERN}'", admin=True)
-        return [name for name in listed.splitlines() if re.fullmatch(ROLLBACK_PATTERN, name)]
+        names = [name for name in listed.splitlines() if re.fullmatch(ROLLBACK_PATTERN, name)]
+        copies = self.pg / CLONE_DIRECTORY
+        if copies.is_dir() and not copies.is_symlink():
+            for entry in sorted(copies.iterdir()):
+                if re.fullmatch(ROLLBACK_PATTERN, entry.name):
+                    if entry.name not in names:
+                        names.append(entry.name)
+                elif entry.name.startswith("."):
+                    self._discard_tree(entry)  # an interrupted clone or removal
+        return names
 
     def snapshot_space(self):
         """(free, needed) bytes on the data volume for one more copy of APP_DB."""
+        if self._clone_supported():
+            return shutil.disk_usage(self.data).free, SNAPSHOT_MARGIN
         size = int(self.query(f"SELECT pg_database_size('{APP_DB}')", admin=True))
         return shutil.disk_usage(self.data).free, size + max(size // 10, SNAPSHOT_MARGIN)
 
@@ -472,9 +581,177 @@ class Database:
         except Exception:
             return "unknown"
 
+    def _discard_tree(self, path):
+        """Remove a clone directory without making a start or a restart wait
+        for it: unlinking a large cluster takes tens of seconds. Renamed out
+        of the way first; what a stopped supervisor leaves is removed by
+        update_databases at the next start."""
+        if path.is_symlink() or not path.is_dir():
+            path.unlink(missing_ok=True)
+            return
+        if not path.name.startswith("."):
+            hidden = path.with_name(f".{path.name}.removing-{secrets.token_hex(4)}")
+            os.rename(path, hidden)
+            path = hidden
+        threading.Thread(target=shutil.rmtree, args=(path,), kwargs={"ignore_errors": True},
+                         daemon=True, name="database-copy-removal").start()
+
+    def _clone_supported(self):
+        """Whether a copy can be a clone here: an image whose own supervisor
+        can put one back, the ordinary single account, and a volume that both
+        shares file blocks and swaps two directories in one step. Probed with
+        scratch files beside the cluster; the cluster itself is not touched."""
+        if (not self.clone_copies or self.process is None or isolation().ACTIVE is not None
+                or os.environ.get("AI_SHUFFLE_PERF_DATABASE_CLONE", "").strip().lower() in ("0", "false", "off")):
+            return False
+        try:
+            with tempfile.TemporaryDirectory(prefix=".clone-probe-", dir=self.pg) as scratch:
+                first, second = Path(scratch, "first"), Path(scratch, "second")
+                first.mkdir()
+                second.mkdir()
+                (first / "block").write_bytes(b"\0" * 4096)
+                _clone_file(first / "block", second / "copy", 0o600)
+                _exchange(first, second)
+                return (first / "copy").is_file() and (second / "block").is_file()
+        except (OSError, AttributeError):
+            return False
+
+    def _stop_server(self):
+        """FAST-stop PostgreSQL. False when it had to be killed."""
+        clean = True
+        if self.process is not None:
+            if self.process.poll() is None:
+                self.process.send_signal(signal.SIGINT)  # PostgreSQL FAST shutdown
+                try:
+                    self.process.wait(timeout=PG_FAST_SHUTDOWN_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    clean = False
+            kill_group(self.process, signal.SIGKILL)
+            self.process.wait(timeout=5)
+        return clean
+
+    def _start_server(self):
+        """Start PostgreSQL again after an offline copy or swap, on the same
+        port and password; only the private socket directory is new."""
+        if self.pg_log is not None:
+            self.pg_log.close()
+        if self.private_runtime is not None:
+            self.private_runtime.cleanup()
+        self.start()
+        self.wait_ready()
+        write_private(self.pg / "runtime.json", json.dumps({"version": 1, "socket": str(self.socket),
+            "port": self.port, "system_identifier": self.identifier}), replace=True)
+
+    def _clone_snapshot(self, name):
+        """Take the copy as a clone of the stopped cluster. True when the clone
+        is complete and durable. False when it was not taken: PostgreSQL is
+        running again and the caller copies the usual way. Raises only when
+        PostgreSQL cannot be started again."""
+        started = time.monotonic()
+        copies = self.pg / CLONE_DIRECTORY
+        partial = copies / f".{name}.partial"
+        try:
+            copies.mkdir(mode=0o700, exist_ok=True)
+            check_owned(copies, directory=True)
+            # One name is one copy: a restore looks for a clone first.
+            self.admin_script(f"DROP DATABASE IF EXISTS {name}", timeout=120)
+        except (OSError, RuntimeFailure):
+            return False
+        _telemetry_log("database snapshot starting strategy=CLONE")
+        files = size = 0
+        complete, clone_seconds = False, 0.0
+        try:
+            # Only a cleanly shut down cluster is cloned. One that had to be
+            # killed is started again (crash recovery) and copied by SQL.
+            if self._stop_server() and self._shut_down():
+                clone_started = time.monotonic()
+                try:
+                    files, size = _clone_tree(self.data, partial)
+                    write_private(partial / CLONE_MARKER, json.dumps({"version": 1, "name": name}))
+                    os.rename(partial, copies / name)
+                    _sync_directory(copies)
+                    complete = True
+                finally:
+                    clone_seconds = time.monotonic() - clone_started
+        except (OSError, RuntimeFailure) as exc:
+            _telemetry_log(f"database snapshot clone not taken ({type(exc).__name__}); copying instead")
+        finally:
+            if not complete:
+                shutil.rmtree(partial, ignore_errors=True)
+            self._start_server()
+        _telemetry_log(f"database snapshot {'complete' if complete else 'failed'} strategy=CLONE "
+            f"duration_seconds={time.monotonic() - started:.3f} clone_seconds={clone_seconds:.3f} "
+            f"files={files} cloned_bytes={size}")
+        return complete
+
+    def _shut_down(self):
+        text = self.command(["pg_controldata", str(self.data)], reject_stderr=True)
+        return bool(re.search(r"^Database cluster state:\s*shut down\s*$", text, re.M))
+
+    def _restore_clone(self, name, discard):
+        """Put a clone back as the cluster. False when ``name`` is not a clone
+        (the caller then looks for a database of that name).
+
+        Every step is a single rename and may be repeated after an
+        interruption; the cluster directory exists throughout:
+          1. swap the clone with the cluster (the clone carries CLONE_MARKER,
+             so afterwards the marker is in the cluster);
+          2. rename what the update left behind, now under the clone's name,
+             to ``discard``;
+          3. remove the marker."""
+        copies = self.pg / CLONE_DIRECTORY
+        if copies.is_symlink() or not copies.is_dir():
+            return False
+        clone, kept, swapped = copies / name, copies / discard, self.data / CLONE_MARKER
+        present = clone.is_dir() and not clone.is_symlink()
+        if not present and not swapped.is_file():
+            return kept.is_dir() and not kept.is_symlink()  # finished before, or never a clone
+        check_owned(copies, directory=True)
+        if present and (clone / CLONE_MARKER).is_file():
+            check_owned(clone, directory=True)
+            version = clone / "PG_VERSION"
+            if (read_record(clone / CLONE_MARKER).get("name") != name or not version.is_file()
+                    or version.read_text().strip() != MAJOR or not (clone / "global" / "pg_control").is_file()):
+                raise RuntimeFailure("the database copy taken before the update is damaged")
+            # What the update left behind is being replaced: it need not stop cleanly.
+            self._stop_server()
+            _exchange(self.data, clone)
+            _sync_directory(copies)
+            _sync_directory(self.pg)
+        elif present and not swapped.is_file():
+            raise RuntimeFailure("the database copy taken before the update is incomplete")
+        if present:
+            if kept.exists() or kept.is_symlink():
+                self._discard_tree(kept)
+            os.rename(clone, kept)
+            _sync_directory(copies)
+        swapped.unlink(missing_ok=True)
+        _sync_directory(self.data)
+        if self.process is None or self.process.poll() is not None:
+            self._start_server()
+        _telemetry_log("database snapshot restored strategy=CLONE")
+        return True
+
+    def _forget_clones(self, name):
+        """One name is one copy. Before a new copy is taken, nothing of an
+        earlier attempt under this name may remain for a restore to mistake
+        for it: not a clone, not what a restore set aside, not its marker."""
+        copies = self.pg / CLONE_DIRECTORY
+        try:
+            for stale in (copies / name, copies / name.replace("_rollback_", "_failed_", 1),
+                          copies / f".{name}.partial"):
+                if stale.exists() or stale.is_symlink():
+                    self._discard_tree(stale)
+            (self.data / CLONE_MARKER).unlink(missing_ok=True)
+        except OSError:
+            raise RuntimeFailure("could not clear an earlier database copy") from None
+
     def snapshot(self, name):
         """Copy APP_DB to ``name`` while the application is stopped."""
         _rollback_name(name, "rollback")
+        self._forget_clones(name)
+        if self._clone_supported() and self._clone_snapshot(name):
+            return
         started = time.monotonic()
         _telemetry_log("database snapshot starting strategy=FILE_COPY")
         _telemetry_log(f"database snapshot source_database_bytes={self._snapshot_bytes(APP_DB)}")
@@ -509,6 +786,8 @@ class Database:
         repeat after an interruption: a finished swap leaves ``discard``."""
         _rollback_name(name, "rollback")
         _rollback_name(discard, "failed")
+        if self._restore_clone(name, discard):
+            return
         present = set(self.update_databases())
         if name not in present:
             if discard in present:
@@ -530,6 +809,9 @@ class Database:
     def drop_update_database(self, name):
         if not re.fullmatch(ROLLBACK_PATTERN, name):
             raise RuntimeFailure("refusing to drop a database the updater did not create")
+        clone = self.pg / CLONE_DIRECTORY / name
+        if clone.exists() or clone.is_symlink():
+            self._discard_tree(clone)
         self.admin_script(f"DROP DATABASE IF EXISTS {name}", timeout=120)
 
     def record_mode(self):
@@ -732,16 +1014,7 @@ class Database:
     def close(self):
         try:
             if self.process is not None:
-                forced = False
-                if self.process.poll() is None:
-                    self.process.send_signal(signal.SIGINT)  # PostgreSQL FAST shutdown
-                    try:
-                        self.process.wait(timeout=PG_FAST_SHUTDOWN_TIMEOUT)
-                    except subprocess.TimeoutExpired:
-                        forced = True
-                kill_group(self.process, signal.SIGKILL)
-                self.process.wait(timeout=5)
-                if forced:
+                if not self._stop_server():
                     raise RuntimeFailure("PostgreSQL fast shutdown deadline exceeded; operator inspection required")
                 for endpoint in (self.pg / "runtime.json", self.root / "managed-postgres.json"):
                     if endpoint.exists():
@@ -1862,6 +2135,7 @@ def run(settings, action, filename=None):
         image_file = image_dir() / "image.json"
         if image_file.is_file():
             image = json.loads(image_file.read_text())
+            db.clone_copies = CLONE_CAPABILITY in (image.get("provides") or [])
             if is_production(image):
                 import httpx
                 module = load_updater()

@@ -28,7 +28,7 @@ class ResidentUpdater(BaseModel):
 
 class UpdateStage(BaseModel):
     stage: Literal["command", "source_download", "source_extract", "source_verify", "runtimes", "assembly",
-                   "python_dependencies", "python_cache", "fluid", "prebuilt_ui", "prepare_files",
+                   "python_dependencies", "python_cache", "fluid", "bytecode", "prebuilt_ui", "prepare_files",
                    "frontend_cache", "frontend_dependencies", "frontend_build", "tools_cache",
                    "tools_dependencies", "tools_build", "browser_mcp_cache", "browser_mcp_dependencies",
                    "browser_mcp_build", "desktop_cache", "desktop_dependencies", "desktop_build"]

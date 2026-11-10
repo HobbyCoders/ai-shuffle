@@ -165,7 +165,7 @@ export interface UpdateRuntimeStatus extends Partial<UpdatePolicy> {
 export const UPDATE_STAGE_LABELS = {
 	command: 'Build command', source_download: 'Source download', source_extract: 'Source extraction', source_verify: 'Source verification',
 	runtimes: 'Runtime preparation', assembly: 'Update assembly', python_dependencies: 'Python dependencies', python_cache: 'Python cache',
-	fluid: 'Fluid installation', prebuilt_ui: 'Prebuilt UI', prepare_files: 'File preparation', frontend_cache: 'UI cache',
+	fluid: 'Fluid installation', bytecode: 'Bytecode compilation', prebuilt_ui: 'Prebuilt UI', prepare_files: 'File preparation', frontend_cache: 'UI cache',
 	frontend_dependencies: 'UI dependencies', frontend_build: 'UI build', tools_cache: 'Tools cache', tools_dependencies: 'Tools dependencies',
 	tools_build: 'Tools build', browser_mcp_cache: 'Browser cache', browser_mcp_dependencies: 'Browser dependencies', browser_mcp_build: 'Browser build',
 	desktop_cache: 'Desktop cache', desktop_dependencies: 'Desktop dependencies', desktop_build: 'Desktop build'

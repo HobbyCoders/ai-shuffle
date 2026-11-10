@@ -388,11 +388,13 @@ def _validated_terminal_cwd(cwd: Optional[str]) -> tuple[Optional[str], Optional
 
 
 @router.post("/from-files", status_code=201)
-async def terminal_from_files(body: FromFilesBody, who: str = Depends(require_terminal_owner)):
+async def terminal_from_files(body: FromFilesBody, request: Request, who: str = Depends(require_terminal_owner)):
     from app.api.workspace_files import validate_workspace_path
 
     path = await run_sync(validate_workspace_path, body.path)
-    return await create_terminal(CreateTerminal(cwd=str(path)), who)
+    # By keyword: called directly, the route's ``Depends`` default is not
+    # resolved, so a misplaced argument silently becomes the creator.
+    return await create_terminal(CreateTerminal(cwd=str(path)), request=request, who=who)
 
 
 # Monitor watching is deliberately separate from interactive terminals. These

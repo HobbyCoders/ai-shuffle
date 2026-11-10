@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import signal
@@ -29,8 +30,12 @@ IN_USE_MESSAGE = ("Claude Code is running (a Claude chat or a terminal is using 
                   "Stop it, then remove Claude Code.")
 ORPHAN_MESSAGE = ("A Claude Code install or update started before the worker restarted "
                   "is still running. Try again in a few minutes.")
+# A worker runs the CLI's own updater once per start; one restarting in a loop
+# asks Anthropic at most this often.
+STARTUP_CHECK_SECONDS = 600
 _lock = threading.RLock()
 _job = None
+logger = logging.getLogger(__name__)
 
 
 def _key(name):
@@ -290,6 +295,9 @@ def _execute(kind):
         claude_cli_status.invalidate()
         with _lock:
             _job.update(state=state, finished_at=_now(), message=message, output_tail=tail or None)
+        # The startup check has nobody watching Settings: the log is its result.
+        logger.log(logging.INFO if state == "succeeded" else logging.WARNING,
+                   "Claude Code %s %s: %s", kind, state, message)
 
 
 def start(kind):
@@ -308,3 +316,26 @@ def start(kind):
                 "message": None, "output_tail": None}
         threading.Thread(target=_execute, args=(kind,), daemon=True, name="claude-cli-install").start()
     return payload()
+
+
+def update_on_startup(cli):
+    """Run the CLI's own updater when the worker starts. True when it started.
+
+    The same job as "Check for update" in Settings > Providers > Claude. Never
+    from the test suite or a branch preview: both share the real install.
+    """
+    if not cli.installed or sys.platform not in ("linux", "darwin", "win32"):
+        return False
+    if os.environ.get("TESTING") == "1" or os.environ.get("AI_SHUFFLE_PREVIEW") == "1":
+        return False
+    key = _key("claude_cli_startup_check_at")
+    try:
+        last = float(database.get_system_setting(key) or 0)
+    except ValueError:
+        last = 0.0
+    now = time.time()
+    if 0 <= now - last < STARTUP_CHECK_SECONDS:
+        return False
+    database.set_system_setting(key, str(now))
+    start("update")
+    return True
