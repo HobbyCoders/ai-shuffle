@@ -1460,13 +1460,21 @@
 			editorRef?.blur();
 		};
 
+		// A note send holds the next send until its frame is written (the
+		// store's onDispatched) or the send ended without one (finally below).
+		// Not at the note answer, which lands before the frame, and not when the
+		// store send returns: a voice call's send returns only once its
+		// acknowledgement arrives or times out, and a draft put back then would
+		// go out again with the next send. Other sends let the next one go once
+		// the cold-cache check has answered.
+		const holdUntilDispatched = !!notesForm;
+
 		// Once, when the store has the note form's answer or the send ended
 		// without asking (refused, held, thrown).
 		let notesFormSettled = !notesForm;
 		const settleNotesForm = () => {
 			if (notesFormSettled) return;
 			notesFormSettled = true;
-			released?.();
 			dropPendingSend(pendingNote);
 		};
 
@@ -1477,10 +1485,10 @@
 				// send: an update reload waits for it as it waits for the request.
 				mayGoNow = mayGo ? await trackSend(mayGo) : true;
 			} finally {
-				// A note's form is asked inside the store send: the next send and
-				// the pending note wait for that answer, so sends keep their order.
+				if (!holdUntilDispatched) released?.();
+				// A note's form is asked inside the store send: the pending note
+				// waits for that answer.
 				if (!notesForm) {
-					released?.();
 					// Handed over or about to be put back: either way the note is done,
 					// so a reload never brings back words the server already has.
 					dropPendingSend(pendingNote);
@@ -1495,6 +1503,7 @@
 				: {};
 			const sent = await activeSession.sendMessage(finalPrompt, {
 				...late,
+				...(holdUntilDispatched && released ? { onDispatched: released } : {}),
 				...(pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : {}),
                 ...(pendingReferences.length ? { pendingUploadReferences: pendingReferences } : {}),
 				...(compactBeforeSend ? { compactFirst: true } : {}),
@@ -1514,6 +1523,10 @@
 			restoreOnFailure();
 		} finally {
 			settleNotesForm();
+			// Ended, with or without a frame: the next send may go. Released
+			// already at dispatch; the release is bound to this send, so a
+			// second call is a no-op and never frees a later send.
+			released?.();
 			stopWatchingReason();
 		}
 	}
