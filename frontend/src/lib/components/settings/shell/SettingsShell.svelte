@@ -194,21 +194,29 @@
 		const req = settingsNav.focusRequest;
 		if (!req || req.n <= seenFocus) return;
 		seenFocus = req.n;
-		untrack(() => void focusHeading(req.pane, req.n));
+		untrack(() => void focusHeading(req.pane, req.n, inputs));
 	});
 
+	// Keys and presses since the shell mounted. A heading that arrives late
+	// must not take focus from someone who has gone on to do something else.
+	let inputs = 0;
+	let headingTimer: ReturnType<typeof setTimeout> | undefined;
+	onDestroy(() => clearTimeout(headingTimer));
+
 	// A first visit loads the page's code; on a slow link or a busy machine that
-	// has taken over 5s, so keep looking for 15s. A newer navigation ends it.
-	async function focusHeading(pane: 'page' | 'detail', n: number, tries = 300): Promise<void> {
+	// has taken over 5s, so keep looking for 15s. A newer navigation, a key or
+	// a press ends it.
+	async function focusHeading(pane: 'page' | 'detail', n: number, seen: number, tries = 300): Promise<void> {
 		await tick();
-		if (settingsNav.focusRequest?.n !== n) return;
+		if (settingsNav.focusRequest?.n !== n || inputs !== seen) return;
 		const el = root?.querySelector<HTMLElement>(`[data-settings-heading="${pane}"]`);
 		if (el) {
 			el.focus({ preventScroll: true });
 			return;
 		}
 		// A collection may still be loading.
-		if (tries > 0) setTimeout(() => void focusHeading(pane, n, tries - 1), 50);
+		clearTimeout(headingTimer);
+		if (tries > 0) headingTimer = setTimeout(() => void focusHeading(pane, n, seen, tries - 1), 50);
 	}
 
 	function cssEscape(value: string): string {
@@ -219,6 +227,8 @@
 	const collectionCategory = $derived(isPreferenceCategory(category) ? null : (category as CollectionCategory));
 	const ReadyCollection = $derived(collectionCategory ? loadedCollection(collectionCategory) : undefined);
 </script>
+
+<svelte:window onkeydowncapture={() => inputs++} onpointerdowncapture={() => inputs++} />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div

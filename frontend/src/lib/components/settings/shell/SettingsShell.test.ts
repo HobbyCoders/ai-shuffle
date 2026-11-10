@@ -156,6 +156,43 @@ describe('SettingsShell index', () => {
 		expect(document.activeElement).toBe(late);
 	});
 
+	it('leaves focus alone when the person typed while the page was loading', async () => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+			settingsNav.focusRequest = null;
+		});
+		const { container } = render(SettingsShell);
+		settingsNav.focusRequest = { pane: 'detail', n: (settingsNav.focusRequest?.n ?? 0) + 1000 };
+		await vi.advanceTimersByTimeAsync(3_000);
+		const search = container.querySelector<HTMLInputElement>('input[type="search"]')!;
+		search.focus();
+		await fireEvent.keyDown(search, { key: 'l' });
+		const late = document.createElement('h2');
+		late.tabIndex = -1;
+		late.dataset.settingsHeading = 'detail';
+		container.querySelector('.settings-shell')!.append(late);
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(document.activeElement).toBe(search);
+	});
+
+	it('stops looking for the heading when Settings closes', async () => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+			settingsNav.focusRequest = null;
+		});
+		const { unmount } = render(SettingsShell);
+		settingsNav.focusRequest = { pane: 'detail', n: (settingsNav.focusRequest?.n ?? 0) + 1000 };
+		await vi.advanceTimersByTimeAsync(1_000);
+		unmount();
+		const timers = vi.spyOn(globalThis, 'setTimeout');
+		await vi.advanceTimersByTimeAsync(1_000);
+		// The search retries every 50ms; none may be scheduled after the close.
+		expect(timers.mock.calls.filter(([, delay]) => delay === 50)).toHaveLength(0);
+		timers.mockRestore();
+	});
+
 	it('shows an attention count from a category module', async () => {
 		const { MODULES } = await import('$lib/settings/registry');
 		const before = MODULES.logs;
