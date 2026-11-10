@@ -1527,7 +1527,9 @@ async def _stream_query_turn(
     try:
         # Expand @Notes/<id> as the caller that sent this prompt (#1402); the
         # chat keeps the typed text, the event records what the agent got.
-        agent_prompt = await asyncio.to_thread(_resolve_note_references_for, prompt, api_user_id)
+        agent_prompt = prompt
+        if prompt and NOTE_REFERENCE.search(prompt):
+            agent_prompt = await run_sync(_resolve_note_references_for, prompt, api_user_id)
         recorder = await plan_scope.enter_async_context(recorded_turn(
             session_id, prompt, profile_id, agent_content=agent_prompt,
         ))

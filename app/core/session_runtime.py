@@ -51,7 +51,7 @@ from app.core.turn_recorder import (
 )
 from app.db import runs as runs_db
 from app.db import turns as turns_db
-from app.db.async_database import run_lease
+from app.db.async_database import run_lease, run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -2392,7 +2392,7 @@ class SessionRuntime:
 
         if not prompt or not NOTE_REFERENCE.search(prompt):
             return None
-        expanded = await asyncio.to_thread(_resolve_note_references_for, prompt, self.api_user_id)
+        expanded = await run_sync(_resolve_note_references_for, prompt, self.api_user_id)
         return expanded if expanded != prompt else None
 
     def _steer_refusal(

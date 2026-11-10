@@ -76,7 +76,7 @@
 	import { detectProjectMismatch } from './project-mismatch';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
-	import { chatRunsElsewhere } from './runs-elsewhere';
+	import { notesGoAsReferences } from './runs-elsewhere';
 	import { UI_MOUNT } from '$lib/utils/ui-signature';
 	import TiptapEditor from './TiptapEditor.svelte';
 	import type { Editor } from '@tiptap/core';
@@ -1146,12 +1146,21 @@
 			if (!(await holdForProjectSetup(need))) return;
 		}
 		// Get serialized message from editor (includes inline @path references).
-		// Decided now, against where the message goes: a "Runs on" or owner change
-		// after a note was picked counts (#1364).
-		const finalPrompt = editorRef?.getMessage({ notesAsReferences: chatRunsElsewhere(
-			$activeSession, $sessions.find((session) => session.id === $activeSession.sessionId), !!moveWait,
-			appData.sessionOwnership()
-		) }) ?? '';
+		// A note chip goes as this worker's path only to a chat this worker runs,
+		// else as `@Notes/<id>`. For an open chat the server is asked now: the
+		// page's copy of who runs it can be stale after a hand-off (#1364).
+		let notesAsReferences = false;
+		if ((editorRef?.getMessage({ notesAsReferences: true }) ?? '') !== (editorRef?.getMessage() ?? '')) {
+			const choice = notesGoAsReferences($activeSession, !!moveWait);
+			notesAsReferences = typeof choice === 'boolean' ? choice : await choice;
+			if (!ownsComposer()) return;
+			if (!stillAtDestination(destination, composerPlace())) {
+				if (movedAwayFrom(destination, composerPlace())) keepUnsentDraft(destination, typedDraft, false);
+				else refuseSend(SEND_MOVED_MESSAGE, 'warning');
+				return;
+			}
+		}
+		const finalPrompt = editorRef?.getMessage({ notesAsReferences: notesAsReferences || !!moveWait }) ?? '';
 
 		// Surface WHY a send is blocked instead of silently swallowing the click,
 		// which read as a dead app. The guards keep the message in the composer and

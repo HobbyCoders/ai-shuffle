@@ -66,6 +66,8 @@ async def _sse(route, request, api_user, tmp_path):
             # The new chat's row is real, so the turn's events can be recorded.
             if getattr(fn, "__name__", "") == "create_session":
                 database.create_session(kwargs["session_id"], "default")
+            if fn is qe._resolve_note_references_for:  # the code under test runs for real
+                return fn(*args, **kwargs)
             return await fake_run_sync(fn, *args, **kwargs)
 
         stack.enter_context(patch.object(qe, "run_sync", new=run_sync))
@@ -103,6 +105,8 @@ async def test_conversation_start_expands_as_the_caller(notes, api_user):
         async def run_sync(fn, *args, **kwargs):
             if fn is database.create_session:  # real row, so events can be recorded
                 database.create_session(kwargs["session_id"], "default")
+            if fn is qe._resolve_note_references_for:  # the code under test runs for real
+                return fn(*args, **kwargs)
             return await fake_run_sync(fn, *args, **kwargs)
 
         stack.enter_context(patch.object(qb, "run_sync", new=run_sync))

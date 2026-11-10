@@ -95,13 +95,15 @@ async def _run_background_query(
     recorder = None
     from app.core.session_plan import run_context
 
-    from app.core.query_engine import _resolve_note_references_for
+    from app.core.query_engine import NOTE_REFERENCE, _resolve_note_references_for
 
     try:
         recorder = await TurnRecorder.maybe_create(session_id)
         # Expand @Notes/<id> as the caller that sent this prompt (#1402); the
         # chat keeps the typed text, the event records what the agent got.
-        agent_prompt = await asyncio.to_thread(_resolve_note_references_for, prompt, api_user_id)
+        agent_prompt = prompt
+        if prompt and NOTE_REFERENCE.search(prompt):
+            agent_prompt = await run_sync(_resolve_note_references_for, prompt, api_user_id)
         with run_context(recorder):
             if recorder:
                 await recorder.start(prompt, profile_id=profile.get("id"), agent_content=agent_prompt)

@@ -1,43 +1,67 @@
-import { expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 
-import { chatRunsElsewhere } from './runs-elsewhere';
+import { askRunsElsewhere, notesGoAsReferences } from './runs-elsewhere';
 
 const open = { sessionId: 's1', deviceIntent: null };
+const never = () => { throw new Error('no request expected'); };
 
-it('reads an open chat\'s owner from its row first, then from /live', () => {
-	expect(chatRunsElsewhere({ ...open, isRemote: false }, { is_remote: true })).toBe(true);
-	expect(chatRunsElsewhere({ ...open, isRemote: true }, { is_remote: false })).toBe(false);
-	expect(chatRunsElsewhere({ ...open, isRemote: true }, null)).toBe(true);
-	expect(chatRunsElsewhere({ ...open, isRemote: false }, undefined)).toBe(false);
+afterEach(() => {
+	vi.unstubAllGlobals();
+	vi.useRealTimers();
 });
 
-it('treats an open chat whose owner is not known yet as elsewhere', () => {
-	expect(chatRunsElsewhere({ ...open, isRemote: undefined }, null)).toBe(true);
-	expect(chatRunsElsewhere({ ...open, isRemote: undefined }, { is_remote: null })).toBe(true);
+it('follows the "Runs on" pick for a new chat, asking nothing', () => {
+	expect(notesGoAsReferences({ sessionId: null, deviceIntent: null }, false, never)).toBe(false);
+	expect(notesGoAsReferences({ sessionId: null, deviceIntent: { id: 'dev_b', name: 'B' } }, false, never)).toBe(true);
 });
 
-it('follows the "Runs on" pick for a new chat', () => {
-	expect(chatRunsElsewhere({ sessionId: null, isRemote: undefined, deviceIntent: null })).toBe(false);
-	expect(chatRunsElsewhere({ sessionId: null, isRemote: undefined, deviceIntent: { id: 'dev_b', name: 'B' } })).toBe(true);
-	// A stale owner from the previous chat does not count for a new one.
-	expect(chatRunsElsewhere({ sessionId: null, isRemote: true, deviceIntent: null })).toBe(false);
+it('sends references for a message held for a queued move, asking nothing', () => {
+	expect(notesGoAsReferences(open, true, never)).toBe(true);
 });
 
-it('counts a message held for a queued move as elsewhere', () => {
-	// The move sends it to the new worker, whatever the row says now.
-	expect(chatRunsElsewhere({ ...open, isRemote: false }, { is_remote: false }, true)).toBe(true);
-	expect(chatRunsElsewhere({ ...open, isRemote: false }, { is_remote: false }, false)).toBe(false);
+it('sends paths to an open chat only when the server says it runs here', async () => {
+	expect(await notesGoAsReferences(open, false, async () => false)).toBe(false);
+	expect(await notesGoAsReferences(open, false, async () => true)).toBe(true);
+	expect(await notesGoAsReferences(open, false, async () => null)).toBe(true);
 });
 
-it('counts an open chat as elsewhere until the session list answers a "sessions" signal', () => {
-	const local = { ...open, isRemote: false };
-	const row = { is_remote: false };
-	// A signal (a hand-off, a reconnect) the list has not answered yet.
-	expect(chatRunsElsewhere(local, row, false, { signals: 2, answered: 1 })).toBe(true);
-	// Answered: the row is the list fetched after the signal.
-	expect(chatRunsElsewhere(local, row, false, { signals: 2, answered: 2 })).toBe(false);
-	// Answered, but this chat has no row there: /live may predate the signal.
-	expect(chatRunsElsewhere(local, null, false, { signals: 2, answered: 2 })).toBe(true);
-	// No signal since the page loaded: /live's answer still stands.
-	expect(chatRunsElsewhere(local, null, false, { signals: 0, answered: 0 })).toBe(false);
+function answer(body: unknown, status = 200) {
+	const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
+	vi.stubGlobal('fetch', fetch);
+	return fetch;
+}
+
+it('asks /live afresh for the owner fields only', async () => {
+	const fetch = answer({ session_meta: { is_remote: false } });
+	expect(await askRunsElsewhere('s 1')).toBe(false);
+	expect(String(fetch.mock.calls[0][0])).toContain('/sessions/s%201/live?include_messages=false&owner_fields=true');
+	expect(fetch.mock.calls[0][1]).toMatchObject({ cache: 'no-store' });
+	answer({ session_meta: { is_remote: true } });
+	expect(await askRunsElsewhere('s1')).toBe(true);
+});
+
+it('has no answer for an error, a refusal, an old worker or no network', async () => {
+	answer({ detail: 'x' }, 500);
+	expect(await askRunsElsewhere('s1')).toBeNull();
+	answer({ detail: 'Forbidden' }, 403);
+	expect(await askRunsElsewhere('s1')).toBeNull();
+	answer({ session_meta: { title: 'Plan' } });
+	expect(await askRunsElsewhere('s1')).toBeNull();
+	vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+	expect(await askRunsElsewhere('s1')).toBeNull();
+});
+
+it('gives up, and aborts the request, at the time limit', async () => {
+	vi.useFakeTimers();
+	let signal: AbortSignal | undefined;
+	vi.stubGlobal('fetch', vi.fn((_: unknown, init?: RequestInit) => {
+		signal = init?.signal ?? undefined;
+		return new Promise<Response>(() => {});
+	}));
+	const asked = askRunsElsewhere('s1', 2000);
+	await vi.advanceTimersByTimeAsync(1999);
+	expect(signal?.aborted).toBe(false);
+	await vi.advanceTimersByTimeAsync(1);
+	expect(await asked).toBeNull();
+	expect(signal?.aborted).toBe(true);
 });

@@ -11,6 +11,7 @@ Rewind uses persisted transcript/checkpoint services rather than terminal parsin
 
 import asyncio
 import logging
+import re
 from typing import Any, Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
@@ -467,22 +468,63 @@ def _agent_text(row: dict) -> str:
     return (payload.get("agent_content") or payload.get("content") or "").strip()
 
 
+def _shown_text(row: dict) -> str:
+    """The prompt text the chat shows for a ``message.user`` event, trimmed."""
+    return ((row.get("payload") or {}).get("content") or "").strip()
+
+
+def _may_have_given(row: dict, text: str) -> bool:
+    """True when the shown text and the agent's text of ``row`` may differ in
+    a way that matters for ``text``.
+
+    * The row recorded a different agent text, and ``text`` is one of the two.
+    * The row shows a ``@Notes/<id>`` reference and recorded nothing: a turn
+      recorded before #1401 may have expanded it to ``text`` (the reference
+      replaced by a path or the note's text, the rest unchanged), and the
+      event log cannot say.
+    """
+    shown, agent = _shown_text(row), _agent_text(row)
+    if agent != shown:
+        return text in (shown, agent)
+    from app.core.query_engine import NOTE_REFERENCE
+
+    parts = NOTE_REFERENCE.split(shown)[::2]  # drop the captured note ids
+    if len(parts) < 2:
+        return False
+    return re.fullmatch(".*".join(map(re.escape, parts)), text, re.DOTALL) is not None
+
+
+def _text_translated(prompts: List[dict], text: str) -> bool:
+    """True when some prompt event that shows ``text`` or gave the agent
+    ``text`` may have shown one text and given another.
+
+    When False, the prompts that show ``text`` are exactly the prompts that
+    gave the agent ``text``: the translation is the identity, and the rewind
+    takes the exact path it took before agent texts were recorded.
+    """
+    return any(_may_have_given(row, text) for row in prompts)
+
+
 def _recorded_agent_target(
     session_id: str, shown: str, occurrence: int,
-) -> tuple[tuple[str, int, int] | None, str | None]:
+) -> tuple[tuple[str, int, int | None] | None, str | None]:
     """Translate the client's occurrence into the transcript's terms.
 
     The client counts bubbles by the text they SHOW; the transcript holds the
     text the agent GOT. A reference and its expanded text typed literally show
-    differently and match the same transcript text, so every prompt is
-    translated, not only one that recorded ``agent_content``. Returns
+    differently and match the same transcript text. Returns
     ``((agent_text, occurrence, count), None)``: its occurrence among the
     event-log prompts the agent got that text for, and how many there are.
-    FAILS CLOSED when the event log has no such shown occurrence.
+
+    When no prompt involved translates (``_text_translated``), the shown text
+    and occurrence come back unchanged with ``count`` None: no event-log check
+    and no count check, as before #1401. Otherwise it FAILS CLOSED when the
+    event log has no such shown occurrence.
     """
     prompts = [row for row in _load_message_events(session_id) if _is_prompt_event(row)]
-    shown_rows = [i for i, row in enumerate(prompts)
-                  if ((row.get("payload") or {}).get("content") or "").strip() == shown]
+    if not _text_translated(prompts, shown):
+        return (shown, occurrence, None), None
+    shown_rows = [i for i, row in enumerate(prompts) if _shown_text(row) == shown]
     if occurrence < 0 or occurrence >= len(shown_rows):
         return None, (
             f"Rewind refused: event log has {len(shown_rows)} user prompt(s) showing "
@@ -513,9 +555,10 @@ def _resolve_checkpoint_uuid_from_content(
     a real prompt's text. FAILS CLOSED when nothing matches (content guard).
 
     With ``session_id``, the shown text and occurrence are first translated to
-    the text the agent got (``_recorded_agent_target``), and the event log and
-    the transcript must hold the same number of prompts with that text: when
-    they differ, the n-th of one need not be the n-th of the other.
+    the text the agent got (``_recorded_agent_target``). When that translation
+    is not the identity, the event log and the transcript must hold the same
+    number of prompts with that text: when they differ, the n-th of one need
+    not be the n-th of the other.
     """
     want = (target_content or "").strip()
     if not want:
@@ -616,20 +659,23 @@ def _resolve_rewind_from_seq(
             1 for cp in user_cps[:pos]
             if (cp.full_message or "").strip() == want
         )
-        prompts = [
-            (i, row) for i, row in enumerate(events)
-            if _is_prompt_event(row) and _agent_text(row) == want
-        ]
-        matching_cps = sum(1 for cp in user_cps if (cp.full_message or "").strip() == want)
-        if len(prompts) != matching_cps:
-            # Same rule as the content lookup: unequal counts (a prompt the
-            # transcript never got, or one recorded before agent_content was
-            # kept) mean the n-th of one need not be the n-th of the other.
-            return None, (
-                f"Rewind refused: event log has {len(prompts)} user prompt(s) "
-                f"matching the target's text but the transcript has "
-                f"{matching_cps} (content guard)"
-            )
+        prompt_rows = [(i, row) for i, row in enumerate(events) if _is_prompt_event(row)]
+        if not _text_translated([row for _, row in prompt_rows], want):
+            # Nothing involved translates: the exact match on the shown text,
+            # as before agent texts were recorded (#1401).
+            prompts = [(i, row) for i, row in prompt_rows if _shown_text(row) == want]
+        else:
+            prompts = [(i, row) for i, row in prompt_rows if _agent_text(row) == want]
+            matching_cps = sum(1 for cp in user_cps if (cp.full_message or "").strip() == want)
+            if len(prompts) != matching_cps:
+                # Same rule as the content lookup: unequal counts (a prompt the
+                # transcript never got, or one recorded before agent_content was
+                # kept) mean the n-th of one need not be the n-th of the other.
+                return None, (
+                    f"Rewind refused: event log has {len(prompts)} user prompt(s) "
+                    f"matching the target's text but the transcript has "
+                    f"{matching_cps} (content guard)"
+                )
         if occurrence >= len(prompts):
             return None, (
                 f"Rewind refused: event log has {len(prompts)} user prompt(s) "

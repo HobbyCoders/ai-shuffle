@@ -950,21 +950,10 @@ def _announce_owner(sid, target, session):
     # even if the destination's outer receive reply is lost.
     from app.core.global_events import global_events
 
-    # The page's row also carries is_remote, from this worker's view
-    # (sessions_helpers). Without it the row keeps the previous owner's flag
-    # until the debounced reload, and a note picked from @ in that window was
-    # given this worker's file path for a chat that now runs elsewhere (#1364).
-    try:
-        from app.network import runners
-        mine = {settings.effective_instance_id, runners.own_device_id()}
-    except Exception:  # noqa: BLE001 — never fail the commit over a display flag
-        mine = {settings.effective_instance_id}
-
     owner = session.get("api_user_id")
     global_events.lifecycle(owner, {
         "type": "user_session_updated", "session_id": sid,
         "updates": {"owner_device_id": target, "instance_id": target,
-                    "is_remote": target not in mine,
                     "placement": {"where": "runner:" + target}},
     }, user_type="admin" if owner is None else "api_user")
 

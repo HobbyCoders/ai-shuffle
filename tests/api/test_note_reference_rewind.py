@@ -185,3 +185,58 @@ async def test_a_collision_recorded_before_agent_text_was_kept_is_refused(rewind
     ))
     assert not result.success and "content guard" in result.error
     assert rewind_env.truncate_calls == []
+
+
+def _seed_with_stopped(sequence, stopped, *, recorded=True):
+    """Like ``_seed``, but the prompts at ``stopped`` were stopped after their
+    event was written and before the engine ran: no reply, no checkpoint.
+    Returns the checkpoint uuid per prompt (None when stopped) and the seqs."""
+    from tests.shared_fixtures import seed_session
+
+    seed_session(SID)
+    events, cps, uuids = [], [], []
+    for i, (_, shown, agent) in enumerate(sequence):
+        payload = {"content": shown, **({"agent_content": agent} if agent and recorded else {})}
+        events.append({"type": "message.user", "turn_id": f"t{i}", "payload": payload})
+        if i in stopped:
+            uuids.append(None)
+            continue
+        events.append({"type": "message.assistant", "turn_id": f"t{i}", "payload": {"content": f"a{i}", "kind": "text"}})
+        uuids.append(f"cp{i}")
+        cps += [_cp(f"cp{i}", agent or shown, index=len(cps)), _cp(f"cp{i}-a", f"a{i}", role="assistant", index=len(cps) + 1)]
+    session_events.append_events(SID, events)
+    seqs = [row["seq"] for row in session_events.get_events(SID) if row["event_type"] == "message.user"]
+    return cps, uuids, seqs
+
+
+HELLO = ("hello", "hello", None)
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+async def test_a_plain_message_in_a_chat_with_a_note_rewinds_as_before(rewind_env, monkeypatch, recorded):  # noqa: F811
+    # The note reference does not touch "hello": its stopped repeat must not
+    # refuse the first one, with or without the reference's recorded text.
+    cps, uuids, seqs = _seed_with_stopped((REF, HELLO, HELLO), stopped={2}, recorded=recorded)
+    _patch_checkpoints(monkeypatch, cps)
+    result = await execute_rewind_and_wait(SID, commands.RewindRequestV2(
+        target_uuid="", target_content="hello", target_occurrence=0, include_response=False,
+    ))
+    assert result.success, result.error
+    assert rewind_env.truncate_calls == [uuids[1]]
+    cut = [row["payload"]["from_seq"] for row in session_events.get_events(SID) if row["event_type"] == "transcript.rewound"]
+    assert cut == [seqs[1]]
+
+
+@pytest.mark.parametrize("target", [0, 1])
+async def test_a_note_reference_sent_twice_with_one_never_run_is_refused(rewind_env, monkeypatch, target):  # noqa: F811
+    # Known limit: the event log has two prompts the agent would have got the
+    # expanded text for, the transcript one. Which bubble owns it cannot be
+    # told, so the rewind is refused and nothing is removed.
+    cps, _, _ = _seed_with_stopped((REF, REF), stopped={1})
+    _patch_checkpoints(monkeypatch, cps)
+    result = await execute_rewind_and_wait(SID, commands.RewindRequestV2(
+        target_uuid="", target_content=SHOWN, target_occurrence=target, include_response=False,
+    ))
+    assert not result.success and "content guard" in result.error
+    assert rewind_env.truncate_calls == []
+    assert [row for row in session_events.get_events(SID) if row["event_type"] == "transcript.rewound"] == []

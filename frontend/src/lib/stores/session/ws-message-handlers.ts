@@ -229,8 +229,8 @@ const LIST_SHAPE_FIELDS: ReadonlySet<string> = new Set(['hidden', 'tags', 'proje
  */
 const STALE_COMPANION_FIELDS: ReadonlySet<string> = new Set([
 	'last_user_message_at',
-	// The hand-off frame carries the new owner's id and `is_remote` but not its
-	// `device_name` or pin, which the reload brings.
+	// The hand-off frame carries the new owner's id but not its `device_name`,
+	// `is_remote` or pin, which the reload brings.
 	'owner_device_id',
 ]);
 
@@ -670,12 +670,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const title = updates.title;
 				update(s => ({ ...s, title }));
 				onPersistSession();
-			}
-			// A hand-off committed: the open chat's own flag follows the new
-			// owner too, for a chat whose sidebar row is not loaded here (#1364).
-			if (typeof updates.is_remote === 'boolean' && sessionId && sessionId === getState().sessionId) {
-				const isRemote = updates.is_remote;
-				update(s => ({ ...s, isRemote }));
 			}
 			// A settle (from any device, or the SettleSession tool) dismisses the
 			// session's pending permission/question server-side (#2324): drop the
