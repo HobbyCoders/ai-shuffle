@@ -75,6 +75,30 @@ const valueIs = (page, text) =>
 
 const positions = async (page) => ({ row: await top(row(page)), help: await top(help(page)) });
 
+const LOGS = /\/api\/v1\/logs(\?|$)/;
+const LOG_LINES = 120;
+
+/**
+ * Answer Settings > Logs with a fixed list of LOG_LINES lines (the shape
+ * app/api/logs.py get_logs returns), so the page is long whatever the worker
+ * has logged. The lines are built once: the 10s poll gets the same lines and
+ * ids, so it never replaces or shortens the list.
+ */
+async function answerLogs(page) {
+	const start = Date.now();
+	const lines = Array.from({ length: LOG_LINES }, (_, i) => {
+		const timestamp = new Date(start - i * 1000).toISOString();
+		const level = i % 7 === 3 ? 'WARNING' : 'INFO';
+		const logger_name = `app.journey.fixture${i % 4}`;
+		return { timestamp, level, logger_name, message: `${timestamp} - ${logger_name} - ${level} - Journey fixture log line ${LOG_LINES - i}` };
+	});
+	const payload = { lines, total: LOG_LINES, returned: LOG_LINES, levels: ['INFO', 'WARNING'] };
+	await page.route(LOGS, async (route) => {
+		if (route.request().method() !== 'GET') return route.continue();
+		await route.fulfill({ json: payload }).catch(() => {});
+	});
+}
+
 /**
  * Bring the row into view the way a reader scrolls to it, then let input
  * grace pass so a later move counts. Returns where the row and Help sit.
@@ -141,7 +165,8 @@ function lateAttention(viewport) {
  * The same late answer after arriving by Settings search from a scrolled Logs
  * page. Chromium's scroll anchoring scrolled the page by the notice's height
  * when it landed, moving the row the search took the reader to up by 67px.
- * System turns scroll anchoring off.
+ * System turns scroll anchoring off. Logs gets a fixed answer, so the scrolled
+ * start does not depend on how much the worker has logged.
  */
 const searchArrival = {
 	name: 'attention-late-after-search',
@@ -149,9 +174,11 @@ const searchArrival = {
 	throttles: ['fast'],
 	async setup({ page, status }) {
 		await answerHealth(page, attention(), { held: true });
+		await answerLogs(page);
 		await gotoApp(page, status);
 		await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
 		await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'Logs', exact: true }).filter({ visible: true }).first().click();
+		await page.getByText(`Journey fixture log line ${LOG_LINES}`, { exact: false }).filter({ visible: true }).first().waitFor({ timeout: 15_000 });
 		// The reader scrolls down the log, so the search reveal scrolls up.
 		await page.waitForFunction(
 			() => {
@@ -161,9 +188,11 @@ const searchArrival = {
 				return true;
 			},
 			null,
-			{ timeout: 30_000 }
+			{ timeout: 15_000 }
 		);
 		await page.waitForTimeout(800);
+		const scrolled = await page.evaluate(() => document.querySelector('.settings-viewport')?.scrollTop ?? 0);
+		expect(scrolled >= 1200, `the reader starts far down the log (scrollTop ${scrolled})`);
 	},
 	async act({ page, mark }) {
 		await mark('the reader follows the search result to Memory health while it loads');
