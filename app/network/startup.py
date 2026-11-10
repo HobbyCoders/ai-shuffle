@@ -585,7 +585,18 @@ async def start() -> List[asyncio.Task]:
     # Account connectivity is enrollment infrastructure, not workload execution.
     # It must run before approval, including when approval arrives after boot.
     _tasks.append(asyncio.create_task(managed_connection.supervise(), name="managed-account-connection"))
+    # Off the loop: records committed before a crash were never written to the files.
+    _tasks.append(asyncio.create_task(reconcile_memory(), name="memory-reconcile"))
     return list(_tasks)
+
+
+async def reconcile_memory() -> None:
+    """Write memory records committed before a crash, which no notice will announce again."""
+    try:
+        from app.network import memory_records
+        await run_sync(memory_records.reconcile_files)
+    except Exception:  # noqa: BLE001 - still owed: the next publish pass retries
+        logger.warning("Reconciling memory records failed", exc_info=True)
 
 
 def _drop_applied_subscription() -> None:

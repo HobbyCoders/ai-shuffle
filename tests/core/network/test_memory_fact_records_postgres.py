@@ -11,10 +11,11 @@ import json
 import time
 
 import pytest
+from fluid.codemode.facts import FactStore
 from fluid.codemode.skills import SkillStore
 
 from app.db import network as store
-from app.network import engine, membership, memory_records, transport
+from app.network import engine, membership, memory_records, startup, transport
 from tests.core.network.test_transcript_op_retention_postgres import (  # noqa: F401
     admit,
     cluster,
@@ -214,23 +215,26 @@ async def test_facts_converge_through_per_fact_and_barrier_records(pg_workers, t
     assert all(e["text"] != "A fact that will be archived." for e in doc["entries"])
 
 
-async def test_receiver_skips_capable_snapshot_and_merges_legacy_one(pg_workers, touched):
+async def test_receiver_merges_every_live_whole_store_record(pg_workers, touched):
+    # A presence can lag a downgrade: skipping a capable publisher's live
+    # whole-store record on old presence would never be reconsidered.
     a, b = await pair(pg_workers, touched)
     legacy_store = SkillStore(b.data_dir / "legacy-source")
     legacy_store.save_memory("From a worker on the old version.", protected=True)
     capable_store = SkillStore(b.data_dir / "capable-source")
-    capable_store.save_memory("Arrives only as a per-fact record.", protected=True)
+    capable_store.save_memory("Only in a capable worker's whole-store record.", protected=True)
     old_device = "dev_" + "1" * 24
     owner_hash = memory_records._hash("local")
     with b.active():
+        assert memory_records._supports(engine.all_presence().get(a.device_id))
         for device, source in ((old_device, legacy_store), (a.device_id, capable_store)):
             b.sql("INSERT INTO network_memory_records (id, kind, scope, content, content_hash, deleted) "
                   "VALUES (%s, 'fact', 'global', %s, 'h', FALSE)",
                   (f"{memory_records.SNAPSHOT_PREFIX}{device}:{owner_hash}", json.dumps(source._facts.export())))
-        memory_records.apply_to_files([f"{memory_records.SNAPSHOT_PREFIX}{d}:{owner_hash}"
-                                       for d in (old_device, a.device_id)])
+        assert memory_records.apply_to_files([f"{memory_records.SNAPSHOT_PREFIX}{d}:{owner_hash}"
+                                              for d in (old_device, a.device_id)]) == 2
     assert "From a worker on the old version." in texts(b)
-    assert "Arrives only as a per-fact record." not in texts(b)
+    assert "Only in a capable worker's whole-store record." in texts(b)
 
 
 async def test_dropped_fact_retracts_only_the_record_and_does_not_delete_the_replica(pg_workers, touched):
@@ -293,9 +297,13 @@ async def test_bad_record_does_not_block_the_rest_of_its_group(pg_workers, touch
                                        "entries": third["entries"]})):
             b.sql("INSERT INTO network_memory_records (id, kind, scope, content, content_hash, deleted) "
                   "VALUES (%s, 'fact', 'global', %s, 'h', FALSE)", (rid, json.dumps(content, sort_keys=True)))
-        assert memory_records.apply_to_files(ids) == 1
+        b.sql("INSERT INTO network_memory_records (id, kind, scope, content, content_hash, deleted) "
+              "VALUES (%s, 'fact', 'global', 'not json', 'h', FALSE)", (ids[0] + "-json",))
+        assert memory_records.apply_to_files([*ids, ids[0] + "-json"]) == 1
     assert "Fact from a third store." in texts(b)
     assert "Bad." not in texts(b)
+    # A refused record is never retried: it stays as bad as it was.
+    assert memory_records._reconcile_owed is False
 
 
 async def test_api_owner_store_routes_by_owner(pg_workers, touched):
@@ -327,3 +335,64 @@ async def test_state_copy_notice_materializes_every_fact_record(pg_workers, touc
         # What a finished state copy hands the app: the collection, no ids.
         assert memory_records.apply_to_files([""]) == 4
     assert {f"Fact {n} copied by a state copy." for n in range(3)} <= texts(b)
+
+
+async def test_startup_reconcile_writes_records_committed_without_a_notice(pg_workers, touched):
+    """A crash after the commit and before the apply: no notice comes again."""
+    a, b = await pair(pg_workers, touched)
+    with a.active():
+        gone = facts(a).save_memory("Forgotten while B was down.", protected=True)
+        dropped = facts(a).save_memory("Dropped on A without a Forget.", protected=True)
+    publish(a)
+    await receive(b, a, touched)
+    assert "Forgotten while B was down." in texts(b)
+    with a.active():
+        facts(a).save_memory("Committed on B, never written.", protected=True)
+        assert facts(a).delete_memory(gone.id, explicit=True, expected_revision=gone.revision)
+    publish(a)
+    touched.clear()
+    await sync(b, ServedBy(a, "https://a.example.com"))
+    assert {i.split(":")[0] + ":" for i in touched} >= {memory_records.FACT_PREFIX, memory_records.BARRIER_PREFIX}
+    assert "Committed on B, never written." not in texts(b)  # rows only, files untouched
+    with b.active():
+        await startup.reconcile_memory()  # what network start runs
+    assert "Committed on B, never written." in texts(b)
+    assert "Forgotten while B was down." not in texts(b)  # the barrier arrived too
+
+    # A worker's own records never flow back into its own store: a fact it
+    # dropped before its next publish pass stays dropped.
+    root = a.data_dir / "fluid" / "skills" / "memories.json"
+    with a.active():
+        doc = json.loads(root.read_text(encoding="utf-8"))
+        doc["entries"] = [e for e in doc["entries"] if e["id"] != dropped.id]
+        root.write_text(json.dumps(doc), encoding="utf-8")
+        assert any(not r["deleted"] for r in own(a, memory_records.FACT_PREFIX).values()
+                   if "Dropped on A" in r["content"])
+        await startup.reconcile_memory()
+    assert "Dropped on A without a Forget." not in texts(a)
+
+
+async def test_failed_write_is_retried_on_the_next_publish_pass(pg_workers, touched, monkeypatch):
+    a, b = await pair(pg_workers, touched)
+    real = FactStore.merge
+    broken = [True]
+
+    def merge(self, snapshot):
+        if broken[0]:
+            raise OSError("disk briefly unavailable")
+        return real(self, snapshot)
+
+    monkeypatch.setattr(FactStore, "merge", merge)
+    with a.active():
+        facts(a).save_memory("Arrives despite a failed write.", protected=True)
+    publish(a)
+    ids = await receive(b, a, touched)
+    assert ids and "Arrives despite a failed write." not in texts(b)
+    assert memory_records._reconcile_owed is True
+    broken[0] = False
+    before = {r["id"]: r["content"] for r in b.sql("SELECT id, content FROM network_memory_records")}
+    publish(b)  # the record itself has not changed
+    assert {i: before[i] for i in ids} == {r["id"]: r["content"] for r in b.sql(
+        "SELECT id, content FROM network_memory_records WHERE id = ANY(%s)", (ids,))}
+    assert "Arrives despite a failed write." in texts(b)
+    assert memory_records._reconcile_owed is False

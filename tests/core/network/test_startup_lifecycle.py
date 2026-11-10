@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from app.core import managed_connection
-from app.network import engine, enrollment, hub, startup, startup_sync, transport
+from app.network import engine, enrollment, hub, memory_records, startup, startup_sync, transport
 
 TOUCHED = [("owner_prefs", "theme", "upsert")]
 
@@ -20,6 +20,7 @@ def lifecycle(monkeypatch):
     monkeypatch.setattr(transport, "start", list)
     monkeypatch.setattr(enrollment, "resume_enrollment", lambda: None)
     monkeypatch.setattr(hub, "start", list)
+    monkeypatch.setattr(memory_records, "reconcile_files", lambda: 0)
 
     async def idle():
         await asyncio.Event().wait()

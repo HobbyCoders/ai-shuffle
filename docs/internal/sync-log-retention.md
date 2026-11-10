@@ -264,8 +264,10 @@ tombstones and forget filter), so a change to one fact appends one envelope of
 that fact's size. The whole-store `memory-v2:` record is still written while
 another active worker does not advertise `memory_fact_records` in its signed
 presence (or its presence has not arrived), and is marked deleted once every
-other worker does; receivers skip it only when its publisher advertises the
-capability. Compaction still applies to all of these records: an edited fact's
+other worker does; receivers merge every live one. A per-fact record is sent
+once, so a worker re-applies every peer's live memory record at network start
+and after a failed write instead of waiting for a later whole-store copy.
+Compaction still applies to all of these records: an edited fact's
 older envelopes are superseded like any other. A fact a worker no longer holds
 (dropped, expired from the archive, forgotten) leaves its record marked deleted
 with empty content; nothing collects deleted memory records yet, so they stay

@@ -14,8 +14,14 @@ transaction API.
 
 The whole-store record (``memory-v2:<device>:<owner hash>``) is still written
 while another active worker does not advertise :data:`CAPABILITY` in its
-signed presence, and receivers merge it only when its publisher does not
-advertise it either, so old and new workers keep exchanging memory.
+signed presence, and marked deleted once every one does. Receivers merge every
+live whole-store record, whoever published it, so old and new workers keep
+exchanging memory.
+
+Incoming records are committed first and written to the files by a one-shot
+post-commit notification. :func:`reconcile_files` re-applies every peer's live
+record: once at network start (a crash between the commit and the apply) and
+on the next publish pass after an apply hit an I/O error.
 Code-mode Python skills live under ``skills_root()``; prose skill folders
 (``~/.fluid/skills/<name>/SKILL.md``) ride the same collection through
 :mod:`app.network.prose_skills`.
@@ -44,6 +50,7 @@ WRITE_QUIET_SECONDS = 0.1
 WRITE_MAX_WAIT_SECONDS = 2.0
 _write_lock = threading.Lock()
 _write_window = None  # first/last committed local change; peer applies never enter it
+_reconcile_owed = False  # an apply hit an I/O error; the next publish pass re-applies
 
 
 def _publish_due() -> bool:
@@ -124,6 +131,22 @@ def refresh_from_files(*, ctx=None) -> None:
         manifest = prose_skills.load_manifest()
         if _refresh(ctx, manifest):
             prose_skills.save_manifest(manifest)
+    if _reconcile_owed:
+        try:
+            reconcile_files(ctx=ctx)
+        except Exception:  # noqa: BLE001 - still owed; publishing must go on
+            log.warning("Re-applying memory records failed", exc_info=True)
+
+
+def reconcile_files(*, ctx=None) -> int:
+    """Re-apply every peer's live fact, barrier and whole-store record.
+
+    A per-fact record is sent once, so one the files missed (a crash after
+    its commit, a failed write) stays missing until that fact changes again.
+    This worker's own records are skipped: its files are their source, and
+    merging an older copy back could restore a fact it has since dropped.
+    """
+    return apply_to_files([], ctx=ctx, reconcile=True)
 
 
 def _supports(presence_row) -> bool:
@@ -252,30 +275,51 @@ def publish(*, ctx=None) -> int:
     return engine.scan_collection("memory", ctx=ctx)
 
 
-def apply_to_files(ids: list[str], *, ctx=None) -> int:
-    ctx = ctx or engine.context()
-    if not ctx or not ids:
+def apply_to_files(ids: list[str], *, ctx=None, reconcile=False) -> int:
+    global _reconcile_owed
+    if not (ids or reconcile):
         return 0
-    if "" in ids:
-        # A state copy announces the collection, not its records. Unchanged
-        # facts would otherwise never reach the files: no later whole-store
-        # record carries them. Merging is idempotent.
-        with get_db() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM network_memory_records WHERE deleted = FALSE AND "
-                        "(id LIKE %s OR id LIKE %s OR id LIKE %s)",
-                        tuple(p + "%" for p in (FACT_PREFIX, BARRIER_PREFIX, SNAPSHOT_PREFIX)))
-            ids = sorted({i for i in ids if i} | {r["id"] for r in cur.fetchall()})
-        if not ids:
+    try:
+        ctx = ctx or engine.context()
+        if not ctx:
             return 0
-    from fluid.codemode.transactions import suppress_changes
-    with suppress_changes(), prose_skills.LOCK:
-        manifest = prose_skills.load_manifest()
-        before = json.dumps(manifest, sort_keys=True)
-        applied = _apply(ids, ctx, manifest)
-        if json.dumps(manifest, sort_keys=True) != before:
-            prose_skills.save_manifest(manifest)
+        if "" in ids or reconcile:
+            # A state copy announces the collection, not its records. Unchanged
+            # facts would otherwise never reach the files: no later whole-store
+            # record carries them. Merging is idempotent. A reconcile (see
+            # reconcile_files) leaves out this worker's own records.
+            if reconcile:
+                _reconcile_owed = False  # set again by any failure below
+            own = () if "" in ids else tuple(f"{p}{ctx.device_id}:" for p in
+                                             (FACT_PREFIX, BARRIER_PREFIX, SNAPSHOT_PREFIX))
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT id FROM network_memory_records WHERE deleted = FALSE AND "
+                            "(id LIKE %s OR id LIKE %s OR id LIKE %s)",
+                            tuple(p + "%" for p in (FACT_PREFIX, BARRIER_PREFIX, SNAPSHOT_PREFIX)))
+                ids = sorted({i for i in ids if i} |
+                             {r["id"] for r in cur.fetchall() if not (own and r["id"].startswith(own))})
+            if not ids:
+                return 0
+        from fluid.codemode.transactions import suppress_changes
+        with suppress_changes(), prose_skills.LOCK:
+            manifest = prose_skills.load_manifest()
+            before = json.dumps(manifest, sort_keys=True)
+            applied = _apply(ids, ctx, manifest)
+            if json.dumps(manifest, sort_keys=True) != before:
+                prose_skills.save_manifest(manifest)
+    except Exception:
+        _reconcile_owed = True
+        raise
     return applied
+
+
+def _rejected(rid, exc) -> None:
+    """A bad record is refused for good; an I/O failure is retried (#1167)."""
+    global _reconcile_owed
+    if isinstance(exc, OSError):
+        _reconcile_owed = True
+    log.error("Memory replica rejected: %s", rid, exc_info=exc)
 
 
 def _apply(ids, ctx, manifest) -> int:
@@ -294,7 +338,6 @@ def _apply(ids, ctx, manifest) -> int:
     records = [r for r in records if not authored_plugins.is_record(r["id"])]
     from fluid.codemode.skills import atomic_write_text
     fact_groups = {}
-    presence = None
     for record in records:
         rid = record["id"]
         try:
@@ -329,12 +372,6 @@ def _apply(ids, ctx, manifest) -> int:
                 continue
             if rid.startswith(SNAPSHOT_PREFIX):
                 if not record.get("deleted"):
-                    if presence is None:
-                        presence = engine.all_presence()
-                    # A worker advertising per-fact records sends its facts
-                    # that way; re-merging its whole store adds nothing.
-                    if _supports(presence.get(rid.split(":")[1])):
-                        continue
                     payload = json.loads(record.get("content") or "{}")
                     _store(payload.get("owner"))._facts.merge(payload)
                     applied += 1
@@ -357,8 +394,8 @@ def _apply(ids, ctx, manifest) -> int:
             store._facts.merge({"schema": 2, "owner": "local", "store_id": origin,
                                 "entries": [item], "tombstones": []})
             applied += 1
-        except (ValueError, KeyError, TypeError, OSError):
-            log.exception("Memory replica rejected: %s", rid)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            _rejected(rid, exc)
     for (_schema, owner, _store_id), group in fact_groups.items():
         applied += _merge_fact_group(owner, group)
     return applied
@@ -373,8 +410,8 @@ def _merge_fact_group(owner, group) -> int:
     """
     try:
         facts = _store(owner)._facts
-    except (ValueError, OSError):
-        log.exception("Memory replica rejected: %s", group[0][0])
+    except (ValueError, OSError) as exc:
+        _rejected(group[0][0], exc)
         return 0
     if len(group) > 1:
         first = group[0][1]
@@ -399,6 +436,6 @@ def _merge_fact_group(owner, group) -> int:
         try:
             facts.merge(payload)
             applied += 1
-        except (ValueError, KeyError, TypeError, OSError):
-            log.exception("Memory replica rejected: %s", rid)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            _rejected(rid, exc)
     return applied

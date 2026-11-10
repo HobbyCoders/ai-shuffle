@@ -222,9 +222,13 @@ merges one apply batch's records per store in one write. While another active
 worker does not advertise `memory_fact_records` in its signed presence (or its
 presence is unknown), each worker also keeps writing the older whole-store
 record (`memory-v2:<device>:<owner-hash>`); once every other worker advertises
-it, that record is marked deleted. A receiver skips a whole-store record whose
-publisher advertises the capability and merges it otherwise, so mixed-version
-networks keep converging. The committed local file is the durable source for
+it, that record is marked deleted. A receiver merges every live whole-store
+record, whoever published it, so mixed-version networks keep converging.
+Received records are committed before they are written to the files, so each
+worker re-applies every peer's live memory record once at network start (a
+crash between the two) and again on the next publish pass after a write failed
+with an I/O error; its own records are left out, since its files are their
+source. The committed local file is the durable source for
 retrying publication, so a crash between a save and a publish does not lose the
 save. A local receipt does not claim that an offline worker has received it.
 User-level prose skill folders (`~/.fluid/skills/<name>/SKILL.md`) travel in
