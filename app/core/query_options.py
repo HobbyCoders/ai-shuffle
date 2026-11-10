@@ -635,17 +635,22 @@ async def ensure_pending_checkout(
     # ownership of the saved path, never by the folder: a finisher holding the
     # lock may be about to remove a folder that exists right now. A refusal
     # becomes terminal in build_options_from_profile (switched_checkout_refusal).
-    if isinstance(path, str) and path and (
-            is_worker_branch(branch, session_row.get("id") or "")
-            or await asyncio.to_thread(owns_switched_checkout, session_row)):
+    switched = (isinstance(path, str) and bool(path)
+                and not is_worker_branch(branch, session_row.get("id") or "")
+                and await asyncio.to_thread(owns_switched_checkout, session_row))
+    if isinstance(path, str) and path and (switched or is_worker_branch(branch, session_row.get("id") or "")):
         from app.core.turn_scheduler import message_resume_lock
 
         # An old finisher may already be deleting the initially existing cwd.
         # Wait before checking it; a later finisher sees this queued/live turn.
         async with message_resume_lock(session_row["id"]):
-            if not Path(path).is_dir():
+            # A switched checkout that exists still goes through the restore:
+            # it publishes a restore whose Git add finished but whose record
+            # did not, before this turn edits the folder.
+            missing = not Path(path).is_dir()
+            if switched or missing:
                 ok, note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
-                restored = ok and Path(path).is_dir()
+                restored = ok and missing and Path(path).is_dir()
                 if not ok:
                     logger.info("Checkout restore refused for %s: %s", session_row["id"], note)
     # Even after restoration, claim/wait for a queued operation below. Another

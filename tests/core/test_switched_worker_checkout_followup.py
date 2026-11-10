@@ -153,7 +153,15 @@ async def test_execution_preflight_restores_switched_checkout(cleaned):
 
 @pytest.mark.asyncio
 async def test_switched_worker_with_existing_folder_is_unchanged(cleaned, monkeypatch):
+    from app.core import checkout_manager
+
     checkout, tip, _ = cleaned
+    assert checkouts.get_checkout_by_path(checkout.path, project_id=checkout.project_v2_id)["status"] == "active"
+
+    def no_publish(*args, **kwargs):
+        raise AssertionError("an active checkout must not be re-validated or re-published")
+
+    monkeypatch.setattr(checkout_manager, "_accept_branch_checkout", no_publish)
     enqueue = AsyncMock(return_value={})
     monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", enqueue)
     await turn_scheduler.on_agent_message(SID, "parent", "continue")
@@ -311,3 +319,137 @@ async def test_unowned_sessions_do_not_take_the_message_lock(repo, monkeypatch):
         database.set_session_branch(sid, "feat/somebody", row["project_v2_id"])
         await qo.ensure_pending_checkout(database.get_session(sid))
     assert taken == []
+
+
+# ── Expected I/O failures, and a restore whose publication failed ──────
+
+def io_failure(kind, path):
+    import subprocess
+
+    from app.core.git_worktree_ops import WorktreeLockError
+
+    return {
+        "permission": PermissionError(13, "Permission denied", f"{path}/.git"),
+        "timeout": subprocess.TimeoutExpired(["git", "-C", path, "rev-parse"], 10),
+        "lock": WorktreeLockError("Timed out waiting for the checkout lock; retry when the other operation finishes."),
+    }[kind]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["permission", "timeout", "lock"])
+async def test_unreadable_switched_checkout_is_a_path_free_retry_refusal(cleaned, monkeypatch, kind):
+    from app.core.query_options import WorktreeUnavailableError
+
+    checkout, _, _ = cleaned
+
+    def fail(path, *, force=False):
+        raise io_failure(kind, path)
+
+    monkeypatch.setattr(git_service, "require_complete_worktree", fail)
+    enqueue = AsyncMock(return_value={})
+    monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", enqueue)
+    with pytest.raises(worker_checkout.WorkerCheckoutError) as admission:
+        await turn_scheduler.on_agent_message(SID, "parent", "continue")
+    enqueue.assert_not_awaited()
+    with pytest.raises(WorktreeUnavailableError) as execution:
+        build_options(checkout.path)
+    for note in (str(admission.value), str(execution.value)):
+        assert f"'{FIX}'" in note and "Send the message again" in note and "dispatch a new Task" in note
+        assert str(Path(checkout.path).parent) not in note, "refusal must not name filesystem paths"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_is_not_turned_into_a_refusal(cleaned, monkeypatch):
+    import asyncio
+
+    def cancelled(path, *, force=False):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(git_service, "require_complete_worktree", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        worker_checkout.switched_checkout_refusal(database.get_session(SID))
+    with pytest.raises(asyncio.CancelledError):
+        worker_checkout.restore_worker_checkout(SID)
+
+
+@pytest.mark.asyncio
+async def test_restore_whose_publication_failed_is_published_by_the_next_message(cleaned, monkeypatch):
+    from app.core import checkout_manager
+
+    checkout, tip, _ = cleaned
+    await reclaim(checkout)
+    real = checkout_manager._accept_branch_checkout
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError("database briefly unavailable")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(checkout_manager, "_accept_branch_checkout", flaky)
+    # Git creates the folder, then publication fails: refused, row incomplete.
+    assert worker_checkout.restore_worker_checkout(SID) == (False, None)
+    assert Path(checkout.path).is_dir()
+    row = checkouts.get_checkout_by_path(checkout.path, project_id=checkout.project_v2_id)
+    assert row["status"] == "incomplete"
+    enqueue = AsyncMock(return_value={})
+    monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", enqueue)
+    await turn_scheduler.on_agent_message(SID, "parent", "continue")
+    enqueue.assert_awaited_once()
+    row = checkouts.get_checkout_by_path(checkout.path, project_id=checkout.project_v2_id)
+    assert row["status"] == "active" and row["branch"] == FIX, "admitted with an unpublished checkout"
+    assert git(checkout.path, "rev-parse", "HEAD") == tip
+
+
+@pytest.mark.asyncio
+async def test_folder_added_by_another_restore_meanwhile_is_refused_not_adopted(cleaned, monkeypatch):
+    import contextlib
+
+    checkout, _, base = cleaned
+    await reclaim(checkout)
+    real_lock = worker_checkout._project_lock
+
+    @contextlib.contextmanager
+    def lock_after_other_restore(project_id):
+        # A cancelled caller's restore thread adds the folder (not yet
+        # published) while this restore waits for the project lock.
+        git(base, "worktree", "add", checkout.path, FIX)
+        with real_lock(project_id):
+            yield
+
+    monkeypatch.setattr(worker_checkout, "_project_lock", lock_after_other_restore)
+    ok, note = worker_checkout.restore_worker_checkout(SID)
+    assert not ok and "another restore" in note
+
+
+@pytest.mark.asyncio
+async def test_execution_refuses_until_a_failed_publication_is_repaired(cleaned, monkeypatch):
+    from app.core import checkout_manager
+    from app.core.query_options import WorktreeUnavailableError
+
+    checkout, tip, _ = cleaned
+    await reclaim(checkout)
+    real = checkout_manager._accept_branch_checkout
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError("database briefly unavailable")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(checkout_manager, "_accept_branch_checkout", flaky)
+    # The preflight's restore adds the folder but cannot publish it: this turn
+    # must not run in it, even through the saved cwd override.
+    with pytest.raises(WorktreeUnavailableError) as error:
+        await execute(checkout.path)
+    note = str(error.value)
+    assert f"'{FIX}'" in note and "Send the message again" in note
+    assert str(Path(checkout.path).parent) not in note
+    # The retry publishes first, then resolves options on the bound branch.
+    options, _ = await execute(checkout.path)
+    assert Path(str(options.cwd)).resolve() == Path(checkout.path).resolve()
+    row = checkouts.get_checkout_by_path(checkout.path, project_id=checkout.project_v2_id)
+    assert row["status"] == "active" and row["branch"] == FIX
+    assert git(checkout.path, "rev-parse", "HEAD") == tip
