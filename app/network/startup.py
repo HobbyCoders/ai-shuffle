@@ -266,10 +266,12 @@ _reconcile_lock: Optional[asyncio.Lock] = None
 _reconcile_lock_loop: Optional[asyncio.AbstractEventLoop] = None
 # Scheduled reconciles not finished yet, so ``stop()`` can settle them; each
 # drops itself when done. Touched from any thread, under ``_reconcile_guard``,
-# with ``_reconciles_refused`` (set by ``stop()``, cleared by ``start()``).
+# with ``_refused_loop``: the loop ``stop()`` ran on, whose reconciles are
+# refused until ``start()`` clears it. Bound to that loop, like the lock above,
+# so it never outlives it.
 _reconcile_guard = threading.Lock()
 _reconcile_futures: set = set()
-_reconciles_refused = False
+_refused_loop: Optional[asyncio.AbstractEventLoop] = None
 RECONCILE_SETTLE_SECONDS = 5.0
 
 
@@ -349,7 +351,7 @@ def request_connector_reconcile(connector_ids=None) -> None:
         return
     ids = None if connector_ids is None else list(connector_ids)
     with _reconcile_guard:
-        if _reconciles_refused:
+        if _refused_loop is loop:
             logger.debug("Connector reconcile refused: the worker network is stopping")
             return
         future = asyncio.run_coroutine_threadsafe(_reconcile_owned_connectors(ids), loop)
@@ -369,9 +371,9 @@ def _forget_reconcile(future) -> None:
 
 async def _settle_reconciles() -> None:
     """Refuse new reconciles, then cancel and await those scheduled (``stop()``)."""
-    global _reconciles_refused
+    global _refused_loop
     with _reconcile_guard:
-        _reconciles_refused = True
+        _refused_loop = asyncio.get_running_loop()
         pending = list(_reconcile_futures)
     for future in pending:
         future.cancel()
@@ -391,7 +393,7 @@ async def _reconcile_owned_connectors(connector_ids=None) -> None:
     from app.core.connectors.manager import connector_manager
     from app.network import ownership
     async with _connector_reconcile_lock():
-        if _reconciles_refused:
+        if _refused_loop is asyncio.get_running_loop():
             return
         if connector_ids is not None:
             await _follow_connector_rows(connector_manager, connector_ids)
@@ -599,9 +601,9 @@ def _on_applied(touched) -> None:
 async def start() -> List[asyncio.Task]:
     from app.network import transport, enrollment, hub
     from app.core import managed_connection
-    global _unsubscribe_applied, _reconciles_refused
+    global _unsubscribe_applied, _refused_loop
     with _reconcile_guard:
-        _reconciles_refused = False  # a stop() earlier in this process refused them
+        _refused_loop = None  # a stop() earlier in this process refused them
     # One subscription per lifecycle: stop() (or a failed start) removes it,
     # and a start without a stop replaces it, so applies are never delivered
     # twice (#2097).

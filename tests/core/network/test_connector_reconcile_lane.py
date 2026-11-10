@@ -115,7 +115,7 @@ async def net(monkeypatch):
         task.cancel()
     await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 2)
     with startup._reconcile_guard:
-        startup._reconciles_refused = False
+        startup._refused_loop = None
         startup._reconcile_futures.clear()
 
 
