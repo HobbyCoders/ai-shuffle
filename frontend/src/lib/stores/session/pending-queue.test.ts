@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { pendingQueue, reconcilePendingPeerMessages, isLocalPendingId, LOCAL_PENDING_PREFIX, type PendingEntry } from './pending-queue';
+import { pendingQueue, reconcilePendingPeerMessages, isLocalPendingId, LOCAL_PENDING_PREFIX, DELIVERY_HOLD_MS, type PendingEntry } from './pending-queue';
 import type { ChatMessage, PendingPeerMessage } from '../types';
 
 /**
@@ -694,6 +694,22 @@ describe('pendingQueue — a delivered row keeps its bubble until it renders (#1
 		expect(shown.map(e => e.id)).toEqual(['turn-a', 'turn-b']);
 		// The fold re-reconciles what is on screen without moving it.
 		expect(pendingQueue.reconcile(SID, shown)).toBe(shown);
+	});
+
+	it('starts clean after a reload during a hold: no stray release, no ghost, no second copy', () => {
+		vi.useFakeTimers();
+		const onRelease = vi.fn();
+		const a = queued('turn-a', 'queued a', 'client-a');
+		snapshot(snapshot([], [a]), [], onRelease);
+		expect(pendingQueue.isHeld(SID, a)).toBe(true);
+		// A reload drops the page's memory: the server's snapshot is all there is.
+		pendingQueue.reset(SID, true);
+		vi.advanceTimersByTime(DELIVERY_HOLD_MS);
+		expect(onRelease).not.toHaveBeenCalled();
+		expect(pendingQueue.isHeld(SID, a)).toBe(false);
+		expect(snapshot([], [])).toEqual([]);
+		pendingQueue.noteDelivered(SID, 'queued a', 'turn-a', true, 'client-a', new Date(2000).toISOString());
+		expect(pendingQueue.reconcile(SID, [])).toEqual([]);
 	});
 
 	it('retires a row without a command id by its turn id', () => {
