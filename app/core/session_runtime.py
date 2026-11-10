@@ -2087,8 +2087,15 @@ class SessionRuntime:
                     steer_id = (command_id if isinstance(command_id, str)
                                 and command_id.startswith("client-") else row_id)
                     self._steer_ids[row_id] = steer_id
+                    from app.core.query_engine import _resolve_note_references_for
                     from app.core.time_awareness import owner_message_receipt
 
+                    # A message steered into the live turn skips the engine's
+                    # turn setup, so expand its ``@Notes/<id>`` references here,
+                    # the same way and on this (the running) worker (#1364).
+                    prompt = await asyncio.to_thread(
+                        _resolve_note_references_for, prompt, self.api_user_id,
+                    )
                     await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=steer_id,
                                         accepted_at=owner_message_receipt(row)["owner_message_at"])
                     # Armed only once the engine took the message: a steer that

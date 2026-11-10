@@ -1,15 +1,16 @@
-"""Resolve legacy note references used in stored prompts."""
+"""Resolve the @Notes/note-id references a prompt carries on the running worker."""
 import re
 
 from app.db import database
 
 
 def resolve_note_references(prompt: str) -> str:
-    """Resolve legacy @Notes/note-id references in a prompt.
+    """Resolve @Notes/note-id references in a prompt on this worker.
 
-    New notes use physical file paths that the SDK reads natively.
-    This handles legacy virtual references from older messages by
-    redirecting to the physical file or inlining the content.
+    The chat @ menu inserts these references for notes (#1364): a note's file
+    path is per-worker, so the worker that runs the turn redirects the
+    reference to its own copy of the file, or inlines the content when it has
+    no file for the note yet.
     """
     def replace_note(match):
         note_id = match.group(1)

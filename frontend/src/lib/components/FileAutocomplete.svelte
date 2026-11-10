@@ -400,7 +400,12 @@
       files = notes.map((note) => ({
         name: note.title,
         type: 'note' as const,
-        path: note.absolute_path || `${NOTES_FOLDER}/${note.id}`,
+        // Always the note's id, never `absolute_path`: that path is where the
+        // note's file sits on the worker you are viewing from, and a chat can
+        // run on another worker with a different data folder (#1364). The
+        // running worker turns `@Notes/<id>` into its own copy of the file,
+        // or the note's text when it has no file yet.
+        path: `${NOTES_FOLDER}/${note.id}`,
         note_id: note.id,
         preview: note.preview,
         note_tags: note.tags

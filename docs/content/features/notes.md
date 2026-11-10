@@ -22,6 +22,7 @@ Notes are a simple place for ideas, bugs and plans. They are not tied to a proje
 - **Pin** important notes to the top.
 - **Search** by title or text.
 - **Attachments:** use **Attach file**, then type `@` in the note to link it.
+- **Use a note in a chat:** type `@` in the message box, open **Notes** and pick the note. The message carries a reference to the note, and the worker that runs the chat fills in its own copy, so this works for a chat on another worker too.
 
 Each [API key](/docs/api-reference/api-users) has its own notes and sees only those. As the owner, you see every note.
 

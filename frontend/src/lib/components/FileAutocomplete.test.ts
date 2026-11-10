@@ -241,3 +241,18 @@ it('offers project agents only from the local project it is told about', async (
     await waitFor(() => expect(getSubagentsForAutocomplete).toHaveBeenCalled());
     expect(getSubagentsForAutocomplete.mock.calls[0][1]).toBeUndefined();
 });
+
+it('inserts a picked note as its Notes/<id> reference, not the viewing worker\'s file path (#1364)', async () => {
+    // `absolute_path` is where the file sits on the worker you view from; a
+    // chat on another worker has a different data folder, so the chip must
+    // carry the id the running worker resolves itself.
+    getNotesAutocomplete.mockResolvedValue([
+        { ...note('Pelican note'), id: 'note-0123456789ab', absolute_path: '/viewer/data/notes/test.md' },
+    ]);
+    const { component } = render(FileAutocomplete, { ...props, inputValue: '@Notes/remote' });
+    await screen.findByText('Pelican note');
+    expect(component.handleKeyDown(new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }))).toBe(true);
+    expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        type: 'note', path: 'Notes/note-0123456789ab', note_id: 'note-0123456789ab',
+    }));
+});

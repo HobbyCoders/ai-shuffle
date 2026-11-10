@@ -26,12 +26,17 @@
 //                        draft of a chat that already has a turn
 //   remote-chat-keeps-local-agents a chat on another worker still holding its
 //                        local project lists that project's agents
+//   note-pick-names-the-note a note picked in a chat on another worker is
+//                        inserted as `Notes/<id>`, not the viewing worker's
+//                        file path (#1364)
+//   note-pick-resolves-on-running-worker the same pick, sent: the worker
+//                        running the turn hands the model its own note file
 //
 // Slow desktop and phone only. Shards have little time to spare, and the races
 // here show up under the slow throttle.
 import { runJourney } from './runner.mjs';
 import { readFileSync } from 'node:fs';
-import { PROJECT, SEEDED, composer, expect, gotoApp, isPhone, openFromSidebar, openNewChat, seededChatId, sendButton, showSidebar, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { PROJECT, SEEDED, api, composer, expect, gotoApp, isPhone, openFromSidebar, openNewChat, seededChatId, sendButton, showSidebar, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const PEER = 'Peer worker';
@@ -180,6 +185,27 @@ async function sendAndExpectReply(page, status, token, messagesAtLeast) {
 	const prompt = promptWith(status, token);
 	expect(prompt, `the model received the message carrying ${token}`);
 	return prompt;
+}
+
+/** Real keystrokes: open Notes, find the note by its token, take it with Enter. */
+async function pickNote(page, { title, token }) {
+	await composer(page).click();
+	await page.keyboard.type(`@Notes/${token}`);
+	const menu = page.locator(MENU);
+	await menu.getByText(title).waitFor({ timeout: 15_000 });
+	await page.keyboard.press('Enter');
+	await menu.waitFor({ state: 'detached', timeout: 5_000 });
+	const chip = page.locator(CHIP).first();
+	await chip.waitFor({ timeout: 5_000 });
+	return chip.getAttribute('data-path');
+}
+
+/** A note of this run's own, found in the menu by its token. */
+async function stageNote(page) {
+	const token = uniq();
+	const title = `Mention note ${token}`;
+	const note = await api(page, 'POST', '/notes', { title, content: `Note body ${token}` });
+	return { id: note.id, title, token };
 }
 
 const startNewChat = async ({ page, status }) => { await openNewChat({ page, status }, { project: PROJECT }); };
@@ -331,6 +357,41 @@ await runJourney({
 				expect(asked.every((id) => id && !id.startsWith('pv2-')), `agents are listed for the local project, got ${JSON.stringify(asked)}`);
 				await clearComposer(page);
 				await draftSaved(page);
+			}
+		},
+		{
+			name: 'note-pick-names-the-note',
+			setup: async (ctx) => {
+				await start('long', SEEDED.long, {})(ctx);
+				ctx.note = await stageNote(ctx.page);
+			},
+			async act({ page, mark, note }) {
+				await mark('pick a note in a chat on another worker');
+				const path = await pickNote(page, note);
+				expect(path === `Notes/${note.id}`, `the chip names the note, not this worker's file, got ${path}`);
+				await clearComposer(page);
+				await draftSaved(page);
+			}
+		},
+		{
+			name: 'note-pick-resolves-on-running-worker',
+			setup: async (ctx) => {
+				await startNewChat(ctx);
+				ctx.note = await stageNote(ctx.page);
+			},
+			async act({ page, mark, status, note }) {
+				await mark('take the note');
+				const path = await pickNote(page, note);
+				expect(path === `Notes/${note.id}`, `the chip names the note in every chat, got ${path}`);
+				const token = uniq();
+				// Focus without a tap: on a phone the tap lands on the chip, selecting it.
+				await composer(page).press('ControlOrMeta+End');
+				await page.keyboard.type(` read ${token}`);
+				await mark('send it');
+				const prompt = await sendAndExpectReply(page, status, token, 2);
+				// The worker running the turn expands the reference to its own file.
+				expect(!prompt.includes(`Notes/${note.id}`) && /[\\/]notes[\\/][^"\s]+\.md/.test(prompt),
+					`the model gets the running worker's copy of the note, got ${prompt.slice(0, 400)}`);
 			}
 		}
 	],

@@ -119,7 +119,7 @@ _LEGACY_NOTE_REF = re.compile(r"@Notes/(note-[a-f0-9]+)")
 
 
 def _resolve_note_references_for(prompt: str, api_user_id: Optional[str]) -> str:
-    """Expand legacy ``@Notes/note-<id>`` references the caller may read.
+    """Expand ``@Notes/note-<id>`` references the caller may read.
 
     Same rule as the notes API (``app.api.notes._owned_note``): the owner (no
     key) reaches every note; an API key only the notes it wrote
