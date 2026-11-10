@@ -1964,8 +1964,10 @@ def level_file(level):
 
 
 def declare_image_level(updater, tmp_path, level):
-    """The image's own code declares ``level`` (None: code from before levels)."""
+    """The image's own code declares ``level`` (None: code from before levels),
+    and its supervisor understands an update that took no copy."""
     updater.image_root = tmp_path / "image"
+    updater.image["provides"] = [*updater.image.get("provides", ["base-1"]), application_updates.LEVEL_CAPABILITY]
     if level is not None:
         path = updater.image_root / application_updates.DATABASE_COMPATIBILITY
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2052,6 +2054,23 @@ def test_the_level_is_compared_with_the_installed_update_not_the_image(feed, tmp
     stage(updater, publish, revision=C, sequence=3, level=2)  # B is at 2: none
     assert updater.state == {"active": B, "pending": C, "booting": C, "compatible": True}
     assert not [call for call in database.calls if call[0] == "snapshot"]
+
+
+def test_an_image_built_before_database_levels_keeps_the_copy(feed, tmp_path):
+    # A container restart during the first start is handled by the image's own
+    # supervisor, which would find no copy and block.
+    updater, publish, _, _, _ = feed
+    updater.database = database = FakeDatabase()
+    declare_image_level(updater, tmp_path, 1)
+    updater.image["provides"].remove(application_updates.LEVEL_CAPABILITY)
+    stage(updater, publish)
+    assert updater.state["snapshot"] == "ai_shuffle_rollback_" + B[:12] and "compatible" not in updater.state
+    assert ("snapshot", updater.state["snapshot"]) in database.calls
+
+
+def test_an_image_built_from_this_source_provides_the_level_capability():
+    assert application_updates.LEVEL_CAPABILITY in contract.PROVIDES
+    assert application_updates.LEVEL_CAPABILITY in contract.image_record(A, 1)["provides"]
 
 
 def test_the_copy_can_be_kept_for_every_update(feed, tmp_path, monkeypatch):

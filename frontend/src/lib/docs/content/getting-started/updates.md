@@ -69,6 +69,8 @@ Most updates take no copy of the database. Every release declares a database lev
 
 An update that changes the level, and an update from or to a version that declares none, copies the database after the app stops and before the new version starts. If that first start fails, the copy is put back and the previous version runs again. The time the copy takes is downtime. Set `AI_SHUFFLE_UPDATE_RESTORE_POINT=always` on the container to take the copy before every update.
 
+The copy is skipped only when the **Docker image** itself is new enough to go back without one (image capability `database-level-v1`). If the container restarts while an update's first start is still unconfirmed, the image's own startup code does the recovery, so an older image keeps the copy for every update. An in-app update alone does not change this: [update the Docker image](#updating-the-docker-image) once.
+
 Without a copy there is nothing to put back if both the update and the previous version fail to start. See [If AI Shuffle will not start after an update](#if-ai-shuffle-will-not-start-after-an-update).
 
 On a data volume that can share file blocks between files (btrfs, XFS with reflink, ZFS with block cloning) the copy is a copy-on-write clone of the stopped database directory. It takes seconds whatever the size of the database and needs no free space for a second copy; PostgreSQL is stopped and started once around it. On any other volume, and whenever the clone cannot be taken, the database is copied in full as before, which needs free space for a second copy and takes time in proportion to its size.

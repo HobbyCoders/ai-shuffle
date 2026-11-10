@@ -673,6 +673,10 @@ HANDOVER_FILES = ("docker/container_runtime.py", "docker/application_updates.py"
 # the signed tree). A release raises it when its migrations remove, rename or
 # retype something older code reads (scripts/ci/database_compatibility.py).
 DATABASE_COMPATIBILITY = "app/db/compatibility.json"
+# The image capability (docker/update_contract.py) that says the image's own
+# supervisor understands state["compatible"]. A container restart during an
+# update's first start is handled by the image's code, not the update's.
+LEVEL_CAPABILITY = "database-level-v1"
 
 
 def database_level(source):
@@ -1197,9 +1201,13 @@ class ContainerUpdates:
         level: its migrations then only add, the previous version runs over
         the migrated database, and a failed first start goes back by starting
         that version again. A level that differs or is unknown on either side
-        (code from before levels, an unreadable file) keeps the copy, as does
-        AI_SHUFFLE_UPDATE_RESTORE_POINT=always."""
+        (code from before levels, an unreadable file) keeps the copy, as do
+        AI_SHUFFLE_UPDATE_RESTORE_POINT=always and an image built before
+        LEVEL_CAPABILITY: if the container restarts during the first start,
+        that image's own supervisor would find no copy and block."""
         if os.environ.get("AI_SHUFFLE_UPDATE_RESTORE_POINT", "").strip().lower() == "always":
+            return True
+        if LEVEL_CAPABILITY not in (self.image.get("provides") or []):
             return True
         try:
             active = self.state.get("active")
