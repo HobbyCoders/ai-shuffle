@@ -275,7 +275,7 @@ async def test_dropped_fact_retracts_only_the_record_and_does_not_delete_the_rep
     assert "Fact Y, dropped on A only." not in texts(b)
 
 
-async def test_bad_record_does_not_block_the_rest_of_its_group(pg_workers, touched):
+async def test_bad_record_refuses_only_its_batch_for_that_store_in_one_merge(pg_workers, touched, monkeypatch):
     a, b = await pair(pg_workers, touched)
     with a.active():
         facts(a).save_memory("A good fact.", protected=True)
@@ -299,11 +299,21 @@ async def test_bad_record_does_not_block_the_rest_of_its_group(pg_workers, touch
                   "VALUES (%s, 'fact', 'global', %s, 'h', FALSE)", (rid, json.dumps(content, sort_keys=True)))
         b.sql("INSERT INTO network_memory_records (id, kind, scope, content, content_hash, deleted) "
               "VALUES (%s, 'fact', 'global', 'not json', 'h', FALSE)", (ids[0] + "-json",))
-        assert memory_records.apply_to_files([*ids, ids[0] + "-json"]) == 1
+        merges = []
+        merge = FactStore.merge
+        monkeypatch.setattr(FactStore, "merge", lambda self, snapshot: merges.append(1) or merge(self, snapshot))
+        # A's own store is another group: it merges, in one store write.
+        assert memory_records.apply_to_files([*ids, ids[0] + "-json", *rows]) == len(rows)
+        # The bad record refused its batch in one merge, not one rewrite per record.
+        assert len(merges) == 2
+        assert "Fact from a third store." not in texts(b)
+        assert "Bad." not in texts(b)
+        # A refused record is never retried: it stays as bad as it was.
+        assert memory_records._reconcile_owed is False
+        # The good record is not lost for good: it applies when it arrives without the bad one.
+        assert memory_records.apply_to_files([ids[1]]) == 1
     assert "Fact from a third store." in texts(b)
     assert "Bad." not in texts(b)
-    # A refused record is never retried: it stays as bad as it was.
-    assert memory_records._reconcile_owed is False
 
 
 async def test_api_owner_store_routes_by_owner(pg_workers, touched):

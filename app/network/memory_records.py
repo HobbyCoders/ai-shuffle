@@ -404,38 +404,27 @@ def _apply(ids, ctx, manifest) -> int:
 def _merge_fact_group(owner, group) -> int:
     """Merge one store's fact and barrier records in one store write.
 
-    A first sync can bring hundreds of records; one combined merge rewrites
-    the store file once. If it is refused, merge record by record so one bad
-    record does not hold back the others.
+    A first sync or a reconcile can bring a whole store's records; one combined
+    merge rewrites the store file once. A bad record refuses the records that
+    arrived with it for that store, as one bad entry always refused a
+    whole-store record: every merge rewrites the whole file, so retrying
+    record by record would rewrite it once per record.
     """
+    first = group[0][1]
+    combined = {"schema": first.get("schema"), "owner": owner, "store_id": first.get("store_id"),
+                "entries": [], "tombstones": []}
+    bloom = None
     try:
-        facts = _store(owner)._facts
-    except (ValueError, OSError) as exc:
-        _rejected(group[0][0], exc)
+        for _rid, payload in group:
+            combined["entries"] += payload["entries"]
+            combined["tombstones"] += payload.get("tombstones") or []
+            if payload.get("forgotten"):
+                bits = bytes.fromhex(payload["forgotten"])
+                bloom = bits if bloom is None else bytes(x | y for x, y in zip(bloom, bits, strict=True))
+        if bloom is not None:
+            combined["forgotten"] = bloom.hex()
+        _store(owner)._facts.merge(combined)
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        _rejected(f"{len(group)} record(s) starting at {group[0][0]}", exc)
         return 0
-    if len(group) > 1:
-        first = group[0][1]
-        combined = {"schema": first.get("schema"), "owner": owner, "store_id": first.get("store_id"),
-                    "entries": [], "tombstones": []}
-        bloom = None
-        try:
-            for _rid, payload in group:
-                combined["entries"] += payload["entries"]
-                combined["tombstones"] += payload.get("tombstones") or []
-                if payload.get("forgotten"):
-                    bits = bytes.fromhex(payload["forgotten"])
-                    bloom = bits if bloom is None else bytes(x | y for x, y in zip(bloom, bits, strict=True))
-            if bloom is not None:
-                combined["forgotten"] = bloom.hex()
-            facts.merge(combined)
-            return len(group)
-        except (ValueError, KeyError, TypeError, OSError):
-            log.warning("Combined memory merge refused; merging %d records one by one", len(group), exc_info=True)
-    applied = 0
-    for rid, payload in group:
-        try:
-            facts.merge(payload)
-            applied += 1
-        except (ValueError, KeyError, TypeError, OSError) as exc:
-            _rejected(rid, exc)
-    return applied
+    return len(group)
