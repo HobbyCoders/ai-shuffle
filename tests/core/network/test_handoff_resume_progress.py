@@ -26,7 +26,8 @@ def test_agent_resume_wake_is_stable_and_manual_moves_never_wake(mock_db, monkey
     assert "Do the next step" in first["prompt"]
     assert first["fire_at"] <= time.time()
     assert handoff._moving_wakes({"wakes": [first, {"id": "ordinary"}],
-                                  "resume_wake_id": first["id"]}) == {"wake_ids": ["ordinary"]}
+                                  "resume_wake_id": first["id"]}) == {"wake_ids": ["ordinary"],
+                                                                       "report_receipts": []}
     assert handoff._resume_wake("resume-chat", {**queued, "requested_by": "owner"}, "target") is None
     monkeypatch.setattr(runners, "find", lambda _: {"capabilities": {"move_wakes": 3}})
     assert handoff._resume_wake("resume-chat", queued, "target") is None

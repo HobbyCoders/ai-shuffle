@@ -436,6 +436,11 @@ def _orchestration_report_handler():
     return handle_remote_report
 
 
+def _orchestration_report_forward_handler():
+    from app.core.session_orchestration import handle_forwarded_report
+    return handle_forwarded_report
+
+
 def _orchestration_message_handler():
     from app.core.session_orchestration import handle_remote_message
     return handle_remote_message
@@ -608,6 +613,7 @@ _LAZY_HANDLERS = {
     "orchestration-start": _orchestration_start_handler,
     "orchestration-start-readback": _orchestration_start_readback_handler,
     "orchestration-report": _orchestration_report_handler,
+    "orchestration-report-forward": _orchestration_report_forward_handler,
     "orchestration-message": _orchestration_message_handler,
     "orchestration-peers": _orchestration_peers_handler,
     "task-start": _task_start_handler,

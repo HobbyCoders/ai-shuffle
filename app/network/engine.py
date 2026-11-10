@@ -704,11 +704,13 @@ def materialize(
             return None
     if coll.name == "pending_interactions":
         from app.core.model_override import RECEIPT_KINDS
+        from app.core.session_orchestration import REPORT_RECEIPT_KIND
         # Ordinary sync is a read mirror, not an owner consent channel. Only
-        # the explicit leased handoff may import these execution receipts.
+        # the explicit leased handoff may import these execution receipts, or
+        # a started chat's report receipt (it travels with the chat, #1443).
         existing = _read_row(cursor, coll, record_id)
-        if ((record or {}).get("kind") in RECEIPT_KINDS
-                or (existing or {}).get("kind") in RECEIPT_KINDS):
+        held = (*RECEIPT_KINDS, REPORT_RECEIPT_KIND)
+        if (record or {}).get("kind") in held or (existing or {}).get("kind") in held:
             return existing
         # Only the worker that owns the chat records a prompt's decision: a
         # remote device's answer reaches it through the signed control channel
@@ -735,6 +737,13 @@ def materialize(
             delete_connector_row(cursor, *keys)
             return None
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
+        if coll.name == "sessions":
+            # The same durable deletion record a local delete writes, so a
+            # started chat held here still defers its report after leaving the
+            # network clears sync_records (#1443). Also when the row never
+            # reached this worker: the accepted tombstone is the proof.
+            from app.db.sessions import record_deleted_chat
+            record_deleted_chat(cursor, record_id)
         return None
     record = dict(record)
     if coll.name == "session_events":
