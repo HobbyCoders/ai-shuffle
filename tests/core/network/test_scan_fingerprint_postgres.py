@@ -5,6 +5,7 @@ nothing had changed. These tests pin both halves of the replacement: an
 unchanged pass moves no payload out of the database, and every kind of
 change the full read caught is still caught.
 """
+import re
 from contextlib import contextmanager
 
 import pytest
@@ -83,7 +84,7 @@ def _sessions(count, prefix="s"):
 
 def _payloads(reads, table="sessions", keys=("id",)):
     """Full rows that crossed the database boundary (not key/fingerprint pairs)."""
-    return [row for query, rows in reads if f"FROM {table} " in query + " " for row in rows
+    return [row for query, rows in reads if re.search(rf"FROM {table}\b", query) for row in rows
             if set(row) - {FINGERPRINT, *keys}]
 
 
@@ -141,6 +142,20 @@ def test_volatile_only_change_is_read_once_and_not_published(owner, monkeypatch)
     _full_read_agrees(monkeypatch)
 
 
+def test_columns_the_scan_skips_are_neither_fingerprinted_nor_read(owner, monkeypatch):
+    skipped = policy.collection("sessions").scan_skip
+    assert skipped
+    _sessions(3)
+    with returned_rows(monkeypatch, engine) as reads:
+        assert engine.scan_collection("sessions", owner_only=True) == 3
+    assert len(_payloads(reads)) == 3 and not any(set(row) & set(skipped) for row in _payloads(reads))
+    # These columns change on every turn of a live chat: a pass must not notice.
+    for column in skipped:
+        _execute(f"UPDATE sessions SET {column} = %s WHERE id = 's000'", ('{"turn": 2}',))
+    assert _scan(monkeypatch) == (0, [])
+    _full_read_agrees(monkeypatch)
+
+
 def test_a_record_that_moved_is_republished_although_its_row_did_not(owner, monkeypatch):
     _sessions(3)
     assert _scan(monkeypatch)[0] == 3
@@ -177,7 +192,7 @@ def test_changed_rows_are_read_in_bounded_statements(owner, monkeypatch):
     ids = _sessions(10)
     with returned_rows(monkeypatch, engine) as reads:
         assert engine.scan_collection("sessions", owner_only=True) == 10
-    batches = [len(rows) for query, rows in reads if "FROM sessions " in query and _payloads([(query, rows)])]
+    batches = [len(rows) for query, rows in reads if _payloads([(query, rows)])]
     assert batches == [4, 4, 2]
     assert sorted(row["id"] for row in _payloads(reads)) == ids
 

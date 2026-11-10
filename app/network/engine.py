@@ -1227,9 +1227,6 @@ def _row_fingerprints(coll: policy.Collection, where: Sequence[str],
         if choice >= len(_SCAN_FINGERPRINT_SQL):
             return None
         expression = _SCAN_FINGERPRINT_SQL[choice]
-        query = f"SELECT {keys}, {expression} AS {_SCAN_FINGERPRINT_COLUMN} FROM {coll.table} {_SCAN_ROW}"
-        if where:
-            query += " WHERE " + " AND ".join(where)
         found: Dict[tuple, Any] = {}
         unkeyed = False
         try:
@@ -1240,6 +1237,10 @@ def _row_fingerprints(coll: policy.Collection, where: Sequence[str],
                 if choice == 0 and version < 140000:
                     raise _NoFingerprint()
                 cursor = conn.cursor()
+                query = (f"SELECT {keys}, {expression} AS {_SCAN_FINGERPRINT_COLUMN} "
+                         f"FROM {_scan_source(cursor, coll)} {_SCAN_ROW}")
+                if where:
+                    query += " WHERE " + " AND ".join(where)
                 cursor.execute(query, tuple(params))
                 for row in cursor.fetchall():
                     key = tuple(row[name] for name in coll.keys)
@@ -1368,7 +1369,7 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
         if known is None:
             known = read_known(cursor)
         if fingerprinted is None:
-            query = f"SELECT * FROM {coll.table}"
+            query = f"SELECT {_scan_columns(cursor, coll)} FROM {coll.table}"
             if where:
                 query += " WHERE " + " AND ".join(where)
             cursor.execute(query, params)
@@ -1376,6 +1377,7 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
                 consider(row)
         else:
             expression, fingerprints = fingerprinted
+            source = _scan_source(cursor, coll)
             trusted = cache.rows
             if ids is None and time.monotonic() - cache.verified_at >= SCAN_FINGERPRINT_VERIFY_SECONDS:
                 trusted = {}
@@ -1403,7 +1405,7 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
                 # The fingerprint is read with its row: one statement, one
                 # snapshot, so it can never describe an older version.
                 query = (f"SELECT {_SCAN_ROW}.*, {expression} AS {_SCAN_FINGERPRINT_COLUMN} "
-                         f"FROM {coll.table} {_SCAN_ROW} WHERE " + " AND ".join(
+                         f"FROM {source} {_SCAN_ROW} WHERE " + " AND ".join(
                              [*where, f"{columns} IN ({', '.join([one] * len(batch))})"]))
                 cursor.execute(query, params + tuple(value for key in batch for value in key))
                 for row in [dict(r) for r in cursor.fetchall()]:
@@ -1447,6 +1449,26 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
 
 
 SCAN_PUBLISH_BATCH = 200
+
+
+def _scan_columns(cursor, coll: policy.Collection) -> str:
+    """The select list for a collection scan: every column but ``scan_skip``.
+
+    Read from the live table rather than the policy, so a column a migration
+    added still reaches ``shared_row`` and the serializer.
+    """
+    if not coll.scan_skip:
+        return "*"
+    cursor.execute(f"SELECT * FROM {coll.table} LIMIT 0")
+    names = [column[0] for column in cursor.description or () if column[0] not in coll.scan_skip]
+    return ", ".join('"' + name.replace('"', '""') + '"' for name in names) if names else "*"
+
+
+def _scan_source(cursor, coll: policy.Collection) -> str:
+    """The rows a scan covers, as a FROM item: the table less its ``scan_skip``
+    columns, so neither a fingerprint nor a row read ever touches them."""
+    columns = _scan_columns(cursor, coll)
+    return coll.table if columns == "*" else f"(SELECT {columns} FROM {coll.table})"
 
 
 def scan_all(*, ctx: Optional[NetworkContext] = None, include_catalog: bool = True,
