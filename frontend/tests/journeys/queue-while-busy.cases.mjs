@@ -114,9 +114,24 @@ async function expectWatcherCatchesEveryState(page, log) {
 			// Late ResizeObserver callbacks, then put right at the next frame.
 			await inLateObserver(host, () => rows['ro-gap'].remove()); await nextFrame(); host.appendChild(rows['ro-gap']);
 			await nextFrame();
+			// Cascade: the wrapper's observer first takes its initial notification
+			// (which does nothing), so the only later one it gets is the resize the
+			// outer observer makes, delivered in a second observer pass.
+			let armed = false;
+			let removed;
+			const cascaded = new Promise((r) => { removed = r; });
+			const inner = new ResizeObserver(() => {
+				if (!armed) return;
+				inner.disconnect(); rows['ro-cascade-gap'].remove(); removed();
+			});
+			inner.observe(wrap);
+			await nextFrame(); await nextFrame();
+			armed = true;
 			const outer = new ResizeObserver(() => { outer.disconnect(); wrap.style.height = '3px'; });
-			outer.observe(host); host.style.width = '5px';
-			await inLateObserver(wrap, () => rows['ro-cascade-gap'].remove()); await nextFrame(); wrap.appendChild(rows['ro-cascade-gap']);
+			outer.observe(host);
+			// No cascade in 2s means no gap, and the probe's own check then fails.
+			await Promise.race([cascaded, new Promise((r) => setTimeout(r, 2000))]);
+			inner.disconnect(); await nextFrame(); wrap.appendChild(rows['ro-cascade-gap']);
 			await nextFrame();
 			let dup = null;
 			await inLateObserver(host, () => { dup = row(needles['ro-twice']); }); await nextFrame(); dup.remove();
