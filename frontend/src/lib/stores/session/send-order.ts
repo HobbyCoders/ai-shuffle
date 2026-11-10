@@ -27,6 +27,13 @@ export interface SendTurn {
 	release: () => void;
 }
 
+/** A place in line taken before the send is made (`reserveSend`). */
+export interface SendReservation {
+	/** Gives the place up when nothing will be sent. Idempotent; a no-op
+	 *  once the send was made with it. */
+	cancel(): void;
+}
+
 export function createSendOrder() {
 	type OpenTurn = { chat: SendChat; done: Promise<void> };
 	const open: OpenTurn[] = [];

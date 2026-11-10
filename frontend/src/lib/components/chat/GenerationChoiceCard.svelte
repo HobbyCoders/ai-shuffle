@@ -345,6 +345,9 @@
 		const chosen = values[index];
 		const keep = variant === 'settings' ? true : remember;
 		outcome = null;
+		// The reply's place in the chat is the click's, not the save's end: a
+		// message sent while the pick saves goes after it (#1444).
+		const turn = variant === 'chat' ? activeSession.reserveSend() : null;
 		try {
 			const result =
 				handoff && onpick
@@ -355,7 +358,7 @@
 			const view = saveOutcome(result || null, kind);
 			if (view) outcome = { index, verb: savedVerb(keep), view };
 			if (variant === 'chat') {
-				const sent = await activeSession.sendMessage(pickMessage(tool, kind, option, chosen, priceView(quotes[index], kind), keep));
+				const sent = await activeSession.sendMessage(pickMessage(tool, kind, option, chosen, priceView(quotes[index], kind), keep), turn ? { turn } : undefined);
 				if (!canAct(sourceSessionId)) return;
 				if (sent === false) throw new Error('Your pick was saved, but the reply could not be sent. Reply in the chat instead.');
 			}
@@ -366,6 +369,7 @@
 		} catch (e) {
 			saveError = getErrorMessage(e, 'Could not use this choice.');
 		} finally {
+			turn?.cancel();
 			saving = false;
 		}
 	}

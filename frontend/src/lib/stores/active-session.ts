@@ -37,6 +37,7 @@ import {
 } from './session/session-switcher';
 
 // Extracted sub-modules
+import type { SendReservation } from './session/send-order';
 import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
@@ -1096,8 +1097,11 @@ export const activeSession = {
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
 
-	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean; stillAtDestination?: () => boolean; notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> }; onDispatched?: () => void }) =>
+	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean; stillAtDestination?: () => boolean; notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> }; onDispatched?: () => void; turn?: SendReservation }) =>
 		messageSender.sendMessage(prompt, options),
+	/** Take a send's place in line before awaiting, then pass it as
+	 *  `options.turn` (#1444; see send-order.ts). */
+	reserveSend: (): SendReservation => messageSender.reserveSend(),
 
 	stopGeneration: () => messageSender.stopGeneration(),
 	interruptForQueuedMessages: () => messageSender.interruptForQueuedMessages(),

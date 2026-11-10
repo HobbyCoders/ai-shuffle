@@ -476,6 +476,28 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		expect(queries().map((frame) => frame.prompt)).toEqual(['read the plan', BY_PATH]);
 	});
 
+	it('writes a Browser panel prompt sent while the composer\'s cold-cache check waits after the composer message (#1444)', async () => {
+		let answerCache = (_: unknown) => {};
+		net.cache = () => new Promise((resolve) => { answerCache = resolve; });
+		// An idle open chat: the composer asks /cache-state before it sends.
+		const view = await compose('idle-chat');
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		// What BrowserPanel's sendElementPrompt does: straight to the store.
+		const panel = activeSession.sendMessage('panel prompt');
+		// Any socket a send opened meanwhile is up: a send that may go, goes.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		for (const socket of Socket.all) socket.open();
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(queries()).toEqual([]);
+		answerCache({ cold: false, warn: false, large: false });
+		await waitFor(() => expect(Socket.all.some((socket) => socket.readyState === Socket.CONNECTING)).toBe(true));
+		for (const socket of Socket.all) if (socket.readyState === Socket.CONNECTING) socket.open();
+		await waitFor(() => expect(queries()).toHaveLength(2));
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'panel prompt']);
+		await expect(panel).resolves.toBe(true);
+	});
+
 	it('writes a Browser panel prompt sent while a note send waits for its ownership answer after the note (#1444 case 3)', async () => {
 		let answer = (_: unknown) => {};
 		net.live = () => new Promise((resolve) => { answer = resolve; });

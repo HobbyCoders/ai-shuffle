@@ -270,10 +270,12 @@ describe('a send in flight holds off an update reload (#711)', () => {
 		try {
 			const first = sender.sendMessage('one', { compactFirst: true });
 			const second = sender.sendMessage('two', { compactFirst: true });
-			await vi.waitFor(() => expect(settles).toHaveLength(2));
+			// The second waits for the first's admission (#1444), and still counts.
+			await vi.waitFor(() => expect(settles).toHaveLength(1));
 			settles[0]({ turn_id: 'c1', queued_turn_id: 'q1', session_id: 's1' });
 			await first;
 			expect(reloadBlockers()).toContain('message-sending');
+			await vi.waitFor(() => expect(settles).toHaveLength(2));
 			settles[1]({ turn_id: 'c2', queued_turn_id: 'q2', session_id: 's1' });
 			await second;
 			expect(reloadBlockers()).not.toContain('message-sending');
@@ -2672,16 +2674,94 @@ describe('sends to one chat are written in the order they were sent (#1444)', ()
 		}
 	});
 
-	it('lets the next send go once a compact-first request is out, without waiting for its answer', async () => {
+	it('holds the next send until a compact-first send is admitted, so the socket cannot admit it first', async () => {
 		let answer!: (value: unknown) => void;
 		apiMocks.post.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
 		const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
 		const sender = createMessageSender(deps);
 		const first = sender.sendMessage('compact then this', { compactFirst: true });
-		expect(await sender.sendMessage('second')).toBe(true);
-		expect(prompts(wsConn)).toEqual(['second']);
+		const second = sender.sendMessage('second');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// The compact request is out but not yet admitted: nothing on the socket.
+		expect(prompts(wsConn)).toEqual([]);
 		answer({ turn_id: 'c', queued_turn_id: 'q', session_id: 's1' });
 		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(prompts(wsConn)).toEqual(['second']);
+	});
+
+	it('lets the next send go after a while when a compact-first answer never comes', async () => {
+		vi.useFakeTimers();
+		try {
+			apiMocks.post.mockImplementationOnce(() => new Promise(() => {}));
+			const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+			const sender = createMessageSender(deps);
+			void sender.sendMessage('compact then this', { compactFirst: true });
+			const second = sender.sendMessage('second');
+			await vi.advanceTimersByTimeAsync(9_000);
+			expect(prompts(wsConn)).toEqual([]);
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(await second).toBe(true);
+			expect(prompts(wsConn)).toEqual(['second']);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('writes a send made after a reserved place in line after the reserved send', async () => {
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		const sender = createMessageSender(deps);
+		// The composer reserves at Send, then awaits its cold-cache check.
+		const turn = sender.reserveSend();
+		const panel = sender.sendMessage('panel prompt');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(prompts(wsConn)).toEqual([]);
+		expect(await sender.sendMessage('composer message', { turn })).toBe(true);
+		expect(await panel).toBe(true);
+		expect(prompts(wsConn)).toEqual(['composer message', 'panel prompt']);
+	});
+
+	it('lets later sends go when a reserved place is given up', async () => {
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
+		const sender = createMessageSender(deps);
+		const turn = sender.reserveSend();
+		const panel = sender.sendMessage('panel prompt');
+		turn.cancel();
+		expect(await panel).toBe(true);
+		expect(prompts(wsConn)).toEqual(['panel prompt']);
+	});
+
+	it('sends a new chat\'s second send to the chat its first send created, not as a second new chat', async () => {
+		const { deps, wsConn, internal } = makeDeps(baseState({ worktreeIntent: 'local', sessionId: null, messages: [] }));
+		const sender = createMessageSender(deps);
+		expect(await sender.sendMessage('first')).toBe(true);
+		const second = sender.sendMessage('second');
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		expect(prompts(wsConn)).toEqual(['first']);
+		// session_created echoes the first send's token: the chat adopts it.
+		internal.pendingRequestId = null;
+		internal.awaitingNewSession = false;
+		deps.update((s) => ({ ...s, sessionId: 'created', title: 'first' }));
+		expect(await second).toBe(true);
+		const frames = wsConn.send.mock.calls.map(([frame]) => frame).filter((frame) => frame.type === 'query');
+		expect(frames.map((frame) => [frame.prompt, frame.session_id ?? null])).toEqual([['first', null], ['second', 'created']]);
+		expect(frames[1].request_id).toBeUndefined();
+	});
+
+	it('keeps a new chat\'s second send unsent when the first send\'s chat is never adopted', async () => {
+		vi.useFakeTimers();
+		try {
+			const { deps, wsConn } = makeDeps(baseState({ worktreeIntent: 'local', sessionId: null, messages: [] }));
+			const sender = createMessageSender(deps);
+			expect(await sender.sendMessage('first')).toBe(true);
+			const second = sender.sendMessage('second');
+			await vi.advanceTimersByTimeAsync(11_000);
+			expect(await second).toBe(false);
+			expect(prompts(wsConn)).toEqual(['first']);
+			expect(deps.getState().error).toContain('still being created');
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('lets the next send go once a voice call\'s text frame is written, before its acknowledgement', async () => {

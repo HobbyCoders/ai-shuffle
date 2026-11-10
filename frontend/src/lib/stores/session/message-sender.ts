@@ -27,9 +27,9 @@ import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
-import { claimBootSend, releaseBootSend } from './session-init';
+import { claimBootSend, releaseBootSend, getInitGeneration } from './session-init';
 import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
-import { ANY_CHAT, createSendOrder } from './send-order';
+import { ANY_CHAT, createSendOrder, type SendChat, type SendReservation, type SendTurn } from './send-order';
 
 // ─── Sends in flight ─────────────────────────────────────────────────────────
 
@@ -63,6 +63,12 @@ export async function trackSend<T>(send: () => Promise<T>): Promise<T> {
 
 // Match the streamed typed-text admission deadline in voiceAudioStream.
 const VOICE_CONTEXT_SAVE_TIMEOUT_MS = 10_000;
+// Send order (#1444): the longest a later send to the same chat waits for
+// a compact-first send's admission, for a new chat's first send to be
+// adopted, or for a reserved send the caller never makes.
+const COMPACT_ADMISSION_WAIT_MS = 10_000;
+const NEW_CHAT_ADOPTION_WAIT_MS = 10_000;
+const RESERVED_TURN_LIMIT_MS = 15_000;
 
 /**
  * Who owns the session an unbound compose is about to create. The backend
@@ -230,6 +236,9 @@ interface SendMessageOptions {
 	 *  frame, a compact-first send or a send that creates a worktree. The
 	 *  composer lets the next send go here, so sends keep their order. */
 	onDispatched?: () => void;
+	/** The place in line this send took earlier (`reserveSend`), for a caller
+	 *  that awaits before it calls sendMessage (#1444). */
+	turn?: SendReservation;
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -432,8 +441,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	const sender = {
 		/** `letNextGo` is the wrapper's: called where this send's frame is
-		 *  written, so the next send to its chat may go. */
-		async sendMessage(prompt: string, options?: SendMessageOptions, letNextGo?: () => void): Promise<boolean> {
+		 *  written, so the next send to its chat may go. Given a promise, the
+		 *  next send waits for that instead (a new chat's adoption). */
+		async sendMessage(prompt: string, options?: SendMessageOptions, letNextGo?: (after?: Promise<unknown>) => void): Promise<boolean> {
 			prompt = prompt.trim();
 
 			// Restore-race guard: right after a page load, init() may have adopted
@@ -796,9 +806,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					let refused = false;
 					try {
 						const compacting = compactSession(_state.sessionId!, query);
-						// The request is out: a later send does not wait for its answer.
-						letNextGo?.();
-						const result = await compacting;
+						// The worker admits this send when it answers. Until then a later
+						// send waits, else the socket can admit it first; bounded, so a
+						// slow answer never holds the chat.
+						const handOn = setTimeout(() => letNextGo?.(), COMPACT_ADMISSION_WAIT_MS);
+						const result = await compacting.finally(() => clearTimeout(handOn));
 						if (!result.queued_turn_id) {
 							refused = true;
 							throw new Error('This worker needs an update to compact and send. Your draft has been kept.');
@@ -836,7 +848,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					return true;
 				}
 				querySent = wsConn.send(query);
-				letNextGo?.();
+				// A new chat's next send goes once this one's chat is adopted, to
+				// that chat: sent unbound too, it would create a second chat.
+				letNextGo?.(requestId && querySent ? untilAdopted(requestId, clientMessageId) : undefined);
 				if (!querySent) {
 					pendingQueue.acknowledgeSend(_state.sessionId, clientMessageId);
 					pendingQueue.forgetSendUploads(clientMessageId);
@@ -1480,24 +1494,116 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	// send to its chat (send-order.ts, #1444). The turn is taken here, as the
 	// send is made; a send with no earlier one waiting goes on without an
 	// await, exactly as before.
-	const send = sender.sendMessage;
-	sender.sendMessage = (prompt: string, options?: SendMessageOptions) => {
+	/** Adopted from an earlier unbound send, in that compose (navigation). */
+	let adoptedHere: { sessionId: string; navigation: number } | null = null;
+	/** A compose whose first send went out and was not adopted in time. */
+	let unadoptedIn: number | null = null;
+
+	/** Settles once the new chat this send creates is adopted, the send was
+	 *  refused (its echo withdrawn), the user left the compose, or the wait ran
+	 *  out (recorded for the next send). */
+	function untilAdopted(requestId: string, commandId: string): Promise<void> {
+		const navigation = getInitGeneration();
+		const echoed = () => getState().messages.some(m => m.commandId === commandId);
+		const watchEcho = echoed();
+		return new Promise<void>((resolve) => {
+			const finish = (timedOut: boolean) => {
+				clearTimeout(limit);
+				clearInterval(check);
+				const sessionId = getState().sessionId;
+				if (sessionId && internal.pendingRequestId !== requestId && getInitGeneration() === navigation) {
+					adoptedHere = { sessionId, navigation };
+				} else if (timedOut) {
+					unadoptedIn = navigation;
+				}
+				resolve();
+			};
+			const limit = setTimeout(() => finish(true), NEW_CHAT_ADOPTION_WAIT_MS);
+			const check = setInterval(() => {
+				if (internal.pendingRequestId !== requestId || getInitGeneration() !== navigation
+					|| (watchEcho && !getState().sessionId && !echoed())) finish(false);
+			}, 50);
+		});
+	}
+
+	type Taken = { chat: SendChat; navigation: number; turn: SendTurn };
+	function takeTurn(): Taken {
 		const made = getState();
 		const chat = made.isRestoringSession ? ANY_CHAT : made.sessionId;
-		const turn = sendOrder.take(chat);
-		return trackSend(async () => {
-			try {
-				if (turn.ready) {
-					await turn.ready;
-					// The chat it was made in was left while it waited: nothing goes,
-					// and no error lands in the chat open now. The caller keeps the words.
-					if (chat !== ANY_CHAT && getState().sessionId !== chat) return false;
-				}
-				return await send(prompt, options, turn.release);
-			} finally {
-				turn.release();
+		return { chat, navigation: getInitGeneration(), turn: sendOrder.take(chat) };
+	}
+
+	/** May a send that waited still go? False when the chat it was made in
+	 *  was left; nothing goes, no error lands in the chat open now, and the
+	 *  caller keeps the words. A new chat's send follows the chat its earlier
+	 *  send created. */
+	function stillMayGo({ chat, navigation }: Taken): boolean {
+		if (chat === ANY_CHAT) return true;
+		const now = getState().sessionId;
+		if (now === chat) {
+			if (chat !== null) return true;
+			if (getInitGeneration() !== navigation) return false;
+			if (unadoptedIn === navigation) {
+				update(s => ({ ...s, error: 'This session is still being created — try again in a moment.' }));
+				return false;
 			}
-		});
+			return true;
+		}
+		return chat === null && getInitGeneration() === navigation
+			&& adoptedHere?.sessionId === now && adoptedHere.navigation === navigation;
+	}
+
+	const reserved = new WeakMap<SendReservation, Taken & { spent: boolean; limit: ReturnType<typeof setTimeout> }>();
+	const send = sender.sendMessage;
+	const ordered = {
+		sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
+			const held = options?.turn ? reserved.get(options.turn) : undefined;
+			let taken: Taken;
+			if (held && !held.spent) {
+				held.spent = true;
+				clearTimeout(held.limit);
+				taken = held;
+			} else {
+				taken = takeTurn();
+			}
+			const { turn } = taken;
+			let handOn: Promise<unknown> | null = null;
+			const letNextGo = (after?: Promise<unknown>) => {
+				if (after) handOn = after;
+				else turn.release();
+			};
+			return trackSend(async () => {
+				try {
+					if (turn.ready) {
+						await turn.ready;
+						if (!stillMayGo(taken)) return false;
+					}
+					return await send(prompt, options, letNextGo);
+				} finally {
+					if (handOn) void handOn.finally(turn.release);
+					else turn.release();
+				}
+			});
+		},
+		/** Take this send's place in line now, for a caller that awaits before
+		 *  it sends (the composer's cold-cache check, a generation choice's
+		 *  save). Pass it as `options.turn`; cancel it when nothing will be
+		 *  sent. Lapses after a while, so a stuck caller never holds the chat. */
+		reserveSend(): SendReservation {
+			const taken = takeTurn();
+			const reservation: SendReservation = {
+				cancel() {
+					const held = reserved.get(reservation);
+					if (!held || held.spent) return;
+					held.spent = true;
+					clearTimeout(held.limit);
+					held.turn.release();
+				},
+			};
+			reserved.set(reservation, { ...taken, spent: false, limit: setTimeout(taken.turn.release, RESERVED_TURN_LIMIT_MS) });
+			return reservation;
+		},
 	};
-	return sender;
+	sender.sendMessage = ordered.sendMessage;
+	return Object.assign(sender, { reserveSend: ordered.reserveSend });
 }

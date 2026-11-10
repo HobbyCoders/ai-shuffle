@@ -97,7 +97,7 @@ describe('cold send warning', () => {
 		expect(sends).not.toHaveBeenCalled();
 		await fireEvent.submit(view.container.querySelector('form')!);
 		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(prompt || '@/uploads/proof.png', {
-			pendingUploadPaths:['/uploads/proof.png'], stillAtDestination: expect.any(Function)
+			pendingUploadPaths:['/uploads/proof.png'], stillAtDestination: expect.any(Function), turn: expect.anything()
 		}));
 	});
 	it('restores unsent words and file chips to the composer without sending', async () => {
@@ -145,7 +145,7 @@ describe('cold send warning', () => {
 		await waitFor(() => expect(screen.getByRole('button', { name: 'Compact first' })).toBeTruthy());
 		await fireEvent.click(screen.getByRole('button', { name: 'Compact first' }));
 		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT, {
-			compactFirst: true, pendingUploadPaths: undefined, stillAtDestination: expect.any(Function)
+			compactFirst: true, pendingUploadPaths: undefined, stillAtDestination: expect.any(Function), turn: expect.anything()
 		}));
 		await waitFor(() => expect(screen.queryByRole('button', { name: 'Compact first' })).toBeNull());
 		expect(editor.textContent).toBe('');
@@ -161,7 +161,7 @@ describe('cold send warning', () => {
 		const { editor } = await submit(true);
 		await fireEvent.click(await screen.findByRole('button', { name: 'Compact first' }));
 		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT + ' @/uploads/notes.txt', {
-			compactFirst: true, pendingUploadPaths: ['/uploads/notes.txt'], stillAtDestination: expect.any(Function)
+			compactFirst: true, pendingUploadPaths: ['/uploads/notes.txt'], stillAtDestination: expect.any(Function), turn: expect.anything()
 		}));
 		expect(editor.textContent).toBe('');
 	});
@@ -219,7 +219,7 @@ describe('cold send warning', () => {
 		// Held, not refused: the notice explains it, with no failure toast.
 		expect(screen.queryByText('Message not sent. Try again.')).toBeNull();
 		await fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }));
-		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT, { stillAtDestination: expect.any(Function) }));
+		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT, { stillAtDestination: expect.any(Function), turn: expect.anything() }));
 		expect(editor.textContent).toBe('');
 	});
 
@@ -230,7 +230,7 @@ describe('cold send warning', () => {
 		expect(editor.textContent).toBe('');
 		expect(sends).not.toHaveBeenCalled();
 		answer();
-		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT, { stillAtDestination: expect.any(Function) }));
+		await waitFor(() => expect(sends).toHaveBeenCalledExactlyOnceWith(TEXT, { stillAtDestination: expect.any(Function), turn: expect.anything() }));
 		expect(editor.textContent).toBe('');
 	});
 

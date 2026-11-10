@@ -45,6 +45,7 @@
 	import { pastedTextFile } from './tiptap/large-paste';
 	import { joinDrafts, restoreMessageDocument } from './tiptap/serialization';
 	import { captureDestination, keepUnsentDraft, movedAwayFrom, noteLeftDraft, putBackUnsent, retirePutBack, SEND_MOVED_MESSAGE, stillAtDestination, type SendDestination } from './send-destination';
+	import type { SendReservation } from '$lib/stores/session/send-order';
 	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
@@ -1262,7 +1263,14 @@
 		// Send the message, optionally queued behind a server-owned compaction.
 		// sendMessage clears the composer before its first await, and holds the
 		// next send until the cold check has answered so two sends keep order.
-		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm);
+		// The store's place in line is taken now, before the cold check, so a
+		// send made elsewhere meanwhile (the Browser panel) goes after (#1444).
+		const turn = activeSession.reserveSend();
+		try {
+			await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm, turn);
+		} finally {
+			turn.cancel();
+		}
 	}
 
 	/**
@@ -1318,7 +1326,8 @@
 		compactBeforeSend = false,
 		mayGo?: () => Promise<boolean>,
 		released?: () => void,
-		notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> }
+		notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> },
+		turn?: SendReservation
 	) {
 		if (!ownsComposer()) return;
 		// Enforce the same capability as the hidden worktree checkbox, even if
@@ -1507,9 +1516,12 @@
 				...(pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : {}),
                 ...(pendingReferences.length ? { pendingUploadReferences: pendingReferences } : {}),
 				...(compactBeforeSend ? { compactFirst: true } : {}),
+				...(turn ? { turn } : {}),
 				// Re-checked once the store knows its target (after a reload's
 				// restore wait); false sends nothing and lands in restoreOnFailure.
-				stillAtDestination: () => stillAtDestination(destination, composerPlace()),
+				// A New chat counts as the chat an earlier send of it created: the
+				// store sends there only for that chat (#1444).
+				stillAtDestination: () => stillAtDestination(destination, composerPlace(), { adoptedOwnChat: true }),
 			});
 			if (sent === false) restoreOnFailure();
 			else if (ownsComposer() && !mobileComposerDestroyed && getInitGeneration() === sendingNavigation) {
