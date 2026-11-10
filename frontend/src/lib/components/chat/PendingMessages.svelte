@@ -40,7 +40,8 @@
 	 * retrying and drops the flag when an available snapshot lands.
 	 */
 	import type { QueuedMessage } from '$lib/stores/types';
-	import { shouldCollapseUserMessage } from '$lib/utils/message-presentation';
+	import { shouldCollapseUserMessage, userBubbleParts } from '$lib/utils/message-presentation';
+	import AttachmentChip from './AttachmentChip.svelte';
 
 	interface Props {
 		messages: QueuedMessage[];
@@ -88,7 +89,7 @@
 			<div class="userrow" role="article" data-queue-confirmed={msg.id !== msg.clientMessageId} data-queue-status={msg.status}>
 				<div class="usercol">
 					<div class="bubble" class:is-cancelling={msg.status === 'cancelling'}>
-						<div class="bubble-text" class:is-clamped={shouldCollapseUserMessage(msg.content)}>{msg.content}</div>
+						<div class="bubble-text" class:is-clamped={shouldCollapseUserMessage(msg.content)}>{#each userBubbleParts(msg.content, msg.uploadPaths ?? []) as part}{#if typeof part === 'string'}{part}{:else}<AttachmentChip path={part.path} />{/if}{/each}</div>
 						{#if !isAnchor && msg.status !== 'delivered' && msg.status !== 'stopped'}
 							<button
 								type="button"

@@ -172,6 +172,11 @@ class CreateWorktreeSessionRequest(BaseModel):
     # worktree, and submits a durable first turn, so the query runs server-side
     # regardless of WS state.
     prompt: Optional[str] = None
+    # The sender's command identity for ``prompt`` (``client-`` + 32 hex, as on
+    # a WebSocket query). It is stamped on the first turn so the transcript's
+    # ``message.user`` matches the sender's local row by id, not by text: the
+    # stored prompt names the checkout's copy of each upload (#1351).
+    client_message_id: Optional[str] = None
     # The composer's run picks (model, effort, permission mode, ...). With a
     # prompt they ride the first turn; without one they are stored on the new
     # session as its run binding, the same values that turn would have stored.

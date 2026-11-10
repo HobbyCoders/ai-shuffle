@@ -131,6 +131,15 @@ def _encode_frame(data: Dict[str, Any]) -> str:
 _V2_QUEUE_SOURCES = ("user", "queue")
 
 
+def _queue_upload_paths(payload: Any) -> Dict[str, Any]:
+    """A queued send's recorded attachment paths, for its chips (#1313)."""
+    paths = payload.get("upload_paths") if isinstance(payload, dict) else None
+    if not isinstance(paths, list):
+        return {}
+    paths = [p for p in paths if isinstance(p, str) and p]
+    return {"upload_paths": paths} if paths else {}
+
+
 def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
     """The user-visible queue for a session, re-sourced from the durable
     ``turns`` table (v2 path).
@@ -143,6 +152,10 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
     same turn id, so FE-held ids match for remove), ``content``←prompt,
     ``created_at``←ISO. Valid client command ids are exposed as both
     ``command_id`` and ``client_message_id`` for snapshot reconciliation.
+    ``upload_paths`` are the attachments the send recorded, so the bubble can
+    show them as chips instead of the ``@path`` mentions in ``content`` (#1313).
+    ``recorded`` marks a row whose message is already in the transcript (a
+    re-queued steer): its run records none, so a client must not wait for one.
     """
     rows: List[Dict[str, Any]] = []
     pos = 0
@@ -152,12 +165,16 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
         created = turn.get("created_at")
         if created is not None and hasattr(created, "isoformat"):
             created = created.isoformat()
+        payload = turn.get("payload")
         rows.append({
             "id": turn["id"],
             **({"command_id": turn["command_id"], "client_message_id": turn["command_id"]}
                if _valid_client_message_id(turn.get("command_id")) else {}),
             "session_id": session_id,
             "content": turn.get("prompt") or "",
+            **_queue_upload_paths(payload),
+            **({"recorded": True} if isinstance(payload, dict)
+               and payload.get("user_message_already_recorded") else {}),
             "profile_id": turn.get("profile_id"),
             "project_id": turn.get("project_id"),
             "position": pos,
@@ -179,6 +196,7 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
                if _valid_client_message_id(held.get("command_id")) else {}),
             "session_id": session_id,
             "content": held.get("prompt") or "",
+            **_queue_upload_paths(held.get("payload")),
             "profile_id": held.get("profile_id"),
             "project_id": held.get("project_id"),
             "position": pos,

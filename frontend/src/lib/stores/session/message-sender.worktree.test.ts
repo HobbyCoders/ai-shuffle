@@ -295,6 +295,20 @@ describe('autoCreateWorktree', () => {
 		expect(sendMessage).not.toHaveBeenCalled();
 	});
 
+	it('sends the local row\'s own command id with the create, so the delivered row reconciles by id (#1351)', async () => {
+		// The server stores the prompt with each upload's checkout path, so the
+		// delivered message.user text differs from this row: only the id matches.
+		post.mockResolvedValueOnce({ session_id: 'wt-id', branch_name: 'b', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
+		const { sender, state } = setup();
+
+		await sender.autoCreateWorktree('look at @/ws/proj/uploads/a.txt', ['/ws/proj/uploads/a.txt']);
+
+		const body = post.mock.calls[0][1] as { client_message_id?: string };
+		expect(body.client_message_id).toMatch(/^client-[0-9a-f]{32}$/);
+		expect(state().messages).toHaveLength(1);
+		expect(state().messages[0].commandId).toBe(body.client_message_id);
+	});
+
 	it('leaves the view the user switched to alone, and sends the turn itself only if the backend did not', async () => {
 		let resolvePost!: (v: unknown) => void;
 		post.mockReturnValueOnce(new Promise((r) => { resolvePost = r; }));
