@@ -152,6 +152,16 @@ const replayedCommands = new Map<string, number>();
 const MAX_PARKED_SESSIONS = 50;
 /** Session id → the pending bubbles it showed when the user left it. */
 const parked = new Map<string, PendingEntry[]>();
+/**
+ * Session id → the bubbles `unpark` put back on screen, until the first
+ * authoritative snapshot after the return speaks for them. That snapshot is the
+ * server's whole answer about a queue this page was not watching: a bubble it
+ * no longer lists ran or was cancelled while the chat was closed, so it is not
+ * held for a delivery (#524, #1052).
+ */
+const returned = new Map<string, Set<string>>();
+/** The returned bubbles the snapshot being recorded right now answers for. */
+let returnSnapshot: { id: string | null; keys: Set<string> } | null = null;
 // Keep an unresolved cancellation visible even if a queue-cleared frame wins
 // the race with its verdict. No text matching or expiring local-id map.
 interface CancellationState {
@@ -302,6 +312,8 @@ export const pendingQueue = {
 			for (const state of cancellations.values()) for (const timer of state.timers.values()) clearTimeout(timer);
 			cancellations.clear();
 			parked.clear();
+			returned.clear();
+			returnSnapshot = null;
 			recoverySends.clear();
 			sendUploads.clear();
 		}
@@ -314,6 +326,7 @@ export const pendingQueue = {
 	park(id: string | null, entries: PendingEntry[]): void {
 		if (!id) return;
 		parked.delete(id);
+		returned.delete(id);
 		if (entries.length === 0) return;
 		parked.set(id, entries.map(e => ({ ...e })));
 		while (parked.size > MAX_PARKED_SESSIONS) {
@@ -326,15 +339,19 @@ export const pendingQueue = {
 	/**
 	 * The bubbles to show the instant a session is re-opened, before its queue
 	 * snapshot lands. Withdrawn entries stay gone; everything else waits for the
-	 * server to say it was consumed or cancelled.
+	 * server to say it was consumed or cancelled. `away` is false when the
+	 * chat never left the screen (a re-open of the open chat): its queue was
+	 * watched throughout, so a row its next snapshot drops is a live delivery.
 	 */
-	unpark(id: string | null): PendingEntry[] {
+	unpark(id: string | null, away = true): PendingEntry[] {
 		if (!id) return [];
 		const entries = parked.get(id);
 		parked.delete(id);
 		if (!entries) return [];
 		const { withdrawn } = cancellationState(id);
-		return entries.filter(e => !withdrawn.has(removalKey(e)) && !withdrawn.has(e.id));
+		const back = entries.filter(e => !withdrawn.has(removalKey(e)) && !withdrawn.has(e.id));
+		if (away && back.length) returned.set(id, new Set(back.map(removalKey)));
+		return back;
 	},
 
 	/** Test/diagnostic hook: the bubbles parked for a session. */
@@ -419,6 +436,7 @@ export const pendingQueue = {
 		for (const timer of cancellations.get(id)?.timers.values() ?? []) clearTimeout(timer);
 		cancellations.delete(id);
 		parked.delete(id);
+		returned.delete(id);
 		for (const [key, send] of recoverySends) if (send.sessionId === id) recoverySends.delete(key);
 		for (const [key, uploads] of sendUploads) if (uploads.sessionId === id) sendUploads.delete(key);
 	},
@@ -448,6 +466,9 @@ export const pendingQueue = {
 	noteAuthoritative(id: string | null, rows: PendingEntry[]): void {
 		useSession(id);
 		lastAuthorityAt = Date.now();
+		const back = id ? returned.get(id) : undefined;
+		if (id) returned.delete(id);
+		returnSnapshot = back ? { id, keys: back } : null;
 		const state = cancellations.get(id);
 		for (const row of rows) {
 			stamp(row.id);
@@ -553,6 +574,8 @@ export const pendingQueue = {
 	 * feed can trail the queue), which is at once when it has: `inTranscript`
 	 * answers for a transcript this page opened without replaying it. A row with
 	 * no command id (a voice hand-off) has no message of its own to wait for.
+	 * A bubble put back on return to a chat is not held by the first snapshot
+	 * after that return: it left the queue while the chat was closed.
 	 */
 	holdDelivering(
 		id: string | null, previous: PendingEntry[], rows: PendingEntry[], onRelease: () => void,
@@ -560,9 +583,10 @@ export const pendingQueue = {
 	): void {
 		const state = cancellationState(id);
 		const listed = new Set(rows.map(removalKey));
+		const back = returnSnapshot?.id === id ? returnSnapshot.keys : null;
 		for (const entry of previous) {
 			const key = removalKey(entry);
-			if (listed.has(key) || entry.status || entry.unconfirmed || state.delivering.has(key)
+			if (listed.has(key) || back?.has(key) || entry.status || entry.unconfirmed || state.delivering.has(key)
 				|| (entry.recorded && (!entry.clientMessageId || sawRecordedMessage(id, entry)
 					|| inTranscript?.(entry.clientMessageId)))
 				|| state.sends.has(key) || state.removals.has(key)

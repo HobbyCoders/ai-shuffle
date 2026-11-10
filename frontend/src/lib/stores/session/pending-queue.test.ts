@@ -712,6 +712,28 @@ describe('pendingQueue — a delivered row keeps its bubble until it renders (#1
 		expect(pendingQueue.reconcile(SID, [])).toEqual([]);
 	});
 
+	it('does not hold a bubble put back on return when the return snapshot no longer lists it (#524)', () => {
+		const a = queued('turn-a', 'queued a', 'client-a'), b = queued('turn-b', 'queued b', 'client-b');
+		snapshot([], [a, b]);
+		pendingQueue.park(SID, [a, b]);
+		const back = pendingQueue.unpark(SID);
+		// The first snapshot after the return: a ran while the chat was closed.
+		expect(snapshot(back, [b]).map(e => e.id)).toEqual(['turn-b']);
+		expect(pendingQueue.isHeld(SID, a)).toBe(false);
+		// From here the chat is watched again, so b leaving the queue is a delivery.
+		expect(snapshot([b], []).map(e => e.id)).toEqual(['turn-b']);
+		expect(pendingQueue.isHeld(SID, b)).toBe(true);
+	});
+
+	it('still holds a delivery after a re-open of the chat that never left the screen', () => {
+		const a = queued('turn-a', 'queued a', 'client-a');
+		snapshot([], [a]);
+		pendingQueue.park(SID, [a]);
+		const back = pendingQueue.unpark(SID, false);
+		expect(snapshot(back, []).map(e => e.id)).toEqual(['turn-a']);
+		expect(pendingQueue.isHeld(SID, a)).toBe(true);
+	});
+
 	it('retires a row without a command id by its turn id', () => {
 		const a = queued('turn-a', 'from another device');
 		let shown = snapshot(snapshot([], [a]), []);
