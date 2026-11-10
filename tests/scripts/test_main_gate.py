@@ -561,4 +561,15 @@ def test_the_wait_runs_in_its_own_step_before_reporting():
     assert settle["run"] == "python scripts/ci/main_gate.py settle"
     assert settle["if"] == report["if"] and settle["if"].startswith("always() && ")
     assert settle["continue-on-error"] == "true"
-    assert int(settle["timeout-minutes"]) * 60 > gate.SETTLE_SECONDS
+    assert int(settle["timeout-minutes"]) * 60 > gate.SETTLE_SECONDS + gate.POLL_SECONDS
+
+
+def test_waiting_and_reporting_fit_before_github_stops_the_cancelled_gate():
+    # GitHub force-stops a cancelled job 5 minutes after the cancel; both
+    # steps, at their step limits, must end well before that (a minute spare).
+    assert gate.CANCELLED_JOB_LIMIT_SECONDS == 300
+    steps = {step.get("name"): step for step in workflow("main-suite.yml")["jobs"]["main-suite"]["steps"]}
+    settle = int(steps["Wait for cancelled jobs to stop"]["timeout-minutes"]) * 60
+    report = int(steps["Open or update flaky journey issues"]["timeout-minutes"]) * 60
+    assert settle + report <= gate.CANCELLED_JOB_LIMIT_SECONDS - 60
+    assert gate.SETTLE_SECONDS + gate.POLL_SECONDS < settle

@@ -57,8 +57,11 @@ CONFIRM_SECONDS = 5
 STALL_SECONDS = 300
 # Consecutive unreadable polls before the gate gives up (about ten minutes).
 MAX_FAILED_READS = 30
-# After cancelling, how long to wait for the cancelled jobs to stop.
-SETTLE_SECONDS = 600
+# After cancelling, how long to wait for the cancelled jobs to stop. GitHub
+# force-stops a cancelled job 5 minutes after the cancel, the gate included:
+# this wait and the reporting step after it must both fit well inside that.
+SETTLE_SECONDS = 90
+CANCELLED_JOB_LIMIT_SECONDS = 300
 EXPRESSION = re.compile(r"\$\{\{.*?\}\}")
 
 

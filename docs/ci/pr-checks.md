@@ -1269,9 +1269,12 @@ outcomes, the run link and commit, **never raw logs, errors or evidence paths**.
 The full evidence still expires after 3 days.
 
 The reporting step uses `always()`, so a recovered case is still reported when
-another shard/job is red. On a cancelled run the step before it waits (up to
-ten minutes, non-blocking) for the cancelled jobs to stop, because a cancelled
-shard still uploads its receipts. It is non-blocking (`continue-on-error`): an
+another shard/job is red. On a cancelled run the step before it waits (non-blocking) for the cancelled
+jobs to stop, because a cancelled shard still uploads its receipts. GitHub
+force-stops a cancelled job five minutes after the cancel, the gate job
+included, so the wait gives up after 90 seconds (two-minute step limit) and
+the two-minute reporting step still fits: a shard that has not finished
+uploading by then is not collected, which only costs this advisory report. It is non-blocking (`continue-on-error`): an
 API/reporting failure emits a warning and cannot change the verdict or prevent
 nightly publication. Only the `Main suite` job has `issues: write` (beside
 `actions: write` for the verdict); workflow defaults and all PR jobs remain

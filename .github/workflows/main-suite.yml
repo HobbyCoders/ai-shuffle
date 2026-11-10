@@ -274,10 +274,13 @@ jobs:
           python tests/scripts/test_ci_parallel_gates.py --desktop-evidence "$EVIDENCE"
       # Cancelled journey shards still upload their receipts; the cancel stops
       # the verdict step too, so this waits in its own step (at once when the
-      # verdict was reached: every job has finished then).
+      # verdict was reached: every job has finished then). GitHub force-stops a
+      # cancelled job 5 minutes after the cancel, so this wait (at most 90 s)
+      # and the reporting step together stay within 4 minutes; a shard still
+      # uploading after that is not collected.
       - name: Wait for cancelled jobs to stop
         if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        timeout-minutes: 12
+        timeout-minutes: 2
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
