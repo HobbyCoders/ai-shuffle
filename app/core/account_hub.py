@@ -50,6 +50,13 @@ _verdicts: dict = {}
 _failures: dict = {}
 _verification_flights: dict = {}
 _verification_generation = 0
+# Hub answers are written in the order their checks started, never the order
+# they finish: each check takes a ticket, and a cache write (confirm, forget,
+# remembered failure) for a device is dropped if a later-started check already
+# wrote. Otherwise a slow check from before a sign-in could overwrite the
+# sign-in's fresh answer, in either direction (#1424).
+_check_ticket = 0
+_last_write: dict = {}
 _VERDICT_CAP = 2048
 
 # Badge metadata only: never consulted by authorization or revocation checks.
@@ -125,9 +132,21 @@ def _verdict_age(key):
     return None if confirmed_at is None else time.monotonic() - confirmed_at
 
 
-def _forget_verdict(key):
-    with _VERDICT_LOCK:
-        _verdicts.pop(key, None)
+def _take_ticket():
+    """Order of this check among checks that may write the cache. Lock held."""
+    global _check_ticket
+    _check_ticket += 1
+    return _check_ticket
+
+
+def _may_write(key, ticket):
+    """True and record the write if no later-started check wrote. Lock held."""
+    if _last_write.get(key, 0) > ticket:
+        return False
+    _last_write[key] = ticket
+    if len(_last_write) > _VERDICT_CAP:
+        _last_write.pop(min(_last_write, key=_last_write.get), None)
+    return True
 
 
 def reset_verification_cache():
@@ -136,6 +155,7 @@ def reset_verification_cache():
     with _VERDICT_LOCK:
         _verdicts.clear()
         _failures.clear()
+        _last_write.clear()
         _verification_generation += 1
 
 
@@ -146,10 +166,21 @@ def _replay(failure):
     return clone
 
 
-def _remember_failure(key, generation, failure):
-    """Replay this hub answer for one TTL, unless a sign-out reset came between."""
+def _remember_refusal(key, generation, ticket, failure):
+    """The hub refused this device: drop its confirmation and replay the refusal."""
     with _VERDICT_LOCK:
-        if generation != _verification_generation:
+        if generation != _verification_generation or not _may_write(key, ticket):
+            return
+        _verdicts.pop(key, None)
+        _failures[key] = (time.monotonic(), failure)
+        if len(_failures) > _VERDICT_CAP:
+            _failures.pop(min(_failures, key=lambda k: _failures[k][0]), None)
+
+
+def _remember_failure(key, generation, ticket, failure):
+    """Replay this hub answer for one TTL, unless a sign-out reset or a later check came between."""
+    with _VERDICT_LOCK:
+        if generation != _verification_generation or not _may_write(key, ticket):
             return
         _failures[key] = (time.monotonic(), failure)
         if len(_failures) > _VERDICT_CAP:
@@ -432,9 +463,10 @@ def worker_link_call(action, body):
 def require_active(owner, *, fresh=False):
     """Hub check for a device, at most one live call per verify TTL.
 
-    ``fresh`` is for a just-exchanged sign-in ticket: it asks the hub now
-    instead of replaying a remembered refusal or joining a check that started
-    before the sign-in. A young confirmation still answers it.
+    ``fresh`` is for a sign-in or re-pairing that exchanges a credential: it
+    asks the hub now instead of answering from anything remembered (a
+    confirmation or a refusal) or joining a check that started before it. Its
+    answer replaces whatever an older, slower check reports later.
 
     None means a legacy/direct-paired credential. The local binding is checked
     on every call. The hub is asked again once the remembered verdict is older
@@ -450,14 +482,15 @@ def require_active(owner, *, fresh=False):
         raise HTTPException(status_code=401, detail='Account authorization revoked')
     suffix = 'devices/' + identifier(owner['hub_device_id'])
     key = _verdict_key(owner)
-    age = _verdict_age(key)
+    age = None if fresh else _verdict_age(key)
     if age is not None and age < settings.mobile_account_hub_verify_ttl_seconds:
         return binding
     with _VERDICT_LOCK:
-        confirmed_at = _verdicts.get(key)
+        confirmed_at = None if fresh else _verdicts.get(key)
         if confirmed_at is not None and time.monotonic() - confirmed_at < settings.mobile_account_hub_verify_ttl_seconds:
             return binding
         generation = _verification_generation
+        ticket = 0
         failed = None if fresh else _failures.get(key)
         flight_key = (generation, _display_identity(binding), key)
         future = None if fresh else _verification_flights.get(flight_key)
@@ -468,6 +501,7 @@ def require_active(owner, *, fresh=False):
             leader = True
             future = Future()
             flight_key = None
+            ticket = _take_ticket()
         elif failed is not None and time.monotonic() - failed[0] < settings.mobile_account_hub_verify_ttl_seconds:
             # The hub answered this device within the TTL without confirming
             # it: give the same answer (grace still applies below) unasked.
@@ -477,6 +511,7 @@ def require_active(owner, *, fresh=False):
             leader = True
             future = Future()
             _verification_flights[flight_key] = future
+            ticket = _take_ticket()
     try:
         if leader:
             try:
@@ -489,17 +524,15 @@ def require_active(owner, *, fresh=False):
                     # read as an outage they kept that device's sessions
                     # failing 503 forever, never signed out.
                     if hub_status(exc) in (401, 403):
-                        _forget_verdict(key)
                         refused = HTTPException(status_code=401, detail='Account authorization revoked')
-                        _remember_failure(key, generation, refused)
+                        _remember_refusal(key, generation, ticket, refused)
                         raise refused from None
-                    _remember_failure(key, generation, exc)
+                    _remember_failure(key, generation, ticket, exc)
                     raise
                 if (result.get('active') is not True or result.get('account_id') != owner['account_id']
                         or result.get('device_id') != owner['hub_device_id']):
-                    _forget_verdict(key)
                     refused = HTTPException(status_code=401, detail='Account authorization revoked')
-                    _remember_failure(key, generation, refused)
+                    _remember_refusal(key, generation, ticket, refused)
                     raise refused
                 if _display_identity(store.get_binding()) != _display_identity(binding):
                     raise HTTPException(status_code=401, detail='Account authorization revoked')
@@ -508,11 +541,14 @@ def require_active(owner, *, fresh=False):
                         raise HTTPException(status_code=401, detail='Account authorization revoked')
                     # One timestamp for the entire flight; waiters never extend
                     # the existing verification TTL or outage grace window.
-                    _verdicts[key] = time.monotonic()
-                    _failures.pop(key, None)
-                    if len(_verdicts) > _VERDICT_CAP:
-                        oldest = min(_verdicts, key=_verdicts.get)
-                        _verdicts.pop(oldest, None)
+                    # A later-started check already wrote: this answer is
+                    # still this caller's, but it must not replace that one.
+                    if _may_write(key, ticket):
+                        _verdicts[key] = time.monotonic()
+                        _failures.pop(key, None)
+                        if len(_verdicts) > _VERDICT_CAP:
+                            oldest = min(_verdicts, key=_verdicts.get)
+                            _verdicts.pop(oldest, None)
                 future.set_result(None)
             except BaseException as exc:  # noqa: BLE001 - release waiters even if the leader is interrupted
                 future.set_exception(exc)

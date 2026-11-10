@@ -720,6 +720,100 @@ def test_fresh_sign_in_is_checked_now_not_refused_from_memory(setup, monkeypatch
     assert checks == [f'devices/{DEVICE}']
 
 
+def _slow_then_fresh(monkeypatch, slow_active, fresh_active):
+    """The first hub check blocks until released; the next answers at once."""
+    import threading
+    entered, release, calls = threading.Event(), threading.Event(), []
+
+    def hub(binding, method, suffix, body=None):
+        calls.append(suffix)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+            return {'active': slow_active, 'account_id': ACCOUNT, 'device_id': DEVICE}
+        return {'active': fresh_active, 'account_id': ACCOUNT, 'device_id': DEVICE}
+
+    monkeypatch.setattr(account_hub, 'call', hub)
+    return entered, release, calls
+
+
+def _run_slow_check(owner):
+    import threading
+    outcome = {}
+
+    def check():
+        try:
+            outcome['value'] = account_hub.require_active(owner)
+        except HTTPException as exc:
+            outcome['value'] = exc.status_code
+
+    thread = threading.Thread(target=check)
+    thread.start()
+    return thread, outcome
+
+
+def test_an_older_slow_allow_does_not_undo_a_fresh_refusal(setup, monkeypatch):
+    """A background check that started before a sign-in and answers after it
+    must not overwrite the sign-in's fresh refusal (#1424)."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    _fake_clock(monkeypatch)
+    entered, release, calls = _slow_then_fresh(monkeypatch, slow_active=True, fresh_active=False)
+    thread, outcome = _run_slow_check(owner)
+    assert entered.wait(5)
+    with pytest.raises(HTTPException) as fresh:
+        account_hub.require_active(owner, fresh=True)
+    assert fresh.value.status_code == 401
+    release.set()
+    thread.join(5)
+    assert outcome['value']['server_id'] == SERVER  # its own caller still gets its answer
+    with pytest.raises(HTTPException) as later:
+        account_hub.require_active(owner)
+    assert later.value.status_code == 401
+    assert len(calls) == 2  # the fresh refusal is replayed, not re-asked
+
+
+def test_an_older_slow_refusal_does_not_undo_a_fresh_allow(setup, monkeypatch):
+    """The inverse: an old refusal that lands after a fresh confirmation must
+    not block the phone for a TTL (#1424)."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=0)
+    _fake_clock(monkeypatch)
+    entered, release, calls = _slow_then_fresh(monkeypatch, slow_active=False, fresh_active=True)
+    thread, outcome = _run_slow_check(owner)
+    assert entered.wait(5)
+    assert account_hub.require_active(owner, fresh=True)['server_id'] == SERVER
+    release.set()
+    thread.join(5)
+    assert outcome['value'] == 401
+    assert account_hub.require_active(owner)['server_id'] == SERVER
+    assert len(calls) == 2  # the fresh confirmation answers, unasked
+
+
+def test_fresh_check_asks_the_hub_even_with_a_remembered_allow(setup, monkeypatch):
+    """A sign-in is checked live even while a confirmation is young, and its
+    refusal replaces that confirmation (#1424)."""
+    bind()
+    owner = {'server_id': SERVER, 'account_id': ACCOUNT, 'hub_device_id': DEVICE}
+    _verdict_settings(monkeypatch, ttl=90, grace=1800)
+    clock = _fake_clock(monkeypatch)
+    monkeypatch.setattr(account_hub, 'call', active)
+    account_hub.require_active(owner)
+    clock[0] += 1
+    refuse = Mock(return_value={'active': False, 'account_id': ACCOUNT, 'device_id': DEVICE})
+    monkeypatch.setattr(account_hub, 'call', refuse)
+    with pytest.raises(HTTPException) as fresh:
+        account_hub.require_active(owner, fresh=True)
+    assert fresh.value.status_code == 401
+    assert refuse.call_count == 1
+    with pytest.raises(HTTPException) as later:
+        account_hub.require_active(owner)
+    assert later.value.status_code == 401
+    assert refuse.call_count == 1
+
+
 def test_binding_deactivation_bypasses_cache(setup, monkeypatch):
     bind()
     insert()
