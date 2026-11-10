@@ -30,7 +30,12 @@ export function backToChats(): void {
 	else layout.openChat(null);
 }
 
-export function openSession(sessionId: string, openedSession?: Session): void {
+/**
+ * `reopen`: the chat is already open and this only reloads it with its row
+ * (boot after a `/?session=` link). Not a navigation, so a send waiting on
+ * that chat goes on (#1350). A different chat by then is opened as usual.
+ */
+export function openSession(sessionId: string, openedSession?: Session, { reopen = false }: { reopen?: boolean } = {}): void {
 	// Persistent assistant homes are intentionally absent from ordinary lists.
 	const session = openedSession ?? appData.current.sessions.find((row) => row.id === sessionId);
 	const worktreeInfo = session?.worktree_id || session?.worktree_branch || session?.branch ? {
@@ -45,8 +50,11 @@ export function openSession(sessionId: string, openedSession?: Session): void {
 	// A subagent's chat opens without Git or private access controls.
 	if (session?.is_worker !== undefined) subagentChats.mark(sessionId, session.is_worker);
 	const select = () => {
-		activeSession.switchSession(sessionId, session?.project_id, worktreeInfo,
-			session?.title || null, session?.project_v2_id ?? null);
+		// Only a reopen says so; every other open calls the store as before.
+		const place = [sessionId, session?.project_id, worktreeInfo,
+			session?.title || null, session?.project_v2_id ?? null] as const;
+		if (reopen) activeSession.switchSession(...place, { reopen: true });
+		else activeSession.switchSession(...place);
 		layout.openChat(sessionId);
 	};
 	if (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed) {

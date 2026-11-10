@@ -68,6 +68,7 @@ import { selectedContextWindow, standardContextCap } from './session/context-win
 import { appMode } from './sessionMode.svelte';
 import { bindSessionOwner } from './session-owner';
 import { finishBootReconciliation, getInitGeneration, hasBootProjectPick } from './session/session-init';
+import { captureDestination, stillAtDestination } from '$lib/components/chat/send-destination';
 
 describe('bootstrap new-chat landing', () => {
 	it('forwards the same-surface landing intent without changing explicit New chat', () => {
@@ -424,6 +425,33 @@ describe('attaching a project (#371)', () => {
 		expect(sessionEphemeralCache.restore('attach-me')?.permissionModeOverride).toBe('default');
 		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
 		expect(activeSession.current.project).toBe('');
+	});
+});
+
+describe('boot reopening a chat opened by link (#1350)', () => {
+	afterEach(() => { activeSession.destroy(); vi.restoreAllMocks(); });
+
+	it('does not call off a send waiting on that chat; any other open does', async () => {
+		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
+		await activeSession.init({ deepLinkSessionId: 'linked' });
+		const place = () => ({ sessionId: activeSession.current.sessionId, editorOwner: 'linked' });
+		// Sent while boot's first loads ran; the cold-cache check still waits.
+		const destination = captureDestination(place());
+		activeSession.switchSession('linked', null, null, null, null, { reopen: true });
+		expect(activeSession.current.sessionId).toBe('linked');
+		expect(stillAtDestination(destination, place())).toBe(true);
+		// The user opening the chat again themselves is still navigation.
+		activeSession.switchSession('linked');
+		expect(stillAtDestination(destination, place())).toBe(false);
+	});
+
+	it('is navigation when another chat is open by then', async () => {
+		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
+		await activeSession.init({ deepLinkSessionId: 'linked' });
+		activeSession.switchSession('other');
+		const generation = getInitGeneration();
+		activeSession.switchSession('linked', null, null, null, null, { reopen: true });
+		expect(getInitGeneration()).toBe(generation + 1);
 	});
 });
 

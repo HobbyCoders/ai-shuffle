@@ -102,6 +102,105 @@ describe('Send activates once', () => {
 		expect(sends.mock.calls[1][0]).toBe('second');
 		accept(true);
 	});
+
+	// #1344: Send, type, Send again while the first is still being checked.
+	// The second click was dropped with no word and its message stayed put.
+	it('sends a new message typed during the first send\'s check, after the first', async () => {
+		activeSession.setDraft('first');
+		const view = render(ChatInput);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: import('@tiptap/core').Editor };
+		await waitFor(() => expect(editor.textContent).toBe('first'));
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		await waitFor(() => expect(answerCacheState).not.toBeNull());
+		expect(editor.textContent).toBe('');
+
+		editor.editor.commands.insertContent('second');
+		await fireEvent.submit(form);
+		// Not ahead of the first: it waits for that check.
+		expect(sends).not.toHaveBeenCalled();
+		expect(editor.textContent).toBe('second');
+		answerCacheState!();
+		await waitFor(() => expect(heldChecks.length).toBe(1));
+		await waitFor(() => expect(editor.textContent).toBe(''));
+		answerCacheState!();
+		await waitFor(() => expect(sends).toHaveBeenCalledTimes(2));
+		expect(sends.mock.calls.map(([prompt]) => prompt)).toEqual(['first', 'second']);
+	});
+
+	// A double click on Send during that wait is one message: the repeat must
+	// not come back later and send whatever the composer holds by then.
+	it('drops a repeated Send while that message waits for the first send\'s check', async () => {
+		activeSession.setDraft('first');
+		const view = render(ChatInput);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: import('@tiptap/core').Editor };
+		await waitFor(() => expect(editor.textContent).toBe('first'));
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		await waitFor(() => expect(answerCacheState).not.toBeNull());
+
+		editor.editor.commands.insertContent('second');
+		await fireEvent.submit(form);
+		await fireEvent.submit(form);
+		answerCacheState!();
+		await waitFor(() => expect(heldChecks.length).toBe(1));
+		await waitFor(() => expect(editor.textContent).toBe(''));
+		editor.editor.commands.insertContent('third');
+		answerCacheState!();
+		await waitFor(() => expect(sends).toHaveBeenCalledTimes(2));
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(sends.mock.calls.map(([prompt]) => prompt)).toEqual(['first', 'second']);
+		expect(heldChecks.length).toBe(0);
+		expect(editor.textContent).toBe('third');
+	});
+
+	// A second Enter on the composer the first send just cleared is that send
+	// again. It must not wait and then send words typed afterwards.
+	it('does not send text typed after a repeated Send on the cleared composer', async () => {
+		activeSession.setDraft('first');
+		const view = render(ChatInput);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: import('@tiptap/core').Editor };
+		await waitFor(() => expect(editor.textContent).toBe('first'));
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		await waitFor(() => expect(answerCacheState).not.toBeNull());
+		expect(editor.textContent).toBe('');
+
+		await fireEvent.submit(form);
+		editor.editor.commands.insertContent('not sent yet');
+		answerCacheState!();
+		await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(sends.mock.calls.map(([prompt]) => prompt)).toEqual(['first']);
+		expect(heldChecks.length).toBe(0);
+		expect(editor.textContent).toBe('not sent yet');
+	});
+
+	// A message left waiting in a chat the user then switched away from gives
+	// up on its own; it must not swallow a Send in the chat they went to.
+	it('lets another chat\'s Send through while a left chat\'s message still waits', async () => {
+		activeSession.setDraft('first');
+		const view = render(ChatInput);
+		const editor = view.container.querySelector<HTMLElement>('.tiptap')! as HTMLElement & { editor: import('@tiptap/core').Editor };
+		await waitFor(() => expect(editor.textContent).toBe('first'));
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		await waitFor(() => expect(answerCacheState).not.toBeNull());
+
+		editor.editor.commands.insertContent('second');
+		await fireEvent.submit(form);
+		openChat('chat-b');
+		await tick();
+		editor.editor.commands.insertContent('for b');
+		await fireEvent.submit(form);
+		answerCacheState!();
+		await waitFor(() => expect(heldChecks.length).toBe(1));
+		answerCacheState!();
+		await waitFor(() => expect(sends.mock.calls.map(([prompt]) => prompt)).toContain('for b'));
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(sends.mock.calls.map(([prompt]) => prompt)).not.toContain('second');
+		expect(heldChecks.length).toBe(0);
+	});
 });
 
 describe('composer selection follows the chat', () => {

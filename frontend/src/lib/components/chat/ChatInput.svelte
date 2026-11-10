@@ -457,7 +457,17 @@
 		if (!ownsComposer()) return;
 		// Adoption is not a navigation away from the draft we already painted.
 		if (!newSessionId && $activeSession.isRestoringSession && prevSessionId === composerBootSessionId) return;
-		if (newSessionId !== prevSessionId) {
+		if (newSessionId !== prevSessionId && editorRef && prevSessionId === null
+			&& newChatSendNavigation === getInitGeneration()) {
+			// New chat taking the id its own send created, with no navigation since,
+			// is not a leave: what was typed after Send stays in the editor (caret
+			// included) and becomes the adopted chat's draft, moved out of the New
+			// chat slot the send emptied (#1361).
+			detachComposerDictation(editorRef.getEditor());
+			prevSessionId = newSessionId;
+			saveDraftImmediately();
+			writeDraft(null, '');
+		} else if (newSessionId !== prevSessionId) {
 			// Move capture off the shared editor before replacing its document.
 			detachComposerDictation(editorRef?.getEditor());
 			// A send still waiting for the chat being left keeps this, the newest
@@ -472,14 +482,11 @@
 			// the editor at once, so it can only hold what was typed or deleted
 			// since. A send held for this chat puts its words back in front of
 			// this draft later (send-destination.ts), so nothing here overwrites
-			// that. The one exception is New chat taking the id its own send
-			// created, with no navigation since: that is not a leave, and the send
-			// has already emptied the New chat slot. New chat and every chat
-			// switch move the navigation count on, so leaving New chat for another
-			// chat is always saved, whatever was sent elsewhere (PR #1212 review
-			// S2, S4, S5).
-			const adoptingOwnSend = prevSessionId === null && newChatSendNavigation === getInitGeneration();
-			if (editorRef && !adoptingOwnSend) {
+			// that. The one exception, New chat adopting its own send's chat, is
+			// handled above. New chat and every chat switch move the navigation
+			// count on, so leaving New chat for another chat is always saved,
+			// whatever was sent elsewhere (PR #1212 review S2, S4, S5).
+			if (editorRef) {
 				const leavingDraft = getDraftJSON();
 				activeSession.saveDraftForSession(prevSessionId, leavingDraft);
 				// Keep the persisted mirror aligned with the ephemeral cache so the
@@ -1094,8 +1101,15 @@
 	// submitted slash command, Send anyway, Compact first) comes through here,
 	// and the checks below await before the composer is cleared; a second
 	// click or tap in that window would read the same text and send it again.
-	// Held until the composer is cleared, so a new message may go at once.
-	let submitPending = false;
+	// Once the composer is cleared it holds a new message: that send waits for
+	// this one's cold-cache check, so two sends keep their order, then goes
+	// (#1344). Held until the check has answered.
+	let pendingSubmit: { cleared: boolean; done: Promise<void> } | null = null;
+	// Where a send is waiting behind an earlier check. It still shows its words
+	// in the composer, so another activation there is the same message again
+	// and is dropped. A waiter left behind by a chat switch gives up when it
+	// wakes; it does not stand in the way of a send from the new place.
+	let waitingSend: SendDestination | null = null;
 
 	// Send clears the composer at the click, and an empty composer offers Talk
 	// in Send's place. The Send circle keeps the slot through a double click's
@@ -1117,14 +1131,36 @@
 	}
 
 	async function handleSubmit(compactBeforeSend = false) {
-		if (submitPending) return;
-		submitPending = true;
+		if (pendingSubmit) {
+			if (!pendingSubmit.cleared) return;
+			// Nothing typed since the clear (a second Enter): the same action
+			// again, not a message. Waiting would send what is typed later.
+			if (!(editorRef?.getMessage() ?? '').trim() && uploadedFiles.length === 0) return;
+			if (waitingSend && stillAtDestination(waitingSend, composerPlace(), { adoptedOwnChat: true })) return;
+			// New chat or a switch during the wait: the words stay as the draft
+			// of the chat they were typed in (session-change effect).
+			const clickedIn = captureDestination(composerPlace());
+			waitingSend = clickedIn;
+			try {
+				while (pendingSubmit) await pendingSubmit.done;
+			} finally {
+				if (waitingSend === clickedIn) waitingSend = null;
+			}
+			if (!stillAtDestination(clickedIn, composerPlace(), { adoptedOwnChat: true })) return;
+		}
+		let settle!: () => void;
+		const submit = { cleared: false, done: new Promise<void>((resolve) => { settle = resolve; }) };
+		pendingSubmit = submit;
 		const releaseSendCircle = holdSendCircle();
-		try {
-			await submitComposer(compactBeforeSend, () => { submitPending = false; releaseSendCircle(); });
-		} finally {
-			submitPending = false;
+		const release = () => {
+			if (pendingSubmit === submit) pendingSubmit = null;
+			settle();
 			releaseSendCircle();
+		};
+		try {
+			await submitComposer(compactBeforeSend, release);
+		} finally {
+			release();
 		}
 	}
 
@@ -1329,6 +1365,7 @@
 		// Clear editor content. Words an earlier refused send put back go out
 		// with this one.
 		editorRef?.clear();
+		if (pendingSubmit) pendingSubmit.cleared = true;
 		retirePutBack(destination.chat);
 
 		// Clear draft immediately (not debounced) - important because

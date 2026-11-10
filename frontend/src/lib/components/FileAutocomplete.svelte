@@ -682,6 +682,11 @@
       {/if}
     </div>
 
+    <!-- One height for every state below: the panel grows up from the
+         composer, so a body that changed height when the list (or the
+         offline notice) replaced the loading row moved the whole menu a
+         moment after it opened, with no input (#1414). -->
+    <div class="file-autocomplete-body">
     <!-- Loading state -->
     {#if loading}
       <div class="autocomplete-loading">
@@ -898,6 +903,7 @@
         {/if}
       </ul>
     {/if}
+    </div>
 
     <!-- Footer -->
     <div class="autocomplete-footer">
@@ -918,6 +924,18 @@
     max-height: 20rem;
     z-index: 50;
     background: var(--popover, var(--card));
+  }
+
+  .file-autocomplete-body {
+    display: flex;
+    flex-direction: column;
+    height: 14rem;
+    min-height: 0;
+  }
+
+  .file-autocomplete-body > .autocomplete-loading,
+  .file-autocomplete-body > .autocomplete-empty {
+    flex: 1;
   }
 
   .file-autocomplete-list {

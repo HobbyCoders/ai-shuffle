@@ -1,13 +1,15 @@
 // Keyboard, focus and navigation in the real app: Shift+Enter with a suggestion
 // menu open is a new line (#1194), Ctrl+N works from the message editor
 // (#1202), New chat pressed right after Send never carries the message into the
-// new chat (#1077), browser Back after a sidebar chat switch returns to the
+// new chat (#1077), a send from a chat opened by link survives boot opening
+// that chat again (#1350), browser Back after a sidebar chat switch returns to the
 // previous chat (#953), and closing the phone's notification history keeps
 // focus on a real control (#1168).
 import { runJourney } from './runner.mjs';
 import {
 	PROJECT, SEEDED, api, chatState, composer, countUserRows, expect, gotoApp, isPhone,
-	openFromSidebar, openNewChat, sendButton, showSidebar, uniq, waitChat, waitChatOpen
+	openFromSidebar, openNewChat, seededChatId, sendButton, showSidebar, uniq, waitChat, waitChatOpen,
+	waitTurnSettled
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
@@ -79,6 +81,30 @@ async function reloadWithHistoryHeld(page, token, mark) {
 	for (let waited = 0; held === 0 && waited < 15_000; waited += 100) await page.waitForTimeout(100);
 	expect(held > 0, 'the reloaded chat is waiting for its history');
 	return { release, feed };
+}
+
+/**
+ * Hold the chat socket's `session_created` and every frame after it until
+ * released, so a new chat gets its id when the case says (setup, before load).
+ */
+async function holdSessionCreated(page) {
+	let holding = true;
+	let held = 0;
+	const queued = [];
+	await page.routeWebSocket(/\/api\/v1\/ws\/chat/, (ws) => {
+		const server = ws.connectToServer();
+		ws.onMessage((message) => server.send(message));
+		server.onMessage((message) => {
+			if (holding && (queued.length || String(message).includes('"session_created"'))) {
+				if (!queued.length) held += 1;
+				queued.push(() => ws.send(message));
+			} else ws.send(message);
+		});
+	});
+	return {
+		held: () => held,
+		release() { holding = false; for (const send of queued.splice(0)) send(); }
+	};
 }
 
 async function clearComposer(page) {
@@ -184,6 +210,45 @@ await runJourney({
 			expect((await chatState(page)).session === chatA, 'the first chat is open again');
 			expect((await editorText(page)).includes(token), 'the message waits there as its draft');
 			expect((await countUserRows(page, token)) === 0, 'and it was not sent in that chat either');
+			await clearComposer(page);
+			await page.waitForTimeout(500);
+		}
+	}, {
+		// Typing right after a new chat's first Send: the chat getting its id
+		// mid-word used to replace the composer with the new chat's empty draft
+		// (#1361). Adopting its own send's chat is not a navigation.
+		name: 'text-typed-after-a-new-chats-first-send-survives-its-session-id',
+		throttles: ['fast'],
+		async setup(ctx) {
+			await watchQueries(ctx.page);
+			ctx.created = await holdSessionCreated(ctx.page);
+			await openNewChat(ctx, { project: PROJECT });
+		},
+		async act({ page, mark, log, created }) {
+			const first = `first-${uniq()}`;
+			const typed = `typed-${uniq()}`;
+			const half = Math.floor(typed.length / 2);
+			await composer(page).click();
+			await composer(page).pressSequentially(first);
+			await mark('Send the first message, then type at once');
+			await sendButton(page).click();
+			await page.waitForFunction((t) => !document.querySelector('[data-message-editor]')?.textContent?.includes(t), first, { timeout: 10_000 });
+			for (let waited = 0; created.held() === 0 && waited < 15_000; waited += 50) await page.waitForTimeout(50);
+			expect(created.held() > 0, 'the server created the chat');
+			// The id lands inside the composer's draft debounce, as on CI.
+			await composer(page).pressSequentially(typed.slice(0, half));
+			expect(!/^s:/.test((await chatState(page)).session ?? ''), 'the composer has no session id yet');
+			await mark('the chat gets its id mid-word');
+			created.release();
+			await composer(page).pressSequentially(typed.slice(half));
+			await waitChat(page, { session: /^s:/ }, { timeout: 10_000 });
+			await page.waitForTimeout(1000);
+			const text = await editorText(page);
+			log(`composer: ${JSON.stringify(text)}`);
+			expect(text === typed, `everything typed after Send is still in the composer (${JSON.stringify(text)})`);
+			expect(await sendButton(page).isEnabled(), 'and can be sent');
+			const sent = await queries(page);
+			expect(sent.length === 1 && sent[0].includes(first), `only the first message went out (${JSON.stringify(sent)})`);
 			await clearComposer(page);
 			await page.waitForTimeout(500);
 		}
@@ -363,6 +428,69 @@ await runJourney({
 			expect((await countUserRows(page, token)) === 0, 'and it was not sent in that chat either');
 			await clearComposer(page);
 			await page.waitForTimeout(500);
+		}
+	}, {
+		// A chat opened by link (an Android notification opens `/?session=<id>`)
+		// takes sends before the first loads end; boot then opens that same chat
+		// again with its row loaded. That second open is not the user leaving:
+		// a send still waiting on its cold-cache check used to be called off
+		// with "the chat changed" (#1350).
+		name: 'send-from-a-linked-chat-before-boot-reopens-it-goes-out',
+		throttles: ['fast'],
+		async setup(ctx) {
+			const { page, status } = ctx;
+			await watchQueries(page);
+			// Hold boot's tag list, one of the first loads, so it has not re-opened
+			// the linked chat yet when the case sends; and the cold-cache check, so
+			// the send is still waiting when boot does.
+			const hold = (pattern) => {
+				let release;
+				const gate = { held: 0, released: new Promise((resolve) => { release = resolve; }) };
+				gate.release = release;
+				gate.ready = page.route(pattern, async (route) => { gate.held += 1; await gate.released; await route.continue().catch(() => {}); });
+				return gate;
+			};
+			ctx.tags = hold((url) => url.pathname.endsWith('/api/v1/tags'));
+			ctx.coldCheck = hold('**/cache-state*');
+			await Promise.all([ctx.tags.ready, ctx.coldCheck.ready]);
+			await page.goto(new URL(`/?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`, status.urls.ui).toString());
+			await waitChatOpen(page, { hold: 0 });
+		},
+		async act({ page, mark, log, tags, coldCheck }) {
+			const token = `linked-${uniq()}`;
+			expect(tags.held > 0 && new URL(page.url()).searchParams.has('session'), 'boot has not re-opened the linked chat yet');
+			const messagesBefore = Number((await chatState(page)).messages);
+			await composer(page).click();
+			await composer(page).pressSequentially(token);
+			await mark('Send before boot re-opens the linked chat');
+			await sendButton(page).click();
+			for (let waited = 0; coldCheck.held === 0 && waited < 10_000; waited += 50) await page.waitForTimeout(50);
+			expect(coldCheck.held > 0, 'the send is waiting on its cold-cache check');
+			await mark('boot finishes and re-opens the same chat');
+			tags.release();
+			// The link is taken off the address once boot has re-opened the chat.
+			await page.waitForFunction(() => !new URLSearchParams(location.search).has('session'), null, { timeout: 15_000 });
+			await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+			await mark('the cold-cache check answers');
+			coldCheck.release();
+			await page.unroute((url) => url.pathname.endsWith('/api/v1/tags'));
+			await page.unroute('**/cache-state*');
+			// Either the message shows in the transcript or the send is refused.
+			const outcome = await page.waitForFunction((t) => {
+				if ((document.body.innerText || '').includes('Message not sent')) return 'refused';
+				return [...document.querySelectorAll('[data-user-turn-id]')].some((el) => el.textContent?.includes(t)) ? 'sent' : false;
+			}, token, { timeout: 15_000 }).then((handle) => handle.jsonValue(), () => 'neither');
+			const sent = await queries(page);
+			log(`outcome: ${outcome}; queries: ${JSON.stringify(sent)}`);
+			expect(outcome === 'sent', `no "Message not sent" notice: the chat never changed (outcome: ${outcome})`);
+			expect(!(await page.getByText('Message not sent', { exact: false }).first().isVisible()), 'and none comes after the message shows');
+			expect(sent.filter((q) => q.includes(token)).length === 1, 'the message went out once');
+			expect((await countUserRows(page, token)) === 1, 'and shows once in the transcript');
+			// The reply follows it, and the re-open's feed restart loses neither.
+			await waitTurnSettled(page, { messagesAtLeast: messagesBefore + 2 });
+			const afterReply = await countUserRows(page, token);
+			expect(afterReply === 1, `the message still shows once after the reply (${afterReply} user rows)`);
+			expect(!(await editorText(page)).includes(token), 'the composer does not hold the message');
 		}
 	}, {
 		name: 'browser-back-after-a-sidebar-switch',
