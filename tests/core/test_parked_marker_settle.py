@@ -310,3 +310,50 @@ async def test_sweep_rechecks_settlement_guards_at_mutation(mock_db, test_db, ra
         mutation.assert_called_once()
 
     assert turns.get_turn(parked["id"])["state"] == "parked"
+
+
+async def test_a_held_idle_clear_cannot_undo_a_later_park(mock_db, test_db):
+    """#1285 review: the idle decision is re-checked where the clear is applied.
+
+    The clear sees nothing to park on and is held before the marker write; a
+    later turn ends with new background work and writes "agent". The resumed
+    clear must neither overwrite that marker nor publish a clear.
+    """
+    import asyncio
+
+    from app.core import turn_finalize
+
+    session_id = _parked_session(test_db, kind="shell")
+    registry = _registry([])
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def held_close(_session_id):
+        entered.set()
+        await release.wait()
+        return False
+
+    published = []
+
+    async def broadcast(*, user_id, session_id, updates, **kwargs):
+        published.append(updates.get("parked_task_kind"))
+
+    with patch("app.core.task_registry.task_registry", new=registry), patch(
+        "app.core.turn_finalize.close_park_work_time", new=held_close,
+    ), patch("app.core.sync_engine.sync_engine") as sync, patch(
+        "app.core.session_pr_state.schedule_session_pr_reconcile",
+    ), patch("app.core.session_handoff.schedule"), patch("app.core.pg_session_store.flush_summary_folds"):
+        sync.broadcast_user_session_updated = AsyncMock(side_effect=broadcast)
+        clear = asyncio.create_task(clear_parked_marker_if_idle(session_id))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            registry.get_parking_background_work.return_value = [{"id": "new-agent", "kind": "agent"}]
+            await turn_finalize.persist_turn_end_state(session_id, resync_branch=False)
+            assert _marker(test_db, session_id) == "agent"
+            release.set()
+            assert await asyncio.wait_for(clear, 5) is False
+        finally:
+            release.set()
+            await asyncio.wait_for(clear, 5)
+
+    assert _marker(test_db, session_id) == "agent", "the stale idle clear overwrote the later park"
+    assert published == ["agent"], f"the stale idle clear was published: {published}"

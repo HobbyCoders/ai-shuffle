@@ -264,14 +264,14 @@ async def test_rewind_timeout_fences_old_parked_marker_write_and_broadcast(mock_
     def held_write(session_id, kind, **kwargs):
         calls.append(kind)
         if len(calls) == 1:  # turn A's write
-            guard = kwargs.get("still_owner")
+            guard = kwargs.get("still_valid")
             if delay == "inside_write" and guard is not None:
                 def checked_then_held():
                     owner = guard()
                     entered.set()
                     assert release.wait(5)
                     return owner
-                kwargs["still_owner"] = checked_then_held
+                kwargs["still_valid"] = checked_then_held
             else:
                 entered.set()
                 assert release.wait(5)
@@ -326,5 +326,70 @@ async def test_rewind_timeout_fences_old_parked_marker_write_and_broadcast(mock_
             await asyncio.wait_for(running, 5)
             if successor is not None:
                 await asyncio.wait_for(successor, 5)
+            if direct is not None:
+                await wait_for_lease_release(direct)
+
+
+async def test_old_parked_marker_publication_is_fenced_inside_the_broadcaster(mock_db):
+    """#1285 review: the broadcaster awaits its owner lookup before publishing.
+
+    A writes its clear, passes every check before the broadcast, then waits
+    inside ``_broadcast_user_message`` on the owner lookup. A rewind takes the
+    chat and gives up; B writes and publishes "agent". A's resumed broadcast
+    must reach neither the lifecycle stream nor any device queue.
+    """
+    from types import SimpleNamespace
+
+    from app.core import turn_finalize
+    from app.core.global_events import global_events
+    from app.core.sync_engine import sync_engine
+    from app.db import async_database, database
+
+    database.create_session(session_id=SID, profile_id="default")
+    real_run_sync = async_database.run_sync
+    entered, release = asyncio.Event(), asyncio.Event()
+    hold = {"next": False}
+
+    async def run_sync(fn, *args, **kwargs):
+        if hold["next"] and fn is database.get_session:
+            hold["next"] = False
+            entered.set()
+            await release.wait()
+        return await real_run_sync(fn, *args, **kwargs)
+
+    lifecycle, devices = [], []
+
+    def fan_out(bucket, targets, message):
+        devices.append(message["updates"].get("parked_task_kind", "-"))
+        return []
+
+    with patch.object(async_database, "run_sync", new=run_sync), patch.object(
+        global_events, "lifecycle",
+        side_effect=lambda owner, message, **kw: lifecycle.append(message["updates"].get("parked_task_kind", "-")),
+    ), patch.object(sync_engine, "_fan_out_to_user_devices", side_effect=fan_out), patch.dict(
+        sync_engine._user_connections, {"admin": {"d1": SimpleNamespace(device_id="d1")}},
+    ), patch.object(admission, "_ENDING_WAIT_SECONDS", 0.01):
+        old = await admission.acquire(SID)
+        direct = None
+        hold["next"] = True
+        stale = asyncio.create_task(turn_finalize._write_parked_task_kind(SID, None, writer=old))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            rewind = await admission.begin_rewind(SID)
+            assert admission.take_for_rewind(rewind) is old
+            await wait_for_lease_release(rewind)
+            assert not admission.holds_chat(old)
+            direct = await admission.acquire(SID)
+            assert await turn_finalize._write_parked_task_kind(SID, "agent", writer=direct)
+            release.set()
+            await asyncio.wait_for(stale, 5)
+            assert database.get_session(SID)["parked_task_kind"] == "agent"
+            assert lifecycle == ["agent"], f"A's stale clear reached the lifecycle stream: {lifecycle}"
+            assert devices == ["agent"], f"A's stale clear reached a device queue: {devices}"
+        finally:
+            release.set()
+            await asyncio.wait_for(stale, 5)
+            admission.close(old)
+            await wait_for_lease_release(old)
             if direct is not None:
                 await wait_for_lease_release(direct)

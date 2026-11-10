@@ -1771,7 +1771,7 @@ _PARKED_MARKER_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 def set_session_parked_task_kind(
     session_id: str, kind: Optional[str], *,
-    still_owner: Optional[Callable[[], bool]] = None,
+    still_valid: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """Persist (or clear, with ``None``) the durable parked marker.
 
@@ -1785,15 +1785,17 @@ def set_session_parked_task_kind(
     write must not reorder the sessions list. Returns True if a row was
     updated.
 
-    ``still_owner`` is the writing turn's ownership check (#1285). It runs
-    under a per-session lock that every write here holds through its commit,
-    so a turn that has lost the chat writes nothing, and one that passed the
-    check commits before any later writer's update. A write without it (no
-    turn of its own) is still ordered by the lock.
+    ``still_valid`` is the writer's condition for the write (#1285): the
+    writing turn still holds the chat, and for an idle clear, nothing is left
+    to park on. It runs under a per-session lock that every write here holds
+    through its commit, so a stale writer writes nothing, and one that passed
+    the check commits before any later writer's update. A write without it
+    is still ordered by the lock. It must be synchronous and must not touch
+    the database (it runs on this thread, before the connection is taken).
     """
     _ph = ph()
     with _PARKED_MARKER_LOCKS[hash(session_id) % len(_PARKED_MARKER_LOCKS)]:
-        if still_owner is not None and not still_owner():
+        if still_valid is not None and not still_valid():
             return False
         with get_db() as conn:
             cursor = get_cursor(conn)
