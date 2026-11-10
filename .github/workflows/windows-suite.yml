@@ -36,6 +36,10 @@ on:
       main_suite:
         type: boolean
         default: false
+      gated_by_caller:
+        description: The caller judges these jobs itself (main-suite), so the verdict job here does not queue for a runner
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       tests:
@@ -118,7 +122,7 @@ jobs:
 
   desktop-gate:
     name: Windows desktop
-    if: always() && (github.event_name == 'pull_request' || inputs.main_suite == true)
+    if: always() && (github.event_name == 'pull_request' || inputs.main_suite == true) && inputs.gated_by_caller != true
     needs: [desktop]
     runs-on: ubuntu-latest
     timeout-minutes: 5
