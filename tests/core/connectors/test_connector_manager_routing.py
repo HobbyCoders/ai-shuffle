@@ -252,8 +252,8 @@ class TestStartConnector:
     @pytest.mark.parametrize("change", ["fenced", "owned_elsewhere", "deleted", "ownership_down"])
     async def test_start_rule_is_rechecked_after_connect(self, mgr, db, fake_registry, monkeypatch, change):
         """A fence (or an ownership move / delete) that lands while connect() is
-        in flight stops the client once it connects, instead of leaving it to
-        the startup sweep, which gives up after FENCE_SETTLE_SECONDS."""
+        in flight stops the client once it connects, so no sweep of the
+        registry is needed after a fence."""
         db.get_connector.return_value = connector_row()
         state = {"rule": "start"}
 

@@ -1,39 +1,33 @@
 """A membership change that fences this worker stops its running connectors."""
 import asyncio
 
-import pytest
-
 from app.core.connectors import manager as manager_mod
 from app.network import ownership, startup
 
 
-@pytest.fixture(autouse=True)
-def _short_settle(monkeypatch):
-    monkeypatch.setattr(startup, "FENCE_SETTLE_SECONDS", 0.3)
-    monkeypatch.setattr(startup, "FENCE_SWEEP_INTERVAL", 0.01)
-
-
 class _FakeManager:
-    def __init__(self, running, stop_delay=0.0):
+    """Records the RUN/STOP the reconcile hands out; the lanes are not modelled."""
+
+    def __init__(self, running, connecting=()):
         self.running = dict(running)
+        self.connecting = set(connecting)  # a connect in flight: held, not registered
         self.stopped = []
         self.started = 0
         self.events = []
-        self.stop_delay = stop_delay
 
-    def get_running_connectors(self, connector_type=None):
-        yield from list(self.running.items())
+    def held_connector_ids(self):
+        return set(self.running) | self.connecting
 
-    async def stop_connector(self, connector_id):
+    def request_stop(self, connector_id):
         if connector_id == "boom":
-            raise RuntimeError("disconnect failed")
-        if self.stop_delay:
-            await asyncio.sleep(self.stop_delay)  # a disconnect takes a moment
+            raise RuntimeError("stop request failed")
         self.stopped.append(connector_id)
         self.events.append(("stop", connector_id))
         self.running.pop(connector_id, None)
+        self.connecting.discard(connector_id)
 
-    async def start_all(self):
+    async def start_all(self, wait=True):
+        assert wait is False  # the reconcile never waits for a connect
         self.started += 1
         self.events.append(("start_all",))
         self.running.setdefault("a", object())
@@ -62,42 +56,25 @@ async def test_eligible_worker_starts_its_connectors(monkeypatch):
 
 
 async def test_fence_stops_a_connector_that_was_still_connecting(monkeypatch):
-    """R8-7: a start already past its eligibility check awaits connect() and
-    registers only afterwards; one pass over the registry missed it and the
-    connector kept running on the fenced worker."""
-    fake = _FakeManager({"a": object()})
+    """R8-7 / #1398: a start whose connect() is in flight is not registered yet;
+    the fence asks it to stop too (its lane cancels the connect), instead of
+    sweeping the registry until it registers."""
+    fake = _FakeManager({"a": object()}, connecting={"late"})
     monkeypatch.setattr(manager_mod, "connector_manager", fake)
     monkeypatch.setattr(ownership, "can_execute_local", lambda: False)
 
-    async def in_flight_start():
-        await asyncio.sleep(0.05)  # connect() returns after the fence's first pass
-        fake.running["late"] = object()
-
-    starting = asyncio.create_task(in_flight_start())
     await startup._reconcile_owned_connectors()
-    await starting
 
     assert fake.stopped == ["a", "late"]
-    assert fake.running == {}
-
-
-async def test_readmission_ends_the_fence_sweep(monkeypatch):
-    monkeypatch.setattr(startup, "FENCE_SETTLE_SECONDS", 30.0)
-    fake = _FakeManager({"a": object()})
-    monkeypatch.setattr(manager_mod, "connector_manager", fake)
-    answers = iter([False])
-    monkeypatch.setattr(ownership, "can_execute_local", lambda: next(answers, True))
-
-    await asyncio.wait_for(startup._reconcile_owned_connectors(), 2.0)
-
-    assert fake.stopped == ["a"]
+    assert fake.held_connector_ids() == set()
 
 
 async def test_fence_then_readmission_apply_in_order(monkeypatch):
     """R8-7: two reconciles scheduled back to back ran concurrently; the
     fence's slow disconnect finished after the re-admission's start and left
-    an eligible worker with its connector stopped."""
-    fake = _FakeManager({"a": object()}, stop_delay=0.05)
+    an eligible worker with its connector stopped. Decisions are still made
+    in order; each connector's lane applies the latest one."""
+    fake = _FakeManager({"a": object()})
     monkeypatch.setattr(manager_mod, "connector_manager", fake)
     answers = iter([False])
     monkeypatch.setattr(ownership, "can_execute_local", lambda: next(answers, True))
