@@ -17,7 +17,8 @@ const FOCUSABLE = [
 	'select:not([disabled])',
 	'textarea:not([disabled])',
 	'[contenteditable="true"]',
-	'[tabindex]:not([tabindex="-1"])'
+	'[tabindex]:not([tabindex="-1"])',
+	'summary'
 ].join(',');
 
 export interface FocusTrapOptions {
@@ -25,10 +26,28 @@ export interface FocusTrapOptions {
 	initial?: string;
 }
 
+/** The summary that opens and closes `details`: its first `summary` child. */
+function summaryOf(details: HTMLDetailsElement): HTMLElement | null {
+	return (Array.from(details.children).find((child) => child.tagName === 'SUMMARY') as HTMLElement | undefined) ?? null;
+}
+
+/**
+ * The elements Tab stops on inside `node`, in document order. Like the
+ * browser: a `<details>` element's summary is a stop, and the content of a
+ * closed `<details>` (its summary aside) is not.
+ */
 export function focusableWithin(node: HTMLElement): HTMLElement[] {
-	return Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-		(el) => el.getAttribute('tabindex') !== '-1' && !el.closest('[hidden], [inert]')
-	);
+	return Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => {
+		if (el.getAttribute('tabindex') === '-1' || el.closest('[hidden], [inert]')) return false;
+		if (el.tagName === 'SUMMARY') {
+			const details = el.parentElement;
+			if (!(details instanceof HTMLDetailsElement) || summaryOf(details) !== el) return false;
+		}
+		for (let d = el.parentElement?.closest('details'); d && node.contains(d); d = d.parentElement?.closest('details')) {
+			if (!d.open && !summaryOf(d)?.contains(el)) return false;
+		}
+		return true;
+	});
 }
 
 /**
