@@ -369,12 +369,16 @@ class WorktreeUnavailableError(Exception):
         path: Optional[str] = None,
         mismatch: Optional[str] = None,
         checkout_error: Optional[str] = None,
+        message: Optional[str] = None,
     ):
         self.session_id = session_id
         self.branch_name = branch_name
         self.reason = reason
         self.path = path
         self.mismatch = mismatch
+        if message:
+            super().__init__(message)
+            return
         branch = f" (branch '{branch_name}')" if branch_name else ""
         if mismatch:
             # The folder is present but on another branch: saying it "no
@@ -620,23 +624,30 @@ async def ensure_pending_checkout(
     # Restore a reclaimed Task cwd at execution too, before either native or
     # delegated options resolve it. Refusals remain actionable checkout errors
     # from build_session_options, never permission to use another checkout.
-    from app.core.worker_checkout import is_worker_branch, restore_worker_checkout_async
+    from app.core.worker_checkout import (
+        is_worker_branch, owns_switched_checkout, restore_worker_checkout_async,
+    )
 
     path = session_row.get("worktree_path")
     restored = False
     # A worker that switched its own checkout to another branch is bound to
-    # that branch; its missing folder still needs restoring (#944). The
-    # restore helper itself decides whether a missing folder is a Task's own.
+    # that branch; its missing folder still needs restoring (#944). Enter by
+    # ownership of the saved path, never by the folder: a finisher holding the
+    # lock may be about to remove a folder that exists right now. A refusal
+    # becomes terminal in build_options_from_profile (switched_checkout_refusal).
     if isinstance(path, str) and path and (
-            is_worker_branch(branch, session_row.get("id") or "") or not Path(path).is_dir()):
+            is_worker_branch(branch, session_row.get("id") or "")
+            or await asyncio.to_thread(owns_switched_checkout, session_row)):
         from app.core.turn_scheduler import message_resume_lock
 
         # An old finisher may already be deleting the initially existing cwd.
         # Wait before checking it; a later finisher sees this queued/live turn.
         async with message_resume_lock(session_row["id"]):
             if not Path(path).is_dir():
-                ok, _note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
+                ok, note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
                 restored = ok and Path(path).is_dir()
+                if not ok:
+                    logger.info("Checkout restore refused for %s: %s", session_row["id"], note)
     # Even after restoration, claim/wait for a queued operation below. Another
     # chat bound to this branch must not pretend it restored the owner's cwd.
     try:
@@ -980,6 +991,18 @@ def build_options_from_profile(
             session_row = database.get_session(session_id)
         except Exception:
             session_row = None
+
+    # #944: a Task worker that switched its own checkout and lost the folder
+    # to cleanup. The pre-turn restore refused, so stop here: no other cwd
+    # resolver (a saved cwd override, a recorded-tip branch recovery) may run.
+    if session_row:
+        from app.core.worker_checkout import switched_checkout_refusal
+
+        refusal = switched_checkout_refusal(session_row)
+        if refusal:
+            raise WorktreeUnavailableError(
+                session_id, branch_name=session_row.get("branch"),
+                message=f"This worker cannot run: {refusal}.")
 
     # Who sent this turn (#641): a preview or unknown caller keeps the ceiling.
     turn_caller_value = turn_caller(overrides)

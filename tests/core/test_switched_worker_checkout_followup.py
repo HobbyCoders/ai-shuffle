@@ -177,3 +177,137 @@ async def test_non_worker_session_with_missing_folder_is_unchanged(repo, monkeyp
     await turn_scheduler.on_agent_message("plain", "parent", "continue")
     enqueue.assert_awaited_once()
     assert not missing.exists()
+
+
+# ── The code a queued turn actually runs: preflight, then the real option build ──
+
+def build_options(cwd=None):
+    from unittest.mock import patch
+
+    from app.core import query_options as qo
+    from tests.core.helpers import query_profile
+
+    with patch.object(qo, "get_security_instructions", return_value=""):
+        return qo.build_options_from_profile(profile=query_profile(), session_id=SID,
+                                             overrides={"cwd": cwd} if cwd else None)
+
+
+async def execute(cwd=None):
+    from app.core import query_options as qo
+
+    await qo.ensure_pending_checkout(database.get_session(SID))
+    return build_options(cwd)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved_cwd_override", [False, True])
+async def test_execution_restores_and_resolves_options_on_bound_branch(cleaned, saved_cwd_override):
+    checkout, tip, _ = cleaned
+    await reclaim(checkout)
+    # A worker turn is submitted with its saved cwd as an override (provider_agent).
+    options, _ = await execute(checkout.path if saved_cwd_override else None)
+    assert Path(str(options.cwd)).resolve() == Path(checkout.path).resolve()
+    assert git(checkout.path, "branch", "--show-current") == FIX
+    assert git(checkout.path, "rev-parse", "HEAD") == tip
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved_cwd_override", [False, True])
+async def test_execution_refusal_is_terminal_and_never_recreates_at_starting_commit(cleaned, saved_cwd_override):
+    from app.core.query_options import WorktreeUnavailableError
+
+    checkout, _, base = cleaned
+    await reclaim(checkout)
+    git(base, "branch", "-D", FIX)
+    git(base, "push", "origin", "--delete", FIX)
+    with pytest.raises(WorktreeUnavailableError) as error:
+        await execute(checkout.path if saved_cwd_override else None)
+    note = str(error.value)
+    assert f"'{FIX}'" in note and "Dispatch a new Task" in note
+    assert str(Path(checkout.path).parent) not in note, "refusal must not name filesystem paths"
+    # Neither the recorded-tip recovery nor any other resolver ran.
+    assert not branch_exists(base, FIX)
+    assert not Path(checkout.path).exists()
+    assert not any(Path(base, ".fluid", "worktrees").glob("*followup-work*"))
+
+
+@pytest.mark.asyncio
+async def test_origin_only_restore_refreshes_a_stale_tracking_ref(cleaned, monkeypatch, tmp_path):
+    checkout, old_tip, base = cleaned
+    await reclaim(checkout)
+    git(base, "branch", "-D", FIX)
+    # refs/remotes/origin/<branch> exists from the worker's push; origin moves on.
+    origin = git(base, "remote", "get-url", "origin")
+    clone = tmp_path / "other-clone"
+    git(tmp_path, "clone", "-b", FIX, origin, str(clone))
+    git(clone, "config", "user.email", "t@example.com")
+    git(clone, "config", "user.name", "t")
+    (clone / "later.txt").write_text("pushed from elsewhere\n")
+    git(clone, "add", "later.txt")
+    git(clone, "commit", "-m", "later")
+    git(clone, "push", "origin", FIX)
+    new_tip = git(clone, "rev-parse", "HEAD")
+    assert new_tip != old_tip
+    options, _ = await execute()
+    assert git(checkout.path, "rev-parse", "HEAD") == new_tip
+    assert Path(str(options.cwd)).resolve() == Path(checkout.path).resolve()
+
+
+@pytest.mark.asyncio
+async def test_unreachable_origin_refuses_instead_of_trusting_cached_ref(cleaned, monkeypatch, tmp_path):
+    checkout, _, base = cleaned
+    await reclaim(checkout)
+    git(base, "branch", "-D", FIX)
+    git(base, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    note = await refused(checkout, monkeypatch, "could not be reached")
+    assert "origin" in note
+    assert not Path(checkout.path).exists()
+    assert not branch_exists(base, FIX)
+
+
+@pytest.mark.asyncio
+async def test_preflight_waits_for_a_finisher_removing_an_existing_switched_checkout(cleaned):
+    import asyncio
+
+    from app.core import query_options as qo
+
+    checkout, tip, _ = cleaned
+    row = database.get_session(SID)
+    assert Path(checkout.path).is_dir()
+    async with turn_scheduler.message_resume_lock(SID):
+        # The folder exists when the turn starts; a finisher holding the lock
+        # removes it before the preflight may look.
+        preflight = asyncio.create_task(qo.ensure_pending_checkout(row))
+        await asyncio.sleep(0)
+        assert await asyncio.to_thread(worker_checkout.reclaim_untouched_worker_checkout, SID, checkout)
+        assert not Path(checkout.path).exists()
+        assert not preflight.done(), "preflight ran without waiting for the finisher's lock"
+    await preflight
+    options, _ = build_options()
+    assert git(checkout.path, "branch", "--show-current") == FIX
+    assert git(checkout.path, "rev-parse", "HEAD") == tip
+    assert Path(str(options.cwd)).resolve() == Path(checkout.path).resolve()
+
+
+@pytest.mark.asyncio
+async def test_unowned_sessions_do_not_take_the_message_lock(repo, monkeypatch):
+    from app.core import query_options as qo
+
+    row, _, base, _ = repo
+    taken = []
+    real = turn_scheduler.message_resume_lock
+    monkeypatch.setattr(turn_scheduler, "message_resume_lock", lambda sid: taken.append(sid) or real(sid))
+    other = bind_worker(repo, "someone-else")
+    cases = {
+        # A plain branch session, its folder missing and present.
+        "plain-missing": str(base / ".fluid" / "worktrees" / "feat-somebody"),
+        "plain-present": str(base),
+        # A worker whose saved cwd is another worker's checkout, not its own.
+        "task-unowned": other.path,
+    }
+    for sid, path in cases.items():
+        database.create_session(sid, "coder", project_v2_id=row["project_v2_id"],
+                                worktree_path=path, worktree_branch="feat/somebody")
+        database.set_session_branch(sid, "feat/somebody", row["project_v2_id"])
+        await qo.ensure_pending_checkout(database.get_session(sid))
+    assert taken == []
