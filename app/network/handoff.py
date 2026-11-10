@@ -217,8 +217,9 @@ WAKE_COLUMNS = ("id", "prompt", "fire_at", "profile_id", "project_id", "reason",
 def _session_wakes(sid):
     from app.db import wakeups
 
+    # A hand-off failure notice (#1419) is about this worker: it never travels.
     return [{column: row.get(column) for column in WAKE_COLUMNS}
-            for row in wakeups.get_session_wakeups(sid)]
+            for row in wakeups.get_session_wakeups(sid) if row.get("source") != "handoff_failed"]
 
 
 def wake_carry(target):

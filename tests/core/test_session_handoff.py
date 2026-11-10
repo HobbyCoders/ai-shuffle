@@ -2156,3 +2156,20 @@ async def test_1419_a_boot_expiry_still_closing_refuses_a_new_hand_off_and_never
         await asyncio.wait_for(boot, timeout=5)
     await _settle(lambda: False, rounds=20)
     assert session_moves.get("s1")["handoff_id"] == "move-2" and _notices() == []
+
+
+async def test_1419_a_pending_notice_never_travels_with_a_later_move_and_is_dropped_here():
+    from app.core import wakeup_service
+    from app.db import wakeups
+    from app.network import handoff
+    _chat()
+    with _submit_for_notice(lambda: "none"), patch.object(wakeup_service, "_RETRY_BASE_SECONDS", 30):
+        await _agent_move_ends("move")  # its admission is refused: the notice stays pending
+        assert await _settle(lambda: wakeups.get_session_wakeups("s1", source=sh.FAILED_PAYLOAD))
+    wakeups.create_wakeup(id="w-1", session_id="s1", prompt="later", fire_at=time.time() + 600)
+    assert [wake["id"] for wake in handoff._session_wakes("s1")] == ["w-1"]
+    # A later move landed: the notice left here is dropped at its next fire.
+    wake = wakeups.get_session_wakeups("s1", source=sh.FAILED_PAYLOAD)[0]
+    with patch("app.network.control.owner_of", return_value="dev-gaming"):
+        await wakeup_service._fire(wake)
+    assert _notices() == [] and wakeups.get_session_wakeups("s1", source=sh.FAILED_PAYLOAD) == []
