@@ -231,7 +231,7 @@ curl -X POST http://localhost:8000/api/v1/network/owners \
 
 **Response:** `{"table": "connectors", "id": "conn-1a2b3c4d", "owner_device_id": "DEVICE_ID"}`. `400` when `device_id` is a phone or browser, `404` for an unknown definition or a device that is not an active member, `409` when this worker is not in a network.
 
-A connector moves without a restart: the worker that lost it disconnects and the new owner connects as soon as the change reaches each of them. A scheduled automation checks its owner each time it is due, so the move takes effect at its next scheduled run. A run started by a connector message, a webhook or by hand is not checked against the owner yet: it runs on the worker that received it.
+A connector moves without a restart: the worker that lost it disconnects and the new owner connects as soon as the change reaches each of them. An automation checks its owner every time it starts, whether by its schedule, a connector message or trigger, a webhook, by hand or after an approval, so a move takes effect at its next start. A start that reaches a worker that does not own the automation is dropped there with a log line; a manual run there answers `409` naming the owner. An approved run whose automation moved while it waited is cancelled. If the owner is offline, its automation does not run until it is back.
 
 ## Recovery key
 
