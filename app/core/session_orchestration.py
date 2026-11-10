@@ -2276,7 +2276,9 @@ async def handle_remote_report(body, from_device):
     """
     from app.db.async_database import run_sync
     home, frame = await run_sync(accept_remote_report, body, from_device)
-    await deliver_started_report(home, frame, steer=False)
+    # The settled chat's worker sends this once and never resends it (a reply
+    # it lost is MaybeApplied), so like a local first delivery it may steer.
+    await deliver_started_report(home, frame, steer=True)
     return {"delivered": True}
 
 

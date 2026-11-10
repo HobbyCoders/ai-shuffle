@@ -200,7 +200,7 @@ async def test_a_chat_started_on_a_third_worker_reports_through_the_starting_wor
         report = {"task_id": CHILD, "status": "completed", "summary": "Done on C",
                   "agent_message_turn_id": "child-turn-1", "kind": "session", "title": "Started work"}
         with c.active():
-            for _ in range(2):  # C's own retry after a lost reply
+            for _ in range(2):  # the same report arriving twice
                 answer = await control.call(a.device_id, orch.REPORT_ACTION,
                                             {"session_id": CHILD, "report": report})
                 assert answer["delivered"] is True
@@ -776,6 +776,41 @@ async def test_a_local_report_the_live_turn_does_not_take_is_queued_with_its_rec
         [wake] = _reports(PARENT)
         assert wake["payload"]["pending_frames"][0]["task_id"] == CHILD
         assert len(_receipts()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_report_from_a_third_worker_for_a_parent_mid_turn_steers_as_before(pair, tmp_path, monkeypatch):
+    """The worker that holds a started chat sends its report once (never
+    resent after a lost reply), so the parent this worker runs mid-turn
+    takes it as a steer, as before #1443: no queued wake, no outbox row."""
+    a, _b, _, _ = pair
+    c = Worker("c", tmp_path)
+    join(a, c)
+    converge([a, c])
+    try:
+        with a.active():
+            _working(PARENT)
+            receipt = turns.enqueue_turn(orch.REMOTE_RECEIPT_PREFIX + CHILD, "agent_message",
+                                         profile_id="default", command_id="orchestration:start:" + "c" * 64,
+                                         parent_turn_id="root-turn",
+                                         payload={"remote_device_id": c.device_id, "report_to": PARENT,
+                                                  "orchestration_depth": 1})
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (receipt["id"],))
+        monkeypatch.setattr(control, "call", _route([a, c]))
+        steered = _steer_taken(monkeypatch)
+        report = {"task_id": CHILD, "status": "completed", "summary": "Done on C",
+                  "agent_message_turn_id": "child-turn-1", "kind": "session", "title": "Started work"}
+        with c.active():
+            answer = await control.call(a.device_id, orch.REPORT_ACTION, {"session_id": CHILD, "report": report})
+            assert answer["delivered"] is True
+        with a.active():
+            assert steered == [PARENT]
+            assert _all_reports(PARENT) == []
+            assert _receipts() == []
+            assert orch.pending_forwarded_reports() == []
+    finally:
+        c.close()
 
 
 def _as_older_receiver(monkeypatch):
