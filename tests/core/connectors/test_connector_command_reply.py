@@ -137,6 +137,7 @@ async def test_disconnect_cancels_a_queued_command_result() -> None:
     await asyncio.wait_for(connector.disconnect(), 1)
     assert all(task.cancelled() for task in tasks)
     assert not connector._reply_tasks
+    assert not connector._result_chats and not connector._command_rounds
 
 
 @pytest.mark.parametrize("lamps", [1, 6])

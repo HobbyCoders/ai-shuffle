@@ -406,6 +406,11 @@ class BaseConnector(ABC):
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        # A task cancelled before it started never ran its cleanup.
+        self._result_chats.clear()
+        self._counted_results.clear()
+        self._command_rounds.clear()
+        self._capped_chats.clear()
 
     async def handle_delivery(
         self,
