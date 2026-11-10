@@ -300,3 +300,178 @@ raise AssertionError('startup exec did not occur')
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["revision"] == B and report["lock"] == "released"
+
+
+# --- #1121: an idle restart holds an admission fence through verification ---
+
+def _idle_restart_harness(healthy, monkeypatch, loop, client, launch):
+    from app.api import internal
+    from app.core import startup
+
+    monkeypatch.setenv("SHUFFLE_DESKTOP_LIFECYCLE_TOKEN", "test-child-secret")
+    monkeypatch.setattr(internal, "_shutdown_task", None)
+    monkeypatch.setattr(startup, "is_shutting_down", False)
+    monkeypatch.setattr(healthy, "launch", launch)
+    monkeypatch.setattr(healthy, "snapshot_room", lambda: None)
+    monkeypatch.setattr(healthy, "activating", lambda: None)
+    monkeypatch.setattr(runtime, "stop_group", lambda *args: None)
+    monkeypatch.setattr(runtime, "start_app", lambda *args: "new-app")
+    actions = []
+
+    async def request(action):
+        actions.append(action.split("?", 1)[0])
+        response = await client.request("GET" if action == "active-sessions" else "POST",
+                                        f"/api/v1/internal/desktop/{action}",
+                                        headers={"Authorization": "Bearer test-child-secret"})
+        response.raise_for_status()
+        return response.json()
+
+    healthy.lifecycle.side_effect = lambda action: asyncio.run_coroutine_threadsafe(request(action), loop).result(10)
+    return actions
+
+
+def _internal_client():
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from app.api import internal
+    from app.serve import IngressApplication
+
+    app = FastAPI()
+    app.include_router(internal.router)
+    return AsyncClient(transport=ASGITransport(app=IngressApplication(app, 8000)), base_url="http://localhost:8000")
+
+
+async def _wait_state(turns, turn_id, state):
+    for _ in range(200):
+        if turns.get_turn(turn_id)["state"] == state:
+            return
+        await asyncio.sleep(0.02)
+    assert turns.get_turn(turn_id)["state"] == state
+
+
+@pytest.mark.parametrize("outcome", ["preflight-fails", "commits"])
+async def test_idle_restart_never_stops_a_turn_admitted_during_verification(healthy, mock_db, monkeypatch, outcome):
+    """A turn that arrives while the supervisor verifies stays queued (never
+    stopped). A failed preflight reopens admission and the queued turn runs."""
+    from app.core import restart_fence, session_runtime, startup, turn_scheduler
+    from app.db import turns
+    from tests.core.test_session_runtime import _runtime_env
+
+    loop = asyncio.get_running_loop()
+    verifying, admitted = asyncio.Event(), threading.Event()
+    began, finish = asyncio.Queue(), asyncio.Event()
+
+    def launch(env, activate=False):
+        loop.call_soon_threadsafe(verifying.set)
+        assert admitted.wait(10), "test did not admit work during verification"
+        if outcome == "preflight-fails":
+            raise module.UpdateError("synthetic verification failure")
+        return ["true"], None, env
+
+    async def pump(**kwargs):
+        began.put_nowait(True)
+        await finish.wait()
+        yield {"type": "done"}
+
+    arriving = turns.enqueue_turn("verification-race", "user", prompt="new work")
+    async with _internal_client() as client:
+        actions = _idle_restart_harness(healthy, monkeypatch, loop, client, launch)
+        with _runtime_env(pump=pump) as env:
+            env["registry"].active_session_ids.return_value = []
+            env["registry"].get_active.return_value = []
+            restart = asyncio.create_task(asyncio.to_thread(runtime.restart_into_update, "old-app", healthy, {}))
+            try:
+                await asyncio.wait_for(verifying.wait(), 10)
+                assert restart_fence.is_closed()
+                # Both real turn producers hold the turn back without starting it.
+                assert await session_runtime.execute(arriving) is None
+                turn_scheduler.kick("verification-race")
+                await asyncio.sleep(0.05)
+                assert began.empty()
+                assert turns.get_turn(arriving["id"])["state"] == "queued"
+                assert not session_runtime.active_executions()
+            finally:
+                admitted.set()
+            if outcome == "preflight-fails":
+                with pytest.raises(runtime.RestartRejected):
+                    await asyncio.wait_for(restart, 10)
+                assert actions == ["restart-reserve", "restart-release"]
+                assert not restart_fence.is_closed() and not startup.is_shutting_down
+                # Release re-kicked the held session: the turn runs now.
+                await asyncio.wait_for(began.get(), 10)
+                assert turns.get_turn(arriving["id"])["state"] == "running"
+                finish.set()
+                await _wait_state(turns, arriving["id"], "completed")
+            else:
+                assert await asyncio.wait_for(restart, 10) == "new-app"
+                assert actions == ["restart-reserve", "stop-sessions"]
+                # Nothing was running to stop; the turn is durable for the next boot.
+                assert began.empty()
+                assert turns.get_turn(arriving["id"])["state"] == "queued"
+                finish.set()
+
+
+async def test_idle_restart_refuses_a_turn_registered_at_the_fence_without_stopping_it(healthy, mock_db, monkeypatch):
+    from app.core import restart_fence, session_runtime, startup
+    from app.db import turns
+    from tests.core.test_session_runtime import _runtime_env
+
+    loop = asyncio.get_running_loop()
+    began, finish = asyncio.Queue(), asyncio.Event()
+    launch = Mock(side_effect=AssertionError("busy restart must not verify"))
+
+    async def pump(**kwargs):
+        began.put_nowait(True)
+        await finish.wait()
+        yield {"type": "done"}
+
+    existing = turns.enqueue_turn("at-the-fence", "user", prompt="keep working")
+    assert existing is not None
+    async with _internal_client() as client:
+        actions = _idle_restart_harness(healthy, monkeypatch, loop, client, launch)
+        with _runtime_env(pump=pump) as env:
+            env["registry"].active_session_ids.return_value = []
+            env["registry"].get_active.return_value = []
+            # Reservation first: the turn arriving in the next loop step is
+            # held back as a queued row, then started by the release.
+            assert (await restart_fence.reserve("c" * 32))["reserved"] is True
+            assert await session_runtime.execute(existing) is None
+            assert turns.get_turn(existing["id"])["state"] == "queued"
+            restart_fence.release("c" * 32)
+            await asyncio.wait_for(began.get(), 10)
+            # Turn first: registered in the same step as its check, so the
+            # supervisor's reservation sees it and refuses without stopping it.
+            assert (await restart_fence.reserve("d" * 32))["reserved"] is False
+            with pytest.raises(runtime.RestartRejected):
+                await asyncio.to_thread(runtime.restart_into_update, "old-app", healthy, {})
+            launch.assert_not_called()
+            assert actions == ["restart-reserve"]
+            assert not restart_fence.is_closed() and not startup.is_shutting_down
+            assert turns.get_turn(existing["id"])["state"] == "running"
+            finish.set()
+            await _wait_state(turns, existing["id"], "completed")
+
+
+async def test_lost_reserve_answer_is_released_and_admission_reopens(healthy, mock_db, monkeypatch):
+    """The reservation landed but its answer was lost: the supervisor releases
+    it by the token it chose, so the worker is not left fenced."""
+    import httpx
+    from app.core import restart_fence
+
+    loop = asyncio.get_running_loop()
+    async with _internal_client() as client:
+        actions = _idle_restart_harness(healthy, monkeypatch, loop, client, Mock())
+        routed = healthy.lifecycle.side_effect
+
+        def lossy(action):
+            answer = routed(action)
+            if action.startswith("restart-reserve"):
+                assert restart_fence.is_closed()
+                raise httpx.ReadTimeout("synthetic lost answer")
+            return answer
+
+        healthy.lifecycle.side_effect = lossy
+        with pytest.raises(runtime.RestartRejected):
+            await asyncio.to_thread(runtime.restart_into_update, "old-app", healthy, {})
+    assert actions == ["restart-reserve", "restart-release"]
+    assert not restart_fence.is_closed()

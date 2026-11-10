@@ -252,6 +252,9 @@ async def _restart_when_idle(request_id):
     try:
         while _deferred and _deferred["id"] == request_id and time.time() < _deferred["expires_at"]:
             await asyncio.sleep(DEFER_POLL_SECONDS)
+            # A cheap pre-filter only. The container supervisor reserves the
+            # admission fence (restart_fence) before verifying the update and
+            # refuses, without stopping anything, if work started meanwhile.
             from app.core.desktop_lifecycle import reconciled_active_session_ids
             if await reconciled_active_session_ids():
                 continue

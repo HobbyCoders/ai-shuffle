@@ -289,6 +289,12 @@ def kick(session_id: str) -> None:
             "(queued turns stay durable)", session_id,
         )
         return
+    from app.core import restart_fence
+    if restart_fence.is_closed():
+        # An idle update restart is being prepared: the row stays queued and
+        # is kicked again when admission reopens (#1121).
+        restart_fence.defer_kick(session_id)
+        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

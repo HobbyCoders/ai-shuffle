@@ -2607,3 +2607,77 @@ def test_confirm_handover_is_a_no_op_for_the_image_supervisor(tmp_path, monkeypa
 
 def test_chrome_falls_back_to_the_image_command_without_scripts_beside_it(image_here):
     assert runtime.chrome_command({"A": "1"}) == (["chrome-supervisor"], {"A": "1"}, None)
+
+
+# --- #1121: idle restart reserves the app's admission fence before verifying ---
+
+class _FenceUpdates:
+    """A supervisor-side updater double that records lifecycle calls."""
+
+    def __init__(self, tmp_path, answers, launch=None):
+        self.root, self.calls, self.answers = tmp_path, [], answers
+        self.launch = Mock(side_effect=launch) if launch else Mock(return_value=(["app"], None, {}))
+        self.snapshot_room, self.activating = Mock(), Mock()
+
+    def lifecycle(self, action):
+        self.calls.append(action)
+        answer = self.answers[action.split("?", 1)[0]]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+def _http_status(code):
+    import httpx
+    request = httpx.Request("POST", "http://127.0.0.1/api/v1/internal/desktop/restart-reserve")
+    return httpx.HTTPStatusError("old app", request=request, response=httpx.Response(code, request=request))
+
+
+@pytest.fixture
+def no_processes(monkeypatch):
+    monkeypatch.setattr(runtime, "stop_group", Mock())
+    monkeypatch.setattr(runtime, "start_app", Mock(return_value="new-app"))
+
+
+@pytest.mark.parametrize("code", [404, 405])
+@pytest.mark.parametrize("busy", [False, True])
+def test_older_app_without_the_fence_falls_back_to_the_active_sessions_check(tmp_path, no_processes, code, busy):
+    updates = _FenceUpdates(tmp_path, {"restart-reserve": _http_status(code),
+                                       "active-sessions": {"active_sessions": 1 if busy else 0},
+                                       "stop-sessions": {"stopped": True}})
+    if busy:
+        with pytest.raises(runtime.RestartRejected):
+            runtime.restart_into_update("old-app", updates, {})
+        updates.launch.assert_not_called()
+        assert [c.split("?")[0] for c in updates.calls] == ["restart-reserve", "active-sessions"]
+    else:
+        assert runtime.restart_into_update("old-app", updates, {}) == "new-app"
+        assert [c.split("?")[0] for c in updates.calls] == ["restart-reserve", "active-sessions", "stop-sessions"]
+
+
+def test_refused_reservation_changes_nothing(tmp_path, no_processes):
+    updates = _FenceUpdates(tmp_path, {"restart-reserve": {"reserved": False, "active_sessions": 1,
+                                                           "reason": "Finish active sessions before restarting"}})
+    with pytest.raises(runtime.RestartRejected):
+        runtime.restart_into_update("old-app", updates, {})
+    updates.launch.assert_not_called()
+    runtime.stop_group.assert_not_called()
+    assert [c.split("?")[0] for c in updates.calls] == ["restart-reserve"]
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("verification failed"), KeyboardInterrupt()])
+def test_preflight_failure_or_interruption_releases_the_same_reservation(tmp_path, no_processes, failure):
+    updates = _FenceUpdates(tmp_path, {"restart-reserve": {"reserved": True}, "restart-release": {"released": True}},
+                            launch=failure)
+    with pytest.raises(runtime.RestartRejected if isinstance(failure, Exception) else KeyboardInterrupt):
+        runtime.restart_into_update("old-app", updates, {})
+    reserve, release = updates.calls
+    assert reserve.startswith("restart-reserve?token=") and release.startswith("restart-release?token=")
+    assert reserve.split("=", 1)[1] == release.split("=", 1)[1]
+    runtime.stop_group.assert_not_called()
+
+
+def test_committed_idle_restart_keeps_the_fence_through_the_quiesce(tmp_path, no_processes):
+    updates = _FenceUpdates(tmp_path, {"restart-reserve": {"reserved": True}, "stop-sessions": {"stopped": True}})
+    assert runtime.restart_into_update("old-app", updates, {}) == "new-app"
+    assert [c.split("?")[0] for c in updates.calls] == ["restart-reserve", "stop-sessions"]

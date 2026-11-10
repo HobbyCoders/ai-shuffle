@@ -2077,25 +2077,62 @@ def prepare_updater_refresh(updates):
     raise RestartRejected("Updater refresh is unavailable", UPDATER_REFRESH_UNAVAILABLE)
 
 
-def restart_into_update(current, updates, env, before_start=None):
-    """Replace the running app with the staged update; returns the new process.
+def _release_restart(updates, token):
+    if token is None:
+        return
+    try:
+        updates.lifecycle(f"restart-release?token={token}")
+    except Exception:
+        log("could not release the restart reservation; it expires on its own")
 
-    RestartRejected leaves ``current`` untouched and serving. Any other error
-    comes after the worker was asked to quiesce, and watch replaces it with a
-    fresh process (start_current)."""
+
+def _reserve_restart(updates):
+    """Close the app's admission before verifying the update (#1121).
+
+    An idle restart never stops work: a turn or task that starts during
+    verification would otherwise be stopped by the quiesce call. Returns the
+    reservation token to release on refusal, or None when the running app
+    predates the fence (then today's active-sessions check applies)."""
+    token = secrets.token_hex(16)
+    answer = None
+    try:
+        answer = updates.lifecycle(f"restart-reserve?token={token}")
+    except Exception as exc:
+        if getattr(getattr(exc, "response", None), "status_code", None) not in (404, 405):
+            _release_restart(updates, token)  # the request may still have landed
+            raise RestartRejected("Application update preflight failed") from exc
+    if isinstance(answer, dict) and "reserved" in answer:
+        if answer["reserved"] is not True:
+            raise RestartRejected(str(answer.get("reason") or "Finish active sessions before restarting"))
+        return token
     try:
         busy = updates.lifecycle("active-sessions").get("active_sessions") != 0
     except Exception as exc:
         raise RestartRejected("Application update preflight failed") from exc
     if busy:
         raise RestartRejected("Finish active sessions before restarting")
+    return None
+
+
+def restart_into_update(current, updates, env, before_start=None):
+    """Replace the running app with the staged update; returns the new process.
+
+    RestartRejected leaves ``current`` untouched and serving, with its
+    admission reopened. Any other error comes after the worker was asked to
+    quiesce, and watch replaces it with a fresh process (start_current)."""
+    token = _reserve_restart(updates)
     try:
         # Validate staged files, policy and room for the database copy
         # before stopping the healthy app.
         command, cwd, child_env = updates.launch(env, activate=True)
         updates.snapshot_room()
-    except Exception as exc:
+    except BaseException as exc:
+        _release_restart(updates, token)
+        if not isinstance(exc, Exception):
+            raise
         raise RestartRejected("Application update preflight failed", str(exc) if _update_error(exc) else None) from exc
+    # Admission is closed, so this quiesce finds nothing new to stop; an
+    # older app without the fence keeps today's behaviour.
     # Once sent, even a timeout cannot prove the worker is still usable.
     if updates.lifecycle("stop-sessions").get("stopped") is not True:
         raise RuntimeFailure("Could not quiesce the worker")
@@ -2186,7 +2223,8 @@ def run(settings, action, filename=None):
                 env["SHUFFLE_CONTAINER_UPDATES"] = str(root)
 
                 def lifecycle(action):
-                    method = "POST" if action == "stop-sessions" else "GET"
+                    method = "POST" if action.split("?", 1)[0] in (
+                        "stop-sessions", "restart-reserve", "restart-release") else "GET"
                     with httpx.Client(trust_env=False, timeout=35) as client:
                         response = client.request(method, f"http://127.0.0.1:{settings.port}/api/v1/internal/desktop/{action}",
                                                   headers={"Authorization": f"Bearer {token}"})

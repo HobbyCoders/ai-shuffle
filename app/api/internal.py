@@ -154,6 +154,28 @@ async def desktop_update_action(body: DesktopUpdateAction, request: Request):
         raise HTTPException(409, str(exc)) from exc
 
 
+@router.post("/desktop/restart-reserve")
+async def desktop_restart_reserve(request: Request, token: str):
+    """Close admission for an idle update restart, or refuse without stopping
+    anything (#1121). The caller picks ``token`` so it can release a
+    reservation whose answer it never received. Older supervisors keep using
+    active-sessions; this route is only additive."""
+    require_desktop(request)
+    from fastapi import HTTPException
+    from app.core import restart_fence
+    try:
+        return await restart_fence.reserve(token)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/desktop/restart-release")
+async def desktop_restart_release(request: Request, token: str):
+    require_desktop(request)
+    from app.core import restart_fence
+    return {"released": restart_fence.release(token)}
+
+
 _shutdown_task = None
 
 

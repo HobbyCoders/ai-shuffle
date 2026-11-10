@@ -4185,6 +4185,12 @@ async def execute(turn_row: Dict[str, Any], **kwargs: Any) -> Optional[str]:
 
     if startup.is_shutting_down:
         return None
+    from app.core import restart_fence
+    if restart_fence.is_closed():
+        # Check and registration share one loop step, so an idle restart
+        # either sees this execution or this turn stays queued (#1121).
+        restart_fence.defer_kick(turn_row["session_id"])
+        return None
     task = asyncio.current_task()
     _executions[task] = turn_row["session_id"]
     try:
