@@ -22,7 +22,7 @@ permissions:
 jobs:
   record:
     name: Record the pass
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
       # The tree of the tested merge commit. A failure here only loses the

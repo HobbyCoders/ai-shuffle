@@ -79,7 +79,7 @@ def test_ci_builder_never_passes_publication_secrets_to_candidate_npm(assets, tm
 def test_nightly_and_both_stable_paths_use_the_unprivileged_bundle_job():
     workflow = (ROOT / ".github/workflows/source-ui-bundle.yml").read_text()
     assert "contents: read" in workflow and "persist-credentials: false" in workflow
-    assert "secrets." not in workflow and "ubuntu-latest" in workflow
+    assert "secrets." not in workflow and "ubuntu-24.04" in workflow
     nightly = (ROOT / ".github/workflows/desktop-source.yml").read_text()
     assert "uses: ./.github/workflows/source-ui-bundle.yml" in nightly
     assert "SOURCE_UI_BUNDLE_FILE:" in nightly and "- cron: '0 6 * * *'" in nightly

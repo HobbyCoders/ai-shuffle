@@ -76,7 +76,7 @@ class MinifiedBuildTests(unittest.TestCase):
         self.assertEqual({"build", "smoke"}, set(workflow["jobs"]))
         build, smoke = workflow["jobs"]["build"], workflow["jobs"]["smoke"]
         for job in (build, smoke):
-            self.assertEqual("ubuntu-latest", job["runs-on"])
+            self.assertEqual("ubuntu-24.04", job["runs-on"])
         self.assertEqual({"34", "36"}, {leg["api"] for leg in smoke["strategy"]["matrix"]["include"]})
         self.assertNotIn("continue-on-error", smoke)
         command = next(step["run"] for step in build["steps"] if step.get("name", "").startswith("Build production"))

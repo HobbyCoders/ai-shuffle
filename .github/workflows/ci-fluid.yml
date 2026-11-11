@@ -20,7 +20,7 @@ jobs:
     name: fluid unit tests
     timeout-minutes: 20
     # A single-process pytest run needs no larger runner.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -56,7 +56,7 @@ jobs:
 
   delegated-tool-output:
     name: delegated tool-output contract (${{ matrix.cli_version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false

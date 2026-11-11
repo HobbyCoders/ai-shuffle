@@ -10,8 +10,11 @@ attested full pass authorizes the read-only publication gate.
 
 PR workflows use only free standard GitHub-hosted Linux and Windows runners.
 The Docker runtime-overlay acceptance uses native `ubuntu-24.04` and
-`ubuntu-24.04-arm` runners; the other PR workflows use `ubuntu-latest` and
+`ubuntu-24.04-arm` runners; the other PR workflows use `ubuntu-24.04` and
 `windows-latest`. No larger/paid runners and no macOS PR jobs are used.
+Linux jobs pin `ubuntu-24.04` rather than `ubuntu-latest`, because the newer
+`ubuntu-26.04` image lacks the preinstalled PostgreSQL 16 the backend jobs use;
+moving to a newer image is a deliberate change, not a silent label update.
 macOS and iOS native checks remain manual. Docker uses the official Buildx and
 build-push actions with branch-isolated GitHub Actions layer caching.
 
@@ -87,7 +90,7 @@ and exercises the full native instrumentation suite on API 34 and API 36 for PRs
 changing `android/**`, `mobile/**`, `frontend/**`, the workflow itself, or its CI
 cost/publication policy tests. The asset paths matter: the APK's offline demo is
 built from `mobile/` and shared `frontend/` dependencies. Drafts and forks run too,
-on standard free `ubuntu-latest` runners. Superseded PR runs are cancelled.
+on standard free `ubuntu-24.04` runners. Superseded PR runs are cancelled.
 
 Both Android emulator workflows deliberately use `google_apis` on API 36 again,
 reversing the earlier AOSP-only choice after SystemUI/GMS ANRs. This image permits
@@ -402,7 +405,7 @@ tools-only and workflow-only changes. Backend credential-path checks and contrac
 read those trees too, and `docs/content/` is served at runtime. There is no path
 classifier, skip approval, or reduced-coverage lane.
 
-Full coverage runs four `ubuntu-latest` shards with two xdist workers apiece and
+Full coverage runs four `ubuntu-24.04` shards with two xdist workers apiece and
 `fail-fast: false`, plus serial real boot/schema, checkpoint/crash recovery, Mobile
 PostgreSQL and network migration contracts on a separate runner. Each worker
 partitions the actual unsharded collection using `scripts/ci/backend_shards.py` and

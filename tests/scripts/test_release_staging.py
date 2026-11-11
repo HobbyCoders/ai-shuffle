@@ -362,7 +362,8 @@ def test_new_workflow_paths_hold_publication_and_never_rebuild_promotion():
 def test_default_release_graph_contract():
     # Canonical YAML digest includes input-based Windows and the all-platform
     # read-back gate (#242/#166), including their read-only GitHub API tokens;
-    # explicit behavior tests cover both paths.
+    # explicit behavior tests cover both paths. Linux jobs run on the pinned
+    # ubuntu-24.04 image, so a runner-label change moves this digest too.
     # Remove ONLY opt-in staging inputs/jobs and guards that are true at defaults.
     wf = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     del wf["on"]["workflow_dispatch"]["inputs"]["stage_only"]
@@ -384,7 +385,7 @@ def test_default_release_graph_contract():
     # stable source publication, without changing any release activation guards.
     assert jobs["ui-stable"]["permissions"] == {"contents": "read"}
     assert "ui-stable" in jobs["source-stable"]["needs"]
-    assert p.sha256(p.canonical(wf)) == "090794b1a4a901fa67c1c0a30afb144386372949d31a848163c930dc22f0a67b"
+    assert p.sha256(p.canonical(wf)) == "5f5acb3a27674be60a5f3b6c36498ae971fef141b363d075c22734f0622fa93a"
 
 
 def test_real_stage_producer_round_trip_uses_immutable_uploads(candidate, tmp_path, monkeypatch):

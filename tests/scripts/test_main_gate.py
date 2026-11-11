@@ -474,7 +474,7 @@ def test_a_matrix_the_gate_cannot_read_fails_the_plan(tmp_path):
     source = ROOT / ".github/workflows"
     for case, old, new in (
             ("computed", "inputs.main_suite == true) && '[\"windows-latest\"]'",
-             "inputs.main_suite == true) && '[\"windows-latest\", \"ubuntu-latest\"]'"),
+             "inputs.main_suite == true) && '[\"windows-latest\", \"ubuntu-24.04\"]'"),
             ("two keys", "chrome-mode: [external, panel-demand, direct-page-demand]",
              "chrome-mode: [external, panel-demand, direct-page-demand]\n        size: [small, large]")):
         target = tmp_path / case

@@ -34,7 +34,7 @@ class CacheSeedWorkflowTest(unittest.TestCase):
         self.assertEqual({"contents": "read"}, config["permissions"])
         self.assertEqual({"group": "android-webview-cache-main", "cancel-in-progress": "false"}, config["concurrency"])
         job = config["jobs"]["seed"]
-        self.assertEqual("ubuntu-latest", job["runs-on"])
+        self.assertEqual("ubuntu-24.04", job["runs-on"])
         self.assertEqual("15", job["timeout-minutes"])
         self.assertNotIn("strategy", job)
         self.assertNotIn("continue-on-error", job)

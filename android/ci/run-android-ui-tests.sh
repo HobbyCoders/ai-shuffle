@@ -60,7 +60,7 @@ python3 ci/check-instrumentation.py "$out/cold-chat.txt"
 # The real Save dialog needs an external driver and has a separate manual run.
 # Exclude only that opt-in test, so the strict result parser continues rejecting
 # every unexpected skip or failure.
-# On ubuntu-latest the 61-test suite reached test 59 at 596 seconds;
+# On ubuntu-24.04 the 61-test suite reached test 59 at 596 seconds;
 # the old 600s suite deadline killed a healthy test, not a hung refresh.
 # Give the full suite room while bounding each test independently (milliseconds).
 # Keep the host deadline as a backstop for an unresponsive instrumentation process.
