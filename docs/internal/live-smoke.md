@@ -98,6 +98,16 @@ Run it under Monitor or in a terminal: a full run takes several minutes.
   They are hidden from ordinary Chats, counts and search, but retained by ID and
   export. Cleanup explicitly Stops unfinished test-owned work, then settles it,
   also after a failure, the cap, Ctrl-C or SIGTERM. Settling itself is not Stop.
+- Exception: a `start` step with `"visible": true` starts an ordinary visible
+  chat instead, for checks the app deliberately refuses on hidden chats.
+  Top-level orchestration (the peer-message route behind MessageSession)
+  accepts only active, local, visible top-level chats as caller and as
+  receiver, so row `two-worker-smoke.9` starts both of its chats visible; the
+  catalog check rejects a `peer_delivery` step whose sender or receiver is not
+  visible. Cleanup Stops and settles these chats the same way, so they leave
+  the active list, but they stay in ordinary settled history and search, as
+  every smoke chat did before disposable chats existed. Use `visible` only
+  where a hidden chat cannot exercise the check.
 
 ### Offline workers
 
@@ -303,9 +313,15 @@ A row:
   by hand, and `needs` says why, see above). `two_worker: true` marks rows that need the peer;
   `optional: true` keeps a browser row from blocking; `needs_project: true`
   skips a row when the project is not found.
-- Ops: `workers`, `start` (`as`, `on: self|peer`, `prompt`, `wait`),
-  `message` (`session`, `prompt`, `when: reply_seen`, `wait`), `await`
-  (`session`), `compact` (`session`). Each takes `within_s`.
+- Ops: `workers`, `start` (`as`, `on: self|peer`, `prompt`, `wait`,
+  `visible`, see "Cost and cleanup"), `message` (`session`, `prompt`,
+  `when: reply_seen`, `wait`), `await` (`session`), `compact` (`session`),
+  `tool_catalog` (`tools`), `peer_delivery` (`sender`, `session`, `message`,
+  `request_id`). Each takes `within_s`.
+- `compact` passes on a recorded compaction boundary, or on the engine's
+  designed "nothing to compact" note (the native engine's "nothing could be
+  compacted" reason, or the Claude Code engine's note flagged
+  `nothing_to_compact`); any other `compact_failed` reason fails it.
 - Checks on `start`, `message` and `await`: `expect_reply` (regex on the
   last assistant text), `expect_tool` (names), `expect_owner: peer`,
   `expect_files`, `user_messages` (exact count), `replies` (regex → exact

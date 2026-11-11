@@ -336,7 +336,7 @@
           "check": "Compact",
           "kind": "script",
           "how": "one reply, then /compact through the API, then one more reply",
-          "pass_when": "compact boundary recorded, the next message still answers",
+          "pass_when": "compact boundary recorded, or the engine's designed nothing-to-compact note (native or Claude Code; any other compact_failed reason fails); the next message still answers",
           "past_bug": "/compact failed or lost the session",
           "steps": [
             {"op": "start", "as": "a",
@@ -614,13 +614,13 @@
           "id": "two-worker-smoke.9",
           "check": "Peer message delivery",
           "kind": "script",
-          "how": "start two throwaway chats, then dispatch a peer message with owner authority on local ingress (require_admin), using a stable request id, and poll its durable receipt",
+          "how": "start two visible chats (top-level orchestration refuses hidden disposable chats on both ends, by design; cleanup settles them), then dispatch a peer message with owner authority on local ingress (require_admin), using a stable request id, and poll its durable receipt",
           "pass_when": "MessageSession is in the available tool catalog; the same receiver turn id reaches consumed (queued, begun or stopped alone never pass); no model wording or tool-choice requirement",
           "past_bug": "message only delivered after session fully completed",
           "steps": [
             {"op": "tool_catalog", "tools": ["MessageSession"]},
-            {"op": "start", "as": "a", "prompt": "Live test {run} A: reply briefly, no tools."},
-            {"op": "start", "as": "b", "prompt": "Live test {run} B: reply briefly, no tools."},
+            {"op": "start", "as": "a", "visible": true, "prompt": "Live test {run} A: reply briefly, no tools."},
+            {"op": "start", "as": "b", "visible": true, "prompt": "Live test {run} B: reply briefly, no tools."},
             {"op": "peer_delivery", "sender": "b", "session": "a", "within_s": 240,
              "message": "Live smoke {run}: delivery probe; no reply required.", "request_id": "{run}-9"}
           ]

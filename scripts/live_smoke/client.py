@@ -240,11 +240,17 @@ class HttpWorkerClient:
 
     def send(self, prompt: str, *, session_id: str | None = None, model: str | None = None,
              permission_mode: str | None = None, project: str | None = None,
-             target_instance_id: str | None = None, profile: str | None = None) -> str:
-        """Start a session (no ``session_id``) or send a message; returns the session id."""
+             target_instance_id: str | None = None, profile: str | None = None,
+             disposable: bool = True) -> str:
+        """Start a session (no ``session_id``) or send a message; returns the session id.
+
+        A new session is a hidden ``disposable_test`` chat unless ``disposable``
+        is False. Top-level orchestration (peer messages) refuses hidden chats,
+        so a row that exercises it starts ordinary visible chats instead.
+        """
         request_id = uuid.uuid4().hex
         frame = {"type": "query", "prompt": prompt, "request_id": request_id}
-        if not session_id:
+        if not session_id and disposable:
             frame["disposable_test"] = True
         if session_id:
             frame["session_id"] = session_id

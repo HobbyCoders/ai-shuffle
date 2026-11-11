@@ -159,9 +159,36 @@ def _pending_user(messages: list) -> bool:
     return bool(users) and (not replies or users[-1] > replies[-1])
 
 
-# fluid/fluid/engine/native.py ``_run_manual_compaction``: the reason a native
-# /compact gives when the chat is already as small as compaction makes it.
+# The reason a /compact gives when the chat is already as small as compaction
+# makes it: a designed no-op, not a failure. ``tests/test_live_smoke.py`` pins
+# both texts to the engines, so a wording change fails a unit test.
+# fluid/fluid/engine/native.py ``_run_manual_compaction`` (native chats):
 NOTHING_TO_COMPACT = "nothing could be compacted"
+# fluid/fluid/engine/delegated.py ``NOTHING_TO_COMPACT`` (Claude Code chats),
+# which also marks its note ``nothing_to_compact: true`` (#726):
+CLAUDE_NOTHING_TO_COMPACT = (
+    "Nothing more to compact: the context is already as small as Fluid's "
+    "compaction makes it while keeping the current work as it is"
+)
+
+
+def _compact_noop(data) -> bool:
+    """Whether a ``compact_failed`` note's data is the designed "nothing to compact"."""
+    data = data if isinstance(data, dict) else {}
+    if data.get("nothing_to_compact") is True:
+        return True
+    reason = str(data.get("reason") or "")
+    return reason.startswith((NOTHING_TO_COMPACT, CLAUDE_NOTHING_TO_COMPACT))
+
+
+def _compact_reason(data) -> str:
+    return str((data if isinstance(data, dict) else {}).get("reason") or "") or "no reason"
+
+
+def _compact_noop_evidence(data) -> str:
+    reason = _compact_reason(data)
+    engine = "native engine" if reason.startswith(NOTHING_TO_COMPACT) else "Claude Code engine"
+    return f"{engine}: {reason}"
 
 
 def _tool_names(messages: list) -> set:
@@ -470,10 +497,14 @@ class Runner:
             if op == "start":
                 alias = step.get("as", "a")
                 on_peer = step.get("on") == "peer"
+                # ``visible``: an ordinary chat instead of a hidden disposable
+                # one, for rows whose checks refuse hidden chats. Cleanup
+                # still Stops and settles it.
                 sid = self.client.send(
                     self._fmt(step["prompt"], sessions), model=self.model, project=ctx.get("project"),
                     permission_mode=self.defaults.get("permission_mode"), profile=self.agent,
-                    target_instance_id=self.peer["instance_id"] if on_peer else None)
+                    target_instance_id=self.peer["instance_id"] if on_peer else None,
+                    disposable=not step.get("visible", False))
                 sessions[alias] = sid
                 self.created.append({"session_id": sid, "row": row["id"], "alias": alias,
                                      "on": "peer" if on_peer else "self"})
@@ -537,10 +568,13 @@ class Runner:
     def _compact(self, sid: str, within: float) -> str:
         """POST /compact and wait for its outcome; returns the evidence line.
 
-        Claude Code records a ``compact_boundary`` in the history. A native
-        chat records its outcome as a ``system.note`` in the event log only:
-        on a chat this short the engine correctly answers "nothing could be
-        compacted", which proves /compact ran and kept the session.
+        A compaction records a ``compact_boundary`` in the history. When the
+        chat is already as small as compaction makes it, both engines answer
+        with a ``compact_failed`` note that says so (see :func:`_compact_noop`):
+        on a chat this short that is the expected outcome, and it proves
+        /compact ran and kept the session. The note is read from the history
+        when it carries it, else from the event log. Any other
+        ``compact_failed`` reason fails the step.
         """
         try:
             self.client.compact(sid)
@@ -549,20 +583,26 @@ class Runner:
         deadline = self.clock() + within
         while True:
             s = self._snapshot(sid)
-            subtypes = [m.get("systemSubtype") or m.get("subtype") for m in s.get("messages") or []]
+            messages = s.get("messages") or []
+            subtypes = [m.get("systemSubtype") or m.get("subtype") for m in messages]
             busy = self._busy(sid, s)
-            if "compact_failed" in subtypes:
-                raise StepFailed("compact_failed recorded")
+            failed = [m.get("systemData") for m in messages
+                      if (m.get("systemSubtype") or m.get("subtype")) == "compact_failed"]
+            for data in failed:
+                if not _compact_noop(data):
+                    raise StepFailed(f"compact_failed recorded: {_compact_reason(data)}")
             if "compact_boundary" in subtypes and not busy:
                 return "boundary recorded"
+            if failed and not busy:
+                return _compact_noop_evidence(failed[-1])
             if not busy:
                 for note in self.client.system_notes(sid):
                     if note.get("subtype") != "compact_failed":
                         continue
-                    reason = str((note.get("data") or {}).get("reason") or "")
-                    if reason.startswith(NOTHING_TO_COMPACT):
-                        return f"native engine: {reason}"
-                    raise StepFailed(f"compact_failed recorded: {reason or 'no reason'}")
+                    data = note.get("data")
+                    if _compact_noop(data):
+                        return _compact_noop_evidence(data)
+                    raise StepFailed(f"compact_failed recorded: {_compact_reason(data)}")
             if self.clock() >= deadline:
                 raise StepFailed(f"no compact boundary within {int(within)}s")
             self.sleep(self.poll_s)
@@ -658,7 +698,8 @@ class Runner:
                     pass
 
     def cleanup(self) -> list:
-        """Explicitly Stop unfinished test-owned work, then settle its hidden evidence."""
+        """Explicitly Stop unfinished test-owned work, then settle every chat the run started
+        (hidden disposable chats and the visible ones a ``visible`` start step made)."""
         report = []
         for c in self.created:
             sid = c["session_id"]

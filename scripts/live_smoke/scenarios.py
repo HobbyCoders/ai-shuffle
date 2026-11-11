@@ -40,7 +40,7 @@ STEP_KEYS = {
     "workers": set(),
     "tool_catalog": {"tools"},
     "peer_delivery": {"sender", "session", "message", "request_id", "within_s"},
-    "start": {"as", "on", "prompt", "wait", "within_s", *EXPECT_KEYS},
+    "start": {"as", "on", "prompt", "wait", "within_s", "visible", *EXPECT_KEYS},
     "message": {"session", "prompt", "when", "wait", "within_s", *EXPECT_KEYS},
     "await": {"session", "within_s", *EXPECT_KEYS},
     "compact": {"session", "within_s"},
@@ -104,7 +104,7 @@ def validate(data: dict, journeys: set | None = None) -> None:
             if row["kind"] != "script" and steps:
                 raise ScenarioError(f"{rid}: only script rows have steps")
             _validate_coverage(rid, row, journeys)
-            aliases = set()
+            aliases, visible = set(), set()
             for step in steps:
                 op = step.get("op")
                 if op not in OPS:
@@ -117,13 +117,22 @@ def validate(data: dict, journeys: set | None = None) -> None:
                         raise ScenarioError(f"{rid}: start needs a prompt")
                     if step.get("on", "self") not in ("self", "peer"):
                         raise ScenarioError(f"{rid}: on must be self or peer")
+                    if not isinstance(step.get("visible", False), bool):
+                        raise ScenarioError(f"{rid}: visible must be true or false")
                     aliases.add(step.get("as", "a"))
+                    if step.get("visible"):
+                        visible.add(step.get("as", "a"))
                 elif op == "tool_catalog":
                     if not step.get("tools"):
                         raise ScenarioError(f"{rid}: tool_catalog needs tools")
                 elif op == "peer_delivery":
                     if step.get("sender") not in aliases or step.get("session") not in aliases:
                         raise ScenarioError(f"{rid}: peer_delivery needs earlier sender and receiver sessions")
+                    if not {step["sender"], step["session"]} <= visible:
+                        # The peer-message route refuses hidden chats on both ends
+                        # (app/core/session_orchestration.py _caller and _target).
+                        raise ScenarioError(f"{rid}: peer_delivery needs sender and receiver started "
+                                            "with visible: true")
                     if not step.get("message") or not step.get("request_id"):
                         raise ScenarioError(f"{rid}: peer_delivery needs message and request_id")
                 elif op in ("message", "await", "compact"):
@@ -177,8 +186,8 @@ def render_markdown(data: dict) -> str:
     out += [
         "",
         "Cleanup: the runner explicitly Stops its own unfinished test work, then settles every",
-        "explicitly hidden session it created, also on failure",
-        "or interruption. Rows that need the peer are reported \"not run: worker",
+        "session it created (explicitly hidden ones, and the visible ones a row needs),",
+        "also on failure or interruption. Rows that need the peer are reported \"not run: worker",
         "offline\" when it is not online.",
         "",
     ]
