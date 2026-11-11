@@ -149,33 +149,64 @@ class HttpWorkerClient:
     def compact(self, session_id: str) -> dict:
         return self._req("POST", f"/sessions/{session_id}/compact")
 
-    def system_notes(self, session_id: str) -> list:
+    def system_notes(self, session_id: str, after_seq: int = 0) -> list:
         """The session's ``system.note`` events, read from its event log.
 
         Notes such as a native ``compact_failed`` live only in the event log
         (the web UI replays it); the message history leaves them out. Reads
         the SSE backfill up to ``caught_up`` and closes the stream.
+        ``after_seq``: only notes whose event seq (the frame's ``id:``) is
+        greater, i.e. written after :meth:`event_seq` returned it.
+        """
+        return [note for seq, note in self._backfill(session_id)[0] if seq > after_seq]
+
+    def event_seq(self, session_id: str) -> int:
+        """The seq of the last event in the session's log (``caught_up``)."""
+        seq = self._backfill(session_id)[1]
+        if seq is None:
+            raise ClientError(f"GET /sessions/{session_id}/events: no caught_up position")
+        return seq
+
+    def _backfill(self, session_id: str) -> tuple:
+        """``([(seq, note), ...], caught_up seq or None)`` from the SSE backfill.
+
+        A ``reset`` ends the read with no position; its notes count as unseen
+        (seq 0), so a caller asking for newer notes gets none.
         """
         notes: list = []
-        event = None
+        event, seq, caught_up = None, 0, None
         try:
             with self._http.stream("GET", API + f"/sessions/{session_id}/events",
                                    headers={"Accept": "text/event-stream"}) as resp:
                 if resp.status_code >= 400:
                     raise ClientError(f"GET /sessions/{session_id}/events: HTTP {resp.status_code}")
                 for line in resp.iter_lines():
-                    if line.startswith("event: "):
+                    if line.startswith("id: "):
+                        try:
+                            seq = int(line[len("id: "):].strip())
+                        except ValueError:
+                            seq = 0
+                    elif line.startswith("event: "):
                         event = line[len("event: "):].strip()
-                        if event in ("caught_up", "reset"):
+                        if event == "reset":
+                            notes = [(0, note) for _seq, note in notes]
                             break
+                    elif line.startswith("data: ") and event == "caught_up":
+                        try:
+                            caught_up = int(json.loads(line[len("data: "):]).get("seq"))
+                        except (ValueError, TypeError, AttributeError):
+                            caught_up = None
+                        break
                     elif line.startswith("data: ") and event == "system.note":
                         try:
-                            notes.append(json.loads(line[len("data: "):]))
+                            notes.append((seq, json.loads(line[len("data: "):])))
                         except ValueError:
                             pass
+                    elif not line:
+                        seq = 0  # the next frame names its own id (or has none)
         except httpx.TransportError as exc:
             raise Unreachable(f"{self.base_url} unreachable: {type(exc).__name__}") from None
-        return notes
+        return notes, caught_up
 
     def settle(self, session_id: str) -> None:
         """Settle test-owned evidence. Call Stop separately for unfinished test work."""
@@ -240,11 +271,20 @@ class HttpWorkerClient:
 
     def send(self, prompt: str, *, session_id: str | None = None, model: str | None = None,
              permission_mode: str | None = None, project: str | None = None,
-             target_instance_id: str | None = None, profile: str | None = None) -> str:
-        """Start a session (no ``session_id``) or send a message; returns the session id."""
+             target_instance_id: str | None = None, profile: str | None = None,
+             disposable: bool = True, on_created=None) -> str:
+        """Start a session (no ``session_id``) or send a message; returns the session id.
+
+        A new session is a hidden ``disposable_test`` chat unless ``disposable``
+        is False. Top-level orchestration (peer messages) refuses hidden chats,
+        so a row that exercises it starts ordinary visible chats instead.
+        ``on_created(session_id)`` runs as soon as the worker acknowledges a
+        new session, before the post-acknowledgement linger, so a caller can
+        track it for cleanup even if it is interrupted during that wait.
+        """
         request_id = uuid.uuid4().hex
         frame = {"type": "query", "prompt": prompt, "request_id": request_id}
-        if not session_id:
+        if not session_id and disposable:
             frame["disposable_test"] = True
         if session_id:
             frame["session_id"] = session_id
@@ -263,9 +303,14 @@ class HttpWorkerClient:
             # few seconds so a refusal is still seen.
             self._exchange(frame, lambda r: r.get("type") == "query_queued", wait_s=self.linger_s)
             return session_id
-        created = self._exchange(
-            frame, lambda r: r.get("type") == "session_created" and r.get("request_id") == request_id,
-            wait_s=self.ack_timeout, linger_s=self.linger_s)
+        def acknowledged(reply):
+            ok = (reply.get("type") == "session_created" and reply.get("request_id") == request_id
+                  and bool(reply.get("session_id")))
+            if ok and on_created:
+                on_created(reply["session_id"])
+            return ok
+
+        created = self._exchange(frame, acknowledged, wait_s=self.ack_timeout, linger_s=self.linger_s)
         if not created:
             raise ClientError("worker did not confirm the new session")
         return created["session_id"]
