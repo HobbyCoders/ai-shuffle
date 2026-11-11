@@ -193,6 +193,24 @@ def test_scan_budget_resumes_instead_of_skipping_large_tree(world, monkeypatch):
     assert not path.exists()
 
 
+def test_guard_past_pass_deadline_still_deletes(world, monkeypatch):
+    # Process check plus Windows probe can succeed yet outlast the pass budget.
+    root, _, sweep = world
+    path = folder(root, count=2)
+    monkeypatch.setattr(ss, "PASS_SECONDS", 0.2)
+
+    def slow(deadline, **kwargs):
+        time.sleep(0.3)
+        return set()
+    monkeypatch.setattr(ss, "_process_references", slow)
+    for _ in range(5):
+        sweep.step()
+        assert sweep.disabled_reason == "none"
+        if not path.exists():
+            break
+    assert not path.exists()
+
+
 def test_one_failed_folder_does_not_starve_siblings(world, monkeypatch):
     root, _, sweep = world
     bad = folder(root, "bad")

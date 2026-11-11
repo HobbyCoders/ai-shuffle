@@ -443,7 +443,11 @@ class ScratchSweep:
                 if not self._guard(job, deadline):
                     self.close_job()
                     continue
-                tranche = min(deadline, time.monotonic() + 0.1)
+                # The guard's scans have budgets of their own and may end past
+                # the pass deadline. A passed guard still gets one short tranche,
+                # or a slow check would repeat every pass and never delete.
+                now = time.monotonic()
+                tranche = min(deadline, now + 0.1) if now < deadline else now + 0.1
                 while time.monotonic() < tranche:
                     line = job["manifest"].readline()
                     if not line:
