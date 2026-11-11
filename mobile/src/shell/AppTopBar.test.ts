@@ -394,18 +394,20 @@ describe('AppTopBar drawer lifecycle', () => {
 			expect(drawerClosed()).toBe(true);
 			expect(props.onOpenFeature).not.toHaveBeenCalled();
 
+			// A slow pop: elapsed time alone never opens it.
+			vi.advanceTimersByTime(2000);
+			expect(props.onOpenFeature).not.toHaveBeenCalled();
 			page.state = {};
 			window.dispatchEvent(new PopStateEvent('popstate'));
 			expect(props.onOpenFeature).toHaveBeenCalledExactlyOnceWith('settings', 'system');
-			vi.advanceTimersByTime(1000);
+			window.dispatchEvent(new PopStateEvent('popstate'));
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 
-			// No popstate at all (the entry was already gone): it still opens.
+			// The drawer's entry was never pushed (router not ready): it opens at once.
+			push.mockImplementation(() => {});
 			await fireEvent.click(menuButton());
 			await tick();
 			await fireEvent.click(screen.getByRole('button', { name: 'Stub settings target' }));
-			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
-			vi.advanceTimersByTime(400);
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(2);
 		} finally {
 			vi.useRealTimers();

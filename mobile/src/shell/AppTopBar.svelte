@@ -221,24 +221,29 @@
 
 	// A Settings target (Needs you's memory item, #1042) pushes its own history
 	// step. The drawer's pop above is asynchronous and would land after that
-	// step and undo it, leaving Settings on its index, so open it once the pop
-	// is done.
+	// step and undo it, leaving Settings on its index, so open it only once
+	// that pop is seen. Never on elapsed time: a slow pop would still undo it.
+	// A newer drawer action or the bar going away calls a waiting open off.
+	let pendingTarget: (() => void) | null = null;
 	function drawerOpenFeature(type: ViewType, itemId?: string | null) {
+		pendingTarget?.();
 		const popping = drawerOpen && entryLive;
 		dismissDrawer();
 		if (!itemId) return onOpenFeature(type);
 		if (!popping) return onOpenFeature(type, itemId);
-		let done = false;
+		// The popstate after the drawer's own history.back() is that pop.
 		const open = () => {
-			if (done) return;
-			done = true;
-			window.removeEventListener('popstate', open);
-			clearTimeout(fallback);
+			stop();
 			onOpenFeature(type, itemId);
 		};
+		const stop = () => {
+			window.removeEventListener('popstate', open);
+			if (pendingTarget === stop) pendingTarget = null;
+		};
+		pendingTarget = stop;
 		window.addEventListener('popstate', open);
-		const fallback = setTimeout(open, 400);
 	}
+	$effect(() => () => pendingTarget?.());
 
 	// --- Swipe ----------------------------------------------------------------
 	// A right swipe on the main screen pulls the drawer open; a left swipe
