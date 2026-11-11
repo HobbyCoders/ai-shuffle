@@ -1487,6 +1487,15 @@
           "past_bug": "An old agent flag made the rewind dialog offer a file restore the backend always refused, with a warning that blamed a missing checkpoint."
         },
         {
+          "id": "harness-basics.source-update-dependency-cleanup-asar",
+          "check": "Desktop dependency cleanup removes an unused desktop npm set and releases the update lock",
+          "kind": "owner",
+          "needs": ["device", "install"],
+          "how": "On a disposable Windows desktop install with synthetic data, take two source updates that change desktop/package-lock.json so an older desktop npm set under updates/dependencies/node/desktop is no longer used by any kept version. Restart the app and wait for the healthy start. Read the app log for the dependency cleanup line, list the old set's folder, and check whether updates/update.lock exists. Then run Check for updates from the app. Never touch a production install.",
+          "pass_when": "The log names the old desktop set as removed, its folder (including node_modules/electron/dist/resources/default_app.asar) is gone, update.lock is absent once the cleanup has run, and the update check completes instead of reporting that an application update is already running.",
+          "past_bug": "Inside Electron, the cleanup's recursive delete treated default_app.asar as a folder and never settled, so update.lock stayed held by the running app and every update check said an update was already running."
+        },
+        {
           "id": "harness-basics.source-update-dependency-reuse",
           "check": "Docker source revisions reuse only complete compatible dependencies and run current Fluid",
           "kind": "owner",
