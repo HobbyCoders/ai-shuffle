@@ -543,6 +543,49 @@ describe('a second send while the first send creates the worktree (#1444)', () =
 		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
 	});
 
+	// Review round 3 (S1): the new chat can show in the sidebar before the
+	// create answers. A send made there waits to learn which chat the create
+	// made, then goes after its first query.
+	it.each(['staged branch', 'auto branch'] as const)(
+		'with a %s, writes the first query ahead of a send made in the new chat opened before the create answered',
+		async (kind) => {
+			let resolvePost!: (v: unknown) => void;
+			post.mockReturnValueOnce(new Promise((r) => { resolvePost = r; }));
+			const { sender, internal, wsConn, deps } = setup({ worktreeBranch: kind === 'staged branch' ? 'fix/first' : '' }, { realActiveSession: true });
+			deps.appData.current = { sessions: [{ id: 'old' }] };
+			const first = sender.sendMessage('first');
+			await vi.waitFor(() => expect(post).toHaveBeenCalled());
+			// The sidebar lists the new chat; the user opens it and sends.
+			bumpInitGeneration();
+			internal.worktreeCreationGeneration++;
+			deps.update(s => ({ ...s, sessionId: 'wt-s', messages: [] }));
+			const second = sender.sendMessage('second');
+			await new Promise(r => setTimeout(r, 20));
+			expect(wsConn.send).not.toHaveBeenCalled();
+			resolvePost({ session_id: 'wt-s', branch_name: 'fix/first', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: false });
+			expect(await first).toBe(true);
+			expect(await second).toBe(true);
+			const queries = wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query');
+			expect(queries.map(frame => [frame.prompt, frame.session_id])).toEqual([['first', 'wt-s'], ['second', 'wt-s']]);
+		},
+	);
+
+	it('does not hold a send in a chat listed before the create began', async () => {
+		let resolvePost!: (v: unknown) => void;
+		post.mockReturnValueOnce(new Promise((r) => { resolvePost = r; }));
+		const { sender, internal, wsConn, deps } = setup({}, { realActiveSession: true });
+		deps.appData.current = { sessions: [{ id: 'old' }] };
+		const first = sender.sendMessage('first');
+		await vi.waitFor(() => expect(post).toHaveBeenCalled());
+		bumpInitGeneration();
+		internal.worktreeCreationGeneration++;
+		deps.update(s => ({ ...s, sessionId: 'old', messages: [] }));
+		expect(await sender.sendMessage('elsewhere')).toBe(true);
+		expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'query', prompt: 'elsewhere', session_id: 'old' }));
+		resolvePost({ session_id: 'wt-s', branch_name: 'feat/auto', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
+		expect(await first).toBe(true);
+	});
+
 	// Review round 1 (S2): each create's own first send runs in its own
 	// create's turn, whichever create ends first.
 	it('sends each create\'s first query when two creates from different composes end oldest first', async () => {

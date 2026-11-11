@@ -5,8 +5,12 @@
  *
  * One rule:
  *  - Every send belongs to one lane: the chat it was made in, or, for a new
- *    chat's compose, that compose. A chat created from the compose stays in
- *    the compose's lane while a send of it is still open.
+ *    chat's compose, that compose. Once a compose knows the chat it made,
+ *    the two lanes are one (`join`).
+ *  - A send made in a chat that an earlier compose may still turn out to
+ *    have made (that compose has a send open and has not named its chat
+ *    yet) waits until it has: behind that compose's sends if it made this
+ *    chat, not at all if it made another.
  *  - A send goes only on its place in line, taken the moment it is made,
  *    before any await, and used once. A caller that awaits before it sends
  *    (the composer, a generation choice) reserves it at the click
@@ -50,24 +54,57 @@ export interface SendReservation {
 export function createSendOrder() {
 	type OpenTurn = { lane: SendLane; done: Promise<void> };
 	const open: OpenTurn[] = [];
-	const meets = (a: SendLane, b: SendLane) => a === b || a === ANY_CHAT || b === ANY_CHAT;
+	/** A compose lane joined to the chat lane it made, while it has turns. */
+	const joinedTo = new Map<SendLane, SendLane>();
+	/** Settles when a lane is joined, for the sends that wait to learn it. */
+	const onJoin = new Map<SendLane, { joined: Promise<void>; settle: () => void }>();
+	const root = (lane: SendLane) => joinedTo.get(lane) ?? lane;
+	const meets = (a: SendLane, b: SendLane) => a === ANY_CHAT || b === ANY_CHAT || root(a) === root(b);
+	const joined = (lane: SendLane) => {
+		let entry = onJoin.get(lane);
+		if (!entry) {
+			let settle!: () => void;
+			entry = { joined: new Promise<void>(resolve => { settle = resolve; }), settle };
+			onJoin.set(lane, entry);
+		}
+		return entry.joined;
+	};
 	return {
-		/** Take a turn now, in the order sends are made. */
-		take(lane: SendLane): SendTurn {
+		/** Take a turn now, in the order sends are made. `unsure`: lanes that
+		 *  may still be joined to this one; their open turns are waited for
+		 *  until each lane is joined (then only if joined here) or ends. */
+		take(lane: SendLane, unsure: SendLane[] = []): SendTurn {
 			const earlier = open.filter(turn => meets(turn.lane, lane));
+			const maybe = open.filter(turn => unsure.includes(turn.lane) && !joinedTo.has(turn.lane) && !earlier.includes(turn));
 			let finish!: () => void;
 			const entry: OpenTurn = { lane, done: new Promise<void>(resolve => { finish = resolve; }) };
 			open.push(entry);
 			let released = false;
+			const waits = [
+				...earlier.map(turn => turn.done),
+				...maybe.map(turn => Promise.race([turn.done, joined(turn.lane)])
+					.then(() => (meets(turn.lane, lane) ? turn.done : undefined))),
+			];
 			return {
-				ready: earlier.length ? Promise.all(earlier.map(turn => turn.done)).then(() => {}) : null,
+				ready: waits.length ? Promise.all(waits).then(() => {}) : null,
 				release() {
 					if (released) return;
 					released = true;
 					open.splice(open.indexOf(entry), 1);
 					finish();
+					if (!open.some(turn => turn.lane === lane)) {
+						joinedTo.delete(lane);
+						onJoin.delete(lane);
+					}
 				},
 			};
+		},
+		/** From now on `from` (a compose lane with open turns) is the same
+		 *  lane as `to` (the chat it made). */
+		join(from: SendLane, to: SendLane): void {
+			if (from === to || joinedTo.has(from) || !open.some(turn => turn.lane === from)) return;
+			joinedTo.set(from, to);
+			onJoin.get(from)?.settle();
 		},
 		/** Whether a turn in this lane has not ended yet. */
 		isOpen(lane: SendLane): boolean {

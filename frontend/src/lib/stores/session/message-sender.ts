@@ -195,6 +195,8 @@ export interface MessageSenderDeps {
 	appData: {
 		loadSessions: () => void;
 		loadApiUserSessions: () => void;
+		/** The sidebar's chats: the ones a compose started now cannot create. */
+		current?: { sessions: { id: string }[] };
 	};
 
 	persistSession: () => void;
@@ -1550,12 +1552,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	/** A new chat's compose, shared by its sends: the chat creation one of
 	 *  them started (pending), and how many of its creations ended without a
 	 *  chat (failed). A creation that ended with one is the chat now open. */
-	type Compose = { lane: string; creating: CreationEnd | null; failed: number; chat?: string };
+	type Compose = { lane: string; creating: CreationEnd | null; failed: number; chat?: string; known: Set<string> };
 	let compose: Compose | null = null;
-	/** Earlier navigations' composes while a send of theirs is still open.
-	 *  Once one knows the chat it made (compose.chat), that chat's sends keep
-	 *  going in its lane. */
+	/** Earlier navigations' composes while a send of theirs is still open. */
 	let adopted: Compose[] = [];
+	/** The compose learned the chat it made: from now on that chat's sends
+	 *  go in the compose's lane, after the ones queued there before the id
+	 *  existed, wherever the chat was reopened from. */
+	function named(c: Compose, chat: string) {
+		if (c.chat) return;
+		c.chat = chat;
+		sendOrder.join(c.lane, `chat:${chat}`);
+	}
 	function settle(c: Compose): number {
 		if (c.creating?.ended()) {
 			if (!getState().sessionId) c.failed++;
@@ -1576,19 +1584,19 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		const lane = `compose:${navigation}`;
 		if (compose?.lane !== lane) {
 			if (compose) adopted.push(compose);
-			compose = { lane, creating: null, failed: 0 };
+			compose = { lane, creating: null, failed: 0, known: new Set(deps.appData.current?.sessions.map(s => s.id)) };
 		}
 		adopted = adopted.filter(c => sendOrder.isOpen(c.lane));
-		// A chat adopted from a compose stays in its lane while a send of the
-		// compose is open, even after the user left and reopened that chat: a
-		// send queued there before the id existed keeps its place ahead of one
-		// made after.
 		if (made.sessionId) {
-			const from = adopted.find(c => c.chat === made.sessionId)?.lane;
-			if (from) return { lane: from, chat: made.sessionId, navigation, turn: sendOrder.take(from) };
 			const chat = `chat:${made.sessionId}`;
-			if (!sendOrder.isOpen(lane)) return { lane: chat, chat: made.sessionId, navigation, turn: sendOrder.take(chat) };
-			compose.chat = made.sessionId;
+			if (!sendOrder.isOpen(lane)) {
+				// An earlier compose that has not named its chat yet may have made
+				// this one (it can show in the sidebar before the create answers):
+				// wait to learn. A chat listed before that compose began cannot be it.
+				const unsure = adopted.filter(c => !c.chat && !c.known.has(made.sessionId!)).map(c => c.lane);
+				return { lane: chat, chat: made.sessionId, navigation, turn: sendOrder.take(chat, unsure) };
+			}
+			named(compose, made.sessionId);
 		}
 		return { lane, chat: made.sessionId, navigation, compose, failed: settle(compose), turn: sendOrder.take(lane) };
 	}
@@ -1649,7 +1657,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				holds.push(after.done);
 			} else if (!holds.length) turn.release();
 		};
-		letNextGo.made = (chat) => { if (taken.compose) taken.compose.chat ??= chat; };
+		letNextGo.made = (chat) => { if (taken.compose) named(taken.compose, chat); };
 		return trackSend(async () => {
 			try {
 				if (turn.ready) {
@@ -1670,7 +1678,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					if (taken.compose && settle(taken.compose) > taken.failed!) return false;
 				}
 				// The chat this compose adopted, for its sends made after a leave.
-				if (taken.compose && getState().sessionId) taken.compose.chat ??= getState().sessionId!;
+				if (taken.compose && getState().sessionId) named(taken.compose, getState().sessionId!);
 				return await send(prompt, options, letNextGo);
 			} finally {
 				if (holds.length) void Promise.allSettled(holds).then(turn.release);
