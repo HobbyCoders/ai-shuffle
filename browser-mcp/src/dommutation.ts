@@ -84,7 +84,9 @@ export const WATCH_KEY = "__browserMcpWatch";
  *   disconnected while idle. A late-starting frame clock can therefore cost
  *   one conservative capped action before its baseline exists.
  * - Navigation never samples, so a clock in a fresh control-free document
- *   reaches the cap with text_churn_ignored:false.
+ *   reaches the cap with text_churn_ignored:false. Rendered pages without
+ *   controls get a short DOM-quiet wait; loading shells get a bounded
+ *   hydration wait (src/tools/navigate.ts).
  * - Known limitation: an action that reuses an already-churning ticker element
  *   for progress driven by untracked rAF can return early with
  *   text_churn_ignored:true.
