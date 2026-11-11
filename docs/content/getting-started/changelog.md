@@ -18,7 +18,7 @@ New Cloud plans, direct sync between workers on the same network, Settings > Mem
 
 ### License
 
-- New AI Shuffle Cloud plans: Free includes 3 remote workers, Pro 10 for $10/month and Ultimate 30 for $30/month. All plans are billed monthly. Settings > Cloud shows the plan you are on.
+- New AI Shuffle Cloud plans: Free includes 3 remote workers, Pro includes 10 for $10/month and Ultimate includes 30 for $30/month. All plans are billed monthly. Settings > Cloud shows the plan you are on.
 
 ### Sync and workers
 
@@ -53,7 +53,7 @@ New Cloud plans, direct sync between workers on the same network, Settings > Mem
 
 - Sends keep their order and your typed text, even when you send quickly or right after a reload.
 - Queued messages keep their attachment chips and no longer vanish when the turn starts. Attachments no longer go missing, including in chats running on another worker.
-- Rewinds no longer blank the transcript, keep typed words apart and bring attachments back as chips.
+- Rewinds no longer blank the transcript. They also keep typed words apart and bring attachments back as chips.
 - A failed turn's error shows once, sidebar rows no longer jump when a new chat arrives, and the sidebar says what is true of each chat.
 
 ### Updates
