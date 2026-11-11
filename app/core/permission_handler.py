@@ -119,6 +119,20 @@ class PermissionRule:
         if not self.tool_pattern:
             return True
 
+        if str(tool_name or "").endswith("chat-access__ChatHttpRequest"):
+            # A batched call carries its requests in a list the generic match
+            # cannot see. A Deny that names any request covers the call; an
+            # Allow (or Defer) only one that names every request. A malformed
+            # batch is refused by the tool, so only a Deny claims it.
+            from app.core import chat_http_batch
+            try:
+                batch = chat_http_batch.items(tool_input)
+            except ValueError:
+                return self.decision == PermissionDecision.DENY
+            if batch is not None:
+                hits = [self._match_pattern(item) for item in batch]
+                return any(hits) if self.decision == PermissionDecision.DENY else all(hits)
+
         # Pattern matching based on tool type
         return self._match_pattern(tool_input)
 
