@@ -573,18 +573,14 @@ class VoiceStream:
         self.pending_typed = False
         # What that typed text carried, already validated.
         self.pending_uploads: list[str] = []
-        # The identity of the chat request the pending caller words are sent
-        # as; the store that writes them records it, then it is cleared (#1265).
-        self.pending_request_id: str | None = None
         self.last_caption_role = None
         self.last_assistant_caption_ids: tuple[str | None, str | None] = (None, None)
         self.progress = None
         self.transcript_seq = 0
         self.delegated_seq = 0
-        # The transcript seq caller words were last stored through as their
-        # own message (not as a request): past ``delegated_seq``, the next
-        # request's context holds caller words an earlier message shows, so
-        # its checkpoint is not that request alone (#1265).
+        # The transcript seq caller words were last stored through outside a
+        # request's capture: past ``delegated_seq``, the next request holds
+        # caller words another message shows, so it gets no identity (#1265).
         self.stored_seq = 0
         self.last_user_caption_at = 0.0
         self.last_user_seq = 0
@@ -708,26 +704,15 @@ class VoiceStream:
         user = self.pending["user"].rstrip()
         return bool(user) and not is_noise(user) and not user.endswith("?") and is_backchannel(self.pending["assistant"])
 
-    async def flush(self, *, keep_reply: bool = False, request_id: str | None = None,
-                    span: tuple[int, int] | None = None) -> bool:
+    async def flush(self, *, keep_reply: bool = False):
         """Store the pending exchange as one voice turn.
 
         ``keep_reply`` stores only the caller's words and keeps a reply that is
         still being spoken pending, so a handoff never cuts it in two (#1798).
-        ``request_id`` is the chat request those words are sent as: recorded
-        on the stored caller message, if this flush writes one. With ``span``
-        (the transcript seqs a handoff captured, exclusive start and inclusive
-        end) it is recorded only while the pending caller words are still
-        exactly that span: none of it stored yet and no caller words after it.
-        Returns whether the identity was recorded (#1265).
         """
         # Checkpoint, handoff and speaker changes can flush concurrently. Keep
         # their durable turns in arrival order, including during barge-in.
         async with self.flush_lock:
-            tagged = request_id is not None and (
-                span is None or (self.stored_seq <= span[0] and self.last_user_seq <= span[1]))
-            if tagged:
-                self.pending_request_id = request_id
             user, assistant = self.pending["user"], self.pending["assistant"]
             if keep_reply:
                 assistant = ""
@@ -736,16 +721,40 @@ class VoiceStream:
                 self.pending = {"user": "", "assistant": ""}
                 self.reply_starts, self.reply_timed = [], True
             await self._store(user, assistant, new_reply=not keep_reply)
-            return tagged
 
-    async def _store(self, user: str, assistant: str, *, new_reply: bool) -> None:
-        """Record one exchange; the caller holds ``flush_lock``."""
+    async def capture_request(self) -> tuple[list[dict], str | None]:
+        """Capture the caller's request since the previous one and store its
+        words, as ONE step: ``(transcript entries, identity)``.
+
+        The rule (#1265): the caller words stored under an identity are
+        exactly the caller words of the request sent with it. So the entries
+        are captured, the pending caller words taken and the identity chosen
+        under ``flush_lock`` with no await in between, and the store happens
+        before the dispatch gives up the loop for anything else (an
+        acknowledgement, the approval desk, the chat agent). No caption, flush
+        or other dispatch can then move words into or out of the request.
+        The identity is None, and the stored words carry none, when any of the
+        request's caller words were already stored outside a capture, or when
+        an approval question is waiting (its answer is taken out of the
+        request); a rewind of that message is then refused.
+        """
+        async with self.flush_lock:
+            entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
+            alone = self.stored_seq <= self.delegated_seq and not self.approval_waiting()
+            self.delegated_seq = self.transcript_seq
+            user, self.pending["user"] = self.pending["user"], ""
+            request_id = new_call_request_id() if alone else None
+            # The reply the voice is speaking now stays pending, stored whole
+            # once spoken (#1798).
+            recorded = await self._store(user, "", new_reply=False, request_id=request_id)
+            return entries, request_id if recorded else None
+
+    async def _store(self, user: str, assistant: str, *, new_reply: bool, request_id: str | None = None) -> bool:
+        """Record one exchange; the caller holds ``flush_lock``. True when
+        caller words were recorded with ``request_id``."""
         from app.core.turn_recorder import record_voice_exchange
         typed, self.pending_typed = self.pending_typed, False
         uploads, self.pending_uploads = self.pending_uploads, []
-        # Only the next store may record it: a request whose words were stored
-        # earlier has no message of its own, so it is never matched (#1265).
-        request_id, self.pending_request_id = self.pending_request_id, None
         if typed:  # The marker is for the chat agent; the record keeps the words.
             user = user.strip().removeprefix(TYPED_MESSAGE_PREFIX)
         if is_noise(user):
@@ -755,13 +764,15 @@ class VoiceStream:
             if new_reply:
                 self.caption_ids["assistant"] += 1
             if self.remote_owner:
-                return  # A mirror is read-only; the owner records the request.
+                return False  # A mirror is read-only; the owner records the request.
             if user and not request_id:
                 self.stored_seq = self.transcript_seq
             await record_voice_exchange(self.session_id, user or None, assistant or None, model=self.config["model"],
                                         user_source="typed" if typed else "voice",
                                         **({"upload_paths": uploads} if uploads else {}),
                                         **({"call_request_id": request_id} if request_id and user else {}))
+            return bool(request_id and user)
+        return False
 
     def _reply_cut(self, start_ms: float | None) -> int | None:
         """Where the pending reply starts to come after caller words at ``start_ms``.
@@ -871,13 +882,12 @@ class VoiceStream:
 
     async def caption(self, role: str, delta: str, offset: int = 0, *, start_ms: float | None = None,
                       response_id: str | None = None, item_id: str | None = None,
-                      typed_uploads: list[str] | None = None, request_id: str | None = None):
+                      typed_uploads: list[str] | None = None):
         """One transcript fragment. ``start_ms`` is where it starts on the
         provider session's timeline (GPT Live), None when unknown. Provider
         response/item ids distinguish new assistant utterances from word pieces.
         ``typed_uploads`` (even empty) marks ``delta`` as text typed into the
-        call, with the files it carries, and ``request_id`` the chat request
-        it is sent as."""
+        call, with the files it carries."""
         if not delta:
             return
         if role == "assistant" and self.last_caption_role == "user" and self.approval_waiting():
@@ -938,7 +948,6 @@ class VoiceStream:
             # Set with the words, after any flush above and before the length
             # flush below: whichever flush stores these words carries them.
             self.pending_typed, self.pending_uploads = True, typed_uploads
-            self.pending_request_id = request_id
         self.pending[role] += delta
         self.last_caption_at = time.monotonic()
         if role == "user":
@@ -949,30 +958,19 @@ class VoiceStream:
         await self.emit({"type": "caption", "role": role, "id": f"{role}:{self.caption_ids[role]}", "delta": delta})
         # Live has no authoritative transcript turn-end event. Segment long
         # captions for display/storage only; never infer a task boundary here.
-        if len(self.pending[role]) >= 2000:
+        # Typed text is stored whole by the request capture that follows it.
+        if len(self.pending[role]) >= 2000 and typed_uploads is None:
             await self.flush()
 
     async def run_delegation(self, delegation_id: str, entries=None, *, file_note: str = "", uploads: dict | None = None,
-                             request_id: str | None = None, alone: bool = False,
-                             span: tuple[int, int] | None = None):
+                             request_id: str | None = None):
         """Send one request to the chat agent.
 
-        ``request_id`` is the identity typed text was already stored with; a
-        spoken request gets a new one here, recorded on the caller words this
-        handoff stores. The request carries it, so the turn it runs as can
-        bind its checkpoint to that message and a rewind finds it by identity
-        (#1265). ``alone`` says no earlier stored caller message holds any of
-        this request's context; otherwise the request goes without its
-        identity, since its checkpoint would hold caller words another message
-        shows, and this message's rewind stays refused. (The voice's own
-        replies are call-only rows the engine never had as messages.)
-        ``span`` is the transcript range a spoken handoff captured: if those
-        caller words were stored or joined by later ones before this handoff
-        stores them, the request also goes without its identity.
+        ``entries`` and ``request_id`` come from :meth:`capture_request`, which
+        already stored the caller's words under that identity. The request
+        carries it, so the turn it runs as can bind its checkpoint to that
+        message and a rewind finds it by identity (#1265).
         """
-        stored = request_id is not None
-        request_id = request_id or new_call_request_id()
-        sent_id = request_id if alone else None
         try:
             # Keep the read loop free. Group partial captions into readable
             # turns; the Live delegation event itself carries no task text.
@@ -991,12 +989,6 @@ class VoiceStream:
                 await self.send({"type": "session.thinking.append", "delegation_id": delegation_id,
                                  "content": NO_REQUEST_NOTE})
                 return
-            # Store the request before the chat turn starts, but not the reply
-            # the voice is speaking right now: it is stored whole once spoken.
-            if stored:
-                await self.flush(keep_reply=True)
-            elif not await self.flush(keep_reply=True, request_id=request_id, span=span):
-                sent_id = None
             # The caller's own words: what an owning worker records (#700).
             spoken = " ".join(e["text"].strip() for e in conversation
                               if e["role"] == "user" and not is_noise(e["text"])).strip().removeprefix(TYPED_MESSAGE_PREFIX)
@@ -1010,7 +1002,7 @@ class VoiceStream:
                     await self.progress.submitted(turn_id, delegation_id)
                 result = await delegate_to_selected_model(self.session_id, context, on_submitted=submitted,
                                                           spoken=spoken, command=command, caller=self.caller,
-                                                          request_id=sent_id,
+                                                          request_id=request_id,
                                                           **({"uploads": uploads} if uploads else {}))
                 if not result and followed:
                     return  # Progress and final results arrive on the event stream.
@@ -1021,7 +1013,7 @@ class VoiceStream:
                     result = SENT_NOTE
             else:
                 result = await delegate_to_selected_model(self.session_id, context, spoken=spoken, command=command,
-                                                          caller=self.caller, request_id=sent_id,
+                                                          caller=self.caller, request_id=request_id,
                                                           **({"uploads": uploads} if uploads else {}))
             # Live appends have a 500-token ceiling. <=400 UTF-8 bytes is a
             # conservative bound even without the provider's tokenizer.
@@ -1052,12 +1044,9 @@ class VoiceStream:
             await self.settle_speech()
         finally:
             ids, self.settling = self.settling or [], None
-        # Capture only speech since the previous handoff. The chat already
-        # owns the earlier history.
-        entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
-        alone = self.stored_seq <= self.delegated_seq
-        span = (self.delegated_seq, self.transcript_seq)
-        self.delegated_seq = self.transcript_seq
+        # Capture only speech since the previous handoff (the chat already
+        # owns the earlier history) and store it, before anything below waits.
+        entries, request_id = await self.capture_request()
         for extra in ids[1:]:
             try:
                 await self.send({"type": "session.thinking.append", "delegation_id": extra, "content": MERGED_REQUEST_NOTE})
@@ -1080,7 +1069,7 @@ class VoiceStream:
                 # A quick status question reads the app's task state directly.
                 await self.answer_status(ids[0])
                 return
-        await self.run_delegation(ids[0], entries, alone=alone, span=span)
+        await self.run_delegation(ids[0], entries, request_id=request_id)
 
     async def upstream_frames(self):
         if self.first_frame is not None:
@@ -1264,21 +1253,16 @@ class VoiceStream:
             # Typed requests reuse the existing same-session delegation
             # path, not a guessed provider text event or a second conversation.
             await self.flush()
-            request_id = new_call_request_id()
-            await self.caption("user", "\n\n" + TYPED_MESSAGE_PREFIX + text, typed_uploads=recorded,
-                               request_id=request_id)
-            await self.flush()  # Durable admission before acknowledging/dispatching.
-            entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
-            alone = self.stored_seq <= self.delegated_seq
-            self.delegated_seq = self.transcript_seq
+            await self.caption("user", "\n\n" + TYPED_MESSAGE_PREFIX + text, typed_uploads=recorded)
+            # Durable admission before acknowledging/dispatching.
+            entries, request_id = await self.capture_request()
             # A resent draft is accepted once; typed ids stay out of the
             # provider session's handoff count.
             self.typed_ids[key] = None
             while len(self.typed_ids) > MAX_TYPED_IDS:
                 del self.typed_ids[next(iter(self.typed_ids))]
             self.delegation_task = asyncio.create_task(
-                self.run_delegation(None, entries, file_note=file_note, uploads=uploads, request_id=request_id,
-                                    alone=alone))
+                self.run_delegation(None, entries, file_note=file_note, uploads=uploads, request_id=request_id))
             _workers.add(self.delegation_task)
             self.delegation_task.add_done_callback(_workers.discard)
         await self.emit({"type": "text.accepted", "id": identity})

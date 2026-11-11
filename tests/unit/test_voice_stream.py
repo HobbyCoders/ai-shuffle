@@ -73,8 +73,8 @@ def stream(model="gpt-live-1"):
 async def test_live_delegation_is_correlated_and_uses_accumulated_user_context(monkeypatch):
     delegate = AsyncMock(return_value="The answer is forty-two.")
     monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    capture = recorder(monkeypatch)
     call = stream()
-    call.flush = AsyncMock()
     did = "delegation-1"
     call.upstream = Upstream([json.dumps(e) for e in [
         {"type": "session.input_transcript.delta", "delta": "What is six", "end_ms": 1000},
@@ -84,9 +84,10 @@ async def test_live_delegation_is_correlated_and_uses_accumulated_user_context(m
     ]])
     await call.receive_upstream()
     await call.delegation_task
-    call.flush.assert_awaited_once()
+    capture.assert_awaited_once()
     # The request carries the identity its stored words are recorded with (#1265).
-    request_id = call.flush.await_args.kwargs["request_id"]
+    request_id = capture.await_args.kwargs["call_request_id"]
+    assert capture.await_args.args[1] == "What is six times seven?" and request_id
     delegate.assert_awaited_once_with("s1", "Live conversation context (only the latest new request needs action):\nuser: What is six times seven?\n",
                                       spoken="What is six times seven?", command=f"voice:{call.call_key}:{did}",
                                       caller=None, request_id=request_id)  # The test stream was opened by nobody (#654).
@@ -675,7 +676,8 @@ async def test_a_handoff_stores_the_request_and_keeps_the_reply_being_spoken_who
     call.upstream = Upstream([])
     await call.caption("user", "Take a look at the two images.")
     await call.caption("assistant", "Sure,")
-    await call.run_delegation("d1", list(call.transcript))
+    entries, request_id = await call.capture_request()
+    await call.run_delegation("d1", entries, request_id=request_id)
     # The reply arrives in several transcript segments after the handoff.
     await call.caption("assistant", " I- I'll take a")
     await call.caption("assistant", " look when they come in.")
@@ -1044,16 +1046,13 @@ def test_split_attachment_note_reads_only_a_whole_note():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reply,expected", [
-    ("It is sunny and warm today.", [("Request A.", "It is sunny and warm today.", None), ("Message B.", None, None)]),
-    ("Sure.", [("Request A. Message B.", None, None)]),  # A listening sound joins B to A's words.
-])
-async def test_a_handoff_whose_words_changed_meanwhile_gives_no_message_its_identity(monkeypatch, reply, expected):
-    """Request A is captured, then the voice answers and the caller says B
-    while the merged handoff is acknowledged: that stores A without an
-    identity, or joins B to A's words. A's identity must not land on words
-    its request does not hold, and the request goes without it, so a rewind
-    of either message is refused (#1265)."""
+@pytest.mark.parametrize("between", ["", "It is sunny and warm today.", "Sure."])
+async def test_overlapping_dispatches_store_each_request_under_its_own_identity(monkeypatch, between):
+    """S4 (#1265): A's dispatch waits on an acknowledgement and B's words
+    arrive, with or without a reply between them, and B's own dispatch runs
+    meanwhile. "A + B" was stored under B's identity. Capturing a request and
+    storing its words are one step before any wait, so each stored message
+    holds exactly the words of the request sent with its identity."""
     from app.core import turn_recorder
     call = stream()
     call.upstream = Upstream([])
@@ -1062,23 +1061,31 @@ async def test_a_handoff_whose_words_changed_meanwhile_gives_no_message_its_iden
     monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
     monkeypatch.setattr(call, "settle_speech", AsyncMock())
     await call.caption("user", "Request A.")
-    sent = []
+    second = []
 
     async def send(event):
-        sent.append(event)
-        if event.get("content") == voice_stream.MERGED_REQUEST_NOTE:
-            await call.caption("assistant", reply)
-            await call.caption("user", "Message B.")
+        if event.get("content") == voice_stream.MERGED_REQUEST_NOTE and not second:
+            if between:
+                await call.caption("assistant", between)
+            await call.caption("user", "Request B.")
+            call.settling = ["b"]
+            second.append(await call.dispatch_when_settled())
     monkeypatch.setattr(call, "send", send)
-    call.settling = ["first", "second"]
+    call.settling = ["a1", "a2"]
     await call.dispatch_when_settled()
-    stored = [(c.args[1], c.args[2], c.kwargs.get("call_request_id")) for c in record.await_args_list]
-    assert stored == expected
-    assert delegate.await_args.kwargs["request_id"] is None
+    assert second
+    words = {c.kwargs["call_request_id"]: c.args[1] for c in record.await_args_list if c.kwargs.get("call_request_id")}
+    sent = {c.kwargs["request_id"]: c.kwargs["spoken"] for c in delegate.await_args_list}
+    assert sorted(words.values()) == ["Request A.", "Request B."]
+    # Every identity a request carries is on a message holding exactly its words.
+    for request_id, spoken in sent.items():
+        assert request_id is None or words[request_id] == spoken
 
 
 @pytest.mark.asyncio
-async def test_a_handoff_whose_words_are_unchanged_keeps_its_identity(monkeypatch):
+async def test_a_request_holding_words_stored_outside_its_capture_gets_no_identity(monkeypatch):
+    """A long caption segment stored half of the request before the handoff:
+    neither message holds the request alone, so neither gets its identity."""
     from app.core import turn_recorder
     call = stream()
     call.upstream = Upstream([])
@@ -1087,9 +1094,42 @@ async def test_a_handoff_whose_words_are_unchanged_keeps_its_identity(monkeypatc
     monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
     monkeypatch.setattr(call, "settle_speech", AsyncMock())
     monkeypatch.setattr(call, "send", AsyncMock())
-    await call.caption("user", "Request A.")
-    call.settling = ["first", "second"]
+    await call.caption("user", "First part.")
+    await call.flush()
+    await call.caption("user", " Second part.")
+    call.settling = ["d"]
     await call.dispatch_when_settled()
+    assert [c.kwargs.get("call_request_id") for c in record.await_args_list] == [None, None]
+    assert delegate.await_args.kwargs["request_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_request_captured_while_an_approval_question_waits_gets_no_identity(monkeypatch):
+    from app.core import turn_recorder
+    call = stream()
+    call.upstream = Upstream([])
+    record = AsyncMock()
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    monkeypatch.setattr(call, "approval_waiting", lambda: True)
+    await call.caption("user", "Yes, and also run the tests.")
+    entries, request_id = await call.capture_request()
+    assert request_id is None and record.await_args.kwargs.get("call_request_id") is None
+    assert [e["text"] for e in entries] == ["Yes, and also run the tests."]
+
+
+@pytest.mark.asyncio
+async def test_a_long_typed_message_is_stored_whole_under_its_identity(monkeypatch):
+    """The 2,000-character segment flush stored typed text before its capture,
+    so it lost its identity; typed text is stored whole by its capture."""
+    from app.core import turn_recorder
+    call = stream()
+    call.upstream = Upstream([])
+    record = AsyncMock()
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    text = "word " * 600
+    await call.caption("user", "\n\n" + voice_stream.TYPED_MESSAGE_PREFIX + text, typed_uploads=["/up/a.png"])
+    _, request_id = await call.capture_request()
     record.assert_awaited_once()
-    assert record.await_args.args[1] == "Request A."
-    assert record.await_args.kwargs["call_request_id"] == delegate.await_args.kwargs["request_id"] is not None
+    assert request_id and record.await_args.kwargs["call_request_id"] == request_id
+    assert record.await_args.kwargs["user_source"] == "typed"
+    assert record.await_args.kwargs["upload_paths"] == ["/up/a.png"]

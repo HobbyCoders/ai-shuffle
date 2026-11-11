@@ -574,3 +574,60 @@ async def test_the_identity_rides_the_queued_turn_not_its_prompt_and_is_not_forw
     assert forwarded.await_args.args[2] == "Run the tests"
     assert "request_id" not in forwarded.await_args.kwargs
     assert "cd" * 16 not in json.dumps([forwarded.await_args.args[3:], forwarded.await_args.kwargs], default=str)
+
+
+@pytest.mark.parametrize("by_content", [False, True])
+async def test_the_whole_path_from_a_typed_call_send_to_its_rewind(staged_upload, rewind_env, monkeypatch, by_content):
+    """Review round 3: one test through every real step. The call admits a
+    typed send with an attachment and stores it under a fresh identity; the
+    real delegation queues the turn; a real SessionRuntime claims its run and
+    a real TurnRecorder records the binding (with that run's id) from the
+    engine's TurnStarted node; the rewind resolves the message through that
+    stored binding, cuts both histories there and gives the file back.
+    Only the provider's stream (the pump) and the checkpoint store are stubbed.
+    """
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    from app.core import session_runtime, voice_stream
+    from app.db import database, turns
+    from app.core.sync_engine import sync_engine
+    from tests.core.test_send_steering import _pump_env
+
+    socket = SimpleNamespace(send_json=AsyncMock(), send_bytes=AsyncMock(), close=AsyncMock())
+    call = voice_stream.VoiceStream(socket, {"id": SID}, {"model": "gpt-live-1", "voice": "marin"}, "secret", 5)
+    call.upstream = AsyncMock()
+    # As a streamed call with a conversation does: the turn is followed on the
+    # event stream, so the dispatch returns once it is queued.
+    call.progress = SimpleNamespace(submitted=AsyncMock())
+    real = database.get_session
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda sid: {**real(sid), "model": "text-model"})
+    session_events.append_events(SID, [_user_ev("earlier"), _asst_ev("ok", uuid="ok-id")])
+    words = f"inspect @{staged_upload}"
+    await _type(call, words, [str(staged_upload)])
+    row = _users()[-1]
+    request_id = row["payload"]["call_request_id"]
+    assert row["payload"]["upload_paths"] == [str(staged_upload)]
+    (turn,) = turns.get_queued_turns(SID)
+    assert turn["payload"]["call_request_id"] == request_id
+
+    async def pump(**kwargs):
+        yield {"type": "turn_node", "node_id": "call-cp"}
+        yield {"type": "done", "metadata": {}}
+
+    real_recorder = session_runtime.TurnRecorder.create_for_run
+    with ExitStack() as stack:
+        stack.enter_context(_pump_env(pump))
+        # The real recorder, under the run lease the runtime claims.
+        stack.enter_context(patch.object(session_runtime.TurnRecorder, "create_for_run", new=real_recorder))
+        for method in ("broadcast_message_added", "broadcast_queue_updated"):
+            stack.enter_context(patch.object(sync_engine, method, AsyncMock()))
+        await session_runtime.SessionRuntime(turns.get_turn(turn["id"])).execute()
+
+    (binding,) = [r for r in session_events.get_events(SID) if r["event_type"] == "call.checkpoint_bound"]
+    assert binding["payload"] == {"call_request_id": request_id, "node_id": "call-cp"}
+    assert binding["turn_id"] == turn["id"] and binding["run_id"]
+    # What the transcript holds for the request is never read: identity only.
+    _patch_checkpoints(monkeypatch, [_cp("earlier-cp", "earlier"), _cp("call-cp", turn["prompt"])])
+
+    await _assert_cut(rewind_env, _request(by_content, "call-cp", words), "call-cp", row, [str(staged_upload)])
