@@ -140,7 +140,7 @@ def test_workspace_cases_keep_real_browser_and_ui_security_checks():
     steps = {step.get("name"): step for step in job["steps"]}
     install = steps["Install isolated Chromium"]
     assert "if" not in install
-    assert "python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium" in install["run"]
+    assert "python3 ../scripts/ci/bounded_apt.py --debs ~/.cache/chromium-debs npx --no-install playwright-core install-deps chromium" in install["run"]
     assert "timeout --kill-after=10s 90s npx --no-install playwright-core install chromium" in install["run"]
     assert "||" not in install["run"]
     assert "kernel.apparmor_restrict_unprivileged_userns=0" in install["run"]

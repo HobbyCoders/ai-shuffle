@@ -220,6 +220,19 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-mcp/package-lock.json') }}
 
+      - name: Name the Chromium system-package cache
+        id: chromium-debs
+        # The hosted image (ImageOS, ImageVersion) decides what is preinstalled,
+        # and playwright-core decides what Chromium needs.
+        run: echo "key=chromium-debs-$ImageOS-$ImageVersion-${{ runner.arch }}-$(node -p 'require("./browser-mcp/node_modules/playwright-core/package.json").version')" >> "$GITHUB_OUTPUT"
+      - name: Cache Chromium's system packages
+        # Fonts and libraries apt fetched on a miss (an index refresh plus about
+        # 21 MB from the Ubuntu archive, which is sometimes slow); a hit installs
+        # the same signed .deb files with no download.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chromium-debs
+          key: ${{ steps.chromium-debs.outputs.key }}-${{ hashFiles('scripts/ci/bounded_apt.py') }}
       - name: Prepare sandboxed Chromium
         timeout-minutes: 13
         working-directory: browser-mcp
@@ -232,7 +245,7 @@ jobs:
           sudo sed -i -E 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
           # Bound root OS dependencies, clean up the whole tree, and repair dpkg
           # after an interrupted attempt before the one permitted retry.
-          python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium
+          python3 ../scripts/ci/bounded_apt.py --debs ~/.cache/chromium-debs npx --no-install playwright-core install-deps chromium
           # Browser downloads stay owned by the runner and use its cache.
           timeout --kill-after=10s 90s npx --no-install playwright-core install chromium
 
@@ -296,14 +309,14 @@ jobs:
         id: select
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 -m scripts.devloop.ci matrix --shards 16 >> "$GITHUB_OUTPUT"
+        run: python3 -m scripts.devloop.ci matrix --shards 18 >> "$GITHUB_OUTPUT"
       # The selection in a step name, where main-suite's gate reads it from the
       # run's job list (scripts/ci/main_gate.py) to wait for every chosen shard.
       - name: 'Selected UI journey shards: ${{ steps.select.outputs.shards }}'
         run: 'true'
 
   journeys:
-    name: UI journeys (${{ matrix.shard }}/16)
+    name: UI journeys (${{ matrix.shard }}/18)
     # Real app, real PostgreSQL 16, fake AI, real Chromium: the selected
     # frontend/tests/journeys/*.journey.mjs against a fresh dev instance
     # (python -m scripts.devloop up --ci). Shards split those files by measured
@@ -323,10 +336,10 @@ jobs:
       - name: Plan this shard
         id: plan
         run: |
-          plan=$(python3 -m scripts.devloop.ci plan --shards 16 --only "$JOURNEY_SELECTION")
+          plan=$(python3 -m scripts.devloop.ci plan --shards 18 --only "$JOURNEY_SELECTION")
           files=$(python3 -c 'import json, sys; print(" ".join(json.loads(sys.argv[1])[int(sys.argv[2]) - 1]))' "$plan" "${{ matrix.shard }}")
           echo "files=$files" >> "$GITHUB_OUTPUT"
-          echo "UI journeys shard ${{ matrix.shard }}/16: ${files:-no journey files} (plan: $plan)" >> "$GITHUB_STEP_SUMMARY"
+          echo "UI journeys shard ${{ matrix.shard }}/18: ${files:-no journey files} (plan: $plan)" >> "$GITHUB_STEP_SUMMARY"
       - if: steps.plan.outputs.files != ''
         uses: actions/setup-python@v5
         with:
@@ -363,6 +376,21 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('browser-mcp/package-lock.json') }}
+      - name: Name the Chromium system-package cache
+        id: chromium-debs
+        if: steps.plan.outputs.files != ''
+        # The hosted image (ImageOS, ImageVersion) decides what is preinstalled,
+        # and playwright-core decides what Chromium needs.
+        run: echo "key=chromium-debs-$ImageOS-$ImageVersion-${{ runner.arch }}-$(node -p 'require("./browser-mcp/node_modules/playwright-core/package.json").version')" >> "$GITHUB_OUTPUT"
+      - name: Cache Chromium's system packages
+        if: steps.plan.outputs.files != ''
+        # Fonts and libraries apt fetched on a miss (an index refresh plus about
+        # 21 MB from the Ubuntu archive, which is sometimes slow); a hit installs
+        # the same signed .deb files with no download.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chromium-debs
+          key: ${{ steps.chromium-debs.outputs.key }}-${{ hashFiles('scripts/ci/bounded_apt.py') }}
       - name: Install isolated Chromium
         if: steps.plan.outputs.files != ''
         timeout-minutes: 13
@@ -372,7 +400,7 @@ jobs:
           # Use the primary signed Ubuntu archive, not the hosted mirror's
           # slow Azure fallback. Keep suites, components and Signed-By intact.
           sudo sed -i -E 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
-          python3 ../scripts/ci/bounded_apt.py npx --no-install playwright-core install-deps chromium
+          python3 ../scripts/ci/bounded_apt.py --debs ~/.cache/chromium-debs npx --no-install playwright-core install-deps chromium
           timeout --kill-after=10s 90s npx --no-install playwright-core install chromium
           node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "CHROMIUM_PATH=" + require("playwright-core").chromium.executablePath() + "\n")'
       - name: Build and stamp the desktop UI
@@ -392,7 +420,7 @@ jobs:
           # The runner's preinstalled, stopped PostgreSQL 16 binaries; the dev
           # instance initializes its own throwaway cluster on a free port.
           export PATH="/usr/lib/postgresql/16/bin:$PATH"
-          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/16" --only "$JOURNEY_SELECTION" --out "$RUNNER_TEMP/ui-journeys" --retry-failures
+          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/18" --only "$JOURNEY_SELECTION" --out "$RUNNER_TEMP/ui-journeys" --retry-failures
       - name: Upload journey timelines
         # A green retry is still a bug signal: retain both attempts.
         if: failure() || steps.journeys.outputs.retried == 'true'

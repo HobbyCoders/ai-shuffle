@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import zipfile
 from datetime import datetime, timedelta, timezone
 
@@ -31,29 +32,25 @@ def test_runtime_partition_is_deterministic_and_exact(shards):
     assert len(buckets) == shards
 
 
-def test_split_journeys_have_an_explicit_unmeasured_budget():
+SPLIT_HALVES = (
+    "chat-position-stability.journey.mjs", "chat-position-stability-2.journey.mjs",
+    "stop-with-queued-messages.journey.mjs", "stop-with-queued-messages-2.journey.mjs",
+    "sidebar-truth.journey.mjs", "sidebar-truth-2.journey.mjs",
+)
+
+
+def test_split_journeys_have_hosted_measurements():
+    # Three journeys that each filled a shard were split in two; every half
+    # now has a green hosted median rather than a guessed budget.
     data = json.loads(ci.WEIGHTS.read_text())
     estimates = ci.estimated_seconds()
-    assert len(ci.UNMEASURED_BUDGET_FLOORS) == 6
-    for name, floor in ci.UNMEASURED_BUDGET_FLOORS.items():
+    for name in SPLIT_HALVES:
         assert (ci.JOURNEYS / name).is_file(), name
-        if data["case_counts"].get(name) == ci.case_count(ci.JOURNEYS / name, strict=True):
+        assert name in data["seconds"] and name in data["case_counts"], name
+        if data["case_counts"][name] == ci.case_count(ci.JOURNEYS / name, strict=True):
             assert estimates[name] == data["seconds"][name]
-        else:
-            assert estimates[name] >= floor
     # No file may fill a hosted shard by itself again: split it instead.
     assert max(estimates.values()) <= 600, max(estimates, key=estimates.get)
-
-
-def test_unmeasured_budget_never_overrides_a_green_median(tmp_path, monkeypatch):
-    name = "chat-position-stability.journey.mjs"
-    (tmp_path / name).touch()
-    monkeypatch.setattr(ci, "UNMEASURED_BUDGET_FLOORS", {name: 18 * 60})
-    monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: 47)
-    assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}))[name] == 18 * 60
-    assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {name: 900}, counts={name: 47}))[name] == 900
-    # It is a floor, not a cap on the ordinary per-case estimate.
-    assert ci.estimated_seconds(tmp_path, _weights(tmp_path, {}, per_case=30))[name] == 1410
 
 
 def test_steer_lifecycle_keeps_slow_desktop_and_phone_coverage():
@@ -188,8 +185,7 @@ def test_checked_in_measurements_use_matching_inventory_or_safe_fallback():
         if measured is not None and cases == recorded_cases:
             assert weights[path.name] == measured
         else:
-            fallback = max(cases * data["seconds_per_case"],
-                           ci.UNMEASURED_BUDGET_FLOORS.get(path.name, 0))
+            fallback = cases * data["seconds_per_case"]
             if measured is not None:
                 # A grown slow file must not retain its old short runtime or
                 # become cheaper merely because the global median is lower.
@@ -211,15 +207,13 @@ def test_changed_case_inventory_uses_conservative_fallback(
     assert path.read_bytes() == original  # never label an estimate as a measurement
 
 
-@pytest.mark.parametrize("per_case,expected", [(10, 1080), (30, 1440)])
-def test_stale_heavy_measurement_restores_the_conservative_floor(
-        tmp_path, monkeypatch, per_case, expected):
+@pytest.mark.parametrize("per_case,expected", [(10, 900 * 48 / 47), (30, 1440)])
+def test_stale_heavy_measurement_keeps_its_scaled_runtime(tmp_path, monkeypatch, per_case, expected):
     name = "chat-position-stability.journey.mjs"
     (tmp_path / name).touch()
-    monkeypatch.setattr(ci, "UNMEASURED_BUDGET_FLOORS", {name: 18 * 60})
     path = _weights(tmp_path, {name: 900}, per_case, counts={name: 47})
     monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: 48)
-    assert ci.estimated_seconds(tmp_path, path) == {name: expected}
+    assert ci.estimated_seconds(tmp_path, path) == {name: pytest.approx(expected)}
 
 
 @pytest.mark.parametrize("inventory", [None, {}])
@@ -448,13 +442,27 @@ def refresh_inventory(tmp_path, monkeypatch):
     directory.mkdir()
     for stem in ("a", "b"):
         (directory / f"{stem}.journey.mjs").touch()
+    monkeypatch.setattr(ci, "ROOT", tmp_path)
     monkeypatch.setattr(ci, "JOURNEYS", directory)
     monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: {
         "a.journey.mjs": 3, "b.journey.mjs": 2,
     }[path.name])
-    # These producer tests supply fake hosted logs; revision matching has its
-    # own git-boundary tests below rather than consulting this checkout.
-    monkeypatch.setattr(ci, "require_matching_workload", lambda run_id, revision: None)
+    # These producer tests supply fake hosted logs; the workload comparison has
+    # its own git tests below rather than consulting this checkout.
+    changed = []
+    monkeypatch.setattr(ci, "changed_workload", lambda run_id, revision: list(changed))
+    return changed
+
+
+def _gh(logs, **metadata):
+    """Fake gh: run states plus each run's archive from ``logs`` (run id -> log text)."""
+    def gh(command, **kwargs):
+        if command[:3] == ["gh", "repo", "view"]:
+            return "owner/repo\n"
+        if command[:3] == ["gh", "run", "view"]:
+            return _run_state(command, **metadata)
+        return _archive(logs[int(command[2].split("/")[-2])])
+    return gh
 
 
 def _run_state(command, *, attempt=1, conclusion="success", **metadata):
@@ -565,57 +573,91 @@ def test_refresh_refuses_unreadable_case_counts_before_network_or_writing(tmp_pa
 
 
 @pytest.mark.parametrize("measured_cases", [1, 4])
-def test_refresh_refuses_changed_case_count_after_a_complete_run(
-        tmp_path, monkeypatch, refresh_inventory, measured_cases):
-    path = _weights(tmp_path, {"unchanged.journey.mjs": 123})
+def test_refresh_ignores_samples_measured_with_other_cases(
+        tmp_path, monkeypatch, refresh_inventory, capsys, measured_cases):
+    monkeypatch.setattr(ci.subprocess, "check_output", _gh({
+        10: _log("a", 30, 3) + _log("b", 10, 2),
+        20: _log("a", 90, measured_cases) + _log("b", 30, 2)}))
+    path = tmp_path / "weights.json"
+    ci.refresh_weights([10, 20], path)
+    data = json.loads(path.read_text())
+    # Only run 10 timed a's current three cases; b has a sample from each run.
+    assert data["seconds"] == {"a.journey.mjs": 30, "b.journey.mjs": 20}
+    assert data["case_counts"] == {"a.journey.mjs": 3, "b.journey.mjs": 2}
+    assert f"a.journey.mjs ran {measured_cases} cases, the file now has 3" in capsys.readouterr().err
+
+
+def test_refresh_keeps_files_without_a_usable_sample_and_drops_removed_ones(
+        tmp_path, monkeypatch, refresh_inventory, capsys):
+    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456, "gone.journey.mjs": 7},
+                    counts={"a.journey.mjs": 5, "b.journey.mjs": 2, "gone.journey.mjs": 1})
+    data = json.loads(path.read_text())
+    data.update(source_runs=[5], source_revisions={"5": "b" * 40})
+    path.write_text(json.dumps(data))
+    # Run 10 lacks b, and reports a journey this checkout no longer has.
+    monkeypatch.setattr(ci.subprocess, "check_output", _gh({10: _log("a", 30, 3) + _log("c", 10, 2)}))
+    ci.refresh_weights([10], path)
+    data = json.loads(path.read_text())
+    assert data["seconds"] == {"a.journey.mjs": 30, "b.journey.mjs": 456}
+    # b keeps the inventory it was measured at, so a changed b still counts as stale.
+    assert data["case_counts"] == {"a.journey.mjs": 3, "b.journey.mjs": 2}
+    assert data["source_runs"] == [5, 10]
+    assert data["source_revisions"] == {"5": "b" * 40, "10": "a" * 40}
+    err = capsys.readouterr().err
+    assert "no usable sample for b.journey.mjs: kept its existing weight" in err
+    assert "c.journey.mjs is no longer a journey file" in err
+
+
+def test_refresh_without_an_existing_entry_leaves_the_per_case_fallback(
+        tmp_path, monkeypatch, refresh_inventory, capsys):
+    monkeypatch.setattr(ci.subprocess, "check_output", _gh({10: _log("a", 30, 3)}))
+    path = tmp_path / "weights.json"
+    ci.refresh_weights([10], path)
+    data = json.loads(path.read_text())
+    assert data["seconds"] == {"a.journey.mjs": 30}
+    assert set(data["case_counts"]) == set(data["seconds"])
+    assert "no usable sample for b.journey.mjs: it keeps the per-case fallback" in capsys.readouterr().err
+    assert ci.estimated_seconds(ci.JOURNEYS, path)["b.journey.mjs"] == 2 * data["seconds_per_case"]
+
+
+def test_refresh_writes_out_and_leaves_the_checked_in_weights(tmp_path, monkeypatch, refresh_inventory, capsys):
+    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456},
+                    counts={"a.journey.mjs": 3, "b.journey.mjs": 2})
     original = path.read_bytes()
-
-    def gh(command, **kwargs):
-        if command[:3] == ["gh", "repo", "view"]:
-            return "owner/repo\n"
-        if command[:3] == ["gh", "run", "view"]:
-            return _run_state(command)
-        cases = 3 if command[2].endswith("/10/logs") else measured_cases
-        return _archive(_log("a", 30, cases) + _log("b", 10, 2))
-
-    monkeypatch.setattr(ci.subprocess, "check_output", gh)
-    with pytest.raises(ValueError, match=rf"Run 20.*a\.journey\.mjs.*measured {measured_cases}.*checkout 3"):
-        ci.refresh_weights([10, 20], path)
+    out = tmp_path / "refreshed.json"
+    monkeypatch.setattr(ci.subprocess, "check_output", _gh({10: _log("a", 30, 3) + _log("b", 10, 2)}))
+    ci.refresh_weights([10], path, out=out)
     assert path.read_bytes() == original
+    assert json.loads(out.read_text())["seconds"] == {"a.journey.mjs": 30, "b.journey.mjs": 10}
+    captured = capsys.readouterr()
+    assert captured.out == f"[ci] refreshed 2 journey weights from 1 green runs (0 kept): {out}\n"
 
 
-def test_refresh_cli_dispatches_run_ids(monkeypatch):
+def test_refresh_cli_dispatches_run_ids(monkeypatch, tmp_path):
     refreshed = []
-    monkeypatch.setattr(ci, "refresh_weights", lambda ids: refreshed.extend(ids))
+    monkeypatch.setattr(ci, "refresh_weights", lambda ids, out=None: refreshed.append((ids, out)))
     assert ci.main(["refresh-weights", "20", "10"]) == 0
-    assert refreshed == [20, 10]
+    assert ci.main(["refresh-weights", "10", "--out", str(tmp_path / "w.json")]) == 0
+    assert refreshed == [([20, 10], None), ([10], tmp_path / "w.json")]
 
 
 @pytest.mark.parametrize("crashed", [False, True])
-def test_refresh_refuses_retried_green_run_with_clear_reason_without_writing(
-        tmp_path, monkeypatch, refresh_inventory, crashed):
-    path = _weights(tmp_path, {"unchanged.journey.mjs": 123})
-    original = path.read_bytes()
+def test_refresh_skips_a_job_that_retried_a_journey(tmp_path, monkeypatch, refresh_inventory, capsys, crashed):
     first = ("2026-10-30T00:00:00Z [ci] running a.journey.mjs\n" if crashed
              else _log("a", 30, 3, passed=2))
     selection = "(whole journey)" if crashed else "copy@desktop-fast"
+    # The retry's footer must never pass for the first attempt's runtime.
     retried = (first + f"2026-10-30T00:01:00Z [ci] retrying a.journey.mjs: {selection} (budget 180s)\n"
-               + "2026-10-30T00:01:30Z a: 1/1 passed; timelines in /tmp/attempt-2/a\n"
-               + "2026-10-30T00:01:30Z ::warning title=UI journey passed on retry::a recovered\n")
-
-    def gh(command, **kwargs):
-        if command[:3] == ["gh", "repo", "view"]:
-            return "owner/repo\n"
-        if command[:3] == ["gh", "run", "view"]:
-            return _run_state(command)
-        # Validate a clean run first too: no partial refresh may be written.
-        return _archive(_log("a", 30, 3) + _log("b", 10, 2)
-                        if command[2].endswith("/10/logs") else retried)
-
-    monkeypatch.setattr(ci.subprocess, "check_output", gh)
-    with pytest.raises(ValueError, match="Run 20 contained retries.*cannot be used for runtime weights"):
-        ci.refresh_weights([10, 20], path)
-    assert path.read_bytes() == original
+               + "2026-10-30T00:01:30Z a: 3/3 passed; timelines in /tmp/attempt-2/a\n"
+               + "2026-10-30T00:01:30Z ::warning title=UI journey passed on retry::a recovered\n"
+               + _log("b", 50, 2))
+    monkeypatch.setattr(ci.subprocess, "check_output", _gh({
+        10: _log("a", 30, 3) + _log("b", 10, 2), 20: retried}))
+    path = tmp_path / "weights.json"
+    ci.refresh_weights([10, 20], path)
+    # Nothing from run 20's retried job is used, not even its clean b.
+    assert json.loads(path.read_text())["seconds"] == {"a.journey.mjs": 30, "b.journey.mjs": 10}
+    assert "run 20: skipping" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("attempt", [2, 3])
@@ -640,44 +682,15 @@ def test_refresh_refuses_reruns_before_downloading_partial_logs(
     assert not any(command[:2] == ["gh", "api"] for command in calls)
 
 
-@pytest.mark.parametrize("stems", [("a",), ("a", "c")])
-def test_refresh_refuses_partial_or_wrong_inventory_even_after_a_complete_run(
-        tmp_path, monkeypatch, refresh_inventory, stems):
-    # The existing weights may already be partial: expected coverage comes from files.
-    path = _weights(tmp_path, {"a.journey.mjs": 123})
-    original = path.read_bytes()
-
-    def gh(command, **kwargs):
-        if command[:3] == ["gh", "repo", "view"]:
-            return "owner/repo\n"
-        if command[:3] == ["gh", "run", "view"]:
-            return _run_state(command)
-        selected = ("a", "b") if command[2].endswith("/10/logs") else stems
-        return _archive("".join(_log(stem, 30, 3 if stem == "a" else 2) for stem in selected))
-
-    monkeypatch.setattr(ci.subprocess, "check_output", gh)
-    with pytest.raises(ValueError, match=r"Run 20.*journey coverage.*missing.*b\.journey\.mjs") as error:
-        ci.refresh_weights([10, 20], path)
-    if "c" in stems:
-        assert "unexpected" in str(error.value) and "c.journey.mjs" in str(error.value)
-    assert path.read_bytes() == original
-
-
-def test_refresh_must_not_merge_partial_runs_into_full_coverage(tmp_path, monkeypatch, refresh_inventory):
-    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456})
-    original = path.read_bytes()
-
-    def gh(command, **kwargs):
-        if command[:3] == ["gh", "repo", "view"]:
-            return "owner/repo\n"
-        if command[:3] == ["gh", "run", "view"]:
-            return _run_state(command)
-        return _archive(_log("a" if command[2].endswith("/10/logs") else "b", 30, 3))
-
-    monkeypatch.setattr(ci.subprocess, "check_output", gh)
-    with pytest.raises(ValueError, match=r"Run 10.*journey coverage.*missing.*b\.journey\.mjs"):
-        ci.refresh_weights([10, 20], path)
-    assert path.read_bytes() == original
+def test_refresh_combines_runs_that_each_lack_a_file(tmp_path, monkeypatch, refresh_inventory):
+    # A push to main runs only the journeys its change touched.
+    monkeypatch.setattr(ci.subprocess, "check_output", _gh({
+        10: _log("a", 30, 3), 20: _log("b", 10, 2), 30: _log("a", 50, 3)}))
+    path = tmp_path / "weights.json"
+    ci.refresh_weights([10, 20, 30], path)
+    data = json.loads(path.read_text())
+    assert data["seconds"] == {"a.journey.mjs": 40, "b.journey.mjs": 10}
+    assert data["source_runs"] == [10, 20, 30]
 
 
 def test_refresh_detects_retry_after_unterminated_output_line(tmp_path, monkeypatch, refresh_inventory):
@@ -696,61 +709,20 @@ def test_refresh_detects_retry_after_unterminated_output_line(tmp_path, monkeypa
         return _archive(log)
 
     monkeypatch.setattr(ci.subprocess, "check_output", gh)
-    with pytest.raises(ValueError, match="Run 10 contained retries.*cannot be used for runtime weights"):
+    with pytest.raises(ValueError, match="No usable UI journey measurements.*no weights were replaced"):
         ci.refresh_weights([10], path)
     assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize("revision", [None, "", "main", "abc", "z" * 40])
-def test_runtime_refresh_refuses_unidentified_source_revision(revision, monkeypatch):
-    monkeypatch.setattr(ci.subprocess, "run", lambda *args, **kwargs:
-                        pytest.fail("invalid revisions must not invoke git"))
-    with pytest.raises(ValueError, match="no valid source revision"):
-        ci.require_matching_workload(10, revision)
-
-
-@pytest.mark.parametrize("diff_code,untracked", [(0, ""), (1, ""), (128, ""), (0, "frontend/tests/journeys/lib/new.mjs\n")])
-def test_runtime_refresh_checks_workload_not_just_case_counts(monkeypatch, diff_code, untracked):
-    calls = []
-
-    def git(command, **kwargs):
-        calls.append(command)
-        code = diff_code if command[1] == "diff" else 0
-        return ci.subprocess.CompletedProcess(command, code, stdout="" if command[1] == "diff" else untracked)
-
-    monkeypatch.setattr(ci.subprocess, "run", git)
-    if diff_code or untracked:
-        with pytest.raises(ValueError, match="workload differs.*no weights were replaced"):
-            ci.require_matching_workload(10, "a" * 40)
-    else:
-        ci.require_matching_workload(10, "a" * 40)
-    assert calls[0][:5] == ["git", "diff", "--quiet", "a" * 40, "--"]
-    assert {"app", "fluid", "frontend", "browser-mcp", "tools", "scripts/devloop"} <= set(calls[0])
-    assert ":(exclude)scripts/devloop/ci.py" in calls[0]
-    assert ":(exclude)scripts/devloop/journey_weights.json" in calls[0]
-
-
-def test_refresh_refuses_different_revision_workload_before_logs_or_writing(tmp_path, monkeypatch, refresh_inventory):
-    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456})
+def test_refresh_refuses_a_run_without_a_source_revision(tmp_path, monkeypatch, refresh_inventory, revision):
+    path = _weights(tmp_path, {"a.journey.mjs": 123})
     original = path.read_bytes()
-    checked = []
-
-    def gh(command, **kwargs):
-        if command[:3] == ["gh", "repo", "view"]:
-            return "owner/repo\n"
-        assert command[:3] == ["gh", "run", "view"]  # no archive download on mismatch
-        return _run_state(command)
-
-    def mismatch(run_id, revision):
-        checked.append((run_id, revision))
-        raise ValueError("workload differs")
-
-    monkeypatch.setattr(ci.subprocess, "check_output", gh)
-    monkeypatch.setattr(ci, "require_matching_workload", mismatch)
-    with pytest.raises(ValueError, match="workload differs"):
+    monkeypatch.setattr(ci.subprocess, "check_output", _gh({10: _log("a", 30, 3)}, headSha=revision))
+    with pytest.raises(ValueError, match="no valid source revision"):
         ci.refresh_weights([10], path)
-    assert checked == [(10, "a" * 40)]
     assert path.read_bytes() == original
+
 
 @pytest.mark.parametrize("metadata", [
     {"event": "pull_request"},
@@ -780,67 +752,151 @@ def test_refresh_refuses_ambiguous_checkout_before_logs_or_writing(
     assert path.read_bytes() == original
 
 
+def _git(root, *args):
+    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+
+
 @pytest.fixture
 def workload_repo(tmp_path, monkeypatch):
-    """Exercise the real git pathspec, not a mocked successful diff."""
+    """A real repository with two journeys, a module only one imports, and shared runtime."""
     root = tmp_path / "repo"
-    root.mkdir()
+    journeys = root / "frontend/tests/journeys"
+    (journeys / "lib").mkdir(parents=True)
+    (journeys / "runner.mjs").write_text("export const run = 1;\n")
+    (journeys / "lib/geometry.mjs").write_text("import { run } from '../runner.mjs';\n")
+    (journeys / "shell-geometry.journey.mjs").write_text(
+        "import { run } from './runner.mjs';\nimport './lib/geometry.mjs';\n")
+    (journeys / "other.journey.mjs").write_text("import { run } from './runner.mjs';\n")
+    (root / "app/core").mkdir(parents=True)
+    (root / "app/core/runtime.py").write_text("SPEED = 1\n")
+    (root / "docs").mkdir()
+    (root / "docs/notes.md").write_text("notes\n")
+    (root / ".github/workflows").mkdir(parents=True)
+    (root / ".github/workflows/ci-frontend.yml").write_text("env:\n  JOURNEY_SHEETS: '0'\n")
+    (root / "scripts/devloop").mkdir(parents=True)
+    (root / "scripts/devloop/ci.py").write_text("SHEETS_DEFAULT = '0'\n")
+    (root / "scripts/devloop/journey_weights.json").write_text("{}\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "old")
     monkeypatch.setattr(ci, "ROOT", root)
-
-    def git(*arguments):
-        return ci.subprocess.check_output(["git", *arguments], cwd=root, text=True).strip()
-
-    def commit():
-        git("add", ".")
-        git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
-            "-c", "commit.gpgsign=false", "commit", "-m", "Test workload")
-        return git("rev-parse", "HEAD")
-
-    git("init", "-q")
-    for name in ("app/feature.py", "frontend/tests/journeys/a.journey.mjs",
-                 "fluid/tests/fixtures/fake_claude_script.py",
-                 "fluid/tests/fixtures/fake_guard_ready.py"):
-        path = root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("// baseline workload\n")
-    return root, commit(), commit
+    monkeypatch.setattr(ci, "JOURNEYS", journeys)
+    monkeypatch.setattr(ci, "case_count", lambda path, *, strict=False: 22)
+    path = _weights(tmp_path, {"shell-geometry.journey.mjs": 124.04, "other.journey.mjs": 50},
+                    counts={"shell-geometry.journey.mjs": 22, "other.journey.mjs": 22})
+    return root, _git(root, "rev-parse", "HEAD"), path
 
 
-def test_runtime_refresh_accepts_metadata_only_commits(workload_repo):
-    root, revision, commit = workload_repo
-    for name in (
-        "docs/ci/pr-checks.md", "app/README.md", "frontend/docs/development.md",
-        "frontend/tests/journeys/README.md", "frontend/tests/journeys/map.json",
-        "frontend/tests/journeys/select.mjs", "frontend/tests/journeys/select.test.mjs",
-        "frontend/tests/journeys/lib/boot.test.mjs", "frontend/src/lib/panel.test.ts",
-        "frontend/src/lib/panel.spec.ts", "fluid/tests/unit/test_unit.py", "fluid/tests/conftest.py",
-        "tools/tests/unit.test.ts", "browser-mcp/tests/unit.test.ts", "tests/scripts/test_new.py",
-        "frontend/src/lib/__tests__/panel.test.ts",
-    ):
-        path = root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("unrelated metadata or unit test\n")
-    commit()
-    ci.require_matching_workload(10, revision)
+def test_journey_modules_follow_relative_imports(workload_repo):
+    assert ci.journey_modules() == {
+        "other.journey.mjs": {"frontend/tests/journeys/other.journey.mjs",
+                              "frontend/tests/journeys/runner.mjs"},
+        "shell-geometry.journey.mjs": {"frontend/tests/journeys/shell-geometry.journey.mjs",
+                                       "frontend/tests/journeys/lib/geometry.mjs",
+                                       "frontend/tests/journeys/runner.mjs"},
+    }
 
 
-@pytest.mark.parametrize("name", [
-    "app/feature.py", "fluid/fluid/core/engine.py", "frontend/src/lib/Panel.svelte",
-    "frontend/tests/journeys/a.journey.mjs", "frontend/tests/journeys/lib/app.mjs",
-    "frontend/package-lock.json", "requirements.txt", "scripts/devloop/fake_claude/cli.py",
-    "browser-mcp/src/index.ts", "tools/src/index.ts",
-    "fluid/tests/fixtures/fake_claude_script.py", "fluid/tests/fixtures/fake_guard_ready.py",
-    "fluid/tests/fixtures/fake_provider_server.py", "frontend/tests/flight-recorder/record.mjs",
-    "browser-mcp/tests/fixtures/frame.html", "tools/tests/fixtures/reply.json",
-    "frontend/src/lib/__tests__/fixtures/reply.json",
+def test_changed_workload_reads_committed_uncommitted_and_untracked_changes(workload_repo, capsys):
+    root, old, _ = workload_repo
+    assert ci.changed_workload(10, old) == []
+    (root / "docs/notes.md").write_text("only documentation\n")
+    (root / "app/core/runtime.py").write_text("SPEED = 2\n")
+    (root / "app/core/new.py").write_text("")
+    assert ci.changed_workload(10, old) == ["app/core/new.py", "app/core/runtime.py"]
+    assert ci.changed_workload(10, "f" * 40) is None
+    assert "cannot compare its revision" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("change,kept", [
+    # The reviewer's case: an old green run timed shell-geometry at the same 22
+    # cases, but the shared runtime has changed since, so 74.81s must not
+    # replace the current 124.04s.
+    ("app/core/runtime.py", True),
+    ("frontend/tests/journeys/runner.mjs", True),
+    ("frontend/tests/journeys/lib/geometry.mjs", True),
+    # Another journey's own file does not change what shell-geometry runs.
+    ("frontend/tests/journeys/other.journey.mjs", False),
+    ("docs/notes.md", False),
 ])
-@pytest.mark.parametrize("committed", [False, True])
-def test_runtime_refresh_rejects_producing_changes(workload_repo, name, committed):
-    root, revision, commit = workload_repo
-    path = root / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("changed workload even with identical case counts\n")
-    if committed:
-        commit()
-    with pytest.raises(ValueError, match="workload differs"):
-        ci.require_matching_workload(10, revision)
+def test_same_case_count_changed_workload_keeps_the_current_weight(
+        workload_repo, monkeypatch, capsys, change, kept):
+    root, old, path = workload_repo
+    (root / change).write_text((root / change).read_text() + "// slower now\n")
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qam", "new")
+    log = _log("shell-geometry", 74.81, 22) + _log("other", 40, 22)
+    monkeypatch.setattr(ci.subprocess, "check_output", _gh({42664620034: log}, headSha=old))
+    if change.startswith("app/") or change.endswith("runner.mjs"):
+        # Every journey depends on it, so no sample from the run is usable.
+        original = path.read_bytes()
+        with pytest.raises(ValueError, match="No usable UI journey measurements"):
+            ci.refresh_weights([42664620034], path)
+        assert path.read_bytes() == original
+        err = capsys.readouterr().err
+        if change.startswith("app/"):
+            assert f"shared journey runtime changed since the run ({change})" in err
+        else:
+            assert "shell-geometry.journey.mjs or a module it imports changed" in err
+            assert "other.journey.mjs or a module it imports changed" in err
+        return
+    ci.refresh_weights([42664620034], path)
+    seconds = json.loads(path.read_text())["seconds"]
+    assert seconds["shell-geometry.journey.mjs"] == (124.04 if kept else 74.81)
+    assert seconds["other.journey.mjs"] == (50 if change.endswith("other.journey.mjs") else 40)
+    if kept:
+        assert "shell-geometry.journey.mjs or a module it imports changed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("change,edit", [
+    # A workflow-only change that turns on contact sheets makes every journey
+    # slower at the same case count.
+    (".github/workflows/ci-frontend.yml", ("JOURNEY_SHEETS: '0'", "JOURNEY_SHEETS: '1'")),
+    # So does changing a runner default in the planner script.
+    ("scripts/devloop/ci.py", ("SHEETS_DEFAULT = '0'", "SHEETS_DEFAULT = '1'")),
+])
+def test_execution_settings_change_rejects_every_sample(workload_repo, monkeypatch, capsys, change, edit):
+    root, old, path = workload_repo
+    (root / change).write_text((root / change).read_text().replace(*edit))
+    _git(root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qam", "new")
+    assert ci.changed_workload(10, old) == [change]
+    monkeypatch.setattr(ci.subprocess, "check_output",
+                        _gh({10: _log("shell-geometry", 74.81, 22) + _log("other", 40, 22)}, headSha=old))
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match="No usable UI journey measurements"):
+        ci.refresh_weights([10], path)
+    assert path.read_bytes() == original
+    assert f"shared journey runtime changed since the run ({change})" in capsys.readouterr().err
+
+
+def test_weights_file_alone_is_not_workload(workload_repo):
+    root, old, _ = workload_repo
+    (root / "scripts/devloop/journey_weights.json").write_text('{"seconds": {}}\n')
+    assert ci.changed_workload(10, old) == []
+
+
+def test_shared_runtime_change_refuses_before_downloading_logs(
+        tmp_path, monkeypatch, refresh_inventory, capsys):
+    refresh_inventory.append("app/core/runtime.py")
+    path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456})
+    original = path.read_bytes()
+    calls = []
+
+    def gh(command, **kwargs):
+        calls.append(command)
+        return _gh({10: _log("a", 30, 3)})(command, **kwargs)
+
+    monkeypatch.setattr(ci.subprocess, "check_output", gh)
+    with pytest.raises(ValueError, match="No usable.*no weights were replaced"):
+        ci.refresh_weights([10], path)
+    assert path.read_bytes() == original
+    assert not any(command[:2] == ["gh", "api"] for command in calls)
+    assert "run 10: shared journey runtime changed since the run (app/core/runtime.py)" in capsys.readouterr().err
+
+
+def test_workload_paths_ignore_docs_and_metadata_but_not_runtime():
+    paths = ci.WORKLOAD_PATHS
+    assert {"app", "fluid", "frontend", "browser-mcp", "tools", "scripts/devloop"} <= set(paths)
+    assert ":(exclude)scripts/devloop/ci.py" not in paths
+    assert ".github/workflows/ci-frontend.yml" in paths
+    assert ":(exclude)scripts/devloop/journey_weights.json" in paths
+    assert ":(exclude)frontend/tests/journeys/map.json" in paths

@@ -587,11 +587,66 @@ def test_windows_denied_process_does_not_turn_complete_table_into_unknown(monkey
     assert ss._psutil_references(time.monotonic() + 2, notes, windows=False) is None
 
 
+def windows_table(monkeypatch, holder=None, count=150, delay=0.03):
+    """A desktop-sized psutil table where open_files is slow and some rows are denied."""
+    from types import SimpleNamespace
+
+    def slow_files():
+        time.sleep(delay)  # psutil walks the system handle table per process on Windows
+        return []
+    table = [Denied(1000 + pid) if pid % 10 == 0 else
+             SimpleNamespace(pid=1000 + pid, name=lambda: "svchost.exe", cwd=lambda: "C:\\Windows",
+                             open_files=slow_files, cmdline=lambda: ["svchost.exe", "-k"])
+             for pid in range(count)] + ([holder] if holder else [])
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter(table))
+    monkeypatch.setattr(ss, "_process_references", lambda deadline, diagnostics=None:
+                        ss._psutil_references(deadline, diagnostics, windows=True))
+    monkeypatch.setattr(ss, "_session_rows", lambda key: [{"id": key, "is_active": False, "open_turn": False}])
+
+
+def test_windows_scan_finishes_on_slow_process_table(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "projects"
+    path = session(root)
+    windows_table(monkeypatch)
+    sweep = ss.ScratchSweep(root)
+    try:
+        with caplog.at_level("INFO", logger=ss.__name__):
+            removed = sum(sweep.step() for _ in range(2))
+    finally:
+        sweep.close()
+    assert "disabled=process scan deadline reached" not in caplog.text
+    assert removed == 1 and not path.exists()
+    assert "Session scratch pass: removed=1 " in caplog.text and "disabled=none" in caplog.text
+
+
+@pytest.mark.parametrize("field", ["cwd", "cmdline"])
+def test_windows_scan_keeps_folder_named_by_live_process(tmp_path, monkeypatch, field):
+    from types import SimpleNamespace
+    root = tmp_path / "projects"
+    path = session(root)
+    holder = SimpleNamespace(pid=4242, name=lambda: "python.exe", open_files=list,
+                             cwd=lambda: str(path) if field == "cwd" else "C:\\",
+                             cmdline=lambda: ["python.exe", str(path / "payload") if field == "cmdline" else "-V"])
+    windows_table(monkeypatch, holder)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 0
+    finally:
+        sweep.close()
+    assert (path / "payload").read_bytes() == b"data"
+    assert sweep.disabled_reason == "none"
+    assert sweep.reasons["process_reference pid=4242 name=python.exe"] == 1
+
+
 @pytest.mark.skipif(os.name != "nt", reason="real Windows handle sharing semantics")
 @pytest.mark.parametrize("share_delete", [False, True])
 def test_windows_opaque_handle_holder_survives_and_sibling_drains(tmp_path, monkeypatch, share_delete):
     root = tmp_path / "projects"
     held = session(root, "held")
+    # Listed before the held payload: one held entry keeps the whole folder.
+    (held / "a-sibling").write_bytes(b"data")
+    os.utime(held / "a-sibling", (1, 1))
+    os.utime(held, (1, 1))
     good = session(root, "good")
     script = """
 import ctypes, sys
@@ -617,9 +672,51 @@ sys.stdin.read(1)
         try:
             assert sweep.step() == 1
             assert (held / "payload").read_bytes() == b"data"
+            assert (held / "a-sibling").read_bytes() == b"data"
             assert not good.exists()
-            assert sweep.retained == 1
+            assert sweep.retained == 1 and sweep.reasons["entry open elsewhere"] == 1
         finally:
             sweep.close()
     finally:
+        child.communicate("x", timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows handle sharing semantics")
+def test_windows_handle_opened_between_paced_slices_keeps_remaining_folder(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    path = session(root, "paced")
+    for name in ("f0", "f1", "f2"):
+        (path / name).write_bytes(b"data")
+        os.utime(path / name, (1, 1))
+    os.utime(path, (1, 1))
+    # The path arrives on stdin, so neither cwd nor cmdline names the folder.
+    script = """
+import ctypes, sys
+from ctypes import wintypes
+kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                              wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+kernel.CreateFileW.restype = wintypes.HANDLE
+handle = kernel.CreateFileW(sys.stdin.readline().strip(), 0x80000000, 7, None, 3, 0x80, None)
+if handle == wintypes.HANDLE(-1).value:
+    raise ctypes.WinError(ctypes.get_last_error())
+print('ready', flush=True)
+sys.stdin.read(1)
+"""
+    child = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, text=True, cwd=tmp_path)
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter([psutil.Process(child.pid)]))
+    monkeypatch.setattr(ss, "_session_rows", lambda key: [{"id": key, "is_active": False, "open_turn": False}])
+    monkeypatch.setattr(ss, "MAX_SLICE_FILES", 1)
+    sweep = ss.ScratchSweep(root)
+    try:
+        assert sweep.step() == 0 and not (path / "f0").exists()  # first paced slice
+        child.stdin.write(str(path / "payload") + "\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "ready"
+        assert sweep.step() == 0
+        assert sweep.reasons["entry open elsewhere"] == 1
+        assert all((path / name).read_bytes() == b"data" for name in ("f1", "f2", "payload"))
+    finally:
+        sweep.close()
         child.communicate("x", timeout=5)

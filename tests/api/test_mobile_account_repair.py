@@ -161,6 +161,29 @@ def test_changed_or_unapproved_authority_never_repaired(repair, test_db, monkeyp
     assert unconsumed(test_db) == 0
 
 
+def test_repair_after_recovery_is_checked_now_not_refused_from_memory(repair, test_db, monkeypatch):
+    """Re-pairing exchanges a credential: a refusal remembered from before
+    the account was recovered must not reject it (#1424)."""
+    client, device, _, _ = repair
+    unregister(repair)
+    grant()
+    monkeypatch.setattr(type(settings), 'mobile_account_hub_verify_ttl_seconds', property(lambda self: 90))
+    monkeypatch.setattr(account_hub, 'call', lambda *a, **k: {
+        'active': False, 'account_id': ACCOUNT, 'device_id': PHONE})
+    assert client.post('/api/v1/mobile/register', json=payload(device)).status_code == 401
+    assert unconsumed(test_db) == 0
+    checks = []
+
+    def recovered(binding, method, suffix, body=None):
+        checks.append(suffix)
+        return {'active': True, 'account_id': ACCOUNT, 'device_id': PHONE}
+
+    monkeypatch.setattr(account_hub, 'call', recovered)
+    response = client.post('/api/v1/mobile/register', json=payload(device))
+    assert response.status_code == 200, response.text
+    assert checks == ['devices/' + PHONE]
+
+
 @pytest.mark.parametrize('purpose,expires', [('runner', 1), ('controller', -1)])
 def test_wrong_purpose_or_expired_grant_cannot_restore_key(repair, test_db, purpose, expires):
     client, device, _, _ = repair

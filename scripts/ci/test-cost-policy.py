@@ -152,7 +152,7 @@ class CostPolicyTests(unittest.TestCase):
         # back to the last commit main-suite passed on.
         self.assertEqual(checkout["with"], {"fetch-depth": "${{ github.event_name == 'pull_request' && 2 || 0 }}"})
         self.assertEqual(select["env"], {"GH_TOKEN": "${{ github.token }}"})
-        self.assertEqual(select["run"], 'python3 -m scripts.devloop.ci matrix --shards 16 >> "$GITHUB_OUTPUT"')
+        self.assertEqual(select["run"], 'python3 -m scripts.devloop.ci matrix --shards 18 >> "$GITHUB_OUTPUT"')
         for step in plan["steps"]:
             for forbidden in ("if", "continue-on-error", "shell"):
                 self.assertNotIn(forbidden, step)

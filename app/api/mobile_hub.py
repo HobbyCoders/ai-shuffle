@@ -324,8 +324,11 @@ def enroll(body: EnrollRequest):
     except ValueError:
         raise HTTPException(403, 'Ticket identity does not match this installation') from None
     identity['server_id'] = binding['server_id']
+    # A ticket the hub just exchanged is a new sign-in: ask the hub now, not a
+    # refusal remembered from before it (#1424).
     account_hub.require_active({'server_id': binding['server_id'],
-                                'account_id': identity['account_id'], 'hub_device_id': identity['device_id']})
+                                'account_id': identity['account_id'], 'hub_device_id': identity['device_id']},
+                               fresh=True)
     key = 'aim_' + secrets.token_urlsafe(32)
     from app.core.device_keys import KEY_LIFETIME_DAYS
     expires = datetime.now(timezone.utc) + timedelta(days=KEY_LIFETIME_DAYS)
