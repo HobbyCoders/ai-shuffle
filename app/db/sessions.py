@@ -1891,19 +1891,98 @@ def delete_session(session_id: str, *, expected_project_id: Optional[str] = None
         # commands, and any git failure never blocks the delete.
         _cleanup_working_set_ref(session_id)
         _cleanup_pending_wakeups(session_id)
-    deleted = _delete_session_rows(session_id, expected_project_id)
+    deleted, remembered = _delete_session_rows(session_id, expected_project_id, _deleting_worker())
     if conditional and deleted:
         _cleanup_working_set_ref(session_id, row=deleted)
         _cleanup_pending_wakeups(session_id)
+    if remembered:
+        _publish_owner_deletion(session_id)
     return bool(deleted)
 
 
-def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
+def _deleting_worker() -> tuple:
+    """``(device_id, instance_id, error)`` for the owner check, before the delete's transaction.
+
+    Python only: no connection and no statement. The identity and instance id
+    are cached in memory after their first read, which happens here and never
+    under the delete's locks. If either cannot be read, the ids are None: the
+    delete then runs as on main and remembers nothing.
+    """
+    from app.network import engine
+
+    ctx = engine._context
+    try:
+        if ctx is not None:
+            device_id = ctx.device_id
+        else:
+            from app.network import identity
+            device_id = identity.load(create=False).device_id
+        return device_id, engine._my_instance_id(), None
+    except Exception as exc:  # noqa: BLE001 - never fail a delete over the fact
+        return None, None, exc
+
+
+def _remember_owner_deletion(cursor, session_id: str, row: dict, worker: tuple) -> bool:
+    """Record, in the delete's transaction, that this worker deleted its own chat (#1308).
+
+    Only the owner writes it: the locked row names this device (or, for a
+    legacy row, this instance), the catalog publisher's rule. A forwarded
+    delete runs on the owner; a mirror, a materialized tombstone or a stale row
+    of another owner writes nothing. Incoming sync never recreates a chat with
+    this fact (``engine._refuse_deleted_session``) and the tombstone stays
+    pending until it is recorded (``engine.publish_session_deletions``). It is
+    pending at once when the network already holds a record of the chat; a
+    chat it never knew has none, and gets a tombstone only if one arrives.
+
+    Writing it can never fail the delete. One read of network_state on the
+    delete's own connection (no lock) names the network that authorizes the
+    fact; off a network nothing is written. A worker that cannot read its
+    own identity cannot tell whether it owns the chat, so it remembers nothing
+    and warns: that delete behaves as on main. The writes run in a savepoint,
+    so a failed statement leaves the delete's transaction usable.
+    """
+    device_id, instance_id, error = worker
+    cursor.execute("SELECT network_id FROM network_state WHERE id = 1")
+    network = cursor.fetchone()
+    if network is None:
+        return False
+    if device_id is None:
+        logger.warning("Session %s was deleted without remembering it for sync: this worker's "
+                       "identity could not be read (%s)", session_id, error)
+        return False
+    owner = row.get("owner_device_id")
+    if owner != device_id and (owner or (row.get("instance_id") or "") != instance_id):
+        return False
+    from app.db import network as network_store
+    from app.db.database import _savepoint
+
+    try:
+        with _savepoint(cursor, "sp_owner_deletion"):
+            known = network_store.get_record(cursor, "sessions", session_id) is not None
+            network_store.remember_session_deletion(cursor, session_id, pending=known,
+                                                    network_id=network["network_id"])
+    except Exception:  # noqa: BLE001 - rolled back to the savepoint; the delete goes on
+        logger.warning("Could not remember the deletion of session %s for sync", session_id, exc_info=True)
+        return False
+    return known
+
+
+def _publish_owner_deletion(session_id: str) -> None:
+    """Publish the owner's tombstone now; the owner scan retries what this cannot."""
+    try:
+        from app.network import engine
+
+        engine.publish_session_deletions(session_ids=[session_id])
+    except Exception:  # noqa: BLE001 — the delete has committed and the fact is durable
+        logger.warning("Could not publish the deletion of session %s yet", session_id, exc_info=True)
+
+
+def _delete_session_rows(session_id: str, expected_project_id: Optional[str], worker: tuple):
     """The transaction of :func:`delete_session`.
 
-    Unconditional: returns whether the row was deleted. Conditional: returns
-    the deleted row (for post-commit cleanup), or None when the chat is gone
-    or now belongs to another project.
+    Returns ``(row, pending)``: the deleted row (for post-commit cleanup),
+    or None when the chat is gone or, conditional, now belongs to another
+    project; and whether the owner's tombstone waits to be published.
     """
     _ph = ph()
     with get_db() as conn:
@@ -1933,7 +2012,7 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
         if expected_project_id is not None and (row is None or row["project_id"] != expected_project_id):
             # Re-checked under the session lock: a chat moved to another
             # project after the caller listed it keeps its data (review S10).
-            return None
+            return None, False
         # Under this chat's counter: a mirror op that arrives after this
         # delete commits must store nothing (#1222).
         mark_sessions_deleted([session_id])
@@ -1956,12 +2035,11 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str]):
                 f"DELETE FROM {table} WHERE session_id = {_ph}", (session_id,)
             )
         cursor.execute(f"DELETE FROM sessions WHERE id = {_ph}", (session_id,))
-        removed = cursor.rowcount > 0
-        if removed:
-            record_deleted_chat(cursor, session_id)
-        if expected_project_id is not None:
-            return dict(row) if removed else None
-        return removed
+        if cursor.rowcount <= 0:
+            return None, False
+        record_deleted_chat(cursor, session_id)
+        deleted = dict(row)
+        return deleted, _remember_owner_deletion(cursor, session_id, deleted, worker)
 
 
 # Durable proof that a chat was deleted here (#1443): one settled ``turns`` row

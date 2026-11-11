@@ -437,7 +437,7 @@ def leave_network() -> dict:
                       "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
                       "network_joins", "network_member_names", "network_instance_aliases", "network_members",
                       "network_transcript_backfill", "network_transcript_backfill_state",
-                      "network_transcript_repairs"):
+                      "network_transcript_repairs", "network_session_deletions"):
             cursor.execute(f"DELETE FROM {table}")
         cursor.execute("DELETE FROM sync_blobs WHERE present = FALSE")
         store.delete_state(_conn=conn)
@@ -746,6 +746,10 @@ def materialize(
             record_deleted_chat(cursor, record_id)
         return None
     record = dict(record)
+    if coll.name == "sessions":
+        _refuse_deleted_session(cursor, record_id)
+    elif coll.name in _SESSION_CHILD_COLLECTIONS:
+        _refuse_child_of_deleted_session(cursor, record)
     if coll.name == "session_events":
         # One rule for merged delta runs on every apply path (#1278).
         from app.db.session_events import fit_mirrored_delta
@@ -1140,6 +1144,123 @@ def record_after_commit(collection: str, record_id: str) -> None:
         changed = record(cursor, collection, record_id, row, ctx=ctx) is not None
     if changed:
         kick()
+
+
+# ---------------------------------------------------------------------------
+# Chats this worker deleted as their owner (#1308)
+# ---------------------------------------------------------------------------
+# The owner's delete writes ``network_session_deletions`` in its own
+# transaction. The fact, not the state of the moment (outbox, local sync
+# record, placement, the route by which this worker became owner), decides:
+# incoming sync never recreates the chat, and its tombstone is published until
+# it is recorded, over whichever worker signed the chat's record.
+
+# Chats whose record or child sync refused here because of the fact: only a
+# hint that publishes sooner after an apply. The obligation itself is derived
+# from durable state by ``store.owe_session_tombstones`` on every owner scan.
+_refused_session_ids: set = set()
+_refused_lock = threading.Lock()
+
+# Session children sync applies through ``materialize``; their parent is
+# ``record["session_id"]``. Transcript events are checked in bulk by
+# ``_lock_mirror_event_counters``.
+_SESSION_CHILD_COLLECTIONS = frozenset({"session_tags", "session_runtime", "session_active",
+                                        "pending_interactions"})
+
+
+def _note_refused_sessions(session_ids: Iterable[str]) -> None:
+    with _refused_lock:
+        _refused_session_ids.update(session_ids)
+
+
+def _refuse_child_of_deleted_session(cursor, record: Mapping[str, Any]) -> None:
+    """Consume a child of a chat this worker deleted as owner: store nothing, raise no error.
+
+    A session foreign key would otherwise abort the whole page or copy, and a
+    table without one would keep an orphan. The child proves the network
+    still knows the chat, so its tombstone is owed.
+    """
+    session_id = record.get("session_id")
+    if isinstance(session_id, str) and store.deleted_session_ids(cursor, [session_id]):
+        _note_refused_sessions([session_id])
+        raise _KeepObservation
+
+
+def _refuse_deleted_session(cursor, session_id: str) -> None:
+    """Keep a chat this worker deleted as its owner deleted against an incoming row.
+
+    Runs under the apply's N and before the row is written. S first: a delete
+    of this chat that is still running holds the row, so this waits for it and
+    then reads its committed fact. A row present again was recreated here (the
+    fact is stale and dropped). Otherwise the incoming record is kept for
+    forwarding but not materialized, and the tombstone is marked for
+    publication: it is signed after this clock was observed, so it outranks it.
+    """
+    cursor.execute("SELECT id FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+    present = cursor.fetchone() is not None
+    fact = store.session_deletion(cursor, session_id)
+    if fact is None:
+        return
+    if present:
+        store.forget_session_deletion(cursor, session_id)
+        return
+    store.set_session_deletion_pending(cursor, session_id, True)
+    _note_refused_sessions([session_id])
+    raise _KeepObservation
+
+
+def publish_session_deletions(*, ctx: Optional[NetworkContext] = None,
+                              session_ids: Optional[Iterable[str]] = None) -> int:
+    """Publish the pending tombstones of chats this worker deleted as owner.
+
+    One short transaction per chat, N first then the fact, so no delete or
+    apply waits behind the batch. A tombstone that cannot be recorded yet
+    (outbox held, bootstrap not ready) stays pending for the next owner scan.
+    """
+    ctx = ctx or context()
+    if ctx is None:
+        return 0
+    refused: List[str] = []
+    if session_ids is None:
+        with _refused_lock:
+            refused = sorted(_refused_session_ids)
+            _refused_session_ids.clear()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            # A refusal whose transaction rolled back still owes its tombstone.
+            for session_id in sorted(store.deleted_session_ids(cursor, refused)):
+                store.set_session_deletion_pending(cursor, session_id, True)
+            if session_ids is None:
+                store.owe_session_tombstones(cursor, ctx.device_id)  # the durable obligation (S9)
+            ids = store.pending_session_deletions(cursor, None if session_ids is None else sorted(set(session_ids)))
+            if session_ids is None:
+                store.prune_session_deletions(cursor)
+    except BaseException:
+        _note_refused_sessions(refused)
+        raise
+    published = 0
+    for session_id in ids:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            store.lock_state(cursor)
+            fact = store.session_deletion(cursor, session_id)
+            if fact is None or not fact["pending"]:
+                continue
+            cursor.execute("SELECT 1 FROM sessions WHERE id = %s", (session_id,))
+            if cursor.fetchone() is not None:
+                store.forget_session_deletion(cursor, session_id)  # recreated here since
+                continue
+            existing = store.get_record(cursor, "sessions", session_id)
+            if existing is not None:  # outrank the version seen, not tie it
+                store.observe_clock(cursor, int(existing["clock"]))
+            if record(cursor, "sessions", session_id, None, ctx=ctx, force=True) is None:
+                continue
+            store.set_session_deletion_pending(cursor, session_id, False)
+            published += 1
+    if published:
+        kick()
+    return published
 
 
 # ---------------------------------------------------------------------------
@@ -1686,6 +1807,15 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str], *,
             tuple(unknown),
         )
         gone |= {row["record_id"] for row in cursor.fetchall()}
+    absent = [sid for sid in session_ids if sid not in present]
+    if absent:
+        # A chat this worker deleted as owner may have no record at all
+        # (refused, never synced here): its fact is the durable answer, and
+        # its children prove the network still knows it (#1308).
+        refused = store.deleted_session_ids(cursor, absent)
+        if refused:
+            _note_refused_sessions(refused)
+            gone |= refused
     if gone:
         # Carry the fact to a later reservation in this batch (per-op apply)
         # without another lookup.
@@ -2664,6 +2794,11 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
     try:
         result = _apply_batch(envelopes, ctx=ctx, _pending_streams=_pending_streams,
                               _pending_chunk_limit=_pending_chunk_limit)
+        if _refused_session_ids:
+            try:
+                publish_session_deletions(ctx=ctx)
+            except Exception:  # noqa: BLE001 — the owner scan retries
+                logger.warning("Could not publish refused session deletions", exc_info=True)
         if result._pending_more:
             _wake_pending()
         return result

@@ -991,7 +991,8 @@ def _commit(sid, target, payload, token):
                 from app.db.base import parse_jsonb
                 receipt = (parse_jsonb(session.get("placement")) or {}).get("handoff") or {}
                 held_messages = receipt.get("held_messages", 0)
-                return {"committed": True, **({"held_messages": held_messages} if held_messages else {})}
+                return {"committed": True, "clock": _network_clock(cur),
+                        **({"held_messages": held_messages} if held_messages else {})}
     control._require_owned(sid)
     project = project_resolver.resolve_project_v2(session)
     if project and payload.get("plain_folder") is True:
@@ -1102,7 +1103,40 @@ def _commit(sid, target, payload, token):
     global_events.resources_changed("sessions")
     _announce_owner(sid, target, session)
     engine.kick()
-    return {"committed": True, **({"held_messages": held_messages} if held_messages else {})}
+    with get_db() as conn:
+        clock = _network_clock(conn.cursor())
+    return {"committed": True, "clock": clock, **({"held_messages": held_messages} if held_messages else {})}
+
+
+def _network_clock(cur):
+    """This worker's sync clock, at or past the commit's ownership record (#1308)."""
+    cur.execute("SELECT clock FROM network_state WHERE id=1")
+    row = cur.fetchone()
+    return int(row["clock"]) if row else 0
+
+
+def network_clock():
+    """This worker's sync clock; finalize-wakes carries it like the commit reply."""
+    with get_db() as conn:
+        return _network_clock(conn.cursor())
+
+
+def _observe_commit_clock(clock):
+    """Order the receiver's next writes after the source's commit record (#1308).
+
+    The commit reply, or a source's later finalize-wakes when every reply was
+    lost, reaches the receiver before the source's sync op does. Without this,
+    a delete the new owner makes right away is signed with an older clock than
+    the commit record, which then wins on both workers and brings the chat
+    back. Its own transaction, before the acceptance: N alone
+    (app/db/session_locks.py). An older source sends no clock.
+    """
+    if not isinstance(clock, int) or isinstance(clock, bool) or clock <= 0:
+        return
+    with get_db() as conn:
+        cur = conn.cursor()
+        network_store.lock_state(cur)
+        network_store.observe_clock(cur, clock)
 
 
 # Long Git/history operations must not occupy a single HTTP response: tunnel
@@ -1219,6 +1253,7 @@ async def _handle(payload, peer_device_id):
 async def _handle_phase(payload, peer_device_id):
     sid = str(payload.get("session_id") or "")
     if payload.get("phase") == "finalize-wakes":
+        await run_sync(_observe_commit_clock, payload.get("clock"))
         rows = await run_sync(_finalize_wakes, sid, peer_device_id, payload)
         from app.core import wakeup_service
 
@@ -2139,6 +2174,7 @@ async def _owner_commit(owner, payload):
         if payload.get("token"):
             await run_sync(_discard_history, payload["session_id"], payload["token"])
         raise ValueError(reason)
+    await run_sync(_observe_commit_clock, result.get("clock"))
     return result
 
 
