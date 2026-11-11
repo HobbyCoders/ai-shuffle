@@ -1,8 +1,10 @@
 """Scoped Chat tools. All authorization lives in the broker, not tool risk flags."""
+import asyncio
 import json
 import logging
 
 from app.mcp.inproc import create_tool_server, tool
+from app.core import chat_http_batch
 from app.core.chat_access import AccessDenied, broker
 from app.mcp.sdk_compat import patch_sdk_server
 
@@ -29,8 +31,36 @@ ungranted resources.
 """
 
 
+FAILED = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
+_HTTP_FIELDS = {
+    "grant_id": {"type": "string"},
+    "method": {"type": "string", "description": "GET, HEAD, POST, PUT, PATCH or DELETE."},
+    "path": {"type": "string"},
+    "body": {"type": "string"},
+    "content_type": {"type": "string"},
+}
+HTTP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        **_HTTP_FIELDS,
+        "requests": {
+            "type": "array", "minItems": 1, "maxItems": chat_http_batch.LIMIT,
+            "description": "Several requests in one call; leave the top-level fields blank.",
+            "items": {"type": "object", "properties": _HTTP_FIELDS, "required": ["grant_id", "method", "path"]},
+        },
+    },
+}
+
+
 def create_chat_access_server(session_id: str):
     async def invoke(operation, args):
+        ok, value = await attempt(operation, args)
+        if ok:
+            return {"content": [{"type": "text", "text": json.dumps(value)}]}
+        return {"isError": True, "content": [{"type": "text", "text": value}]}
+
+    async def attempt(operation, args):
+        """``(True, result)`` or ``(False, the message the model sees)``."""
         try:
             if operation == "request":
                 kind = args.get("kind", "")
@@ -72,13 +102,24 @@ def create_chat_access_server(session_id: str):
                 result = await broker.resources(session_id)
             else:
                 result = await broker.run(session_id, args.get("grant_id", ""), operation, args)
-            return {"content": [{"type": "text", "text": json.dumps(result)}]}
+            return True, result
         except AccessDenied as exc:
-            message = str(exc)
+            return False, str(exc)
         except Exception as exc:
             logger.warning("Chat resource operation failed: %s", type(exc).__name__)
-            message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
-        return {"isError": True, "content": [{"type": "text", "text": message}]}
+            return False, FAILED
+
+    async def http_batch(batch):
+        # Each request takes the broker path on its own (grant, scope, its own
+        # one-shot card for a write, revocation); one refusal or failure never
+        # cancels or fails the others. Results return in input order once all settle.
+        settled = await asyncio.gather(*(attempt("http", item) for item in batch), return_exceptions=True)
+        results = []
+        for index, outcome in enumerate(settled):
+            ok, value = outcome if isinstance(outcome, tuple) else (False, FAILED)
+            results.append({"index": index, "ok": True, "result": value} if ok
+                           else {"index": index, "ok": False, "error": value})
+        return {"content": [{"type": "text", "text": json.dumps({"results": results})}]}
 
     @tool("RequestChatAccess", "Show a private card for an SSH machine, Linux/macOS folder or HTTPS service; explain why in purpose. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user at once, NOT access: preparation lasts 24 hours. Host posts the outcome here, or to a subagent's main chat: end your turn or keep working. Never poll, re-request or assume consent. Identical retries reuse pending preparation without extending it; cancelled/expired cards need a new request with user consent. Hints are editable, grant no access and must be known, never guessed; omit unknowns for private entry. Machine hints use only host/port/username as specified below. Call ChatResources first for saved connection IDs, kinds and labels. Pass saved_id alone (without hints or plugin sign-in) to preselect an owned entry for approval, not to grant access. Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named. Without saved_id, machine hints preselect only when host and any supplied port/user match. Approved details stay private, never in results. Folder paths are on this worker (Docker: container path, not an unmounted host path); hints do not create folders. For services, explain the task and required read-only resources so the user can scope a token. Cloudflare prefills its official API endpoint. For a plugin-declared sign-in pass plugin and service instead of hints: ChatHttpRequest attaches its token only to the plugin's declared address. No generic OAuth: plugin-declared sign-ins are the only OAuth. Grants expose only temporary handles, resource kinds, permissions and expiry. ChatResources lists saved IDs, kinds and owner-chosen labels, never addresses or credentials. Reuse via saved_id; unrelated sessions need their own grant. Local Task descendants reuse ancestor handles with unchanged scope, expiry and revocation, under their own confirmation mode; never across workers. Scope, expiry and revocation apply in every permission mode. After a grant, writes, commands and non-GET/HEAD API requests skip confirmation only in bypass mode; otherwise each needs a one-shot card decision. A service grant holds one API key/token, attached privately by ChatHttpRequest with redacted responses; collect no other secret because no tool can consume it privately. Machine access is broad administration as the approved account on the verified SSH target, not a sandbox or local worker shell grant; it can modify code or use that machine's network. Folders support only ChatListFiles, ChatReadFile and ChatWriteFile; commands run only on SSH machine grants; for service scope, read-only methods and redirects see ChatHttpRequest. Follow the private-resource safety rules in the prompt.", {
         "type": "object",
@@ -120,9 +161,15 @@ def create_chat_access_server(session_id: str):
     async def command(args):
         return await invoke("command", args)
 
-    @tool("ChatHttpRequest", "Send one HTTPS request to a granted API service. The worker attaches the private credential; you never see it. path starts with / and stays under the granted address (query allowed). method is GET, HEAD, POST, PUT, PATCH or DELETE; pass body and content_type as empty strings when unused. Read-only grants allow GET/HEAD only. Other methods need a writable grant and, outside bypass permission mode, wait for one-shot approval. Redirects are not followed; the body is bounded to 64 KiB with known encodings of the credential redacted.", {"grant_id": str, "method": str, "path": str, "body": str, "content_type": str})
+    @tool("ChatHttpRequest", "Send an HTTPS request to a granted API service. The worker attaches the private credential; you never see it. path starts with / and stays under the granted address (query allowed). method is GET, HEAD, POST, PUT, PATCH or DELETE; pass body and content_type as empty strings when unused. Read-only grants allow GET/HEAD only. Other methods need a writable grant and, outside bypass permission mode, wait for one-shot approval. Redirects are not followed; the body is bounded to 64 KiB with known encodings of the credential redacted. For independent requests, pass requests (1-8 items with these fields) instead: they run concurrently and return {results: [{index, ok, result or error}]} in order once all finish; one failure does not stop the others.", HTTP_SCHEMA)
     async def http(args):
-        return await invoke("http", args)
+        try:
+            batch = chat_http_batch.items(args)
+        except AccessDenied as exc:
+            return {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
+        if batch is None:
+            return await invoke("http", args)
+        return await http_batch(batch)
 
     tools = [request, resources, listing, read, write, command, http]
     return patch_sdk_server(create_tool_server(name="chat-access", version="1.0.0", tools=tools), tools)

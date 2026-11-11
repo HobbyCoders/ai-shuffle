@@ -154,6 +154,16 @@ Boundaries (`app/core/chat_services.py`):
   path must stay under the granted prefix: dot segments (also percent-encoded),
   encoded slashes/backslashes, empty segments, fragments and spaces are refused,
   and the final URL is re-parsed to confirm scheme, host, port and prefix.
+- One `ChatHttpRequest` call can instead carry `requests`, a list of 1 to 8
+  items with those same fields (top-level fields left blank; anything else is
+  refused). The items run concurrently, each through the same broker checks
+  as a single request: grant, scope, read-only refusal, plugin checks,
+  revocation and, for a write outside Bypass, its own one-shot card (several
+  cards can wait at once). The call returns once every item has settled, with
+  `{"results": [{"index", "ok", "result" | "error"}]}` in input order; one
+  item's refusal or failure never cancels its siblings. The owner gate stands
+  aside only when every item is GET/HEAD, and a saved Deny pattern that
+  matches any item denies the whole call (an Allow pattern must match all).
 - The credential header cannot replace framing/routing headers. Redirects are
   returned, never followed. No proxy, netrc or other worker environment is
   inherited. Only content type/length, location, retry-after, etag and

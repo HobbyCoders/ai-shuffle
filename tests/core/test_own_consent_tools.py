@@ -8,6 +8,7 @@ decision. ``OWN_CONSENT_TOOLS`` lists them; the gate stands aside when their
 own consent covers the call and still asks where the mode skips it.
 """
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -67,6 +68,42 @@ def test_ask_mode_does_not_ask_before_a_tool_that_asks_itself(name, data, mode):
 ])
 def test_bypass_keeps_the_gate_where_the_tools_own_card_is_skipped(name, data, asks):
     assert ap.needs_owner(name, data, SCOPE, permission_mode="bypassPermissions") is asks
+
+
+_GET = {"grant_id": "g", "method": "GET", "path": "/zones"}
+_HEAD = {"grant_id": "g", "method": "head", "path": "/"}
+_POST = {"grant_id": "g", "method": "POST", "path": "/x", "body": "{}"}
+_BLANK = {"grant_id": "", "method": "", "path": "", "body": "", "content_type": ""}
+
+
+@pytest.mark.parametrize("data,asks_in_bypass", [
+    # Every request reads: the grant alone covers the batch in every mode.
+    ({"requests": [_GET, _HEAD]}, False),
+    ({**_BLANK, "requests": [_GET, _HEAD]}, False),
+    ({"requests": json.dumps([_GET, _HEAD])}, False),
+    # One write in the batch: Bypass skips its card, so the gate asks.
+    ({"requests": [_GET, _POST]}, True),
+    ({**_BLANK, "requests": [_POST]}, True),
+    ({"requests": json.dumps([_GET, _POST])}, True),
+    ({"requests": [_GET, {**_GET, "method": None}]}, True),
+    # Malformed or ambiguous batches fail closed, whatever top-level says.
+    ({"method": "GET", "path": "/zones", "requests": [_POST]}, True),
+    ({"method": "GET", "requests": "not json"}, True),
+    ({"requests": [_GET] * 9}, True),
+    ({"requests": [_GET, "GET /"]}, True),
+    ({"requests": {"method": "GET"}}, True),
+    ({"requests": []}, True),
+    # Blank filler beside a single request leaves the single request in charge.
+    ({**_GET, "requests": []}, False),
+    ({**_GET, "requests": [{"grant_id": "", "method": ""}]}, False),
+    ({**_POST, "requests": None}, True),
+])
+def test_batched_http_is_covered_only_when_every_request_reads(data, asks_in_bypass):
+    name = CHAT + "ChatHttpRequest"
+    assert ap.needs_owner(name, data, SCOPE, permission_mode="bypassPermissions") is asks_in_bypass
+    # Outside Bypass a write's own one-shot card is the consent either way.
+    for mode in ("default", "acceptEdits"):
+        assert not ap.needs_owner(name, data, SCOPE, permission_mode=mode)
 
 
 def test_auto_keeps_the_gate_for_screen_access_only():
