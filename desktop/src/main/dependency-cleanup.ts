@@ -27,10 +27,19 @@
  * - leaves runtimes/ (old PostgreSQL majors are kept on purpose), builds/ and
  *   anything it does not recognise alone.
  */
-import { promises as fs } from 'node:fs';
+import type * as FS from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { parseSourceState, type SourceState } from './source-updates';
+
+/**
+ * Electron's unpatched fs, as in source-build.ts and rawFs() in asar.ts. Inside Electron,
+ * node:fs treats `*.asar` files as folders, and every desktop npm set holds Electron's own
+ * dist/resources/default_app.asar. A recursive fs.rm over such a set deleted everything
+ * else and then never settled, so update.lock stayed held until the app quit and every
+ * update check reported that an update was already running.
+ */
+const fs: typeof FS.promises = (process.versions?.electron ? require('original-fs') : require('node:fs')).promises;
 
 const REVISION = /^[a-f0-9]{40}$/;
 const DIGEST = /^[a-f0-9]{64}$/;

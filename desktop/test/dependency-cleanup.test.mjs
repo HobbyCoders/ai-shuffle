@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { promises as fs } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -268,6 +269,47 @@ test('a lock that cannot be written is closed and removed again, and another pro
   await fs.writeFile(path.join(f.root, 'update.lock'), '4242');
   assert.match((await pruneDependencies(f.root, R, quiet)).skipped, /update is running/);
   assert.equal(await fs.readFile(path.join(f.root, 'update.lock'), 'utf8'), '4242');
+});
+
+// Every desktop npm set holds Electron's own default_app.asar. Inside Electron, node:fs treats an
+// .asar file as a folder, and a recursive fs.rm over such a set never settled, so update.lock
+// stayed held until the app quit and every update check said an update was already running.
+const UNUSED_DESKTOP = `node/desktop/${gen('a')}`;
+const DEFAULT_APP = 'node_modules/electron/dist/resources/default_app.asar';
+
+async function assertAsarSetRemoved(f, result) {
+  assert.equal(result.skipped, undefined);
+  assert.deepEqual(result.failed, []);
+  assert.ok(result.removed.includes(UNUSED_DESKTOP), `${UNUSED_DESKTOP} is removed`);
+  assert.equal(await exists(f.d(UNUSED_DESKTOP)), false);
+  assert.ok(await exists(f.d('node/desktop', gen('f'), 'node_modules/electron/dist/electron.exe')), 'the kept desktop set survives');
+  assert.equal(await exists(path.join(f.root, 'update.lock')), false);
+}
+
+test('an unused desktop npm set holding default_app.asar is removed and the lock is released', async t => {
+  const f = await fixture(t);
+  await file(f.d(UNUSED_DESKTOP, DEFAULT_APP), 'not an archive');
+  await assertAsarSetRemoved(f, await pruneDependencies(f.root, R, quiet));
+});
+
+let electron = null;
+try { electron = require('electron'); if (typeof electron !== 'string' || !existsSync(electron)) electron = null; } catch { electron = null; }
+// The real archive the installed Electron ships (dist/resources on Windows and Linux, Resources in the macOS bundle).
+const realDefaultApp = electron && [path.join(path.dirname(electron), 'resources', 'default_app.asar'), path.join(path.dirname(electron), '..', 'Resources', 'default_app.asar')].find(existsSync);
+
+test('real Electron in node mode removes an unused desktop npm set holding a real default_app.asar and releases the lock', { skip: realDefaultApp ? false : 'no Electron binary installed' }, async t => {
+  // Plain Node above has no asar patch; this runs the built cleanup inside Electron, where it has.
+  const f = await fixture(t);
+  await dir(path.dirname(f.d(UNUSED_DESKTOP, DEFAULT_APP)));
+  await fs.copyFile(realDefaultApp, f.d(UNUSED_DESKTOP, DEFAULT_APP));
+  const script = `require(process.argv[1]).pruneDependencies(process.argv[2], process.argv[3], { log() {}, warn: (...args) => console.error(...args) })
+    .then(result => process.stdout.write(JSON.stringify(result)), error => { console.error(error); process.exit(1); });`;
+  const child = spawnSync(electron, ['-e', script, require.resolve('../dist/main/dependency-cleanup.js'), f.root, R],
+    { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000, windowsHide: true });
+  assert.equal(child.error?.code, undefined, `the cleanup did not finish within 60 s: ${child.error?.message}`);
+  assert.equal(child.status, 0, child.stderr);
+  assert.ok(child.stdout, `the cleanup never settled; stderr: ${child.stderr}`);
+  await assertAsarSetRemoved(f, JSON.parse(child.stdout));
 });
 
 test('a staged or pending build keeps what it links, and a missing updates folder is not an error', async t => {
