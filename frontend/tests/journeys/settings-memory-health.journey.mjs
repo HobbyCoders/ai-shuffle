@@ -1,8 +1,8 @@
-// Settings > System > Memory health and its sidebar "Needs you" item against
-// synthetic answers (never the owner's memory): healthy stays quiet in both
-// places, a loss is one Needs you item that opens Memory health (mouse and
-// keyboard) and goes when the check is healthy, a late answer moves nothing
-// on the page, and a store never checked says so (#1042).
+// Settings > System > Memory health against synthetic answers (never the
+// owner's memory): healthy stays quiet, a loss shows on the row only and never
+// in the sidebar's "Needs you" lane (the owner cannot act on it; the worker
+// repairs by itself), a late answer moves nothing on the page, and a store
+// never checked says so (#1042).
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -30,23 +30,20 @@ const attention = (checkedAt = now() - 12 * MINUTE) => ({
 	],
 	repairs: []
 });
-const WARNING = 'Capacity: Automatic cleanup has recorded 3 permanent deletions of older facts (3 at the archive limit; 0 on expiry). 1 more check needs attention.';
 
 const HEALTH = /\/api\/v1\/memory\/health(\?|$)/;
 const row = (page) => page.locator('[data-setting-anchor="system.memoryHealth"]').filter({ visible: true }).first();
 const hint = (page) => row(page).locator('.st-rh');
 const toggle = (page) => row(page).locator('button[aria-expanded]');
-// The page carries no warning of its own any more: the sidebar item does.
+// The page carries no warning notice of its own: the row's value says it.
 const pageNotice = (page) => page.locator('.settings-viewport .st-banner').filter({ visible: true });
 const lane = (page) => page.locator('[data-group="needs-you"]').filter({ visible: true });
-const laneHead = (page) => page.getByRole('complementary', { name: 'Chats' }).locator('button.sect.needs').filter({ visible: true });
-const memoryItem = (page) => page.locator('[data-needs-item="memory-health"] button').filter({ visible: true });
 const help = (page) => page.locator('[data-setting-anchor="system.reportProblem"]').filter({ visible: true }).first();
 const top = (locator) => locator.evaluate((el) => Math.round(el.getBoundingClientRect().top));
 
 /**
- * Answer the health check with `payload` (the app asks at start and again as
- * Settings > System opens). With `held`, the answer waits until
+ * Answer the health check with `payload` (the app asks only as Settings >
+ * System opens). With `held`, the answer waits until
  * `page.memoryHealth.release()` (a worker slow to answer). `answer(next)`
  * changes what later requests get.
  */
@@ -60,50 +57,6 @@ async function answerHealth(page, payload, { held = false } = {}) {
 		await gate;
 		await route.fulfill({ json: page.memoryHealth.payload }).catch(() => {});
 	});
-}
-
-/** The Needs you item is on screen (the drawer opened on a phone), saying what is wrong. */
-async function itemOnScreen(page, variant) {
-	if (variant.viewport === 'phone') await showSidebar(page);
-	await memoryItem(page).waitFor({ timeout: 15_000 });
-	const text = (await memoryItem(page).textContent()).replace(/\s+/g, ' ');
-	expect(text.includes('Memory needs attention') && text.includes(WARNING), `the item says what is wrong: ${text}`);
-	const head = (await laneHead(page).textContent()).replace(/\s+/g, ' ').trim();
-	expect(head === 'Needs you 1', `the lane counts it: ${head}`);
-	const box = await memoryItem(page).boundingBox();
-	const line = await memoryItem(page).evaluate((el) => el.querySelector('.l2')?.getBoundingClientRect().height ?? 0);
-	expect(box && box.height < 60 && line > 0 && line < 22, `one row, its reason on one line (${box?.height}px, line ${line}px)`);
-}
-
-/** Settings > System is open with Memory health opened and on screen. */
-async function landedOnMemoryHealth(page) {
-	await page.getByRole('heading', { name: 'System', exact: true }).first().waitFor({ timeout: 15_000 });
-	await page.waitForFunction(() => document.querySelector('[data-setting-anchor="system.memoryHealth"] button[aria-expanded="true"]'), null, { timeout: 15_000 });
-	const list = page.locator('.mh-list').filter({ visible: true });
-	await list.waitFor({ timeout: 10_000 });
-	expect((await list.textContent()).includes(LOSS), 'the open list has the full reason');
-	// The reveal scrolls smoothly: wait for the row to come to rest on screen.
-	await page
-		.waitForFunction(
-			() => {
-				const box = document.querySelector('[data-setting-anchor="system.memoryHealth"]')?.getBoundingClientRect();
-				return box && box.top >= 0 && box.top < innerHeight;
-			},
-			null,
-			{ timeout: 5000 }
-		)
-		.catch(() => {});
-	const box = await row(page).boundingBox();
-	expect(box && box.y >= 0 && box.y < page.viewportSize().height, `the row is on screen (${box?.y})`);
-}
-
-/** Leave Settings for the chats, with the sessions sidebar showing (the drawer on a phone). */
-async function backToChats(page, variant) {
-	const back = page.getByRole('button', { name: 'Back to Settings', exact: true }).filter({ visible: true });
-	if (await back.count()) await back.first().click();
-	await page.getByRole('button', { name: 'Back to chats', exact: true }).filter({ visible: true }).first().click();
-	if (variant.viewport === 'phone') await showSidebar(page);
-	await page.getByRole('complementary', { name: 'Chats' }).locator('.sect').first().waitFor({ timeout: 10_000 });
 }
 
 async function openSystem(page, status, variant) {
@@ -160,8 +113,8 @@ async function scrollToRow(page) {
 
 /**
  * An attention answer that lands four seconds late, after the reader has
- * scrolled the row into view. Only the row's value and hint change: the
- * warning is the sidebar's Needs you item, so nothing on the page moves.
+ * scrolled the row into view. Only the row's value and hint change: there is
+ * no warning notice, so nothing on the page moves.
  */
 function lateAttention(viewport) {
 	return {
@@ -290,7 +243,7 @@ await runJourney({
 				await mark('an attention answer lands with the page');
 				await valueIs(page, '2 need attention');
 				expect((await hint(page).textContent()) === 'Checked 12m ago', 'the hint says when it checked');
-				expect((await pageNotice(page).count()) === 0, 'the warning is the sidebar item, not a notice in the page');
+				expect((await pageNotice(page).count()) === 0, 'no warning notice in the page');
 				expect((await toggle(page).getAttribute('aria-expanded')) === 'false', 'the row stays closed');
 				await page.waitForTimeout(800);
 			}
@@ -299,64 +252,29 @@ await runJourney({
 		lateAttention('phone'),
 		searchArrival,
 		{
-			// A loss is one Needs you item, alone in the lane here; clicking it
-			// opens Settings > System with Memory health open and in view.
-			name: 'needs-you-item-click',
+			// A loss never reaches the sidebar: the owner cannot act on it, so a
+			// Needs you item would never go. The app does not ask at start either;
+			// only Settings > System does.
+			name: 'attention-stays-out-of-needs-you',
 			...variants,
 			async setup({ page, status, variant }) {
 				await answerHealth(page, attention());
 				await gotoApp(page, status);
-				await itemOnScreen(page, variant);
+				if (variant.viewport === 'phone') await showSidebar(page);
+				await page.getByRole('complementary', { name: 'Chats' }).locator('.sect').first().waitFor({ timeout: 15_000 });
 			},
 			async act({ page, mark }) {
-				await mark('the owner clicks the memory item in Needs you');
-				await memoryItem(page).click();
-				await landedOnMemoryHealth(page);
-				await page.waitForTimeout(800);
-			}
-		},
-		{
-			// The item is in the lane's tab order, right after the lane header,
-			// and Enter opens it.
-			name: 'needs-you-item-keyboard',
-			...variants,
-			async setup({ page, status, variant }) {
-				await answerHealth(page, attention());
-				await gotoApp(page, status);
-				await itemOnScreen(page, variant);
-			},
-			async act({ page, mark }) {
-				await mark('the owner tabs from the lane header to the item and presses Enter');
-				await laneHead(page).focus();
-				await page.keyboard.press('Tab');
-				const focused = await page.evaluate(() => document.activeElement?.closest('[data-needs-item="memory-health"]') != null);
-				expect(focused, 'Tab from the lane header lands on the item');
-				await page.keyboard.press('Enter');
-				await landedOnMemoryHealth(page);
-				await page.waitForTimeout(800);
-			}
-		},
-		{
-			// It follows the check: the next answer being healthy (Settings asks
-			// again as System opens) takes it away, and the lane with it.
-			name: 'needs-you-item-clears',
-			...variants,
-			async setup({ page, status, variant }) {
-				await answerHealth(page, attention());
-				await gotoApp(page, status);
-				await itemOnScreen(page, variant);
-			},
-			async act({ page, variant, mark }) {
-				await mark('the check reports healthy as System opens');
-				page.memoryHealth.answer(healthy());
+				await mark('the chats sidebar with the memory check reporting a loss');
+				await page.waitForTimeout(2000);
+				expect(page.memoryHealth.hits === 0, `the app does not ask outside Settings (${page.memoryHealth.hits} requests)`);
+				expect((await page.locator('[data-needs-item]').count()) === 0, 'no memory item in Needs you');
+				expect((await page.getByText('Memory needs attention').count()) === 0, 'no "Memory needs attention" anywhere');
+				expect((await lane(page).count()) === 0, 'no Needs you lane with nothing waiting');
+				await mark('Settings > System still shows the loss on its row');
 				await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
 				await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'System', exact: true }).filter({ visible: true }).first().click();
-				await valueIs(page, 'Healthy, 1 note');
-				await mark('back in the chats, the lane is gone');
-				await backToChats(page, variant);
-				await page.waitForFunction(() => !document.querySelector('[data-needs-item]'), null, { timeout: 10_000 });
-				expect((await lane(page).count()) === 0, 'the lane it was alone in is gone');
-				await page.waitForTimeout(800);
+				await valueIs(page, '2 need attention');
+				await page.waitForTimeout(500);
 			}
 		},
 		{

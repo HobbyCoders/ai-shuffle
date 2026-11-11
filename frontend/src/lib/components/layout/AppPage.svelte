@@ -534,13 +534,11 @@
 	// when this tab left a questioning session means the user answered from
 	// elsewhere (the WS frame path is in ws-message-handlers).
 	$effect(() => observeSessionRows($sessions));
-	// Memory health for the sidebar's Needs you lane and Settings (#1042): one
-	// answer from the worker this UI is connected to, for its owner only.
-	// Signing out (also the way to another account) or losing owner rights
-	// stops it and forgets the answer; signing in starts it again.
+	// Settings > System's memory health answer is the owner's only: signing out
+	// (also the way to another account) or losing owner rights forgets it.
 	$effect(() => {
-		if (!$isAuthenticated || !$isAdmin) return;
-		return untrack(() => memoryHealth.start());
+		if ($isAuthenticated && $isAdmin) return;
+		untrack(() => memoryHealth.reset());
 	});
 	const groupToolCalls = $derived(chatPreferences.current?.groupToolCalls !== false);
 	const openId = $derived($activeSession?.sessionId ?? null);
