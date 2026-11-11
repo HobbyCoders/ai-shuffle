@@ -385,3 +385,25 @@ describe('AppPage tab title', () => {
   expect(get(proseQuestionSessions).has('work')).toBe(false);
  });
 });
+
+describe('AppPage memory health answer (#1042)', () => {
+ // Signing out swaps AppPage for the sign-in gate, so the forgetting must
+ // happen as the page goes, not in an effect that would see signed-out state.
+ it('forgets the owner answer when the page unmounts (sign-out) and when owner rights go', async () => {
+  const { memoryHealth } = await import('$lib/stores/memory-health.svelte');
+  const reset = vi.spyOn(memoryHealth, 'reset');
+  try {
+   const view = render(AppPage, { shell });
+   await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+   expect(reset).not.toHaveBeenCalled();
+   admin.set(false); await tick();
+   expect(reset).toHaveBeenCalledOnce();
+   admin.set(true); await tick();
+   expect(reset).toHaveBeenCalledOnce();
+   view.unmount();
+   expect(reset).toHaveBeenCalledTimes(2);
+  } finally {
+   reset.mockRestore();
+  }
+ });
+});

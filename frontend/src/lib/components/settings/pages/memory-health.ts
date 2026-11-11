@@ -76,28 +76,6 @@ export function memoryCheckedAt(health: MemoryHealth): string {
 	return `Last checked ${date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`;
 }
 
-/**
- * The warning the sidebar's Needs you item carries while something needs
- * attention (#1042): the first check's name and the first sentence of its
- * reason ("Capacity: Automatic cleanup has recorded 3 permanent deletions…"),
- * and how many more there are. Empty when healthy. The full reasons are in
- * Settings > System > Memory health's opened list.
- */
-const ALERT_MAX = 180;
-
-export function memoryAlert(health: MemoryHealth): string {
-	if (health.state === 'healthy') return '';
-	const signals = (health.signals ?? []).filter((s) => s.state === 'attention');
-	if (!signals.length) return 'Memory needs attention.';
-	const [first] = signals;
-	// A sentence ends at ". " before a capital, so "approx. 3" stays whole;
-	// a long one is cut at a word, the full text is in the opened list.
-	let sentence = (first.reason ?? '').trim().split(/(?<=[.!?])\s+(?=[A-Z])/)[0] ?? '';
-	if (sentence.length > ALERT_MAX) sentence = `${sentence.slice(0, ALERT_MAX).replace(/\s+\S*$/, '')}…`;
-	const more = signals.length > 1 ? ` ${signals.length - 1} more ${signals.length === 2 ? 'check needs' : 'checks need'} attention.` : '';
-	return `${first.label}: ${sentence || 'needs attention.'}${more}`;
-}
-
 const WEEK = 7 * 24 * 3600;
 
 function when(at: number): string {
