@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build:
     name: Build minified release and smoke APKs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -79,7 +79,7 @@ jobs:
   smoke:
     name: Minified releaseSmoke (API ${{ matrix.api }})
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false

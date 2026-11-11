@@ -22,7 +22,7 @@ jobs:
   smoke:
     name: Browser editor smoke checks
     # Keep every smoke check on a standard GitHub-hosted runner.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +42,7 @@ jobs:
       matrix:
         chrome-mode: [external, panel-demand, direct-page-demand]
     timeout-minutes: 25
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
@@ -141,7 +141,7 @@ jobs:
     name: Real browser workspace
     if: always() && inputs.gated_by_caller != true
     needs: [smoke, workspace]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every branch to succeed

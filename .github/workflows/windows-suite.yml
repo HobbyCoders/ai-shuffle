@@ -124,7 +124,7 @@ jobs:
     name: Windows desktop
     if: always() && (github.event_name == 'pull_request' || inputs.main_suite == true) && inputs.gated_by_caller != true
     needs: [desktop]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every branch to succeed

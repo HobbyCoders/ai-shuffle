@@ -180,7 +180,7 @@ def test_main_suite_has_no_test_secrets_or_paid_runners():
             else:
                 assert "continue-on-error" not in job
             if "uses" not in job:
-                assert job["runs-on"] == "ubuntu-latest"
+                assert job["runs-on"] == "ubuntu-24.04"
 
 
 def main_gate():
@@ -221,7 +221,7 @@ def test_the_gate_alone_may_cancel_the_run_and_checks_the_receipts_the_skipped_v
     assert [name for name, job in jobs.items() if job.get("permissions", {}).get("actions") == "write"] == ["main-suite"]
     # It holds its runner for the whole run, which is longer than any job.
     assert int(gate["timeout-minutes"]) >= 150
-    assert gate["runs-on"] == "ubuntu-latest"
+    assert gate["runs-on"] == "ubuntu-24.04"
     module = main_gate()
     assert module.GATE == gate["name"] == "Main suite"
     steps = gate["steps"]

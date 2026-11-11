@@ -152,7 +152,7 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert record["needs"] == ["backend"] and record["uses"] == "./.github/workflows/record-pass.yml"
     assert record["if"].startswith("needs.backend.result == 'success' && github.event_name == 'pull_request'")
     assert set(jobs) == {"backend", "backend-shard", "backend-contracts", "backend-security"}
-    assert all(job["runs-on"] == "ubuntu-latest" for job in jobs.values())
+    assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     assert all("continue-on-error" not in json.dumps(job) for job in jobs.values())
     assert jobs["backend-shard"]["strategy"] == {"fail-fast": "false", "matrix": {"shard": ["1", "2", "3", "4"]}}
     assert jobs["backend-security"]["if"] == "always()"

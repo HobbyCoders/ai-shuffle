@@ -48,10 +48,10 @@ concurrency:
 jobs:
   build:
     name: Build and test Android app
-    # A cold ubuntu-latest runner needs ~18 minutes for unit tests/lint alone;
+    # A cold ubuntu-24.04 runner needs ~18 minutes for unit tests/lint alone;
     # leave time to package both APKs (and signed release artifacts when asked).
     timeout-minutes: 35
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: android
@@ -238,7 +238,7 @@ jobs:
             advisory: true
     needs: build
     continue-on-error: ${{ matrix.advisory }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # One emulator run takes about 17 minutes; leave room for the single retry after an emulator loss.
     timeout-minutes: 45
     defaults:
@@ -435,7 +435,7 @@ jobs:
     name: Publish verified Android download
     needs: [build, android-ui]
     if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write

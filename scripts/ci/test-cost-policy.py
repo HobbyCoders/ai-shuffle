@@ -32,6 +32,9 @@ AUTOMATIC = {
     "runtime-overlay-acceptance.yml": {"pull_request", "workflow_dispatch"},
     **{name: {"pull_request", "workflow_dispatch", "workflow_call"} for name in PR_CHECKS},
 }
+# Linux jobs pin the image: ubuntu-latest moved to 26.04, which lacks the
+# preinstalled PostgreSQL 16 the backend jobs use. Moving on is deliberate.
+LINUX_RUNNER = "ubuntu-24.04"
 RECORD_PASS = "./.github/workflows/record-pass.yml"
 FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "workflow_run",
              "check_run", "check_suite", "issue_comment", "pull_request_review"}
@@ -79,7 +82,7 @@ class CostPolicyTests(unittest.TestCase):
                     self.assertNotIn(forbidden, text)
                 for key, job in config["jobs"].items():
                     if job.get("uses") == RECORD_PASS:
-                        # Leaves a pass record for main-suite; runs on ubuntu-latest itself.
+                        # Leaves a pass record for main-suite; runs on LINUX_RUNNER itself.
                         self.assertEqual(set(job), {"needs", "if", "uses", "with"})
                         self.assertIn("github.event_name == 'pull_request'", job["if"])
                         continue
@@ -93,7 +96,7 @@ class CostPolicyTests(unittest.TestCase):
                             "${{ fromJSON((github.event_name == 'pull_request' || inputs.main_suite == true) && "
                             "'[\"windows-latest\"]' || '[\"windows-latest\", \"macos-latest\"]') }}")
                     else:
-                        self.assertIn(runner, {"ubuntu-latest", "windows-latest"})
+                        self.assertIn(runner, {LINUX_RUNNER, "windows-latest"})
 
     def test_android_native_pr_checks_cover_the_apk_inputs_on_free_runners(self):
         config = workflow("android.yml")
@@ -112,7 +115,7 @@ class CostPolicyTests(unittest.TestCase):
             self.assertNotIn("if", job)  # Includes drafts and forks.
             self.assertEqual(job.get("permissions", config["permissions"]), {"contents": "read"})
         for job in config["jobs"].values():
-            self.assertEqual(job["runs-on"], "ubuntu-latest")
+            self.assertEqual(job["runs-on"], LINUX_RUNNER)
         self.assertEqual([leg["api"] for leg in config["jobs"]["android-ui"]["strategy"]["matrix"]["include"]], ["34", "36"])
 
     def test_minified_android_smoke_runs_on_the_same_apk_inputs_and_stays_read_only(self):
@@ -132,7 +135,7 @@ class CostPolicyTests(unittest.TestCase):
         for job in config["jobs"].values():
             self.assertNotIn("if", job)  # Includes drafts and forks.
             self.assertEqual(job.get("permissions", {"contents": "read"}), {"contents": "read"})
-            self.assertEqual(job["runs-on"], "ubuntu-latest")
+            self.assertEqual(job["runs-on"], LINUX_RUNNER)
 
     def test_ui_journeys_run_whole_off_pull_requests_and_skip_only_on_an_empty_selection(self):
         jobs = workflow("ci-frontend.yml")["jobs"]
@@ -277,7 +280,7 @@ class CostPolicyTests(unittest.TestCase):
         for config, key, timeout in [(backend, "backend-shard", "35"), (backend, "backend-contracts", "35"),
                                      (backend, "backend-security", "35"), (javascript, "frontend", "20")]:
             self.assertEqual(config["jobs"][key]["timeout-minutes"], timeout)
-            self.assertEqual(config["jobs"][key]["runs-on"], "ubuntu-latest")
+            self.assertEqual(config["jobs"][key]["runs-on"], LINUX_RUNNER)
         command = next(step["run"] for step in shard["steps"] if step.get("name") == "Run fast test subset")
         self.assertIn('-n 2', command)
         self.assertIn('-p scripts.ci.backend_shards', command)
@@ -288,7 +291,7 @@ class CostPolicyTests(unittest.TestCase):
             "deploy-hub.yml", "deploy-license.yml", "deploy-site.yml", "deploy-uptime.yml",
             "ci-license.yml", "ci-uptime.yml", "withdraw-release.yml",
         }
-        allowed = {"ubuntu-latest", "ubuntu-24.04", "ubuntu-24.04-arm", "windows-latest", "macos-latest", "macos-14"}
+        allowed = {LINUX_RUNNER, "ubuntu-24.04-arm", "windows-latest", "macos-latest", "macos-14"}
         for path in sorted(WORKFLOWS.glob("*.yml")):
             if path.name in private_cloud:
                 continue
@@ -315,6 +318,12 @@ class CostPolicyTests(unittest.TestCase):
                             self.assertIn(entry["runner"], allowed)
                     else:
                         self.assertIn(runner, allowed)
+
+    def test_linux_jobs_stay_on_the_pinned_image(self):
+        # A floating label silently changes the image under every job.
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            with self.subTest(workflow=path.name):
+                self.assertNotIn("ubuntu-latest", path.read_text(encoding="utf-8"))
 
     def test_runner_axis_cannot_hide_a_paid_job_behind_free_include_entries(self):
         config = workflow("runtime-overlay-acceptance.yml")
