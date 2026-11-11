@@ -10,6 +10,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 import { composerPreferences } from '../composer-preferences';
 import { bindSessionOwner } from '../session-owner';
+import { bumpInitGeneration } from './session-init';
 
 vi.mock('$lib/services/voiceCall', () => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn() }));
 vi.mock('$lib/services/voiceExecutionContext', () => ({ persistVoiceContext: vi.fn(async () => {}), voiceContextFor: vi.fn(() => ({})) }));
@@ -516,6 +517,36 @@ describe('a second send while the first send creates the worktree (#1444)', () =
 		expect(await second).toBe(false);
 		expect(post.mock.calls.filter(([path]) => path === '/sessions/with-worktree')).toHaveLength(1);
 	});
+
+	// Review round 1 (S2): each create's own first send runs in its own
+	// create's turn, whichever create ends first.
+	it('sends each create\'s first query when two creates from different composes end oldest first', async () => {
+		vi.useFakeTimers();
+		try {
+			let finishA!: (value: typeof ok) => void;
+			let finishB!: (value: typeof ok) => void;
+			post.mockReturnValueOnce(new Promise(resolve => { finishA = resolve; }))
+				.mockReturnValueOnce(new Promise(resolve => { finishB = resolve; }));
+			const { sender, deps, internal, wsConn } = setup(staged, { realActiveSession: true });
+			const a = sender.sendMessage('task a');
+			await vi.advanceTimersByTimeAsync(10);
+			expect(post).toHaveBeenCalledTimes(1);
+			// The user opens another New chat and starts a second staged create.
+			bumpInitGeneration();
+			internal.worktreeCreationGeneration++;
+			deps.update(s => ({ ...s, messages: [], sessionId: null, isCreatingWorktree: false, worktreeBranch: 'live/second' }));
+			const b = sender.sendMessage('task b');
+			await vi.advanceTimersByTimeAsync(10);
+			expect(post).toHaveBeenCalledTimes(2);
+			finishA({ ...ok, session_id: 'wt-a' });
+			expect(await a).toBe(true);
+			finishB({ ...ok, session_id: 'wt-b', branch_name: 'live/second' });
+			await vi.advanceTimersByTimeAsync(16_000);
+			expect(await b).toBe(true);
+			const queries = wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query');
+			expect(queries.map(frame => [frame.prompt, frame.session_id])).toContainEqual(['task b', 'wt-b']);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
+	});
 });
 
 describe('a place in line is the only way to send (#1444)', () => {
@@ -576,6 +607,32 @@ describe('a place in line is the only way to send (#1444)', () => {
 			await vi.advanceTimersByTimeAsync(100);
 			expect(await second).toBe(false);
 			expect(prompts(wsConn)).toEqual(['first']);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
+	});
+
+	// Review round 1 (S1): a chat adopted from a compose keeps that compose's
+	// lane while a send of it is open, across a leave and reopen.
+	it('keeps a send queued in a new chat ahead of one made after leaving and reopening the chat it created', async () => {
+		vi.useFakeTimers();
+		try {
+			const { sender, deps, wsConn } = setup({ worktreeIntent: 'local' }, { realActiveSession: true });
+			const first = sender.sendMessage('first');
+			const second = sender.sendMessage('second');
+			expect(prompts(wsConn)).toEqual(['first']);
+			// The socket drops, then the chat is adopted: the first send's turn
+			// ends and the second waits for the socket in its turn.
+			wsConn.isConnected.mockReturnValue(false);
+			deps.update(s => ({ ...s, sessionId: 'chat-s' }));
+			await vi.advanceTimersByTimeAsync(60);
+			// Leave the chat and reopen it; the socket opens and a third send is made.
+			bumpInitGeneration();
+			wsConn.isConnected.mockReturnValue(true);
+			const third = sender.sendMessage('third');
+			await vi.advanceTimersByTimeAsync(200);
+			expect(await first).toBe(true);
+			expect(await second).toBe(true);
+			expect(await third).toBe(true);
+			expect(prompts(wsConn)).toEqual(['first', 'second', 'third']);
 		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
 	});
 

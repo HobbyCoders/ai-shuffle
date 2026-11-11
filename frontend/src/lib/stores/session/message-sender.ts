@@ -209,13 +209,21 @@ export interface MessageSenderDeps {
 	 *  (sendMessage calls itself after worktree creation). */
 	getActiveSession: () => {
 		sendMessage: (prompt: string, options?: SendMessageOptions) => Promise<boolean>;
-		createWorktree: (prompt?: string, pendingUploadPaths?: string[]) => Promise<string | null>;
-		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) => Promise<boolean>;
+		createWorktree: (prompt?: string, pendingUploadPaths?: string[], creation?: Creation) => Promise<string | null>;
+		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[], creation?: Creation) => Promise<boolean>;
 	};
 }
 
+/** A worktree create in progress, handed to its own first send (made with
+ *  skipWorktreeSetup) so that send runs inside the creating send's turn
+ *  (#1444). Passed, never shared: creates from two composes can end in any
+ *  order. */
+export type Creation = { holdUntil: (after: CreationEnd) => void };
+
 interface SendMessageOptions {
 	skipWorktreeSetup?: boolean;
+	/** The create this first send belongs to (see Creation). */
+	creation?: Creation;
 	skipMessageAppend?: boolean;
 	pendingUploadPaths?: string[];
 	pendingUploadReferences?: import('$lib/api/rewind').UploadReference[];
@@ -261,7 +269,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	// ─── Internal helper for worktree existing branch sessions ──────
 
-	async function startSessionOnExistingWorktree(prompt: string, pendingUploadPaths?: string[]): Promise<boolean> {
+	async function startSessionOnExistingWorktree(prompt: string, pendingUploadPaths?: string[], creation?: Creation): Promise<boolean> {
 		const _state = getState();
 		if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return false; }
 		if (!_state.project) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return false; }
@@ -273,6 +281,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		return getActiveSession().sendMessage(prompt, {
 			skipWorktreeSetup: true,
 			pendingUploadPaths,
+			creation,
 		});
 	}
 
@@ -438,9 +447,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	// Sends to one chat keep their order (#1444); see the wrapper at the end.
 	const sendOrder = createSendOrder();
-	/** The worktree create in progress, whose own first send (made with
-	 *  skipWorktreeSetup) runs inside the creating send's turn. */
-	let creationTurn: { holdUntil: (after: CreationEnd) => void } | null = null;
 
 	const sender = {
 		/** `letNextGo` is the wrapper's: called where this send's frame is
@@ -546,7 +552,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// The create is this send: its turn lasts until the create ends, so
 				// a send made meanwhile waits and goes to the chat it creates
 				// rather than starting a second create. The create's own first
-				// send runs inside this turn (creationTurn).
+				// send runs inside this turn (Creation).
 				if (_state.worktreeMode === 'existing' && !_state.worktreeId) {
 					update(s => ({...s, worktreeError:'Please select an available existing worktree before sending.'}));
 					return false;
@@ -559,25 +565,23 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const creationGen = internal.worktreeCreationGeneration;
 				const bootClaim = claimBootSend();
 				let accepted = false;
-				const outerCreation = creationTurn;
-				creationTurn = { holdUntil: (after) => letNextGo?.(after) };
+				const creation: Creation = { holdUntil: (after) => letNextGo?.(after) };
 				let createEnded!: () => void;
 				let createOver = false;
 				letNextGo?.({ ended: () => createOver, done: new Promise<void>(resolve => { createEnded = resolve; }) });
 				try {
 					if (_state.worktreeMode === 'existing' && _state.worktreeId) {
-						accepted = await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths);
+						accepted = await startSessionOnExistingWorktree(prompt, options?.pendingUploadPaths, creation);
 					} else if (_state.worktreeBranch) {
-						accepted = (await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths)) !== null;
+						accepted = (await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths, creation)) !== null;
 					} else {
-						accepted = await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths);
+						accepted = await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths, creation);
 					}
 					accepted ||= creationGen !== internal.worktreeCreationGeneration;
 					return accepted;
 				} finally {
 					createOver = true;
 					createEnded();
-					creationTurn = outerCreation;
 					// Creation can adopt the chat before its inner first send fails.
 					// That live chat still owns boot even when its draft is restored.
 					if (!accepted && !getState().sessionId) releaseBootSend(bootClaim);
@@ -1003,7 +1007,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		 *  this view adopted it, or null (the reason is in `worktreeError` or
 		 *  `error`, or the user navigated away). With a prompt, null also means
 		 *  the session was created but its first message was refused. */
-		async createWorktree(prompt?: string, pendingUploadPaths?: string[]): Promise<string | null> {
+		async createWorktree(prompt?: string, pendingUploadPaths?: string[], creation?: Creation): Promise<string | null> {
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return null; }
 			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return null; }
@@ -1132,6 +1136,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					const sent = await getActiveSession().sendMessage(prompt, {
 						skipWorktreeSetup: true,
 						pendingUploadPaths,
+						creation,
 					});
 					// This view bound the session itself, so nothing else opens its
 					// feed: the follow-up query lands as a queued turn, whose WS
@@ -1197,7 +1202,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		/** Resolves false when this view refused or failed the create (the reason
 		 *  is in `worktreeError`), true once the request was accepted or the
 		 *  user navigated away from it. */
-		async autoCreateWorktree(prompt: string, pendingUploadPaths?: string[]): Promise<boolean> {
+		async autoCreateWorktree(prompt: string, pendingUploadPaths?: string[], creation?: Creation): Promise<boolean> {
 			prompt = prompt.trim();
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return false; }
@@ -1439,7 +1444,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					return true;
 				}
 
-				const sent = await getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
+				const sent = await getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true, creation });
 				// Refused: the composer takes the text back, so drop its echo.
 				if (!sent) update(s => ({ ...s, messages: s.messages.filter(m => m.id !== userMsgId) }));
 				return sent;
@@ -1539,8 +1544,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	/** A new chat's compose, shared by its sends: the chat creation one of
 	 *  them started (pending), and how many of its creations ended without a
 	 *  chat (failed). A creation that ended with one is the chat now open. */
-	type Compose = { lane: string; creating: CreationEnd | null; failed: number };
+	type Compose = { lane: string; creating: CreationEnd | null; failed: number; chat?: string };
 	let compose: Compose | null = null;
+	/** Earlier navigations' composes that adopted a chat, while a send of
+	 *  theirs is still open: that chat's sends keep going in their lane. */
+	let adopted: Compose[] = [];
 	function settle(c: Compose): number {
 		if (c.creating?.ended()) {
 			if (!getState().sessionId) c.failed++;
@@ -1559,12 +1567,22 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		const navigation = getInitGeneration();
 		if (made.isRestoringSession) return { lane: ANY_CHAT, chat: ANY_CHAT, navigation, turn: sendOrder.take(ANY_CHAT) };
 		const lane = `compose:${navigation}`;
-		if (compose?.lane !== lane) compose = { lane, creating: null, failed: 0 };
-		// A chat adopted from this compose stays in its lane while a send of
-		// the compose is open: a send queued there before the id existed keeps
-		// its place ahead of one made after.
-		const chat = `chat:${made.sessionId}`;
-		if (made.sessionId && !sendOrder.isOpen(lane)) return { lane: chat, chat: made.sessionId, navigation, turn: sendOrder.take(chat) };
+		if (compose?.lane !== lane) {
+			if (compose?.chat) adopted.push(compose);
+			compose = { lane, creating: null, failed: 0 };
+		}
+		adopted = adopted.filter(c => sendOrder.isOpen(c.lane));
+		// A chat adopted from a compose stays in its lane while a send of the
+		// compose is open, even after the user left and reopened that chat: a
+		// send queued there before the id existed keeps its place ahead of one
+		// made after.
+		if (made.sessionId) {
+			const from = adopted.find(c => c.chat === made.sessionId)?.lane;
+			if (from) return { lane: from, chat: made.sessionId, navigation, turn: sendOrder.take(from) };
+			const chat = `chat:${made.sessionId}`;
+			if (!sendOrder.isOpen(lane)) return { lane: chat, chat: made.sessionId, navigation, turn: sendOrder.take(chat) };
+			compose.chat = made.sessionId;
+		}
 		return { lane, chat: made.sessionId, navigation, compose, failed: settle(compose), turn: sendOrder.take(lane) };
 	}
 
@@ -1602,8 +1620,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	sender.sendMessage = (prompt: string, options?: SendMessageOptions): Promise<boolean> => {
 		// A worktree create's own first send: part of the creating send,
 		// inside its turn, which lasts while this one's chat is created.
-		if (options?.skipWorktreeSetup && creationTurn) {
-			const creation = creationTurn;
+		const creation = options?.skipWorktreeSetup ? options.creation : undefined;
+		if (creation) {
 			return trackSend(() => send(prompt, options, (after) => { if (after) creation.holdUntil(after); }));
 		}
 		// A send goes only on a place in line, used once. A caller with no
@@ -1643,6 +1661,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// was made, never sent as a second create.
 					if (taken.compose && settle(taken.compose) > taken.failed!) return false;
 				}
+				// The chat this compose adopted, for its sends made after a leave.
+				if (taken.compose && getState().sessionId) taken.compose.chat ??= getState().sessionId!;
 				return await send(prompt, options, letNextGo);
 			} finally {
 				if (holds.length) void Promise.allSettled(holds).then(turn.release);
