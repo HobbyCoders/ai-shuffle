@@ -141,6 +141,7 @@
 	// Opening moves focus into the drawer (it covers the whole screen), and a
 	// dismissal hands it back to the ☰ instead of dropping it on <body>.
 	async function openDrawer() {
+		pendingTarget?.();
 		mounted = true;
 		if (!drawerOpen) {
 			drawerOpen = true;
@@ -157,6 +158,8 @@
 	}
 
 	function dismissDrawer() {
+		// Any newer navigation calls off a Settings target still waiting.
+		pendingTarget?.();
 		if (!drawerOpen) return;
 		closeDrawer();
 		popDrawerEntry();
@@ -167,6 +170,8 @@
 	// drawer instead of leaving the app. Closing it any other way pops that
 	// entry again, so Back never needs a second press to do something.
 	let entryLive = false;
+	/** Calls off a drawer Settings target still waiting for the pop. */
+	let pendingTarget: (() => void) | null = null;
 
 	function pushDrawerEntry() {
 		try {
@@ -223,16 +228,18 @@
 	// step. The drawer's pop above is asynchronous and would land after that
 	// step and undo it, leaving Settings on its index, so open it only once
 	// that pop is seen. Never on elapsed time: a slow pop would still undo it.
-	// A newer drawer action or the bar going away calls a waiting open off.
-	let pendingTarget: (() => void) | null = null;
+	// Reopening the drawer, any newer navigation (dismissDrawer) or the bar
+	// going away calls a waiting open off.
 	function drawerOpenFeature(type: ViewType, itemId?: string | null) {
-		pendingTarget?.();
 		const popping = drawerOpen && entryLive;
 		dismissDrawer();
 		if (!itemId) return onOpenFeature(type);
 		if (!popping) return onOpenFeature(type, itemId);
-		// The popstate after the drawer's own history.back() is that pop.
+		// The drawer's pop is shallow, so the router has set page.state by the
+		// time this later listener runs: a popstate still on the drawer's
+		// entry is not that pop.
 		const open = () => {
+			if (page.state?.mobileDrawer) return;
 			stop();
 			onOpenFeature(type, itemId);
 		};

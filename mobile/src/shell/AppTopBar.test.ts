@@ -403,6 +403,19 @@ describe('AppTopBar drawer lifecycle', () => {
 			window.dispatchEvent(new PopStateEvent('popstate'));
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 
+			// A newer navigation calls a waiting target off: tap the target,
+			// reopen the drawer and open a chat before the slow pop lands.
+			await fireEvent.click(menuButton());
+			await tick();
+			await fireEvent.click(screen.getByRole('button', { name: 'Stub settings target' }));
+			await fireEvent.click(menuButton());
+			await tick();
+			await fireEvent.click(screen.getByRole('button', { name: 'Stub open session' }));
+			page.state = {};
+			window.dispatchEvent(new PopStateEvent('popstate'));
+			expect(props.onOpenSession).toHaveBeenCalledWith('s-2');
+			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
+
 			// The drawer's entry was never pushed (router not ready): it opens at once.
 			push.mockImplementation(() => {});
 			await fireEvent.click(menuButton());
