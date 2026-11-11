@@ -497,6 +497,13 @@ class Runner:
             if op == "start":
                 alias = step.get("as", "a")
                 on_peer = step.get("on") == "peer"
+                def track(new_sid, alias=alias, on_peer=on_peer):
+                    # Once per chat: at the acknowledgement (so an interruption
+                    # during the client's linger still cleans it up) and on return.
+                    if not any(c["session_id"] == new_sid for c in self.created):
+                        self.created.append({"session_id": new_sid, "row": row["id"], "alias": alias,
+                                             "on": "peer" if on_peer else "self"})
+
                 # ``visible``: an ordinary chat instead of a hidden disposable
                 # one, for rows whose checks refuse hidden chats. Cleanup
                 # still Stops and settles it.
@@ -504,10 +511,9 @@ class Runner:
                     self._fmt(step["prompt"], sessions), model=self.model, project=ctx.get("project"),
                     permission_mode=self.defaults.get("permission_mode"), profile=self.agent,
                     target_instance_id=self.peer["instance_id"] if on_peer else None,
-                    disposable=not step.get("visible", False))
+                    disposable=not step.get("visible", False), on_created=track)
                 sessions[alias] = sid
-                self.created.append({"session_id": sid, "row": row["id"], "alias": alias,
-                                     "on": "peer" if on_peer else "self"})
+                track(sid)
             else:
                 sid = sessions[step.get("session", "a")]
                 if op == "compact":
@@ -575,7 +581,19 @@ class Runner:
         /compact ran and kept the session. The note is read from the history
         when it carries it, else from the event log. Any other
         ``compact_failed`` reason fails the step.
+
+        Only outcomes of THIS request count: history messages after the last
+        message the pre-request snapshot already held, and event-log notes
+        past the log's pre-request seq. When the history cannot be anchored
+        (no earlier message is in the new window), it is not used; when no
+        new outcome appears, the step times out. Never an older outcome.
         """
+        before = self._snapshot(sid).get("messages") or []
+        seen = {m.get("id") for m in before}
+        try:
+            log_seq = self.client.event_seq(sid)
+        except ClientError as exc:
+            raise StepFailed(f"compact: could not read the event-log position: {exc}") from None
         try:
             self.client.compact(sid)
         except ClientError as exc:
@@ -584,9 +602,12 @@ class Runner:
         while True:
             s = self._snapshot(sid)
             messages = s.get("messages") or []
-            subtypes = [m.get("systemSubtype") or m.get("subtype") for m in messages]
+            anchors = [i for i, m in enumerate(messages) if m.get("id") in seen]
+            new = (messages[anchors[-1] + 1:] if anchors else [] if seen else messages)
+            new = [m for m in new if m.get("id") not in seen]
+            subtypes = [m.get("systemSubtype") or m.get("subtype") for m in new]
             busy = self._busy(sid, s)
-            failed = [m.get("systemData") for m in messages
+            failed = [m.get("systemData") for m in new
                       if (m.get("systemSubtype") or m.get("subtype")) == "compact_failed"]
             for data in failed:
                 if not _compact_noop(data):
@@ -596,13 +617,13 @@ class Runner:
             if failed and not busy:
                 return _compact_noop_evidence(failed[-1])
             if not busy:
-                for note in self.client.system_notes(sid):
-                    if note.get("subtype") != "compact_failed":
-                        continue
-                    data = note.get("data")
-                    if _compact_noop(data):
-                        return _compact_noop_evidence(data)
-                    raise StepFailed(f"compact_failed recorded: {_compact_reason(data)}")
+                notes = [n for n in self.client.system_notes(sid, after_seq=log_seq)
+                         if n.get("subtype") == "compact_failed"]
+                for note in notes:
+                    if not _compact_noop(note.get("data")):
+                        raise StepFailed(f"compact_failed recorded: {_compact_reason(note.get('data'))}")
+                if notes:
+                    return _compact_noop_evidence(notes[-1].get("data"))
             if self.clock() >= deadline:
                 raise StepFailed(f"no compact boundary within {int(within)}s")
             self.sleep(self.poll_s)

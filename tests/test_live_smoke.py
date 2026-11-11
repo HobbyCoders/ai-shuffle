@@ -6,6 +6,7 @@ worker's HTTP API, and the client's own wire behaviour is checked against
 """
 import json
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -74,7 +75,7 @@ class FakeWorker:
     def preference(self, key):
         return self.prefs.get(key)
 
-    def send(self, prompt, *, session_id=None, target_instance_id=None, **kw):
+    def send(self, prompt, *, session_id=None, target_instance_id=None, on_created=None, **kw):
         if self.raise_on_send and self.raise_on_send(prompt):
             raise self.raise_on_send.exc
         self.sent.append({"prompt": prompt, "session_id": session_id, "target": target_instance_id, **kw})
@@ -83,6 +84,8 @@ class FakeWorker:
             self.sessions[session_id] = {"messages": [], "queue": [], "tokens": 0,
                                          "remote": target_instance_id == "dev_peer",
                                          "hidden": kw.get("disposable", True)}
+            if on_created:  # the session_created acknowledgement
+                on_created(session_id)
         s = self.sessions[session_id]
         s["messages"].append({"id": len(s["messages"]), "role": "user", "type": None, "content": prompt})
         s["queue"].append(prompt)
@@ -132,8 +135,12 @@ class FakeWorker:
                               "content": "", "systemSubtype": "compact_boundary"})
         return {}
 
-    def system_notes(self, sid):
-        return list(self.sessions[sid].get("notes", []))
+    def system_notes(self, sid, after_seq=0):
+        # A note's event-log seq is its 1-based position.
+        return list(self.sessions[sid].get("notes", []))[after_seq:]
+
+    def event_seq(self, sid):
+        return len(self.sessions[sid].get("notes", []))
 
     def stop(self, sid):
         self.stopped.append(sid)
@@ -405,6 +412,59 @@ def test_compact_without_any_outcome_fails_at_the_deadline(tmp_path):
             return {}
     result, _ = _run(Silent(), _data(_compact_row()), tmp_path)
     assert result["rows"][0]["status"] == "fail"
+    assert result["rows"][0]["reason"] == "no compact boundary within 0s"
+
+
+class CompactTwice(FakeWorker):
+    """The first compact is the Claude Code no-op; the second records ``second``."""
+
+    def __init__(self, second, where):
+        super().__init__()
+        self.second, self.compact_note_in = second, where
+
+    def compact(self, sid):
+        if self.compacted:
+            if self.second is None:  # no outcome at all
+                self.compacted.append(sid)
+                return {}
+            self.compact_note = self.second
+        else:
+            self.compact_note = CLAUDE_NOOP
+        return super().compact(sid)
+
+
+def _compact_twice_row():
+    return {"id": "t.1", "check": "c", "kind": "script", "steps": [
+        {"op": "start", "as": "a", "prompt": "reply OK", "expect_reply": "OK"},
+        {"op": "compact", "session": "a", "within_s": 0},
+        {"op": "compact", "session": "a", "within_s": 0}]}
+
+
+@pytest.mark.parametrize("where", ["events", "history"])
+@pytest.mark.parametrize("second, reason", [
+    (None, "no compact boundary within 0s"),
+    ({"reason": "compaction failed: RuntimeError"}, "compact_failed recorded: compaction failed: RuntimeError"),
+], ids=["no-new-outcome", "new-failure"])
+def test_a_second_compact_is_judged_by_its_own_outcome(tmp_path, where, second, reason):
+    # The first compact's no-op note must not pass the second compact.
+    worker = CompactTwice(second, where)
+    result, _ = _run(worker, _data(_compact_twice_row()), tmp_path)
+    row = result["rows"][0]
+    assert len(worker.compacted) == 2
+    assert row["status"] == "fail" and row["reason"] == reason
+
+
+def test_compact_ignores_a_history_window_it_cannot_anchor(tmp_path):
+    # History ids that do not line up with the pre-request snapshot (a moved
+    # or rebuilt window) are not trusted; with no new event-log note, the step
+    # times out instead of passing on the first compact's no-op.
+    class Renumbered(CompactTwice):
+        def session(self, sid):
+            snapshot = super().session(sid)
+            for m in snapshot["messages"]:
+                m["id"] = f"{m['id']}-{self.calls}"
+            return snapshot
+    result, _ = _run(Renumbered(None, "history"), _data(_compact_twice_row()), tmp_path)
     assert result["rows"][0]["reason"] == "no compact boundary within 0s"
 
 
@@ -942,6 +1002,22 @@ def test_http_client_reads_system_notes_up_to_caught_up():
     client = HttpWorkerClient(transport=httpx.MockTransport(handler))
     assert client.system_notes("s1") == [note]
     assert seen[0].url.path == "/api/v1/sessions/s1/events"
+    assert client.event_seq("s1") == 2
+    assert client.system_notes("s1", after_seq=1) == [note]
+    assert client.system_notes("s1", after_seq=2) == []
+
+
+def test_http_client_counts_no_note_as_new_after_a_reset_or_without_a_position():
+    note = {"type": "system.note", "subtype": "compact_failed", "data": {"reason": "nothing"}}
+    bodies = iter([
+        f"id: 7\nevent: system.note\ndata: {json.dumps(note)}\n\nevent: reset\ndata: {{}}\n\n",
+        f"id: 7\nevent: system.note\ndata: {json.dumps(note)}\n\n",
+    ])
+    client = HttpWorkerClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, text=next(bodies), headers={"content-type": "text/event-stream"})))
+    assert client.system_notes("s1", after_seq=0) == []
+    with pytest.raises(ClientError, match="no caught_up"):
+        client.event_seq("s1")
 
 
 def _real_routes():
@@ -1050,6 +1126,22 @@ def test_ws_send_starts_a_visible_chat_only_when_asked(ws_stub):
     assert "disposable_test" not in frames[0]
     client.send("follow-up", session_id="new1", disposable=True)
     assert "disposable_test" not in frames[-1]  # only a new chat carries provenance
+
+
+def test_ws_send_reports_the_new_chat_before_the_linger(ws_stub):
+    # An interruption during the post-acknowledgement linger must not lose the id.
+    url, _frames, _origins, _paths = ws_stub
+    client = HttpWorkerClient(url, ack_timeout=5)
+    client.linger_s = 60
+    created = []
+
+    def on_created(sid):
+        created.append(sid)
+        raise KeyboardInterrupt  # Ctrl-C right after the acknowledgement
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        client.send("hello", on_created=on_created)
+    assert created == ["new1"] and time.monotonic() - started < 30
 
 
 def test_ws_follow_up_carries_the_agent(ws_stub):
@@ -1161,6 +1253,27 @@ def test_row9_visible_chats_are_settled_when_interrupted(tmp_path):
     assert worker.settled == ["s1", "s2"]
 
 
+@pytest.mark.parametrize("on, visible", [("self", True), ("self", False), ("peer", False)])
+def test_a_chat_interrupted_after_its_acknowledgement_is_cleaned_up_once(tmp_path, on, visible):
+    # Ctrl-C/SIGTERM during the client's linger after session_created: send()
+    # never returns the id, but the runner tracked it at the acknowledgement.
+    class InterruptedInLinger(FakeWorker):
+        def send(self, prompt, **kw):
+            sid = super().send(prompt, **kw)
+            if len(self.sessions) == 2:
+                raise KeyboardInterrupt
+            return sid
+    row = {"id": "t.1", "check": "c", "kind": "script", "steps": [
+        {"op": "start", "as": "a", "prompt": "reply OK", "expect_reply": "OK"},
+        {"op": "start", "as": "b", "on": on, "visible": visible, "prompt": "reply OK", "wait": False}]}
+    worker = InterruptedInLinger()
+    result, _ = _run(worker, _data(row), tmp_path)
+    assert result["outcome"] == "interrupted"
+    assert worker.settled == ["s1", "s2"]  # each once, though s1 was also tracked on return
+    assert [c["session_id"] for c in result["sessions"]] == ["s1", "s2"]
+    assert worker.sessions["s2"]["remote"] is (on == "peer")
+
+
 @pytest.mark.parametrize("receipt", ["queued", "begun", "stopped", "unknown"])
 def test_peer_delivery_requires_consumed_receipt(tmp_path, receipt):
     data = _harness_rows("two-worker-smoke.9")
@@ -1263,6 +1376,23 @@ def test_new_harness_steps_validate_required_inputs(step):
     row["steps"].append(step)
     with pytest.raises(scenarios.ScenarioError):
         scenarios.validate(_data(row))
+
+
+@pytest.mark.parametrize("first, second, ok", [
+    (True, False, False),  # visible, then restarted hidden: a is hidden now
+    (False, True, True),   # hidden, then restarted visible: a is visible now
+])
+def test_peer_delivery_checks_the_latest_start_of_each_alias(first, second, ok):
+    row = {"id": "t.1", "check": "c", "kind": "script", "steps": [
+        {"op": "start", "as": "a", "prompt": "p", "visible": first},
+        {"op": "start", "as": "a", "prompt": "p", "visible": second},
+        {"op": "start", "as": "b", "prompt": "p", "visible": True},
+        {"op": "peer_delivery", "sender": "b", "session": "a", "message": "probe", "request_id": "r"}]}
+    if ok:
+        scenarios.validate(_data(row), journeys=set())
+    else:
+        with pytest.raises(scenarios.ScenarioError, match="visible: true"):
+            scenarios.validate(_data(row), journeys=set())
 
 
 # -- preview runs and the row-skip policy --------------------------------------

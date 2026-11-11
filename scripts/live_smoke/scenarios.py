@@ -120,6 +120,8 @@ def validate(data: dict, journeys: set | None = None) -> None:
                     if not isinstance(step.get("visible", False), bool):
                         raise ScenarioError(f"{rid}: visible must be true or false")
                     aliases.add(step.get("as", "a"))
+                    # A restart rebinds the alias: only its latest start counts.
+                    visible.discard(step.get("as", "a"))
                     if step.get("visible"):
                         visible.add(step.get("as", "a"))
                 elif op == "tool_catalog":

@@ -98,6 +98,10 @@ Run it under Monitor or in a terminal: a full run takes several minutes.
   They are hidden from ordinary Chats, counts and search, but retained by ID and
   export. Cleanup explicitly Stops unfinished test-owned work, then settles it,
   also after a failure, the cap, Ctrl-C or SIGTERM. Settling itself is not Stop.
+  A chat counts as the run's from the worker's `session_created`
+  acknowledgement; an interruption before that arrives can leave a chat the run
+  never learned the id of, so after an interrupted run settle any stray smoke
+  chat by hand.
 - Exception: a `start` step with `"visible": true` starts an ordinary visible
   chat instead, for checks the app deliberately refuses on hidden chats.
   Top-level orchestration (the peer-message route behind MessageSession)
