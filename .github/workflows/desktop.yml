@@ -38,7 +38,7 @@ jobs:
   check:
     name: Typecheck and unit tests
     timeout-minutes: 10
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: desktop
@@ -82,7 +82,7 @@ jobs:
     timeout-minutes: 20
     if: github.event_name == 'workflow_dispatch' && inputs.build_linux_runtime == true
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: desktop

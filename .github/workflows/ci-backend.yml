@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       runner_cpus:
-        description: 'Legacy input (retained for callers); shards use two workers on ubuntu-latest'
+        description: 'Legacy input (retained for callers); shards use two workers on ubuntu-24.04'
         type: choice
         options: ['2', '4']
         default: '2'
@@ -37,7 +37,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     timeout-minutes: 35
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
@@ -120,7 +120,7 @@ jobs:
   backend-contracts:
     name: backend-contracts
     timeout-minutes: 35
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
@@ -188,7 +188,7 @@ jobs:
         run: python -m pytest --durations=50 --junitxml=reports/contracts-8-1.xml tests/smoke tests/db/test_schema_lifecycle.py -m boot_smoke -o addopts="" -q -rs -p no:cacheprovider --timeout=240
 
       - name: Start the runner's PostgreSQL
-        # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;
+        # The ubuntu-24.04 runner image ships PostgreSQL 16 preinstalled and stopped;
         # starting it costs seconds, where a service container costs a pull
         # and a health-check wait on every run. One database per contract
         # suite so neither sees the other's tables.
@@ -265,7 +265,7 @@ jobs:
     name: backend-security
     if: always()
     timeout-minutes: 35
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
@@ -330,7 +330,7 @@ jobs:
         run: sudo -E env "PATH=$PATH" python -m pytest --durations=50 --junitxml=reports/security-7-1.xml tests/core/test_agent_isolation_root.py -o addopts="" -q -rs -p no:cacheprovider --timeout=180
 
       - name: Start the runner's PostgreSQL
-        # The Ubuntu runner image ships PostgreSQL preinstalled and stopped;
+        # The ubuntu-24.04 runner image ships PostgreSQL 16 preinstalled and stopped;
         # starting it costs seconds, where a service container costs a pull
         # and a health-check wait on every run. One database per contract
         # suite so neither sees the other's tables.
@@ -443,7 +443,7 @@ jobs:
     name: Backend tests
     if: always() && inputs.gated_by_caller != true
     needs: [backend-shard, backend-contracts, backend-security]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

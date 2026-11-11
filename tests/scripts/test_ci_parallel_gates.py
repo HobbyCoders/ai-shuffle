@@ -99,7 +99,7 @@ def test_all_parallel_branches_remain_unconditional_and_required():
         for key, job in config["jobs"].items():
             if job.get("uses") == "./.github/workflows/record-pass.yml":
                 continue
-            assert job["runs-on"] in ["ubuntu-latest", "windows-latest"]
+            assert job["runs-on"] in ["ubuntu-24.04", "windows-latest"]
             assert "continue-on-error" not in job
             for step in job["steps"]:
                 assert "continue-on-error" not in step
@@ -232,7 +232,7 @@ def test_ui_journeys_and_visual_regression_gate_every_pr():
     jobs = workflow("ci-frontend.yml")["jobs"]
     assert {"journey-plan", "journeys", "visual"} <= set(jobs["javascript"]["needs"])
     journeys = jobs["journeys"]
-    assert journeys["runs-on"] == "ubuntu-latest"
+    assert journeys["runs-on"] == "ubuntu-24.04"
     assert journeys["strategy"]["fail-fast"] == "false"
     from scripts.devloop.ci import HOSTED_SHARDS
     # Only the shards the selection gave a file start; the selection job plans

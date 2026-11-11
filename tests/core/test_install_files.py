@@ -76,7 +76,7 @@ def test_buyer_compose_is_verified_in_ci():
     assert any("verify_buyer_compose.py" in step.get("run", "") for step in steps)
     release = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
     job = release["jobs"]["buyer-install"]
-    assert job["runs-on"] == "ubuntu-latest" and job["needs"] == ["create-release", "docker"]
+    assert job["runs-on"] == "ubuntu-24.04" and job["needs"] == ["create-release", "docker"]
     assert any("verify_buyer_compose.py" in step.get("run", "") for step in job["steps"])
 
 

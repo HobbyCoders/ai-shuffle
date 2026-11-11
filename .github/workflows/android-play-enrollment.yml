@@ -24,7 +24,7 @@ concurrency:
 jobs:
   checks:
     name: Encrypted Play key export tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.private && inputs.confirm_existing_key_export)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

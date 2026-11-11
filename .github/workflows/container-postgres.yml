@@ -19,7 +19,7 @@ jobs:
   container-postgres:
     name: Single-container PostgreSQL and browser
     # Standard Linux runner with BuildKit layers cached in GitHub Actions.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4

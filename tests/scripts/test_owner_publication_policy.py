@@ -126,7 +126,7 @@ def test_pr_checks_stay_on_standard_runners_and_fail_loudly(name, job, commands)
     config = workflow(name)
     assert set(config["on"]) == {"pull_request", "workflow_dispatch", "workflow_call"}
     check = config["jobs"][job]
-    assert check["runs-on"] == "ubuntu-latest"
+    assert check["runs-on"] == "ubuntu-24.04"
     assert "continue-on-error" not in check
     assert all("continue-on-error" not in step for step in check["steps"])
     for command in commands:
@@ -178,7 +178,7 @@ def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
     jobs = workflow("ci-frontend.yml")["jobs"]
     assert jobs["frontend"]["timeout-minutes"] == "20"
     job = jobs["browser-mcp"]
-    assert job["runs-on"] == "ubuntu-latest"
+    assert job["runs-on"] == "ubuntu-24.04"
     assert job["timeout-minutes"] == "15"
     # It waits on nothing; main skips it only when a pull request passed it on the same files.
     assert "needs" not in job and job["if"] == "inputs.checks_proven != true"
@@ -359,7 +359,7 @@ def test_late_restore_acceptance_is_owner_only_and_reads_only_its_installer_url(
 def test_windows_installer_requires_tagged_unit_tests_before_building():
     jobs = workflow("desktop-installer.yml")["jobs"]
     check = jobs["check"]
-    assert check["runs-on"] == "ubuntu-latest"
+    assert check["runs-on"] == "ubuntu-24.04"
     assert check["if"] == jobs["build"]["if"]
     assert check["steps"][0]["with"]["ref"] == "refs/tags/${{ inputs.release_tag }}"
     assert any(step.get("run") == "npm ci && npm test" for step in check["steps"])

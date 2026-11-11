@@ -239,7 +239,7 @@ def test_source_ui_is_parallel_optional_and_secret_free_but_not_a_suite_substitu
     assert build["on"]["workflow_call"]["inputs"]["optional"] == {"type": "boolean", "default": "false"}
     job = build["jobs"]["build"]
     assert job["continue-on-error"] == "${{ inputs.optional }}"
-    assert job["runs-on"] == "ubuntu-latest" and "environment" not in job
+    assert job["runs-on"] == "ubuntu-24.04" and "environment" not in job
     assert "secrets" not in (ROOT / ".github/workflows/source-ui-bundle.yml").read_text()
     checkout, control = job["steps"][:2]
     assert checkout["with"]["persist-credentials"] == control["with"]["persist-credentials"] == "false"

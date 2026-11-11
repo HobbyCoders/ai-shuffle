@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
@@ -80,7 +80,7 @@ jobs:
   contracts:
     name: JavaScript contracts, docs and frontend audit
     if: inputs.checks_proven != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
@@ -114,7 +114,7 @@ jobs:
   build:
     name: Frontend and mobile production build
     if: inputs.checks_proven != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
@@ -134,7 +134,7 @@ jobs:
   typechecks:
     name: Frontend and mobile typechecks
     if: inputs.checks_proven != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
@@ -157,7 +157,7 @@ jobs:
   mobile:
     name: Mobile tests
     if: inputs.checks_proven != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
@@ -177,7 +177,7 @@ jobs:
   tools:
     name: Tools tests and WebCrypto vectors
     if: inputs.checks_proven != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -198,7 +198,7 @@ jobs:
     # Run independently: frontend checks took 14m on a standard runner, while
     # the real browser suite needs about 5m. Neither should consume the other's
     # budget or hide a hang behind the overall JavaScript deadline.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -289,7 +289,7 @@ jobs:
     # since the last commit main-suite passed on, and nothing when a pull
     # request already passed those journeys on these exact files. A scheduled
     # or dispatched run always runs every journey.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -327,7 +327,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.journey-plan.outputs.shards) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
       JOURNEY_SELECTION: ${{ needs.journey-plan.outputs.only }}
@@ -439,7 +439,7 @@ jobs:
     # run. The committed baselines are this image's renders: when the
     # playwright-core version changes, this tag changes with it (a policy test
     # checks) and the baselines are refreshed (docs/ci/pr-checks.md).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     container:
       image: mcr.microsoft.com/playwright:v1.61.1-noble
@@ -484,7 +484,7 @@ jobs:
     name: JavaScript package checks
     if: always() && inputs.gated_by_caller != true
     needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp, journey-plan, journeys, visual]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every branch to succeed
