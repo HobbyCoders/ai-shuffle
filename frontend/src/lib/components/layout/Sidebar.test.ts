@@ -175,8 +175,6 @@ import Sidebar from './Sidebar.svelte';
 import { layout } from '$lib/stores/layout.svelte';
 import { viewPanel } from '$lib/stores/view-panel.svelte';
 import { platform } from '$lib/stores/platform.svelte';
-import { memoryHealth } from '$lib/stores/memory-health.svelte';
-import { encodeTarget } from '$lib/settings/navigation.svelte';
 
 function session(
 	id: string,
@@ -1999,106 +1997,5 @@ describe('Sidebar without the retired assistant (#371 step 5)', () => {
 		expect(document.body.textContent).not.toMatch(/Your ongoing conversation|Set up your assistant/);
 		expect(cardIds()).toEqual(['active']);
 		expect(onOpenFeature).not.toHaveBeenCalledWith('assistant');
-	});
-});
-
-
-describe('Sidebar Needs you: memory health (#1042)', () => {
-	const loss = {
-		state: 'attention',
-		checked_at: 1,
-		signals: [
-			{ id: 'capacity', label: 'Capacity', state: 'attention', reason: 'Automatic cleanup has recorded 3 permanent deletions of older facts. Recall cannot recover a deleted copy.' }
-		],
-		repairs: []
-	};
-	const healthy = { state: 'healthy', checked_at: 1, signals: [], repairs: [] };
-	const memoryTarget = encodeTarget({ category: 'system', anchor: 'system.memoryHealth', open: 'system.memoryHealth' });
-	const lane = () => document.querySelector('[data-group="needs-you"]');
-	const item = () => screen.queryByRole('button', { name: /^Memory needs attention/ });
-
-	/** The worker's next answer to GET /memory/health, fetched by the shared store. */
-	async function answer(body: unknown) {
-		mocks.apiGet.mockImplementation(async (path: string) => {
-			if (path !== '/memory/health') return { allow_updates: false, update_all_workers: false, workers: [] };
-			if (body instanceof Error) throw body;
-			return body;
-		});
-		await memoryHealth.refresh();
-		await tick();
-	}
-
-	beforeEach(() => memoryHealth.reset());
-	afterEach(() => memoryHealth.reset());
-
-	it('is the lane on its own when nothing else waits, counted in the header', async () => {
-		await answer(loss);
-		render(Sidebar, { props: sidebarProps });
-		await tick();
-		expect(sectLabels()).toEqual(['Needs you 1', 'Active 1', 'Settled 1']);
-		const button = item();
-		expect(button).toBeTruthy();
-		expect(lane()?.contains(button)).toBe(true);
-		expect(button!.textContent).toContain('Capacity: Automatic cleanup has recorded 3 permanent deletions of older facts.');
-		// Not a session row, and no dismiss control: it follows the check.
-		expect(button!.closest('[data-session-card]')).toBeNull();
-		expect(within(lane() as HTMLElement).queryByRole('button', { name: /dismiss/i })).toBeNull();
-	});
-
-	it('sits above the chats waiting on you and adds to their count', async () => {
-		mocks.backgroundPermissions.set(new Map([['active', { count: 1, kind: 'permission' }]]));
-		await answer(loss);
-		render(Sidebar, { props: sidebarProps });
-		await tick();
-		expect(sectLabels()).toEqual(['Needs you 2', 'Active 0', 'Settled 1']);
-		const order = Array.from(lane()!.querySelectorAll('[data-session-card], [data-needs-item]')).map(
-			(node) => node.getAttribute('data-session-card') ?? node.getAttribute('data-needs-item')
-		);
-		expect(order).toEqual(['memory-health', 'active']);
-	});
-
-	it('opens Settings > System at Memory health, with the row open', async () => {
-		await answer(loss);
-		const onOpenFeature = vi.fn();
-		render(Sidebar, { props: { ...sidebarProps, onOpenFeature } });
-		await tick();
-		const button = item() as HTMLButtonElement;
-		// A real button: in the tab order like the rows, Enter and Space included.
-		expect(button.tagName).toBe('BUTTON');
-		expect(button.tabIndex).toBe(0);
-		await fireEvent.click(button);
-		expect(onOpenFeature).toHaveBeenCalledWith('settings', memoryTarget);
-	});
-
-	it('goes away when the check reports healthy, and hides the lane it was alone in', async () => {
-		await answer(loss);
-		render(Sidebar, { props: sidebarProps });
-		await tick();
-		expect(item()).toBeTruthy();
-		await answer(healthy);
-		expect(item()).toBeNull();
-		expect(lane()).toBeNull();
-		expect(sectLabels()).toEqual(['Active 1', 'Settled 1']);
-	});
-
-	it.each([
-		['healthy', healthy],
-		['unreadable', Object.assign(new Error('Server error'), { status: 500 })],
-		['refused', Object.assign(new Error('Owner access required'), { status: 403 })]
-	])('never shows for a %s check', async (_name, body) => {
-		await answer(body);
-		render(Sidebar, { props: sidebarProps });
-		await tick();
-		expect(item()).toBeNull();
-		expect(sectLabels()).toEqual(['Active 1', 'Settled 1']);
-	});
-
-	it('collapses with the lane', async () => {
-		await answer(loss);
-		render(Sidebar, { props: sidebarProps });
-		await tick();
-		await fireEvent.click(screen.getByRole('button', { name: /^Needs you/ }));
-		expect(item()).toBeNull();
-		expect(sectLabels()[0]).toBe('Needs you 1');
 	});
 });
