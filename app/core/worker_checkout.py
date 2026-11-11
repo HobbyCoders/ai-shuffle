@@ -293,10 +293,7 @@ def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, b
 
     try:
         if path and os.path.isdir(path):
-            head = git_service._run_git(path, ["rev-parse", "HEAD"], timeout=5)
-            status = git_service._run_git(path, ["status", "--porcelain"], timeout=10)
-            if (head.returncode or head.stdout.strip() != (head_commit or base_commit)
-                    or status.returncode or status.stdout.strip()):
+            if not _clean_at(path, head_commit or base_commit):
                 return False
             if not git_service.remove_worktree(main_dir, path, force=False):
                 return False
@@ -317,6 +314,16 @@ def _reclaim(main_dir: str, project_id: str, path: Optional[str], branch: str, b
     except Exception:  # noqa: BLE001 — reclaim is best-effort; never mask the caller
         logger.warning("worker_checkout: could not reclaim %s", branch, exc_info=True)
         return False
+
+
+def _clean_at(path: str, expected_head: str) -> bool:
+    """The checkout is at ``expected_head`` with no changes or untracked files."""
+    from app.core.git_service import git_service
+
+    head = git_service._run_git(path, ["rev-parse", "HEAD"], timeout=5)
+    status = git_service._run_git(path, ["status", "--porcelain"], timeout=10)
+    return not (head.returncode or head.stdout.strip() != expected_head
+                or status.returncode or status.stdout.strip())
 
 
 async def reclaim_finished_worker_checkout(worker_session_id: str, checkout: Optional[WorkerCheckout] = None) -> bool:
@@ -341,14 +348,22 @@ async def reclaim_finished_worker_checkout(worker_session_id: str, checkout: Opt
             except Exception:  # noqa: BLE001 — the cleanup helper also fails closed on binding errors
                 return False
             path = (row or {}).get("worktree_path")
+        from app.core.session_pool import get_session_pool
+
         had_directory = bool(path and await asyncio.to_thread(os.path.isdir, path))
+        retired = False
+        if (os.name == "nt" and had_directory
+                and await asyncio.to_thread(_would_reclaim_untouched, worker_session_id, checkout)):
+            # Windows will not delete a live process's cwd: Git would remove the
+            # files and leave the empty folder and the branch (#1481). Retire
+            # the pooled client first; a kept (dirty) checkout keeps its client.
+            await get_session_pool().remove(worker_session_id, preserve_session=True)
+            retired = True
         reclaimed = await asyncio.to_thread(reclaim_untouched_worker_checkout, worker_session_id, checkout)
         # Ref deletion can fail after Git removed the cwd (for example a ref lock).
         # Overall cleanup success is not the lifetime of that directory inode.
         cwd_removed = had_directory and not await asyncio.to_thread(os.path.isdir, path)
-        if reclaimed or cwd_removed:
-            from app.core.session_pool import get_session_pool
-
+        if (reclaimed or cwd_removed) and not retired:
             # A retained subprocess still points at the removed directory inode,
             # even after the same path is restored. Retire it before admission
             # unlocks; the next request resumes a fresh client in the new cwd.
@@ -366,6 +381,18 @@ def reclaim_untouched_worker_checkout(
     with commits past its recorded base or uncommitted changes is retained for
     review. Returns True when it was removed.
     """
+    plan = _untouched_reclaim_plan(worker_session_id, checkout)
+    return plan is not None and _reclaim(*plan)
+
+
+def _untouched_reclaim_plan(
+    worker_session_id: str, checkout: Optional[WorkerCheckout] = None,
+) -> Optional[Tuple[str, str, str, str, str, Optional[str]]]:
+    """The :func:`_reclaim` arguments when the checkout may be reclaimed, else None.
+
+    Read-only: every Git check except the final clean-tree one, which
+    :func:`_reclaim` repeats immediately before removal.
+    """
     from app.core import worktree_reclaim
     from app.core.git_service import git_service
     from app.db import database
@@ -376,14 +403,14 @@ def reclaim_untouched_worker_checkout(
         try:
             row: Optional[Dict[str, Any]] = database.get_session(worker_session_id)
         except Exception:  # noqa: BLE001
-            return False
+            return None
         branch = (row or {}).get("branch") or ""
         path = (row or {}).get("worktree_path")
         project_id = (row or {}).get("project_v2_id")
     if not is_worker_branch(branch, worker_session_id) or not path or not project_id:
-        return False
+        return None
     if not os.path.isdir(path):
-        return False
+        return None
     # The branch's oldest reflog entry is the caller HEAD it was forked from.
     # Any later entry (a commit, reset or rebase) means the worker touched it;
     # no reflog at all means we cannot prove that, so keep it.
@@ -392,26 +419,33 @@ def reclaim_untouched_worker_checkout(
     )
     entries = [e for e in (log.stdout or "").split() if e]
     if log.returncode or len(entries) != 1 or not _SHA.fullmatch(entries[0]):
-        return False
+        return None
     base_commit = entries[0]
     main_dir = _main_dir_for(path)
     if not main_dir:
-        return False
+        return None
     # Untouched does not mean disposable: the parent may have dropped its
     # unpublished tip while the worker ran, leaving this branch its only ref.
     if not worktree_reclaim._held_elsewhere(main_dir, base_commit, branch, None):
         logger.info("worker_checkout: kept %s: its starting commit %s is held only by its own branch",
                     branch, base_commit[:12])
-        return False
+        return None
     head = git_service._run_git(path, ["rev-parse", "--verify", "HEAD^{commit}"], timeout=5)
     head_commit = head.stdout.strip() if head.returncode == 0 else ""
     if head_commit != base_commit:
         # A reviewer moved HEAD (``git checkout --detach``, ``gh pr checkout``).
         # Released only when that HEAD is pushed and nothing local is at stake.
         if not _stranded_review_head(main_dir, path, branch, base_commit, head_commit):
-            return False
-        return _reclaim(main_dir, project_id, path, branch, base_commit, head_commit)
-    return _reclaim(main_dir, project_id, path, branch, base_commit)
+            return None
+        return main_dir, project_id, path, branch, base_commit, head_commit
+    return main_dir, project_id, path, branch, base_commit, None
+
+
+def _would_reclaim_untouched(worker_session_id: str, checkout: Optional[WorkerCheckout] = None) -> bool:
+    """Whether :func:`reclaim_untouched_worker_checkout` would remove the
+    checkout right now. Changes nothing."""
+    plan = _untouched_reclaim_plan(worker_session_id, checkout)
+    return plan is not None and _clean_at(plan[2], plan[5] or plan[4])
 
 
 def _stranded_review_head(main_dir: str, path: str, branch: str, base_commit: str, head_commit: str) -> bool:
@@ -553,6 +587,9 @@ def restore_worker_checkout(worker_session_id: str, *, follow_live_switch: bool 
                                "part-way, or a restore retained the snapshot. The folder may not contain all "
                                f"the saved work; {worktree_reclaim.archive_note(base_path, branch)}. "
                                "Dispatch a new Task instead")
+        # A Windows cwd lock can leave an empty folder after cleanup (#1481);
+        # restore into it below, as the switched-branch path does (#1440).
+        if os.path.isdir(path) and not checkout_manager._is_empty_cleanup_remnant(path, {"path": path}):
             # An idle worker left its clean checkout detached: put it back on
             # its branch under the same rules as a turn start (#1437). A live
             # turn returned above; a checkout already on a branch is untouched.

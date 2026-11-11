@@ -1,6 +1,7 @@
 """Producing-path regressions from the fresh independent PR 1040 review."""
 import asyncio
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -153,7 +154,8 @@ async def test_reclaimed_checkout_retires_pooled_cwd_generation(repo, monkeypatc
         Path(checkout.path, "keep-owner-work.txt").write_text("retain this checkout")
     async def retire(session_id, *, preserve_session):
         assert session_id == "followup" and preserve_session is True
-        assert not Path(checkout.path).exists()
+        # Windows cannot delete a live client's cwd, so it retires first (#1481).
+        assert Path(checkout.path).exists() is (os.name == "nt")
         assert turn_scheduler.message_resume_lock(session_id).locked()
     removed = AsyncMock(side_effect=retire)
     monkeypatch.setattr(session_pool, "remove", removed)
@@ -212,7 +214,10 @@ for line in sys.stdin:
         if dirty:
             assert current == {"cwd": checkout.path}
         else:
-            assert retired_cwd == [{"error": "FileNotFoundError", "errno": 2}]
+            # POSIX retires the client after Git deleted its cwd; Windows must
+            # retire it first, or Git cannot delete the folder (#1481).
+            expected = {"cwd": checkout.path} if os.name == "nt" else {"error": "FileNotFoundError", "errno": 2}
+            assert retired_cwd == [expected]
             assert process.poll() is not None, "the deleted-cwd process must be retired"
             # The still-held ref lock also blocks Git checkout; admission fails closed.
             assert not await query_options.ensure_pending_checkout(database.get_session("followup"))
