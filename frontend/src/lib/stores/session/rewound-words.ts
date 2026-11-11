@@ -13,12 +13,14 @@ export function composerWordsOf(draft: string | null | undefined): string {
 	return hasComposerDraft(draft) ? draftPreview(draft!, Number.MAX_SAFE_INTEGER) : '';
 }
 
-export function chatDraftNow(sessionId: string): string {
+/** A chat's draft right now (null: New chat): the open chat's, with a
+ *  composer's pending save flushed into it first, else the saved one. */
+export function chatDraftNow(sessionId: string | null): string {
 	flushPendingDraft();
 	const active = get(activeSession);
 	return active.sessionId === sessionId
 		? active.draft ?? ''
-		: sessionEphemeralCache.peekDraft(sessionId) || readDraft(sessionId) || '';
+		: sessionEphemeralCache.peekDraft(sessionId ?? '__new_chat__') || readDraft(sessionId) || '';
 }
 
 export function composerBaseline(sessionId: string): string | null {

@@ -11,7 +11,7 @@ import Harness from './test-fixtures/TranscriptSafetyHarness.svelte';
 const mocks = vi.hoisted(() => ({ rewind: vi.fn(), report: vi.fn(), stop: vi.fn(), save: vi.fn(), send: vi.fn(), pendingRestore: vi.fn() }));
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
-	return { activeSession: Object.assign(writable({}), { sendMessage: mocks.send, setPendingRestorePrompt: mocks.pendingRestore }) };
+	return { activeSession: Object.assign(writable({}), { sendMessage: mocks.send, reserveSend: () => ({ cancel() {} }), setPendingRestorePrompt: mocks.pendingRestore }) };
 });
 vi.mock('$lib/api/client', async (original) => ({ ...(await original<object>()), executeRewind: mocks.rewind }));
 vi.mock('$lib/stores/support-report.svelte', () => ({ canReportAiContent: () => true, reportAiContent: mocks.report }));

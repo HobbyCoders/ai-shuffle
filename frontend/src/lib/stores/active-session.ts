@@ -37,6 +37,8 @@ import {
 } from './session/session-switcher';
 
 // Extracted sub-modules
+import type { SendReservation } from './session/send-order';
+import type { Creation } from './session/message-sender';
 import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
@@ -1102,8 +1104,11 @@ export const activeSession = {
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
 
-	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean; stillAtDestination?: () => boolean; notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> }; onDispatched?: () => void }) =>
+	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean; stillAtDestination?: () => boolean; notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> }; onDispatched?: () => void; turn?: SendReservation }) =>
 		messageSender.sendMessage(prompt, options),
+	/** Take a send's place in line before awaiting, then pass it as
+	 *  `options.turn` (#1444; see send-order.ts). */
+	reserveSend: (): SendReservation => messageSender.reserveSend(),
 
 	stopGeneration: () => messageSender.stopGeneration(),
 	interruptForQueuedMessages: () => messageSender.interruptForQueuedMessages(),
@@ -1609,11 +1614,11 @@ export const activeSession = {
 			...(mode === 'chat' ? { permissionModeOverride: noProjectPermission(s.permissionModeOverride) } : {}) }));
 	},
 
-	createWorktree: (prompt?: string, pendingUploadPaths?: string[]) =>
-		withHeldSwaps(() => messageSender.createWorktree(prompt, pendingUploadPaths)),
+	createWorktree: (prompt?: string, pendingUploadPaths?: string[], creation?: Creation) =>
+		withHeldSwaps(() => messageSender.createWorktree(prompt, pendingUploadPaths, creation)),
 
-	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
-		withHeldSwaps(() => messageSender.autoCreateWorktree(prompt, pendingUploadPaths)),
+	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[], creation?: Creation) =>
+		withHeldSwaps(() => messageSender.autoCreateWorktree(prompt, pendingUploadPaths, creation)),
 
 	/** Create the composed session with no first message (the call button). */
 	startSessionWithoutPrompt: () => messageSender.startSessionWithoutPrompt(),

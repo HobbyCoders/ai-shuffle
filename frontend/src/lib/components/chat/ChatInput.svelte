@@ -44,7 +44,8 @@
 	import { promptHistory, createPromptRecall } from '$lib/stores/session/prompt-recall';
 	import { pastedTextFile } from './tiptap/large-paste';
 	import { joinDrafts, restoreMessageDocument } from './tiptap/serialization';
-	import { captureDestination, keepUnsentDraft, movedAwayFrom, noteLeftDraft, putBackUnsent, retirePutBack, SEND_MOVED_MESSAGE, stillAtDestination, type SendDestination } from './send-destination';
+	import { captureDestination, keepRefusedSend, keepUnsentDraft, onDraftChanged, movedAwayFrom, noteLeftDraft, putBackUnsent, retirePutBack, SEND_MOVED_MESSAGE, stillAtDestination, type SendDestination } from './send-destination';
+	import type { SendReservation } from '$lib/stores/session/send-order';
 	import { composerInsert, completeComposerInsert } from '$lib/stores/composer-insert';
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
@@ -1106,6 +1107,18 @@
 	// this one's cold-cache check, so two sends keep their order, then goes
 	// (#1344). Held until the check has answered.
 	let pendingSubmit: { cleared: boolean; done: Promise<void> } | null = null;
+	// A submission outlives an unmounted composer and still sends in its place
+	// in line (#1444). Refused then, its words go into its chat's draft
+	// (keepRefusedSend), and the composer showing that chat shows it again.
+	let composerGone = false;
+	const stopShowingDraft = onDraftChanged((chat) => {
+		const state = get(activeSession);
+		if (ownsComposer() && chat === prevSessionId && state.sessionId === chat) setComposerDraft(state.draft);
+	});
+	onDestroy(() => {
+		composerGone = true;
+		stopShowingDraft();
+	});
 	// Where a send is waiting behind an earlier check. It still shows its words
 	// in the composer, so another activation there is the same message again
 	// and is dropped. A waiter left behind by a chat switch gives up when it
@@ -1138,6 +1151,21 @@
 			// again, not a message. Waiting would send what is typed later.
 			if (!(editorRef?.getMessage() ?? '').trim() && uploadedFiles.length === 0) return;
 			if (waitingSend && stillAtDestination(waitingSend, composerPlace(), { adoptedOwnChat: true })) return;
+		}
+		// The submission is accepted: its place among this chat's sends is
+		// taken now, before any wait below, so a send made elsewhere meanwhile
+		// (the Browser panel) goes after it (#1444). Every path that sends
+		// nothing gives it up.
+		const turn = activeSession.reserveSend();
+		try {
+			await submitInTurn(compactBeforeSend, turn);
+		} finally {
+			turn.cancel();
+		}
+	}
+
+	async function submitInTurn(compactBeforeSend: boolean, turn: SendReservation) {
+		if (pendingSubmit) {
 			// New chat or a switch during the wait: the words stay as the draft
 			// of the chat they were typed in (session-change effect).
 			const clickedIn = captureDestination(composerPlace());
@@ -1159,13 +1187,13 @@
 			releaseSendCircle();
 		};
 		try {
-			await submitComposer(compactBeforeSend, release);
+			await submitComposer(compactBeforeSend, release, turn);
 		} finally {
 			release();
 		}
 	}
 
-	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void) {
+	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void, turn: SendReservation) {
 		if (!ownsComposer() || heldForCatalog || heldForSetup || (compacting && !compactBeforeSend)) return;
 		// The chat this message was typed in. The checks below and the store's
 		// restore wait can await; a New chat or chat switch in that window must
@@ -1262,7 +1290,8 @@
 		// Send the message, optionally queued behind a server-owned compaction.
 		// sendMessage clears the composer before its first await, and holds the
 		// next send until the cold check has answered so two sends keep order.
-		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm);
+		// It sends in the place taken at the click (handleSubmit).
+		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm, turn);
 	}
 
 	/**
@@ -1318,7 +1347,8 @@
 		compactBeforeSend = false,
 		mayGo?: () => Promise<boolean>,
 		released?: () => void,
-		notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> }
+		notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> },
+		turn?: SendReservation
 	) {
 		if (!ownsComposer()) return;
 		// Enforce the same capability as the hidden worktree checkbox, even if
@@ -1366,9 +1396,13 @@
 		// for either to be set during this send.
 		const reasonAtSend = { error: $activeSession.error, worktreeError: $activeSession.worktreeError };
 		const reasonSet = { error: false, worktreeError: false };
+		// The chat a New chat send made: New chat taking a session with no
+		// navigation since. Its words belong there if refused (#1444).
+		let madeChat: string | null = null;
 		const stopWatchingReason = activeSession.subscribe(s => {
 			if (s.error !== reasonAtSend.error) reasonSet.error = true;
 			if (s.worktreeError !== reasonAtSend.worktreeError) reasonSet.worktreeError = true;
+			if (destination.chat === null && !madeChat && s.sessionId && getInitGeneration() === destination.navigation) madeChat = s.sessionId;
 		});
 		const priorDraftJSON = getDraftJSON();
 		const priorInputValue = inputValue;
@@ -1395,6 +1429,20 @@
 		// the component may be destroyed/recreated when isEmptyState changes
 		saveDraftImmediately('');
 
+		// Every refusal names its reason in the session's error or worktree
+		// banner; this covers one that does not, including one that left an
+		// earlier attempt's banner standing.
+		const nameRefusal = (held: boolean) => {
+			const now = get(activeSession);
+			if ((now.error && reasonSet.error) || (now.worktreeError && reasonSet.worktreeError)) return;
+			// Left and reopened this chat while the send waited: it was called off.
+			// A send held by the cold-cache check is otherwise named by its notice.
+			const calledOff = !stillAtDestination(destination, composerPlace(), { adoptedOwnChat: true });
+			if (calledOff) refuseSend(SEND_MOVED_MESSAGE, 'warning');
+			// A held send's notice was in the composer that has gone.
+			else if (!held || composerGone) refuseSend('Message not sent. Try again.', 'warning');
+		};
+
 		// `held`: the send was held back before it went out (the cold-cache
 		// notice says why), so the text comes back without a refusal toast.
 		const restoreOnFailure = (held = false) => {
@@ -1406,22 +1454,22 @@
 			// every draft; nothing of the old account's words comes back, held
 			// or not (PR #1212 review S1).
 			if (!ownsComposer()) return;
+			// This composer has gone: no snapshot of it decides anything. The
+			// words, upload chips included, go in front of the draft their chat
+			// has now, the chat being the one sent to or the one this send made.
+			if (composerGone) {
+				nameRefusal(held);
+				const paths = priorUploadedFiles.map((f) => f.full_path).filter(Boolean);
+				const files = JSON.stringify(restoreMessageDocument('', paths));
+				keepRefusedSend(destination, destination.chat ?? madeChat, !paths.length ? priorDraftJSON : hasComposerDraft(priorDraftJSON) ? joinDrafts(priorDraftJSON, files) : files);
+				return;
+			}
 			if (movedAwayFrom(destination, composerPlace())) {
 				if (held) messageSent = false;
 				keepUnsentDraft(destination, priorDraftJSON, true);
 				return;
 			}
-			// Every refusal names its reason in the session's error or worktree
-			// banner; this covers one that does not, including one that left an
-			// earlier attempt's banner standing.
-			const now = get(activeSession);
-			if (!(now.error && reasonSet.error) && !(now.worktreeError && reasonSet.worktreeError)) {
-				// Left and reopened this chat while the send waited: it was called off.
-				// A send held by the cold-cache check is otherwise named by its notice.
-				const calledOff = !stillAtDestination(destination, composerPlace(), { adoptedOwnChat: true });
-				if (calledOff) refuseSend(SEND_MOVED_MESSAGE, 'warning');
-				else if (!held) refuseSend('Message not sent. Try again.', 'warning');
-			}
+			nameRefusal(held);
 			// A slow create can fail after the user started a new message: put
 			// the refused one back in front of it instead of replacing it.
 			// Several refused sends come back in the order they were sent.
@@ -1507,9 +1555,12 @@
 				...(pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : {}),
                 ...(pendingReferences.length ? { pendingUploadReferences: pendingReferences } : {}),
 				...(compactBeforeSend ? { compactFirst: true } : {}),
+				...(turn ? { turn } : {}),
 				// Re-checked once the store knows its target (after a reload's
 				// restore wait); false sends nothing and lands in restoreOnFailure.
-				stillAtDestination: () => stillAtDestination(destination, composerPlace()),
+				// A New chat counts as the chat an earlier send of it created: the
+				// store sends there only for that chat (#1444).
+				stillAtDestination: () => stillAtDestination(destination, composerPlace(), { adoptedOwnChat: true }),
 			});
 			if (sent === false) restoreOnFailure();
 			else if (ownsComposer() && !mobileComposerDestroyed && getInitGeneration() === sendingNavigation) {
