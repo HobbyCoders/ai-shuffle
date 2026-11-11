@@ -10,7 +10,7 @@ vi.mock('$lib/api/client', () => ({
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
 	const store = writable({ messages: [] as unknown[], sessionId: 's1' });
-	return { activeSession: { subscribe: store.subscribe, sendMessage: mocks.send, __set: store.set } };
+	return { activeSession: { subscribe: store.subscribe, sendMessage: mocks.send, reserveSend: () => ({ cancel() {} }), __set: store.set } };
 });
 
 import { generationChoices } from '$lib/stores/generation-choices.svelte';

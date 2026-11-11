@@ -683,6 +683,17 @@
 			]
 		},
 		{
+			"why": "sends from the composer and from a panel reach one chat in the order they were made (#1444)",
+			"journeys": ["send-order"],
+			"globs": [
+				"frontend/src/lib/components/chat/ChatInput.svelte",
+				"frontend/src/lib/components/chat/GenerationChoiceCard.svelte",
+				"frontend/src/lib/components/browser/BrowserPanel.svelte",
+				"frontend/src/lib/components/layout/git-resolve-with-agent*",
+				"frontend/src/lib/components/git/GitHeaderActions*"
+			]
+		},
+		{
 			"why": "Git panel actions report their outcome in the panel: Sync/Pull (clean, conflicts with Resolve with agent, dirty tree with Stash & pull) and a rejected Push with Pull first",
 			"journeys": ["git-sync"],
 			"globs": [

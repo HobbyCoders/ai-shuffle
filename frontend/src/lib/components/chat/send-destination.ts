@@ -14,7 +14,9 @@
  */
 import { activeSession } from '$lib/stores/active-session';
 import { getInitGeneration } from '$lib/stores/session/session-init';
+import { get } from 'svelte/store';
 import { writeDraft } from '$lib/stores/session/draft-persistence';
+import { chatDraftNow } from '$lib/stores/session/rewound-words';
 import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 import { notify } from '$lib/stores/notifications';
 import { joinDrafts } from './tiptap/serialization';
@@ -183,6 +185,35 @@ export function putBackUnsent(destination: SendDestination, unsent: string, curr
 /** The composer is sending this chat's draft: the words put back go with it. */
 export function retirePutBack(chat: string | null): void {
 	putBack.delete(chat);
+}
+
+/** Composers showing a chat whose draft a refused send just changed. */
+const draftChanged = new Set<(chat: string | null) => void>();
+
+/** Re-show the open chat's draft when keepRefusedSend changes it. */
+export function onDraftChanged(show: (chat: string | null) => void): () => void {
+	draftChanged.add(show);
+	return () => draftChanged.delete(show);
+}
+
+/**
+ * A send refused after its composer went (#1444). `chat` is the chat it was
+ * for, read now: its destination, or the chat its New chat created. Its words
+ * go in front of that chat's draft as it is at this moment (the open chat's
+ * live draft, else the saved one), never another chat's and never an earlier
+ * copy. The composer showing that chat, if any, re-shows its draft; else the
+ * next one opens with it.
+ */
+export function keepRefusedSend(destination: SendDestination, chat: string | null, unsent: string): void {
+	const draft = putBackUnsent({ ...destination, chat }, unsent, chatDraftNow(chat));
+	// A send called off later builds on this draft, not an earlier leave.
+	const left = leftDrafts.get(chat);
+	if (left) left.draft = draft;
+	const open = get(activeSession).sessionId === chat;
+	if (open) activeSession.setDraft(draft);
+	else activeSession.saveDraftForSession(chat, draft);
+	writeDraft(chat, draft, { preserveNewChat: true });
+	if (open) for (const show of draftChanged) show(chat);
 }
 
 /**

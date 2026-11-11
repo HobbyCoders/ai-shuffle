@@ -10,6 +10,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
 import { composerPreferences } from '../composer-preferences';
 import { bindSessionOwner } from '../session-owner';
+import { bumpInitGeneration } from './session-init';
 
 vi.mock('$lib/services/voiceCall', () => ({ isCallActiveFor: vi.fn(() => false), sendVoiceText: vi.fn() }));
 vi.mock('$lib/services/voiceExecutionContext', () => ({ persistVoiceContext: vi.fn(async () => {}), voiceContextFor: vi.fn(() => ({})) }));
@@ -28,7 +29,7 @@ vi.mock('./v2/feed-controller', () => ({
 import { feedController } from './v2/feed-controller';
 import { generateBranchName } from '$lib/api/git';
 
-function setup(overrides: Partial<ActiveSessionState> = {}) {
+function setup(overrides: Partial<ActiveSessionState> = {}, options: { realActiveSession?: boolean } = {}) {
 	let state = {
 		sessionId: null,
 		title: 'New Chat',
@@ -55,7 +56,7 @@ function setup(overrides: Partial<ActiveSessionState> = {}) {
 		pendingTools: new Set(), awaitingNewSession: false, pendingRequestId: null,
 		stopRequestedBeforeSession: false, worktreeCreationGeneration: 0, worktreeCreateAbort: null,
 	};
-	const wsConn = { isConnected: vi.fn(() => true), connect: vi.fn(), send: vi.fn(() => true), resetReconnectAttempts: vi.fn() };
+	const wsConn = { isConnected: vi.fn(() => true), connect: vi.fn(), send: vi.fn((_frame: Record<string, unknown>) => true), resetReconnectAttempts: vi.fn() };
 	const sendMessage = vi.fn<ReturnType<typeof createMessageSender>['sendMessage']>(async () => true);
 	const deps: MessageSenderDeps = {
 		update: (fn) => { state = fn(state); },
@@ -66,9 +67,12 @@ function setup(overrides: Partial<ActiveSessionState> = {}) {
 		appData: { loadSessions: vi.fn(), loadApiUserSessions: vi.fn() },
 		persistSession: vi.fn(),
 		stopTimeout: { get: () => null, set: vi.fn() },
-		getActiveSession: () => ({ sendMessage, createWorktree: vi.fn(), autoCreateWorktree: vi.fn() }),
+		// realActiveSession: the store's own entry points, as activeSession has them.
+		getActiveSession: () => options.realActiveSession ? sender
+			: ({ sendMessage, createWorktree: vi.fn(), autoCreateWorktree: vi.fn() }),
 	};
-	return { sender: createMessageSender(deps), deps, internal, wsConn, sendMessage, state: () => state };
+	const sender = createMessageSender(deps);
+	return { sender, deps, internal, wsConn, sendMessage, state: () => state };
 }
 
 beforeEach(() => {
@@ -464,5 +468,247 @@ describe('back-to-back worktree creation keeps each session independent (#1528)'
 			type: 'query', session_id: 'wt-1', prompt: 'first task',
 			overrides: expect.objectContaining({ effort: 'high', fast: true }),
 		}));
+	});
+});
+
+describe('a second send while the first send creates the worktree (#1444)', () => {
+	const ok = { session_id: 'wt-c', branch_name: 'live/staged', base_branch: 'main', worktree_path: '/w', status: 'ok' };
+	const staged = { worktreeBranch: 'live/staged', worktreeBaseBranch: 'main', worktreeCreateNewBranch: false };
+
+	it('waits for the create and goes to the chat it created, never starting a second create', async () => {
+		let finish!: (value: typeof ok) => void;
+		post.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		const { sender, wsConn } = setup(staged, { realActiveSession: true });
+		const first = sender.sendMessage('first');
+		const second = sender.sendMessage('second');
+		await new Promise(resolve => setTimeout(resolve, 20));
+		finish(ok);
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(post.mock.calls.filter(([path]) => path === '/sessions/with-worktree')).toHaveLength(1);
+		const queries = wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query');
+		expect(queries.map(frame => [frame.prompt, frame.session_id])).toEqual([['first', 'wt-c'], ['second', 'wt-c']]);
+	});
+
+	it('keeps the second send unsent when the create fails', async () => {
+		let fail!: (reason: unknown) => void;
+		post.mockReturnValueOnce(new Promise((_, reject) => { fail = reject; }));
+		const { sender, wsConn } = setup(staged, { realActiveSession: true });
+		const first = sender.sendMessage('first');
+		const second = sender.sendMessage('second');
+		await new Promise(resolve => setTimeout(resolve, 20));
+		fail({ status: 500, detail: 'worktree add failed' });
+		expect(await first).toBe(false);
+		expect(await second).toBe(false);
+		expect(post).toHaveBeenCalledTimes(1);
+		expect(wsConn.send.mock.calls.filter(([frame]) => frame.type === 'query')).toEqual([]);
+	});
+
+	// Review round 3: the outcome is read when the queued send's turn comes,
+	// so a creation that starts after the send was queued still counts.
+	it('keeps a send queued before the first send started its create unsent when that create fails', async () => {
+		post.mockRejectedValue({ status: 500, detail: 'worktree add failed' });
+		const { sender } = setup(staged, { realActiveSession: true });
+		// The composer accepted the first send but is still doing its own waits.
+		const turn = sender.reserveSend();
+		const second = sender.sendMessage('second');
+		const first = sender.sendMessage('first', { turn });
+		expect(await first).toBe(false);
+		expect(await second).toBe(false);
+		expect(post.mock.calls.filter(([path]) => path === '/sessions/with-worktree')).toHaveLength(1);
+	});
+
+	// Review round 2 (S1): the create names its chat when the POST returns,
+	// so a send made there after a leave and reopen waits for the create's
+	// own first query, even one written by the navigation fallback.
+	it('writes an auto worktree\'s fallback first query ahead of a send made after leaving and reopening its chat', async () => {
+		vi.useFakeTimers();
+		try {
+			post.mockResolvedValueOnce({ session_id: 'wt-s', branch_name: 'feat/auto-name', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: false });
+			const { sender, internal, wsConn, state } = setup({}, { realActiveSession: true });
+			wsConn.isConnected.mockReturnValue(false);
+			const first = sender.sendMessage('first');
+			await vi.advanceTimersByTimeAsync(10);
+			expect(state().sessionId).toBe('wt-s');
+			// Leave the chat and reopen it; the socket opens and a send is made.
+			bumpInitGeneration();
+			internal.worktreeCreationGeneration++;
+			wsConn.isConnected.mockReturnValue(true);
+			const second = sender.sendMessage('second');
+			await vi.advanceTimersByTimeAsync(200);
+			expect(await first).toBe(true);
+			expect(await second).toBe(true);
+			const queries = wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query');
+			expect(queries.map(frame => [frame.prompt, frame.session_id])).toEqual([['first', 'wt-s'], ['second', 'wt-s']]);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
+	});
+
+	// Review round 3 (S1): the new chat can show in the sidebar before the
+	// create answers. A send made there waits to learn which chat the create
+	// made, then goes after its first query.
+	it.each(['staged branch', 'auto branch'] as const)(
+		'with a %s, writes the first query ahead of a send made in the new chat opened before the create answered',
+		async (kind) => {
+			let resolvePost!: (v: unknown) => void;
+			post.mockReturnValueOnce(new Promise((r) => { resolvePost = r; }));
+			const { sender, internal, wsConn, deps } = setup({ worktreeBranch: kind === 'staged branch' ? 'fix/first' : '' }, { realActiveSession: true });
+			deps.appData.current = { sessions: [{ id: 'old' }] };
+			const first = sender.sendMessage('first');
+			await vi.waitFor(() => expect(post).toHaveBeenCalled());
+			// The sidebar lists the new chat; the user opens it and sends.
+			bumpInitGeneration();
+			internal.worktreeCreationGeneration++;
+			deps.update(s => ({ ...s, sessionId: 'wt-s', messages: [] }));
+			const second = sender.sendMessage('second');
+			await new Promise(r => setTimeout(r, 20));
+			expect(wsConn.send).not.toHaveBeenCalled();
+			resolvePost({ session_id: 'wt-s', branch_name: 'fix/first', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: false });
+			expect(await first).toBe(true);
+			expect(await second).toBe(true);
+			const queries = wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query');
+			expect(queries.map(frame => [frame.prompt, frame.session_id])).toEqual([['first', 'wt-s'], ['second', 'wt-s']]);
+		},
+	);
+
+	it('does not hold a send in a chat listed before the create began', async () => {
+		let resolvePost!: (v: unknown) => void;
+		post.mockReturnValueOnce(new Promise((r) => { resolvePost = r; }));
+		const { sender, internal, wsConn, deps } = setup({}, { realActiveSession: true });
+		deps.appData.current = { sessions: [{ id: 'old' }] };
+		const first = sender.sendMessage('first');
+		await vi.waitFor(() => expect(post).toHaveBeenCalled());
+		bumpInitGeneration();
+		internal.worktreeCreationGeneration++;
+		deps.update(s => ({ ...s, sessionId: 'old', messages: [] }));
+		expect(await sender.sendMessage('elsewhere')).toBe(true);
+		expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'query', prompt: 'elsewhere', session_id: 'old' }));
+		resolvePost({ session_id: 'wt-s', branch_name: 'feat/auto', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
+		expect(await first).toBe(true);
+	});
+
+	// Review round 1 (S2): each create's own first send runs in its own
+	// create's turn, whichever create ends first.
+	it('sends each create\'s first query when two creates from different composes end oldest first', async () => {
+		vi.useFakeTimers();
+		try {
+			let finishA!: (value: typeof ok) => void;
+			let finishB!: (value: typeof ok) => void;
+			post.mockReturnValueOnce(new Promise(resolve => { finishA = resolve; }))
+				.mockReturnValueOnce(new Promise(resolve => { finishB = resolve; }));
+			const { sender, deps, internal, wsConn } = setup(staged, { realActiveSession: true });
+			const a = sender.sendMessage('task a');
+			await vi.advanceTimersByTimeAsync(10);
+			expect(post).toHaveBeenCalledTimes(1);
+			// The user opens another New chat and starts a second staged create.
+			bumpInitGeneration();
+			internal.worktreeCreationGeneration++;
+			deps.update(s => ({ ...s, messages: [], sessionId: null, isCreatingWorktree: false, worktreeBranch: 'live/second' }));
+			const b = sender.sendMessage('task b');
+			await vi.advanceTimersByTimeAsync(10);
+			expect(post).toHaveBeenCalledTimes(2);
+			finishA({ ...ok, session_id: 'wt-a' });
+			expect(await a).toBe(true);
+			finishB({ ...ok, session_id: 'wt-b', branch_name: 'live/second' });
+			await vi.advanceTimersByTimeAsync(16_000);
+			expect(await b).toBe(true);
+			const queries = wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query');
+			expect(queries.map(frame => [frame.prompt, frame.session_id])).toContainEqual(['task b', 'wt-b']);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
+	});
+});
+
+describe('a place in line is the only way to send (#1444)', () => {
+	const prompts = (wsConn: ReturnType<typeof setup>['wsConn']) =>
+		wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query').map(frame => frame.prompt);
+
+	it('sends nothing on a cancelled place, and frees the line for the next send', async () => {
+		const { sender, wsConn } = setup({ sessionId: 'old-chat', worktreeIntent: 'local' }, { realActiveSession: true });
+		const turn = sender.reserveSend();
+		const later = sender.sendMessage('later');
+		turn.cancel();
+		turn.cancel();
+		expect(await later).toBe(true);
+		// The cancelled submission's continuation reaches the store after all.
+		expect(await sender.sendMessage('called off', { turn })).toBe(false);
+		expect(prompts(wsConn)).toEqual(['later']);
+	});
+
+	it('sends nothing on a place already used', async () => {
+		const { sender, wsConn } = setup({ sessionId: 'old-chat', worktreeIntent: 'local' }, { realActiveSession: true });
+		const turn = sender.reserveSend();
+		expect(await sender.sendMessage('first', { turn })).toBe(true);
+		expect(await sender.sendMessage('again', { turn })).toBe(false);
+		expect(prompts(wsConn)).toEqual(['first']);
+	});
+
+	it('frees the line when a used place throws before its frame', async () => {
+		const { sender, wsConn } = setup({ sessionId: 'old-chat', worktreeIntent: 'local' }, { realActiveSession: true });
+		const turn = sender.reserveSend();
+		const first = sender.sendMessage('first', { turn, notesForm: { pathPrompt: 'path first', runsHere: async () => { throw new Error('ownership check failed'); } } });
+		const rejected = expect(first).rejects.toThrow('ownership check failed');
+		const later = sender.sendMessage('later');
+		await rejected;
+		expect(await later).toBe(true);
+		expect(prompts(wsConn)).toEqual(['later']);
+	});
+
+	it('writes an ordinary single send synchronously', async () => {
+		const { sender, wsConn } = setup({ sessionId: 'old-chat', worktreeIntent: 'local' }, { realActiveSession: true });
+		const sent = sender.sendMessage('plain');
+		expect(prompts(wsConn)).toEqual(['plain']);
+		expect(await sent).toBe(true);
+	});
+
+	it('keeps a new-chat send queued during reconnect unsent when the first send is refused', async () => {
+		vi.useFakeTimers();
+		try {
+			const { sender, deps, wsConn } = setup({ worktreeIntent: 'local' }, { realActiveSession: true });
+			wsConn.isConnected.mockReturnValue(false);
+			const first = sender.sendMessage('first');
+			const second = sender.sendMessage('second');
+			wsConn.isConnected.mockReturnValue(true);
+			await vi.advanceTimersByTimeAsync(100);
+			expect(await first).toBe(true);
+			expect(prompts(wsConn)).toEqual(['first']);
+			// The correlated refusal withdraws the first send's echo.
+			deps.update(s => ({ ...s, messages: [] }));
+			await vi.advanceTimersByTimeAsync(100);
+			expect(await second).toBe(false);
+			expect(prompts(wsConn)).toEqual(['first']);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
+	});
+
+	// Review round 1 (S1): a chat adopted from a compose keeps that compose's
+	// lane while a send of it is open, across a leave and reopen.
+	it('keeps a send queued in a new chat ahead of one made after leaving and reopening the chat it created', async () => {
+		vi.useFakeTimers();
+		try {
+			const { sender, deps, wsConn } = setup({ worktreeIntent: 'local' }, { realActiveSession: true });
+			const first = sender.sendMessage('first');
+			const second = sender.sendMessage('second');
+			expect(prompts(wsConn)).toEqual(['first']);
+			// The socket drops, then the chat is adopted: the first send's turn
+			// ends and the second waits for the socket in its turn.
+			wsConn.isConnected.mockReturnValue(false);
+			deps.update(s => ({ ...s, sessionId: 'chat-s' }));
+			await vi.advanceTimersByTimeAsync(60);
+			// Leave the chat and reopen it; the socket opens and a third send is made.
+			bumpInitGeneration();
+			wsConn.isConnected.mockReturnValue(true);
+			const third = sender.sendMessage('third');
+			await vi.advanceTimersByTimeAsync(200);
+			expect(await first).toBe(true);
+			expect(await second).toBe(true);
+			expect(await third).toBe(true);
+			expect(prompts(wsConn)).toEqual(['first', 'second', 'third']);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
+	});
+
+	it('still sends a retry made after the first new-chat send was refused', async () => {
+		const { sender, deps, wsConn } = setup({ worktreeIntent: 'local' }, { realActiveSession: true });
+		expect(await sender.sendMessage('first')).toBe(true);
+		deps.update(s => ({ ...s, messages: [] }));
+		expect(await sender.sendMessage('retry')).toBe(true);
+		expect(prompts(wsConn)).toEqual(['first', 'retry']);
 	});
 });

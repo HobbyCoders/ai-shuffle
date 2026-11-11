@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import ChatInput from './ChatInput.svelte';
+import GenerationChoiceCard from './GenerationChoiceCard.svelte';
+import { generationChoices } from '$lib/stores/generation-choices.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import { appData } from '$lib/stores/app-data.svelte';
 import { startLiveSync } from '$lib/services/live-sync';
 import type { ChatMessage } from '$lib/stores/types';
+import type { GenerationOption } from '$lib/utils/generation-choice';
 import { readDraft, writeDraft } from '$lib/stores/session/draft-persistence';
+import { takePendingSends } from '$lib/stores/session/pending-send-note';
 import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
 import '$lib/test-stubs/composer-dom';
 
@@ -455,5 +459,300 @@ describe('the note form is asked after every wait of the real send (S16)', () =>
 		await new Promise((resolve) => setTimeout(resolve, 150));
 		expect(queries()).toEqual([]);
 		expect(readDraft('open-chat')).toContain(NOTE_ID);
+	});
+
+	// #1444: the order lives in the store, so it holds whichever component sent.
+	it('writes a plain send that waited for the socket before a note send made as the socket opens (#1444 case 1)', async () => {
+		start('reconnect-chat', NOTE_ID, { isRemote: false }, false);
+		const view = render(ChatInput);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toContain('read the plan'));
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		// The socket is down: the store opens one and waits for it.
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		const editor = (view.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(content: unknown): void } } }).editor;
+		editor.commands.setContent(JSON.parse(draftWith(NOTE_ID)));
+		// It opens, and the note send goes before the store's poll has seen it.
+		Socket.all[0].open();
+		await fireEvent.submit(form);
+		await waitFor(() => expect(queries()).toHaveLength(2));
+		expect(queries().map((frame) => frame.prompt)).toEqual(['read the plan', BY_PATH]);
+	});
+
+	it('writes a Browser panel prompt sent while the composer\'s cold-cache check waits after the composer message (#1444)', async () => {
+		let answerCache = (_: unknown) => {};
+		net.cache = () => new Promise((resolve) => { answerCache = resolve; });
+		// An idle open chat: the composer asks /cache-state before it sends.
+		const view = await compose('idle-chat');
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		// What BrowserPanel's sendElementPrompt does: straight to the store.
+		const panel = activeSession.sendMessage('panel prompt');
+		// Any socket a send opened meanwhile is up: a send that may go, goes.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		for (const socket of Socket.all) socket.open();
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(queries()).toEqual([]);
+		answerCache({ cold: false, warn: false, large: false });
+		await waitFor(() => expect(Socket.all.some((socket) => socket.readyState === Socket.CONNECTING)).toBe(true));
+		for (const socket of Socket.all) if (socket.readyState === Socket.CONNECTING) socket.open();
+		await waitFor(() => expect(queries()).toHaveLength(2));
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'panel prompt']);
+		await expect(panel).resolves.toBe(true);
+	});
+
+	// Round 2 S1: the composer's place is taken at submission, before its own
+	// wait behind the earlier submission's cold check.
+	it('writes a composer send queued behind an earlier cold check before a panel prompt sent after it (#1444)', async () => {
+		let answerCache = (_: unknown) => {};
+		net.cache = () => new Promise((resolve) => { answerCache = resolve; });
+		const view = await compose('idle-chat');
+		const form = view.container.querySelector('form')!;
+		await fireEvent.submit(form);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		const editor = (view.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(text: string): void } } }).editor;
+		editor.commands.setContent('second');
+		await fireEvent.submit(form);
+		const panel = activeSession.sendMessage('panel prompt');
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		for (const socket of Socket.all) socket.open();
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(queries()).toEqual([]);
+		net.cache = () => ({ cold: false, warn: false, large: false });
+		answerCache({ cold: false, warn: false, large: false });
+		const opened = setInterval(() => { for (const socket of Socket.all) if (socket.readyState === Socket.CONNECTING) socket.open(); }, 10);
+		try {
+			await waitFor(() => expect(queries()).toHaveLength(3));
+		} finally { clearInterval(opened); }
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'second', 'panel prompt']);
+		await expect(panel).resolves.toBe(true);
+	});
+
+	it('writes a Browser panel prompt sent while a note send waits for its ownership answer after the note (#1444 case 3)', async () => {
+		let answer = (_: unknown) => {};
+		net.live = () => new Promise((resolve) => { answer = resolve; });
+		const view = await compose('panel-chat', { isStreaming: true });
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		await waitFor(() => expect(net.liveCalls).toHaveLength(1));
+		// What BrowserPanel's sendElementPrompt does: straight to the store.
+		const panel = activeSession.sendMessage('panel prompt');
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(queries()).toEqual([]);
+		answer({ session_meta: { is_remote: false } });
+		await waitFor(() => expect(queries()).toHaveLength(2));
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'panel prompt']);
+		await expect(panel).resolves.toBe(true);
+	});
+
+	it('keeps the note draft when the store refuses a send that waited too long behind an earlier one (#1444)', async () => {
+		const view = await compose('held-chat', { isStreaming: true });
+		const earlier = activeSession.reserveSend();
+		vi.useFakeTimers();
+		try {
+			await fireEvent.submit(view.container.querySelector('form')!);
+			await vi.advanceTimersByTimeAsync(16_000);
+			expect(queries()).toEqual([]);
+			expect(view.container.querySelector('.ProseMirror')?.textContent).toContain('read');
+			expect(view.container.querySelector('[data-file-chip]')).toBeTruthy();
+			expect(readDraft('held-chat')).toContain(NOTE_ID);
+		} finally { earlier.cancel(); vi.useRealTimers(); }
+	});
+
+	// Review round 3 (S10) and round 4 (S11): a send outlives its unmounted
+	// component and still goes in the place taken at the click, never after a
+	// later send; refused, its words go to the composer now on the chat.
+	const COLD = { context_tokens: 412_000, idle_seconds: 5400, cache_ttl_seconds: 3600, cache_write_ttl: '1h', threshold_tokens: 150_000, cold: true, large: true, warn: true };
+	async function remountDuringColdCheck(chat: string) {
+		let answerCache = (_: unknown) => {};
+		net.cache = () => new Promise((resolve) => { answerCache = resolve; });
+		const view = await compose(chat);
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		view.unmount();
+		return (answer: unknown) => answerCache(answer);
+	}
+	async function typeNewer(view: { container: HTMLElement }, chat: string) {
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')).toBeTruthy());
+		const editor = (view.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(text: string): void } } }).editor;
+		editor.commands.setContent('newer text');
+		await waitFor(() => expect(readDraft(chat)).toContain('newer text'));
+	}
+
+	it('writes a composer send unmounted during its cold-cache check before a panel prompt sent after it (#1444)', async () => {
+		const answerCache = await remountDuringColdCheck('unmount-chat');
+		// Queued behind the composer's place, the panel prompt waits for it.
+		const panel = activeSession.sendMessage('panel prompt');
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(Socket.all).toHaveLength(0);
+		answerCache({ cold: false, warn: false, large: false });
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		expect(await panel).toBe(true);
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH, 'panel prompt']);
+	});
+
+	it('sends a send once, in order, when its composer remounts during the cold-cache check, and keeps the newer text (#1444)', async () => {
+		const answerCache = await remountDuringColdCheck('remount-chat');
+		const replacement = render(ChatInput);
+		await typeNewer(replacement, 'remount-chat');
+		answerCache({ cold: false, warn: false, large: false });
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		await waitFor(() => expect(queries()).toHaveLength(1));
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(queries().map((frame) => frame.prompt)).toEqual([BY_PATH]);
+		expect(replacement.container.querySelector('.ProseMirror')?.textContent).toBe('newer text');
+		expect(readDraft('remount-chat')).toContain('newer text');
+		expect(readDraft('remount-chat')).not.toContain(NOTE_ID);
+	});
+
+	it('puts a refused send from a remounted composer in front of the newer text in the replacement (#1444)', async () => {
+		const answerCache = await remountDuringColdCheck('refused-remount-chat');
+		const replacement = render(ChatInput);
+		await typeNewer(replacement, 'refused-remount-chat');
+		answerCache(COLD);
+		await waitFor(() => expect(replacement.container.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(replacement.container.querySelector('.ProseMirror')?.textContent).toMatch(/read[\s\S]*newer text/);
+		expect(readDraft('refused-remount-chat')).toContain(NOTE_ID);
+		expect(readDraft('refused-remount-chat')).toContain('newer text');
+		// Handed over, so its reload note is done, and it survives another remount.
+		expect(takePendingSends('refused-remount-chat', 'another-page')).toBe('');
+		replacement.unmount();
+		const reopened = render(ChatInput);
+		await waitFor(() => expect(reopened.container.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(reopened.container.querySelector('.ProseMirror')?.textContent).toMatch(/read[\s\S]*newer text/);
+		expect(queries()).toEqual([]);
+	});
+
+	it('keeps a refused send as its chat\'s draft when no composer is on screen, for the next one to open with (#1444)', async () => {
+		const answerCache = await remountDuringColdCheck('gone-chat');
+		answerCache(COLD);
+		await waitFor(() => expect(readDraft('gone-chat')).toContain(NOTE_ID));
+		const reopened = render(ChatInput);
+		await waitFor(() => expect(reopened.container.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(reopened.container.querySelector('.ProseMirror')?.textContent).toContain('read');
+		expect(queries()).toEqual([]);
+	});
+
+	// Review round 5, blocker 1: the chat's saved draft at refusal time is the
+	// one the words go into, never what a composer saw when it left the chat.
+	it('puts a send refused after its composers are gone in front of the newer text its chat holds now (#1444)', async () => {
+		let answerCache = (_: unknown) => {};
+		net.cache = () => new Promise((resolve) => { answerCache = resolve; });
+		const view = await compose('stale-chat');
+		await fireEvent.submit(view.container.querySelector('form')!);
+		await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe(''));
+		// Leave the chat and come back in this composer: it holds nothing then.
+		activeSession.switchSession('stale-b');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('stale-b'));
+		activeSession.switchSession('stale-chat');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('stale-chat'));
+		view.unmount();
+		// A replacement composer on the chat gets newer text, then goes too,
+		// and another chat is opened.
+		const replacement = render(ChatInput);
+		await typeNewer(replacement, 'stale-chat');
+		replacement.unmount();
+		activeSession.switchSession('stale-b');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('stale-b'));
+		answerCache(COLD);
+		await waitFor(() => expect(readDraft('stale-chat')).toContain(NOTE_ID));
+		expect(readDraft('stale-chat')).toContain('newer text');
+		expect(readDraft('stale-b') ?? '').not.toContain('read');
+		activeSession.switchSession('stale-chat');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('stale-chat'));
+		const reopened = render(ChatInput);
+		await waitFor(() => expect(reopened.container.querySelector('[data-file-chip]')).toBeTruthy());
+		expect(reopened.container.querySelector('.ProseMirror')?.textContent).toMatch(/read[\s\S]*newer text/);
+		expect(queries()).toEqual([]);
+	});
+
+	it('sends a generation choice\'s reply in its place when the card unmounts while the pick saves (#1444)', async () => {
+		vi.spyOn(generationChoices, 'load').mockResolvedValue(undefined);
+		let finish!: (value: never) => void;
+		const saving = vi.spyOn(generationChoices, 'save').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+		start('choice-unmount-chat', null, {}, false);
+		const option = { source: 'fal', account: 'fal-ai', worker: 'worker-a', model: 'fal-ai/flux/dev', kind: 'image', options: {}, verified: false, schema: { fields: [] }, available: true, reason: null, price: { currency: 'USD', unit: 'item', amount: '0.025', total: '0.025', status: 'estimated' } } as unknown as GenerationOption;
+		const view = render(GenerationChoiceCard, { props: { kind: 'image', options: [option], tool: 'generateImage', prompt: 'a tree', toolId: 'choose-1', answeredBy: null } });
+		await fireEvent.click(view.getByRole('button', { name: 'Use this' }));
+		expect(saving).toHaveBeenCalledOnce();
+		// Same chat: its transcript window unmounts this row while saving.
+		view.unmount();
+		const panel = activeSession.sendMessage('panel prompt');
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(Socket.all).toHaveLength(0);
+		finish(undefined as never);
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		expect(await panel).toBe(true);
+		const prompts = queries().map((frame) => frame.prompt);
+		expect(prompts).toHaveLength(2);
+		expect(prompts[1]).toBe('panel prompt');
+	});
+
+	// Review round 3 (S7): through the real refusal handler.
+	it('keeps a second new-chat send unsent after the first send is refused during reconnect (#1444)', async () => {
+		start(null as unknown as string, null, { worktreeIntent: 'local' }, false);
+		const first = activeSession.sendMessage('first');
+		const second = activeSession.sendMessage('second');
+		await waitFor(() => expect(Socket.all).toHaveLength(1));
+		Socket.all[0].open();
+		expect(await first).toBe(true);
+		expect(queries()).toHaveLength(1);
+		Socket.all[0].onmessage?.({ data: JSON.stringify({ type: 'error', client_message_id: queries()[0].client_message_id, message: 'Missing agent' }) });
+		expect(await second).toBe(false);
+		expect(queries()).toHaveLength(1);
+	});
+});
+
+// Review round 5, blocker 2: a new chat's first send that created its chat
+// (a worktree create binds the chat, then its first message is refused) keeps
+// its words with the chat it created, never in New chat.
+describe('a refused first send whose composer is gone, after it created its chat (#1444)', () => {
+	const WORDS = 'read the plan';
+	async function sendCreating(chat: string) {
+		let refuse!: () => void;
+		sends.mockImplementationOnce(() => new Promise<boolean>((resolve) => { refuse = () => resolve(false); }));
+		start(null, null, { worktreeIntent: 'worktree' }, false);
+		const hero = render(ChatInput);
+		await waitFor(() => expect(hero.container.querySelector('.ProseMirror')?.textContent).toBe(WORDS));
+		await fireEvent.submit(hero.container.querySelector('form')!);
+		await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+		// The create binds the chat it made, and the New chat screen gives way.
+		Object.assign(activeSession.current, { sessionId: chat });
+		activeSession.clearError();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		hero.unmount();
+		return () => refuse();
+	}
+
+	it('puts its words in front of what the chat\'s composer holds now', async () => {
+		const refuse = await sendCreating('wt-made');
+		const chatView = render(ChatInput);
+		await waitFor(() => expect(chatView.container.querySelector('.ProseMirror')).toBeTruthy());
+		const editor = (chatView.container.querySelector('.ProseMirror') as HTMLElement & { editor: { commands: { setContent(text: string): void } } }).editor;
+		editor.commands.setContent('newer text');
+		await waitFor(() => expect(readDraft('wt-made')).toContain('newer text'));
+		refuse();
+		await waitFor(() => expect(chatView.container.querySelector('.ProseMirror')?.textContent).toMatch(/read the plan[\s\S]*newer text/));
+		expect(readDraft('wt-made')).toContain(WORDS);
+		expect(readDraft('wt-made')).toContain('newer text');
+		expect(readDraft(null) ?? '').not.toContain(WORDS);
+	});
+
+	it('keeps its words as that chat\'s draft after the user opened another chat', async () => {
+		const refuse = await sendCreating('wt-left');
+		activeSession.switchSession('other-chat');
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('other-chat'));
+		const other = render(ChatInput);
+		await waitFor(() => expect(other.container.querySelector('.ProseMirror')).toBeTruthy());
+		refuse();
+		await waitFor(() => expect(readDraft('wt-left')).toContain(WORDS));
+		expect(readDraft(null) ?? '').not.toContain(WORDS);
+		expect(readDraft('other-chat') ?? '').not.toContain(WORDS);
+		expect(other.container.querySelector('.ProseMirror')?.textContent).toBe('');
 	});
 });
