@@ -740,8 +740,15 @@ def _outside_bypass(data: Mapping[str, Any], mode: Optional[str]) -> bool:
 
 
 def _chat_http_consent(data: Mapping[str, Any], mode: Optional[str]) -> bool:
-    method = data.get("method")
-    if isinstance(method, str) and method.upper() in ("GET", "HEAD"):
+    # A batch is covered by the grant alone only when every request in it
+    # reads; one write (or a malformed batch) keeps the Bypass gate.
+    from app.core import chat_http_batch
+    try:
+        batch = chat_http_batch.items(data)
+    except Exception:  # noqa: BLE001 — doubt keeps the owner's yes in Bypass
+        return _outside_bypass(data, mode)
+    calls = [data] if batch is None else batch
+    if all(isinstance(c.get("method"), str) and c["method"].upper() in ("GET", "HEAD") for c in calls):
         return True
     return _outside_bypass(data, mode)
 
@@ -767,8 +774,9 @@ def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bo
 #:
 #: * RequestChatAccess: the private access card, in every mode. The owner
 #:   approves it there (and types any secret there); Away refuses it.
-#: * ChatListFiles, ChatReadFile, ChatHttpRequest GET/HEAD: inside a grant the
-#:   owner approved; the broker refuses anything outside it or after expiry.
+#: * ChatListFiles, ChatReadFile, ChatHttpRequest GET/HEAD (every request of a
+#:   batch): inside a grant the owner approved; the broker refuses anything
+#:   outside it or after expiry.
 #: * ChatRunCommand, ChatWriteFile, other ChatHttpRequest methods: the broker's
 #:   one-shot card, outside Bypass. In Bypass the grant card promises no repeat
 #:   approval, so the owner gate asks as before.

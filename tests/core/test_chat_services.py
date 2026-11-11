@@ -22,6 +22,7 @@ from app.core.chat_access import AccessDenied, Broker, GrantInput, GrantSubmissi
 from app.core.chat_services import Origin
 
 SECRET = "svc-test-only-token-0123456789/+="
+SLOW_SECONDS = 0.4
 
 
 def _certificate(subject, issuer_name, key, issuer_key, *, ca):
@@ -157,6 +158,9 @@ class Service:
             self.held.set()
             await asyncio.sleep(60)
             payload = b""
+        elif target.startswith("/api/slow"):
+            await asyncio.sleep(SLOW_SECONDS)
+            payload = json.dumps({"method": method, "target": target}).encode()
         elif target.startswith("/api/drip"):
             # Each byte arrives well inside the per-read timeout, so only an overall
             # deadline ends the request. The body would take far longer than any test.
@@ -1151,6 +1155,130 @@ async def test_sdk_tool_returns_redacted_result_and_errors_without_secret(
     assert SECRET not in json.dumps(resources) and str(service.port) not in json.dumps(
         resources
     )
+    broker.revoke("chat", grant["id"])
+
+
+# --- Batched ChatHttpRequest -------------------------------------------------
+
+
+def _http_tool(broker, monkeypatch):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    return tools["ChatHttpRequest"].handler
+
+
+def _results(response):
+    assert not response.get("isError"), response
+    return json.loads(response["content"][0]["text"])["results"]
+
+
+async def test_batch_runs_concurrently_and_keeps_input_order(broker, service, trust, monkeypatch):
+    http = _http_tool(broker, monkeypatch)
+    grant = await broker.create("chat", spec(service))
+    items = [{"grant_id": grant["id"], "method": "GET", "path": f"/slow?n={n}", "body": "", "content_type": ""}
+             for n in range(3)]
+    started = asyncio.get_running_loop().time()
+    # Plain-JSON providers fill the unused top-level fields with blanks.
+    results = _results(await http({"grant_id": "", "method": "", "path": "", "body": "", "content_type": "",
+                                   "requests": items}))
+    elapsed = asyncio.get_running_loop().time() - started
+    # Three 0.4 s requests in about 0.4 s, not 1.2 s.
+    assert elapsed < 2 * SLOW_SECONDS, elapsed
+    assert [r["index"] for r in results] == [0, 1, 2] and all(r["ok"] for r in results)
+    assert [json.loads(r["result"]["body"])["target"] for r in results] == [f"/api/slow?n={n}" for n in range(3)]
+    assert all(r["result"]["status"] == 200 for r in results)
+    assert SECRET not in json.dumps(results)
+    broker.revoke("chat", grant["id"])
+
+
+async def test_batch_refusals_and_failures_never_fail_their_siblings(broker, service, trust, monkeypatch):
+    http = _http_tool(broker, monkeypatch)
+    grant = await broker.create("chat", spec(service))  # read-only
+    real_run = broker.run
+
+    async def run(session_id, grant_id, operation, arguments):
+        if arguments.get("path") == "/boom":
+            raise RuntimeError("socket exploded with " + SECRET)
+        return await real_run(session_id, grant_id, operation, arguments)
+
+    monkeypatch.setattr(broker, "run", run)
+    g = grant["id"]
+    results = _results(await http({"requests": [
+        {"grant_id": g, "method": "GET", "path": "/a"},
+        {"grant_id": g, "method": "POST", "path": "/b", "body": "{}", "content_type": ""},
+        {"grant_id": "fabricated", "method": "GET", "path": "/c"},
+        {"grant_id": g, "method": "GET", "path": "/../admin"},
+        {"grant_id": g, "method": "GET", "path": "/boom"},
+        {"grant_id": g, "method": "HEAD", "path": "/d"},
+    ]}))
+    assert [r["ok"] for r in results] == [True, False, False, False, False, True]
+    assert [r["index"] for r in results] == list(range(6))
+    assert "read-only" in results[1]["error"]
+    # A generic failure reads exactly as a single call's does, without its detail.
+    from app.mcp.chat_access_sdk import FAILED
+    assert results[4]["error"] == FAILED and SECRET not in json.dumps(results)
+    # The refused write never reached the service; the reads did.
+    assert sorted((r["method"], r["target"]) for r in service.requests) == [("GET", "/api/a"), ("HEAD", "/api/d")]
+    assert not broker.actions
+    broker.revoke("chat", g)
+
+
+async def test_batch_writes_wait_on_their_own_cards_while_reads_finish(broker, service, trust, monkeypatch):
+    http = _http_tool(broker, monkeypatch)
+    grant = await broker.create("chat", spec(service, writable=True))
+    g = grant["id"]
+    call = asyncio.create_task(http({"requests": [
+        {"grant_id": g, "method": "POST", "path": "/items", "body": '{"n": 1}', "content_type": ""},
+        {"grant_id": g, "method": "GET", "path": "/status"},
+        {"grant_id": g, "method": "DELETE", "path": "/items/2"},
+    ]}))
+    async with asyncio.timeout(5):
+        while len(broker.actions) < 2 or not service.requests:
+            await asyncio.sleep(0.005)
+    # Both one-shot cards wait at once, and the read already ran without one.
+    assert [(r["method"], r["target"]) for r in service.requests] == [("GET", "/api/status")]
+    cards = {a.arguments["method"]: a for a in broker.actions.values()}
+    assert set(cards) == {"POST", "DELETE"}
+    assert {a["id"] for a in (await broker.snapshot("chat"))["actions"]} == {a.id for a in cards.values()}
+    assert not call.done()
+    await broker.decide("chat", cards["DELETE"].id, False)
+    await broker.decide("chat", cards["POST"].id, True)
+    results = _results(await asyncio.wait_for(call, 5))
+    assert [r["ok"] for r in results] == [True, True, False]
+    assert results[0]["result"]["status"] == 200 and "denied" in results[2]["error"]
+    assert ("DELETE", "/api/items/2") not in [(r["method"], r["target"]) for r in service.requests]
+    assert ("POST", "/api/items") in [(r["method"], r["target"]) for r in service.requests]
+    broker.revoke("chat", g)
+
+
+@pytest.mark.parametrize("args,needle", [
+    ({"requests": "not json"}, "1 to 8"),
+    ({"requests": {"grant_id": "g"}}, "1 to 8"),
+    ({"requests": []}, "1 to 8"),
+    ({"requests": ["GET /a"]}, "1 to 8"),
+    ({"requests": [{"grant_id": "g", "method": "GET", "path": "/a"}] * 9}, "1 to 8"),
+    ({"grant_id": "g", "method": "GET", "path": "/a",
+      "requests": [{"grant_id": "g", "method": "GET", "path": "/b"}]}, "grant_id, method, path"),
+])
+async def test_malformed_batch_is_one_tool_error(broker, service, trust, monkeypatch, args, needle):
+    http = _http_tool(broker, monkeypatch)
+    response = await http(args)
+    assert response["isError"] and needle in response["content"][0]["text"]
+    assert service.requests == [] and not broker.actions
+
+
+@pytest.mark.parametrize("filler", [None, "", [], [{"grant_id": "", "method": "", "path": ""}]])
+async def test_single_request_shape_is_unchanged_beside_blank_requests(broker, service, trust, monkeypatch, filler):
+    http = _http_tool(broker, monkeypatch)
+    grant = await broker.create("chat", spec(service))
+    args = {"grant_id": grant["id"], "method": "GET", "path": "/status", "body": "", "content_type": ""}
+    if filler is not None:
+        args["requests"] = filler
+    result = json.loads((await http(args))["content"][0]["text"])
+    assert result["status"] == 200 and "results" not in result
     broker.revoke("chat", grant["id"])
 
 
