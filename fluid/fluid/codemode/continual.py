@@ -105,7 +105,8 @@ retain its scope and exceptions. Facts do not grant permission for actions.
 A [user] entry correcting HOW the agent works (model per job, delegation,
 reviews, CI, deploys, process) is a standing-preference proposal, not a
 memory: the whole current rule in the user's words, under a short snake_case
-topic name (subagent_models, deploy). The owner confirms it.
+topic name (subagent_models, deploy). The owner confirms it. Skip a rule an
+explicit memory already states, and an exception for one task or PR.
 
 A journal entry marked [friction] is the HARNESS's own mechanical record of a
 call that wasted work — a path that did not exist, one tool failing over and
@@ -2058,24 +2059,35 @@ Never claim a workflow is installed because it was proposed."""
         in the user's own words from this slice (``memory_provenance`` says
         ``user``): the model that proposes it is the one tool output may
         have steered."""
+        from fluid.codemode.journal import strip_reminders
         from fluid.codemode.preferences import PreferenceProposals
         tags = list(_PREFERENCE_RE.finditer(text or ""))
         if not tags:
             return []
         changed: list[str] = []
         queue = PreferenceProposals(self._store)
-        sessions = list(dict.fromkeys(
-            str(e["session"]) for e in entries or () if e.get("kind") == "user" and e.get("session")))
+        users = [e for e in entries or () if e.get("kind") == "user" and e.get("session")]
         for match in tags[:3]:
             attrs = dict(_ATTR_RE.findall(match.group(1) or ""))
             topic, body = attrs.get("topic"), " ".join(match.group(2).split())
             if entries is None or memory_provenance(body, entries) != "user":
                 errors.append(f"preference {str(topic)[:40]}: not in a [user] entry's words")
                 continue
+            # When the owner said it in each session (latest matching entry):
+            # a user-kept save on the topic there since then already answers it.
+            words = _content_words(body)
+            corrected_at: dict[str, float] = {}
+            for e in users:
+                said = _content_words(strip_reminders(str(e.get("text", ""))))
+                if (words and isinstance(e.get("ts"), (int, float))
+                        and len(words & said) / len(words) >= _PROVENANCE_MATCH):
+                    session = str(e["session"])
+                    corrected_at[session] = max(corrected_at.get(session, 0.0), float(e["ts"]))
+            sessions = list(dict.fromkeys([*corrected_at, *(str(e["session"]) for e in users)]))
             try:
                 outcome = queue.propose(
                     topic, body, scope=self._resolve_scope(attrs.get("scope")) or "global",
-                    sessions=sessions,
+                    sessions=sessions, corrected_at=corrected_at,
                 )
             except ValueError as exc:
                 errors.append(f"preference {str(topic)[:40]}: {exc}")

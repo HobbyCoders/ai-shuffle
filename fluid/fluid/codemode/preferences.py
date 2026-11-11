@@ -16,7 +16,11 @@ raise the question, both bounded so they cannot nag:
   :data:`PREFERENCE_PROPOSAL_TTL`. A proposal closes itself once a user-kept
   memory on the same topic is saved after it: one keyed by the topic name,
   or one sharing the proposal's subject terms (:func:`same_topic`). No key
-  convention is needed. The guidance queue
+  convention is needed. The owner already answered it, in any scope, when
+  one of the sessions the correction came from saved such a memory after the
+  owner's words (the learner reads journals later, so that save may predate
+  the proposal); an older memory never suppresses a proposal that changes it.
+  The guidance queue
   (``pending-proposals.jsonl``) is not reused: ``fluid evolve`` replays
   everything in it through the guidance gate.
 
@@ -93,7 +97,9 @@ def same_topic(topic: str, text: str, key: str | None, terms: set[str]) -> bool:
         return True
     mine = _salient(text)
     shared = len(mine & terms)
-    return (shared >= PROPOSAL_ANSWER_MIN_SHARED
+    # A short rule ("still no ModelX") has fewer subject terms than the
+    # minimum; naming every one of them (at least two) is the same subject.
+    return (len(mine) >= 2 and shared >= min(PROPOSAL_ANSWER_MIN_SHARED, len(mine))
             and shared >= PROPOSAL_ANSWER_MIN_RATIO * max(1, min(len(mine), len(terms))))
 
 
@@ -123,9 +129,9 @@ class PreferenceProposals:
                 records.append(record)
         return records
 
-    def _saved_preferences(self, entries: list[Any] | None) -> list[tuple[str, str, float, str, set[str]]]:
-        """``(key, scope, updated_at, fingerprint, subject terms)`` of live
-        user-kept facts (dicts or MemoryEntry objects)."""
+    def _saved_preferences(self, entries: list[Any] | None) -> list[tuple[str, str, float, str, set[str], str]]:
+        """``(key, scope, updated_at, fingerprint, subject terms, source
+        session)`` of live user-kept facts (dicts or MemoryEntry objects)."""
         if entries is None:
             try:
                 entries = self._store.memories()
@@ -141,18 +147,21 @@ class PreferenceProposals:
                 text = str(get("text") or "")
                 out.append((str(get("key") or ""), str(get("scope") or "global"),
                             float(get("updated_at") or get("created_at") or 0.0),
-                            _fingerprint(text), _salient(text)))
+                            _fingerprint(text), _salient(text), str(get("source_session") or "")))
         return out
 
     def _is_open(self, record: dict, saved, now: float) -> bool:
         if now - float(record["ts"]) >= PREFERENCE_PROPOSAL_TTL:
             return False
         scope = record.get("scope") or "global"
+        sessions = set(record.get("sessions") or ())
         # Answered: the owner's confirmation (or correction) of the topic was
-        # saved after the proposal was made.
-        return not any((s == scope or s == "global") and at >= float(record["ts"])
+        # saved after the proposal was made, in its scope, or in any scope by
+        # a session the correction came from (where that agent judged it holds).
+        return not any((s == scope or s == "global" or (source and source in sessions))
+                       and at >= float(record["ts"])
                        and same_topic(record["topic"], record["text"], k, terms)
-                       for k, s, at, _, terms in saved)
+                       for k, s, at, _, terms, source in saved)
 
     def open(self, project: str | None = None, *, entries: list[Any] | None = None,
              now: float | None = None) -> list[dict]:
@@ -165,12 +174,18 @@ class PreferenceProposals:
 
     # ─── writing ────────────────────────────────────────────────────────
     def propose(self, topic: Any, text: str, *, scope: str = "global",
-                sessions: list[str] | tuple[str, ...] = (), now: float | None = None) -> str:
+                sessions: list[str] | tuple[str, ...] = (), now: float | None = None,
+                corrected_at: dict[str, float] | None = None) -> str:
         """Queue a proposed rule for ``topic``.
+
+        ``corrected_at`` maps a source session to when the owner said the
+        rule there (the latest such [user] entry).
 
         Returns ``proposed`` (queued, or replaced the topic's older wording),
         ``duplicate`` (the same wording is already open), ``saved`` (a
-        user-kept fact in scope already says it word for word) or ``full`` (the
+        user-kept fact in scope already says it word for word, or that session
+        saved a user-kept fact on the topic at or after the owner's words, in
+        any scope) or ``full`` (the
         queue holds MAX_OPEN_PREFERENCE_PROPOSALS other topics). Raises
         ValueError for a malformed topic, an empty or oversized text, a
         credential or an injection pattern."""
@@ -191,7 +206,12 @@ class PreferenceProposals:
             if not held:
                 raise ValueError("preference proposals are busy; the next pass retries")
             saved = self._saved_preferences(None)
-            if any(s in (scope, "global") and fp == fingerprint for _, s, _, fp, _ in saved):
+            if any(s in (scope, "global") and fp == fingerprint for _, s, _, fp, _, _ in saved):
+                return "saved"
+            corrected = corrected_at or {}
+            if any(source in corrected and at >= corrected[source]
+                   and same_topic(name, body, k, terms)
+                   for k, _, at, _, terms, source in saved):
                 return "saved"
             records = [r for r in self._read() if self._is_open(r, saved, now)]
             same = [r for r in records if normalize_topic(r["topic"]) == name

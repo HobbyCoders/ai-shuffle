@@ -251,6 +251,87 @@ def test_proposals_dedupe_by_topic_and_stop_at_three(tmp_path):
     assert queue.open(now=later) == [], "an unanswered proposal expires"
 
 
+# Shapes of three proposals a live store showed in every session's snapshot
+# (generic wording): two restated owner memories the agent had already saved.
+MAIN_RULE = "Also have sessions update pull requests to current main before merging."
+MAIN_MEMORY = ("Before merging a pull request, sessions bring it up to date with current main "
+               "(merge main into the PR branch, never rebase).")
+MAIN_WHEN = "When about to merge a pull request"
+
+
+def learner_reads(store, session: str, said: str, proposal: str, topic: str) -> Synthesizer:
+    store.journal_context(session_id=session)
+    store.journal_append({"kind": "user", "text": said})
+    store.journal_append({"kind": "assistant", "text": "Understood."})
+    return Synthesizer(Answer(f'<preference topic="{topic}">{proposal}</preference>'),
+                       "gpt-test", store, min_new_entries=1)
+
+
+async def test_a_rule_the_session_already_saved_is_not_proposed_again(tmp_path):
+    store = SkillStore(tmp_path)
+    synth = learner_reads(store, "s1", MAIN_RULE, MAIN_RULE, "pr_main_updates")
+    # The agent saved the owner's rule right away, in the project; the learner
+    # reads that journal later. Its proposal would only restate the memory.
+    store.save_memory(MAIN_MEMORY, scope="project:fixture", protected=True, when=MAIN_WHEN,
+                      source_session="s1")
+    assert await synth.run() == []
+    assert PreferenceProposals(store).open() == []
+    assert "proposed, not saved" not in store.render_memory_section("project:fixture")
+    assert "proposed, not saved" not in store.render_memory_section("project:other")
+
+
+def test_a_queued_proposal_closes_when_its_session_saves_the_rule_in_a_project(tmp_path):
+    store = SkillStore(tmp_path)
+    queue = PreferenceProposals(store)
+    assert queue.propose("pr_main_updates", MAIN_RULE, sessions=["s1", "s2"]) == "proposed"
+    # Another session's project memory answers nothing outside its project.
+    store.save_memory(MAIN_MEMORY, scope="project:fixture", protected=True, when=MAIN_WHEN,
+                      source_session="s9")
+    assert len(queue.open()) == 1
+    store.save_memory(MAIN_MEMORY + " Always.", scope="project:fixture", protected=True,
+                      when=MAIN_WHEN, source_session="s2")
+    assert queue.open() == []
+
+
+def test_a_short_rule_closes_on_a_later_owner_memory_naming_all_its_terms(tmp_path):
+    store = SkillStore(tmp_path)
+    queue = PreferenceProposals(store)
+    assert queue.propose("subagent_models", "still dont use ModelX for now.", sessions=["s1"]) == "proposed"
+    store.save_memory("The website deploys from main.", protected=True, when="When deploying")
+    store.save_memory("ModelX is fast at frontend work.", protected=True, when="When picking a model")
+    assert len(queue.open()) == 1, "one shared term is not the same subject"
+    store.save_memory("Still dont use ModelX: sessions, subagents and swarms run on ModelY unless "
+                      "the owner names another model.", protected=True,
+                      when="When choosing a model for a subagent", source_session="s7")
+    assert queue.open() == []
+
+
+async def test_a_correction_of_an_older_memory_is_still_proposed(tmp_path):
+    store = SkillStore(tmp_path)
+    # Saved earlier in the same session and in another one: both are stale
+    # once the owner changes the rule, so neither may hide the proposal.
+    store.save_memory("Pull requests merge as they are; sessions never update them to main "
+                      "before merging.", scope="project:fixture", protected=True,
+                      when=MAIN_WHEN, source_session="s1")
+    store.save_memory("Sessions merge pull requests without bringing them up to current main.",
+                      protected=True, when=MAIN_WHEN, source_session="s0")
+    synth = learner_reads(store, "s1", MAIN_RULE, MAIN_RULE, "pr_main_updates")
+    # An unrelated owner rule saved by the session after the correction does
+    # not answer it either.
+    store.save_memory("The website deploys from main after review.", protected=True,
+                      when="When deploying", source_session="s1")
+    assert await synth.run() == ["preference-proposal:pr_main_updates"]
+    [record] = PreferenceProposals(store).open()
+    assert record["sessions"][0] == "s1"
+    assert MAIN_RULE in store.render_memory_section("project:fixture")
+
+
+def test_the_learner_is_told_to_skip_restatements_and_one_task_exceptions():
+    prompt = " ".join(continual_mod._SYNTH_SYSTEM.split())
+    assert "Skip a rule an explicit memory already states" in prompt
+    assert "an exception for one task or PR" in prompt
+
+
 # ─── 3. user-kept facts that disagree become one owner question ─────────────
 
 # Text shapes of a real store's routing rows (no private data).
