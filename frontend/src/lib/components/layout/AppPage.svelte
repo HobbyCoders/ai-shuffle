@@ -535,10 +535,12 @@
 	// elsewhere (the WS frame path is in ws-message-handlers).
 	$effect(() => observeSessionRows($sessions));
 	// Settings > System's memory health answer is the owner's only: signing out
-	// (also the way to another account) or losing owner rights forgets it.
+	// (also the way to another account) or losing owner rights forgets it. The
+	// reset is the cleanup, not a branch for the signed-out state: signing out
+	// unmounts this page before an effect could see that state.
 	$effect(() => {
-		if ($isAuthenticated && $isAdmin) return;
-		untrack(() => memoryHealth.reset());
+		if (!$isAuthenticated || !$isAdmin) return;
+		return () => untrack(() => memoryHealth.reset());
 	});
 	const groupToolCalls = $derived(chatPreferences.current?.groupToolCalls !== false);
 	const openId = $derived($activeSession?.sessionId ?? null);
