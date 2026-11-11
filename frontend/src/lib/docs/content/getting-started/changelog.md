@@ -45,7 +45,7 @@ New Cloud plans, direct sync between workers on the same network, Settings > Mem
 
 - One design across the app: the rail, side panels, Settings, Notes, Files, Projects, Agents, Automations and the phone app.
 - **Settings > Memory** lets you see, search, edit and delete saved memories.
-- **Away for all chats** (the moon at the foot of the rail, or in the top bar on a phone) puts every chat on every worker in Away mode: questions get their recommended answer and approvals wait, never granted. Turning it off returns each chat to its own setting.
+- **Away for all chats** (the moon at the foot of the rail, or in the top bar on a phone) puts every chat on every worker in Away mode: questions get their recommended answer, and approvals are never granted. A request that needs your approval, including one already waiting when you turn it on, is declined, and the agent carries on without that action and lists it for you. Turning it off returns each chat to its own setting.
 - Every permission request in an app chat uses the regular permission prompt. Typing "yes" no longer approves anything.
 - A chat is told when you approve or decline its service access card.
 
