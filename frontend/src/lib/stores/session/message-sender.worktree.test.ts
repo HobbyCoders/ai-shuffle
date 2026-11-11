@@ -518,6 +518,31 @@ describe('a second send while the first send creates the worktree (#1444)', () =
 		expect(post.mock.calls.filter(([path]) => path === '/sessions/with-worktree')).toHaveLength(1);
 	});
 
+	// Review round 2 (S1): the create names its chat when the POST returns,
+	// so a send made there after a leave and reopen waits for the create's
+	// own first query, even one written by the navigation fallback.
+	it('writes an auto worktree\'s fallback first query ahead of a send made after leaving and reopening its chat', async () => {
+		vi.useFakeTimers();
+		try {
+			post.mockResolvedValueOnce({ session_id: 'wt-s', branch_name: 'feat/auto-name', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: false });
+			const { sender, internal, wsConn, state } = setup({}, { realActiveSession: true });
+			wsConn.isConnected.mockReturnValue(false);
+			const first = sender.sendMessage('first');
+			await vi.advanceTimersByTimeAsync(10);
+			expect(state().sessionId).toBe('wt-s');
+			// Leave the chat and reopen it; the socket opens and a send is made.
+			bumpInitGeneration();
+			internal.worktreeCreationGeneration++;
+			wsConn.isConnected.mockReturnValue(true);
+			const second = sender.sendMessage('second');
+			await vi.advanceTimersByTimeAsync(200);
+			expect(await first).toBe(true);
+			expect(await second).toBe(true);
+			const queries = wsConn.send.mock.calls.map(([frame]) => frame).filter(frame => frame.type === 'query');
+			expect(queries.map(frame => [frame.prompt, frame.session_id])).toEqual([['first', 'wt-s'], ['second', 'wt-s']]);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); }
+	});
+
 	// Review round 1 (S2): each create's own first send runs in its own
 	// create's turn, whichever create ends first.
 	it('sends each create\'s first query when two creates from different composes end oldest first', async () => {

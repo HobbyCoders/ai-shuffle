@@ -217,8 +217,12 @@ export interface MessageSenderDeps {
 /** A worktree create in progress, handed to its own first send (made with
  *  skipWorktreeSetup) so that send runs inside the creating send's turn
  *  (#1444). Passed, never shared: creates from two composes can end in any
- *  order. */
-export type Creation = { holdUntil: (after: CreationEnd) => void };
+ *  order. `made` names the chat the create made the moment its id is known,
+ *  before any wait, so a send made in that chat after a leave and reopen
+ *  goes after this create's first query. */
+export type Creation = { holdUntil: (after: CreationEnd) => void; made: (chat: string) => void };
+/** The wrapper's end-of-turn callback for one send (see sendMessage). */
+type LetNextGo = ((after?: CreationEnd) => void) & { made?: (chat: string) => void };
 
 interface SendMessageOptions {
 	skipWorktreeSetup?: boolean;
@@ -453,7 +457,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		 *  written, it ends this send's turn so the next send to its chat may
 		 *  go. Given a promise, the turn ends when that settles instead (a new
 		 *  chat's creation). Not called, the turn ends when this returns. */
-		async sendMessage(prompt: string, options?: SendMessageOptions, letNextGo?: (after?: CreationEnd) => void): Promise<boolean> {
+		async sendMessage(prompt: string, options?: SendMessageOptions, letNextGo?: LetNextGo): Promise<boolean> {
 			prompt = prompt.trim();
 
 			// Restore-race guard: right after a page load, init() may have adopted
@@ -565,7 +569,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const creationGen = internal.worktreeCreationGeneration;
 				const bootClaim = claimBootSend();
 				let accepted = false;
-				const creation: Creation = { holdUntil: (after) => letNextGo?.(after) };
+				const creation: Creation = { holdUntil: (after) => letNextGo?.(after), made: (chat) => letNextGo?.made?.(chat) };
 				let createEnded!: () => void;
 				let createOver = false;
 				letNextGo?.({ ended: () => createOver, done: new Promise<void>(resolve => { createEnded = resolve; }) });
@@ -1062,6 +1066,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// A successful row consumes the one-time account default, even after
 				// navigation, but never a newer choice or a different owner's pick.
 				if (response.session_id) branchClaim.consume();
+				if (response.session_id) creation?.made(response.session_id);
 
 				// The pick is spent once the session row carries the ownership —
 				// only on the compose that spent it (see autoCreateWorktree).
@@ -1331,6 +1336,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					response = await postCreate(retryName);
 				}
 
+				if (response.session_id) creation?.made(response.session_id);
 				// The pick is spent once the session row carries the ownership —
 				// but only on the compose that spent it. After navigation the
 				// current view's device pick belongs to a different compose.
@@ -1546,8 +1552,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	 *  chat (failed). A creation that ended with one is the chat now open. */
 	type Compose = { lane: string; creating: CreationEnd | null; failed: number; chat?: string };
 	let compose: Compose | null = null;
-	/** Earlier navigations' composes that adopted a chat, while a send of
-	 *  theirs is still open: that chat's sends keep going in their lane. */
+	/** Earlier navigations' composes while a send of theirs is still open.
+	 *  Once one knows the chat it made (compose.chat), that chat's sends keep
+	 *  going in its lane. */
 	let adopted: Compose[] = [];
 	function settle(c: Compose): number {
 		if (c.creating?.ended()) {
@@ -1568,7 +1575,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		if (made.isRestoringSession) return { lane: ANY_CHAT, chat: ANY_CHAT, navigation, turn: sendOrder.take(ANY_CHAT) };
 		const lane = `compose:${navigation}`;
 		if (compose?.lane !== lane) {
-			if (compose?.chat) adopted.push(compose);
+			if (compose) adopted.push(compose);
 			compose = { lane, creating: null, failed: 0 };
 		}
 		adopted = adopted.filter(c => sendOrder.isOpen(c.lane));
@@ -1636,12 +1643,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		// What this send's turn still waits for once it returns (a new
 		// chat's creation). Written with nothing to wait for, it ends now.
 		const holds: Promise<void>[] = [];
-		const letNextGo = (after?: CreationEnd) => {
+		const letNextGo: LetNextGo = (after?: CreationEnd) => {
 			if (after) {
 				if (taken.compose) taken.compose.creating = after;
 				holds.push(after.done);
 			} else if (!holds.length) turn.release();
 		};
+		letNextGo.made = (chat) => { if (taken.compose) taken.compose.chat ??= chat; };
 		return trackSend(async () => {
 			try {
 				if (turn.ready) {
