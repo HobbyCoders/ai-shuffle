@@ -73,6 +73,9 @@
 	import AwayAllChatsSwitch from './AwayAllChatsSwitch.svelte';
 	import DesktopUpdateButton from './sidebar/DesktopUpdateButton.svelte';
 	import SessionCard from './SessionCard.svelte';
+	import MemoryNeedsCard from './sidebar/MemoryNeedsCard.svelte';
+	import { memoryHealth } from '$lib/stores/memory-health.svelte';
+	import { encodeTarget } from '$lib/settings/navigation.svelte';
 	import { backToChats } from '$lib/services/session-navigation';
 	import SidebarRail from './sidebar/SidebarRail.svelte';
 	import PanelToggle from './view/PanelToggle.svelte';
@@ -102,7 +105,8 @@
 		/** Settled the session currently open in the main panel — same as New Session. */
 		onSettledOpenSession: () => void;
 		onOpenSession: (sessionId: string) => void;
-		onOpenFeature: (type: ViewType) => void;
+		/** `itemId` is the page's one-shot deep link (a Settings target, see encodeTarget). */
+		onOpenFeature: (type: ViewType, itemId?: string | null) => void;
 		onOpenSpotlight?: () => void;
 		/** Retired with the chat/code switch (#371 step 4); kept so callers compile. */
 		onSelectMode?: (mode: SessionMode) => void;
@@ -429,6 +433,17 @@
 	// if the server still reports a wait.
 	const laneOf = (r: CardRow) => sidebarGroup(r.status, !!r.session.is_active);
 	const needsYouRows = $derived(rows.filter((r) => laneOf(r) === 'needs'));
+	// The worker's memory check reporting a loss is one more item in the lane
+	// (#1042), above the chats. It follows the check: no dismiss, gone when
+	// the check is healthy, never shown for an error.
+	const memoryAlert = $derived(memoryHealth.alert);
+	const needsYouCount = $derived(needsYouRows.length + (memoryAlert ? 1 : 0));
+	const MEMORY_HEALTH_TARGET = encodeTarget({ category: 'system', anchor: 'system.memoryHealth', open: 'system.memoryHealth' });
+	function openMemoryHealth() {
+		sheet = null;
+		cancelSelection();
+		onOpenFeature('settings', MEMORY_HEALTH_TARGET);
+	}
 	const activeRows = $derived(rows.filter((r) => laneOf(r) === 'active'));
 	const settledRows = $derived(rows.filter((r) => laneOf(r) === 'settled'));
 	let settledLimit = $state(SETTLED_LIMIT);
@@ -939,11 +954,13 @@
 		</div>
 
 		<div class="list" class:edge-guard={phone} bind:this={listRef}>
-			{#if needsYouRows.length > 0}
-				{@render sect('needs', 'Needs you', needsYouRows.length)}
+			{#if needsYouCount > 0}
+				{@render sect('needs', 'Needs you', needsYouCount)}
 				{#if !collapsedGroups.needs}
 					<div class="cards" data-group="needs-you">
-						{@render laneRows(needsYouGroups)}
+						<!-- First, above any project header, so it never reads as one project's row. -->
+						{#if memoryAlert}<MemoryNeedsCard detail={memoryAlert} onOpen={openMemoryHealth} />{/if}
+						{#if needsYouRows.length > 0}{@render laneRows(needsYouGroups)}{/if}
 					</div>
 				{/if}
 			{/if}

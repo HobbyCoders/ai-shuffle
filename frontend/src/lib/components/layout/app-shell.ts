@@ -11,6 +11,7 @@ export interface AppShellProps {
 	onNewSession: () => void;
 	onSettledOpenSession: () => void;
 	onOpenSession: (sessionId: string) => void;
-	onOpenFeature: (type: ViewType) => void;
+	/** `itemId`: the page's one-shot deep link, e.g. an encoded Settings target. */
+	onOpenFeature: (type: ViewType, itemId?: string | null) => void;
 	onOpenSpotlight: () => void;
 }

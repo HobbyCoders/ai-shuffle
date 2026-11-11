@@ -77,11 +77,11 @@ export function memoryCheckedAt(health: MemoryHealth): string {
 }
 
 /**
- * The warning the collapsed row shows under itself while something needs
- * attention: the first check's name and the first sentence of its reason
- * ("Capacity: Automatic cleanup has recorded 3 permanent deletions…"), and
- * how many more there are. Empty when healthy. The full reasons are in the
- * opened list.
+ * The warning the sidebar's Needs you item carries while something needs
+ * attention (#1042): the first check's name and the first sentence of its
+ * reason ("Capacity: Automatic cleanup has recorded 3 permanent deletions…"),
+ * and how many more there are. Empty when healthy. The full reasons are in
+ * Settings > System > Memory health's opened list.
  */
 const ALERT_MAX = 180;
 

@@ -57,7 +57,7 @@
 		onNewSession: () => void;
 		onSettledOpenSession: () => void;
 		onOpenSession: (sessionId: string) => void;
-		onOpenFeature: (type: ViewType) => void;
+		onOpenFeature: (type: ViewType, itemId?: string | null) => void;
 		onOpenSpotlight?: () => void;
 		hideGlobalStt?: boolean;
 		/** Out: the actual phone drawer, independent of desktop sidebar preferences. */
@@ -141,6 +141,7 @@
 	// Opening moves focus into the drawer (it covers the whole screen), and a
 	// dismissal hands it back to the ☰ instead of dropping it on <body>.
 	async function openDrawer() {
+		pendingTarget?.();
 		mounted = true;
 		if (!drawerOpen) {
 			drawerOpen = true;
@@ -157,6 +158,8 @@
 	}
 
 	function dismissDrawer() {
+		// Any newer navigation calls off a Settings target still waiting.
+		pendingTarget?.();
 		if (!drawerOpen) return;
 		closeDrawer();
 		popDrawerEntry();
@@ -167,6 +170,8 @@
 	// drawer instead of leaving the app. Closing it any other way pops that
 	// entry again, so Back never needs a second press to do something.
 	let entryLive = false;
+	/** Calls off a drawer Settings target still waiting for the pop. */
+	let pendingTarget: (() => void) | null = null;
 
 	function pushDrawerEntry() {
 		try {
@@ -218,6 +223,34 @@
 			action(...args);
 		};
 	}
+
+	// A Settings target (Needs you's memory item, #1042) pushes its own history
+	// step. The drawer's pop above is asynchronous and would land after that
+	// step and undo it, leaving Settings on its index, so open it only once
+	// that pop is seen. Never on elapsed time: a slow pop would still undo it.
+	// Reopening the drawer, any newer navigation (dismissDrawer) or the bar
+	// going away calls a waiting open off.
+	function drawerOpenFeature(type: ViewType, itemId?: string | null) {
+		const popping = drawerOpen && entryLive;
+		dismissDrawer();
+		if (!itemId) return onOpenFeature(type);
+		if (!popping) return onOpenFeature(type, itemId);
+		// The drawer's pop is shallow, so the router has set page.state by the
+		// time this later listener runs: a popstate still on the drawer's
+		// entry is not that pop.
+		const open = () => {
+			if (page.state?.mobileDrawer) return;
+			stop();
+			onOpenFeature(type, itemId);
+		};
+		const stop = () => {
+			window.removeEventListener('popstate', open);
+			if (pendingTarget === stop) pendingTarget = null;
+		};
+		pendingTarget = stop;
+		window.addEventListener('popstate', open);
+	}
+	$effect(() => () => pendingTarget?.());
 
 	// --- Swipe ----------------------------------------------------------------
 	// A right swipe on the main screen pulls the drawer open; a left swipe
@@ -410,7 +443,7 @@
 			onNewSession={drawerGo(onNewSession)}
 			onSettledOpenSession={drawerGo(onSettledOpenSession)}
 			onOpenSession={drawerGo(onOpenSession)}
-			onOpenFeature={drawerGo(onOpenFeature)}
+			onOpenFeature={drawerOpenFeature}
 			onBackToChats={drawerGo(backToChats)}
 			onOpenSpotlight={onOpenSpotlight ? drawerGo(onOpenSpotlight) : undefined}
 		>
