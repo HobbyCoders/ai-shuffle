@@ -57,6 +57,39 @@ export function classifyMutations(stats: MutationStats, thresholds = DEFAULT_MUT
 }
 export const WATCH_KEY = "__browserMcpWatch";
 
+/*
+ * How an action settles (maintainer notes; the agent-facing summary is the
+ * ACT RESULT section of src/instructions.ts, which only says what the flags
+ * mean and when to observe again).
+ * - Quiet time starts after dispatch: a QUIET_MS window (100ms for fill/type),
+ *   extended while action-started requests or short timers run, capped at
+ *   QUIET_CAP_MS (settle_capped). Long timers beyond that budget (toast
+ *   auto-dismiss) are not waited on.
+ * - Only text containers seen changing BEFORE dispatch may bypass the true
+ *   DOM-quiet check; text_churn_ignored:true reports that heuristic, not
+ *   completion. Counters, typewriters and token streams that the action starts
+ *   are still observed until quiet or the cap; substantial new text churn
+ *   refreshes the snapshot. Non-baseline text must go quiet even while an
+ *   existing clock keeps ticking.
+ * - Passive history covers the top document and its attached open shadow
+ *   roots; detached observers are pruned and native attachShadow is restored
+ *   while idle. Roots attached to already-inserted hosts while idle are found
+ *   and sampled on the next action. Actions finish any remainder of an initial
+ *   100ms window, bounded to 300ms, to establish repeated mutations or find
+ *   arriving roots.
+ * - Frame ticker evidence needs at least two recent pre-action mutations and
+ *   expires after each action: previously ticking frames sample afresh, static
+ *   frames sample once, whitespace-only frames skip sampling until they gain
+ *   text. Document, root and text history is weakly keyed; frame observers are
+ *   disconnected while idle. A late-starting frame clock can therefore cost
+ *   one conservative capped action before its baseline exists.
+ * - Navigation never samples, so a clock in a fresh control-free document
+ *   reaches the cap with text_churn_ignored:false.
+ * - Known limitation: an action that reuses an already-churning ticker element
+ *   for progress driven by untracked rAF can return early with
+ *   text_churn_ignored:true.
+ */
+
 /** Self-contained: Playwright serializes this function into the page. */
 export async function installMutationWatcher(input: string | { key: string; passive: boolean; sample?: boolean }): Promise<void> {
   const key = typeof input === "string" ? input : input.key;
