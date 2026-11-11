@@ -96,6 +96,14 @@ def _psutil_references(deadline, diagnostics, *, windows):
 
     from app.core.scratch_reaper import References, process_label
     refs = References()
+    # Windows: no open_files. psutil enumerates the whole system handle table
+    # and names each file handle on a helper thread, per process, so on a real
+    # desktop this field alone outran every deadline and disabled every pass.
+    # Open handles are covered instead: before any deletion each entry is opened
+    # with no sharing (_windows_remove probe), and each leaf is then deleted
+    # through an exclusive delete handle. cwd and cmdline stay: they are cheap,
+    # and a live command line can name a quiet folder without holding a handle.
+    fields = ("cwd", "cmdline") if windows else ("cwd", "open_files", "cmdline")
     for process in psutil.process_iter():
         if time.monotonic() >= deadline:
             if diagnostics is not None:
@@ -108,7 +116,7 @@ def _psutil_references(deadline, diagnostics, *, windows):
         except psutil.Error:
             name = "unknown"
         owner = process_label(process.pid, name)
-        for field in ("cwd", "open_files", "cmdline"):
+        for field in fields:
             try:
                 value = getattr(process, field)()
                 if field == "cwd":
@@ -166,8 +174,13 @@ def _identity(info):
     return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)]
 
 
-def _windows_remove(path):
-    """Exclusive delete-on-close also rejects holders using FILE_SHARE_DELETE."""
+def _windows_remove(path, *, probe=False):
+    """Exclusive delete-on-close also rejects holders using FILE_SHARE_DELETE.
+
+    probe=True opens for read with no sharing and closes without deleting. It
+    fails while any other handle with read, write, execute or delete access is
+    open, so a whole folder is kept when one of its entries is held.
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -179,12 +192,17 @@ def _windows_remove(path):
     kernel.CloseHandle.restype = wintypes.BOOL
     # DELETE, no sharing, OPEN_EXISTING. Open reparse points themselves, never
     # their targets; BACKUP_SEMANTICS allows directories, DELETE_ON_CLOSE removes.
-    handle = kernel.CreateFileW(str(path), 0x10000, 0, None, 3, 0x02000000 | 0x04000000 | 0x00200000, None)
+    # A probe uses FILE_READ_DATA (allowed on read-only entries) and no delete flag.
+    access, flags = (0x1, 0) if probe else (0x10000, 0x04000000)
+    handle = kernel.CreateFileW(str(path), access, 0, None, 3, 0x02000000 | 0x00200000 | flags, None)
     if handle == wintypes.HANDLE(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
+        error = ctypes.get_last_error()
+        if probe and error == 32:  # ERROR_SHARING_VIOLATION
+            raise ValueError("entry open elsewhere")
+        raise ctypes.WinError(error)
     if not kernel.CloseHandle(handle):
         raise ctypes.WinError(ctypes.get_last_error())
-    if path.exists():
+    if not probe and path.exists():
         raise OSError("exclusive deletion did not remove entry")
 
 
@@ -246,6 +264,7 @@ class ScratchSweep:
         self.removed_bytes = 0
         self.slice_files = 0
         self.slice_bytes = 0
+        self.passes = 0
 
     def close_job(self):
         if self.job:
@@ -323,11 +342,32 @@ class ScratchSweep:
                     key.startswith("process_reference pid=") for key in self.reasons) >= 8:
                 reason = "process_reference additional_holders"
             return self._retain(reason)
+        if os.name == "nt" and job.get("probed") != self.passes:
+            # Stands in for psutil open_files on Windows, refreshed in every pass
+            # that deletes: a handle opened since keeps the whole folder.
+            if not self._probe_remaining(job):
+                return self._retain("probe budget reached")
+            job["probed"] = self.passes
         if path.lstat().st_mtime_ns != job["root_modified"]:
             return self._retain("root_changed")
         return True
 
+    def _probe_remaining(self, job):
+        """Open every entry not yet deleted with no sharing; any holder raises."""
+        manifest = job["manifest"]
+        position = manifest.tell()
+        budget = time.monotonic() + PROCESS_SCAN_SECONDS
+        try:
+            while line := manifest.readline():
+                if time.monotonic() >= budget:
+                    return False
+                _windows_remove(job["path"] / json.loads(line)[0], probe=True)
+            return True
+        finally:
+            manifest.seek(position)
+
     def step(self):
+        self.passes += 1
         self.retained = 0
         self.reasons = Counter()
         self.process_notes = set()
@@ -403,7 +443,11 @@ class ScratchSweep:
                 if not self._guard(job, deadline):
                     self.close_job()
                     continue
-                tranche = min(deadline, time.monotonic() + 0.1)
+                # The guard's scans have budgets of their own and may end past
+                # the pass deadline. A passed guard still gets one short tranche,
+                # or a slow check would repeat every pass and never delete.
+                now = time.monotonic()
+                tranche = min(deadline, now + 0.1) if now < deadline else now + 0.1
                 while time.monotonic() < tranche:
                     line = job["manifest"].readline()
                     if not line:
