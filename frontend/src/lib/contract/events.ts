@@ -32,7 +32,8 @@ export type SessionEvent =
   | TranscriptRewound
   | ArtifactCreated
   | TurnProviderAlive
-  | QueuedMessageWithdrawn;
+  | QueuedMessageWithdrawn
+  | CallCheckpointBound;
 export type CommandId = string | null;
 export type CreatedAt = string;
 export type Id = string;
@@ -419,6 +420,16 @@ export type Seq31 = number;
 export type SessionId32 = string;
 export type TurnId31 = string | null;
 export type Type31 = 'queued_message.withdrawn';
+export type CallRequestId = string;
+export type CommandId32 = string | null;
+export type CreatedAt33 = string;
+export type Id34 = string;
+export type NodeId = string;
+export type RunId32 = string | null;
+export type Seq32 = number;
+export type SessionId33 = string;
+export type TurnId32 = string | null;
+export type Type32 = 'call.checkpoint_bound';
 
 export interface TurnQueued {
   command_id?: CommandId;
@@ -966,5 +977,26 @@ export interface QueuedMessageWithdrawn {
   session_id: SessionId32;
   turn_id?: TurnId31;
   type?: Type31;
+  [k: string]: unknown;
+}
+/**
+ * The turn that ran a streamed call's request wrote checkpoint ``node_id``.
+ *
+ * Host-written only, from the running turn's own payload; never rendered.
+ * ``call_request_id`` is the identity recorded on that request's caller
+ * message, so a rewind of the message resolves its checkpoint by identity
+ * (#1265). A consumer that does not know this type ignores it.
+ */
+export interface CallCheckpointBound {
+  call_request_id: CallRequestId;
+  command_id?: CommandId32;
+  created_at: CreatedAt33;
+  id: Id34;
+  node_id: NodeId;
+  run_id?: RunId32;
+  seq: Seq32;
+  session_id: SessionId33;
+  turn_id?: TurnId32;
+  type?: Type32;
   [k: string]: unknown;
 }

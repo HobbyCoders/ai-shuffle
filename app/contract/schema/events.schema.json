@@ -269,6 +269,88 @@
       "title": "AssistantThinkingDelta",
       "type": "object"
     },
+    "CallCheckpointBound": {
+      "description": "The turn that ran a streamed call's request wrote checkpoint ``node_id``.\n\nHost-written only, from the running turn's own payload; never rendered.\n``call_request_id`` is the identity recorded on that request's caller\nmessage, so a rewind of the message resolves its checkpoint by identity\n(#1265). A consumer that does not know this type ignores it.",
+      "properties": {
+        "call_request_id": {
+          "title": "Call Request Id",
+          "type": "string"
+        },
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "node_id": {
+          "title": "Node Id",
+          "type": "string"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "call.checkpoint_bound",
+          "default": "call.checkpoint_bound",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at",
+        "call_request_id",
+        "node_id"
+      ],
+      "title": "CallCheckpointBound",
+      "type": "object"
+    },
     "InteractionAnswered": {
       "properties": {
         "answer": {
@@ -3557,6 +3639,7 @@
       "artifact.created": "#/$defs/ArtifactCreated",
       "assistant.text_delta": "#/$defs/AssistantTextDelta",
       "assistant.thinking_delta": "#/$defs/AssistantThinkingDelta",
+      "call.checkpoint_bound": "#/$defs/CallCheckpointBound",
       "interaction.answered": "#/$defs/InteractionAnswered",
       "interaction.expired": "#/$defs/InteractionExpired",
       "interaction.requested": "#/$defs/InteractionRequested",
@@ -3685,6 +3768,9 @@
     },
     {
       "$ref": "#/$defs/QueuedMessageWithdrawn"
+    },
+    {
+      "$ref": "#/$defs/CallCheckpointBound"
     }
   ],
   "title": "SessionEvent"

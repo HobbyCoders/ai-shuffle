@@ -20,8 +20,10 @@
 //   busy        a call placed while the chat is still answering says that reply once it lands, then relays a new request
 //   attachment-during-call (#1265) a file sent while a call is live goes as fields beside the words
 //               and shows as a chip on the message
+//   rewind-call-attachment (#1265) rewinding that message cuts both histories at it and puts the file back in the composer
+//   rewind-call-while-busy (#1265) a message typed into a call while the chat answers is refused, nothing cut (desktop)
 import { runJourney } from './runner.mjs';
-import { PROJECT, composer, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
+import { PROJECT, SLOW_REPLY, composer, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import {
 	VOICE_REPLY_SPOKEN,
@@ -262,9 +264,88 @@ const attachmentDuringCall = {
 	}
 };
 
+/** Open the rewind on `message`, confirm it, and return the server's answer. */
+async function rewindMessage(page, message) {
+	const rewind = message.getByTitle('Rewind to before this message', { exact: true });
+	expect((await rewind.count()) === 1, 'the call message offers its rewind button');
+	await rewind.focus();
+	await page.keyboard.press('Enter');
+	const response = page.waitForResponse(r => r.url().includes('/rewind/execute/') && r.request().method() === 'POST');
+	await page.getByRole('dialog').getByRole('button', { name: 'Rewind', exact: true }).click();
+	const reply = await response;
+	return { status: reply.status(), body: await reply.text() };
+}
+
+const rewindCallAttachment = {
+	name: 'rewind-call-attachment',
+	throttles: ['fast'],
+	setup: attachmentDuringCall.setup,
+	async act(ctx) {
+		await attachmentDuringCall.act(ctx);
+		const { page, mark, state, log } = ctx;
+		const message = page.locator('[data-user-turn-id]').filter({ has: page.locator('.attachment-chip').filter({ hasText: state.file }) }).last();
+		const before = await countUserRows(page, '');
+		await mark('rewind the message sent in the call');
+		// Its turn ran and recorded which checkpoint it created (#1265): both
+		// histories are cut at the message and the file goes back in the composer.
+		const { status, body } = await rewindMessage(page, message);
+		log(`rewind answer ${status}: ${body.slice(0, 240)}`);
+		expect(/"success"\s*:\s*true/.test(body), `the rewind succeeds: ${body.slice(0, 240)}`);
+		await composer(page).locator('[data-file-chip]').filter({ hasText: state.file }).first().waitFor({ timeout: 20_000 });
+		await message.waitFor({ state: 'detached', timeout: 20_000 });
+		expect((await countUserRows(page, '')) === before - 1, 'the visible history is cut at the call message');
+		expect(!(await page.locator('.attachment-chip').filter({ hasText: state.file }).count()), 'the cut message and its chip are gone from the chat');
+	}
+};
+
+// A message typed into a call while the chat is still answering: its words
+// land while the running reply still streams, so cutting the chat at them and
+// the agent's history at their checkpoint would differ. The rewind is refused
+// with nothing cut. Desktop only for now: at phone width the queued message
+// joining the chat when the slow reply ends shifts the layout (about 0.07),
+// which is outside this case's subject.
+const rewindCallWhileBusy = {
+	name: 'rewind-call-while-busy',
+	throttles: ['fast'],
+	viewports: ['desktop'],
+	async setup(ctx) {
+		ctx.token = await chatWithScenario(ctx, 'default');
+		await startCall(ctx.page);
+	},
+	async act(ctx) {
+		const { page, mark, log } = ctx;
+		await page.route('**/api/v1/voice/sessions/*/context', route => {
+			if (route.request().method() !== 'PATCH') return route.continue();
+			return route.fulfill({ status: 200, contentType: 'application/json', body: route.request().postData() });
+		});
+		await mark('end the call, start a slow reply, call again and type into it');
+		await endCall(page);
+		await typeAndSend(page, `slow-${ctx.token} [script:slow tps=2]`);
+		await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 30_000 });
+		await startCall(page, { timeout: 45_000 });
+		const words = `while-busy-${uniq()}`;
+		expect(!(await page.getByText(SLOW_REPLY.end, { exact: false }).count()), 'the chat is still answering when the call message goes up');
+		await typeAndSend(page, words);
+		const message = page.locator('[data-user-turn-id]').filter({ hasText: words }).last();
+		await message.waitFor({ timeout: 30_000 });
+		await page.getByText(SLOW_REPLY.end, { exact: false }).first().waitFor({ timeout: 90_000 });
+		await waitTurnSettled(page, { messagesAtLeast: 5, text: 'Live conversation context' });
+		await mark('end the call and rewind the message typed into it');
+		await endCall(page);
+		const before = await countUserRows(page, '');
+		const { status, body } = await rewindMessage(page, message);
+		log(`rewind answer ${status}: ${body.slice(0, 240)}`);
+		expect(!/"success"\s*:\s*true/.test(body), `the rewind is refused: ${body.slice(0, 240)}`);
+		expect(/sent in a call/.test(body), `the refusal names the call message: ${body.slice(0, 240)}`);
+		await page.waitForTimeout(1500);
+		expect((await countUserRows(page, '')) === before, 'no message was cut from the visible history');
+		expect((await message.count()) === 1, 'the call message remains');
+	}
+};
+
 await runJourney({
 	name: 'voice-call',
 	browser: voiceBrowser,
-	cases: [startEnd, relay, waitUpdate, busy, contextAdmissionTimeout, attachmentDuringCall],
+	cases: [startEnd, relay, waitUpdate, busy, contextAdmissionTimeout, attachmentDuringCall, rewindCallAttachment, rewindCallWhileBusy],
 	allow: [...DEV_INSTANCE_NOISE]
 });

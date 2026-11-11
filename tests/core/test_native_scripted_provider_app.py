@@ -692,3 +692,30 @@ async def test_retry_after_a_reply_cut_off_by_a_provider_error_answers_the_promp
     cache = content[-1].pop("cache_control")
     content.append({"type": "text", "text": "\n\n" + clock_note, "cache_control": cache})
     assert provider.requests[1].body == expected
+
+
+async def test_turn_start_names_the_user_node_its_prompt_became(monkeypatch, tmp_path, provider):
+    """#1265: the app learns a turn's checkpoint from the engine's own
+    TurnStarted (the init message's ``node_id``), and it is the stored user
+    node holding that turn's prompt, the one a call request binds to."""
+    from app.core.provider.events import SystemMessage
+
+    provider.script(Messages.text("first"), Messages.text("second"))
+    async with NativeRun(monkeypatch, tmp_path, provider) as run:
+        first = await run.turn("Run the tests")
+        second = await run.turn("Now the linter")
+        engine = run.adapter.engine
+        nodes = await engine.store.load_path(engine.session_id)
+
+    def started(messages):
+        [init] = [m for m in messages if isinstance(m, SystemMessage) and m.subtype == "init"]
+        return init.data["node_id"]
+
+    by_id = {n.node_id: n for n in nodes}
+    for messages, prompt in ((first, "Run the tests"), (second, "Now the linter")):
+        node = by_id[started(messages)]
+        assert node.message.role == "user"
+        text = node.message.content if isinstance(node.message.content, str) else "".join(
+            getattr(b, "text", "") for b in node.message.content)
+        assert prompt in text
+    assert started(first) != started(second)

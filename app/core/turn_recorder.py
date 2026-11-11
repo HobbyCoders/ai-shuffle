@@ -943,6 +943,34 @@ class TurnRecorder:
             )
             return False
 
+    async def record_call_binding(self, call_request_id: str, node_id: str) -> bool:
+        """Append ``call.checkpoint_bound``: this turn, which runs the streamed
+        call request ``call_request_id``, writes checkpoint ``node_id``.
+
+        Only SessionRuntime calls it, from the running turn's own payload and
+        the node id the engine's TurnStarted named. A rewind of that request's
+        caller message resolves its checkpoint through this event alone; with
+        no event (a failed write, a crash before it) the rewind is refused
+        (#1265). Never raises; True when the append was made.
+        """
+        if self._closed or self._superseded or self._recording_failed:
+            return False
+        if not call_request_id or not node_id:
+            return False
+        try:
+            async with self._lock:
+                await self._append(self._drain_buffered_events() + [self._event(
+                    contract.CallCheckpointBound,
+                    call_request_id=call_request_id, node_id=node_id,
+                )])
+            return not (self._recording_failed or self._superseded)
+        except Exception:
+            logger.warning(
+                "[TurnRecorder] record_call_binding failed for %s",
+                self.session_id, exc_info=True,
+            )
+            return False
+
     async def record_task_terminal(self, frames: List[Dict[str, Any]]) -> int:
         """Append one ``task.updated`` per claimed background-task completion.
 
@@ -1910,6 +1938,7 @@ async def record_voice_exchange(
     system_text: Optional[str] = None,
     user_source: str = "voice",
     upload_paths: Optional[List[str]] = None,
+    call_request_id: Optional[str] = None,
 ) -> Optional[str]:
     """Persist ONE completed voice exchange as a synthetic turn.
 
@@ -1926,6 +1955,9 @@ async def record_voice_exchange(
     user message: ``voice`` for speech, ``typed`` for text typed into the call.
     ``upload_paths`` are attachments the caller's intake already validated,
     recorded as a chat send's are so a rewind can hand them back.
+    ``call_request_id`` is the identity of the chat request these words were
+    sent as, recorded on the user message so a rewind finds that request's
+    checkpoint by it, never by words (#1265).
     ``system_text`` is a note the bridge injected into the call, kept
     apart from the user's words throughout (see
     :func:`_voice_exchange_side_effects`). Returns the synthetic turn id, or
@@ -1954,7 +1986,8 @@ async def record_voice_exchange(
             rows.append(_build_event(
                 contract.MessageUser, session_id, turn_id=turn_id,
                 content=user_text, kind="text",
-                extra_payload={"source": user_source, **_voice_upload_fields(upload_paths)},
+                extra_payload={"source": user_source, **_voice_upload_fields(upload_paths),
+                               **({"call_request_id": call_request_id} if call_request_id else {})},
             ))
         if assistant_text:
             rows.append(_build_event(
