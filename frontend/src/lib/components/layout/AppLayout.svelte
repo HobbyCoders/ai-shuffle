@@ -32,7 +32,7 @@
 		onNewSession: () => void;
 		onSettledOpenSession: () => void;
 		onOpenSession: (sessionId: string) => void;
-		onOpenFeature: (type: ViewType) => void;
+		onOpenFeature: (type: ViewType, itemId?: string | null) => void;
 		onOpenSpotlight?: () => void;
 	}
 
@@ -125,7 +125,7 @@
 		onNewSession: () => { onNewSession(); closeFloatingSidebar(); },
 		onSettledOpenSession: () => { onSettledOpenSession(); closeFloatingSidebar(); },
 		onOpenSession: (id: string) => { onOpenSession(id); closeFloatingSidebar(); },
-		onOpenFeature: (type: ViewType) => { onOpenFeature(type); if (rail) layout.setSidebarCollapsed(false); else closeFloatingSidebar(); },
+		onOpenFeature: (type: ViewType, itemId?: string | null) => { onOpenFeature(type, itemId); if (rail) layout.setSidebarCollapsed(false); else closeFloatingSidebar(); },
 		onOpenSpotlight: onOpenSpotlight ? () => { onOpenSpotlight?.(); closeFloatingSidebar(); } : undefined
 	});
 </script>

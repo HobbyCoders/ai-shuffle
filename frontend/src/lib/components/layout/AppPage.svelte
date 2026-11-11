@@ -22,6 +22,7 @@
 	import { page } from '$app/state';
 	import { beginJourney, cancelJourney, claimNavigationOrigin, finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
+	import { memoryHealth } from '$lib/stores/memory-health.svelte';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { isTranscriptProseDismissed, observeSessionRows, proseQuestionDismissals, proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { privateAccessPending } from '$lib/stores/chat-access';
@@ -533,6 +534,14 @@
 	// when this tab left a questioning session means the user answered from
 	// elsewhere (the WS frame path is in ws-message-handlers).
 	$effect(() => observeSessionRows($sessions));
+	// Memory health for the sidebar's Needs you lane and Settings (#1042): one
+	// answer from the worker this UI is connected to, for its owner only.
+	// Signing out (also the way to another account) or losing owner rights
+	// stops it and forgets the answer; signing in starts it again.
+	$effect(() => {
+		if (!$isAuthenticated || !$isAdmin) return;
+		return untrack(() => memoryHealth.start());
+	});
 	const groupToolCalls = $derived(chatPreferences.current?.groupToolCalls !== false);
 	const openId = $derived($activeSession?.sessionId ?? null);
 	const openNeeds = $derived(openSessionNeeds(

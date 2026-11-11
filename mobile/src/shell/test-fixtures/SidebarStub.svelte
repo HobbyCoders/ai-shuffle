@@ -15,7 +15,7 @@
 		onNewSession: () => void;
 		onSettledOpenSession: () => void;
 		onOpenSession: (sessionId: string) => void;
-		onOpenFeature: (type: 'settings') => void;
+		onOpenFeature: (type: 'settings', itemId?: string | null) => void;
 		onOpenSpotlight?: () => void;
 		headerAction?: Snippet;
 	} = $props();
@@ -27,6 +27,7 @@
 	<button type="button" onclick={() => onSettledOpenSession()}>Stub settled session</button>
 	<button type="button" onclick={() => onOpenSession('s-2')}>Stub open session</button>
 	<button type="button" onclick={() => onOpenFeature('settings')}>Stub open settings</button>
+	<button type="button" onclick={() => onOpenFeature('settings', 'system')}>Stub settings target</button>
 	{#if onOpenSpotlight}
 		<button type="button" onclick={() => onOpenSpotlight?.()}>Stub spotlight</button>
 	{/if}

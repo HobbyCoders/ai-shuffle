@@ -375,6 +375,45 @@ describe('AppTopBar drawer lifecycle', () => {
 			page.state = {};
 		}
 	});
+
+	it('opens a Settings target only once the drawer has popped its entry, so the pop cannot undo it', async () => {
+		vi.useFakeTimers();
+		const nav = await import('$app/navigation');
+		const { page } = await import('$app/state');
+		const push = vi.spyOn(nav, 'pushState').mockImplementation((_url, state) => {
+			page.state = state as Record<string, unknown>;
+		});
+		// The real Back is asynchronous: the router hears popstate later.
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		try {
+			const { props } = renderBar();
+			await fireEvent.click(menuButton());
+			await tick();
+			await fireEvent.click(screen.getByRole('button', { name: 'Stub settings target' }));
+			expect(back).toHaveBeenCalledTimes(1);
+			expect(drawerClosed()).toBe(true);
+			expect(props.onOpenFeature).not.toHaveBeenCalled();
+
+			page.state = {};
+			window.dispatchEvent(new PopStateEvent('popstate'));
+			expect(props.onOpenFeature).toHaveBeenCalledExactlyOnceWith('settings', 'system');
+			vi.advanceTimersByTime(1000);
+			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
+
+			// No popstate at all (the entry was already gone): it still opens.
+			await fireEvent.click(menuButton());
+			await tick();
+			await fireEvent.click(screen.getByRole('button', { name: 'Stub settings target' }));
+			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
+			vi.advanceTimersByTime(400);
+			expect(props.onOpenFeature).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+			push.mockRestore();
+			back.mockRestore();
+			page.state = {};
+		}
+	});
 });
 
 describe('AppTopBar drawer swipe', () => {

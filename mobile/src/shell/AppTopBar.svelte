@@ -57,7 +57,7 @@
 		onNewSession: () => void;
 		onSettledOpenSession: () => void;
 		onOpenSession: (sessionId: string) => void;
-		onOpenFeature: (type: ViewType) => void;
+		onOpenFeature: (type: ViewType, itemId?: string | null) => void;
 		onOpenSpotlight?: () => void;
 		hideGlobalStt?: boolean;
 		/** Out: the actual phone drawer, independent of desktop sidebar preferences. */
@@ -217,6 +217,27 @@
 			dismissDrawer();
 			action(...args);
 		};
+	}
+
+	// A Settings target (Needs you's memory item, #1042) pushes its own history
+	// step. The drawer's pop above is asynchronous and would land after that
+	// step and undo it, leaving Settings on its index, so open it once the pop
+	// is done.
+	function drawerOpenFeature(type: ViewType, itemId?: string | null) {
+		const popping = drawerOpen && entryLive;
+		dismissDrawer();
+		if (!itemId) return onOpenFeature(type);
+		if (!popping) return onOpenFeature(type, itemId);
+		let done = false;
+		const open = () => {
+			if (done) return;
+			done = true;
+			window.removeEventListener('popstate', open);
+			clearTimeout(fallback);
+			onOpenFeature(type, itemId);
+		};
+		window.addEventListener('popstate', open);
+		const fallback = setTimeout(open, 400);
 	}
 
 	// --- Swipe ----------------------------------------------------------------
@@ -410,7 +431,7 @@
 			onNewSession={drawerGo(onNewSession)}
 			onSettledOpenSession={drawerGo(onSettledOpenSession)}
 			onOpenSession={drawerGo(onOpenSession)}
-			onOpenFeature={drawerGo(onOpenFeature)}
+			onOpenFeature={drawerOpenFeature}
 			onBackToChats={drawerGo(backToChats)}
 			onOpenSpotlight={onOpenSpotlight ? drawerGo(onOpenSpotlight) : undefined}
 		>

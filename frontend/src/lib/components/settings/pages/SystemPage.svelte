@@ -10,7 +10,7 @@
 	 * here is never replaced by a change made elsewhere; a banner offers the
 	 * newer one instead.
 	 */
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, untrack } from 'svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import { getWorkspaceConfig, setWorkspaceConfig, validateWorkspacePath } from '$lib/api/auth';
 	import { exportAllData } from '$lib/api/sessions';
@@ -36,15 +36,8 @@
 	import { UpdatesState } from './updates-state.svelte';
 	import { lockedReason, UpdateChannelState, type Channel } from './update-channel.svelte';
 	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
-	import {
-		fetchMemoryHealth,
-		memoryAlert,
-		memoryChecked,
-		memoryCheckedAt,
-		memoryRows,
-		memorySummary,
-		type MemoryHealth
-	} from './memory-health';
+	import { memoryChecked, memoryCheckedAt, memoryRows, memorySummary } from './memory-health';
+	import { memoryHealth } from '$lib/stores/memory-health.svelte';
 	import ReportProblemForm, { type ReportFormResult } from './editors/ReportProblemForm.svelte';
 	import type { StatusTone } from '$lib/settings/types';
 	import type { ReportKind } from '$lib/api/support';
@@ -207,22 +200,23 @@
 
 	/* ---------- memory health (read-only; the worker repairs by itself) ---------- */
 
-	let memory = $state<MemoryHealth | null>(null);
-	let memoryLoad = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
-	let memoryError = $state('');
+	/* The answer the sidebar's Needs you item reads too (#1042): shown at once
+	   when the app already has it, then asked again as the page opens. A
+	   warning lives in that item, not in this page's flow, so a late answer
+	   only changes this row's value and hint. */
+	const memoryResult = $derived(memoryHealth.result);
+	const memoryLoad = $derived(memoryResult?.status ?? 'loading');
+	const memory = $derived(memoryResult?.status === 'ok' ? memoryResult.data : null);
+	const memoryError = $derived(memoryResult?.status === 'error' ? memoryResult.message : '');
 	let memoryOpen = $state(false);
-
-	async function loadMemory() {
-		const result = await loadState(fetchMemoryHealth);
-		if (!alive) return;
-		memoryLoad = result.status;
-		if (result.status === 'ok') {
-			memory = result.data;
-			memoryError = '';
-		} else if (result.status === 'error') {
-			memoryError = result.message;
-		}
-	}
+	// The store forgets its answer when the app stops it (owner rights lost)
+	// while this page may stay mounted: close the list and ask again rather
+	// than sit on "Loading".
+	$effect(() => {
+		if (memoryHealth.result !== null) return;
+		memoryOpen = false;
+		untrack(() => void memoryHealth.refresh());
+	});
 
 	const memoryValue = $derived(
 		memoryLoad === 'error' ? 'Unavailable' : memoryLoad === 'forbidden' ? FORBIDDEN_TEXT : memorySummary(memory)
@@ -236,7 +230,6 @@
 	   clock keeps it true while the page stays open. */
 	let memoryNow = $state(Date.now());
 	const memoryHint = $derived(memoryLoad === 'ok' && memory ? memoryChecked(memory, memoryNow) : undefined);
-	const memoryWarning = $derived(memoryLoad === 'ok' && memory ? memoryAlert(memory) : '');
 
 	/* ---------- help: report a problem ---------- */
 
@@ -282,14 +275,6 @@
 		openSupportReport({ error: { message: input.description, source: 'frontend' } });
 	}
 
-	function openMemoryDetails() {
-		memoryOpen = true;
-		// The Details button goes away with the notice; keep focus on the row's toggle.
-		requestAnimationFrame(() =>
-			document.querySelector<HTMLElement>('[data-setting-anchor="system.memoryHealth"] button[aria-expanded]')?.focus()
-		);
-	}
-
 	function closeReport() {
 		reportOpen = false;
 		// The editor held focus; give it back to the row's toggle.
@@ -303,7 +288,7 @@
 	onMount(() => {
 		void loadWorkspace();
 		void refreshDeploy();
-		void loadMemory();
+		void memoryHealth.refresh();
 		void supportCaps.load();
 		updates.start();
 		void channel.refresh();
@@ -476,17 +461,6 @@
 			</span>
 		</SettingRow>
 	</RowGroup>
-	{#if memoryWarning && !memoryOpen}
-		<!-- A warning is read without opening the row; healthy stays quiet (#1042). -->
-		<div class="mh-notice">
-			<InlineBanner tone="warn">
-				{memoryWarning}
-				{#snippet actions()}
-					<button type="button" class="st-btn sm" onclick={openMemoryDetails}>Details</button>
-				{/snippet}
-			</InlineBanner>
-		</div>
-	{/if}
 	{#if memoryError}<p class="st-msg err" role="alert">{memoryError}</p>{/if}
 
 	{#if canSendSupportReport() || aiReportOpen}
@@ -556,17 +530,13 @@
 		/* Only the sentence takes the error colour, not the actions. */
 		color: var(--st-fg);
 	}
-	/* The memory warning belongs to the Memory card: just under it, with the
-	   section gap after it rather than halfway to the Help heading. */
-	:global(.st-grp:has(+ .mh-notice)) {
-		margin-bottom: 0;
-	}
 	/* No scroll anchoring on this page. After a Settings search reveal from a
-	   scrolled page, Chromium's scroll anchoring followed a late warning
-	   inserted under the Memory card and scrolled the page by its height, so
-	   the row the reader was taken to jumped up (journey
-	   attention-late-after-search). Excluding the content under the card did
-	   not stop it; only the page's scroller does. Other pages keep anchoring. */
+	   scrolled page, Chromium's scroll anchoring followed content inserted late
+	   under the Memory card (the old warning, still the error line) and
+	   scrolled the page by its height, so the row the reader was taken to
+	   jumped up (journey attention-late-after-search). Excluding the content
+	   under the card did not stop it; only the page's scroller does. Other
+	   pages keep anchoring. */
 	:global(.settings-viewport:has([data-setting-anchor='system.memoryHealth'])) {
 		overflow-anchor: none;
 	}
@@ -580,11 +550,5 @@
 	}
 	.mh-value:disabled :global(.st-vbtn svg) {
 		opacity: 0.4;
-	}
-	.mh-notice {
-		margin: 10px 0 40px;
-	}
-	.mh-notice :global(.st-banner) {
-		margin: 0;
 	}
 </style>

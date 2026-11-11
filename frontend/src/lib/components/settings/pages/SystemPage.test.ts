@@ -16,6 +16,7 @@ import { CHANNEL_LATE_POLL_MS, CHANNEL_POLL_MS, CHANNEL_READ_MS, CHANNEL_WAIT_MS
 import { resourceSync } from '$lib/services/resource-sync';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
+import { memoryHealth as memoryHealthStore } from '$lib/stores/memory-health.svelte';
 
 let policy: { allow_updates: boolean; update_all_workers: boolean };
 let workspace: string;
@@ -25,6 +26,7 @@ let channelStatus: { channel: string; available: string[]; source: string; edita
 
 beforeEach(() => {
 	vi.resetAllMocks();
+	memoryHealthStore.reset();
 	policy = { allow_updates: true, update_all_workers: false };
 	workspace = '/data/workspace';
 	workers = [{ device_id: 'self', device_name: 'Current worker', online: true, supported: true, phase: 'idle' }];
@@ -60,6 +62,7 @@ afterEach(() => {
 	resourceSync.clear();
 	supportCaps.reset();
 	supportReportDialog.close();
+	memoryHealthStore.reset();
 	vi.useRealTimers();
 });
 
@@ -636,7 +639,7 @@ describe('memory health', () => {
 		expect(screen.queryByText('Saves are writing normally.')).toBeNull();
 	});
 
-	it('says when it last checked, and warns under the collapsed row until it is opened (#1042)', async () => {
+	it('says when it last checked, and leaves the warning to the sidebar, out of the page flow (#1042)', async () => {
 		memoryHealth = {
 			state: 'attention',
 			checked_at: Date.now() / 1000 - 12 * 60,
@@ -650,13 +653,46 @@ describe('memory health', () => {
 		await waitFor(() => expect(row.textContent).toContain('Needs attention'));
 		const setting = row.closest('.st-row') as HTMLElement;
 		expect(setting.querySelector('.st-rh')?.textContent).toBe('Checked 12m ago');
-		const banner = screen.getByText(/^Capacity: Automatic cleanup has recorded 3 permanent deletions of older facts\.$/).closest('.st-banner');
-		expect(banner?.classList.contains('warn')).toBe(true);
-		await fireEvent.click(within(banner as HTMLElement).getByRole('button', { name: 'Details' }));
+		// No notice under the card: a late answer cannot push the page down.
+		expect(document.querySelector('.st-banner.warn')).toBeNull();
+		expect(screen.queryByText(/^Capacity: Automatic cleanup/)).toBeNull();
+		await fireEvent.click(within(row).getByRole('button', { name: /Needs attention/ }));
 		expect(await screen.findByText(/Recall cannot recover a deleted copy\./)).toBeTruthy();
 		expect(screen.getByText(/^Last checked /)).toBeTruthy();
-		expect(document.querySelector('.st-banner.warn')).toBeNull();
-		await waitFor(() => expect(document.activeElement).toBe(within(row).getByRole('button', { name: /Needs attention/ })));
+	});
+
+	it('shares one answer with the sidebar: shown at once, then asked again', async () => {
+		memoryHealth = {
+			state: 'attention',
+			checked_at: Date.now() / 1000 - 60,
+			signals: [{ id: 'capacity', label: 'Capacity', state: 'attention', reason: 'Automatic cleanup has recorded 3 permanent deletions of older facts.' }],
+			repairs: []
+		};
+		await memoryHealthStore.refresh();
+		expect(memoryHealthStore.alert).not.toBe('');
+		const asked = () => transport.get.mock.calls.filter(([path]) => path === '/memory/health').length;
+		expect(asked()).toBe(1);
+		memoryHealth = { state: 'healthy', checked_at: Date.now() / 1000, signals: [], repairs: [] };
+		render(SystemPage);
+		const row = screen.getByTestId('memory-health');
+		// The app's answer is on the row at once, with no Loading in between.
+		expect(row.textContent).toContain('Needs attention');
+		await waitFor(() => expect(row.textContent).toContain('Healthy'));
+		expect(asked()).toBe(2);
+		// The page's newer answer clears the sidebar's warning too.
+		expect(memoryHealthStore.alert).toBe('');
+	});
+
+	it('asks again when the store forgets its answer while the page stays open', async () => {
+		memoryHealth = { state: 'healthy', checked_at: Date.now() / 1000, signals: [], repairs: [] };
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		await waitFor(() => expect(row.textContent).toContain('Healthy'));
+		const asked = () => transport.get.mock.calls.filter(([path]) => path === '/memory/health').length;
+		const before = asked();
+		memoryHealthStore.reset();
+		await waitFor(() => expect(asked()).toBe(before + 1));
+		await waitFor(() => expect(row.textContent).toContain('Healthy'));
 	});
 
 	it('stays quiet when healthy, and says when it has not checked yet', async () => {
@@ -665,7 +701,7 @@ describe('memory health', () => {
 		const row = await screen.findByTestId('memory-health');
 		await waitFor(() => expect(row.textContent).toContain('Healthy'));
 		expect((row.closest('.st-row') as HTMLElement).querySelector('.st-rh')?.textContent).toBe('Not checked yet');
-		expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+		expect(document.querySelector('.st-banner.warn')).toBeNull();
 	});
 
 	it('is owner only', async () => {
@@ -674,7 +710,7 @@ describe('memory health', () => {
 		const row = await screen.findByTestId('memory-health');
 		await waitFor(() => expect(row.textContent).toContain('Available after approval'));
 		expect(within(row).getByRole('button').matches(':disabled')).toBe(true);
-		expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+		expect(document.querySelector('.st-banner.warn')).toBeNull();
 	});
 
 	it('keeps one value button from Loading to the answer, so a late answer does not move the row', async () => {
