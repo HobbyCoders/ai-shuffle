@@ -200,16 +200,15 @@
 
 	/* ---------- memory health (read-only; the worker repairs by itself) ---------- */
 
-	/* The answer the sidebar's Needs you item reads too (#1042): shown at once
-	   when the app already has it, then asked again as the page opens. A
-	   warning lives in that item, not in this page's flow, so a late answer
-	   only changes this row's value and hint. */
+	/* The last answer is shown at once on reopening, then asked again as the
+	   page opens (#1042). There is no warning notice in the page's flow, so a
+	   late answer only changes this row's value and hint. */
 	const memoryResult = $derived(memoryHealth.result);
 	const memoryLoad = $derived(memoryResult?.status ?? 'loading');
 	const memory = $derived(memoryResult?.status === 'ok' ? memoryResult.data : null);
 	const memoryError = $derived(memoryResult?.status === 'error' ? memoryResult.message : '');
 	let memoryOpen = $state(false);
-	// The store forgets its answer when the app stops it (owner rights lost)
+	// The store forgets its answer when the owner signs out or loses owner rights
 	// while this page may stay mounted: close the list and ask again rather
 	// than sit on "Loading".
 	$effect(() => {

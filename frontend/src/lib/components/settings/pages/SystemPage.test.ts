@@ -639,7 +639,7 @@ describe('memory health', () => {
 		expect(screen.queryByText('Saves are writing normally.')).toBeNull();
 	});
 
-	it('says when it last checked, and leaves the warning to the sidebar, out of the page flow (#1042)', async () => {
+	it('says when it last checked, with no warning notice in the page flow (#1042)', async () => {
 		memoryHealth = {
 			state: 'attention',
 			checked_at: Date.now() / 1000 - 12 * 60,
@@ -661,7 +661,7 @@ describe('memory health', () => {
 		expect(screen.getByText(/^Last checked /)).toBeTruthy();
 	});
 
-	it('shares one answer with the sidebar: shown at once, then asked again', async () => {
+	it('shows the last answer at once on reopening, then asks again', async () => {
 		memoryHealth = {
 			state: 'attention',
 			checked_at: Date.now() / 1000 - 60,
@@ -669,18 +669,15 @@ describe('memory health', () => {
 			repairs: []
 		};
 		await memoryHealthStore.refresh();
-		expect(memoryHealthStore.alert).not.toBe('');
 		const asked = () => transport.get.mock.calls.filter(([path]) => path === '/memory/health').length;
 		expect(asked()).toBe(1);
 		memoryHealth = { state: 'healthy', checked_at: Date.now() / 1000, signals: [], repairs: [] };
 		render(SystemPage);
 		const row = screen.getByTestId('memory-health');
-		// The app's answer is on the row at once, with no Loading in between.
+		// The last answer is on the row at once, with no Loading in between.
 		expect(row.textContent).toContain('Needs attention');
 		await waitFor(() => expect(row.textContent).toContain('Healthy'));
 		expect(asked()).toBe(2);
-		// The page's newer answer clears the sidebar's warning too.
-		expect(memoryHealthStore.alert).toBe('');
 	});
 
 	it('asks again when the store forgets its answer while the page stays open', async () => {
