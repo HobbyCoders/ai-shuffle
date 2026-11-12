@@ -197,10 +197,13 @@ Which providers get a row:
 - **OpenAI API:** no credit or spend row is shown. ChatGPT/Codex subscription usage is separate and unchanged.
 - **xAI API:** real prepaid remaining, cycle usage and spending limit with a separate management key (official); the inference key resolves the team.
 - **fal.ai:** the account credit balance, read with the [fal.ai API key](#post-apiv1settingsintegrationsfal-ai) the media tools use. No extra billing key is needed.
+- **Kimi API keys and MiniMax M Plan keys:** the account balance and the plan's remaining quota.
+
+Kimi Code, MiniMax API, OpenCode Go and OpenCode Console keys get no row: the vendors document no usage or balance API, so they are never polled. Each enabled one is listed in `usage_links` instead, with a one-line note and the vendor's dashboard page.
 
 Without balance access, xAI API keys get no row. Other OpenAI-compatible hosts and the Anthropic API key report only per-minute rate limits and get no row. Rows of a deleted provider are dropped.
 
-**Auth:** Required. Every reading is the owner's subscription and provider billing, so an API key gets an empty reading (`"available": false`, no `windows`, `"providers": []`) and its request never starts a refresh. The agent tool `GetUsage` likewise returns nothing in an API key's session.
+**Auth:** Required. Every reading is the owner's subscription and provider billing, so an API key gets an empty reading (`"available": false`, no `windows`, `"providers": []`, `"usage_links": []`) and its request never starts a refresh. The agent tool `GetUsage` likewise returns nothing in an API key's session.
 
 **Query parameters:**
 
@@ -235,6 +238,7 @@ curl "http://localhost:8000/api/v1/usage/limits?refresh=true" \
 | `providers[].last_attempt_at` | Epoch ms of the last attempt. A failed attempt moves only this field |
 | `providers[].cooldown_until` | Epoch ms before which a refresh, forced or not, serves this cached row instead of asking the provider again. `null` when a refresh may ask now, and while a refused capability is paused (see `last_error_kind`) |
 | `provider_refreshing` | `true` while a refresh is running |
+| `usage_links` | Enabled keys that have no meter, each with `provider_id`, `provider_name`, `provider_type`, `kind` (`kimi_code`, `minimax_api`, `opencode_go` or `opencode_console`), `note` (the line the usage popover shows), `dashboard_url` (the vendor's usage page) and `subscription`. A key on a custom endpoint is not listed. `null` when the provider list could not be read; keep the links you already show. Older servers omit the field |
 
 When a Codex or SuperGrok banked reset is used (`POST /api/v1/model-providers/{provider_id}/codex/rate-limit-reset-credits/consume`, or `.../grok/...`) and the outcome is `reset`, the provider's windows that were 100% used are removed from its row. The other windows keep their last reading until the provider next reports usage.
 

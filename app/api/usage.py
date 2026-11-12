@@ -192,6 +192,22 @@ class ProviderUsageEntry(BaseModel):
     cooldown_until: int | None = None
 
 
+class ProviderUsageLink(BaseModel):
+    """A provider row whose key kind has no usage meter.
+
+    Nothing is requested or stored for it: the popover shows ``note`` and a
+    link to the vendor's own usage page. ``kind`` is a
+    ``usage_sources.USAGE_LINKS`` id.
+    """
+    provider_id: str
+    provider_name: Optional[str] = None
+    provider_type: Optional[str] = None
+    kind: str
+    note: str
+    dashboard_url: str
+    subscription: bool = False
+
+
 class UsageSnapshot(BaseModel):
     """Latest usage snapshot across all windows.
 
@@ -217,6 +233,9 @@ class UsageSnapshot(BaseModel):
     # fal.ai credits, SuperGrok, ...). Additive. Null when the cached rows could
     # not be read, so clients keep their last-good rows instead of blanking.
     providers: list[ProviderUsageEntry] | None = []
+    # Enabled provider rows with no usage meter (additive; older clients ignore
+    # it). Null when the rows could not be read: keep the links already shown.
+    usage_links: list[ProviderUsageLink] | None = []
     provider_refreshing: bool = False
     # Kept for older clients: nothing is polled for Claude, so both stay null.
     # ``claude_source`` is the registry entry for the CLI's rate-limit events
@@ -357,6 +376,39 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
         return None
 
 
+async def _load_usage_links(
+    providers: list[ProviderUsageEntry] | None,
+) -> list[ProviderUsageLink] | None:
+    """Enabled rows of a key kind with no meter (``usage_sources.usage_link_for``).
+
+    Read-only: no request and no snapshot row. A row that already has a
+    ``providers`` entry keeps that section instead. Best-effort like the
+    provider rows: a read failure yields ``None``.
+    """
+    try:
+        from app.db import database as db
+        from app.db.async_database import run_sync
+
+        rows = await run_sync(db.get_all_model_providers)
+        shown = {entry.provider_id for entry in providers or ()}
+        links: list[ProviderUsageLink] = []
+        for row in rows:
+            if not row.get("enabled", True) or row["id"] in shown:
+                continue
+            link = usage_sources.usage_link_for(row)
+            if link is None:
+                continue
+            links.append(ProviderUsageLink(
+                provider_id=row["id"], provider_name=row.get("name"),
+                provider_type=row.get("provider_type"), kind=link.id, note=link.note,
+                dashboard_url=link.dashboard_url, subscription=link.subscription,
+            ))
+        return links
+    except Exception:
+        logger.debug("usage links load failed; keeping client links", exc_info=True)
+        return None
+
+
 def _request_claude_refresh() -> None:
     # Re-persists and re-broadcasts the CLI-reported windows; no request. At
     # most once per cooldown, so repeated popover opens do not fan an
@@ -398,7 +450,7 @@ async def get_usage_limits(
     # it, and never starts the owner's provider polling (see
     # API_KEY_USAGE_REASON).
     if _.startswith("api_key:"):
-        return UsageSnapshot(providers=[])
+        return UsageSnapshot(providers=[], usage_links=[])
     # A forced refresh inside the cooldown serves the cached rows (with
     # ``cooldown_until``); the request budget still limits each credential.
     provider_usage_monitor.request_refresh(force=refresh, cooldown=FORCED_REFRESH_COOLDOWN_SECONDS)
@@ -408,7 +460,8 @@ async def get_usage_limits(
     refreshing = provider_usage_monitor.refreshing or usage_limits_monitor.refreshing is True
     providers = await _load_provider_usage()
     return UsageSnapshot(
-        **_claude_fields(snapshot), providers=providers, provider_refreshing=refreshing
+        **_claude_fields(snapshot), providers=providers,
+        usage_links=await _load_usage_links(providers), provider_refreshing=refreshing,
     )
 
 
@@ -426,6 +479,7 @@ async def get_cached_usage_snapshot() -> UsageSnapshot:
     return UsageSnapshot(
         **_claude_fields(snapshot),
         providers=providers,
+        usage_links=await _load_usage_links(providers),
         provider_refreshing=provider_usage_monitor.refreshing,
     )
 

@@ -33,6 +33,9 @@
 	 *      place; it never adds or removes a line. Figures stay those of the last
 	 *      report. Numbers render directly, without replaying old readings or
 	 *      animating digits, so opening and refreshing never hide the latest value.
+	 *      A key kind with no usage meter (the backend's `usage_links`) gets a
+	 *      header and that meta line only: why there are no figures, plus the
+	 *      vendor's usage page.
 	 *
 	 * Usage comes from $activeSession (contextUsed + per-type token fields), all
 	 * set by the SSE-fed reducer. Rate-limit windows come from the `rateLimit`
@@ -105,8 +108,10 @@
 		sharesSelfClaudeAccount,
 		windowRolledOver,
 		claudeUsageSource,
+		usageLinks,
 		type UsageBucket,
 		type ProviderUsageBucket,
+		type UsageLink,
 		type UsageWindow,
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance, usageTargetDeviceName } from '$lib/stores/usage-target';
@@ -846,6 +851,10 @@
 	// OpenAI · API never sits next to OpenAI · prolite and reads as one section
 	// (#1087); within each group, the Settings > Providers order (OpenAI, xAI
 	// Grok, Claude, OpenRouter), then fal.ai and anything else, by name.
+	function linkDisplay(link: UsageLink): ProviderDisplay {
+		return providerDisplayFor({ ...link, planType: null });
+	}
+
 	function isSubscriptionProvider(pb: { providerType: string | null }): boolean {
 		const t = (pb.providerType || '').toLowerCase();
 		return t === 'chatgpt' || t === 'grok' || t === 'minimax_plan';
@@ -867,8 +876,9 @@
 
 	interface SectionEntry {
 		id: string;
-		kind: 'claude' | 'provider';
+		kind: 'claude' | 'provider' | 'link';
 		pb: ProviderUsageBucket | null;
+		link?: UsageLink;
 		name: string;
 		subscription: boolean;
 		rank: number;
@@ -951,6 +961,20 @@
 			subscription: isSubscriptionProvider(pb),
 			rank: familyRank(providerFamily(pb.providerType)),
 		}));
+		// A key kind with no usage meter: the backend names the row, the line and
+		// the vendor's page. A row with a reading keeps its reading section.
+		for (const link of Object.values($usageLinks)) {
+			if ($rateLimit.providerBuckets?.[link.providerId]) continue;
+			entries.push({
+				id: `provider:${link.providerId}`,
+				kind: 'link',
+				pb: null,
+				link,
+				name: linkDisplay(link).name,
+				subscription: link.subscription,
+				rank: familyRank(providerFamily(link.providerType)),
+			});
+		}
 		if (hasClaude) {
 			entries.push({
 				id: 'plan',
@@ -1163,6 +1187,22 @@
 	{/if}
 {/snippet}
 
+<!-- ═══ Key kinds with no usage meter ═══
+     The vendor documents no usage or balance API for these keys, so nothing is
+     read: the meta line says so and links to the vendor's own usage page. -->
+{#snippet linkSection(link: UsageLink)}
+	{@const sectionId = `provider:${link.providerId}`}
+	{@const display = linkDisplay(link)}
+	{@const linkOpen = isSectionOpen(sectionId)}
+	{#snippet linkSummary()}
+		<span class="sec-summary sec-credits sec-empty" title={link.note}>—</span>
+	{/snippet}
+	{@render sectionHeader(sectionId, display.name, display.subtext, linkOpen, `${display.name} usage`, linkSummary)}
+	{#if linkOpen}
+		{@render metaLine({ text: link.note, guidance: false, title: link.note }, link.dashboardUrl, 'Dashboard', 'See usage on the provider dashboard')}
+	{/if}
+{/snippet}
+
 <div class="usage-context-wrapper" class:inline bind:this={wrapperRef}>
 	{#if !inline}
 	<button
@@ -1303,6 +1343,8 @@
 					{@render claudeSection()}
 				{:else if section.pb}
 					{@render providerSection(section.pb)}
+				{:else if section.link}
+					{@render linkSection(section.link)}
 				{/if}
 			{/each}
 			{#if hiddenRows.length > 0}
