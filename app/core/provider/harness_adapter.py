@@ -376,6 +376,8 @@ class HarnessAdapter(ProviderAdapter):
         self._next_turn_source: str = "user"
         # The app source behind ``_next_turn_source`` (Antigravity's guard).
         self._next_app_turn_source: Optional[str] = None
+        # The same, for the connect that serves the next turn (one-shot).
+        self._connect_app_turn_source: Optional[str] = None
         self._antigravity_binding: Optional[str] = None
         # The next submit is the host's emergency compaction at the context
         # limit (set_emergency_compaction). Reset after each submit.
@@ -1505,6 +1507,11 @@ class HarnessAdapter(ProviderAdapter):
         # from the saved rules and the permission mode (_answer_without_approver).
         self._can_use_tool = getattr(sdk_options, "can_use_tool", None)
         self._sdk_options = sdk_options
+        # The app source of the turn this connect serves, for the connect-time
+        # Antigravity guard (SessionOptions has no field for it). One-shot:
+        # ``_connect_antigravity`` takes it, so a later bare ``connect()``
+        # finds none and is refused rather than reusing an old source.
+        self._connect_app_turn_source = getattr(sdk_options, "aih_turn_source", None)
         await self.connect(opts)
         await self.prepare_background_completions(
             getattr(sdk_options, "aih_background_task_completions", None)
@@ -2003,7 +2010,9 @@ class HarnessAdapter(ProviderAdapter):
         row = await run_sync(db.resolve_model_provider, provider_id, include_token=True) if provider_id else None
         if not row:
             raise ProviderConfigError("This chat's Antigravity provider no longer exists.")
-        refusal = await run_sync(antigravity.guard_refusal, row, options)
+        source = getattr(self, "_connect_app_turn_source", None)
+        self._connect_app_turn_source = None
+        refusal = await run_sync(antigravity.guard_refusal, row, options, turn_source=source)
         if refusal:
             raise ProviderTurnRefused(refusal)
         try:

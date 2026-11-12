@@ -334,6 +334,57 @@ async def test_guard_changes_apply_to_the_next_turn_of_a_connected_chat(client, 
     assert adapter._engine.specs == []
 
 
+@pytest.mark.parametrize("source,refused", [
+    ("user", False), ("queue", False), ("api", True), (None, True),
+])
+async def test_the_connect_check_uses_the_source_of_the_turn_it_serves(
+        client, session_row, monkeypatch, source, refused):
+    # A new chat's first turn connects before it submits. SessionOptions has
+    # no turn source, so the one ``connect_with_sdk_options`` was handed must
+    # reach the connect-time guard: the owner's first typed turn runs on a
+    # guarded row, an API request does not, and the value is used once.
+    from app.core.environment import ProviderConfigError, ProviderTurnRefused
+    from app.core.provider.harness_adapter import HarnessAdapter
+
+    row = _create(client)
+    adapter = HarnessAdapter.__new__(HarnessAdapter)
+    seen = {}
+
+    async def connect(opts):
+        seen["source"] = adapter._connect_app_turn_source
+
+    async def nothing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(adapter, "connect", connect, raising=False)
+    monkeypatch.setattr(adapter, "prepare_background_completions", nothing, raising=False)
+    monkeypatch.setattr(adapter, "reconcile_user_questions", nothing, raising=False)
+    try:
+        await adapter.connect_with_sdk_options(SimpleNamespace(model="gemini-3.1-pro", aih_turn_source=source))
+    except Exception:  # noqa: BLE001 — only the hand-over before connect is under test
+        pass
+    assert seen["source"] == source
+
+    def no_binary(*_args, **_kwargs):
+        raise FileNotFoundError("no agy here")  # past the guard: the next step
+
+    monkeypatch.setattr(ag, "build_spec", no_binary)
+    options = SimpleNamespace(extra={"provider_id": row["id"], "app_session_id": "s1"}, add_dirs=[])
+    adapter._connect_app_turn_source = source
+    expected = ProviderTurnRefused if refused else ProviderConfigError
+    with pytest.raises(expected) as caught:
+        await adapter._connect_antigravity(options, None, None, None, None, False)
+    if refused:
+        assert "refused for" in str(caught.value)
+    else:
+        assert "no agy here" in str(caught.value)
+    assert adapter._connect_app_turn_source is None
+    # A later bare connect has no source of its own: refused, not reused.
+    if not refused:
+        with pytest.raises(ProviderTurnRefused, match="no known origin"):
+            await adapter._connect_antigravity(options, None, None, None, None, False)
+
+
 @pytest.mark.parametrize("kind,reason", [
     ("task_or_swarm_worker", "a Task or Swarm worker"),
     ("subagent", "a subagent"),
