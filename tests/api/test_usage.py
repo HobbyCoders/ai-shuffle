@@ -382,7 +382,7 @@ class TestUsageLimitsProviders:
             response = _client().get("/api/v1/usage/limits?refresh=true")
         assert response.status_code == 200
         assert response.json()["provider_refreshing"] is True
-        cached_provider_poll.request_refresh.assert_called_once_with(force=True, cooldown=30)
+        cached_provider_poll.request_refresh.assert_called_once_with(force=True, cooldown=30, on_demand=True)
         cached_provider_poll.poll_once.assert_not_called()
 
     @pytest.mark.parametrize("balance", [None, 0.0, 12.5])

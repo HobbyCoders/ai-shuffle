@@ -400,6 +400,10 @@ async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch):
     ``_create_v2_branch_session`` (after XOR / origin-access checks)."""
     monkeypatch.setattr(worktree_api, "run_sync", _passthrough_run_sync)
     monkeypatch.setattr(worktree_api, "get_api_user_from_request", lambda req: None)
+    # The request is a bare mock with no principal; who entered the opening
+    # prompt is covered in tests/api/test_antigravity_person_entry.py.
+    from app.api import chat_query
+    monkeypatch.setattr(chat_query, "request_person_entry", lambda req: False)
     monkeypatch.setattr(
         worktree_api,
         "require_origin_access",

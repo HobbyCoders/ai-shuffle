@@ -244,6 +244,32 @@ def caller_of(principal: Optional[Mapping[str, Any]]) -> str:
     return CALLER_AUTHENTICATED
 
 
+#: Principal kinds the host authenticates as the owner: the owner's login or
+#: the local listener (``admin``) and the owner's paired devices (``paired``,
+#: the phone app). An API key (``api_user``) is someone the owner let in.
+_OWNER_KINDS = frozenset({"admin", "paired"})
+
+
+def person_entry(principal: Optional[Mapping[str, Any]]) -> Any:
+    """Whether the owner entered what ``principal`` sent: the ONE decision.
+
+    Every admission point of a person's own input (the chat socket's send,
+    queue and steer and its HTTP transport, the socket's question-card answer,
+    a worktree or branch chat's opening prompt) passes this value as
+    ``person_entered``; none states its own. ``True`` only for a sender the
+    host authenticated as the owner (:data:`CALLER_AUTHENTICATED` and not an
+    API key). The agent browser's preview link is ``turns.ENTRY_PREVIEW`` (it
+    names the refusal, never a pass); an API key and no principal are
+    ``False``.
+    """
+    from app.db.turns import ENTRY_PREVIEW
+
+    caller = caller_of(principal)
+    if caller == CALLER_PREVIEW:
+        return ENTRY_PREVIEW
+    return caller == CALLER_AUTHENTICATED and (principal or {}).get("kind") in _OWNER_KINDS
+
+
 def turn_caller(overrides: Optional[Mapping[str, Any]]) -> Optional[str]:
     """The stamped caller of a turn's ``overrides``, or None when unstamped."""
     value = (overrides or {}).get(CALLER_KEY) if isinstance(overrides, Mapping) else None

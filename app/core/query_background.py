@@ -303,6 +303,11 @@ async def _run_background_query_impl(
                             await state.adapter.set_permission_mode(new_perm_mode)
                             logger.debug(f"[Background] Updated permission_mode to {new_perm_mode} for reused session {session_id}")
                         except Exception as e:
+                            from fluid.engine.acp.loop import AcpModeRejected
+                            if isinstance(e, AcpModeRejected):
+                                # The agent kept its mode: never run the turn
+                                # while the app shows another (its message says why).
+                                raise
                             logger.warning(f"[Background] Failed to set permission_mode on reused session {session_id}: {e}")
 
                 logger.info(f"[Background] Reusing pooled client for session {session_id}")
@@ -437,6 +442,9 @@ async def _run_background_query_impl(
         set_turn_source = getattr(state.adapter, "set_turn_source", None)
         if callable(set_turn_source):
             set_turn_source(getattr(options, "aih_turn_source", None))
+        set_person_entered = getattr(state.adapter, "set_turn_person_entered", None)
+        if callable(set_person_entered):
+            set_person_entered(getattr(options, "aih_turn_person_entered", None))
         set_owner_receipt = getattr(state.adapter, "set_owner_receipt", None)
         if callable(set_owner_receipt):
             set_owner_receipt(getattr(options, "aih_owner_receipt", None))

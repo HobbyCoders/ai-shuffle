@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 from app.core import turn_outcome
+from app.core.environment import ProviderTurnRefused
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -797,7 +798,11 @@ class AutomationManager:
             await self._execute_run(automation, run_id, rendered_prompt, trigger_data)
 
         except Exception as e:
-            logger.error(f"Automation {automation_id} execution error: {e}", exc_info=True)
+            if isinstance(e, ProviderTurnRefused):
+                # An owner rule, not a crash: the message says what to change.
+                logger.warning(f"Automation {automation_id} refused: {e}")
+            else:
+                logger.error(f"Automation {automation_id} execution error: {e}", exc_info=True)
             # Bound now: ``e`` is unbound at the end of this except clause, and
             # the closure below runs inside a nested try.
             error_text = str(e)
@@ -1200,6 +1205,19 @@ class AutomationManager:
         return (text or "")[-cls.RESPONSE_TAIL_CHARS:]
 
     @staticmethod
+    async def _refuse_guarded_run(model_resolution: Dict[str, Any]) -> None:
+        """Fail a run on a guarded Antigravity row before anything is minted
+        (the turn-start guard would refuse it anyway, after an empty chat)."""
+        from app.core import antigravity
+
+        refusal = await run_sync(
+            antigravity.unattended_run_refusal,
+            model_resolution.get("provider_id"), "an automation run",
+        )
+        if refusal:
+            raise ProviderTurnRefused(refusal)
+
+    @staticmethod
     async def _discard_unused_session(automation_id: str, session_id: str) -> None:
         """Delete a session minted for a turn that will not start, and drop it
         from connected devices. Best-effort: a failure leaves the empty session
@@ -1262,6 +1280,7 @@ class AutomationManager:
         if model_resolution["error"]:
             raise ValueError(model_resolution["error"])
         model_selection = model_resolution["selection"]
+        await self._refuse_guarded_run(model_resolution)
 
         # 1. Fresh badged session. This runs only AFTER the cross-install
         #    fire claim (_on_schedule_trigger) and budget check (_execute),
@@ -1510,6 +1529,7 @@ class AutomationManager:
                     max_turns = step.get("max_turns", 1)
                     if step_model["error"]:
                         raise ValueError(step_model["error"])
+                    await self._refuse_guarded_run(step_model)
                     step_overrides: Dict[str, Any] = {"max_turns": max_turns}
                     # The step's own model, else the automation's. No explicit
                     # choice leaves the override out, so the step runs on the
@@ -1535,10 +1555,11 @@ class AutomationManager:
                         f"send_prompt step {i} completed"
                     )
                 except Exception as e:
-                    logger.error(
+                    logger.log(
+                        logging.WARNING if isinstance(e, ProviderTurnRefused) else logging.ERROR,
                         f"Automation {automation_id} run {run_id}: "
                         f"send_prompt step {i} failed: {e}",
-                        exc_info=True,
+                        exc_info=not isinstance(e, ProviderTurnRefused),
                     )
 
             elif step_type == "webhook_call":

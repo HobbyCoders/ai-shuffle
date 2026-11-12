@@ -1183,6 +1183,14 @@ class ChatWebSocketHandler:
         from app.core.session_modes import caller_of
         return caller_of(self.trusted_principal)
 
+    @property
+    def _person_entry(self):
+        """Whether the owner entered this socket's sends and answers, as
+        ``session_modes.person_entry`` decides from the principal the host
+        authenticated (never a value from the message)."""
+        from app.core.session_modes import person_entry
+        return person_entry(self.trusted_principal)
+
     async def _may_send_elsewhere(self, session_id: Optional[str]) -> bool:
         """Refuse a preview-cookie send that would run on another worker.
 
@@ -1884,6 +1892,7 @@ class ChatWebSocketHandler:
                     owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,
                     project_id=project_id, overrides=overrides or None, payload=payload or None,
                     owner_send=True, command_id=client_message_id, caller=self._caller,
+                    person_entered=self._person_entry,  # a composer send
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -1911,6 +1920,9 @@ class ChatWebSocketHandler:
             command_id=client_message_id,
             no_kick=placed_remote,
             caller=self._caller,
+            # A composer send (sent, or steering a running turn): one of the
+            # three places a person-entered row is admitted, for the owner only.
+            person_entered=self._person_entry,
         )
 
         if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
@@ -2652,7 +2664,8 @@ class ChatWebSocketHandler:
                 try:
                     forwarded = await control.answer_question(
                         owner_device, request_id=request_id, session_id=response_session_id, answers=answers,
-                        answered_by_device=self.device_id, dismissed=dismissed, skipped=skipped)
+                        answered_by_device=self.device_id, dismissed=dismissed, skipped=skipped,
+                        person_entered=self._person_entry)
                     result = bool(forwarded.get("success"))
                 except (control.RunnerUnreachable, control.ControlRefused) as exc:
                     # Still unanswered: this ack brings back the card the UI
@@ -2674,6 +2687,8 @@ class ChatWebSocketHandler:
                     answered_by_device=self.device_id,
                     dismissed=dismissed,
                     skipped=skipped,
+                    # The owner's own answer to the card is person-entered.
+                    person_entered=self._person_entry,
                 )
             logger.debug(f"User question response processed (v2): {request_id} -> {result}")
             ack = {
@@ -2876,6 +2891,7 @@ class ChatWebSocketHandler:
                     owner_device, session_id, source="queue", prompt=content, profile_id=queue_profile_id,
                     project_id=project_id, payload=payload or None, owner_send=True,
                     command_id=client_message_id, caller=self._caller,
+                    person_entered=self._person_entry,  # a composer queue
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -2896,6 +2912,7 @@ class ChatWebSocketHandler:
             command_id=client_message_id,
             no_kick=placed_remote,
             caller=self._caller,
+            person_entered=self._person_entry,  # a composer queue
         )
         if placed_remote:
             from app.core import turn_claim

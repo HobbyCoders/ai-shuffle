@@ -219,12 +219,16 @@ def provider_row_is_subscription(provider_type: Optional[str], auth_mode: Option
     ChatGPT/Codex (``chatgpt``) and SuperGrok (``grok``) rows, by type or auth
     mode, and any row whose auth mode is a subscription login
     (``fluid_credentials._SUBSCRIPTION_AUTH_MODES``, e.g. an Anthropic row on a
-    Claude plan, which runs on the CLI).
+    Claude plan, which runs on the CLI). An Antigravity row signed in with a
+    Google account (personal or business: either is the owner's own) counts
+    too; only its Gemini API-key mode does not.
     """
     from app.core.provider.fluid_credentials import _SUBSCRIPTION_AUTH_MODES
 
     ptype = (provider_type or "").strip().lower()
     mode = (auth_mode or "").strip().lower()
+    if ptype == "antigravity":
+        return mode != "gemini-api-key"
     return ptype in ("chatgpt", "grok") or mode in ("codex", "plan_key") or mode in _SUBSCRIPTION_AUTH_MODES
 
 
@@ -377,7 +381,7 @@ def provider_id_for_row(row: Mapping[str, Any]) -> str:
         return "openai"
     if auth_mode == "grok" or ptype in ("grok", "xai"):
         return "grok"
-    if ptype in ("openrouter", "kimi", "minimax", "opencode", "google"):
+    if ptype in ("openrouter", "kimi", "minimax", "opencode", "google", "antigravity"):
         return ptype
     return f"gw:{row.get('id')}"
 
@@ -386,14 +390,28 @@ def usable_provider_rows() -> List[dict]:
     """Enabled provider rows that can run a model now; ``[]`` on any failure.
 
     Agent providers only: the media provider (fal.ai) is not a model row.
+    An Antigravity Google sign-in keeps no token in the row: it counts while
+    Google's agent last said it is signed in on this worker.
     """
     try:
         from app.db import database
 
-        return list(database.list_usable_model_providers() or [])
+        rows = list(database.list_usable_model_providers() or [])
     except Exception:  # noqa: BLE001 — a DB hiccup reads as "no provider row"
         logger.warning("Could not read the provider rows for the credential gate", exc_info=True)
         return []
+    try:
+        from app.core import antigravity
+
+        rows += [
+            r for r in database.get_all_model_providers() or []
+            if r.get("provider_type") == antigravity.PROVIDER_TYPE and r.get("enabled")
+            and r.get("auth_mode") in antigravity.STORED_SIGN_IN
+            and antigravity.signed_in_here(str(r.get("id") or ""))
+        ]
+    except Exception:  # noqa: BLE001 — the other rows still count
+        logger.warning("Could not read the Antigravity sign-in rows", exc_info=True)
+    return rows
 
 
 def _claude_ok(cli=None) -> Tuple[bool, Optional[str]]:
@@ -427,13 +445,18 @@ def ready_providers(cli=None, *, claude_ok: Optional[bool] = None) -> List[str]:
 def _default_candidate_rows(servable_only: bool) -> List[dict]:
     """The usable rows a default model may come from.
 
-    Every row :func:`ready_providers` counts, custom gateways included: the
+    Every row :func:`ready_providers` counts but Antigravity's, custom gateways included: the
     main chat leg runs any enabled row (``validate_provider_model(...,
     require_servable=False)``). ``servable_only`` keeps only
     :func:`~app.core.environment.is_provider_servable` rows, for a caller
     that validates its pick with that rule (the voice delegation).
     """
-    rows = [r for r in usable_provider_rows() if r.get("id")]
+    # Never an Antigravity row: a personal Google sign-in would carry ordinary
+    # chats through the owner's Google account unasked, and its guard refuses
+    # the background jobs and automations an implicit default also serves.
+    # The owner can still pick one explicitly.
+    rows = [r for r in usable_provider_rows()
+            if r.get("id") and r.get("provider_type") != "antigravity"]
     if servable_only:
         from app.core.environment import is_provider_servable
 

@@ -27,6 +27,14 @@ def _request_query_principal(request: Request):
     return identity.principal("admin", "install", token) if token else None
 
 
+def request_person_entry(request: Request):
+    """``session_modes.person_entry`` of a REST request's principal, in the
+    chat socket's shape: whether the owner entered what it sends. Blocking."""
+    from app.core.session_modes import person_entry
+
+    return person_entry(_request_query_principal(request))
+
+
 class HTTPQuerySender(ChatWebSocketHandler):
     """Use the same validation, attachments, placement and queueing as a send.
 

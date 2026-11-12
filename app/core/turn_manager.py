@@ -166,6 +166,14 @@ _BINDING_SOURCES = ("user", "queue", "api", "worktree", "connector")
 _CALLER_STAMPED_SOURCES = ("user", "queue")
 
 
+def _entry(value: Any) -> Any:
+    """An admission's ``person_entered`` value as it is stored and carried:
+    ``True``, a reason code (``turns.entry_state``), or ``False``."""
+    from app.db.turns import entry_state
+
+    return entry_state(value)
+
+
 def _stamp_caller(source: str, overrides: Optional[Dict[str, Any]],
                   caller: Optional[str]) -> Optional[Dict[str, Any]]:
     """``overrides`` with the turn's caller stamped, for a human source.
@@ -300,6 +308,7 @@ def _submit_blocking(
     window_pin: Optional[Dict[str, int]] = None,
     reactivated: dict[str, Any] | None = None,
     caller: Optional[str] = None,
+    person_entered: Any = False,
 ) -> str:
     """Every BLOCKING part of :func:`submit` (reactivation, run binding,
     wakeup supersede, enqueue) — and nothing else.
@@ -361,6 +370,7 @@ def _submit_blocking(
         "prompt": prompt, "profile_id": profile_id, "project_id": project_id,
         "worktree_id": worktree_id, "overrides": overrides,
         "explicit_permission": explicit_permission, "payload": payload, "command_id": command_id,
+        "person_entered": _entry(person_entered),
     })
     if held_id is not None:
         if source in _WAKEUP_SUPERSEDING_SOURCES and not session_handoff.moving(session_id):
@@ -486,6 +496,7 @@ def _submit_blocking(
             command_id=command_id,
             parent_turn_id=parent_turn_id,
             instance_id=instance_id,
+            person_entered=_entry(person_entered),
         )
     return turn["id"]
 
@@ -506,6 +517,7 @@ def submit(
     instance_id: Optional[str] = None,
     no_kick: bool = False,
     caller: Optional[str] = None,
+    person_entered: Any = False,
 ) -> str:
     """Enqueue a new turn and kick the scheduler — the SYNCHRONOUS form.
 
@@ -544,6 +556,7 @@ def submit(
             instance_id=instance_id,
             reactivated=reactivated,
             caller=caller,
+            person_entered=person_entered,
         )
     finally:
         if reactivated:
@@ -572,8 +585,14 @@ async def submit_async(
     instance_id: Optional[str] = None,
     no_kick: bool = False,
     caller: Optional[str] = None,
+    person_entered: Any = False,
 ) -> str:
     """:func:`submit` for async callers — identical semantics, off the loop.
+
+    ``person_entered`` (both forms): only the host's admission points of the
+    owner's own input pass True (the chat socket's composer send, a worktree
+    chat's opening prompt) or the value of the row they carry (hand-off).
+    It is never read from a payload (``turns.PERSON_ENTERED_KEY``).
 
     ``caller`` (both forms): who sent a ``user`` or ``queue`` turn, as
     ``session_modes.caller_of`` names the authenticated principal. Omitted,
@@ -616,6 +635,7 @@ async def submit_async(
             window_pin=window_pin,
             reactivated=reactivated,
             caller=caller,
+            person_entered=person_entered,
         )
     finally:
         if reactivated:

@@ -79,7 +79,13 @@ ALLOWLIST_NAMES = frozenset(
 # Exact pure exports, not name-wide exceptions: base.parse_jsonb only decodes
 # JSON/pass-through values and performs no I/O. Other DB modules/aliases with
 # the same function name must still be scanned as possible database calls.
-PURE_DB_CALLS = frozenset({"app.db.base.parse_jsonb"})
+PURE_DB_CALLS = frozenset({
+    "app.db.base.parse_jsonb",
+    # Read who entered a turn from a row or carried value already in hand.
+    "app.db.turns.person_entered",
+    "app.db.turns.entry_provenance",
+    "app.db.turns.entry_state",
+})
 
 # Prefix-matched allowlist entries (pure functions, no I/O).
 ALLOWLIST_PREFIXES = ("hash_",)

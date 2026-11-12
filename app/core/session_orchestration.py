@@ -189,6 +189,11 @@ def _target(caller, session_id, *, allow_stopped=False, owner=None):
         raise ValueError("Session is not an eligible peer; use ListSessions.")
     if not allow_stopped and task_registry.is_user_stopped(session_id):
         raise ValueError("The receiver was stopped by the user; it will not be restarted.")
+    from app.core import antigravity
+    refusal = antigravity.agent_message_refusal(row)
+    if refusal:
+        # Refused before anything is queued: the receiver keeps its state.
+        raise ValueError(refusal)
     from app.core import mobile_tool_identity
     mobile_tool_identity.validate(_principal(session_id))
     return row

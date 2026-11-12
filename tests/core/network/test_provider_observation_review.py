@@ -37,6 +37,9 @@ def test_real_peer_copy_preserves_postcommit_billing_and_observation_signals(wor
         peer_snapshot.apply(manifest, tmp_path, a.device_id)
     assert ("provider_billing", PROVIDER, "upsert") in committed
     assert ("system_settings", key, "upsert") in committed
+    # By id, after commit: a disable or new key that arrives in a copy ends
+    # the row's running agents (startup._on_applied -> reconcile_agents).
+    assert ("model_providers", PROVIDER, "upsert") in committed
 
 
 async def test_observation_arrival_imports_without_forced_refresh_or_budget_requests(workers, monkeypatch):

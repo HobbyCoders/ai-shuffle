@@ -1,6 +1,6 @@
 <!--
 title: Model Providers
-description: Provider rows (OpenAI, ChatGPT, xAI, Grok, OpenRouter, custom), model catalog fetch, ChatGPT and Grok sign-in, banked rate-limit resets, usage tracking keys, and the model registry
+description: Provider rows (OpenAI, ChatGPT, xAI, Grok, OpenRouter, custom), model catalog fetch, ChatGPT and Grok sign-in, Google Antigravity, banked rate-limit resets, usage tracking keys, and the model registry
 order: 13
 -->
 
@@ -224,8 +224,8 @@ and rate limits do not prevent saving. `POST /{id}/check-key` uses the same requ
 `{"status": "valid"}`, `{"status": "unavailable"}` when Google could not be reached, or
 `400` when Google rejected the key. The worker records the verdict locally
 (`credential_status`: `ok` after an accepted check on save, check-key or model fetch,
-`rejected` after a rejection, unset when the key was never checked or the check could not
-finish). A rejected row stops counting as ready until a check passes or the key or
+`rejected` after a rejection, unset when the key was never checked or when the check on
+saving could not finish; a later check that cannot finish keeps the earlier verdict). A rejected row stops counting as ready until a check passes or the key or
 endpoint changes; a verdict about a key replaced while the check ran is dropped.
 `POST /{id}/fetch-models` pages through Google's model list and keeps `gemini-*`
 text models (image, audio, TTS, Live and embedding models are left out).
@@ -548,6 +548,54 @@ curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a6
 Check a Grok sign-in once. Same statuses and errors as the ChatGPT poll. On `complete`, `auth_mode` is `grok`, and a provider with no saved models gets the default Grok model list.
 
 **Auth:** Owner only
+
+## Google Antigravity
+
+Google Antigravity runs Google's own Antigravity agent (`agy`) on the worker and drives it over the Agent Client Protocol. The agent does its own file and shell work and asks AI Shuffle before it acts; AI Shuffle's tools reach it as an MCP server. Only Gemini models are offered. Rows have `provider_type: "antigravity"` and one of three `auth_mode` values:
+
+| `auth_mode` | In Settings | How it connects |
+| --- | --- | --- |
+| `gemini-api-key` | Gemini API key | A key from Google AI Studio, stored encrypted like any other key |
+| `oauth-business` | Business Google sign-in | Antigravity offers this only through a browser on the worker: sign in there with `agy`, or use a key |
+| `oauth-personal` | Personal Google sign-in | The agent's own sign-in link and code, from **Settings > Providers > Google Antigravity** |
+
+The agent keeps a Google sign-in in its own files on the worker. AI Shuffle starts and cancels the sign-in and signs the agent out, but never reads or returns its token.
+
+### In Settings
+
+**Settings > Providers > Google Antigravity** (and the first-run setup) shows whether the agent is installed and its version. **Install Antigravity** downloads Google's release from its official manifest. Each row has an **Overview** tab (status, sign-in or key, sign-out), a **Models** tab (which Gemini models the picker offers) and a **Usage** tab. The model picker offers a thinking level (low, medium, high; Gemini 3.1 Pro offers low and high) as the effort control.
+
+**Terms warning.** Google's Antigravity [terms](https://antigravity.google/terms) (section 6) and [FAQ](https://antigravity.google/docs/faq) restrict using a personal Google sign-in (consumer plans) through third-party software, and Google has suspended accounts for it. AI Shuffle runs Google's own unmodified agent and never touches its sign-in, but the account is yours to risk. A Gemini API key or a business sign-in is the supported route. The warning is shown before a personal sign-in starts and on every personal sign-in row.
+
+**Interactive only.** A personal sign-in row runs only in chats you type into yourself. Automations, scheduled or automatic turns, Task, Swarm and subagent children, sessions another agent started, requests the voice assistant writes on its own, answers Away mode gives for you, and background calls are refused with a message that names the reason and points back to the row. **Allow unattended use** on the row's Overview tab lifts this; it is off for every new row. Key and business rows are not limited.
+
+**Usage.** Google documents no usage API for Antigravity. When you open the usage popover or press **Refresh** on the row's Usage tab, AI Shuffle asks the agent for its own `/usage` reading (at most every 30 seconds) and shows the quota left per model. A reply that cannot be read shows **Unavailable**, an older reading is marked as old, and both link to the Antigravity FAQ (Google publishes no usage page for these plans). Stats count a Google sign-in as a subscription and a Gemini API key as API use.
+
+### Antigravity endpoints
+
+All of these are owner only, under `/api/v1/antigravity`.
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /meta` | `provider_type`, `auth_modes` (`id`, `label`, `headless`, `guarded`, `warning`), the `warning` text, `terms_url`, `dashboard_url`, `guard_default` and `default_models` |
+| `GET /status` | `installed`, `version`, `install` (`state`, `version`, `error`) and `workers_requiring_update` |
+| `POST /install` | Download and install Google's agent; poll `GET /status` |
+| `GET /providers` | This leg's rows (no keys) with `guard_applies`, `allow_unattended` and `guarded`. They also appear in `GET /api/v1/model-providers` |
+| `POST /providers` | Create a row: `{"name", "auth_mode", "api_key"?, "models"?, "default_model"?, "enabled"}`. Returns the provider object plus `guard_applies`, `allow_unattended` and `guarded` |
+| `GET /providers/{id}/status` | `state` (`signed_in`, `signed_out`, `not_installed` or `error`), `message`, the guard fields, `auth_mode` and `login` (a sign-in waiting for its code, started on any device, or `null`) |
+| `PUT /providers/{id}/guard` | `{"allow_unattended": true}` lifts the guard on a personal sign-in row |
+| `POST /providers/{id}/login` | Start a sign-in: `{"login_id", "state": "awaiting_code" or "failed", "url", "message"}`. On a row already signed in on this worker nothing starts: `state` is `signed_in`, `login_id` is `null` and `message` says to sign out first to change accounts |
+| `POST /providers/{id}/login/{login_id}/complete` | `{"code"}` from the Google page; returns `signed_in` or `failed` (a wrong or expired code says so; start the sign-in again for a new code) |
+| `DELETE /providers/{id}/login/{login_id}` | Cancel a sign-in |
+| `POST /providers/{id}/sign-out` | Sign the agent out on this worker |
+
+```bash
+curl -X POST http://localhost:8000/api/v1/antigravity/providers \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "Gemini key", "auth_mode": "gemini-api-key", "api_key": "<private key>", "enabled": true}'
+```
+
+**Errors:** `400` when a key is missing for `gemini-api-key`, sent for a sign-in mode, or the guard is changed on a row that is not a personal sign-in. `404` provider or sign-in not found (a sign-in expires; start it again). `409` `{"message", "workers"}` when a worker on your network needs an update before it can run this provider; `503` when that check fails (nothing is created; retry). Rename, enable and delete a row through the normal provider endpoints above.
 
 ## Banked rate-limit resets
 

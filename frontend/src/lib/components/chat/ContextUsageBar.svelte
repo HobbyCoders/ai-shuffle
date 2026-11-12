@@ -705,9 +705,24 @@
 		return null;
 	}
 
+	/**
+	 * Google Antigravity's quota comes from its agent's own `/usage`, read only
+	 * when this popover refreshes, so say when there is no reading or an old one.
+	 */
+	function antigravityGuidance(pb: ProviderUsageBucket, nowMs: number): string | null {
+		if (pb.sourceInfo?.id !== 'antigravity_usage') return null;
+		const state = providerStatusAt(pb, nowMs);
+		if (pb.lastErrorKind === 'unavailable' || pb.lastErrorKind === 'timeout' || state === 'unavailable') {
+			return pb.fetchedAt != null ? 'Usage unavailable, last reading shown' : 'Usage unavailable';
+		}
+		if (pb.fetchedAt == null) return 'Refresh to read usage';
+		if (state === 'stale') return 'Old reading, refresh to read again';
+		return null;
+	}
+
 	function providerMeta(pb: ProviderUsageBucket, nowMs: number): MetaLine {
 		const checked = checkedText(pb.fetchedAt, nowMs) ?? failedCheckText(pb, nowMs) ?? 'Not checked yet';
-		const guidance = providerGuidance(pb);
+		const guidance = antigravityGuidance(pb, nowMs) ?? providerGuidance(pb);
 		if (guidance) return { text: guidance, guidance: true, title: `${guidance} · ${checked}` };
 		return { text: checked, guidance: false, title: checked };
 	}
@@ -849,6 +864,17 @@
 		});
 	}
 
+	/**
+	 * A section's accessible name. Antigravity rows share one brand (one
+	 * section per key or sign-in), so each is named by its row as well.
+	 */
+	function providerAriaName(pb: ProviderUsageBucket, display: ProviderDisplay): string {
+		if (providerUsageType(pb) !== 'antigravity') return `${display.name} usage`;
+		const rowName = getProviders().find((p) => p.id === pb.providerId)?.name ?? pb.providerName;
+		const label = display.subtext ? `${display.name} · ${display.subtext}` : display.name;
+		return rowName && rowName !== display.name ? `${label} usage, ${rowName}` : `${label} usage`;
+	}
+
 	/** A no-meter row's header: the usage entry says whether the key is a
 	 *  plan, so the label holds while the registry is missing or stale. */
 	function linkDisplay(link: UsageLink): ProviderDisplay {
@@ -916,7 +942,8 @@
 	/**
 	 * Claude, ChatGPT and SuperGrok subscription sections present quota remaining.
 	 * SuperGrok billing reports used-%, which `remainingFromUsedPct` converts — so
-	 * grok rows and their collapsed summary render "% left" too. The remaining
+	 * grok rows and their collapsed summary render "% left" too. Antigravity's
+	 * own quota reading reads the same way, as in its Settings Usage tab. The remaining
 	 * provider feeds keep their used-quota convention: xAI API-key rows
 	 * (`provider_type === 'xai'`), other API-key headers, and OpenRouter credit
 	 * limits all expose utilization directly.
@@ -928,7 +955,7 @@
 		const entry = getProviders().find((p) => p.id === pb.providerId);
 		const type = providerUsageType(pb);
 		// MiniMax M Plan windows are subscription quota, read as remaining.
-		if (type === 'grok' || type === 'openrouter' || pb.providerType === 'minimax_plan') return true;
+		if (type === 'grok' || type === 'openrouter' || type === 'antigravity' || pb.providerType === 'minimax_plan') return true;
 		if (type !== 'chatgpt') return false;
 		const kind = entry?.auth_kind ?? 'subscription';
 		return kind === 'subscription';
@@ -1179,7 +1206,7 @@
 			<span class="sec-summary sec-credits sec-empty">—</span>
 		{/if}
 	{/snippet}
-	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, `${pbDisplay.name} usage`, providerSummary)}
+	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, providerAriaName(pb, pbDisplay), providerSummary)}
 	{#if pbOpen}
 		{#each providerSlots(pb, pbWindows, pbShowsRemaining, pbNoFiveHour, now) as slot (slot.type)}
 			{@render windowRow(slot, suffix)}
@@ -1188,7 +1215,7 @@
 		{#if credits}
 			<div class="row-reset usage-credits">{credits}</div>
 		{/if}
-		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, 'Dashboard', 'Compare on the provider dashboard')}
+		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, pb.sourceInfo?.dashboard_label ?? 'Dashboard', pb.sourceInfo?.dashboard_label && pb.sourceInfo.dashboard_label !== 'Dashboard' ? `Open the ${pb.sourceInfo.dashboard_label}` : 'Compare on the provider dashboard')}
 	{/if}
 {/snippet}
 

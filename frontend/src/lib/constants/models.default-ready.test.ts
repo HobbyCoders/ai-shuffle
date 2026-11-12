@@ -46,6 +46,18 @@ describe('resolveDefaultModel', () => {
 		expect(resolveDefaultModel('prov:gw1:my-model', ['gw:gw1'], [gateway], claudeModels)).toBe('prov:gw1:my-model');
 	});
 
+	it('never falls back to an Antigravity row on its own; an explicit pick still runs', () => {
+		const agyKey = entry({ id: 'agy-key', provider_type: 'antigravity', auth_mode: 'gemini-api-key', models: [{ id: 'gemini-3.1-pro', label: 'Gemini' }] });
+		const agyPersonal = entry({ id: 'agy-me', provider_type: 'antigravity', auth_mode: 'oauth-personal', auth_kind: 'subscription', models: [{ id: 'gemini-3.1-pro', label: 'Gemini' }] });
+		// Newest rows first, as the worker lists them: still not the default.
+		expect(resolveDefaultModel('prov:gone:x', ['antigravity', 'openai', 'claude'], [agyPersonal, agyKey, openaiKey], claudeModels)).toBe('prov:oa-key:gpt-5.5');
+		expect(resolveDefaultModel('prov:gone:x', ['antigravity', 'claude'], [agyKey], claudeModels)).toBe('sonnet');
+		// Only Antigravity can run: the server default stays (the setup message), never the sign-in.
+		expect(resolveDefaultModel('sonnet', ['antigravity'], [agyPersonal], claudeModels)).toBe('sonnet');
+		// A composite the owner chose for it is kept while the row can run.
+		expect(resolveDefaultModel('prov:agy-key:gemini-3.1-pro', ['antigravity'], [agyKey], claudeModels)).toBe('prov:agy-key:gemini-3.1-pro');
+	});
+
 	it("uses a row's default only when it lists it", () => {
 		const stale = entry({ id: 'gw2', provider_type: 'custom', models: [{ id: 'a', label: 'A' }], default_model: 'gone' });
 		expect(resolveDefaultModel('sonnet', ['gw:gw2'], [stale], claudeModels)).toBe('prov:gw2:a');

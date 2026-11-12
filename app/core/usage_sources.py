@@ -93,6 +93,8 @@ class UsageSource:
     support: str
     dashboard_url: str
     endpoints: tuple[Endpoint, ...] = ()
+    #: Link text for ``dashboard_url`` where it is not a usage dashboard.
+    dashboard_label: str = "Dashboard"
     failure_policy: str = STANDARD_FAILURE_POLICY
     #: Figures users often expect that this source cannot report.
     unavailable: tuple[str, ...] = ()
@@ -134,6 +136,7 @@ class UsageSource:
             "freshness_seconds": self.min_interval * 2 if self.id == "xai_management" else self.min_interval or None,
             "failure_policy": self.failure_policy,
             "dashboard_url": self.dashboard_url,
+            "dashboard_label": self.dashboard_label,
             "unavailable": list(self.unavailable),
         }
 
@@ -176,6 +179,11 @@ def is_official_openrouter_row(row: Mapping[str, Any] | None) -> bool:
         return False
 
 
+def is_antigravity_row(row: Mapping[str, Any] | None) -> bool:
+    """Google Antigravity rows (the ``agy`` agent; app/core/antigravity.py)."""
+    return (row or {}).get("provider_type") == "antigravity"
+
+
 def _is_openrouter_row(row: Mapping[str, Any] | None) -> bool:
     return (row or {}).get("provider_type") == "openrouter"
 
@@ -216,6 +224,7 @@ FAL_BALANCE_URL = "https://rest.alpha.fal.ai/billing/user_balance"
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+ANTIGRAVITY_USAGE_COMMAND = "agy -p /usage --output-format json"
 # https://platform.kimi.ai/docs/api/balance
 KIMI_BALANCE_URL = "https://api.moonshot.ai/v1/users/me/balance"
 # https://platform.minimax.io/docs/m-plan/faq ("Use the API endpoint")
@@ -389,6 +398,32 @@ _SOURCES: tuple[UsageSource, ...] = (
         applies=is_grok_subscription_row,
     ),
     UsageSource(
+        id="antigravity_usage",
+        snapshot_type="antigravity",
+        label="Antigravity CLI /usage command",
+        credential="The Antigravity agent's own sign-in or key on this worker (never read by the app)",
+        scope="subscription",
+        scope_label="Model quota windows Google's agent reports for its sign-in",
+        measure=SUBSCRIPTION_ALLOWANCE,
+        collection=POLLED,
+        support=UNDOCUMENTED,
+        # Google publishes no usage page for Antigravity plans; the FAQ
+        # explains its quotas, so the link says what it is.
+        dashboard_url="https://antigravity.google/docs/faq",
+        dashboard_label="Antigravity FAQ",
+        # Not HTTP: the binary's own ``agy -p /usage --output-format json``,
+        # run only when the usage popover asks (on-demand refresh).
+        endpoints=(Endpoint(ANTIGRAVITY_USAGE_COMMAND, 300),),
+        failure_policy=(
+            "Read only on an on-demand refresh, never on the background poll. A "
+            "reply that does not parse, a timeout or a signed-out agent records "
+            "'unavailable' and keeps the last reading."
+        ),
+        unavailable=("spend", "credit balance", "per-turn cost"),
+        poller="_poll_antigravity_provider",
+        applies=is_antigravity_row,
+    ),
+    UsageSource(
         id="kimi_balance",
         snapshot_type="kimi_balance",
         label="Kimi balance API",
@@ -436,6 +471,7 @@ _SNAPSHOT_SOURCES = {
     "openrouter_account": "openrouter_credits",
     "fal": "fal_billing",
     "grok": "grok_subscription",
+    "antigravity": "antigravity_usage",
     "kimi_balance": "kimi_balance",
     "minimax_plan": "minimax_plan",
 }

@@ -171,7 +171,8 @@ async def test_owner_materialized_attachment_rewinds_and_resends_through_a_viewe
         from app.network import control, git as network_git
         parts = await network_git.export_uploads((body.get("payload") or {}).get("upload_blob_ids") or [])
         with patch.object(settings, "instance_id", owner), patch.object(control, "_require_owned", return_value=database.get_session(SID)):
-            return await control._submit_forwarded_turn({**body, "session_id": session_id, "uploads": parts}, "viewer-device", None)
+            # submit_turn always puts the source in the body it sends ("user" by default).
+            return await control._submit_forwarded_turn({"source": "user", **body, "session_id": session_id, "uploads": parts}, "viewer-device", None)
 
     async def send(paths, prompt, references=None):
         with _Patches():

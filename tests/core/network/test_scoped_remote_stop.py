@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from app.core import gemini_provider, native_providers, provider_agent_supervisor, remote_task, runner_capabilities, scoped_remote_stop, turn_scheduler, turn_manager
+from app.core import antigravity, gemini_provider, native_providers, provider_agent_supervisor, remote_task, runner_capabilities, scoped_remote_stop, turn_scheduler, turn_manager
 from app.core.task_persistence import flush
 from app.core.query_session_lifecycle import stop_all_background_tasks
 from app.core.task_registry import task_registry
@@ -81,7 +81,7 @@ def test_explicit_old_or_malformed_capabilities_are_not_replaced(workers, monkey
         engine.publish_presence(capabilities=explicit)
         assert engine.presence_of(a.device_id)["capabilities"] == {
             SECRET_CAPABILITY: 1, native_providers.CAPABILITY: 1,
-            gemini_provider.CAPABILITY: 1, memory_records.CAPABILITY: 1, **explicit}
+            gemini_provider.CAPABILITY: 1, memory_records.CAPABILITY: 1, antigravity.CAPABILITY: 1, **explicit}
         assert not scoped_remote_stop.advertised(a.device_id)
 
 
@@ -96,7 +96,7 @@ def test_bare_presence_with_unavailable_detection_is_unknown(workers, monkeypatc
         engine.publish_presence()
         assert engine.presence_of(a.device_id)["capabilities"] == {
             SECRET_CAPABILITY: 1, native_providers.CAPABILITY: 1,
-            gemini_provider.CAPABILITY: 1, memory_records.CAPABILITY: 1}
+            gemini_provider.CAPABILITY: 1, memory_records.CAPABILITY: 1, antigravity.CAPABILITY: 1}
         assert not scoped_remote_stop.advertised(a.device_id)
 
 

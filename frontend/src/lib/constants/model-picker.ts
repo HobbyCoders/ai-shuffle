@@ -91,6 +91,9 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 		if (providerScope && providerScope !== p.id) continue;
 		if (apiKeyOnly && p.auth_kind !== 'api') continue;
 		if (p.models.length === 0) continue;
+		// An Antigravity row this worker cannot run (a Google sign-in not
+		// signed in here) is not offered: picking it would only be refused.
+		if (p.provider_type === 'antigravity' && p.usable === false) continue;
 		const display = getProviderDisplay(p);
 		groups.push({
 			key: p.id,

@@ -394,8 +394,9 @@ def drop_held(session_id: str, held_id: str) -> bool:
         return session_moves.remove_held(session_id, held_id)
 
 
+# ``person_entered`` is the held message's own admission, replayed unchanged.
 _SUBMIT_KEYS = ("prompt", "profile_id", "project_id", "worktree_id", "overrides",
-                "explicit_permission", "payload", "command_id")
+                "explicit_permission", "payload", "command_id", "person_entered")
 
 
 Released = Tuple[int, List[Dict[str, Any]]]
@@ -803,6 +804,7 @@ async def _deliver_active(session_id: str, target_id: str, label: str,
                 source=str(entry.get("source") or "user"), profile_id=entry.get("profile_id"),
                 project_id=entry.get("project_id"), overrides=entry.get("overrides"),
                 payload=entry.get("payload"), owner_send=bool(entry.get("explicit_permission")),
+                person_entered=entry.get("person_entered") is True,
                 command_id=_held_command_id(entry), caller=_held_caller(entry))
         except control.ControlRefused as exc:
             reason = f" ({exc})" if str(exc) else ""

@@ -374,6 +374,7 @@ function brandOfEntry(id: string, entry: Pick<ProviderEntry, 'provider_type' | '
 		case 'minimax': return 'minimax';
 		case 'opencode': return 'opencode';
 		case 'google': return 'google';
+		case 'antigravity': return 'antigravity';
 		default: return `gw:${id}`;
 	}
 }
@@ -408,7 +409,11 @@ export function resolveDefaultModel(
 ): string {
 	if (!ready || ready.length === 0) return serverDefault;
 	if (serverDefault && !serverDefaultCannotRun(serverDefault, ready, providers)) return serverDefault;
-	const order = [...ready.filter((b) => b !== 'claude'), ...ready.filter((b) => b === 'claude')];
+	// Never Antigravity on its own (as `default_provider_model` on the server):
+	// a personal Google sign-in would carry ordinary chats unasked, and its
+	// guard refuses the background jobs an implicit default also serves.
+	const implicit = ready.filter((b) => b !== 'antigravity');
+	const order = [...implicit.filter((b) => b !== 'claude'), ...implicit.filter((b) => b === 'claude')];
 	for (const brand of order) {
 		if (brand === 'claude') {
 			const preferred = claudeModels.find((m) => m.value === STATIC_DEFAULT) ?? claudeModels[0];
@@ -500,6 +505,7 @@ const PROVIDER_BRANDS: Readonly<Record<string, string>> = {
 	minimax: 'MiniMax',
 	opencode: 'OpenCode',
 	google: 'Google Gemini',
+	antigravity: 'Antigravity',
 	fal: 'fal.ai'
 };
 

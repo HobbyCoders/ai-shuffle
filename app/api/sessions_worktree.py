@@ -342,8 +342,12 @@ async def _create_remote_branch_session(
     target_instance_id: str,
     session_create_overrides: Optional[dict] = None,
     creator: Optional[dict] = None,
+    entry: Any = False,
 ) -> WorktreeSessionResponse:
     """Create a branch session that will materialize on ANOTHER install.
+
+    ``entry`` is ``session_modes.person_entry`` of the request's principal:
+    whether the owner entered the opening prompt.
 
     Nothing is written to this machine's disk: no ``ensure_checkout``, no upload
     migration. Instead the session is created PINNED to the target, a
@@ -531,6 +535,7 @@ async def _create_remote_branch_session(
                     profile_id=portable_profile, project_id=None,
                     overrides=body.overrides, payload=payload or None, owner_send=True,
                     command_id=body.client_message_id,
+                    person_entered=entry,  # the opening prompt, if the owner's
                 )
             else:
                 await turn_manager.submit_async(
@@ -539,6 +544,7 @@ async def _create_remote_branch_session(
                     explicit_permission=True,
                     payload=payload or None, no_kick=True,
                     command_id=body.client_message_id,
+                    person_entered=entry,  # the opening prompt, if the owner's
                 )
                 await run_sync(turn_claim.notify_turns_changed, session_id)
             query_started = True
@@ -568,12 +574,16 @@ async def _create_v2_branch_session(
     *,
     session_create_overrides: Optional[dict] = None,
     creator: Optional[dict] = None,
+    entry: Any = False,
 ) -> WorktreeSessionResponse:
     """V2 branch-intake: create a branch session WITHOUT a legacy worktree row.
 
     ``creator`` (``mobile_tool_identity.request_principal``) is the paired
     device that asked, recorded on the new chat as the chat socket records
     the chats it creates (#1877); None for the owner login or an API key.
+    ``entry`` is ``session_modes.person_entry`` of the request's principal
+    (whether the owner entered the opening prompt); a caller that states
+    none, such as the voice assistant's prompt-less branch chat, is not one.
 
     The session records only its logical ``sessions.branch`` + origin-keyed
     ``project_v2_id``; the deterministic per-runner checkout
@@ -638,6 +648,7 @@ async def _create_v2_branch_session(
             target_instance_id,
             session_create_overrides,
             creator,
+            entry,
         )
 
     # 2. Materialize the deterministic (project, branch) checkout. Idempotent with
@@ -773,6 +784,8 @@ async def _create_v2_branch_session(
                 overrides=body.overrides,
                 explicit_permission=True,
                 command_id=body.client_message_id,
+                # The opening prompt, person-entered when the owner sent it.
+                person_entered=entry,
                 payload={
                     **({"api_user_id": api_user_id} if api_user_id else {}),
                     **({"upload_paths": list(migrated_paths.values())} if migrated_paths else {}),
@@ -850,6 +863,8 @@ async def create_session_with_worktree(
 
     from app.core.mobile_tool_identity import request_principal
     creator = await run_sync(request_principal, request)
+    from app.api.chat_query import request_person_entry
+    entry = await run_sync(request_person_entry, request)
     return await _create_v2_branch_session(
-        body, project, api_user_id, access["project_v2"], creator=creator,
+        body, project, api_user_id, access["project_v2"], creator=creator, entry=entry,
     )

@@ -45,6 +45,12 @@ def provider_billing(provider_type: Optional[str], auth_mode: Optional[str]) -> 
     mode = (auth_mode or "").strip().lower()
     if ptype in ("chatgpt", "grok") or mode == "plan_key" or mode in _SUBSCRIPTION_AUTH_MODES:
         return BILLING_SUBSCRIPTION
+    if ptype == "antigravity":
+        # A Google sign-in is a plan, like the other sign-in legs; only the
+        # key and agent-platform modes bill per token.
+        from fluid.engine.acp.antigravity import STORED_SIGN_IN
+
+        return BILLING_SUBSCRIPTION if mode in STORED_SIGN_IN else BILLING_API
     return BILLING_API
 
 

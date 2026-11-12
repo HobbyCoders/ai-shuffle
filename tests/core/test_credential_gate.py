@@ -312,6 +312,24 @@ def test_a_row_without_a_default_model_uses_its_first_curated_model(mock_db, tmp
     assert credential_gate.default_provider_model() is None
 
 
+def test_an_antigravity_row_never_becomes_the_default_on_its_own(mock_db, tmp_path):
+    """T4: the newest usable row is never an Antigravity one; an explicit pick still runs."""
+    claude_cli_status.get_status()  # the CLI is missing
+    _provider_row("oa", "openai", auth_token="enc:key", checked=True,
+                  models=[{"id": "gpt-5", "label": "GPT-5"}])
+    _provider_row("agy", "antigravity", auth_token="enc:key", auth_mode="gemini-api-key",
+                  models=[{"id": "gemini-3.1-pro", "label": "Gemini"}])
+    with database.get_db() as conn:  # the Antigravity row is the newer one
+        conn.cursor().execute(
+            "UPDATE model_providers SET created_at = '2099-01-01T00:00:00+00:00' WHERE id = 'agy'")
+    assert "agy" in [r["id"] for r in credential_gate.usable_provider_rows()]
+    assert credential_gate.default_provider_model() == ("oa", "gpt-5")
+    assert credential_gate.default_run_selection(prefer_most_used=False) == "prov:oa:gpt-5"
+    database.delete_model_provider("oa")
+    assert credential_gate.default_provider_model() is None
+    assert credential_gate.default_provider_model(servable_only=True) is None
+
+
 def test_a_subscription_row_leads_an_api_row_of_the_same_provider(mock_db):
     _provider_row("api", "openai", auth_token="enc:key", checked=True,
                   models=[{"id": "gpt-5", "label": "GPT-5"}])

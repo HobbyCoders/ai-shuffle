@@ -1522,10 +1522,13 @@ class SessionRuntime:
         # still counts as a wake.
         from app.core.generation_resolver import continues_approved_generation
         from app.core.provider.harness_adapter import fluid_turn_source
-        from app.core.turn_scheduler import effective_turn_source
+        from app.core.turn_scheduler import turn_provenance
 
-        app_source = await asyncio.to_thread(effective_turn_source, self.turn)
+        app_source, person_entered = await asyncio.to_thread(turn_provenance, self.turn)
         turn_overrides["turn_source"] = app_source
+        # Host-set from this row's own admission (never a client value): the
+        # Antigravity guard passes only a turn a person entered in the app.
+        turn_overrides["turn_person_entered"] = person_entered
         from app.core.time_awareness import owner_message_receipt
 
         owner_receipt = owner_message_receipt(self.turn)
@@ -2043,6 +2046,13 @@ class SessionRuntime:
         if (self.turn.get("overrides") or {}).get("workspace_project_ids") is not None:
             # What a row naming no folders inherits (``_steer_refusal``).
             stored_folders = await asyncio.to_thread(self._stored_workspace_ids)
+        # Read fresh for this sweep (the owner restoring or lifting the guard
+        # mid-turn applies to the next steer), off the loop, and only for an
+        # Antigravity agent with a row that would need it.
+        guarded_now: Any = False
+        guard_row = getattr(adapter, "steering_guard_row", None)
+        if callable(guard_row) and isinstance(guard_row(), str):
+            guarded_now = await asyncio.to_thread(self._sweep_guarded_now, rows)
         submitted = 0
         for row in rows:
             if self._steering_closed:
@@ -2050,7 +2060,8 @@ class SessionRuntime:
                 break
             if row.get("source") not in _STEERABLE_SOURCES:
                 continue
-            refusal = self._steer_refusal(row, stored_workspace_ids=stored_folders)
+            refusal = self._steer_refusal(row, stored_workspace_ids=stored_folders,
+                                          guarded_now=guarded_now)
             if refusal is not None:
                 if row.get("id") not in self._steer_refusals_logged:
                     self._steer_refusals_logged.add(row.get("id"))
@@ -2364,8 +2375,34 @@ class SessionRuntime:
         return SessionRuntime(parked)._steer_eligible(queued)
 
     def _steer_eligible(self, row: Dict[str, Any]) -> bool:
-        """Whether ``row``'s prompt can join the LIVE turn as it stands."""
+        """Whether ``row``'s prompt can join the LIVE turn as it stands.
+        Blocking (called inside ``turns_db.start_turn``'s thread)."""
         return self._steer_refusal(row) is None
+
+    def _sweep_guarded_now(self, rows: List[Dict[str, Any]]) -> bool:
+        """:meth:`_steering_guarded_now` for one steer sweep over ``rows``;
+        False without a read when every row there has a person behind it
+        (or is an agent message, screened on its own). Blocking."""
+        if not any(row.get("source") in _STEERABLE_SOURCES and row.get("source") != "agent_message"
+                   and not turns_db.person_entered(row) for row in rows):
+            return False
+        return self._steering_guarded_now()
+
+    def _steering_guarded_now(self) -> bool:
+        """Whether the live agent's row is a guarded Antigravity row right
+        now, read fresh (``antigravity.guarded_now``): only then may text no
+        person entered not steer. False for every other provider, an
+        unguarded Antigravity row (business, API key, unattended use
+        allowed) and a session with no live agent. Blocking DB read."""
+        steering_guard_row = getattr(self._live_adapter(), "steering_guard_row", None)
+        if not callable(steering_guard_row):
+            return False
+        provider_id = steering_guard_row()
+        if not isinstance(provider_id, str) or not provider_id:
+            return False
+        from app.core import antigravity
+
+        return antigravity.guarded_now(provider_id)
 
     def _stored_workspace_ids(self) -> Optional[Set[str]]:
         """This chat's stored extra workspace folders, or None when they
@@ -2401,8 +2438,13 @@ class SessionRuntime:
 
     def _steer_refusal(
         self, row: Dict[str, Any], *, stored_workspace_ids: Any = _UNREAD,
+        guarded_now: Any = _UNREAD,
     ) -> Optional[str]:
         """Why ``row``'s prompt cannot join the LIVE turn, or None when it can.
+
+        ``guarded_now`` is :meth:`_steering_guarded_now`, read by an async
+        caller off the loop; left unread it is read here (blocking), which
+        only a caller already off the loop may do.
 
         Three things disqualify it, all for the same reason — the live turn is
         already running under settings this row would change, and folding the
@@ -2438,6 +2480,15 @@ class SessionRuntime:
                 return "peer message without an attributed sender"
             # The asynchronous sweep revalidates scope immediately before
             # hand-over; this predicate is also used by the startup probe.
+        if row.get("source") != "agent_message" and not turns_db.person_entered(row):
+            # Text no person entered (a voice follow-up, Away mode's answer)
+            # never joins a live turn on a row the guard applies to right now:
+            # it runs as its own turn, where the guard decides it by its
+            # provenance. Every other row steers it as before.
+            if guarded_now is _UNREAD:
+                guarded_now = self._steering_guarded_now()
+            if guarded_now:
+                return "text no person entered runs as its own turn here"
         if payload.get("upload_blob_ids") or payload.get("upload_references"):
             return "attachments need turn setup"
         if row.get("source") != "agent_message":
@@ -3323,6 +3374,8 @@ class SessionRuntime:
             payload["user_message_already_recorded"] = True
             payload["requeued_from_turn_id"] = row_id
             try:
+                # The stranded steer's own admission, unchanged.
+                entered = await asyncio.to_thread(turns_db.entry_provenance, row)
                 fresh = await asyncio.to_thread(
                     turns_db.enqueue_turn,
                     sid,
@@ -3334,6 +3387,7 @@ class SessionRuntime:
                     overrides=row.get("overrides") or None,
                     payload=payload,
                     _owner_receipt=owner_message_receipt(row),
+                    person_entered=entered,
                     command_id=row.get("command_id"),
                     instance_id=row.get("instance_id"),
                     at_front=True,

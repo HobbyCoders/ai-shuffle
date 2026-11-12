@@ -52,6 +52,7 @@ from app.db import turns as turns_db
 from app.db.async_database import run_sync
 from pathlib import Path
 from app.core.config import settings
+from app.core.environment import ProviderTurnRefused
 from app.core.provider import session_admission
 from app.core.provider.session_admission import Lease, SessionReplacedError
 from app.core.session_pool import (
@@ -1377,6 +1378,11 @@ async def _stream_query_turn(
                             await state.adapter.set_permission_mode(new_perm_mode)
                             logger.debug(f"Updated permission_mode to {new_perm_mode} for reused session {session_id}")
                         except Exception as e:
+                            from fluid.engine.acp.loop import AcpModeRejected
+                            if isinstance(e, AcpModeRejected):
+                                # The agent kept its mode: never run the turn
+                                # while the app shows another (its message says why).
+                                raise
                             logger.warning(f"Failed to set permission_mode on reused session {session_id}: {e}")
 
                 logger.info(f"Reusing pooled client for session {session_id}")
@@ -1442,9 +1448,10 @@ async def _stream_query_turn(
             logger.error(f"Timed out connecting to Claude SDK for session {session_id} (60s)")
             yield {"type": "error", "message": "Connection timed out — an MCP server may be unreachable"}
             return
-        except ClaudeCliMissingError as e:
-            # Setup problem, not a crash: no traceback, the message is the fix.
-            logger.warning(f"Claude CLI missing for session {session_id}: {e}")
+        except (ClaudeCliMissingError, ProviderTurnRefused) as e:
+            # Setup problem or an owner rule, not a crash: no traceback, the
+            # message is the fix.
+            logger.warning(f"Could not start session {session_id}: {e}")
             yield {"type": "error", "message": str(e)}
             return
         except Exception as e:
@@ -1545,6 +1552,9 @@ async def _stream_query_turn(
         set_turn_source = getattr(state.adapter, "set_turn_source", None)
         if callable(set_turn_source):
             set_turn_source(getattr(options, "aih_turn_source", None))
+        set_person_entered = getattr(state.adapter, "set_turn_person_entered", None)
+        if callable(set_person_entered):
+            set_person_entered(getattr(options, "aih_turn_person_entered", None))
         set_owner_receipt = getattr(state.adapter, "set_owner_receipt", None)
         if callable(set_owner_receipt):
             set_owner_receipt(getattr(options, "aih_owner_receipt", None))
@@ -2900,9 +2910,10 @@ async def _stream_to_websocket_turn(
                 await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             _connect_elapsed = time.monotonic() - _connect_start
             logger.info(f"[WS] SDK connect for session {session_id}: {_connect_elapsed:.1f}s (reuse=False)")
-        except ClaudeCliMissingError as e:
-            # Setup problem, not a crash: no traceback, the message is the fix.
-            logger.warning(f"[WS] Claude CLI missing for session {session_id}: {e}")
+        except (ClaudeCliMissingError, ProviderTurnRefused) as e:
+            # Setup problem or an owner rule, not a crash: no traceback, the
+            # message is the fix.
+            logger.warning(f"[WS] Could not start session {session_id}: {e}")
             yield {"type": "error", "message": str(e)}
             return
         except Exception as e:
@@ -3133,6 +3144,9 @@ async def _stream_to_websocket_turn(
         set_turn_source = getattr(state.adapter, "set_turn_source", None)
         if callable(set_turn_source):
             set_turn_source(getattr(options, "aih_turn_source", None))
+        set_person_entered = getattr(state.adapter, "set_turn_person_entered", None)
+        if callable(set_person_entered):
+            set_person_entered(getattr(options, "aih_turn_person_entered", None))
         set_owner_receipt = getattr(state.adapter, "set_owner_receipt", None)
         if callable(set_owner_receipt):
             set_owner_receipt(getattr(options, "aih_owner_receipt", None))

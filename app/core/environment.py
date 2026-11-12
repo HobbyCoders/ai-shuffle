@@ -340,6 +340,13 @@ class ProviderConfigError(ValueError):
     """
 
 
+class ProviderTurnRefused(ProviderConfigError):
+    """A rule the owner controls refused this run (for example the
+    Antigravity guard on a personal Google sign-in). Expected, not a fault:
+    callers log it without a traceback and show the message, which says what
+    to change."""
+
+
 class ClaudeCloudSetupError(ProviderConfigError):
     """Cloud mode is on but the CLI environment for the saved method could not
     be prepared (a disk or database error, an unwritable key file). The run
@@ -628,6 +635,11 @@ def apply_provider_env(
     # direct-decrypted-token path below (they are Anthropic-compatible endpoints).
     provider_type = provider.get("provider_type")
     auth_mode = provider.get("auth_mode")
+    # Google Antigravity runs Google's own agent over ACP, whose process env
+    # and credentials app.core.antigravity builds; nothing here reaches it. A
+    # Google sign-in row legitimately stores neither a token nor a URL.
+    if provider_type == "antigravity":
+        return env
     is_translated = (
         provider_type in ("openai", "chatgpt", "xai", "grok")
         or auth_mode in ("chatgpt", "grok")

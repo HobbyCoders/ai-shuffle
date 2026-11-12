@@ -1100,10 +1100,27 @@ def effective_turn_source(turn: Dict[str, Any]) -> Optional[str]:
     stops at the first row it cannot read. Blocking DB reads; call it off
     the event loop.
     """
-    source = turn.get("source")
-    parent_id = turn.get("parent_turn_id")
+    return _retry_chain_origin(turn).get("source")
+
+
+def turn_provenance(turn: Dict[str, Any]) -> tuple[Optional[str], Any]:
+    """``(source, person_entered)`` of the row that began ``turn``'s retry chain.
+
+    Both come from that row's own admission (``turns.entry_provenance``:
+    ``True``, or why a person did not enter it), never
+    from an accounting origin, so an automatic answer or a parked turn's
+    automatic resume never reads as the owner typing. Blocking DB reads.
+    """
+    origin = _retry_chain_origin(turn)
+    return origin.get("source"), turns_db.entry_provenance(origin)
+
+
+def _retry_chain_origin(turn: Dict[str, Any]) -> Dict[str, Any]:
+    """The row a failover retry chain started from (``turn`` itself otherwise)."""
+    row = turn
     for _ in range(_MAX_RETRY_CHAIN):
-        if source not in RETRY_SOURCES or not parent_id:
+        parent_id = row.get("parent_turn_id")
+        if row.get("source") not in RETRY_SOURCES or not parent_id:
             break
         try:
             parent = turns_db.get_turn(parent_id)
@@ -1112,8 +1129,8 @@ def effective_turn_source(turn: Dict[str, Any]) -> Optional[str]:
             break
         if not parent:
             break
-        source, parent_id = parent.get("source"), parent.get("parent_turn_id")
-    return source
+        row = parent
+    return row
 
 
 def _enqueue(session_id: str, source: str, **kwargs: Any) -> Dict[str, Any]:
@@ -1487,16 +1504,107 @@ def _terminal_delivery_lock(session_id: str) -> asyncio.Lock:
     return _terminal_delivery_locks.setdefault(session_id, asyncio.Lock())
 
 
-async def _take_held_peer_messages(session_id: str) -> str:
+async def _take_held(session_id: str) -> Optional[str]:
     """Remove the session's held messages from the durable store and return
-    them, oldest first ("" when none). Messages already delivered to the
-    session are dropped. Caller holds the terminal lock."""
-    from app.core import wakeup_service
+    them, oldest first. Three answers: the messages taken; "" when there is
+    nothing to deliver (none held, all delivered already, or refused); None
+    when it could not decide, with NOTHING taken. Messages already delivered
+    to the session are dropped. Caller holds the terminal lock.
 
+    Decides first, takes second (:func:`held_delivery_refusal`): with nothing
+    held nothing is read beyond the store (main's own reads, which raise as
+    they always did); a refusal takes them and records them as refused; a
+    check that cannot finish takes nothing, so the messages stay in the store.
+    No path deletes a held message before it is known to be delivered or refused.
+    """
+    from app.core import wakeup_service
+    from app.db import wakeups as wakeups_db
+
+    if not await asyncio.to_thread(
+            wakeups_db.session_has_pending, session_id, wakeup_service.HELD_PEER_SOURCE):
+        return ""
+    try:
+        refusal = await held_delivery_refusal(session_id)
+    except Exception:  # noqa: BLE001 — inconclusive: take nothing, they stay held
+        logger.warning(
+            "turn_scheduler: could not check whether %s may receive its held agent "
+            "messages; they stay held", session_id, exc_info=True,
+        )
+        return None
     rows = await wakeup_service.take_session_wakeups(
         session_id, wakeup_service.HELD_PEER_SOURCE,
     )
-    return _undelivered(session_id, _join_held(*(row.get("prompt") for row in rows)))
+    held = _undelivered(session_id, _join_held(*(row.get("prompt") for row in rows)))
+    if refusal and held.strip():
+        refuse_held_peer_messages(session_id, held, refusal)
+        return ""
+    return held
+
+
+async def _take_held_peer_messages(session_id: str) -> str:
+    """:func:`_take_held` for a delivery point that has a later one: a take
+    that cannot decide leaves the messages held and returns "", and the turn
+    they would have ridden runs without them. Its callers are the fold at a
+    turn start, an urgent message's wake and an unpark wake (each starts a
+    turn whose own fold takes them again) and a steer into a live turn (the
+    receiver's next turn takes them). The terminal release has no later one
+    and uses :func:`_take_held` itself (:func:`_release_held_to`)."""
+    return await _take_held(session_id) or ""
+
+
+async def held_delivery_refusal(session_id: str) -> Optional[str]:
+    """Whether this chat may receive its held agent messages now: None to
+    deliver, or the refusal. Call it BEFORE taking them.
+
+    A message held while a personal Google sign-in row allowed unattended
+    use must not ride a later turn once the owner restored the guard: it is
+    checked again where it would be delivered, with the rule and refusal
+    its sender gets before queueing (``antigravity.agent_message_refusal``).
+    Every other row, and this row with unattended use allowed, delivers.
+
+    Raises when the chat or its provider cannot be read (inconclusive): the
+    caller takes nothing, and the turn the messages would have ridden (the
+    owner's own message included) runs without them.
+    """
+    from app.core import antigravity
+    from app.db import sessions
+
+    row = await asyncio.to_thread(sessions.get_session, session_id)
+    return await asyncio.to_thread(antigravity.agent_message_refusal, row, fail_closed=True)
+
+
+def refuse_held_peer_messages(session_id: str, held: str, refusal: str) -> None:
+    """Record taken ``held`` messages as refused: never delivered, never
+    retried, and each sender still running is told. Call on the loop.
+    Messages already delivered to the session are skipped (never "not sent")."""
+    keys = _held_ids(_undelivered(session_id, held))
+    if not keys:
+        return
+    _mark_held_delivered(session_id, keys)
+    senders = {key.split(" sender=", 1)[1] for key in keys if " sender=" in key}
+    logger.info(
+        "turn_scheduler: %d held agent message(s) for %s refused: its provider takes "
+        "turns only from the owner", len(keys), session_id,
+    )
+    for sender in senders:
+        # Off the terminal lock: telling a sender is delivery to another session.
+        task = asyncio.get_running_loop().create_task(_tell_refused_sender(sender, session_id, refusal))
+        _kick_tasks.add(task)
+        task.add_done_callback(_kick_done)
+
+
+async def _tell_refused_sender(sender: str, receiver: str, refusal: str) -> None:
+    """Tell a still-running sender its held message was refused. A sender
+    that has ended is not woken for it; the refusal is logged above."""
+    from app.core import agent_messaging, session_runtime
+
+    if session_runtime.get_live_runtime(sender) is None:
+        logger.info("turn_scheduler: sender %s of a refused message to %s has ended", sender, receiver)
+        return
+    try:
+        await agent_messaging.deliver_message(sender, receiver, refusal, kind="alert")
+    except Exception:  # noqa: BLE001 — the refusal is logged; nothing to retry
+        logger.warning("turn_scheduler: could not tell %s its message was refused", sender, exc_info=True)
 
 
 async def _hold_in_queued_unpark(session_id: str, held: str) -> Optional[Dict[str, Any]]:
@@ -1596,6 +1704,10 @@ async def promote_held_peer_messages(
     stopped (:func:`release_held_progress_from`). A queued unpark wake takes
     them if one is waiting; otherwise they become a ``source="promotion"``
     context wake. Returns the turn id, or None when nothing could be queued.
+
+    Both callers decided before they took ``held``
+    (:func:`held_delivery_refusal`): the timer before its claim, the release
+    through :func:`_take_held` (:func:`_release_held_to`).
     """
     held = _undelivered(session_id, held)
     if not held.strip():
@@ -1732,21 +1844,129 @@ async def release_held_progress_from(sender_id: str) -> int:
         if receiver == sender_id or await asyncio.to_thread(
                 task_registry.get_task, receiver, sender_id, durable=True) is not None:
             continue
-        async with _terminal_delivery_lock(receiver):
-            held = await _take_held_peer_messages(receiver)
-        if not held:
-            continue
-        try:
-            turn_id = await promote_held_peer_messages(receiver, held, released=True)
-        except Exception:  # noqa: BLE001
-            turn_id = None
-            logger.warning("turn_scheduler: releasing held notes for %s failed",
-                           receiver, exc_info=True)
-        if turn_id:
+        outcome = await _release_held_to(receiver)
+        if outcome is None:
+            # Due now, and nothing else may come for it: retry this release.
+            _retry_held_release(receiver, sender_id)
+        elif outcome:
             woken += 1
-        else:
-            _restore_held_peer_messages(receiver, held)
     return woken
+
+
+#: Backoff of a terminal release that could not decide (:func:`_retry_held_release`).
+_HELD_RELEASE_RETRY_BASE_SECONDS = 5.0
+_HELD_RELEASE_RETRY_MAX_SECONDS = 120.0
+#: The one retrying release per receiver. In-process only (see the function).
+_held_release_retries: Dict[str, asyncio.Task] = {}
+#: The ended senders each receiver's retry is owed for. In-process only.
+_held_release_owed: Dict[str, Set[str]] = {}
+
+
+def _holds_note_from(session_id: str, senders: Set[str]) -> bool:
+    """Whether a held note from one of ``senders`` is still pending, not yet
+    delivered, for ``session_id``. Reads the store (each held entry carries
+    its ``sender=`` tag); raises when it cannot be read. Sync."""
+    from app.core import wakeup_service
+    from app.db import wakeups as wakeups_db
+
+    rows = wakeups_db.get_session_wakeups(session_id, wakeup_service.HELD_PEER_SOURCE)
+    held = _undelivered(session_id, _join_held(*(row.get("prompt") for row in rows)))
+    return any(key.split(" sender=", 1)[1] in senders
+               for key in _held_ids(held) if " sender=" in key)
+
+
+async def _release_held_to(receiver: str, owed: Optional[Set[str]] = None) -> Optional[bool]:
+    """Wake ``receiver`` with its held notes now: True when a turn was
+    enqueued, False when there was nothing to deliver (or the promotion
+    failed and they were put back, as before), None when it could not
+    decide whether they may be delivered (nothing taken).
+
+    ``owed`` (a retry): take only while a note from one of these ended
+    senders is still held for the receiver; with none left it takes nothing
+    and answers False. A read that fails answers None, never "none left"."""
+    try:
+        async with _terminal_delivery_lock(receiver):
+            if owed is not None and not await asyncio.to_thread(_holds_note_from, receiver, owed):
+                return False
+            held = await _take_held(receiver)
+    except Exception:  # noqa: BLE001 — the store read failed: nothing was taken
+        logger.warning("turn_scheduler: could not take held notes for %s", receiver, exc_info=True)
+        return None
+    if held is None:
+        return None
+    if not held:
+        return False
+    try:
+        turn_id = await promote_held_peer_messages(receiver, held, released=True)
+    except Exception:  # noqa: BLE001
+        turn_id = None
+        logger.warning("turn_scheduler: releasing held notes for %s failed",
+                       receiver, exc_info=True)
+    if turn_id:
+        return True
+    _restore_held_peer_messages(receiver, held)
+    return False
+
+
+def _retry_held_release(receiver: str, sender: str) -> None:
+    """Retry a terminal release for ``receiver`` that could not decide,
+    owed because ``sender`` ended.
+
+    One retry per receiver; a second ended sender whose release also cannot
+    decide joins it while it has not finished, and otherwise starts a new
+    one (a retry that finished but whose done callback is still pending is
+    replaced, never joined). It delivers only while the release is still owed:
+    before each take it checks, under the receiver's terminal lock, that a
+    note from one of its ended senders is still held. None left (the
+    receiver's own turn took them, a Stop or deletion removed them): it ends
+    without taking, so a note from a sender still running is never woken by
+    it. One left: it takes and promotes all the receiver's held notes, as
+    the first release would have. It backs off from
+    :data:`_HELD_RELEASE_RETRY_BASE_SECONDS` to
+    :data:`_HELD_RELEASE_RETRY_MAX_SECONDS` while it cannot decide (a failed
+    store read included). Every take runs under the receiver's terminal lock
+    and deletes what it takes, so a retry and any other delivery never both
+    deliver. In-process: a restart ends it, and the notes, still in the
+    durable store, ride the receiver's next turn.
+    """
+    _held_release_owed.setdefault(receiver, set()).add(sender)
+    current = _held_release_retries.get(receiver)
+    # Join only a retry that will still read the owed set: one whose loop
+    # returned but whose done callback has not run yet is replaced (that
+    # callback then clears nothing, by the identity check in ``_done``).
+    if current is not None and not current.done():
+        return
+    task = asyncio.get_running_loop().create_task(_held_release_retry_loop(receiver))
+    _held_release_retries[receiver] = task
+    _kick_tasks.add(task)
+
+    def _done(done: asyncio.Task) -> None:
+        if _held_release_retries.get(receiver) is done:
+            _held_release_retries.pop(receiver, None)
+            _held_release_owed.pop(receiver, None)
+        _kick_done(done)
+
+    task.add_done_callback(_done)
+
+
+async def _held_release_retry_loop(receiver: str) -> None:
+    attempt = 0
+    while True:
+        attempt += 1
+        delay = min(_HELD_RELEASE_RETRY_BASE_SECONDS * (2 ** min(attempt - 1, 8)),
+                    _HELD_RELEASE_RETRY_MAX_SECONDS)
+        logger.info("turn_scheduler: held notes for %s could not be released; trying again "
+                    "in %.0fs (attempt %d)", receiver, delay, attempt)
+        await asyncio.sleep(delay)
+        owed = set(_held_release_owed.get(receiver) or ())
+        if await _release_held_to(receiver, owed) is None:
+            continue
+        # A sender that joined during that take was not checked: go again for it.
+        joined = (_held_release_owed.get(receiver) or set()) - owed
+        if not joined:
+            return
+        _held_release_owed[receiver] = joined
+        attempt = 0
 
 
 async def fold_held_peer_messages_for_turn(

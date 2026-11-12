@@ -125,7 +125,22 @@ def _request_overrides(request) -> dict | None:
 
 
 def _request_leg(profile_id: str, overrides: dict | None, session_id: str | None) -> str | None:
-    """The harness leg a request will run on, or None when it cannot tell.
+    """The harness leg a request will run on, or None when it cannot tell."""
+    binding = _request_binding(profile_id, overrides, session_id)
+    if binding is None:
+        return None
+    from types import SimpleNamespace
+
+    from app.core.provider.harness_adapter import provider_kind_for_sdk_options
+
+    provider_id, model = binding
+    return provider_kind_for_sdk_options(SimpleNamespace(model=model, aih_provider_id=provider_id))
+
+
+def _request_binding(
+    profile_id: str, overrides: dict | None, session_id: str | None,
+) -> tuple[str | None, str] | None:
+    """``(provider_id, model)`` a request will run on, or None when it cannot tell.
 
     Mirrors how ``query_options.build_options_from_profile`` binds a run
     without building the options (which can create a git worktree): the
@@ -136,10 +151,7 @@ def _request_leg(profile_id: str, overrides: dict | None, session_id: str | None
     pick the bound provider does not curate drops back to native Claude. The
     leg itself comes from the adapter's own decision table.
     """
-    from types import SimpleNamespace
-
     from app.core.model_registry import DEFAULT_MODEL
-    from app.core.provider.harness_adapter import provider_kind_for_sdk_options
     from app.core.query_options import decode_provider_model, is_native_claude_model
 
     profile = database.get_profile(profile_id)
@@ -174,9 +186,7 @@ def _request_leg(profile_id: str, overrides: dict | None, session_id: str | None
         # gives the REST lane, which carries no typed turn source, the same).
         provider_id, model = default_run_model(prefer_most_used=False)
         model = model or DEFAULT_MODEL
-    return provider_kind_for_sdk_options(
-        SimpleNamespace(model=model, aih_provider_id=provider_id)
-    )
+    return provider_id, model
 
 
 async def _refuse_unready_leg(
@@ -191,15 +201,30 @@ async def _refuse_unready_leg(
     cannot be worked out here, the request goes on: every engine runs the same
     per-leg check on its built options before it starts a turn.
     """
-    from app.core import credential_gate
+    from app.core import antigravity, credential_gate
+    from app.core.provider.harness_adapter import provider_kind_for_sdk_options
 
     try:
-        leg = await asyncio.to_thread(_request_leg, profile_id, overrides, session_id)
+        binding = await asyncio.to_thread(_request_binding, profile_id, overrides, session_id)
     except Exception:  # noqa: BLE001 — the engine's own gate still applies
         logger.debug("Could not work out the leg for the credential gate", exc_info=True)
         return
-    if leg is None:
+    if binding is None:
         return
+    provider_id, model = binding
+    # Every request on these routes comes through the API, never from the
+    # owner typing in the app: a guarded Antigravity sign-in row refuses it
+    # here (the turn-start guard refuses it again if this read missed).
+    refusal = await asyncio.to_thread(
+        antigravity.unattended_run_refusal, provider_id, antigravity.API_REQUEST_REASON)
+    if refusal:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=refusal,
+            headers={"X-Error-Code": antigravity.GUARD_REFUSED_CODE},
+        )
+    from types import SimpleNamespace
+
+    leg = provider_kind_for_sdk_options(SimpleNamespace(model=model, aih_provider_id=provider_id))
     reason = await credential_gate.turn_refusal_async(leg)
     if reason:
         raise HTTPException(

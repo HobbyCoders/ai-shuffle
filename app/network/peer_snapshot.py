@@ -589,7 +589,10 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
                 chunk = _read_page(directory, index, pages[index])
                 page_touched = []
                 applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched)
-                touched.extend(t for t in page_touched if t[0] == "provider_billing" or
+                # Provider rows by id, upserts too: a disable or new key that
+                # arrives here ends the row's running agents (an edit that
+                # changes nothing an agent holds keeps them).
+                touched.extend(t for t in page_touched if t[0] in ("provider_billing", "model_providers") or
                                (t[0] == "system_settings" and t[1].startswith("provider_observation:")))
                 index += 1
             if index >= len(pages):

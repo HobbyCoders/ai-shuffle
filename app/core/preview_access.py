@@ -117,6 +117,7 @@ MUTATION_DENY_PREFIXES = (
     "/api/v1/pairing",
     "/api/v1/mobile",
     "/api/v1/model-providers",
+    "/api/v1/antigravity",
     "/api/v1/claude",
     "/api/v1/github",
     "/api/v1/settings",

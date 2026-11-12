@@ -559,6 +559,23 @@ own `HOME/.local/bin/claude`, which app startup puts first on PATH and the
 app's installer writes to, is also linked to the fake. The app therefore sees
 Claude Code as installed, and nothing in the instance can come before the fake.
 
+## Google Antigravity: the fake `agy` (`--fake-antigravity`)
+
+`up --fake-antigravity` sets the instance's `AI_SHUFFLE_ANTIGRAVITY_BIN` to a
+shim (`fake-agy-bin/agy`) that runs fluid's scripted ACP agent,
+`fluid/tests/fixtures/fake_acp_agent.py`. Settings then reports Antigravity
+installed, and every provider screen works without a Google account:
+- a Gemini API key row takes any key;
+- personal sign-in prints a fake `accounts.google.com` link and accepts any
+  code;
+- a chat message containing "tool" runs a tool call with a permission prompt;
+- `/usage` answers with a quota reply.
+
+The agent's message log is `fake-agy.jsonl` in the scratch directory. Without
+the flag, nothing named `agy` is on the app's PATH, so Settings shows "Not
+installed". Do not press Install on a dev instance: it downloads Google's real
+release.
+
 ## Ports and teardown
 
 Every port is picked free at random (or `--port` / `--vite-port`); 8000 and

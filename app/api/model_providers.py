@@ -138,6 +138,9 @@ class ModelProviderResponse(BaseModel):
     # claims. Only these two strings leave the backend, never the token.
     account_email: Optional[str] = None
     account_plan: Optional[str] = None
+    # Antigravity Google sign-in rows only: whether Google's agent last said
+    # this worker is signed in (null on every other row). Never the sign-in.
+    antigravity_signed_in: Optional[bool] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     revision: Optional[str] = None
@@ -428,6 +431,14 @@ def _iso(value: Any) -> Optional[str]:
     return value.isoformat()
 
 
+def _antigravity_signed_in(row: Dict[str, Any]) -> Optional[bool]:
+    from app.core import antigravity
+
+    if row.get("provider_type") != antigravity.PROVIDER_TYPE or row.get("auth_mode") not in antigravity.STORED_SIGN_IN:
+        return None
+    return antigravity.signed_in_here(str(row.get("id") or ""))
+
+
 def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
     """Shape a DB row (public columns only, no token) into the response model."""
     models = []
@@ -466,6 +477,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         codex_refresh_token_set=bool(row.get("_codex_refresh_token_set")),
         account_email=row.get("_account_email"),
         account_plan=row.get("_account_plan"),
+        antigravity_signed_in=_antigravity_signed_in(row),
         created_at=_iso(row.get("created_at")),
         updated_at=_iso(row.get("updated_at")),
         revision=row.get("revision"),
@@ -1089,6 +1101,10 @@ async def update_provider(
             or effective_type in native_providers.PROVIDERS):
         if effective_type != existing.get("provider_type") or (effective_auth or "api_key") != (existing.get("auth_mode") or "api_key"):
             raise HTTPException(status_code=400, detail="Create a separate row to change provider or credential kind.")
+    from app.core import antigravity
+    if existing.get("provider_type") == antigravity.PROVIDER_TYPE and effective_type != antigravity.PROVIDER_TYPE:
+        # Its sign-in lives with the agent on each worker, not in the row.
+        raise HTTPException(status_code=400, detail="Create a separate row to change provider or credential kind.")
     _validate_base_url(body.base_url, required=False)
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
@@ -1168,8 +1184,15 @@ async def update_provider(
 
     if updates:
         async with operation_lock(provider_id):
+            keep: tuple = ()
+            if "extra_env_json" in updates and existing.get("provider_type") == antigravity.PROVIDER_TYPE:
+                # The guard has its own endpoint: whatever a stale edit sends,
+                # the write keeps the value stored when it commits (read with
+                # the row locked in the same transaction, so a guard restored
+                # on another worker and synced in after our read still wins).
+                keep = (antigravity.GUARD_OVERRIDE_KEY,)
             row = await run_sync(db.update_model_provider, provider_id,
-                                 expected_revision=body.expected_revision, **updates)
+                                 expected_revision=body.expected_revision, keep_env_keys=keep, **updates)
             if row is None:
                 if body.expected_revision is not None and await run_sync(db.get_model_provider, provider_id):
                     raise HTTPException(status_code=409, detail="Models changed on another worker. Reload and try again.")
@@ -1177,6 +1200,9 @@ async def update_provider(
                                     detail="Model provider not found")
             if catalog_binding_changed:
                 await run_sync(model_catalogs.delete, provider_id)
+        if existing.get("provider_type") == antigravity.PROVIDER_TYPE:
+            # Turned off or given a new key: its running agents end now.
+            await antigravity.reconcile_agents([provider_id])
     if gemini_verified is not None:
         await _record_credential_check(provider_id, accepted=True, row=gemini_verified)
 
@@ -1199,6 +1225,10 @@ async def delete_provider(provider_id: str, token: str = Depends(require_admin))
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
         await run_sync(model_catalogs.delete, provider_id)
+        # An Antigravity row's sign-in on this worker goes with it (its pending
+        # sign-ins and private home); a no-op for every other row.
+        from app.core import antigravity
+        await antigravity.forget_row(provider_id)
     return {"success": True}
 
 
@@ -1232,6 +1262,8 @@ async def activate_provider(provider_id: str, token: str = Depends(require_admin
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
         full_row = await run_sync(_row_with_token_flags, provider_id)
+    from app.core import antigravity
+    await antigravity.reconcile_agents(antigravity.agent_row_ids())  # a sibling turned off
     return _public_provider(full_row)
 
 
@@ -1250,6 +1282,8 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
+    from app.core import antigravity
+    await antigravity.reconcile_agents([provider_id])  # turned off: its agents end now
 
     full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)
@@ -1443,6 +1477,14 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
         """Capture credentials used by the successful attempt, not a later DB read."""
         nonlocal checked_binding
         checked_binding = model_catalogs.binding({**row, "codex_access_token": access, "codex_account_id": account})
+
+    from app.core import antigravity
+    if row.get("provider_type") == antigravity.PROVIDER_TYPE:
+        # No HTTP catalog: Google's agent binary owns the model list. Curation
+        # picks from the models it offered (with their thinking levels).
+        return FetchModelsResponse(source="preset", models=[dict(m) for m in antigravity.DEFAULT_MODELS],
+                                   recommended=[m["id"] for m in antigravity.DEFAULT_MODELS],
+                                   binding=checked_binding)
 
     kind = model_catalog_presets.preset_kind_for(row)
     from app.core.http_client import get_http_client

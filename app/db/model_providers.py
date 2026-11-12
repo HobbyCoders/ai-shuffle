@@ -441,7 +441,7 @@ def _normalize_model_capabilities(models):
 
 def update_model_provider(
     provider_id: str, *, expected_revision: Optional[str] = None,
-    _auth_token_reencrypted: bool = False, **kwargs: Any
+    _auth_token_reencrypted: bool = False, keep_env_keys: tuple = (), **kwargs: Any
 ) -> Optional[ModelProviderRow]:
     """Partially update a provider by id and return the fresh row.
 
@@ -454,6 +454,10 @@ def update_model_provider(
     ``_auth_token_reencrypted`` is internal to the verified re-encryption plan:
     the plaintext is known unchanged, but no single active master key can
     compare the old and new ciphertexts. Preserve credential-bound state.
+    ``keep_env_keys`` names reserved ``extra_env_json`` keys this edit never
+    sets: their values are read from the row inside the write's transaction
+    (row locked first), so the kept value is the stored one at write time,
+    even when another worker's synced update landed after the caller's read.
     """
     if "models_json" in kwargs:
         kwargs["models_json"] = _normalize_model_capabilities(kwargs["models_json"])
@@ -499,9 +503,21 @@ def update_model_provider(
     with get_db() as conn:
         cursor = conn.cursor()
         lock_model_provider_slots(cursor)
-        cursor.execute("SELECT provider_type, auth_mode FROM model_providers WHERE id = %s", (provider_id,))
+        cursor.execute(
+            "SELECT provider_type, auth_mode, extra_env_json FROM model_providers WHERE id = %s"
+            + (" FOR UPDATE" if keep_env_keys and "extra_env_json" in kwargs else ""),
+            (provider_id,),
+        )
         previous = cursor.fetchone()
         previous_slot = model_provider_slot(previous) if previous else None
+        if keep_env_keys and "extra_env_json" in kwargs and previous:
+            stored = _parse_json_columns(row_to_dict(previous)).get("extra_env_json")
+            stored = stored if isinstance(stored, dict) else {}
+            sent = kwargs["extra_env_json"]
+            sent = json.loads(sent) if isinstance(sent, str) else (sent or {})
+            merged = {k: v for k, v in dict(sent).items() if k not in keep_env_keys}
+            merged.update({k: stored[k] for k in keep_env_keys if k in stored})
+            values[updates.index("extra_env_json = %s")] = _dump_json_value("extra_env_json", merged)
         cursor.execute(
             f"UPDATE model_providers SET {', '.join(updates)} WHERE id = %s{condition} RETURNING {_PUBLIC_COLUMNS}",
             values,

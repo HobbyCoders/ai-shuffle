@@ -22,7 +22,7 @@ vi.mock('$lib/stores/providers.svelte', () => ({
 vi.mock('./ClaudeConnect.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./ProviderConnect.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 import ProviderStep from './ProviderStep.svelte';
-import { nativeEnrollment } from '$lib/components/settings/providers/fixtures';
+import { googleEnrollment, nativeEnrollment } from '$lib/components/settings/providers/fixtures';
 import { nativeOptions } from '$lib/components/settings/providers/native-options.svelte';
 import { providerReadiness } from './provider-readiness';
 import { buildProviders } from '$lib/components/settings/providers/providers-model';
@@ -59,12 +59,26 @@ describe('setup AI provider step', () => {
 		render(ProviderStep, { isAdmin: true, onContinue: vi.fn(), pollMs: 60_000 });
 		const list = await screen.findByRole('list', { name: 'AI providers' });
 		const names = [...list.querySelectorAll('.name')].map((n) => n.textContent);
-		expect(names).toEqual(['OpenAI', 'xAI Grok', 'Claude', 'OpenRouter', 'Kimi', 'MiniMax', 'OpenCode', 'Your own gateway']);
+		expect(names).toEqual(['OpenAI', 'xAI Grok', 'Claude', 'OpenRouter', 'Kimi', 'MiniMax', 'OpenCode', 'Google Antigravity', 'Your own gateway']);
 		const settingsOrder = buildProviders({ rows: [], claude: null, anthropicKeyMasked: null, fal: { keySet: false, masked: '', enabled: true } })
 			.filter((v) => !v.media).map((v) => v.name);
 		expect(names.slice(0, -1)).toEqual(settingsOrder);
 		expect(list.textContent).not.toMatch(/fal\.ai|recommended/i);
 		expect([...list.querySelectorAll('button[aria-expanded="true"]')]).toHaveLength(0);
+	});
+
+	it('offers the Gemini API key and Antigravity as two separate Google choices', async () => {
+		nativeOptions.providers = [...nativeEnrollment, googleEnrollment];
+		render(ProviderStep, { isAdmin: true, onContinue: vi.fn(), pollMs: 60_000 });
+		const list = await screen.findByRole('list', { name: 'AI providers' });
+		const items = [...list.querySelectorAll('li')].map((li) => li.textContent ?? '');
+		const gemini = items.filter((t) => t.includes('Google Gemini'));
+		const agent = items.filter((t) => t.includes('Google Antigravity'));
+		expect(gemini).toHaveLength(1);
+		expect(agent).toHaveLength(1);
+		expect(gemini[0]).toContain('Google AI Studio API key');
+		expect(agent[0]).toContain('Google sign-in');
+		expect(gemini[0]).not.toContain('Antigravity');
 	});
 
 	it('blocks Continue with zero providers ready', async () => {

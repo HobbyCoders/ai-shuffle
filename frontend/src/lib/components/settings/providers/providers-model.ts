@@ -32,7 +32,7 @@ import { safeKeyHint } from './credential-display';
 // Ids
 // ============================================================================
 
-export type BuiltInProviderId = 'claude' | 'openai' | 'grok' | 'openrouter' | 'fal' | NativeProviderId;
+export type BuiltInProviderId = 'claude' | 'openai' | 'grok' | 'openrouter' | 'fal' | 'antigravity' | NativeProviderId;
 /** Built-in providers, then one `gw:<rowId>` per custom gateway (`gw:draft-<n>` while new). */
 export type ProviderId = BuiltInProviderId | `gw:${string}`;
 
@@ -70,9 +70,13 @@ export function parseRowItem(item: string | null | undefined): string | null {
  * through Amazon Bedrock, Google Vertex AI, Microsoft Foundry or an LLM
  * gateway, chosen by the owner), device
  * (ChatGPT/SuperGrok sign-in), key (OpenAI/xAI/OpenRouter API key),
- * gateway (custom endpoint), fal (fal.ai media key).
+ * gateway (custom endpoint), fal (fal.ai media key), agy-* (Google
+ * Antigravity: Gemini API key, business or personal Google sign-in through
+ * Google's own agent).
  */
-export type CredentialFlavor = 'cli' | 'anthropic' | 'cloud' | 'device' | 'key' | 'gateway' | 'fal' | 'plan-key';
+export type CredentialFlavor =
+	| 'cli' | 'anthropic' | 'cloud' | 'device' | 'key' | 'gateway' | 'fal' | 'plan-key'
+	| 'agy-key' | 'agy-business' | 'agy-personal';
 
 export interface CredentialKindDef {
 	/** Menu and row label: "Subscription", "API key". */
@@ -100,6 +104,12 @@ const KINDS: Record<Exclude<BuiltInProviderId, NativeProviderId> | 'gateway', Cr
 	],
 	openrouter: [{ label: 'API key', flavor: 'key', multiple: true, hint: 'One key, many models' }],
 	fal: [{ label: 'Media key', flavor: 'fal', multiple: false, hint: 'Also reads the balance' }],
+	// The supported routes first; a personal sign-in carries Google's terms warning.
+	antigravity: [
+		{ label: 'Gemini API key', flavor: 'agy-key', multiple: true, hint: 'Pay per use, supported' },
+		{ label: 'Business Google sign-in', flavor: 'agy-business', multiple: false, hint: 'Workspace or Cloud account' },
+		{ label: 'Personal Google sign-in', flavor: 'agy-personal', multiple: false, hint: 'Consumer plan, read the terms' }
+	],
 	gateway: [{ label: 'Gateway key', flavor: 'gateway', multiple: false, hint: 'Endpoint, dialect, token' }]
 };
 
@@ -119,7 +129,7 @@ export const isGatewayId = (id: ProviderId): id is `gw:${string}` => id.startsWi
 // Row classification
 // ============================================================================
 
-export type RowClass = 'chatgpt' | 'grok' | 'openai' | 'xai' | 'openrouter' | 'custom' | NativeProviderId;
+export type RowClass = 'chatgpt' | 'grok' | 'openai' | 'xai' | 'openrouter' | 'custom' | 'antigravity' | NativeProviderId;
 
 /**
  * Which slot a model_providers row belongs to. auth_mode wins (the Codex row
@@ -127,6 +137,7 @@ export type RowClass = 'chatgpt' | 'grok' | 'openai' | 'xai' | 'openrouter' | 'c
  */
 export function classifyRow(p: Pick<ModelProvider, 'auth_mode' | 'provider_type'>): RowClass {
 	if (isNativeProvider(p.provider_type)) return p.provider_type;
+	if (p.provider_type === 'antigravity') return 'antigravity';
 	if (p.auth_mode === 'chatgpt') return 'chatgpt';
 	if (p.auth_mode === 'grok' || p.provider_type === 'grok') return 'grok';
 	if (p.provider_type === 'chatgpt') return 'chatgpt';
@@ -147,6 +158,8 @@ export function providerOfRow(p: ModelProvider): ProviderId {
 			return 'grok';
 		case 'openrouter':
 			return 'openrouter';
+		case 'antigravity':
+			return 'antigravity';
 		default:
 			return `gw:${p.id}`;
 	}
@@ -155,6 +168,7 @@ export function providerOfRow(p: ModelProvider): ProviderId {
 export function flavorOfRow(p: ModelProvider): CredentialFlavor {
 	if (isNativeProvider(p.provider_type)) return p.auth_mode === 'plan_key' ? 'plan-key' : 'key';
 	const cls = classifyRow(p);
+	if (cls === 'antigravity') return antigravityFlavor(p.auth_mode);
 	if (cls === 'chatgpt' || cls === 'grok') return 'device';
 	if (cls === 'custom') return 'gateway';
 	return 'key';
@@ -264,6 +278,7 @@ const BUILT_IN: { id: BuiltInProviderId; name: string; glyph: ProviderGlyphKind;
 	{ id: 'minimax', name: 'MiniMax', glyph: 'minimax', letter: 'M' },
 	{ id: 'opencode', name: 'OpenCode', glyph: 'opencode', letter: 'O' },
 	{ id: 'google', name: 'Google Gemini', glyph: 'google', letter: 'G' },
+	{ id: 'antigravity', name: 'Google Antigravity', glyph: 'antigravity', letter: 'A' },
 	{ id: 'fal', name: 'fal.ai', glyph: 'custom', letter: 'f' }
 ];
 
@@ -586,6 +601,7 @@ export function rowCredential(row: ModelProvider, usagePlan?: string | null): Cr
 			row
 		};
 	}
+	if (cls === 'antigravity') return antigravityCredential(row, antigravityFlavor(row.auth_mode));
 	const host = hostOf(row.base_url);
 	const native = isNativeProvider(row.provider_type) ? nativeOption(row.provider_type, row.auth_mode === 'plan_key') ?? row.native_provider : null;
 	return {
@@ -794,7 +810,10 @@ const DRAFT_BASE: Record<CredentialFlavor, (p: ProviderId) => string> = {
 	'plan-key': (p) => nativeOption(p, true)?.credential_label ?? 'Subscription key',
 	key: (p) => nativeOption(p, false)?.credential_label ?? `${p === 'openai' ? 'OpenAI' : p === 'grok' ? 'Grok' : 'OpenRouter'} API key`,
 	gateway: () => 'Gateway key',
-	fal: () => 'Media key'
+	fal: () => 'Media key',
+	'agy-key': () => 'Gemini API key',
+	'agy-business': () => 'Business Google sign-in',
+	'agy-personal': () => 'Personal Google sign-in'
 };
 
 /** "OpenAI API key", then "OpenAI API key 2" when one with that name exists. */
@@ -802,6 +821,70 @@ export function draftName(providerId: ProviderId, flavor: CredentialFlavor, exis
 	const base = DRAFT_BASE[flavor](providerId);
 	const n = existing.filter((c) => c.name.startsWith(base)).length;
 	return n ? `${base} ${n + 1}` : base;
+}
+
+// ============================================================================
+// Google Antigravity
+// ============================================================================
+
+/** The row's `auth_mode` for each Antigravity kind, as the worker stores it. */
+export const ANTIGRAVITY_AUTH_MODE = {
+	'agy-key': 'gemini-api-key',
+	'agy-business': 'oauth-business',
+	'agy-personal': 'oauth-personal'
+} as const;
+
+export type AntigravityFlavor = keyof typeof ANTIGRAVITY_AUTH_MODE;
+
+export const isAntigravityFlavor = (f: CredentialFlavor): f is AntigravityFlavor => f in ANTIGRAVITY_AUTH_MODE;
+
+/** Reserved `extra_env` key on a personal sign-in row: "1" lifts the interactive-only guard. */
+export const ANTIGRAVITY_GUARD_KEY = 'AI_SHUFFLE_ANTIGRAVITY_ALLOW_UNATTENDED';
+
+function antigravityFlavor(authMode: string | null | undefined): AntigravityFlavor {
+	if (authMode === 'oauth-personal') return 'agy-personal';
+	if (authMode === 'oauth-business') return 'agy-business';
+	return 'agy-key';
+}
+
+/** A personal sign-in row still under the interactive-only guard (on unless the owner lifted it). */
+export function antigravityGuarded(row: Pick<ModelProvider, 'provider_type' | 'auth_mode' | 'extra_env'>): boolean {
+	return row.provider_type === 'antigravity' && row.auth_mode === 'oauth-personal'
+		&& row.extra_env?.[ANTIGRAVITY_GUARD_KEY] !== '1';
+}
+
+/**
+ * An Antigravity row. Rows are independent (no "one active per kind" slot):
+ * each is on or off by itself. A Google sign-in lives in Google's agent on
+ * the worker; the row carries what the agent last said
+ * (`antigravity_signed_in`), and one that is not signed in here reads
+ * "Needs sign-in" and is neither ready nor in the picker. The detail asks
+ * the agent again.
+ */
+function antigravityCredential(row: ModelProvider, flavor: AntigravityFlavor): CredentialView {
+	const kind = KINDS.antigravity.find((k) => k.flavor === flavor)!;
+	const models = row.models?.length ?? 0;
+	const guarded = antigravityGuarded(row);
+	// An older worker sends no flag: trust the row as before.
+	const needsSignIn = flavor !== 'agy-key' && row.antigravity_signed_in === false;
+	const parts = [kind.label, needsSignIn ? 'needs sign-in' : plural(models, 'model')];
+	if (guarded) parts.push('interactive only');
+	return {
+		item: rowItem(row.id),
+		providerId: 'antigravity',
+		flavor,
+		name: row.name?.trim() || kind.label,
+		kind: flavor === 'agy-key' ? 'API key' : flavor === 'agy-business' ? 'Business sign-in' : 'Personal sign-in',
+		summary: row.enabled ? parts.join(', ') : 'Off',
+		status: !row.enabled ? 'off' : needsSignIn ? 'warn' : 'ok',
+		statusText: needsSignIn ? 'Needs sign-in' : row.enabled ? 'On' : 'Off',
+		active: row.enabled,
+		on: row.enabled && !needsSignIn,
+		switchable: true,
+		enabled: row.enabled,
+		attention: row.enabled && needsSignIn,
+		row
+	};
 }
 
 /** Fixed endpoints of the API-key providers. */

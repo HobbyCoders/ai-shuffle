@@ -1029,6 +1029,27 @@ async def test_remote_turn_refuses_missing_upload_bytes_before_enqueue(workers, 
         submit = AsyncMock()
         monkeypatch.setattr(turn_manager, "submit_async", submit)
         with pytest.raises(ValueError, match="Invalid upload transfer"):
-            await control.handle("turns", {"session_id": "upload-session", "prompt": "file",
+            await control.handle("turns", {"session_id": "upload-session", "source": "user", "prompt": "file",
                                            "payload": {"upload_blob_ids": ["missing"]}}, from_device="peer")
+        submit.assert_not_awaited()
+
+
+@pytest.mark.parametrize("source", [None, "", 7])
+async def test_a_forwarded_turn_without_a_source_is_refused_not_read_as_the_owner(workers, monkeypatch, source):
+    # ``submit_turn`` always names the source. A body without one must not
+    # be admitted as "user" (a turn the owner typed, which the personal
+    # Google sign-in guard lets through).
+    from app.core import turn_manager
+    from unittest.mock import AsyncMock
+    a = workers("source-required")
+    with a.active():
+        engine.create_network("Sources")
+        database.create_session(session_id="source-session", profile_id="default", title="Sources")
+        submit = AsyncMock()
+        monkeypatch.setattr(turn_manager, "submit_async", submit)
+        body = {"session_id": "source-session", "prompt": "hello"}
+        if source is not None:
+            body["source"] = source
+        with pytest.raises(ValueError, match="source is required"):
+            await control.handle("turns", body, from_device="peer")
         submit.assert_not_awaited()

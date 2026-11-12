@@ -99,3 +99,52 @@ def test_first_arrival_locks_nothing_and_inserts(cluster):
         conn.commit()
     assert row["id"] == "pg-usage-new"
 
+
+
+def test_a_generic_edit_keeps_the_guard_stored_when_it_writes(cluster, monkeypatch):
+    # The generic PATCH on an Antigravity row keeps the reserved guard key as
+    # stored at write time: it takes the slot lock, then the provider row FOR
+    # UPDATE (the same order as before, then the snapshot), so a synced guard
+    # restore holding the row makes it wait and then wins. No new lock pair:
+    # a usage writer takes the provider row, then its snapshot.
+    from app.core import antigravity
+    from app.db import model_providers
+
+    coll = policy.collection("model_providers")
+    row_id = "pg-antigravity-guard"
+    record = {"id": row_id, "name": "Antigravity", "provider_type": "antigravity",
+              "base_url": "", "auth_mode": "oauth-personal", "enabled": True}
+    key = antigravity.GUARD_OVERRIDE_KEY
+    with closing(pg_connect(cluster)) as setup:
+        engine.materialize(setup.cursor(), coll, row_id, record)
+        setup.cursor().execute("UPDATE model_providers SET extra_env_json = %s WHERE id = %s",
+                               ('{"%s": "1"}' % key, row_id))
+
+    with closing(pg_connect(cluster)) as sync, closing(pg_connect(cluster)) as edit, \
+            closing(pg_connect(cluster)) as watch, ThreadPoolExecutor(max_workers=1) as pool:
+        sync.autocommit = edit.autocommit = False
+        for conn in (sync, edit):
+            conn.cursor().execute("SET lock_timeout TO 10000")
+        edit_cursor = edit.cursor()
+        edit_cursor.execute("SELECT pg_backend_pid() AS pid")
+        edit_pid = edit_cursor.fetchone()["pid"]
+        # The synced restore: row locked, guard key gone, not yet committed.
+        sync.cursor().execute("SELECT 1 FROM model_providers WHERE id = %s FOR UPDATE", (row_id,))
+        sync.cursor().execute("UPDATE model_providers SET extra_env_json = '{}' WHERE id = %s", (row_id,))
+        monkeypatch.setattr(model_providers, "get_db", lambda: nullcontext(edit))
+
+        def stale_edit():
+            saved = model_providers.update_model_provider(
+                row_id, keep_env_keys=(key,), extra_env_json={"OTHER_SETTING": "1", key: "1"})
+            edit.commit()
+            return saved
+
+        future = pool.submit(stale_edit)
+        deadline = time.monotonic() + 5
+        while not waiting_on_lock(watch, edit_pid):
+            assert time.monotonic() < deadline, "the edit never waited for the provider row"
+            time.sleep(0.05)
+        sync.commit()
+        saved = future.result(timeout=15)
+
+    assert saved["extra_env_json"] == {"OTHER_SETTING": "1"}

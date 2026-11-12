@@ -125,7 +125,7 @@ async def test_fence_covers_forwarded_and_sync_intake_and_expires(mock_db, monke
     sid = _make_session("fence")
     assert message_admission.cancel_unknown(sid, CMD) is None
     with pytest.raises(message_admission.CancelledSend):
-        await control._submit_forwarded_turn({"session_id": sid, "prompt": "late", "profile_id": "default"}, "peer", CMD)
+        await control._submit_forwarded_turn({"session_id": sid, "source": "user", "prompt": "late", "profile_id": "default"}, "peer", CMD)
     with pytest.raises(message_admission.CancelledSend):
         turn_manager.submit(sid, "user", prompt="late", command_id=CMD)
     monkeypatch.setattr(message_admission, "monotonic", lambda: float("inf"))

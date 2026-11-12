@@ -26,6 +26,7 @@
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import {
 		addableKinds,
+		antigravityGuarded,
 		claudeGateNotice,
 		claudeHeaderStatus,
 		type CredentialView,
@@ -59,7 +60,15 @@
 			? detailLine(`${getModels().length} built-in models`, 'This worker', provider.claudeSubscriptions ? 'One sign-in and one key selected' : 'One key selected for API key mode')
 			: provider.media
 				? detailLine(head.text, 'Used by media tools')
-				: detailLine(head.text, `${pickerModels} models in the picker`, provider.gateway ? 'Independent model source' : 'One active account per kind')
+				: detailLine(
+						head.text,
+						`${pickerModels} models in the picker`,
+						provider.gateway
+							? 'Independent model source'
+							: provider.id === 'antigravity'
+								? 'Each key or sign-in is on or off by itself'
+								: 'One active account per kind'
+					)
 	);
 
 	const credsCount = $derived(provider.claude ? (mode === 'off' ? 'none active' : 'one active') : `${live.length} on`);
@@ -93,7 +102,8 @@
 
 	function hintFor(c: CredentialView): string {
 		const models = c.row && c.on && c.flavor !== 'fal' ? `, ${c.row.models.length} in picker` : '';
-		return `${c.kind}${models}`;
+		const guard = c.row && antigravityGuarded(c.row) ? ', interactive only' : '';
+		return `${c.kind}${models}${guard}`;
 	}
 </script>
 
@@ -120,7 +130,7 @@
 		<ClaudeCompaction />
 	{/if}
 
-	{#if !provider.claude && !provider.media && !provider.gateway}
+	{#if !provider.claude && !provider.media && !provider.gateway && provider.id !== 'antigravity'}
 		<p class="pv-note">Switching accounts keeps existing chats and automations on the active account. API keys and subscriptions can be active together.</p>
 	{/if}
 	<RowGroup title="Credentials" count={credsCount} id="providers-credentials">

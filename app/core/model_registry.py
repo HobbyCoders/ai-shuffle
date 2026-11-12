@@ -429,6 +429,10 @@ def _is_subscription_row(row: ModelProviderRow) -> bool:
     return ptype in ("chatgpt", "grok") or mode in ("chatgpt", "grok", "plan_key")
 
 
+# Picker subtext for Antigravity sign-in rows (a label, not a billing tier).
+_ANTIGRAVITY_PLANS = {"oauth-personal": "Personal", "oauth-business": "Business"}
+
+
 def _provider_plan_types() -> Dict[str, Optional[str]]:
     """Latest known ``plan_type`` per provider id, from ``provider_usage_snapshots``.
 
@@ -507,9 +511,9 @@ def _providers_payload() -> List[Dict[str, object]]:
     # browser's own default pick skips a row needing a re-sign-in or with a
     # rejected key. ``None`` (unknown) when the read fails.
     try:
-        usable_ids: Optional[set] = {
-            r.get("id") for r in (database.list_usable_model_providers() or [])
-        }
+        from app.core.credential_gate import usable_provider_rows
+
+        usable_ids: Optional[set] = {r.get("id") for r in usable_provider_rows()}
     except Exception as e:
         logger.warning("Could not load usable model providers for registry payload: %s", e)
         usable_ids = None
@@ -530,9 +534,17 @@ def _providers_payload() -> List[Dict[str, object]]:
             # HOW the row authenticates; ``plan_type`` names the subscription
             # tier for subscription rows (null for API-key rows, and for a
             # subscription row whose usage snapshot hasn't landed yet).
-            "auth_kind": "subscription" if _is_subscription_row(row) else "api",
+            # An Antigravity Google sign-in reads as a subscription here only;
+            # defaults and memory billing keep treating it as non-subscription.
+            "auth_kind": "subscription" if _is_subscription_row(row) or (
+                row.get("provider_type") == "antigravity"
+                and row.get("auth_mode") in ("oauth-personal", "oauth-business")) else "api",
+            # Antigravity sign-ins carry no plan string; personal and business
+            # rows would otherwise share one "Subscription" picker heading.
             "plan_type": (
-                plan_types.get(row.get("id", "")) if _is_subscription_row(row) else None
+                plan_types.get(row.get("id", "")) if _is_subscription_row(row)
+                else _ANTIGRAVITY_PLANS.get(row.get("auth_mode") or "")
+                if row.get("provider_type") == "antigravity" else None
             ),
             "models": [
                 {

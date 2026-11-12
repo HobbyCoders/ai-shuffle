@@ -16,21 +16,22 @@ import {
 } from '$lib/components/settings/providers/providers-model';
 
 /** The choices the step offers. `gateway` stands for every custom gateway. */
-export type SetupProviderChoice = 'claude' | 'openai' | 'openrouter' | 'grok' | 'gateway' | NativeProviderId;
+export type SetupProviderChoice = 'claude' | 'openai' | 'openrouter' | 'grok' | 'antigravity' | 'gateway' | NativeProviderId;
 
 export interface SetupProviderDef {
 	id: SetupProviderChoice;
 	name: string;
 	/** One short line under the name. */
 	blurb: string;
-	glyph: 'claude' | 'openai' | 'openrouter' | 'grok' | 'custom' | NativeProviderId;
+	glyph: 'claude' | 'openai' | 'openrouter' | 'grok' | 'antigravity' | 'custom' | NativeProviderId;
 }
 
 const BUILT_IN_CHOICES: Record<Exclude<(typeof AGENT_PROVIDER_ORDER)[number], NativeProviderId>, SetupProviderDef> = {
 	openai: { id: 'openai', name: 'OpenAI', blurb: 'ChatGPT subscription or OpenAI API key', glyph: 'openai' },
 	grok: { id: 'grok', name: 'xAI Grok', blurb: 'SuperGrok subscription or xAI API key', glyph: 'grok' },
 	claude: { id: 'claude', name: 'Claude', blurb: 'Claude subscription or Anthropic API key', glyph: 'claude' },
-	openrouter: { id: 'openrouter', name: 'OpenRouter', blurb: 'One API key, many models', glyph: 'openrouter' }
+	openrouter: { id: 'openrouter', name: 'OpenRouter', blurb: 'One API key, many models', glyph: 'openrouter' },
+	antigravity: { id: 'antigravity', name: 'Google Antigravity', blurb: "Google's agent with a Gemini API key or Google sign-in", glyph: 'antigravity' }
 };
 
 /** Same order as Settings > Providers, then "Your own gateway" last. */
