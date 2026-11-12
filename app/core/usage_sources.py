@@ -180,6 +180,31 @@ def _is_openrouter_row(row: Mapping[str, Any] | None) -> bool:
     return (row or {}).get("provider_type") == "openrouter"
 
 
+def _native_row_on(row: Mapping[str, Any] | None, provider: str, plan: bool, host: str) -> bool:
+    """A native Messages row of this credential kind on the vendor's own host."""
+    from fluid.providers.compatible import endpoint_root
+
+    r = row or {}
+    if r.get("provider_type") != provider or (r.get("auth_mode") == "plan_key") != plan:
+        return False
+    try:
+        url = urlsplit(endpoint_root(provider, r.get("auth_mode"), r.get("base_url")))
+        return (url.scheme == "https" and url.hostname == host and url.port in (None, 443)
+                and not url.username and not url.password)
+    except ValueError:
+        return False
+
+
+def is_kimi_api_row(row: Mapping[str, Any] | None) -> bool:
+    """Moonshot pay-as-you-go keys (international platform), not Kimi Code."""
+    return _native_row_on(row, "kimi", False, "api.moonshot.ai")
+
+
+def is_minimax_plan_row(row: Mapping[str, Any] | None) -> bool:
+    """MiniMax M Plan keys on the international platform."""
+    return _native_row_on(row, "minimax", True, "api.minimax.io")
+
+
 # ---------------------------------------------------------------------------
 # The registry
 # ---------------------------------------------------------------------------
@@ -191,6 +216,10 @@ FAL_BALANCE_URL = "https://rest.alpha.fal.ai/billing/user_balance"
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+# https://platform.kimi.ai/docs/api/balance
+KIMI_BALANCE_URL = "https://api.moonshot.ai/v1/users/me/balance"
+# https://platform.minimax.io/docs/m-plan/faq ("Use the API endpoint")
+MINIMAX_PLAN_URL = "https://www.minimax.io/v1/token_plan/remains"
 
 _SOURCES: tuple[UsageSource, ...] = (
     UsageSource(
@@ -359,6 +388,38 @@ _SOURCES: tuple[UsageSource, ...] = (
         poller="_poll_grok_provider",
         applies=is_grok_subscription_row,
     ),
+    UsageSource(
+        id="kimi_balance",
+        snapshot_type="kimi_balance",
+        label="Kimi balance API",
+        credential="Kimi API platform key (the inference key)",
+        scope="account",
+        scope_label="Account available balance, cash plus vouchers (USD)",
+        measure=MONETARY_CREDIT,
+        collection=POLLED,
+        support=DOCUMENTED,
+        dashboard_url="https://platform.kimi.ai/console/account",
+        endpoints=(Endpoint(KIMI_BALANCE_URL, 300),),
+        unavailable=("Kimi Code membership quota", "per-key spend"),
+        poller="_poll_kimi_balance",
+        applies=is_kimi_api_row,
+    ),
+    UsageSource(
+        id="minimax_plan",
+        snapshot_type="minimax_plan",
+        label="MiniMax M Plan remaining-quota API",
+        credential="MiniMax M Plan key (the inference key)",
+        scope="subscription",
+        scope_label="M Plan 5-hour and weekly text-model windows; not pay-as-you-go balance",
+        measure=SUBSCRIPTION_ALLOWANCE,
+        collection=POLLED,
+        support=DOCUMENTED,
+        dashboard_url="https://platform.minimax.io/console/usage",
+        endpoints=(Endpoint(MINIMAX_PLAN_URL, 300),),
+        unavailable=("pay-as-you-go balance", "image and video model windows"),
+        poller="_poll_minimax_plan",
+        applies=is_minimax_plan_row,
+    ),
 )
 
 SOURCES: dict[str, UsageSource] = {s.id: s for s in _SOURCES}
@@ -375,6 +436,8 @@ _SNAPSHOT_SOURCES = {
     "openrouter_account": "openrouter_credits",
     "fal": "fal_billing",
     "grok": "grok_subscription",
+    "kimi_balance": "kimi_balance",
+    "minimax_plan": "minimax_plan",
 }
 
 

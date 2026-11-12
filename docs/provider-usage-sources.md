@@ -39,6 +39,8 @@ popover keeps the rows it already shows.
 | `fal_billing` | `GET https://rest.alpha.fal.ai/billing/user_balance` | fal.ai API key (the media tools key: saved, or `FAL_KEY` / `FAL_API_KEY`) | Account | Provider-reported credit balance | Polled on demand, 300 s | Undocumented endpoint | [Billing](https://fal.ai/dashboard/billing) |
 | `claude_rate_limit_events` | Rate-limit events from the running Claude Code session | None beyond the session | Subscription | Subscription allowance (one window at a time) | Passive | Response metadata | [Usage](https://claude.ai/settings/usage) |
 | `grok_subscription` | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` and `/v1/settings` | SuperGrok sign-in (Grok CLI OAuth) | Subscription | Subscription allowance and plan | Polled on demand, 300 s per endpoint | Unofficial, subscription-specific | [Grok](https://grok.com/) |
+| `kimi_balance` | `GET https://api.moonshot.ai/v1/users/me/balance` | Kimi API platform key (the inference key) | Account | Available balance in USD (cash plus vouchers) | Polled on demand, 300 s | Documented API | [Account](https://platform.kimi.ai/console/account) |
+| `minimax_plan` | `GET https://www.minimax.io/v1/token_plan/remains` | MiniMax M Plan key (the inference key) | Subscription | 5-hour and weekly text-model windows, as percent remaining | Polled on demand, 300 s | Documented API | [Usage](https://platform.minimax.io/console/usage) |
 
 What each source cannot report is listed with it in the registry (for example,
 the OpenRouter key endpoint has no account balance). The popover shows these as "Not reported by
@@ -241,6 +243,30 @@ subscription > Usage links to
 [claude.ai/settings/usage](https://claude.ai/settings/usage) instead.
 `tests/core/test_claude_cli_no_token_access.py` fails if any app or Fluid
 module names the CLI's credentials file or its `claudeAiOauth` token again.
+
+## Kimi, MiniMax and OpenCode keys
+
+These native Messages rows record per-turn tokens (input, output, cache read
+and cache write) from the vendor's `message_delta` usage, which carries the
+whole block; MiniMax's `message_start` holds placeholder counts, so the final
+delta replaces them. Cost is estimated from the vendor's list price where one
+is published (Kimi API and MiniMax API keys) and stays unknown otherwise.
+OpenCode Console keys record the dollars OpenCode reports charging in
+`usage.cost`; a cost OpenCode marks as estimated (bring-your-own-key) is shown
+as estimated. Subscription keys (Kimi Code, MiniMax M Plan, OpenCode Go) never
+record cash spend.
+
+| Row | Meter |
+| --- | --- |
+| Kimi API (pay as you go) | `kimi_balance`: the documented balance endpoint, on keys from the international platform (`api.moonshot.ai`). A key from another Kimi platform or a custom endpoint shows no meter. |
+| Kimi Code membership | None: Kimi documents no quota API. Compare on [My Quota](https://www.kimi.com/membership/subscription?tab=quota) or the [Kimi Code console](https://www.kimi.com/code/console). |
+| MiniMax M Plan | `minimax_plan`: the remaining-quota endpoint the M Plan FAQ documents. Only the stated remaining percentage is read; the usage counts change meaning between response versions and are ignored. |
+| MiniMax API (pay as you go) | None: no documented balance API. Compare on [Balance](https://platform.minimax.io/user-center/payment/balance). |
+| OpenCode Console and OpenCode Go | None: OpenCode documents no balance or Go usage API. Per-turn cost is recorded from responses; compare on the [OpenCode console](https://opencode.ai/console). |
+
+A refused key (HTTP 401 or 403, or MiniMax business codes 1004 and 2049) is
+not probed again until the key changes. Response bodies are never logged or
+stored.
 
 ## OpenRouter setup and account separation
 

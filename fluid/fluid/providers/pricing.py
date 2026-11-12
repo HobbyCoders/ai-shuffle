@@ -304,12 +304,23 @@ def resolve_price(
 # All sources read 2026-11-05. Plan clients never call this table: an allowance
 # is not cash spend. The app also attributes their usage as subscription.
 _MINIMAX = "https://platform.minimax.io/docs/pricing/overview; 2026-11-05; standard tier"
+_KIMI = "https://platform.kimi.ai/docs/pricing/chat; 2026-11-12; 5-minute cache writes"
+# Kimi K3 1-hour cache writes bill twice the input rate (same source).
+_KIMI_1H_WRITE = 2.0
 COMPATIBLE_PRICES = {
     "minimax": {
         "minimax-m3.1-flash": ModelPrice(input=0.15, cached_input=0.015, output=0.60, source=_MINIMAX),
         "minimax-m3": ModelPrice(input=0.30, cached_input=0.06, output=1.20, source=_MINIMAX + "; <=512K"),
     },
-    "kimi": {},  # https://platform.kimi.ai/docs/pricing/chat: rate table not available in fetched text
+    # Moonshot's pay-as-you-go API only: Kimi Code plan models have no list
+    # price. ``cache_write`` is the default 5-minute TTL; a 1-hour write
+    # bills twice the input rate (see ``_KIMI_1H_WRITE``).
+    "kimi": {
+        "kimi-k3.1-pro": ModelPrice(input=2.00, cached_input=0.20, cache_write=2.00, output=10.00, source=_KIMI),
+        "kimi-k3.1-pro-highspeed": ModelPrice(input=4.00, cached_input=0.20, cache_write=4.00, output=20.00,
+                                              source=_KIMI),
+        "kimi-k3": ModelPrice(input=3.00, cached_input=0.30, cache_write=3.00, output=15.00, source=_KIMI),
+    },
     # Console's cash price table, NOT Go's similarly dollar-denominated allowance.
     "opencode": {
         "minimax-m3": ModelPrice(input=0.30, cached_input=0.06, output=1.20,
@@ -344,7 +355,19 @@ def compatible_cost(provider: str, model: str, usage: Mapping[str, Any]) -> floa
             rates = (0.20, 0.02, 0.25, 0.75) if prompt > 272_000 else (0.10, 0.01, 0.125, 0.50)
         price = ModelPrice(input=rates[0], cached_input=rates[1], cache_write=rates[2], output=rates[3],
                            source="https://opencode.ai/docs/zen/; 2026-11-05; Console cash; context tier")
-    return _cost_from_price(price, usage) if price is not None else None
+    cost = _cost_from_price(price, usage) if price is not None else None
+    if cost is not None and provider == "kimi" and price is not None and price.input is not None:
+        # The 1-hour share of the writes, already billed once at the 5-minute
+        # rate above, adds the difference.
+        from fluid.providers.anthropic.serialize import CACHE_WRITE_1H_KEY
+
+        tokens_1h = usage.get(CACHE_WRITE_1H_KEY, 0) or 0
+        if isinstance(tokens_1h, int) and not isinstance(tokens_1h, bool) and tokens_1h > 0:
+            # A share kept from message_start never exceeds the final total.
+            tokens_1h = min(tokens_1h, usage.get("cache_creation_input_tokens", 0) or 0)
+            write_rate = price.cache_write if price.cache_write is not None else price.input
+            cost += tokens_1h * (price.input * _KIMI_1H_WRITE - write_rate) / 1_000_000
+    return cost
 
 
 def _cost_from_price(price: ModelPrice, usage: Mapping[str, Any]) -> float | None:

@@ -5642,7 +5642,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                                 name=block["tool_name"] or "", input=args)
                     )
             elif chunk.kind == "usage":
-                self._merge_usage(usage_totals, payload.get("usage", {}))
+                self._merge_usage(usage_totals, payload.get("usage", {}),
+                                  replace=payload.get("final_usage") is True)
                 if payload.get("stop_reason"):
                     stop_reason = payload["stop_reason"]
                 if isinstance(payload.get("stop_details"), dict):
@@ -6726,11 +6727,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         return outcome
 
     @staticmethod
-    def _merge_usage(totals: dict[str, Any], usage: dict[str, Any]) -> None:
+    def _merge_usage(
+        totals: dict[str, Any], usage: dict[str, Any], *, replace: bool = False,
+    ) -> None:
         """WITHIN one model call: usage chunks are cumulative snapshots
         (message_start carries input counts, the terminal chunk output counts),
         so token keys take max(); a provider-reported cost rides one terminal
-        chunk and sums harmlessly."""
+        chunk and sums harmlessly. ``replace`` is for a terminal chunk the
+        provider marks authoritative: its token counts overwrite the earlier
+        ones, so a placeholder in message_start cannot outlive the real split."""
         for key, value in usage.items():
             if key in {"provider_requests", "provider_response"}:
                 # Correlation/routing metadata is a snapshot, not a numeric
@@ -6742,7 +6747,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     totals[key] = totals.get(key, 0.0) + float(value)
                 continue
             if isinstance(value, int):
-                totals[key] = max(totals.get(key, 0), value)
+                totals[key] = value if replace else max(totals.get(key, 0), value)
 
     async def record_auxiliary_usage(
         self, usage: dict[str, Any], *, model: str, turn_id: str | None, source: str,

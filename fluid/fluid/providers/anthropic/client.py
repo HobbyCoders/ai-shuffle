@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import time
 from collections.abc import AsyncIterator
@@ -65,6 +66,56 @@ def _redact_key(value, key):
     if isinstance(value, list):
         return [_redact_key(v, key) for v in value]
     return value
+
+
+_PROMPT_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _count(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _compatible_usage(payload: dict, provider: str, plan_key: bool, state: dict | None = None) -> dict:
+    """A gateway's ``message_delta`` usage, as the engine should merge it.
+
+    Kimi, MiniMax and OpenCode send the whole usage block on the final
+    ``message_delta``, and MiniMax's ``message_start`` carries placeholder
+    counts (the full prompt as ``cache_read_input_tokens``). The engine's
+    max() merge would keep that placeholder beside the real split, so a delta
+    that reports its prompt side is marked final and replaces the start's
+    counts. The 1-hour write share is replaced only when the delta states it
+    (its ``cache_creation`` breakdown, or zero writes in total); otherwise the
+    earlier count stands. OpenCode reports the dollars charged as
+    ``usage.cost``; on a pay-as-you-go key that is the bill, so it becomes
+    ``cost_usd``. The figure is cumulative and the engine sums ``cost_usd``,
+    so ``state`` (one dict per stream) passes on only the increase.
+    """
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return payload
+    counts = [_count(usage.get(key)) for key in _PROMPT_KEYS]
+    usage = dict(usage)
+    out = dict(payload, usage=usage)
+    if any(c is not None for c in counts) and sum(c or 0 for c in counts) > 0:
+        out["final_usage"] = True
+        from fluid.providers.anthropic.serialize import CACHE_WRITE_1H_KEY
+
+        breakdown = usage.get("cache_creation")
+        stated = _count(breakdown.get("ephemeral_1h_input_tokens")) if isinstance(breakdown, dict) else None
+        if stated is not None or usage.get("cache_creation_input_tokens") == 0:
+            usage.setdefault(CACHE_WRITE_1H_KEY, stated or 0)
+    cost = usage.get("cost")
+    if (provider == "opencode" and not plan_key and "cost_usd" not in usage
+            and isinstance(cost, (int, float)) and not isinstance(cost, bool)
+            and math.isfinite(cost) and cost >= 0):
+        state = {} if state is None else state
+        seen = state.get("cost_usd", 0.0)
+        usage["cost_usd"] = max(float(cost) - seen, 0.0)
+        state["cost_usd"] = max(float(cost), seen)
+        meta = usage.get("opencode")
+        if isinstance(meta, dict) and meta.get("estimated") is True:
+            usage["cost_from_table"] = True  # priced at list, not charged
+    return out
 
 
 class AnthropicClient:
@@ -216,6 +267,7 @@ class AnthropicClient:
                         # can be retried before the engine sees a message
                         # begin. Once content has flowed, an error surfaces.
                         pending_start: StreamChunk | None = None
+                        usage_state: dict = {}  # cumulative cost already passed on
                         retry_error = False
                         # Set once message_stop or an error reached the
                         # engine; a body that ends before either was cut off.
@@ -238,6 +290,9 @@ class AnthropicClient:
                                 chunk = StreamChunk("error", _redact_key(chunk.payload, self._api_key))
                             if chunk is None:
                                 continue
+                            if chunk.kind == "usage" and self._compatible_provider:
+                                chunk = StreamChunk("usage", _compatible_usage(
+                                    chunk.payload, self._compatible_provider, self._plan_key, usage_state))
                             if chunk.kind == "message_start" and not yielded:
                                 pending_start = chunk
                                 continue
