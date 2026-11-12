@@ -274,7 +274,7 @@ the network subsystem, not this fact-document limit.
 
 ## Forgetting and migration
 
-Forget requires an explicit request and current revision. It removes live,
+Forgetting a fact requires an explicit request and current revision. It removes live,
 archived and retained historical values, purges old inference evidence and legacy
 synthesis previews, and publishes a deletion barrier. Normal learning cannot
 reintroduce a matching forgotten key/value without an explicit restore. It does
