@@ -269,6 +269,23 @@ async def test_resume_after_restart_uses_session_resume(tmp_path: Path) -> None:
         await second.close()
 
 
+async def test_replaced_spec_starts_a_fresh_process_that_resumes(tmp_path: Path) -> None:
+    """A new key or agent setting: the next turn runs a new process on the same session."""
+    d = await _driver(tmp_path, session_id="s-1", auth_mode="gemini-api-key", api_key="test-key-old")
+    try:
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        acp_sid, pid = d.loop.cli_session_id, d.loop.pid
+        await d.loop.replace_spec(_spec(tmp_path, auth_mode="gemini-api-key", api_key="test-key-new"))
+        assert d.loop.pid is None  # stopped between turns, not mid-turn
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert d.loop.pid not in (None, pid)
+        assert d.loop.cli_session_id == acp_sid
+        assert [r["params"]["sessionId"] for r in _received(tmp_path, "session/resume")] == [acp_sid]
+        assert d.loop.spec.env and d.loop.spec.env["GEMINI_API_KEY"] == "test-key-new"
+    finally:
+        await d.close()
+
+
 async def test_resume_op_resends_an_unanswered_prompt(tmp_path: Path) -> None:
     """The app's retry: the head prompt goes out again, with no new user node."""
     d = await _driver(tmp_path, session_id="s-1")

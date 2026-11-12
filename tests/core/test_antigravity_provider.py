@@ -132,22 +132,89 @@ def test_warning_names_the_terms_section_and_faq():
     assert "suspended" in ag.WARNING_TEXT
 
 
-def test_adapter_refuses_an_unattended_turn_on_a_guarded_row():
-    from app.core.environment import ProviderConfigError
+class _Engine:
+    """Stands in for the connected AcpLoop: records process restarts."""
+
+    def __init__(self):
+        self.specs = []
+
+    async def replace_spec(self, spec):
+        self.specs.append(spec)
+
+
+def _connected(row_id, session_id="s1"):
+    """An adapter as ``_connect_antigravity`` leaves it, minus the process."""
     from app.core.provider.harness_adapter import HarnessAdapter
 
     adapter = HarnessAdapter.__new__(HarnessAdapter)
-    adapter._antigravity_row = {"auth_mode": "oauth-personal"}
-    adapter._next_app_turn_source = "automation"
+    adapter._options = SimpleNamespace(
+        extra={"provider_id": row_id, "app_session_id": session_id}, add_dirs=[], aih_turn_source=None)
+    adapter._engine = _Engine()
+    adapter._antigravity_binding = ag.spawn_binding(db.get_model_provider(row_id, include_token=True))
+    adapter._next_app_turn_source = None
+    return adapter
+
+
+async def _turn(adapter, source):
+    adapter._next_app_turn_source = source
+    await adapter._check_antigravity_turn()
+
+
+async def test_guard_changes_apply_to_the_next_turn_of_a_connected_chat(client, session_row):
+    # Each turn reads the stored row: the copy a chat took when it connected
+    # decides nothing, in either direction.
+    from app.core.environment import ProviderConfigError
+
+    row = _create(client)
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+    adapter = _connected(row["id"])
+    await _turn(adapter, "automation")  # lifted: an automatic turn runs
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": False})
     with pytest.raises(ProviderConfigError, match="scheduled or automatic"):
-        adapter._check_antigravity_turn()
-    # The source names one submit only: the next owner turn goes through.
-    adapter._check_antigravity_turn()
-    adapter._next_app_turn_source = "user"
-    adapter._check_antigravity_turn()
-    adapter._antigravity_row = {"auth_mode": "gemini-api-key"}
-    adapter._next_app_turn_source = "automation"
-    adapter._check_antigravity_turn()
+        await _turn(adapter, "automation")
+    await _turn(adapter, "user")  # the owner's own turn still goes through
+    await _turn(adapter, None)  # the source names one submit only
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+    await _turn(adapter, "automation")
+    # Session-level reasons are re-checked too once the guard is back on.
+    session_row[0]["automation_id"] = "auto-1"
+    await _turn(adapter, "user")
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": False})
+    with pytest.raises(ProviderConfigError, match="an automation run"):
+        await _turn(adapter, "user")
+    # The guard is the app's setting, not the agent's: no process restart.
+    assert adapter._engine.specs == []
+
+
+async def test_key_rows_are_never_guarded_and_restart_on_a_new_key(client, session_row):
+    row = _create(client, "gemini-api-key", api_key="test-gemini-secret-value")
+    adapter = _connected(row["id"])
+    await _turn(adapter, "automation")
+    assert adapter._engine.specs == []
+    from app.api.model_providers import _encrypt_token_or_400
+    db.update_model_provider(row["id"], auth_token=_encrypt_token_or_400("test-gemini-other-value"))
+    await _turn(adapter, "user")
+    # The key lives in the agent's environment: the next turn starts a fresh
+    # process with the new one (and resumes the saved conversation).
+    assert len(adapter._engine.specs) == 1
+    assert adapter._engine.specs[0].env.get("GEMINI_API_KEY") == "test-gemini-other-value"
+    await _turn(adapter, "user")
+    assert len(adapter._engine.specs) == 1
+
+
+async def test_a_deleted_or_disabled_row_refuses_the_next_turn(client, session_row):
+    from app.core.environment import ProviderConfigError
+
+    row = _create(client, "gemini-api-key", api_key="test-gemini-secret-value")
+    adapter = _connected(row["id"])
+    db.update_model_provider(row["id"], enabled=False)
+    with pytest.raises(ProviderConfigError, match="disabled"):
+        await _turn(adapter, "user")
+    db.update_model_provider(row["id"], enabled=True)
+    await _turn(adapter, "user")
+    db.delete_model_provider(row["id"])
+    with pytest.raises(ProviderConfigError, match="no longer exists"):
+        await _turn(adapter, "user")
 
 
 # --- API ----------------------------------------------------------------------

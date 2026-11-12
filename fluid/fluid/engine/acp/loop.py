@@ -372,6 +372,16 @@ class AcpLoop:
                     await task
         await self._stop_process()
 
+    async def replace_spec(self, spec: AcpAgentSpec) -> None:
+        """Use ``spec`` from the next turn: the running process is stopped
+        and the next turn starts a fresh one, resuming the saved session.
+        Only between turns; a running turn keeps its process."""
+        if self._turn_task is not None and not self._turn_task.done():
+            raise RuntimeError("a turn is running; replace the spec between turns")
+        async with self._start_lock:
+            self.spec = spec
+            await self._stop_process()
+
     async def release_abandoned(self) -> None:
         await self.aclose()
 

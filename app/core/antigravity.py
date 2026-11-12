@@ -534,18 +534,23 @@ async def sign_out(row: Mapping[str, Any]) -> None:
 # Guard: personal sign-ins are interactive-only by default
 # ---------------------------------------------------------------------------
 
-def unattended_reason(options: Any) -> Optional[str]:
+_CONNECT_SOURCE: Any = object()
+
+
+def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE) -> Optional[str]:
     """Why this run is not the owner typing in their own chat, or None.
 
     Refused: automation runs, scheduled and other unattended turns, Task /
     Swarm workers, subagent children, sessions another agent started, and
     internal calls with no app session. Reads the session row; never raises
-    (a failed read counts as unattended).
+    (a failed read counts as unattended). ``turn_source`` names the turn
+    being started; by default the source the session connected with.
     """
     extra = getattr(options, "extra", None) or {}
     if extra.get("one_shot") or extra.get("assistant_proactive") is not None:
         return "a background call"
-    turn_source = getattr(options, "aih_turn_source", None)
+    if turn_source is _CONNECT_SOURCE:
+        turn_source = getattr(options, "aih_turn_source", None)
     from app.core.turn_sources import PERSON_PRESENT_TURN_SOURCES
     if turn_source and turn_source not in PERSON_PRESENT_TURN_SOURCES:
         return "a scheduled or automatic turn"
@@ -577,12 +582,56 @@ def unattended_reason(options: Any) -> Optional[str]:
     return None
 
 
-def guard_refusal(row: Mapping[str, Any], options: Any) -> Optional[str]:
+def guard_refusal(row: Mapping[str, Any], options: Any, *,
+                  turn_source: Any = _CONNECT_SOURCE) -> Optional[str]:
     """The refusal text for this run on this row, or None to proceed."""
     if not guarded(row):
         return None
-    reason = unattended_reason(options)
+    reason = unattended_reason(options, turn_source=turn_source)
     return GUARD_REFUSAL.format(reason=reason) if reason else None
+
+
+MISSING_ROW = "This chat's Antigravity provider no longer exists."
+
+
+def turn_row(provider_id: Optional[str], options: Any,
+             turn_source: Optional[str]) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Re-read the row as a turn starts: ``(refusal, row)``.
+
+    Every turn decides from the stored row, never from the copy a connected
+    chat took: a guard restored, a row disabled or deleted applies to the
+    very next turn. One primary-key read (with the token, for the spawn
+    binding below), plus the session row only while the guard applies.
+    """
+    from app.db import database as db
+
+    try:
+        row = db.get_model_provider(provider_id, include_token=True) if provider_id else None
+    except Exception:  # noqa: BLE001 — fail closed, like the guard itself
+        logger.debug("[antigravity] turn check could not read %s", provider_id, exc_info=True)
+        return "Could not check this chat's Antigravity provider. Try again.", None
+    if not row or row.get("provider_type") != PROVIDER_TYPE:
+        return MISSING_ROW, None
+    if not row.get("enabled"):
+        return (f"Model provider '{row.get('name') or provider_id}' is disabled. "
+                "Re-enable it in Settings or pick a different model."), None
+    return guard_refusal(row, options, turn_source=turn_source), row
+
+
+def spawn_binding(row: Mapping[str, Any]) -> str:
+    """Digest of everything fixed into the agent process when it starts.
+
+    The key, the agent's extra environment and the installed binary go into
+    its environment and argv at spawn; when any of them changes, the next
+    turn starts a fresh process (resuming the agent's saved session).
+    """
+    import json
+
+    material = json.dumps({
+        "auth_mode": row.get("auth_mode"), "key": row_api_key(row) or "",
+        "env": agent_extra_env(row), "binary": find_binary() or "",
+    }, sort_keys=True)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------

@@ -375,7 +375,7 @@ class HarnessAdapter(ProviderAdapter):
         self._next_turn_source: str = "user"
         # The app source behind ``_next_turn_source`` (Antigravity's guard).
         self._next_app_turn_source: Optional[str] = None
-        self._antigravity_row: Optional[Dict[str, Any]] = None
+        self._antigravity_binding: Optional[str] = None
         # The next submit is the host's emergency compaction at the context
         # limit (set_emergency_compaction). Reset after each submit.
         self._next_emergency_compaction = False
@@ -1875,7 +1875,7 @@ class HarnessAdapter(ProviderAdapter):
                     self._options.extra.get("app_session_id"),
                 )
         if self._provider_kind == _ANTIGRAVITY_KIND:
-            self._check_antigravity_turn()
+            await self._check_antigravity_turn()
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
@@ -2005,11 +2005,11 @@ class HarnessAdapter(ProviderAdapter):
         refusal = await run_sync(antigravity.guard_refusal, row, options)
         if refusal:
             raise ProviderConfigError(refusal)
-        self._antigravity_row = {k: v for k, v in row.items() if k != "auth_token"}
         try:
             spec = await run_sync(antigravity.build_spec, row, add_dirs=list(options.add_dirs or ()))
         except FileNotFoundError as exc:
             raise ProviderConfigError(str(exc)) from exc
+        self._antigravity_binding = await run_sync(antigravity.spawn_binding, row)
         self._workspace_card = None if one_shot else await run_sync(
             self._build_workspace_card, options
         )
@@ -2056,19 +2056,34 @@ class HarnessAdapter(ProviderAdapter):
             system_append=instructions,
         )
 
-    def _check_antigravity_turn(self) -> None:
-        """Refuse an unattended turn on a guarded personal-sign-in row."""
+    async def _check_antigravity_turn(self) -> None:
+        """Decide this turn from the stored row, not the copy taken at connect.
+
+        Refuses a turn on a deleted or disabled row, and an unattended turn
+        on a guarded personal-sign-in row (the guard is read afresh, so
+        restoring it applies to the very next turn). A changed key, agent
+        environment or binary restarts the agent process before the turn.
+        """
         from app.core import antigravity
         from app.core.environment import ProviderConfigError
-        from app.core.turn_sources import PERSON_PRESENT_TURN_SOURCES
 
-        row = self._antigravity_row
         # Like ``_next_turn_source``: it names the next submit only.
         source, self._next_app_turn_source = self._next_app_turn_source, None
-        if row and antigravity.guarded(row) and source and source not in PERSON_PRESENT_TURN_SOURCES:
-            raise ProviderConfigError(
-                antigravity.GUARD_REFUSAL.format(reason="a scheduled or automatic turn")
-            )
+        options = self._options
+        provider_id = ((options.extra if options is not None else None) or {}).get("provider_id")
+        refusal, row = await run_sync(antigravity.turn_row, provider_id, options, source)
+        if refusal:
+            raise ProviderConfigError(refusal)
+        assert row is not None
+        binding = await run_sync(antigravity.spawn_binding, row)
+        if binding != self._antigravity_binding and self._engine is not None:
+            try:
+                spec = await run_sync(antigravity.build_spec, row,
+                                      add_dirs=list((options.add_dirs if options else None) or ()))
+            except FileNotFoundError as exc:
+                raise ProviderConfigError(str(exc)) from exc
+            await self._engine.replace_spec(spec)
+            self._antigravity_binding = binding
 
     def set_turn_source(self, app_source: Optional[str]) -> None:
         """Name what starts the next turn, as an app ``turns.source``.
@@ -2860,7 +2875,7 @@ class HarnessAdapter(ProviderAdapter):
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
         if self._provider_kind == _ANTIGRAVITY_KIND:
-            self._check_antigravity_turn()
+            await self._check_antigravity_turn()
         if self._options is not None and self._options.extra.get("assistant_proactive") is not None:
             from app.core.owner_services import assert_proactive_allowed
             await run_sync(assert_proactive_allowed,
