@@ -83,6 +83,15 @@ GUARD_REFUSAL = (
     "Settings → Providers → Google Antigravity."
 )
 
+# What the sending agent reads when its MessageSession is refused up front:
+# nothing reaches the chat, so it is not left failed by a refused turn.
+AGENT_MESSAGE_REFUSAL = (
+    "Not sent: chat \"{title}\" runs on a personal Google sign-in (Google "
+    "Antigravity), which takes turns only from its owner typing in it. Tell the "
+    "owner instead; they can allow unattended use on that provider in Settings → "
+    "Providers → Google Antigravity."
+)
+
 
 def _thinking(levels: List[str]) -> Dict[str, Any]:
     # No default: the agent keeps its own level until the owner picks one.
@@ -715,6 +724,53 @@ async def prune_orphan_homes() -> int:
 
 _CONNECT_SOURCE: Any = object()
 
+# Why a turn the owner did not type was started, by app ``turns.source``.
+_SOURCE_REASONS = {
+    "wakeup": "a scheduled wake-up",
+    "auto_continue": "an automatic continuation",
+    "automation": "an automation run",
+    "automation_step": "an automation run",
+    "unpark": "a background turn picked up again",
+    "unpark_pump": "a background turn picked up again",
+}
+
+
+def _agent_message_reason(session_id: Optional[str]) -> str:
+    """Names the agent whose message started this chat's live turn."""
+    label = ""
+    if session_id:
+        try:
+            from app.db import turns
+            payload = (turns.get_live_turn(session_id) or {}).get("payload") or {}
+            label = str(payload.get("peer_sender_label") or "").strip()
+        except Exception:  # noqa: BLE001 — the refusal stands without the name
+            logger.debug("[antigravity] could not name the sender for %s", session_id, exc_info=True)
+    label = " ".join(label.split())[:80]
+    return f'a message from another agent ("{label}")' if label else "a message from another agent"
+
+
+def agent_message_refusal(session: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """The MessageSession refusal for a chat on a guarded row, or None.
+
+    Checked when a message is sent (and again when a queued one is
+    delivered), so a refused message never starts a turn that fails the
+    chat. The turn-start guard still decides every turn; this read fails
+    open to it.
+    """
+    provider_id = (session or {}).get("provider_id")
+    if not provider_id:
+        return None
+    try:
+        from app.db import model_providers
+        row = model_providers.get_model_provider(str(provider_id))
+    except Exception:  # noqa: BLE001 — the turn-start guard still applies
+        logger.debug("[antigravity] could not read %s for a message", provider_id, exc_info=True)
+        return None
+    if not row or row.get("provider_type") != PROVIDER_TYPE or not guarded(row):
+        return None
+    title = " ".join(str((session or {}).get("title") or (session or {}).get("id") or "").split())[:80]
+    return AGENT_MESSAGE_REFUSAL.format(title=title)
+
 
 def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE) -> Optional[str]:
     """Why this run is not the owner typing in their own chat, or None.
@@ -731,9 +787,11 @@ def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE) -> Op
     if turn_source is _CONNECT_SOURCE:
         turn_source = getattr(options, "aih_turn_source", None)
     from app.core.turn_sources import PERSON_PRESENT_TURN_SOURCES
-    if turn_source and turn_source not in PERSON_PRESENT_TURN_SOURCES:
-        return "a scheduled or automatic turn"
     session_id = extra.get("app_session_id")
+    if turn_source and turn_source not in PERSON_PRESENT_TURN_SOURCES:
+        if turn_source == "agent_message":
+            return _agent_message_reason(session_id)
+        return _SOURCE_REASONS.get(str(turn_source), "a scheduled or automatic turn")
     if not session_id:
         return "a background call"
     try:

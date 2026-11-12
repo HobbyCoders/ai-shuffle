@@ -98,13 +98,59 @@ def test_unattended_sessions_are_named(session_row, field, value, reason):
 
 def test_unattended_turns_and_calls_are_named(session_row):
     _, started = session_row
-    assert ag.unattended_reason(_options(turn_source="automation")) == "a scheduled or automatic turn"
+    assert ag.unattended_reason(_options(turn_source="automation")) == "an automation run"
+    assert ag.unattended_reason(_options(turn_source="wakeup")) == "a scheduled wake-up"
+    assert ag.unattended_reason(_options(turn_source="auto_continue")) == "an automatic continuation"
+    assert ag.unattended_reason(_options(turn_source="promotion")) == "a scheduled or automatic turn"
     assert ag.unattended_reason(_options(one_shot=True)) == "a background call"
     assert ag.unattended_reason(_options(assistant_proactive="x")) == "a background call"
     assert ag.unattended_reason(_options(session_id=None)) == "a background call"
     assert ag.unattended_reason(_options(session_id="missing")) == "a background call"
     started["s1"] = {"id": "t1"}
     assert ag.unattended_reason(_options()) == "a session another agent started"
+
+
+def test_a_refused_agent_message_names_the_sending_agent(session_row, monkeypatch):
+    from app.db import turns
+    live = {"payload": {"peer_sender_label": "Release  checks\n(on Laptop)"}}
+    monkeypatch.setattr(turns, "get_live_turn", lambda sid: live)
+    assert (ag.unattended_reason(_options(turn_source="agent_message"))
+            == 'a message from another agent ("Release checks (on Laptop)")')
+    live["payload"] = {}
+    assert ag.unattended_reason(_options(turn_source="agent_message")) == "a message from another agent"
+
+
+def test_a_message_to_a_guarded_chat_is_refused_before_it_is_queued(mock_db, monkeypatch):
+    """MessageSession to a chat on a guarded row fails for the sender, and
+    the receiver is untouched (no turn, so it is never left failed)."""
+    from app.core import session_orchestration as so
+    from app.db import model_providers
+
+    rows = {
+        "personal": {"id": "personal", "provider_type": "antigravity", "auth_mode": "oauth-personal"},
+        "lifted": {"id": "lifted", "provider_type": "antigravity", "auth_mode": "oauth-personal",
+                   "extra_env_json": {ag.GUARD_OVERRIDE_KEY: "1"}},
+        "key": {"id": "key", "provider_type": "antigravity", "auth_mode": "gemini-api-key"},
+    }
+    monkeypatch.setattr(model_providers, "get_model_provider", lambda pid, **_: rows.get(pid))
+    chat = {"id": "r1", "title": "Weekly notes", "provider_id": "personal"}
+    refusal = ag.agent_message_refusal(chat)
+    assert refusal and refusal.startswith("Not sent:") and '"Weekly notes"' in refusal
+    assert "Settings → Providers → Google Antigravity" in refusal
+    for pid in ("lifted", "key", "missing", None):
+        assert ag.agent_message_refusal({**chat, "provider_id": pid}) is None
+
+    from app.db import sessions
+    monkeypatch.setattr(sessions, "get_session", lambda sid: dict(chat))
+    monkeypatch.setattr(so, "_local_top_level", lambda row, **_: True)
+    monkeypatch.setattr(so, "_owner", lambda row, *a: "owner")
+    with pytest.raises(ValueError, match="^Not sent:"):
+        so._target({"id": "sender"}, "r1", owner="owner")
+    chat["provider_id"] = "lifted"
+    from app.core import mobile_tool_identity
+    monkeypatch.setattr(mobile_tool_identity, "validate", lambda principal: None)
+    monkeypatch.setattr(so, "_principal", lambda sid: None)
+    assert so._target({"id": "sender"}, "r1", owner="owner")["id"] == "r1"
 
 
 def test_a_failed_check_counts_as_unattended(monkeypatch):
