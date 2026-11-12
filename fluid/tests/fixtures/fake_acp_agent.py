@@ -19,7 +19,10 @@ The prompt text picks the behaviour:
 
 Environment: FAKE_ACP_LOG (append every received message as JSON lines),
 FAKE_ACP_SIGNED_IN=1 (a stored sign-in exists), GEMINI_API_KEY,
-FAKE_ACP_STATE (directory remembering session ids across processes).
+FAKE_ACP_STATE (directory remembering session ids across processes),
+FAKE_ACP_MODES (comma-separated mode ids it offers; default
+"default,accept-edits,plan"), FAKE_ACP_REJECT_MODES (mode ids
+``session/set_mode`` refuses with an RPC error).
 
 Other entry points, like the real binary's: ``acp --login`` prints a sign-in
 link and reads the code on stdin (code ``good`` signs in by writing a marker
@@ -61,14 +64,20 @@ TERMINAL_LOGIN = {"id": "terminal-login", "name": "Log in from the terminal", "d
                   "type": "terminal", "args": ["--login"]}
 
 
-def config_options(model: str = "gemini-3.1-pro", level: str = "low", mode: str = "default") -> list:
+def mode_ids() -> list[str]:
+    raw = os.environ.get("FAKE_ACP_MODES") or "default,accept-edits,plan"
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+def config_options(model: str = "gemini-3.1-pro", level: str = "low", mode: str = "") -> list:
+    mode = mode or mode_ids()[0]
     return [
         {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
          "options": [{"value": v, "name": v} for v in ("gemini-4-argon", "gemini-3.8-flash", "gemini-3.1-pro")]},
         {"id": "thought_level", "name": "Thinking Level", "category": "thought_level", "type": "select",
          "currentValue": level, "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]},
         {"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": mode,
-         "options": [{"value": v, "name": v} for v in ("default", "accept-edits", "plan")]},
+         "options": [{"value": v, "name": v} for v in mode_ids()]},
     ]
 
 
@@ -148,9 +157,8 @@ class Agent:
             self.sessions[sid] = {"params": params, "mcp": params.get("mcpServers") or []}
             if STATE:
                 open(os.path.join(STATE, sid), "w").close()
-            return {"sessionId": sid, "modes": {"currentModeId": "default", "availableModes": [
-                {"id": "default", "name": "Default"}, {"id": "accept-edits", "name": "Accept edits"},
-                {"id": "plan", "name": "Plan"}]}, "configOptions": config_options()}
+            return {"sessionId": sid, "modes": {"currentModeId": mode_ids()[0], "availableModes": [
+                {"id": m, "name": m} for m in mode_ids()]}, "configOptions": config_options()}
         if method == "session/resume":
             self.need_auth()
             sid = params.get("sessionId")
@@ -167,6 +175,9 @@ class Agent:
                     o["currentValue"] = params["value"]
             return {"configOptions": opts}
         if method == "session/set_mode":
+            rejected = (os.environ.get("FAKE_ACP_REJECT_MODES") or "").split(",")
+            if params.get("modeId") in rejected or params.get("modeId") not in mode_ids():
+                raise RpcError(-32602, f"mode {params.get('modeId')} is not available")
             return {}
         if method == "session/close":
             self.sessions.pop(params.get("sessionId"), None)

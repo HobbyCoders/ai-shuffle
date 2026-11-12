@@ -138,9 +138,15 @@ class _TurnRows:
         monkeypatch.setattr(turns, "get_db", lambda: _Conn())
 
 
+_TYPED = {"person_entered": True}  # what turns.enqueue_turn writes for the owner's own input
+
+
 @pytest.mark.parametrize("earlier,reason", [
-    ([{"id": "t1", "source": "user"}], None),
-    ([{"id": "t2", "source": "resume"}, {"id": "t1", "source": "queue"}], None),
+    ([{"id": "t1", "source": "user", "payload": _TYPED}], None),
+    ([{"id": "t2", "source": "resume"}, {"id": "t1", "source": "queue", "payload": _TYPED}], None),
+    # An owner source without the host's positive key is not a person.
+    ([{"id": "t1", "source": "user"}], ag.NOT_ENTERED_REASON),
+    ([{"id": "t1", "source": "user", "payload": {"voice_delegation": True}}], ag.VOICE_REASON),
     ([{"id": "t1", "source": "api"}], "a request through the API"),
     ([{"id": "t1", "source": "wakeup"}], "a scheduled wake-up"),
     ([{"id": "t1", "source": "agent_message"}], "a message from another agent"),
@@ -433,7 +439,7 @@ async def _run(adapter, started):
 def _owner_turn_that_parks(prompt="Plan the beds"):
     from app.db import turns
 
-    first = turns.enqueue_turn("chat-g", "user", prompt=prompt, profile_id="default")
+    first = turns.enqueue_turn("chat-g", "user", prompt=prompt, profile_id="default", person_entered=True)
     first = _start(first["id"])
     assert turns.park_turn(first["id"], ["monitor"])
     return first
@@ -500,7 +506,8 @@ async def test_a_retry_replays_the_exact_row_it_reruns(guarded_chat, client):
     turns.settle_turn(retry["id"], "aborted", error="refused")
 
     # A Retry of the owner's own typed turn passes, and a Retry of that Retry.
-    typed = _start(turns.enqueue_turn("chat-g", "user", prompt="Try again", profile_id="default")["id"])
+    typed = _start(turns.enqueue_turn("chat-g", "user", prompt="Try again", profile_id="default",
+                                      person_entered=True)["id"])
     turns.settle_turn(typed["id"], "aborted", error="the agent stopped")
     for _ in range(2):
         retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default")["id"])
@@ -526,7 +533,8 @@ async def test_a_compaction_written_for_an_answer_keeps_who_entered_it(guarded_c
 
     _, adapter = guarded_chat
     answer = turns.enqueue_turn("chat-g", "user", prompt="Raised beds: Yes", profile_id="default",
-                                payload={"compact_first": True, "question_answer_human_input": human_input})
+                                payload={"compact_first": True, "question_answer_human_input": human_input},
+                                person_entered=human_input)
     compact = turns.get_turn(answer["payload"]["compact_before_turn_id"])
     again = turns.retry_pair_compaction(answer["id"], attempt=2)
     for row in (compact, again):
@@ -539,12 +547,121 @@ async def test_a_compaction_written_for_an_answer_keeps_who_entered_it(guarded_c
                 await _run(adapter, started)
 
 
+async def test_only_the_hosts_own_admission_marks_a_person(guarded_chat):
+    # "A person entered it" is a positive key only enqueue_turn's
+    # ``person_entered`` writes. The voice assistant's own request (source
+    # "user") and a payload that claims the key are not a person.
+    from app.core.environment import ProviderTurnRefused
+    from app.db import turns
+
+    _, adapter = guarded_chat
+    voice = turns.enqueue_turn("chat-g", "user", prompt="Follow up on the build", profile_id="default",
+                               payload={"voice_delegation": True})
+    with pytest.raises(ProviderTurnRefused, match="refused for a request written by the voice assistant"):
+        await _run(adapter, _start(voice["id"]))
+    turns.settle_turn(voice["id"], "aborted", error="refused")
+
+    forged = turns.enqueue_turn("chat-g", "user", prompt="hi", profile_id="default",
+                                payload={"person_entered": True})
+    assert "person_entered" not in forged["payload"]
+    with pytest.raises(ProviderTurnRefused, match="refused for a reply sent for you automatically"):
+        await _run(adapter, _start(forged["id"]))
+    turns.settle_turn(forged["id"], "aborted", error="refused")
+
+    # Only an owner source carries it.
+    wake = turns.enqueue_turn("chat-g", "wakeup", prompt="tick", profile_id="default", person_entered=True)
+    assert "person_entered" not in wake["payload"]
+    turns.settle_turn(_start(wake["id"])["id"], "aborted", error="skipped")
+
+    typed = turns.enqueue_turn("chat-g", "user", prompt="hi", profile_id="default", person_entered=True)
+    assert typed["payload"]["person_entered"] is True
+    await _run(adapter, _start(typed["id"]))
+
+
+def test_only_the_three_admission_points_mark_a_person():
+    # The composer send (sent, queued or steering: chat socket, and its
+    # forward to the owner worker), a worktree chat's opening prompt, and
+    # the owner's own question-card answer (``human_input``). Everything else
+    # carries a row's own value or passes nothing.
+    import re
+
+    import app as app_pkg
+
+    root = Path(app_pkg.__file__).parent
+    literal, keyed = {}, []
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        name = path.relative_to(root.parent).as_posix()
+        if count := len(re.findall(r"person_entered=True\b", text)):
+            literal[name] = count
+        if re.search(r"PERSON_ENTERED_KEY\]\s*=\s*True|[\"']person_entered[\"']\s*:\s*True", text):
+            keyed.append(name)
+    assert literal == {"app/api/chat_ws_handler.py": 4, "app/api/sessions_worktree.py": 3}, literal
+    assert keyed == ["app/db/turns.py"], keyed  # entry_payload, behind enqueue_turn's argument
+    interactions = (root / "db" / "interactions.py").read_text(encoding="utf-8")
+    assert "person_entered=human_input is True" in interactions
+    # The voice assistant creates branch chats through the same intake, but
+    # with no opening prompt (the intake submits only ``if prompt``): every
+    # request it writes goes through the voice bridges, which mark nothing.
+    voice = (root / "api" / "voice.py").read_text(encoding="utf-8")
+    branch_request = voice.split("branch_request = CreateWorktreeSessionRequest(", 1)[1].split(")", 1)[0]
+    assert "prompt" not in branch_request, branch_request
+    intake = (root / "api" / "sessions_worktree.py").read_text(encoding="utf-8")
+    assert "    if prompt:\n        await _persist_and_broadcast_first_message" in intake
+
+
+@pytest.mark.parametrize("stated,reason", [
+    (True, None),
+    (False, ag.NOT_ENTERED_REASON),
+    ("missing", ag.OUTDATED_WORKER_REASON),  # a worker from before the key: "update it"
+])
+async def test_a_forwarded_turn_carries_what_its_worker_stated(guarded_chat, monkeypatch, stated, reason):
+    # The peer channel is worker-authenticated; the sending worker states
+    # who entered the text outside the payload, which never carries it.
+    import re
+
+    from app.core.environment import ProviderTurnRefused
+    from app.db import database, turns
+    from app.network import control
+
+    _, adapter = guarded_chat
+    monkeypatch.setattr("app.core.turn_manager._kick", lambda session_id: None)
+    monkeypatch.setattr(control, "_require_owned", lambda sid: database.get_session(sid))
+    body = {"session_id": "chat-g", "source": "user", "prompt": "hi", "payload": {"person_entered": True}}
+    if stated != "missing":
+        body["person_entered"] = stated
+    result = await control.handle("turns", body, from_device="paired-peer")
+    started = _start(result["turn_id"])
+    if reason is None:
+        await _run(adapter, started)
+    else:
+        with pytest.raises(ProviderTurnRefused, match=re.escape(f"refused for {reason}")):
+            await _run(adapter, started)
+
+
+async def test_submit_turn_always_states_who_entered_it(monkeypatch):
+    from app.network import control
+
+    sent = []
+
+    async def call(device_id, action, body):
+        sent.append(body)
+        return {"turn_id": "t"}
+
+    monkeypatch.setattr(control, "call", call)
+    await control.submit_turn("dev", "s", prompt="hi")
+    await control.submit_turn("dev", "s", prompt="hi", person_entered=True)
+    assert [b["person_entered"] for b in sent] == [False, True]
+
+
 @pytest.mark.parametrize("source,payload,joins", [
-    ("user", {}, True),                                         # the owner typing
-    ("queue", {}, True),                                        # the owner's queued message
-    ("user", {"question_answer_human_input": True}, True),      # the owner's own answer
+    ("user", {"person_entered": True}, True),                   # the owner typing
+    ("queue", {"person_entered": True}, True),                  # the owner's queued message
+    ("user", {"question_answer_human_input": True, "person_entered": True}, True),  # their own answer
     ("user", {"question_answer_human_input": False}, False),    # Away mode's answer
-    ("unpark", {}, False),
+    ("user", {"voice_delegation": True}, False),                # the voice assistant's own request
+    ("user", {}, False),                                        # no key: not a person
+    ("unpark", {"person_entered": True}, False),                # the key counts only on an owner source
 ])
 def test_text_no_person_entered_never_joins_an_antigravity_turn(mock_db, monkeypatch, source, payload, joins):
     from app.core import session_runtime
@@ -1565,6 +1682,67 @@ async def test_a_mid_chat_permission_change_reaches_the_agent(fake_agy, tmp_path
     frames = [_json.loads(line) for line in log.read_text().splitlines() if line.strip()]
     modes = [f["params"]["modeId"] for f in frames if f.get("method") == "session/set_mode"]
     assert modes[-1] == agent_mode, modes
+    # And the mode the host answers the agent's requests in: Auto is the
+    # Claude CLI's alone, so it runs as Ask here (effective_permission_mode)
+    # and the host prompts; Bypass approves every request.
+    assert loop.permission_mode == ("default" if to == "auto" else to)
+
+
+async def _mode_adapter(tmp_path, start, **agent_env):
+    from app.core.provider.harness_adapter import _ANTIGRAVITY_KIND, HarnessAdapter
+    from fluid.engine.acp import AcpLoop
+    from fluid.store.base import MemoryStore
+
+    spec = ag.build_spec({"id": "row-1", "provider_type": "antigravity", "auth_mode": "gemini-api-key",
+                          "auth_token": "test-gemini-not-a-key"})
+    spec.env.update({"FAKE_ACP_LOG": str(tmp_path / "agent.log"), "FAKE_ACP_STATE": str(tmp_path), **agent_env})
+    loop = AcpLoop(store=MemoryStore(), spec=spec, cwd=str(tmp_path), permission_mode=start)
+    adapter = HarnessAdapter.__new__(HarnessAdapter)
+    adapter._engine = loop
+    adapter._is_delegated = False
+    adapter._provider_kind = _ANTIGRAVITY_KIND
+    adapter._options = SimpleNamespace(permission_mode=start)
+    adapter.recorded = []
+    adapter._record_applied = lambda *a: adapter.recorded.append(a)
+    await loop._ensure_session()
+    await loop._ensure_process()
+    return adapter, loop
+
+
+@pytest.mark.parametrize("to,agent_env", [
+    ("default", {"FAKE_ACP_REJECT_MODES": "default"}),            # the agent refuses the change
+    ("bypassPermissions", {"FAKE_ACP_REJECT_MODES": "default"}),  # Bypass runs in its normal mode
+    ("default", {"FAKE_ACP_MODES": "accept-edits,plan"}),         # no mode for Ask, nor a normal one
+])
+async def test_a_mode_change_the_agent_does_not_take_is_not_recorded(fake_agy, tmp_path, to, agent_env):
+    # The app keeps showing the mode the agent is in (Accept Edits), never a
+    # stricter one it is not in, and the person gets a plain reason (409).
+    from fluid.engine.acp.loop import AcpModeRejected
+
+    adapter, loop = await _mode_adapter(tmp_path, "acceptEdits", **agent_env)
+    try:
+        with pytest.raises(AcpModeRejected, match="it was not changed; it stays in its accept-edits mode"):
+            await adapter.set_permission_mode(to)
+        assert isinstance(AcpModeRejected("x"), ValueError)  # sessions_permissions answers 409 with it
+        assert loop.permission_mode == "acceptEdits" and adapter._options.permission_mode == "acceptEdits"
+        assert adapter.recorded == []
+    finally:
+        await loop.aclose()
+
+
+async def test_a_resumed_agent_left_in_a_looser_mode_runs_no_turn(fake_agy, tmp_path):
+    # At connect: an agent that will not leave a mode doing more without
+    # asking than the app's (here an unknown "yolo" mode) fails the start
+    # with the reason; one left in a stricter mode runs.
+    from fluid.engine.acp.loop import AcpModeRejected
+
+    with pytest.raises(AcpModeRejected, match="no mode that matches Ask"):
+        await _mode_adapter(tmp_path, "default", FAKE_ACP_MODES="yolo,careful")
+    adapter, loop = await _mode_adapter(tmp_path, "acceptEdits", FAKE_ACP_REJECT_MODES="accept-edits")
+    try:
+        assert loop._agent_mode == "default"  # stricter than shown: allowed to run
+    finally:
+        await loop.aclose()
 
 
 # --- held agent messages after the guard is restored ------------------------
@@ -1630,17 +1808,33 @@ async def test_a_held_message_does_not_ride_the_owners_turn_after_the_guard_retu
     assert len(told) == 1
 
 
+def _held_rows(session_id="chat-ag"):
+    from app.core import wakeup_service
+    from app.db import wakeups as wakeups_db
+
+    return wakeups_db.get_session_wakeups(session_id, wakeup_service.HELD_PEER_SOURCE)
+
+
 async def test_a_held_message_is_refused_where_it_would_be_promoted(held_chat):
-    from app.core import turn_scheduler
+    # Both promotion points decide before they take: the timer before its
+    # claim, the worker's release through the same take as the owner's turn.
+    from app.core import turn_scheduler, wakeup_service
     from app.db import turns as turns_db
 
     make, told = held_chat
     make()
-    held = _held_text("worker-1", "done now")
-    assert await turn_scheduler.promote_held_peer_messages("chat-ag", held, released=True) is None
-    assert turns_db.get_queued_turns("chat-ag") == []
+    [row] = _held_rows()
+    await wakeup_service._fire(row)  # the hold's timer
+    assert _held_rows() == [] and turns_db.get_queued_turns("chat-ag") == []
     await asyncio.sleep(0.05)
-    assert told and told[0][0] == "worker-1"
+    assert len(told) == 1 and told[0][0] == "worker-1"
+
+    make()
+    async with turn_scheduler._terminal_delivery_lock("chat-ag"):  # as release_held_progress_from
+        assert await turn_scheduler._take_held_peer_messages("chat-ag") == ""
+    assert _held_rows() == [] and turns_db.get_queued_turns("chat-ag") == []
+    await asyncio.sleep(0.05)
+    assert len(told) == 2
 
 
 def _fail_read(monkeypatch, lookup):
@@ -1684,20 +1878,71 @@ async def test_an_inconclusive_screening_keeps_held_messages_back(held_chat, mon
 
 @pytest.mark.parametrize("lookup", ["session", "provider"])
 async def test_an_inconclusive_screening_does_not_promote_held_messages(held_chat, monkeypatch, lookup):
-    from app.core import turn_scheduler
+    # Inconclusive takes nothing: the held row stays in the store (never
+    # deleted and put back), at the timer and at a worker's release alike.
+    from app.core import turn_scheduler, wakeup_service
     from app.db import turns as turns_db
 
     make, told = held_chat
     make(allow=True)
+    [row] = _held_rows()
+    armed = []
+    monkeypatch.setattr(wakeup_service, "_arm", lambda r, delay: armed.append((r["id"], delay)))
     undo = _fail_read(monkeypatch, lookup)
-    held = _held_text("worker-1", "done now")
-    assert await turn_scheduler.promote_held_peer_messages("chat-ag", held, released=True) is None
-    assert turns_db.get_queued_turns("chat-ag") == []
+    await wakeup_service._fire(row)
+    async with turn_scheduler._terminal_delivery_lock("chat-ag"):
+        assert await turn_scheduler._take_held_peer_messages("chat-ag") == ""
     undo()
+    assert [r["id"] for r in _held_rows()] == [row["id"]]  # still there, untouched
+    assert armed and armed[0][0] == row["id"]  # its timer tries again
+    assert turns_db.get_queued_turns("chat-ag") == []
     folded = await turn_scheduler.fold_held_peer_messages_for_turn(
         "chat-ag", {"id": "t-owner", "source": "user", "payload": {}})
-    assert "done now" in folded and "halfway there" in folded  # kept, not lost
+    assert "halfway there" in folded  # kept, not lost
     assert told == []
+
+
+async def test_a_take_never_starts_before_the_screening_decides(held_chat, monkeypatch):
+    # The order itself: nothing reads the held rows destructively while the
+    # screening is still out, so a process exit there loses nothing.
+    from app.core import turn_scheduler, wakeup_service
+
+    make, _ = held_chat
+    make(allow=True)
+    seen = []
+
+    async def screening(session_id):
+        seen.append(len(_held_rows(session_id)))
+        return None
+    monkeypatch.setattr(turn_scheduler, "held_delivery_refusal", screening)
+    taken = wakeup_service.take_session_wakeups
+
+    async def take(session_id, source):
+        assert seen, "taken before the screening decided"
+        return await taken(session_id, source)
+    monkeypatch.setattr(wakeup_service, "take_session_wakeups", take)
+    folded = await turn_scheduler.fold_held_peer_messages_for_turn(
+        "chat-ag", {"id": "t-owner", "source": "user", "payload": {}})
+    assert seen == [1] and "halfway there" in folded and _held_rows() == []
+
+
+async def test_held_messages_on_another_provider_ride_as_on_main(held_chat, monkeypatch):
+    # A chat on any other provider (here: none bound) is screened, delivers,
+    # and takes exactly what main's take took; nothing is refused or kept.
+    from app.core import turn_scheduler
+    from app.db import sessions
+
+    make, told = held_chat
+    make(allow=True)
+    monkeypatch.setattr(sessions, "get_session",
+                        lambda sid: {"id": sid, "title": "Plain", "provider_id": None})
+    folded = await turn_scheduler.fold_held_peer_messages_for_turn(
+        "chat-ag", {"id": "t-owner", "source": "user", "payload": {}})
+    assert "halfway there" in folded and _held_rows() == [] and told == []
+    # And with no held row at all nothing is looked up.
+    monkeypatch.setattr(sessions, "get_session", lambda sid: (_ for _ in ()).throw(AssertionError("read")))
+    assert await turn_scheduler.fold_held_peer_messages_for_turn(
+        "chat-ag", {"id": "t-owner-2", "source": "user", "payload": {}}) == ""
 
 
 @pytest.mark.parametrize("mode,fields,allow", [

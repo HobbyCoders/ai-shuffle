@@ -753,8 +753,10 @@ _CONNECT_SOURCE: Any = object()
 # The guard's own rule: only a turn the owner typed or spoke in the app's own
 # chat UI passes. It reads the turn row's own provenance, two facts set by
 # the host from that row (``turn_scheduler.turn_provenance``): the source it
-# was admitted with, and whether a person entered it (``turns.person_entered``:
-# Away mode's answers and a parked turn's automatic resume are not). The
+# was admitted with, and whether a person entered it (``turns.entry_provenance``:
+# only the positive ``turns.PERSON_ENTERED_KEY`` the host sets where the
+# owner's own input arrives; Away's answers, voice-assistant requests, parked
+# turns' automatic resumes and rows without the key are not). The
 # source must be one of these (deliberately NOT
 # ``turn_sources.PERSON_PRESENT_TURN_SOURCES``, which also admits "api", any
 # public-API caller, and "connector", a chat connector message) AND a person
@@ -781,6 +783,12 @@ _SOURCE_REASONS = {
 NO_SOURCE_REASON = "a run with no known origin"
 #: An owner source no person entered (Away mode's answer, an automatic resume).
 NOT_ENTERED_REASON = "a reply sent for you automatically, such as an answer Away mode gave"
+#: A prompt the voice assistant wrote and sent itself (``voice_delegation``).
+VOICE_REASON = "a request written by the voice assistant"
+#: Forwarded by a worker too old to say whether a person entered it.
+OUTDATED_WORKER_REASON = ("a message sent through a worker that needs updating (update that "
+                          "worker, then send it again)")
+_NOT_ENTERED_REASONS = {"voice": VOICE_REASON, "unstated": OUTDATED_WORKER_REASON}
 #: A run another agent starts (Task, Swarm, a subagent, StartSession).
 AGENT_RUN_REASON = "a run another agent starts"
 API_REQUEST_REASON = _SOURCE_REASONS["api"]
@@ -925,7 +933,7 @@ def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE,
             return _agent_message_reason(session_id)
         return _SOURCE_REASONS.get(str(turn_source), "a scheduled or automatic turn")
     if person_entered is not True:
-        return NOT_ENTERED_REASON
+        return _NOT_ENTERED_REASONS.get(str(person_entered), NOT_ENTERED_REASON)
     if not session_id:
         return "a background call"
     try:

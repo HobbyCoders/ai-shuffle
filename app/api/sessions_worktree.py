@@ -531,6 +531,7 @@ async def _create_remote_branch_session(
                     profile_id=portable_profile, project_id=None,
                     overrides=body.overrides, payload=payload or None, owner_send=True,
                     command_id=body.client_message_id,
+                    person_entered=True,  # the opening prompt the owner entered
                 )
             else:
                 await turn_manager.submit_async(
@@ -539,6 +540,7 @@ async def _create_remote_branch_session(
                     explicit_permission=True,
                     payload=payload or None, no_kick=True,
                     command_id=body.client_message_id,
+                    person_entered=True,  # the opening prompt the owner entered
                 )
                 await run_sync(turn_claim.notify_turns_changed, session_id)
             query_started = True
@@ -773,6 +775,8 @@ async def _create_v2_branch_session(
                 overrides=body.overrides,
                 explicit_permission=True,
                 command_id=body.client_message_id,
+                # The opening prompt the owner entered for the new chat.
+                person_entered=True,
                 payload={
                     **({"api_user_id": api_user_id} if api_user_id else {}),
                     **({"upload_paths": list(migrated_paths.values())} if migrated_paths else {}),

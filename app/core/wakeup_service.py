@@ -433,7 +433,30 @@ async def _fire(row: Dict[str, Any]) -> None:
         await asyncio.to_thread(session_handoff.wait_released)  # after its move's held messages
         claimed = True
     else:
+        held_refusal: Optional[str] = None
+        if row.get("source") == HELD_PEER_SOURCE:
+            # Held agent messages: decide before the claim deletes them
+            # (turn_scheduler.held_delivery_refusal). A check that cannot
+            # finish claims nothing; the row stays and its timer tries again.
+            from app.core import turn_scheduler
+
+            try:
+                held_refusal = await turn_scheduler.held_delivery_refusal(session_id)
+            except Exception as exc:  # noqa: BLE001 — inconclusive: keep the row
+                attempt = _retry_attempts.get(str(wakeup_id), 0) + 1
+                _retry_attempts[str(wakeup_id)] = attempt
+                delay = min(_RETRY_BASE_SECONDS * (2 ** min(attempt - 1, 8)), _RETRY_MAX_SECONDS)
+                logger.warning("wakeup %s (session %s): could not check its held messages (%s) — "
+                               "kept, tried again in %.0fs", wakeup_id, session_id, exc, delay)
+                _arm(row, delay)
+                return
         claimed = await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
+        if claimed and held_refusal:
+            from app.core import turn_scheduler
+
+            _retry_attempts.pop(str(wakeup_id), None)
+            turn_scheduler.refuse_held_peer_messages(str(session_id), row.get("prompt") or "", held_refusal)
+            return
     if not claimed:
         logger.info(
             "wakeup %s (session %s) already claimed/fired — skipping",

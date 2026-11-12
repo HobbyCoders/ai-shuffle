@@ -295,7 +295,7 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
                       profile_id: Optional[str] = None, project_id: Optional[str] = None,
                       overrides: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None,
                       owner_send: bool = False, command_id: Optional[str] = None,
-                      caller: Optional[str] = None) -> Dict[str, Any]:
+                      caller: Optional[str] = None, person_entered: bool = False) -> Dict[str, Any]:
     """Forward a turn to the session's owner device.
 
     ``owner_send`` states that this is the owner's own fresh message (the
@@ -311,10 +311,17 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
     (``session_modes.caller_of``) or as a held message's stamp recorded it.
     It travels apart from ``owner_send``: the owner stamps it on the turn,
     and a send without one keeps the no-project ceiling there (#641).
+
+    ``person_entered`` states whether a person entered the text here (this
+    worker's chat socket or worktree start said so, or the held message it
+    replays was so admitted). Always sent, so the owner can tell "no" from a
+    worker too old to say (``turns.UNSTATED_ENTRY_KEY``). Never in ``payload``:
+    the owner drops the key from any payload.
     """
     body = {
         "session_id": session_id, "source": source, "prompt": prompt, "profile_id": profile_id,
         "project_id": project_id, "overrides": overrides, "payload": payload,
+        "person_entered": person_entered is True,
     }
     if owner_send:
         body["owner_send"] = True
@@ -819,6 +826,15 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
         from app.core import upload_transfer
         await run_sync(upload_transfer.validate_turn_uploads, payload, row)
     payload.setdefault("forwarded_by_device", from_device)
+    # Whether a person entered it, as the sending worker's own admission said.
+    # The peer channel is worker-authenticated (only the owner's paired
+    # workers reach it), and the key never travels inside ``payload``
+    # (enqueue drops it there). A sender too old to state it is marked, so a
+    # guarded row refuses it with "update that worker", not as automatic.
+    stated_entry = body.get("person_entered")
+    if not isinstance(stated_entry, bool):
+        from app.db import turns as entry_keys
+        payload[entry_keys.UNSTATED_ENTRY_KEY] = True
     # Forwarded turns bypass the chat WebSocket's first-message title backfill.
     # Only the owner can persist a title that survives catalog replication.
     prompt = body.get("prompt")
@@ -845,6 +861,7 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
         # session's current mode.
         explicit_permission=body.get("owner_send") is True and source in _OWNER_SEND_SOURCES,
         payload=payload or None, command_id=command_id,
+        person_entered=stated_entry is True,
         # Who sent it, as the sending worker authenticated them or a held
         # message recorded it (#641). A turn without one, or from a sender too
         # old to say, is stamped unknown and keeps the no-project ceiling.

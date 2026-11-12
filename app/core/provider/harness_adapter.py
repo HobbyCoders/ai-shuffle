@@ -1516,7 +1516,8 @@ class HarnessAdapter(ProviderAdapter):
         # ``_connect_antigravity`` takes it, so a later bare ``connect()``
         # finds none and is refused rather than reusing an old source.
         self._connect_app_turn_source = getattr(sdk_options, "aih_turn_source", None)
-        self._connect_turn_person_entered = getattr(sdk_options, "aih_turn_person_entered", None) is True
+        from app.db.turns import entry_state
+        self._connect_turn_person_entered = entry_state(getattr(sdk_options, "aih_turn_person_entered", None))
         await self.connect(opts)
         await self.prepare_background_completions(
             getattr(sdk_options, "aih_background_task_completions", None)
@@ -2016,7 +2017,7 @@ class HarnessAdapter(ProviderAdapter):
         if not row:
             raise ProviderConfigError("This chat's Antigravity provider no longer exists.")
         source = getattr(self, "_connect_app_turn_source", None)
-        entered = getattr(self, "_connect_turn_person_entered", False) is True
+        entered = getattr(self, "_connect_turn_person_entered", False)
         self._connect_app_turn_source, self._connect_turn_person_entered = None, False
         refusal = await run_sync(antigravity.guard_refusal, row, options,
                                  turn_source=source, person_entered=entered)
@@ -2088,7 +2089,7 @@ class HarnessAdapter(ProviderAdapter):
 
         # Like ``_next_turn_source``: it names the next submit only.
         source, self._next_app_turn_source = self._next_app_turn_source, None
-        entered = getattr(self, "_next_turn_person_entered", False) is True
+        entered = getattr(self, "_next_turn_person_entered", False)
         self._next_turn_person_entered = False
         options = self._options
         provider_id = ((options.extra if options is not None else None) or {}).get("provider_id")
@@ -2128,8 +2129,10 @@ class HarnessAdapter(ProviderAdapter):
     def set_turn_person_entered(self, entered: Optional[bool]) -> None:
         """Whether a person entered the next turn in the app (call after
         ``set_turn_source``). Read from the turn row's own admission; only
-        ``True`` counts. Next submit only, like the source."""
-        self._next_turn_person_entered = entered is True
+        ``True`` counts (a reason code says why not). Next submit only, like
+        the source."""
+        from app.db.turns import entry_state
+        self._next_turn_person_entered = entry_state(entered)
 
     def _take_turn_source(self) -> str:
         source, self._next_turn_source = self._next_turn_source, "user"

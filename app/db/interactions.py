@@ -178,7 +178,10 @@ def answer_question_and_enqueue(
                      "deferred_user_record": True,
                      "question_answer_human_input": human_input,
                      "question_request_id": (row.get("payload") or {}).get("request_id")},
-            command_id=f"question-answer-{row['id']}", _conn=conn,
+            command_id=f"question-answer-{row['id']}",
+            # The owner's own question-card answer is person-entered; Away's
+            # automatic answer is not (and a context turn's key never carries).
+            person_entered=human_input is True, _conn=conn,
         )
         if human_input and queued.get("id"):
             # enqueue_turn holds the session admission lock. Reset the saved

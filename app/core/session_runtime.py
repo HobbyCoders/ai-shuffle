@@ -3344,6 +3344,8 @@ class SessionRuntime:
                     overrides=row.get("overrides") or None,
                     payload=payload,
                     _owner_receipt=owner_message_receipt(row),
+                    # The stranded steer's own admission, unchanged.
+                    person_entered=turns_db.person_entered(row),
                     command_id=row.get("command_id"),
                     instance_id=row.get("instance_id"),
                     at_front=True,

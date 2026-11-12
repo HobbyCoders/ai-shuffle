@@ -97,8 +97,25 @@ _ACP_MODES: dict[str, str] = {
 }
 
 
+# How much each of the agent's modes lets it do without asking, least first.
+# A mode id not listed counts as the most permissive (never assumed safe).
+_MODE_RANK: dict[str, int] = {"plan": 0, _ACP_NORMAL_MODE: 1, "accept-edits": 2}
+_MODE_LABELS: dict[str, str] = {"default": "Ask", "acceptEdits": "Accept Edits", "plan": "Plan",
+                                "bypassPermissions": "Bypass", "auto": "Auto"}
+
+
+def _mode_rank(mode_id: str | None) -> int:
+    return _MODE_RANK.get(mode_id or "", len(_MODE_RANK))
+
+
 class AcpAuthRequired(RuntimeError):
     """The agent refused a session because it is not signed in."""
+
+
+class AcpModeRejected(ValueError):
+    """The agent did not take a mode change (it refused ``session/set_mode``,
+    or offers neither the mode nor its normal one). The previous mode stays;
+    the message is for the person who asked."""
 
 
 @dataclass
@@ -255,6 +272,9 @@ class AcpLoop:
         self._session_resumed = False
         self._config_options: list[dict[str, Any]] = []
         self._modes: list[str] = []
+        # The mode the agent last said it is in (session reply, a successful
+        # ``session/set_mode``, or its own ``current_mode_update``).
+        self._agent_mode: str | None = None
         self._turn_task: asyncio.Task[None] | None = None
         self._mapper: TurnMapper | None = None
         self._interrupted = asyncio.Event()
@@ -368,8 +388,15 @@ class AcpLoop:
             if self.effort:
                 await self._apply_config("thought_level", self.spec.effort_value(self.effort))
         elif isinstance(op, SetPermissionMode):
-            self.permission_mode = op.mode
-            await self._apply_mode()
+            # Not recorded until the agent takes it: a refusal keeps the
+            # previous mode here and raises to the caller, which then records
+            # nothing either (the app keeps showing the mode the agent is in).
+            previous, self.permission_mode = self.permission_mode, op.mode
+            try:
+                await self._apply_mode()
+            except AcpModeRejected:
+                self.permission_mode = previous
+                raise
         elif isinstance(op, BackgroundTaskFinished):
             # The host's own turn queue owns the wake on this leg.
             logger.debug("ACP engine: background task %s finished; the host wakes the session", op.task_id)
@@ -570,7 +597,17 @@ class AcpLoop:
                 self._read_session_state(result if isinstance(result, Mapping) else {})
                 await self._apply_config("model", self.model)
                 await self._apply_config("thought_level", self.spec.effort_value(self.effort))
-                await self._apply_mode()
+                try:
+                    await self._apply_mode()
+                except AcpModeRejected as exc:
+                    wanted = _ACP_MODES.get(self.permission_mode, _ACP_NORMAL_MODE)
+                    if _mode_rank(self._agent_mode) > _mode_rank(wanted):
+                        # The agent stays in a mode that does more without
+                        # asking than the one the app shows: no turn runs.
+                        raise
+                    # It stays in a mode that asks at least as often: run, and
+                    # the host's own answers still apply the shown mode.
+                    logger.warning("ACP agent kept mode %s: %s", self._agent_mode, exc)
             except BaseException:
                 self._acp_session = None
                 await self._stop_process()
@@ -591,6 +628,13 @@ class AcpLoop:
                                  if isinstance(v, Mapping)]
                     break
         self._modes = available
+        current = modes.get("currentModeId")
+        if not current:
+            for option in self._config_options:
+                if option.get("category") == "mode" or option.get("id") == "mode":
+                    current = option.get("currentValue")
+                    break
+        self._agent_mode = str(current) if current else None
 
     def _current_config(self, config_id: str) -> str | None:
         for option in self._config_options:
@@ -628,11 +672,26 @@ class AcpLoop:
         conn, sid = self._conn, self._acp_session
         if conn is None or not sid:
             return
-        mode = self.spec.mode_id(self.permission_mode, self._modes)
-        if mode is None:
+        if not self._modes:
+            # An agent that names no modes has only its own; the host's
+            # answers to its permission requests carry Plan and Bypass.
             return
-        with contextlib.suppress(AcpError):
+        mode = self.spec.mode_id(self.permission_mode, self._modes)
+        label = _MODE_LABELS.get(self.permission_mode, self.permission_mode)
+        if mode is None:
+            raise AcpModeRejected(
+                f"The agent has no mode that matches {label}, so it was not changed"
+                f"{self._kept_mode_note()}.")
+        try:
             await conn.request("session/set_mode", {"sessionId": sid, "modeId": mode})
+        except AcpError as exc:
+            raise AcpModeRejected(
+                f"The agent refused to switch to {label} ({exc.message}), so it was not changed"
+                f"{self._kept_mode_note()}.") from exc
+        self._agent_mode = mode
+
+    def _kept_mode_note(self) -> str:
+        return f"; it stays in its {self._agent_mode} mode" if self._agent_mode else ""
 
     async def _cancel_remote(self) -> None:
         conn, sid = self._conn, self._acp_session
@@ -841,7 +900,11 @@ class AcpLoop:
             kind = update.get("sessionUpdate")
             if kind == "config_option_update" and isinstance(update.get("configOptions"), list):
                 self._config_options = [o for o in update["configOptions"] if isinstance(o, dict)]
+            elif kind == "current_mode_update" and update.get("currentModeId"):
+                self._agent_mode = str(update["currentModeId"])
             return
+        if update.get("sessionUpdate") == "current_mode_update" and update.get("currentModeId"):
+            self._agent_mode = str(update["currentModeId"])
         for event in mapper.map_update(update):
             await self._emit(event)
         if mapper.config_options is not None:

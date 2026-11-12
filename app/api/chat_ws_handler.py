@@ -1884,6 +1884,7 @@ class ChatWebSocketHandler:
                     owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,
                     project_id=project_id, overrides=overrides or None, payload=payload or None,
                     owner_send=True, command_id=client_message_id, caller=self._caller,
+                    person_entered=True,  # the owner's composer send
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -1911,6 +1912,9 @@ class ChatWebSocketHandler:
             command_id=client_message_id,
             no_kick=placed_remote,
             caller=self._caller,
+            # The owner's composer send (sent, or steering a running turn):
+            # one of the three places a person-entered row is admitted.
+            person_entered=True,
         )
 
         if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
@@ -2876,6 +2880,7 @@ class ChatWebSocketHandler:
                     owner_device, session_id, source="queue", prompt=content, profile_id=queue_profile_id,
                     project_id=project_id, payload=payload or None, owner_send=True,
                     command_id=client_message_id, caller=self._caller,
+                    person_entered=True,  # the owner's composer queue
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -2896,6 +2901,7 @@ class ChatWebSocketHandler:
             command_id=client_message_id,
             no_kick=placed_remote,
             caller=self._caller,
+            person_entered=True,  # the owner's composer queue
         )
         if placed_remote:
             from app.core import turn_claim
