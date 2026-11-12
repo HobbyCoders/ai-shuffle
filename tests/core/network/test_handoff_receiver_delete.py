@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks
 
 from app.api import sessions as sessions_api
 from app.core import session_handoff
-from app.db import database, session_moves, wakeups
+from app.db import database, session_locks, session_moves, wakeups
 from app.db import network as store
 from app.db import sessions as sessions_db
 from app.db.base import get_db
@@ -298,7 +298,8 @@ async def test_a_worker_that_does_not_own_the_chat_never_writes_the_fact(pair, m
     assert _fact(b) is None
 
 
-def test_an_owed_deletion_outlives_retention_and_a_settled_one_does_not(pair):  # noqa: F811
+def test_a_fact_is_never_forgotten_by_age(pair):  # noqa: F811
+    """The fact lives as long as the chat's deleted sync record (review S13)."""
     _, b, _, _ = pair
     with b.active(), get_db() as conn:
         cur = conn.cursor()
@@ -307,11 +308,52 @@ def test_an_owed_deletion_outlives_retention_and_a_settled_one_does_not(pair):  
             store.remember_session_deletion(cur, sid, network_id=network_id)
         store.put_record(cur, "sessions", "old-owed", clock=5, origin_device_id="dev_other", content_hash="",
                          deleted=False)
+        store.put_record(cur, "sessions", "old-settled", clock=6, origin_device_id=b.device_id, content_hash="",
+                         deleted=True)
         cur.execute("UPDATE network_session_deletions SET deleted_at = %s WHERE session_id <> 'recent'",
                     ("2000-01-01T00:00:00+00:00",))
-        assert store.prune_session_deletions(cur) == 1
+        assert store.prune_session_deletions(cur) == 0
         cur.execute("SELECT session_id FROM network_session_deletions ORDER BY session_id")
-        assert [row["session_id"] for row in cur.fetchall()] == ["old-owed", "recent"]
+        assert [row["session_id"] for row in cur.fetchall()] == ["old-owed", "old-settled", "recent"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["snapshot", "envelope"])
+async def test_a_commit_version_above_the_tombstone_arriving_months_later_stays_refused(
+        pair, monkeypatch, route):  # noqa: F811
+    """Review S13: B learns of the hand-off only from the direct reply and deletes.
+
+    A's commit record W is far above B's clock, so B's tombstone T is below W.
+    A goes offline; long after the old 30-day limit W reaches B (by snapshot
+    or by envelope, after B restarted). The chat stays deleted and B signs a
+    tombstone above W, which then deletes A's copy.
+    """
+    a, b, _, _ = pair
+    await _move_to_receiver(a, b, monkeypatch)
+    await _delete_on_receiver(b)
+    commit, tombstone = _record(a), _record(b)
+    assert not commit["deleted"] and tombstone["deleted"]
+    assert tombstone["clock"] < commit["clock"], "the scenario needs W above B's tombstone"
+    with b.active(), get_db() as conn:
+        conn.cursor().execute("UPDATE network_session_deletions SET deleted_at = %s WHERE session_id = %s",
+                              ("2000-01-01T00:00:00+00:00", SID))
+    with b.active():
+        assert engine.publish_session_deletions() == 0  # the owner scan prunes, then finds nothing owed
+    assert _fact(b) is not None, "an old fact that owes nothing is still the only refusal of W"
+    with session_locks._deleted_lock:
+        session_locks._DELETED.clear()  # B restarted meanwhile: nothing in memory survives
+    if route == "snapshot":
+        _copy_state(b, _snapshot(a, "sessions"))
+    else:
+        exchange(a, b)
+    with b.active():
+        assert database.get_session(SID) is None, "W recreated the chat the owner deleted"
+    assert _record(b)["clock"] == commit["clock"] and not _record(b)["deleted"] and _owed(b)
+    with b.active():
+        assert engine.publish_session_deletions() == 1
+    above = _record(b)
+    assert above["deleted"] and above["origin_device_id"] == b.device_id and above["clock"] > commit["clock"]
+    _assert_deleted_everywhere(a, b)
 
 
 @pytest.mark.asyncio

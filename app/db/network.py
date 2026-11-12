@@ -1456,9 +1456,6 @@ def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_de
         (collection, record_id, clock, origin_device_id, content_hash, bool(deleted), order_seq, _now()))
 
 
-SESSION_DELETION_RETENTION_DAYS = 30  # like the op log (prune_ops)
-
-
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:
     """Record, in the owner's delete transaction, that it deleted this chat (#1308)."""
     cursor.execute(
@@ -1513,18 +1510,21 @@ def forget_session_deletion(cursor, session_id: str) -> None:
     cursor.execute("DELETE FROM network_session_deletions WHERE session_id = %s", (session_id,))
 
 
-def prune_session_deletions(cursor, *, keep_days: int = SESSION_DELETION_RETENTION_DAYS) -> int:
-    """Forget old deletions that owe nothing; one still owed waits for its tombstone.
+def prune_session_deletions(cursor) -> int:
+    """Forget the deletion facts that no longer stand; never by age.
 
-    A fact of another network (written by a delete that raced leaving it) is
-    dropped at once, and so is one whose chat has a row here again: the
-    delete removed the row in the fact's own transaction, so a row now means
-    the chat was recreated (whole-database recovery) since.
+    A fact lives as long as the chat's own deleted sync record (sessions
+    records are kept until this worker leaves the network, which clears
+    both): a peer offline for months can still deliver a live version above
+    the owner's tombstone, and only the fact refuses it (#1308 review S13).
+    Dropped: a fact of another network (a delete that raced leaving it), and
+    one whose chat has a row here again. The delete removed the row in the
+    fact's own transaction, so a row now means the chat was recreated
+    (whole-database recovery) since.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
     cursor.execute("DELETE FROM network_session_deletions WHERE session_id IN ("
-                   f"SELECT d.session_id FROM network_session_deletions d WHERE (d.deleted_at < %s "
-                   f"AND NOT {_LIVE_RECORD}) OR NOT ({_CURRENT_NETWORK}) OR NOT {_NO_ROW})", (cutoff,))
+                   f"SELECT d.session_id FROM network_session_deletions d WHERE NOT ({_CURRENT_NETWORK}) "
+                   f"OR NOT {_NO_ROW})")
     return cursor.rowcount or 0
 
 
