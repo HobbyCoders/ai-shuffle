@@ -1196,7 +1196,7 @@ function reduceInternal(state, event, observe) {
     case "message.user": {
       const startsAgentTurn = state.pendingAgentWake && !event.not_sent;
       if (startsAgentTurn) state = { ...state, pendingAgentWake: false };
-      if (!syntheticTranscript && !event.not_sent) state = closeOpen(markAttemptBoundary(state, seq));
+      if (!syntheticTranscript && !event.not_sent) state = markAttemptBoundary(state, seq);
       const content = str(event.content);
       if (content.includes("<task-notification>")) {
         const { blocks, outside } = splitTaggedBlocks(content, "task-notification");
@@ -2381,7 +2381,7 @@ function materializeProjection(body, records, epoch, runtime) {
 }
 
 // scripts/transcript-reducer-node.ts
-var REDUCER_FINGERPRINT = "431e627d18ed8ee5e34e02d888c5179e18ea0c21e5fe4539f79a9cf0026d5364";
+var REDUCER_FINGERPRINT = "4150405bf63799c2315faa5d5db8f0c26c9125fc25de40cf70fc921dd31c373d";
 var RPC_VERSION = 1;
 var MAX_PACKET_BYTES = 24 * 1024 * 1024;
 function dispatch(method, params) {

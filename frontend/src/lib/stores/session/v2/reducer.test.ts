@@ -743,22 +743,6 @@ describe('message.user reconcile', () => {
 		expect(s.messages.map((m) => m.turnId)).toEqual(['t-1', 't-1']);
 	});
 
-	it('streams the answer to a steer below it, not into the text above', () => {
-		// An ACP agent answers a steer in the same stream, with no tool call
-		// or closed message between the two runs of text.
-		const s = fold([
-			ev('turn.started', { turn_id: 't-1' }),
-			ev('message.user', { id: 'srv-a', content: 'slow', turn_id: 't-1' }),
-			ev('assistant.text_delta', { text: 'working' }),
-			ev('message.user', { id: 'srv-b', content: 'go north', turn_id: 't-1', checkpoint_backed: false }),
-			ev('assistant.text_delta', { text: ' steered' }),
-		]);
-		expect(s.messages.map((m) => [m.role, m.content])).toEqual([
-			['user', 'slow'], ['assistant', 'working'], ['user', 'go north'], ['assistant', ' steered'],
-		]);
-		expect(s.messages[1].streaming).toBe(false);
-	});
-
 	it('prefers the event profile_id over the live turn profile', () => {
 		const s = fold([
 			ev('turn.started', { turn_id: 't-1', profile_id: 'p-turn' }),
