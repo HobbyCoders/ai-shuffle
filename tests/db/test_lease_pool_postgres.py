@@ -181,8 +181,8 @@ def test_lease_sql_timeouts_release_workers_and_do_not_leak(
             renewal = executor.submit(runs.renew_run, run["id"], "owner", run["fence_token"], 60)
             with pytest.raises(psycopg2.errors.LockNotAvailable):
                 renewal.result(timeout=3)
-    with base.get_lease_db() as conn:
-        with pytest.raises(psycopg2.errors.QueryCanceled):
+    with pytest.raises(psycopg2.errors.QueryCanceled):
+        with base.get_lease_db() as conn:
             conn.cursor().execute("SELECT pg_sleep(5)")
     with base.get_db() as conn:
         cursor = conn.cursor()

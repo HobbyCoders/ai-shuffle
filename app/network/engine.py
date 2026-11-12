@@ -2099,10 +2099,14 @@ def _after_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any])
         size = plaintext.get("size") if coll.name == "artifacts" else plaintext.get("size_bytes")
         holder = plaintext.get("owner_device_id")
         if isinstance(digest, str) and digest:
+            # Without the savepoint a failed upsert aborts the apply transaction.
+            _savepoint(cursor, "SAVEPOINT blob_note")
             try:
                 blobs.note_missing(digest, int(size or 0), holder, _cursor=cursor)
             except Exception:  # noqa: BLE001
+                _savepoint(cursor, "ROLLBACK TO SAVEPOINT blob_note")
                 logger.debug("Blob bookkeeping failed for %s", digest[:12], exc_info=True)
+            _savepoint(cursor, "RELEASE SAVEPOINT blob_note")
 
 
 def _apply_membership(cursor, ctx: NetworkContext, plaintext: Mapping[str, Any]) -> None:
