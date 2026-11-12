@@ -443,9 +443,14 @@ def _untouched_reclaim_plan(
 
 def _would_reclaim_untouched(worker_session_id: str, checkout: Optional[WorkerCheckout] = None) -> bool:
     """Whether :func:`reclaim_untouched_worker_checkout` would remove the
-    checkout right now. Changes nothing."""
-    plan = _untouched_reclaim_plan(worker_session_id, checkout)
-    return plan is not None and _clean_at(plan[2], plan[5] or plan[4])
+    checkout right now. Changes nothing. Fails closed, like :func:`_reclaim`:
+    an unreadable checkout keeps its client."""
+    try:
+        plan = _untouched_reclaim_plan(worker_session_id, checkout)
+        return plan is not None and _clean_at(plan[2], plan[5] or plan[4])
+    except Exception:  # noqa: BLE001 — a probe failure means "keep"; never mask the caller
+        logger.warning("worker_checkout: could not check %s for reclaim", worker_session_id, exc_info=True)
+        return False
 
 
 def _stranded_review_head(main_dir: str, path: str, branch: str, base_commit: str, head_commit: str) -> bool:

@@ -83,6 +83,28 @@ async def test_execution_preflight_restores_own_checkout_over_empty_leftover(rep
 
 
 @pytest.mark.asyncio
+async def test_unreadable_checkout_keeps_client_and_checkout(repo, monkeypatch):
+    """A Git timeout in the pre-retire probe means "keep", as in ``_reclaim``:
+    the finisher must not raise into the Task retry loop."""
+    from app.core.git_service import git_service
+    from app.core.session_pool import get_session_pool
+
+    checkout = bind_worker(repo, SID)
+    run_git = git_service._run_git
+    def slow_status(path, args, *rest, **kwargs):
+        if args[:1] == ["status"]:
+            raise subprocess.TimeoutExpired(["git", *args], kwargs.get("timeout", 10))
+        return run_git(path, args, *rest, **kwargs)
+    monkeypatch.setattr(git_service, "_run_git", slow_status)
+    removed = AsyncMock()
+    monkeypatch.setattr(get_session_pool(), "remove", removed)
+    assert await worker_checkout.reclaim_finished_worker_checkout(SID) is False
+    assert removed.await_count == 0
+    assert_restored(checkout)
+    assert git(repo[2], "rev-parse", "refs/heads/" + checkout.branch) == checkout.base_commit
+
+
+@pytest.mark.asyncio
 async def test_nonempty_leftover_is_still_refused(repo):
     checkout = bind_worker(repo, SID)
     leave_empty_leftover(repo, checkout)
