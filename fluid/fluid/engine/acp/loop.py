@@ -84,6 +84,18 @@ UNWATCHED_PERMISSION_TIMEOUT = 10.0
 QUESTION_TIMEOUT = 1800.0
 BUNDLED_SERVER_NAME = "fluid_bundled"
 
+# Client permission mode -> the agent's ACP mode id (``AcpAgentSpec.mode_id``).
+# Bypass has no agent equivalent: the agent runs normally and the host
+# answers every permission request itself (``AcpLoop._permission``).
+_ACP_NORMAL_MODE = "default"
+_ACP_MODES: dict[str, str] = {
+    "default": _ACP_NORMAL_MODE,
+    "acceptEdits": "accept-edits",
+    "plan": "plan",
+    "bypassPermissions": _ACP_NORMAL_MODE,
+    "auto": _ACP_NORMAL_MODE,
+}
+
 
 class AcpAuthRequired(RuntimeError):
     """The agent refused a session because it is not signed in."""
@@ -136,8 +148,18 @@ class AcpAgentSpec:
         return effort
 
     def mode_id(self, permission_mode: str | None, available: Sequence[str]) -> str | None:
-        mode = {"acceptEdits": "accept-edits", "plan": "plan", "default": "default"}.get(permission_mode or "default")
-        return mode if mode in available else None
+        """The agent's mode for a client permission mode, from ``available``.
+
+        Every client mode maps to one: a mode with no agent equivalent
+        (Bypass, where the host approves each request itself; ``auto``) runs
+        in the agent's normal mode, so a change always moves the agent out of
+        a mode it should no longer be in (Plan above all). None only when the
+        agent advertises neither the mapped mode nor its normal one.
+        """
+        mode = _ACP_MODES.get(permission_mode or "default", _ACP_NORMAL_MODE)
+        if mode in available:
+            return mode
+        return _ACP_NORMAL_MODE if _ACP_NORMAL_MODE in available else None
 
     def turn_failure(self, text: str) -> str | None:
         """An error the agent reported as message text instead of an RPC error."""

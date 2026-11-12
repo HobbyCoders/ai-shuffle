@@ -1315,19 +1315,38 @@ def test_an_api_user_cannot_run_the_owners_google_sign_in(client, mode, refused)
 
 # --- permission mode mid-chat -------------------------------------------------
 
-@pytest.mark.parametrize("start,to,agent_mode", [
-    ("acceptEdits", "default", "default"),
-    ("acceptEdits", "plan", "plan"),
-    ("default", "acceptEdits", "accept-edits"),
-    ("default", "plan", "plan"),
-    ("plan", "default", "default"),
-    ("plan", "acceptEdits", "accept-edits"),
-    ("acceptEdits", "auto", "default"),  # Auto is the Claude CLI's alone: Ask here
+#: Every permission mode the app can pick, and the agent mode it must reach.
+#: Bypass and Auto have no agent equivalent: the agent runs in its normal
+#: mode (the host approves every request on Bypass; Auto is the Claude CLI's
+#: alone and runs as Ask here), never staying in Plan.
+_APP_TO_AGENT_MODE = {
+    "default": "default",
+    "acceptEdits": "accept-edits",
+    "plan": "plan",
+    "bypassPermissions": "default",
+    "auto": "default",
+}
+
+
+def test_the_mode_table_covers_every_app_permission_mode():
+    from app.api.voice_context import VALID_PERMISSION_MODES
+    from app.core.session_modes import PERMISSION_MODE_STRICTNESS
+    from fluid.permissions.modes import PERMISSION_MODES
+
+    # Plan is the composer's plan toggle, the rest the permission picker's.
+    every = set(VALID_PERMISSION_MODES) | set(PERMISSION_MODE_STRICTNESS) | set(PERMISSION_MODES) | {"plan"}
+    assert every == set(_APP_TO_AGENT_MODE)
+
+
+@pytest.mark.parametrize("start,to", [
+    (start, to) for start in _APP_TO_AGENT_MODE for to in _APP_TO_AGENT_MODE if start != to
 ])
-async def test_a_mid_chat_permission_change_reaches_the_agent(fake_agy, tmp_path, monkeypatch, start, to, agent_mode):
-    # Through the adapter's hot-change entry point, down to the frame the
-    # agent receives: the ACP engine must get a mode name, never a native
-    # approval policy it cannot map.
+async def test_a_mid_chat_permission_change_reaches_the_agent(fake_agy, tmp_path, monkeypatch, start, to):
+    # Every app mode to every other one, through the adapter's hot-change
+    # entry point, down to the frame the agent receives: the ACP engine must
+    # get a mode name, never a native approval policy it cannot map, and the
+    # agent must leave the mode it was in when the new one says so.
+    agent_mode = _APP_TO_AGENT_MODE[to]
     import json as _json
 
     from app.core.provider.harness_adapter import _ANTIGRAVITY_KIND, HarnessAdapter
