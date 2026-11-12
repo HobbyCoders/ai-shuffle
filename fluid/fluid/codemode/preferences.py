@@ -20,7 +20,9 @@ raise the question, both bounded so they cannot nag:
   a session whose owner messages carry the rule saved such a memory at or
   after the latest time the owner said it (the learner reads journals later,
   so that save may predate the proposal); an older memory never suppresses
-  a proposal that changes it.
+  a proposal that changes it. A rule with fewer subject terms than the
+  minimum closes only by topic key, wording, expiry or dismissal: shared
+  words alone are not evidence the owner's rule was recorded.
   The guidance queue
   (``pending-proposals.jsonl``) is not reused: ``fluid evolve`` replays
   everything in it through the guidance gate.
@@ -98,10 +100,6 @@ def same_topic(topic: str, text: str, key: str | None, terms: set[str]) -> bool:
         return True
     mine = _salient(text)
     shared = len(mine & terms)
-    # A short rule ("still no ModelX") has fewer subject terms than the
-    # minimum: it needs all of them (at least two) plus a word of its topic.
-    if 2 <= len(mine) < PROPOSAL_ANSWER_MIN_SHARED and mine <= terms:
-        return bool(terms & _salient(name.replace("_", " ")))
     return (shared >= PROPOSAL_ANSWER_MIN_SHARED
             and shared >= PROPOSAL_ANSWER_MIN_RATIO * max(1, min(len(mine), len(terms))))
 

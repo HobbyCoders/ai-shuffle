@@ -293,27 +293,20 @@ def test_a_queued_proposal_closes_when_its_session_saves_the_rule_in_a_project(t
     assert queue.open() == []
 
 
-def test_a_short_rule_closes_on_a_later_owner_memory_naming_all_its_terms(tmp_path):
+def test_a_short_rule_is_not_closed_by_term_overlap(tmp_path):
     store = SkillStore(tmp_path)
     queue = PreferenceProposals(store)
     assert queue.propose("subagent_models", "still dont use ModelX for now.", sessions=["s1"]) == "proposed"
-    store.save_memory("The website deploys from main.", protected=True, when="When deploying")
-    store.save_memory("ModelX is fast at frontend work.", protected=True, when="When picking a model")
-    assert len(queue.open()) == 1, "one shared term is not the same subject"
-    store.save_memory("Still dont use ModelX: sessions, subagents and swarms run on ModelY unless "
-                      "the owner names another model.", protected=True,
-                      when="When choosing a model for a subagent", source_session="s7")
-    assert queue.open() == []
-
-
-def test_a_short_rule_stays_open_on_an_unrelated_memory_naming_its_terms(tmp_path):
-    store = SkillStore(tmp_path)
-    queue = PreferenceProposals(store)
-    assert queue.propose("subagent_models", "still dont use ModelX for now.", sessions=["s1"]) == "proposed"
-    # Both subject terms, but nothing of the topic (subagents, models).
+    # Fewer subject terms than the minimum: neither an unrelated memory naming
+    # both nor the owner's own restatement closes it by shared words.
     store.save_memory("For ModelX API errors, dont retry rate-limited requests; wait for quota reset.",
                       protected=True, when="When ModelX API calls fail", source_session="s1")
+    store.save_memory("Still dont use ModelX: subagents run on ModelY unless the owner names another "
+                      "model.", protected=True, when="When choosing a model", source_session="s7")
     assert len(queue.open()) == 1
+    store.save_memory("Subagents run on ModelY.", protected=True, when="When choosing a model",
+                      key="subagent_models")
+    assert queue.open() == [], "a memory keyed by the topic answers it"
 
 
 def learner_reads_sessions(store, said: list[tuple[str, str, float]], proposal: str) -> Synthesizer:
@@ -350,6 +343,24 @@ async def test_only_sessions_that_gave_the_correction_can_answer_it(tmp_path):
     store.save_memory(MAIN_MEMORY, scope="project:fixture", protected=True, when=MAIN_WHEN,
                       source_session="s9")
     assert len(PreferenceProposals(store).open()) == 1
+
+
+async def test_a_correction_over_several_messages_closes_only_in_scope(tmp_path):
+    store = SkillStore(tmp_path)
+    now = time.time()
+    # No single message carries the rule, so no session may close it elsewhere.
+    synth = learner_reads_sessions(store, [
+        ("s1", "Have sessions update branches.", now - 90),
+        ("s1", "Bring pull requests to current main.", now - 60),
+        ("s1", "Do this before merging.", now - 30)], MAIN_RULE)
+    assert await synth.run() == ["preference-proposal:pr_main_updates"]
+    [record] = PreferenceProposals(store).open()
+    assert record["sessions"] == []
+    store.save_memory(MAIN_MEMORY, scope="project:fixture", protected=True, when=MAIN_WHEN,
+                      source_session="s1")
+    assert len(PreferenceProposals(store).open()) == 1, "another scope does not close it"
+    store.save_memory(MAIN_MEMORY + " Always.", protected=True, when=MAIN_WHEN, source_session="s1")
+    assert PreferenceProposals(store).open() == [], "a global save does"
 
 
 @pytest.mark.parametrize("saved_before_the_row", [False, True])
