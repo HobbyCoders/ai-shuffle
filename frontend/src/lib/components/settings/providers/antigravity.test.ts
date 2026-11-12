@@ -67,6 +67,22 @@ describe('Google Antigravity rows', () => {
 		expect(key.summary).not.toContain('interactive only');
 	});
 
+	it('say a sign-in that is not signed in here needs sign-in, and keep each row on or off by itself', () => {
+		const out = { ...agy('oauth-business'), antigravity_signed_in: false };
+		const inHere = { ...agy('oauth-personal'), antigravity_signed_in: true };
+		const creds = buildProviders(input([out, inHere, agy('gemini-api-key')])).find((p) => p.id === 'antigravity')!.credentials;
+		const business = creds.find((c) => c.flavor === 'agy-business')!;
+		expect(business.statusText).toBe('Needs sign-in');
+		expect(business.status).toBe('warn');
+		expect(business.on).toBe(false); // not ready, not counted "in picker"
+		expect(business.summary).toContain('needs sign-in');
+		expect(business.kind).toBe('Business sign-in');
+		const personal = creds.find((c) => c.flavor === 'agy-personal')!;
+		expect([personal.statusText, personal.on, personal.kind]).toEqual(['On', true, 'Personal sign-in']);
+		// No "Active" (a slot word): Antigravity rows have no one-active-per-kind slot.
+		expect(creds.map((c) => c.statusText)).not.toContain('Active');
+	});
+
 	it('label per-model quota windows from the agent', () => {
 		expect(windowLabel('antigravity_gemini_3_1_pro')).toBe('Gemini 3.1 Pro');
 		expect(windowLabel('antigravity_gemini_3_8_flash')).toBe('Gemini 3.8 Flash');

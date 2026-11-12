@@ -224,6 +224,12 @@ async def _run_install() -> None:
             if not (version and url and digest) or urlsplit(url).hostname not in _ALLOWED_DOWNLOAD_HOSTS:
                 raise RuntimeError("Google's update manifest did not name a download.")
             _install.version = version
+            current = find_binary()
+            if current and await binary_version(current) == version:
+                # Already this version (a stale Install button, a second
+                # worker's screen): nothing is downloaded.
+                _install.state = "done"
+                return
             target = _root() / "cli" / re.sub(r"[^\w.-]", "_", version)
             target.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=target.parent) as tmp:
@@ -342,7 +348,48 @@ def build_spec(row: Mapping[str, Any], *, add_dirs: Optional[List[str]] = None,
     )
 
 
+def _signed_in_marker(row_id: str) -> Path:
+    # The app's own file, outside the binary's home: it records what the
+    # binary last answered, never anything read from the sign-in.
+    return _root() / "signed-in" / re.sub(r"[^A-Za-z0-9_.-]", "_", str(row_id))
+
+
+def signed_in_here(row_id: str) -> bool:
+    """Whether the binary last said this sign-in row can open sessions on
+    this worker (a status check or a completed sign-in; cleared by a
+    signed-out answer, sign-out and delete). Cheap: one stat, no process."""
+    try:
+        return bool(row_id) and _signed_in_marker(str(row_id)).is_file()
+    except OSError:
+        return False
+
+
+def _note_signin(row_id: str, state: str) -> None:
+    if not row_id or state not in ("signed_in", "signed_out"):
+        return  # not installed or an error says nothing about the sign-in
+    marker = _signed_in_marker(row_id)
+    try:
+        if state == "signed_in":
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("[antigravity] could not record the sign-in state of %s", row_id, exc_info=True)
+
+
 async def probe(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Ask the binary whether this row can open sessions (see ``_probe``);
+    a sign-in row records the answer for :func:`signed_in_here`."""
+    epoch = signin_epoch(str(row.get("id") or ""))
+    result = await _probe(row)
+    # A sign-out or delete while the binary answered: its answer is stale.
+    if row.get("auth_mode") in STORED_SIGN_IN and epoch == signin_epoch(str(row.get("id") or "")):
+        _note_signin(str(row.get("id") or ""), str(result.get("state") or ""))
+    return result
+
+
+async def _probe(row: Mapping[str, Any]) -> Dict[str, Any]:
     """Ask the binary itself whether this row can open sessions.
 
     ``initialize`` (+ ``authenticate`` for key rows), then ``session/list``:
@@ -610,6 +657,7 @@ async def forget_row(row_id: str, *, reason: Optional[str] = None) -> None:
     await stop_agents(row_id, reason or STOPPED_REMOVED)
     async with _login_lock(str(row_id)):
         await _stop_logins(str(row_id))
+        _note_signin(str(row_id), "signed_out")
         path = _home_path(str(row_id))
         if path.is_dir():
             await asyncio.to_thread(shutil.rmtree, path, True)

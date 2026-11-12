@@ -138,6 +138,9 @@ class ModelProviderResponse(BaseModel):
     # claims. Only these two strings leave the backend, never the token.
     account_email: Optional[str] = None
     account_plan: Optional[str] = None
+    # Antigravity Google sign-in rows only: whether Google's agent last said
+    # this worker is signed in (null on every other row). Never the sign-in.
+    antigravity_signed_in: Optional[bool] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     revision: Optional[str] = None
@@ -428,6 +431,14 @@ def _iso(value: Any) -> Optional[str]:
     return value.isoformat()
 
 
+def _antigravity_signed_in(row: Dict[str, Any]) -> Optional[bool]:
+    from app.core import antigravity
+
+    if row.get("provider_type") != antigravity.PROVIDER_TYPE or row.get("auth_mode") not in antigravity.STORED_SIGN_IN:
+        return None
+    return antigravity.signed_in_here(str(row.get("id") or ""))
+
+
 def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
     """Shape a DB row (public columns only, no token) into the response model."""
     models = []
@@ -466,6 +477,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         codex_refresh_token_set=bool(row.get("_codex_refresh_token_set")),
         account_email=row.get("_account_email"),
         account_plan=row.get("_account_plan"),
+        antigravity_signed_in=_antigravity_signed_in(row),
         created_at=_iso(row.get("created_at")),
         updated_at=_iso(row.get("updated_at")),
         revision=row.get("revision"),

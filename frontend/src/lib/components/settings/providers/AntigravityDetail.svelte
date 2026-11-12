@@ -8,7 +8,7 @@
 	 * Google's terms warning. Models: curation (Gemini models only). Usage: the
 	 * agent's own /usage reading, read on demand.
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { ExternalLink, RefreshCw } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import {
@@ -62,11 +62,20 @@
 	const guarded = $derived(status ? status.guarded : antigravityGuarded(row));
 
 	async function loadStatus() {
+		const id = row.id;
 		try {
-			status = await getAntigravityProviderStatus(row.id);
+			const answer = await getAntigravityProviderStatus(id);
+			if (id !== row.id) return;
+			status = answer;
 			statusError = '';
+			// The answer moves the row's "Needs sign-in" state, readiness and
+			// the picker: reload the list when it changed.
+			const signedIn = answer.state === 'signed_in' ? true : answer.state === 'signed_out' ? false : null;
+			if (!keyRow && signedIn !== null && (row.antigravity_signed_in ?? null) !== signedIn) {
+				await providers.refreshProviders();
+			}
 		} catch (e) {
-			statusError = getErrorMessage(e, 'Could not ask the agent');
+			if (id === row.id) statusError = getErrorMessage(e, 'Could not ask the agent');
 		}
 	}
 
@@ -183,12 +192,42 @@
 		}
 	]);
 
-	onMount(() => {
-		// The agent can be installed or removed outside this screen.
+	// The agent can be installed, signed in or out, or removed outside this
+	// screen (another device, another tab, a terminal on the worker): ask
+	// again whenever the pane is shown, including a reopen on a phone, where
+	// the pane stays mounted behind the list, and when the app regains focus.
+	function refresh() {
 		void antigravity.load(true);
 		void loadStatus();
 		void providers.loadUsage();
-		return () => { destroyed = true; };
+	}
+	let shownFor = '';
+	let statusFor = '';
+	$effect(() => {
+		const shown = !settingsNav.stacked || settingsNav.view === 'detail';
+		const id = row.id;
+		untrack(() => {
+			if (!shown) {
+				shownFor = '';
+				return;
+			}
+			if (shownFor === id) return;
+			if (statusFor !== id) status = null; // another row's answer never shows here
+			statusFor = shownFor = id;
+			refresh();
+		});
+	});
+	onMount(() => {
+		const onFocus = () => {
+			if (document.visibilityState === 'visible') void loadStatus();
+		};
+		window.addEventListener('focus', onFocus);
+		document.addEventListener('visibilitychange', onFocus);
+		return () => {
+			destroyed = true;
+			window.removeEventListener('focus', onFocus);
+			document.removeEventListener('visibilitychange', onFocus);
+		};
 	});
 </script>
 

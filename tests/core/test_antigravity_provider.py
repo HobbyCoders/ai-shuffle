@@ -5,6 +5,7 @@ launched through the binary override, exactly as the real ``agy`` would be.
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -299,6 +300,47 @@ async def test_a_new_key_ends_the_rows_running_agents_and_other_edits_do_not(cli
     assert engine.stops == [ag.STOPPED_KEY_CHANGED]
 
 
+async def test_a_sign_in_row_counts_as_ready_only_while_signed_in_here(mock_db, fake_agy):
+    from app.api.model_providers import _public_provider, _row_with_token_flags
+    from app.core import credential_gate
+
+    row = await _personal_row()
+    usable = lambda: [r["id"] for r in credential_gate.usable_provider_rows()]  # noqa: E731
+    assert row["id"] not in usable()
+    assert _public_provider(_row_with_token_flags(row["id"])).antigravity_signed_in is False
+    ag._note_signin(row["id"], "signed_in")  # what a status check or completed sign-in records
+    assert row["id"] in usable() and ag.signed_in_here(row["id"])
+    assert _public_provider(_row_with_token_flags(row["id"])).antigravity_signed_in is True
+    # Not even then the implicit default: an explicit pick only.
+    assert credential_gate.default_provider_model() is None
+    db.update_model_provider(row["id"], enabled=False)
+    assert row["id"] not in usable()
+    db.update_model_provider(row["id"], enabled=True)
+    ag._note_signin(row["id"], "error")  # an error says nothing about the sign-in
+    assert ag.signed_in_here(row["id"])
+    await ag.sign_out(row)
+    assert row["id"] not in usable() and not ag.signed_in_here(row["id"])
+
+
+async def test_a_signed_out_answer_clears_ready_and_a_stale_answer_is_ignored(mock_db, fake_agy, monkeypatch):
+    row = await _personal_row()
+    ag._note_signin(row["id"], "signed_in")
+    answers = iter([{"state": "signed_out"}])
+
+    async def answer(r):
+        return next(answers)
+    monkeypatch.setattr(ag, "_probe", answer)
+    await ag.probe(row)
+    assert not ag.signed_in_here(row["id"])
+
+    async def slow_signed_in(r):
+        await ag.forget_row(row["id"])  # a sign-out lands while the agent answers
+        return {"state": "signed_in"}
+    monkeypatch.setattr(ag, "_probe", slow_signed_in)
+    await ag.probe(row)
+    assert not ag.signed_in_here(row["id"])
+
+
 # --- API ----------------------------------------------------------------------
 
 def test_meta_carries_the_warning_and_guard_default(client):
@@ -418,6 +460,41 @@ def test_business_sign_in_has_no_headless_flow(client):
     row = _create(client, "oauth-business")
     body = client.post(f"{BASE}/providers/{row['id']}/login").json()
     assert body["state"] == "failed" and "browser" in body["message"]
+
+
+async def test_install_does_nothing_when_that_version_is_installed(mock_db, fake_agy, monkeypatch):
+    import platform
+
+    import httpx
+
+    if os.name != "posix" or platform.machine().lower() not in ("x86_64", "amd64"):
+        pytest.skip("the app installs Antigravity on Linux x64 only")
+    version = await ag.binary_version(str(fake_agy))
+    assert version
+    downloads = []
+
+    class _Manifest:
+        def raise_for_status(self):
+            return self
+
+        def json(self):
+            return {"version": version, "url": "https://storage.googleapis.com/fake/cli.tar.gz",
+                    "sha512": "00"}
+
+    async def get(self, url, **kw):
+        return _Manifest()
+
+    def stream(self, *args, **kw):
+        downloads.append(args)
+        raise AssertionError("a stale Install button must not download")
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
+    monkeypatch.setattr(httpx.AsyncClient, "stream", stream)
+    monkeypatch.setattr(ag, "_install", ag.InstallJob())
+    monkeypatch.setattr(ag, "_install_task", None)
+    ag.start_install()
+    await ag._install_task
+    assert ag.install_state() == {"state": "done", "version": version, "error": None}
+    assert downloads == []
 
 
 def test_not_installed_is_reported(client, monkeypatch):

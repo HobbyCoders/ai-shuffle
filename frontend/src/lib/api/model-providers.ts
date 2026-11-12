@@ -169,6 +169,8 @@ export interface ModelProvider {
 	account_email?: string | null;
 	/** Subscription plan id from the sign-in ("plus", "pro"); null when unknown. */
 	account_plan?: string | null;
+	/** Antigravity Google sign-in rows: whether Google's agent last said this worker is signed in. Null elsewhere. */
+	antigravity_signed_in?: boolean | null;
 	created_at: string | null;
 	updated_at: string | null;
 	/** Fingerprint of the current endpoint/credential, not curation or token ciphertext. */

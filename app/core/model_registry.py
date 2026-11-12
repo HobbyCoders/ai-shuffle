@@ -511,9 +511,9 @@ def _providers_payload() -> List[Dict[str, object]]:
     # browser's own default pick skips a row needing a re-sign-in or with a
     # rejected key. ``None`` (unknown) when the read fails.
     try:
-        usable_ids: Optional[set] = {
-            r.get("id") for r in (database.list_usable_model_providers() or [])
-        }
+        from app.core.credential_gate import usable_provider_rows
+
+        usable_ids: Optional[set] = {r.get("id") for r in usable_provider_rows()}
     except Exception as e:
         logger.warning("Could not load usable model providers for registry payload: %s", e)
         usable_ids = None

@@ -854,29 +854,35 @@ export function antigravityGuarded(row: Pick<ModelProvider, 'provider_type' | 'a
 }
 
 /**
- * An Antigravity row. Sign-in state lives in Google's agent on the worker, so
- * the list says only what the row knows; the detail asks the agent.
+ * An Antigravity row. Rows are independent (no "one active per kind" slot):
+ * each is on or off by itself. A Google sign-in lives in Google's agent on
+ * the worker; the row carries what the agent last said
+ * (`antigravity_signed_in`), and one that is not signed in here reads
+ * "Needs sign-in" and is neither ready nor in the picker. The detail asks
+ * the agent again.
  */
 function antigravityCredential(row: ModelProvider, flavor: AntigravityFlavor): CredentialView {
 	const kind = KINDS.antigravity.find((k) => k.flavor === flavor)!;
 	const models = row.models?.length ?? 0;
 	const guarded = antigravityGuarded(row);
-	const parts = [kind.label, plural(models, 'model')];
+	// An older worker sends no flag: trust the row as before.
+	const needsSignIn = flavor !== 'agy-key' && row.antigravity_signed_in === false;
+	const parts = [kind.label, needsSignIn ? 'needs sign-in' : plural(models, 'model')];
 	if (guarded) parts.push('interactive only');
 	return {
 		item: rowItem(row.id),
 		providerId: 'antigravity',
 		flavor,
 		name: row.name?.trim() || kind.label,
-		kind: flavor === 'agy-key' ? 'API key' : 'Google sign-in',
+		kind: flavor === 'agy-key' ? 'API key' : flavor === 'agy-business' ? 'Business sign-in' : 'Personal sign-in',
 		summary: row.enabled ? parts.join(', ') : 'Off',
-		status: row.enabled ? 'ok' : 'off',
-		statusText: row.enabled ? 'Active' : 'Saved',
+		status: !row.enabled ? 'off' : needsSignIn ? 'warn' : 'ok',
+		statusText: needsSignIn ? 'Needs sign-in' : row.enabled ? 'On' : 'Off',
 		active: row.enabled,
-		on: row.enabled,
+		on: row.enabled && !needsSignIn,
 		switchable: true,
 		enabled: row.enabled,
-		attention: false,
+		attention: row.enabled && needsSignIn,
 		row
 	};
 }
