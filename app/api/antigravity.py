@@ -105,6 +105,21 @@ async def install(token: str = Depends(require_admin)):
     return antigravity.start_install()
 
 
+@router.get("/providers")
+async def list_providers(token: str = Depends(require_admin)):
+    """This leg's rows (public view, no keys) with their guard state.
+
+    The same rows also appear in ``GET /api/v1/model-providers``.
+    """
+    from app.api.model_providers import _apply_token_flags, _public_provider
+
+    rows = await run_sync(db.get_all_model_providers, include_token=True)
+    return {"providers": [
+        {**_public_provider(_apply_token_flags(row)).model_dump(), **_guard_view(row)}
+        for row in rows if row.get("provider_type") == antigravity.PROVIDER_TYPE
+    ]}
+
+
 @router.post("/providers")
 async def create_provider(body: AntigravityProviderCreate, token: str = Depends(require_admin)):
     """Create an Antigravity row once every member worker can run one."""

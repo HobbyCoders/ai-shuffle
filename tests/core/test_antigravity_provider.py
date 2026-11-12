@@ -450,6 +450,10 @@ def test_key_rows_store_the_key_encrypted_and_never_return_it(client):
     assert status["agent"]["agent"] == "Antigravity ACP Server"
     assert status["agent"]["system_prompt"] == "append" and status["agent"]["resume"]
     assert client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True}).status_code == 400
+    personal = _create(client)
+    listed = client.get(f"{BASE}/providers").json()["providers"]
+    assert {r["id"]: r["guarded"] for r in listed} == {row["id"]: False, personal["id"]: True}
+    assert "test-gemini-secret-value" not in str(listed)
 
 
 def test_rows_carry_gemini_models_with_thinking_levels(client):

@@ -554,7 +554,7 @@ The agent keeps a Google sign-in in its own files on the worker. AI Shuffle star
 
 **Interactive only.** A personal sign-in row runs only in chats you type into yourself. Automations, scheduled or automatic turns, Task, Swarm and subagent children, sessions another agent started and background calls are refused with a message that names the reason and points back to the row. **Allow unattended use** on the row's Overview tab lifts this; it is off for every new row. Key and business rows are not limited.
 
-**Usage.** Google documents no usage API for Antigravity. When you open the usage popover or press **Refresh** on the row's Usage tab, AI Shuffle asks the agent for its own `/usage` reading (at most every 30 seconds) and shows the quota left per model. A reply that cannot be read shows **Unavailable**, an older reading is marked as old, and both link to Antigravity's own page.
+**Usage.** Google documents no usage API for Antigravity. When you open the usage popover or press **Refresh** on the row's Usage tab, AI Shuffle asks the agent for its own `/usage` reading (at most every 30 seconds) and shows the quota left per model. A reply that cannot be read shows **Unavailable**, an older reading is marked as old, and both link to the Antigravity FAQ (Google publishes no usage page for these plans). Stats count a Google sign-in as a subscription and a Gemini API key as API use.
 
 ### Antigravity endpoints
 
@@ -565,11 +565,12 @@ All of these are owner only, under `/api/v1/antigravity`.
 | `GET /meta` | `provider_type`, `auth_modes` (`id`, `label`, `headless`, `guarded`, `warning`), the `warning` text, `terms_url`, `dashboard_url`, `guard_default` and `default_models` |
 | `GET /status` | `installed`, `version`, `install` (`state`, `version`, `error`) and `workers_requiring_update` |
 | `POST /install` | Download and install Google's agent; poll `GET /status` |
+| `GET /providers` | This leg's rows (no keys) with `guard_applies`, `allow_unattended` and `guarded`. They also appear in `GET /api/v1/model-providers` |
 | `POST /providers` | Create a row: `{"name", "auth_mode", "api_key"?, "models"?, "default_model"?, "enabled"}`. Returns the provider object plus `guard_applies`, `allow_unattended` and `guarded` |
-| `GET /providers/{id}/status` | `state` (`signed_in`, `signed_out`, `not_installed` or `error`), `message`, the guard fields and `auth_mode` |
+| `GET /providers/{id}/status` | `state` (`signed_in`, `signed_out`, `not_installed` or `error`), `message`, the guard fields, `auth_mode` and `login` (a sign-in waiting for its code, started on any device, or `null`) |
 | `PUT /providers/{id}/guard` | `{"allow_unattended": true}` lifts the guard on a personal sign-in row |
-| `POST /providers/{id}/login` | Start a sign-in: `{"login_id", "state": "awaiting_code" or "failed", "url", "message"}` |
-| `POST /providers/{id}/login/{login_id}/complete` | `{"code"}` from the Google page; returns `signed_in` or `failed` |
+| `POST /providers/{id}/login` | Start a sign-in: `{"login_id", "state": "awaiting_code" or "failed", "url", "message"}`. On a row already signed in on this worker nothing starts: `state` is `signed_in`, `login_id` is `null` and `message` says to sign out first to change accounts |
+| `POST /providers/{id}/login/{login_id}/complete` | `{"code"}` from the Google page; returns `signed_in` or `failed` (a wrong or expired code says so; start the sign-in again for a new code) |
 | `DELETE /providers/{id}/login/{login_id}` | Cancel a sign-in |
 | `POST /providers/{id}/sign-out` | Sign the agent out on this worker |
 
