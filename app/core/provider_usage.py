@@ -1355,8 +1355,9 @@ class ProviderUsageMonitor:
             windows = antigravity.normalize_usage(payload)
             if windows is None:
                 if antigravity.signin_epoch(provider_id) == epoch:
-                    await run_sync(db.record_provider_usage_failure, provider_id, "antigravity",
-                                   "unavailable")
+                    await run_sync(functools.partial(
+                        db.record_provider_usage_failure, provider_id, "antigravity", "unavailable",
+                        expected_provider_revision=revision))
                 return
             written = await run_sync(
                 db.upsert_provider_usage_snapshot, provider_id, "antigravity", None, windows,

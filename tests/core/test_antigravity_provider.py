@@ -408,7 +408,7 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
     monkeypatch.setattr(ag, "read_usage", counted)
     writes = []
     monkeypatch.setattr(db, "upsert_provider_usage_snapshot", lambda *a, **kw: writes.append(("ok", a)))
-    monkeypatch.setattr(db, "record_provider_usage_failure", lambda *a: writes.append(("fail", a)))
+    monkeypatch.setattr(db, "record_provider_usage_failure", lambda *a, **kw: writes.append(("fail", a)))
     monitor = ProviderUsageMonitor()
     await monitor._poll_antigravity_provider(row)
     assert calls == [] and writes == []
@@ -594,13 +594,13 @@ async def test_a_generic_edit_keeps_the_guard_and_the_type(mock_db, fake_agy):
 
 # --- usage readings that must not land ------------------------------------------------
 
-async def _poll_with(monkeypatch, row, during):
+async def _poll_with(monkeypatch, row, during, unparsed=False):
     from app.core.provider_usage import ProviderUsageMonitor
 
     async def read(r):
         await during()
-        return {"status": "OK", "quotas": [{"model": "gemini-3.1-pro", "remainingFraction": 0.5,
-                                            "resetTime": "2026-11-12T10:00:00Z"}]}
+        return None if unparsed else {"status": "OK", "quotas": [{"model": "gemini-3.1-pro", "remainingFraction": 0.5,
+                                                                  "resetTime": "2026-11-12T10:00:00Z"}]}
     monkeypatch.setattr(ag, "read_usage", read)
     monitor = ProviderUsageMonitor()
     monitor._on_demand = True
@@ -614,10 +614,12 @@ async def test_a_reading_is_written_when_nothing_changed(mock_db, fake_agy, monk
     async def nothing():
         return None
     assert await _poll_with(monkeypatch, row, nothing) is not None
+    assert (await _poll_with(monkeypatch, row, nothing, unparsed=True) or {}).get("usage_error") == "unavailable"
 
 
+@pytest.mark.parametrize("unparsed", [False, True], ids=["reading", "unavailable"])
 @pytest.mark.parametrize("change", ["key", "disable", "sign_out", "delete"])
-async def test_a_reading_started_before_a_change_is_not_written(mock_db, fake_agy, monkeypatch, change):
+async def test_a_reading_started_before_a_change_is_not_written(mock_db, fake_agy, monkeypatch, change, unparsed):
     from app.api.model_providers import _encrypt_token_or_400
 
     monkeypatch.setattr(encryption, "_encryption_key", encryption.Fernet.generate_key())
@@ -632,7 +634,7 @@ async def test_a_reading_started_before_a_change_is_not_written(mock_db, fake_ag
             await ag.sign_out(row)
         else:
             db.delete_model_provider(row["id"])
-    assert await _poll_with(monkeypatch, row, during) is None
+    assert await _poll_with(monkeypatch, row, during, unparsed) is None
 
 
 async def test_a_cancelled_usage_read_ends_its_process(mock_db, fake_agy, monkeypatch):
