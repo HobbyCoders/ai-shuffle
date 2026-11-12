@@ -50,7 +50,9 @@ async def test_saved_accounts_slots_encryption_routing_and_automation(client, pr
     assert api_key["slot"] == f"{provider}:key"
     assert plan["auth_token_set"] and "*" in plan["auth_token_masked"]
     assert plan["native_provider"]["credential_kind"] == "subscription"
-    assert not plan["native_provider"]["usage_meter_available"]
+    # Documented key-readable meters: Moonshot balance, MiniMax M Plan quota.
+    assert plan["native_provider"]["usage_meter_available"] is (provider == "minimax")
+    assert api_key["native_provider"]["usage_meter_available"] is (provider == "kimi")
     assert client.post(f"{ROOT}/{second['id']}/activate").status_code == 200
     rows = client.get(ROOT).json()["providers"]
     assert len(rows) == 3

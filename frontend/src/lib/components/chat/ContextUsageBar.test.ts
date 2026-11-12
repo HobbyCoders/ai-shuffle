@@ -768,6 +768,43 @@ describe('ContextUsageBar — provider refresh status', () => {
 	});
 });
 
+describe('ContextUsageBar — native vendor meters', () => {
+	it('shows the Kimi API balance, and a refused key without asking for billing access', async () => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'kimi-key', provider_type: 'kimi_balance', provider_name: 'Kimi', status: 'fresh',
+				fetched_at: Date.now(), credits: { balance_remaining: 7.25, currency: 'USD' } },
+		] });
+		const { container, getByRole } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-credits')?.textContent).toBe('$7.25 left');
+		await fireEvent.click(getByRole('button', { name: 'Kimi usage — collapse' }));
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('$7.25 left');
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'kimi-key', provider_type: 'kimi_balance', provider_name: 'Kimi', status: 'unavailable',
+				last_error_kind: 'billing_access_denied' },
+		] });
+		await tick();
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('Balance unavailable');
+		expect(container.textContent).not.toContain('Billing access required');
+		expect(container.textContent).not.toContain('$0.00');
+	});
+
+	it('shows MiniMax M Plan windows as quota left, with both baseline rows', async () => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'minimax-plan', provider_type: 'minimax_plan', provider_name: 'MiniMax', status: 'fresh',
+				fetched_at: Date.now(), windows: [{ type: 'five_hour', utilization: 40, resets_at: future() }] },
+		] });
+		const { container, getByRole } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('60% left');
+		// The weekly window holds its row until the plan reports it.
+		expect(container.textContent).toContain('not reported yet');
+		expect(container.querySelector('.usage-credits')).toBeNull();
+		await fireEvent.click(getByRole('button', { name: 'MiniMax usage — collapse' }));
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('60% left');
+	});
+});
+
 describe('ContextUsageBar — context breakdown', () => {
 	it('renders the collapse chevron with category rows expanded by default', async () => {
 		const { container } = render(ContextUsageBar);

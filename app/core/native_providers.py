@@ -47,6 +47,15 @@ def is_plan_key(row) -> bool:
     return row.get("provider_type") in PROVIDERS and row.get("auth_mode") == "plan_key"
 
 
+def usage_meter_available(provider: str, mode: str | None) -> bool:
+    """True when a registered usage source reads this vendor and key kind
+    on its default endpoint (see app/core/usage_sources.py)."""
+    from app.core.usage_sources import polled_sources
+
+    row = {"provider_type": provider, "auth_mode": "plan_key" if mode == "plan_key" else None}
+    return bool(polled_sources(row))
+
+
 def metadata(provider: str, mode: str | None) -> dict:
     mode = mode or "api_key"
     plan = mode == "plan_key"
@@ -54,7 +63,7 @@ def metadata(provider: str, mode: str | None) -> dict:
             "credential_kind": "subscription" if plan else "api_key",
             "slot": f"{provider}:{'subscription' if plan else 'key'}",
             "base_url": endpoint_root(provider, mode), "api_dialect": "anthropic",
-            "key_page_url": KEY_PAGES[provider][mode], "usage_meter_available": False,
+            "key_page_url": KEY_PAGES[provider][mode], "usage_meter_available": usage_meter_available(provider, mode),
             "credential_label": ({"kimi": "Kimi Code membership", "minimax": "MiniMax M Plan", "opencode": "OpenCode Go"}[provider]
                                  if plan else {"kimi": "Kimi API (pay as you go)", "minimax": "MiniMax API (pay as you go)",
                                                "opencode": "OpenCode Console (pay as you go)"}[provider]),

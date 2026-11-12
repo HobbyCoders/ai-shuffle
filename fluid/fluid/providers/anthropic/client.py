@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import time
 from collections.abc import AsyncIterator
@@ -65,6 +66,47 @@ def _redact_key(value, key):
     if isinstance(value, list):
         return [_redact_key(v, key) for v in value]
     return value
+
+
+_PROMPT_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _count(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _compatible_usage(payload: dict, provider: str, plan_key: bool) -> dict:
+    """A gateway's ``message_delta`` usage, as the engine should merge it.
+
+    Kimi, MiniMax and OpenCode send the whole usage block on the final
+    ``message_delta``, and MiniMax's ``message_start`` carries placeholder
+    counts (the full prompt as ``cache_read_input_tokens``). The engine's
+    max() merge would keep that placeholder beside the real split, so a delta
+    that reports its prompt side is marked final and replaces the start's
+    counts. OpenCode reports the dollars charged as ``usage.cost``; on a
+    pay-as-you-go key that is the bill, so it becomes ``cost_usd``.
+    """
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return payload
+    counts = [_count(usage.get(key)) for key in _PROMPT_KEYS]
+    usage = dict(usage)
+    out = dict(payload, usage=usage)
+    if any(c is not None for c in counts) and sum(c or 0 for c in counts) > 0:
+        out["final_usage"] = True
+        if _count(usage.get("cache_creation_input_tokens")) is not None:
+            from fluid.providers.anthropic.serialize import CACHE_WRITE_1H_KEY
+
+            usage.setdefault(CACHE_WRITE_1H_KEY, 0)
+    cost = usage.get("cost")
+    if (provider == "opencode" and not plan_key and "cost_usd" not in usage
+            and isinstance(cost, (int, float)) and not isinstance(cost, bool)
+            and math.isfinite(cost) and cost >= 0):
+        usage["cost_usd"] = float(cost)
+        meta = usage.get("opencode")
+        if isinstance(meta, dict) and meta.get("estimated") is True:
+            usage["cost_from_table"] = True  # priced at list, not charged
+    return out
 
 
 class AnthropicClient:
@@ -238,6 +280,9 @@ class AnthropicClient:
                                 chunk = StreamChunk("error", _redact_key(chunk.payload, self._api_key))
                             if chunk is None:
                                 continue
+                            if chunk.kind == "usage" and self._compatible_provider:
+                                chunk = StreamChunk("usage", _compatible_usage(
+                                    chunk.payload, self._compatible_provider, self._plan_key))
                             if chunk.kind == "message_start" and not yielded:
                                 pending_start = chunk
                                 continue

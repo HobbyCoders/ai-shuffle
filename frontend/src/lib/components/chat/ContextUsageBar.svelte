@@ -502,6 +502,7 @@
 		if (!showsRemaining) return [];
 		if (pb.providerType === 'chatgpt') return subscriptionBaselineWindows(noFiveHourLimit);
 		if (pb.providerType === 'grok') return ['seven_day'];
+		if (pb.providerType === 'minimax_plan') return subscriptionBaselineWindows(false);
 		return [];
 	}
 
@@ -649,6 +650,11 @@
 	function reportedBalanceSource(pb: ProviderUsageBucket): boolean {
 		return pb.sourceInfo?.id === 'xai_management';
 	}
+	/** Balances read with the inference key already saved (OpenRouter, fal.ai, Kimi API). */
+	function keyReadBalance(pb: { providerType: string | null }): boolean {
+		const t = pb.providerType;
+		return Boolean(t?.startsWith('openrouter')) || t === 'fal' || t === 'kimi_balance';
+	}
 	function providerCredits(pb: ProviderUsageBucket) {
 		if (reportedBalanceSource(pb) && (providerStatusAt(pb, now) !== 'fresh' || pb.lastErrorKind)) {
 			return null;
@@ -666,7 +672,7 @@
 		// extra billing access exists to add, so a refusal is about that key
 		// and the always-present credits line already says so.
 		if (pb.lastErrorKind === 'billing_access_denied') {
-			return pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal' ? null : 'Billing access required';
+			return keyReadBalance(pb) ? null : 'Billing access required';
 		}
 		if (pb.lastErrorKind === 'missing_credentials') return 'Sign in to view usage';
 		if (pb.lastErrorKind === 'unsupported') return 'Not supported for this credential; polling paused';
@@ -689,7 +695,7 @@
 		const text = creditsSummary(providerCredits(pb), pb.providerType);
 		if (!text && reportedBalanceSource(pb)) return 'Balance unavailable';
 		if (text) return text;
-		if (pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal') return 'Balance unavailable for this key';
+		if (keyReadBalance(pb)) return 'Balance unavailable for this key';
 		return null;
 	}
 
@@ -822,7 +828,7 @@
 	// Grok, Claude, OpenRouter), then fal.ai and anything else, by name.
 	function isSubscriptionProvider(pb: { providerType: string | null }): boolean {
 		const t = (pb.providerType || '').toLowerCase();
-		return t === 'chatgpt' || t === 'grok';
+		return t === 'chatgpt' || t === 'grok' || t === 'minimax_plan';
 	}
 
 	function providerFamily(type: string | null): string {
@@ -886,7 +892,8 @@
 	}): boolean {
 		const entry = getProviders().find((p) => p.id === pb.providerId);
 		const type = providerUsageType(pb);
-		if (type === 'grok' || type === 'openrouter') return true;
+		// MiniMax M Plan windows are subscription quota, read as remaining.
+		if (type === 'grok' || type === 'openrouter' || pb.providerType === 'minimax_plan') return true;
 		if (type !== 'chatgpt') return false;
 		const kind = entry?.auth_kind ?? 'subscription';
 		return kind === 'subscription';
@@ -1117,7 +1124,7 @@
 		{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
 			<!-- ChatGPT extra credits live in the expanded rows only. -->
 			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
-		{:else if reportedBalanceSource(pb) || pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal'}
+		{:else if reportedBalanceSource(pb) || keyReadBalance(pb)}
 			<span class="sec-summary sec-credits">Balance unavailable</span>
 		{:else}
 			<span class="sec-summary sec-credits sec-empty">—</span>

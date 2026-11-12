@@ -143,11 +143,14 @@ def record_provider_usage_failure(
     provider_id: str, provider_type: str, error_kind: str,
     expected_credential_generation: Optional[str] = None,
     denied_fingerprint: str | None = None,
+    expected_provider_revision: Optional[tuple[str, str]] = None,
 ) -> None:
     """Record a failed observation, keeping the last successful reading.
 
     ``denied_fingerprint`` (a digest, never a credential) marks the capability
     as refused for that credential revision so pollers skip re-probing it.
+    ``expected_provider_revision`` drops a failure that outlived the row's key
+    (replaced, disabled or deleted while the request was in flight).
     """
     if error_kind not in {
         "billing_access_denied", "missing_credentials", "timeout", "unavailable", "unsupported",
@@ -156,6 +159,12 @@ def record_provider_usage_failure(
     now = datetime.now(timezone.utc)
     with get_db() as conn:
         cursor = conn.cursor()
+        if expected_provider_revision is not None:
+            guard_id, revision = expected_provider_revision
+            cursor.execute("SELECT revision, enabled FROM model_providers WHERE id = %s FOR UPDATE", (guard_id,))
+            current_provider = cursor.fetchone() or {}
+            if current_provider.get("revision") != revision or not current_provider.get("enabled"):
+                return
         if provider_type in {"fal", "openrouter_account"} and not _lock_usage_generation(cursor, provider_id, provider_type, expected_credential_generation):
             return
         cursor.execute(
