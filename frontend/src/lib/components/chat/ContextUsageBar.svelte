@@ -665,15 +665,15 @@
 	}
 	/**
 	 * A check ran but has produced no reading yet: say how it ended (a refused
-	 * key is not retried until it changes; a failed check is), never "Not
-	 * checked yet". After a good reading the "Checked <age>" line stands.
+	 * key is not retried until it changes; any other failure is "Check
+	 * failed"), never "Not checked yet", in the text or the tooltip. After a
+	 * good reading the "Checked <age>" line stands.
 	 */
 	function failedCheckText(pb: ProviderUsageBucket, nowMs: number): string | null {
 		if (pb.fetchedAt != null || !pb.lastErrorKind) return null;
 		const when = pb.lastAttemptAt != null ? ` ${formatAsOf(pb.lastAttemptAt, nowMs)}` : '';
-		if (pb.lastErrorKind === 'billing_access_denied') return `Key refused${when}`;
-		if (transientFailure(pb)) return `Check failed${when}`;
-		return null;
+		if (pb.lastErrorKind === 'billing_access_denied' && keyReadSource(pb)) return `Key refused${when}`;
+		return `Check failed${when}`;
 	}
 	function providerCredits(pb: ProviderUsageBucket) {
 		if (reportedBalanceSource(pb) && (providerStatusAt(pb, now) !== 'fresh' || pb.lastErrorKind)) {

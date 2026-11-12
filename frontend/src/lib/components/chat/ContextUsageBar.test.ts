@@ -13,7 +13,7 @@ import { render, cleanup, fireEvent, waitFor, screen } from '@testing-library/sv
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ContextUsageBar from './ContextUsageBar.svelte';
 import { tick } from 'svelte';
-import { rateLimit } from '$lib/stores/rate-limit';
+import { rateLimit, type ProviderUsageErrorKind } from '$lib/stores/rate-limit';
 import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
 
@@ -844,6 +844,43 @@ describe('ContextUsageBar — native vendor meters', () => {
 		expect(container.querySelector('.provider-status')).toBeNull();
 		expect(container.textContent).not.toContain('Not checked yet');
 		expect(container.textContent).not.toContain('Billing access required');
+	});
+
+	// "Not checked yet" appears, in the text or the tooltip, only when no check
+	// has been recorded. Every error kind the backend writes, with nothing
+	// read yet, says how the check ended.
+	const KINDS = ['billing_access_denied', 'missing_credentials', 'timeout', 'unavailable', 'unsupported'] as const;
+	const GUIDANCE: Record<string, string> = {
+		missing_credentials: 'Sign in to view usage',
+		unsupported: 'Not supported for this credential; polling paused',
+	};
+	const keyRead = (kind: string) => kind === 'billing_access_denied' ? 'Key refused 5m ago' : 'Check failed 5m ago';
+	it.each([
+		...(['kimi_balance', 'minimax_plan', 'openrouter', 'fal'] as const).flatMap((type) => KINDS.map((kind) => {
+			const guidance = GUIDANCE[kind];
+			return { type, kind, text: guidance ?? keyRead(kind), title: guidance ? `${guidance} · Check failed 5m ago` : keyRead(kind) };
+		})),
+		...KINDS.map((kind) => {
+			const guidance = kind === 'billing_access_denied' ? 'Billing access required' : GUIDANCE[kind];
+			return { type: 'chatgpt', kind, text: guidance ?? 'Check failed 5m ago', title: guidance ? `${guidance} · Check failed 5m ago` : 'Check failed 5m ago' };
+		}),
+		{ type: 'xai', kind: 'billing_access_denied', source: 'xai_management', text: 'Replace xAI management key', title: 'Replace xAI management key · Check failed 5m ago' },
+		...(['kimi_balance', 'openrouter', 'fal', 'chatgpt'] as const).map((type) => ({ type, kind: null, text: 'Not checked yet', title: 'Not checked yet' })),
+	] as { type: string; kind: ProviderUsageErrorKind | null; source?: string; text: string; title: string }[])('meta line and tooltip for $type after a $kind check with nothing read', async ({ type, kind, source, text, title }) => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: `p-${type}`, provider_type: type, provider_name: 'Vendor', status: kind ? 'unavailable' : 'never_fetched',
+				last_error_kind: kind, ...(kind ? { last_attempt_at: Date.now() - 5 * 60_000 } : {}),
+				...(source ? { source_info: { id: source, label: 'xAI Management API', scope: 'organization',
+					scope_label: 'Team prepaid credit and current billing cycle', measure: 'monetary_credit' as const,
+					measure_label: 'Provider-reported credit balance', collection: 'polled' as const, support: 'documented' as const,
+					support_label: 'Documented API', dashboard_url: 'https://console.x.ai/', min_interval_seconds: 300, freshness_seconds: 600 } } : {}) },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const meta = container.querySelector('.usage-meta-text');
+		expect(meta?.textContent).toBe(text);
+		expect(meta?.getAttribute('title')).toBe(title);
+		if (kind) expect(container.innerHTML).not.toContain('Not checked yet');
 	});
 
 	it('keeps the last good reading and its check time after a failed refresh', async () => {
