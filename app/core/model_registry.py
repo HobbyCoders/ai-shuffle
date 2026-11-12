@@ -530,7 +530,11 @@ def _providers_payload() -> List[Dict[str, object]]:
             # HOW the row authenticates; ``plan_type`` names the subscription
             # tier for subscription rows (null for API-key rows, and for a
             # subscription row whose usage snapshot hasn't landed yet).
-            "auth_kind": "subscription" if _is_subscription_row(row) else "api",
+            # An Antigravity Google sign-in reads as a subscription here only;
+            # defaults and memory billing keep treating it as non-subscription.
+            "auth_kind": "subscription" if _is_subscription_row(row) or (
+                row.get("provider_type") == "antigravity"
+                and row.get("auth_mode") in ("oauth-personal", "oauth-business")) else "api",
             "plan_type": (
                 plan_types.get(row.get("id", "")) if _is_subscription_row(row) else None
             ),

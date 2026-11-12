@@ -1344,6 +1344,14 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
         nonlocal checked_binding
         checked_binding = model_catalogs.binding({**row, "codex_access_token": access, "codex_account_id": account})
 
+    from app.core import antigravity
+    if row.get("provider_type") == antigravity.PROVIDER_TYPE:
+        # No HTTP catalog: Google's agent binary owns the model list. Curation
+        # picks from the models it offered (with their thinking levels).
+        return FetchModelsResponse(source="preset", models=[dict(m) for m in antigravity.DEFAULT_MODELS],
+                                   recommended=[m["id"] for m in antigravity.DEFAULT_MODELS],
+                                   binding=checked_binding)
+
     kind = model_catalog_presets.preset_kind_for(row)
     from app.core.http_client import get_http_client
     client = get_http_client()

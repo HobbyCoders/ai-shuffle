@@ -377,7 +377,7 @@ def provider_id_for_row(row: Mapping[str, Any]) -> str:
         return "openai"
     if auth_mode == "grok" or ptype in ("grok", "xai"):
         return "grok"
-    if ptype in ("openrouter", "kimi", "minimax", "opencode"):
+    if ptype in ("openrouter", "kimi", "minimax", "opencode", "antigravity"):
         return ptype
     return f"gw:{row.get('id')}"
 

@@ -184,6 +184,26 @@ def test_key_rows_store_the_key_encrypted_and_never_return_it(client):
     assert client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True}).status_code == 400
 
 
+def test_rows_carry_gemini_models_with_thinking_levels(client):
+    from app.api import model_providers
+    from app.core.model_effort import effort_capabilities
+
+    row = _create(client, "gemini-api-key", api_key="test-gemini-secret-value")
+    stored = db.get_model_provider(row["id"])
+    pro = effort_capabilities("gemini-3.1-pro", stored)
+    assert pro["effort_levels"] == ["low", "high"] and pro["default_effort"] is None
+    assert effort_capabilities("gemini-3.8-flash", stored)["effort_levels"] == ["low", "medium", "high"]
+    # Model curation lists the agent's Gemini models; there is no HTTP catalog.
+    catalog_app = FastAPI()
+    catalog_app.include_router(model_providers.router)
+    catalog_app.dependency_overrides[require_admin] = lambda: None
+    with TestClient(catalog_app) as catalog:
+        fetched = catalog.post(f"/api/v1/model-providers/{row['id']}/fetch-models")
+    assert fetched.status_code == 200, fetched.text
+    ids = [m["id"] for m in fetched.json()["models"]]
+    assert ids == [m["id"] for m in ag.DEFAULT_MODELS] and all(i.startswith("gemini-") for i in ids)
+
+
 def test_personal_rows_are_guarded_until_the_owner_lifts_it(client):
     row = _create(client)
     assert row["guard_applies"] and row["guarded"] and not row["allow_unattended"]

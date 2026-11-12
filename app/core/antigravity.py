@@ -82,6 +82,29 @@ GUARD_REFUSAL = (
     "Settings → Providers (Antigravity)."
 )
 
+
+def _thinking(levels: List[str]) -> Dict[str, Any]:
+    # No default: the agent keeps its own level until the owner picks one.
+    return {"version": 1, "effort_levels": levels, "default_effort": None}
+
+
+#: Models ``agy`` 1.5.6 offered a non-first-party client (spike, 2026-11-11),
+#: with the thinking levels (``thought_level``) the picker offers. 1.5.6
+#: listed low/high for Gemini 3.1 Pro; the others use Google's documented
+#: Gemini thinking levels. The agent's own list wins at session start; these
+#: seed the picker and model curation (``POST /model-providers/{id}/fetch-models``).
+DEFAULT_MODELS: List[Dict[str, Any]] = [
+    {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "reasoning_capabilities": _thinking(["low", "high"])},
+    {"id": "gemini-4-argon", "label": "Gemini 4 Argon",
+     "reasoning_capabilities": _thinking(["low", "medium", "high"])},
+    {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash",
+     "reasoning_capabilities": _thinking(["low", "medium", "high"])},
+    {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash",
+     "reasoning_capabilities": _thinking(["low", "medium", "high"])},
+    {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash",
+     "reasoning_capabilities": _thinking(["low", "medium", "high"])},
+]
+
 _URL_RE = re.compile(r"https://accounts\.google\.com/\S+")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # A line saying how the code went; the binary may keep running after it.

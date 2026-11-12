@@ -24,15 +24,8 @@ from app.core.provider_locks import operation_lock
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/antigravity", tags=["Antigravity"])
 
-#: Models ``agy`` 1.5.6 offered a non-first-party client (spike, 2026-11-11).
-#: The agent's own list wins at session start; these seed the picker.
-DEFAULT_MODELS: List[Dict[str, str]] = [
-    {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro"},
-    {"id": "gemini-4-argon", "label": "Gemini 4 Argon"},
-    {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash"},
-    {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash"},
-    {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash"},
-]
+#: Models seeding the picker (kept in app/core/antigravity.py with their thinking levels).
+DEFAULT_MODELS: List[Dict[str, Any]] = antigravity.DEFAULT_MODELS
 
 _AUTH_MODES = [
     {"id": "oauth-personal", "label": "Personal Google sign-in", "headless": True,
