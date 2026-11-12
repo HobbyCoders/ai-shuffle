@@ -334,8 +334,10 @@ def record_credential_check(
     with get_db() as conn:
         cursor = conn.cursor()
         if guard:
+            # FOR UPDATE: a key or endpoint change committing between this
+            # read and the write below must not receive the old key's verdict.
             cursor.execute(
-                "SELECT auth_token, base_url FROM model_providers WHERE id = %s",
+                "SELECT auth_token, base_url FROM model_providers WHERE id = %s FOR UPDATE",
                 (provider_id,),
             )
             current = row_to_dict(cursor.fetchone())

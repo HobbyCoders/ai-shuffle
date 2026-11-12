@@ -4,8 +4,9 @@
         [--latency-ms N] [--tps N]
 
 Serves ``GET /v1/models`` and streaming ``POST /v1/chat/completions``
-(OpenAI chat), ``/v1/messages`` (Anthropic) and ``/v1/responses`` (OpenAI
-Responses) on loopback, using the wire builders in :mod:`fake_wire`.
+(OpenAI chat), ``/v1/messages`` (Anthropic), ``/v1/responses`` (OpenAI
+Responses) and ``/v1beta/interactions`` (Gemini, plus ``GET /v1beta/models``)
+on loopback, using the wire builders in :mod:`fake_wire`.
 
 Reply selection is stateless and keyed off the request alone:
 
@@ -61,6 +62,7 @@ from scripts.devloop.fake_wire import (
     HOLD,
     Chat,
     FakeProviderServer,
+    Interactions,
     Messages,
     Recorded,
     Reply,
@@ -80,7 +82,7 @@ _REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 _TOKEN = re.compile(r"\S+\s*|\s+")
 # How the app hands a question-tray answer to the agent (user_question_handler).
 _ANSWER = re.compile(r"(?:^|\n)Answer to your question:\n(.*)\Z", re.DOTALL)
-_REDACT = {"authorization", "x-api-key", "cookie", "proxy-authorization"}
+_REDACT = {"authorization", "x-api-key", "x-goog-api-key", "cookie", "proxy-authorization"}
 
 
 # ─── request reading ────────────────────────────────────────────────────────
@@ -89,7 +91,7 @@ _REDACT = {"authorization", "x-api-key", "cookie", "proxy-authorization"}
 def dialect_for(path: str) -> str | None:
     clean = path.split("?", 1)[0].rstrip("/")
     for suffix, dialect in (("/chat/completions", "chat"), ("/messages", "messages"),
-                            ("/responses", "responses")):
+                            ("/responses", "responses"), ("/interactions", "interactions")):
         if clean.endswith(suffix):
             return dialect
     return None
@@ -115,6 +117,17 @@ def conversation(dialect: str, body: Any) -> list[tuple[str, str]]:
     if not isinstance(body, dict):
         return []
     entries: list[tuple[str, str]] = []
+    if dialect == "interactions":
+        for step in body.get("input") or []:
+            kind = step.get("type") if isinstance(step, dict) else None
+            if kind == "function_call":
+                if not entries or entries[-1][0] != "call":
+                    entries.append(("call", ""))
+            elif kind == "function_result":
+                entries.append(("result", ""))
+            elif kind == "user_input":
+                entries.append(("user", _text_of(step.get("content"))))
+        return entries
     if dialect == "responses":
         items = body.get("input")
         if isinstance(items, str):
@@ -519,7 +532,44 @@ def frame_responses(plan: Plan, body: Any, stream: bool) -> Reply:
                                                       output=items, model=model)])
 
 
-_FRAMERS = {"chat": frame_chat, "messages": frame_messages, "responses": frame_responses}
+def frame_interactions(plan: Plan, body: Any, stream: bool) -> Reply:
+    """Gemini Interactions (``store: false``, always streamed by the app).
+
+    A tool round carries a thought step with a fixed signature first, the way
+    Gemini 3+ does, so the follow-up request shows whether it came back."""
+    model = plan.served_model or body.get("model") or Interactions.MODEL
+    input_tokens, output_tokens = _usage(body, plan.text)
+    if not stream:
+        return error_reply(400, "fake-ai: the Interactions dialect is served streamed only")
+    frames: list[Any] = [Interactions.created(model)]
+    index = 0
+    if plan.refusal is not None:
+        return Reply(frames=frames + [Interactions.completed(input_tokens, 0, status="failed",
+                                                             model=model)])
+    if plan.calls:
+        frames += Interactions.thought(index, "Choosing a tool.", FAKE_THOUGHT_SIGNATURE)
+        index += 1
+    if plan.text:
+        frames.append(Interactions.ev("step.start", index=index, step={"type": "model_output"}))
+        text_frames, cut = _streamed(plan.text, plan, lambda t: Interactions.ev(
+            "step.delta", index=index, delta={"type": "text", "text": t}))
+        frames += text_frames
+        if cut:
+            return Reply(frames=frames, framing="chunked")
+        frames.append(Interactions.ev("step.stop", index=index))
+        index += 1
+    for call in plan.calls:
+        frames += Interactions.function_call(index, call["id"], call["name"], _call_args(call))
+        index += 1
+    return Reply(frames=frames + [Interactions.completed(
+        input_tokens, output_tokens, thought=4 if plan.calls else 0, model=model)])
+
+
+#: The opaque signature the Interactions dialect attaches to tool rounds.
+FAKE_THOUGHT_SIGNATURE = "ZmFrZS1haS10aG91Z2h0LXNpZ25hdHVyZQ=="
+
+_FRAMERS = {"chat": frame_chat, "messages": frame_messages, "responses": frame_responses,
+            "interactions": frame_interactions}
 
 
 def _number(value: Any, default: float) -> float:

@@ -373,6 +373,7 @@ function brandOfEntry(id: string, entry: Pick<ProviderEntry, 'provider_type' | '
 		case 'kimi': return 'kimi';
 		case 'minimax': return 'minimax';
 		case 'opencode': return 'opencode';
+		case 'google': return 'google';
 		case 'antigravity': return 'antigravity';
 		default: return `gw:${id}`;
 	}
@@ -499,6 +500,7 @@ const PROVIDER_BRANDS: Readonly<Record<string, string>> = {
 	kimi: 'Kimi',
 	minimax: 'MiniMax',
 	opencode: 'OpenCode',
+	google: 'Google Gemini',
 	antigravity: 'Antigravity',
 	fal: 'fal.ai'
 };

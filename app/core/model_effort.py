@@ -78,6 +78,8 @@ def effort_route(provider: Mapping[str, Any] | None) -> str:
     row = provider or {}
     if row.get("provider_type") in ("openai", "chatgpt", "xai", "grok") or row.get("auth_mode") in ("chatgpt", "grok"):
         return "openai_responses"
+    if row.get("provider_type") == "google":
+        return "gemini"
     if row.get("provider_type") == "openrouter" or row.get("api_dialect") == "openai":
         return "openrouter"
     return "anthropic"
@@ -150,6 +152,12 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
 
             levels = effort_levels(provider["provider_type"], model or "")
             cap = _capability(list(levels) if levels is not None else None)
+        elif provider.get("provider_type") == "google":
+            # https://aistudio.google.com/docs/thinking ("Controlling thinking")
+            from fluid.providers.gemini.serialize import default_level, effort_levels as gemini_levels
+
+            levels = gemini_levels(model or "")
+            cap = _capability(list(levels) if levels is not None else None, default_level(model or ""))
     cap = cap or _capability(None)
     levels = cap["effort_levels"]
     allowed = (ANTHROPIC_EFFORT_LEVELS if route in ("anthropic", "delegated") else

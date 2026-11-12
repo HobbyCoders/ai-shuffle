@@ -174,6 +174,7 @@ from fluid.permissions.engine import PermissionEngine
 from fluid.permissions.modes import MODE_POLICY
 from fluid.permissions.rules import Rule
 from fluid.providers.anthropic.client import AnthropicClient
+from fluid.providers.gemini.client import API_URL as GEMINI_INTERACTIONS_URL, GeminiClient
 from fluid.providers.openai_responses.client import (
     API_URL as OPENAI_RESPONSES_URL,
     CODEX_RESPONSES_URL,
@@ -7215,6 +7216,8 @@ def _provider_row_kind(
         return "openai_responses"
     if ptype in ("kimi", "minimax", "opencode"):
         return "anthropic"
+    if ptype == "google":
+        return "gemini"
     if ptype == "openrouter":
         return "openrouter"
     if ptype == "custom":
@@ -8805,7 +8808,7 @@ def _amend_native_task_spec(
 
 
 def _decide_provider_kind(options: SessionOptions) -> str:
-    """Return one of: 'delegated' | 'anthropic' | 'openai_responses' | 'openrouter'."""
+    """Return one of: 'delegated' | 'anthropic' | 'openai_responses' | 'openrouter' | 'gemini'."""
     engine_hint = _extra_opt(options, "engine")
     if engine_hint == "delegated":
         return "delegated"
@@ -8819,7 +8822,7 @@ def _decide_provider_kind(options: SessionOptions) -> str:
         # legacy env name from before the omni -> fluid harness rename
         or os.environ.get("AIH_OMNI_PROVIDER")
     )
-    if provider_hint in ("anthropic", "openai_responses", "openrouter"):
+    if provider_hint in ("anthropic", "openai_responses", "openrouter", "gemini"):
         return provider_hint
     if provider_hint == "delegated":
         return "delegated"
@@ -8913,6 +8916,21 @@ def _responses_url(base: str) -> str:
     if trimmed.endswith("/v1"):
         trimmed = trimmed[: -len("/v1")]
     return trimmed + "/v1/responses"
+
+
+def _interactions_url(base: str) -> str:
+    """Endpoint-root → full Gemini Interactions URL.
+
+    ``https://generativelanguage.googleapis.com`` and the same root with
+    ``/v1beta`` both become ``.../v1beta/interactions``; a base that already
+    ends in ``/interactions`` is kept as entered.
+    """
+    trimmed = base.rstrip("/")
+    if trimmed.endswith("/interactions"):
+        return trimmed
+    if trimmed.endswith(("/v1beta", "/v1")):
+        return trimmed + "/interactions"
+    return trimmed + "/v1beta/interactions"
 
 
 def _require_env_credential(env_var: str, kind: str) -> None:
@@ -9118,7 +9136,7 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
 
 
 #: Leg kinds a memory learner can call: the native provider clients.
-_LEARNER_KINDS = frozenset({"anthropic", "openai_responses", "openrouter"})
+_LEARNER_KINDS = frozenset({"anthropic", "openai_responses", "openrouter", "gemini"})
 
 
 class _LearnerTarget(NamedTuple):
@@ -9334,6 +9352,23 @@ async def _build_provider_client(
             return client, http_client
         _require_env_credential("OPENAI_API_KEY", kind)
         return OpenAIResponsesClient(**timeouts), None
+    if kind == "gemini":
+        # Google AI Studio key on the Interactions API (fluid/providers/gemini).
+        if creds is None:
+            _require_env_credential("GEMINI_API_KEY", kind)
+            return GeminiClient(**timeouts), None
+        from app.core.config import settings
+
+        session_http = _session_provider_http(timeouts["timeout"])
+        return (
+            GeminiClient(
+                api_key=creds.api_key,
+                base_url=_interactions_url(creds.base_url) if creds.base_url else GEMINI_INTERACTIONS_URL,
+                user_agent=f"ai-shuffle/{settings.version}",
+                http_client=session_http, **timeouts,
+            ),
+            session_http,
+        )
     if kind == "openrouter":
         # fluid's OpenRouterClient is the generic OpenAI chat/completions
         # client — a row-level base_url redirects it (custom rows with

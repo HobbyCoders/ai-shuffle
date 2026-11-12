@@ -548,7 +548,8 @@ def is_provider_servable(provider: Optional[ModelProviderRow]) -> bool:
     ptype = provider.get("provider_type")
     auth_mode = provider.get("auth_mode")
     return (
-        ptype in ("openai", "chatgpt", "xai", "grok", "anthropic", "openrouter", "kimi", "minimax", "opencode")
+        ptype in ("openai", "chatgpt", "xai", "grok", "anthropic", "openrouter", "kimi", "minimax", "opencode",
+                  "google")
         or auth_mode in ("chatgpt", "grok")
     )
 
