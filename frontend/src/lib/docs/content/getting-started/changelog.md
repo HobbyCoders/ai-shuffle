@@ -10,7 +10,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ## 1.3.1 (2026-11-12)
 
-1.3.0 reached the in-app updater and the Windows installer only; 1.3.1 is the first build of this line for Docker, Android and the Linux downloads. Everything listed under 1.3.0 is in this release.
+1.3.0 reached the in-app updater and the Windows installer, but its Android build failed, which also kept the Docker `latest` tag and the website's Linux and Android downloads on the previous version. 1.3.1 finishes that rollout. Everything listed under 1.3.0 is in this release.
 
 ### Agents and providers
 
