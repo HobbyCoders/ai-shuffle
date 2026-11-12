@@ -655,6 +655,26 @@
 		const t = pb.providerType;
 		return Boolean(t?.startsWith('openrouter')) || t === 'fal' || t === 'kimi_balance';
 	}
+	/** Sources read with the saved key (balances, the MiniMax plan): a refusal is about that key. */
+	function keyReadSource(pb: { providerType: string | null }): boolean {
+		return keyReadBalance(pb) || pb.providerType === 'minimax_plan';
+	}
+	/** The last check failed for a passing reason and no reading exists yet. */
+	function transientFailure(pb: ProviderUsageBucket): boolean {
+		return pb.fetchedAt == null && (pb.lastErrorKind === 'timeout' || pb.lastErrorKind === 'unavailable');
+	}
+	/**
+	 * A check ran but has produced no reading yet: say how it ended (a refused
+	 * key is not retried until it changes; a failed check is), never "Not
+	 * checked yet". After a good reading the "Checked <age>" line stands.
+	 */
+	function failedCheckText(pb: ProviderUsageBucket, nowMs: number): string | null {
+		if (pb.fetchedAt != null || !pb.lastErrorKind) return null;
+		const when = pb.lastAttemptAt != null ? ` ${formatAsOf(pb.lastAttemptAt, nowMs)}` : '';
+		if (pb.lastErrorKind === 'billing_access_denied') return `Key refused${when}`;
+		if (transientFailure(pb)) return `Check failed${when}`;
+		return null;
+	}
 	function providerCredits(pb: ProviderUsageBucket) {
 		if (reportedBalanceSource(pb) && (providerStatusAt(pb, now) !== 'fresh' || pb.lastErrorKind)) {
 			return null;
@@ -668,11 +688,11 @@
 			if (pb.providerType === 'xai' && pb.lastErrorScope === 'inference') return 'Replace or fix the xAI API key';
 			return 'Replace xAI management key';
 		}
-		// OpenRouter and fal.ai read the balance with the key already saved; no
-		// extra billing access exists to add, so a refusal is about that key
-		// and the always-present credits line already says so.
+		// OpenRouter, fal.ai, Kimi and the MiniMax plan read with the key already
+		// saved; no extra billing access exists to add, so a refusal is about
+		// that key and the credits and meta lines already say so.
 		if (pb.lastErrorKind === 'billing_access_denied') {
-			return keyReadBalance(pb) ? null : 'Billing access required';
+			return keyReadSource(pb) ? null : 'Billing access required';
 		}
 		if (pb.lastErrorKind === 'missing_credentials') return 'Sign in to view usage';
 		if (pb.lastErrorKind === 'unsupported') return 'Not supported for this credential; polling paused';
@@ -680,7 +700,7 @@
 	}
 
 	function providerMeta(pb: ProviderUsageBucket, nowMs: number): MetaLine {
-		const checked = checkedText(pb.fetchedAt, nowMs) ?? 'Not checked yet';
+		const checked = checkedText(pb.fetchedAt, nowMs) ?? failedCheckText(pb, nowMs) ?? 'Not checked yet';
 		const guidance = providerGuidance(pb);
 		if (guidance) return { text: guidance, guidance: true, title: `${guidance} · ${checked}` };
 		return { text: checked, guidance: false, title: checked };
@@ -695,7 +715,7 @@
 		const text = creditsSummary(providerCredits(pb), pb.providerType);
 		if (!text && reportedBalanceSource(pb)) return 'Balance unavailable';
 		if (text) return text;
-		if (keyReadBalance(pb)) return 'Balance unavailable for this key';
+		if (keyReadBalance(pb)) return transientFailure(pb) ? 'Balance unavailable right now' : 'Balance unavailable for this key';
 		return null;
 	}
 
@@ -1125,7 +1145,7 @@
 			<!-- ChatGPT extra credits live in the expanded rows only. -->
 			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
 		{:else if reportedBalanceSource(pb) || keyReadBalance(pb)}
-			<span class="sec-summary sec-credits">Balance unavailable</span>
+			<span class="sec-summary sec-credits">{keyReadBalance(pb) && transientFailure(pb) ? 'Check failed' : 'Balance unavailable'}</span>
 		{:else}
 			<span class="sec-summary sec-credits sec-empty">—</span>
 		{/if}

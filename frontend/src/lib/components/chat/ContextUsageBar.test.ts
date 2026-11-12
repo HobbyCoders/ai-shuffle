@@ -651,8 +651,12 @@ describe('ContextUsageBar — provider refresh status', () => {
 		// No guidance to act on: the credits line says what is known, and the
 		// meta line only says when it was checked.
 		expect(container.querySelector('.provider-status')).toBeNull();
-		expect(container.querySelector('.usage-credits')?.textContent).toBe(cached ? '$12.34 left' : 'Balance unavailable for this key');
-		expect(container.querySelector('.usage-meta-text')?.textContent).toMatch(/^(Checked |Not checked yet$)/);
+		// A failed check with no reading yet says so; it never reads as a
+		// refused key or as "Not checked yet".
+		expect(container.querySelector('.usage-credits')?.textContent).toBe(
+			cached ? '$12.34 left' : lastErrorKind ? 'Balance unavailable right now' : 'Balance unavailable for this key');
+		expect(container.querySelector('.usage-meta-text')?.textContent).toMatch(
+			lastErrorKind ? /^Check failed/ : /^Not checked yet$/);
 		expect(container.textContent).not.toMatch(/Last known|Last reported|Refresh pending|Refresh timed out|Usage unavailable/);
 		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
 		if (cached) {
@@ -664,7 +668,8 @@ describe('ContextUsageBar — provider refresh status', () => {
 			expect(container.textContent).not.toContain('$0.00');
 		}
 		await fireEvent.click(getByRole('button', { name: 'fal.ai usage — collapse' }));
-		expect(container.querySelector('.sec-summary')?.textContent).toBe(cached ? '$12.34 left' : 'Balance unavailable');
+		expect(container.querySelector('.sec-summary')?.textContent).toBe(
+			cached ? '$12.34 left' : lastErrorKind ? 'Check failed' : 'Balance unavailable');
 	});
 
 	it.each(['stale', 'unavailable', 'never_fetched'] as const)('preserves sign-in guidance for %s credentials', async (status) => {
@@ -802,6 +807,56 @@ describe('ContextUsageBar — native vendor meters', () => {
 		expect(container.querySelector('.usage-credits')).toBeNull();
 		await fireEvent.click(getByRole('button', { name: 'MiniMax usage — collapse' }));
 		expect(container.querySelector('.sec-summary')?.textContent).toBe('60% left');
+	});
+
+	// A check that ran and was refused, and one that could not be completed,
+	// read differently; neither says "Not checked yet".
+	it.each([
+		{ kind: 'billing_access_denied', credits: 'Balance unavailable for this key', meta: 'Key refused 5m ago', summary: 'Balance unavailable' },
+		{ kind: 'unavailable', credits: 'Balance unavailable right now', meta: 'Check failed 5m ago', summary: 'Check failed' },
+		{ kind: 'timeout', credits: 'Balance unavailable right now', meta: 'Check failed 5m ago', summary: 'Check failed' },
+	] as const)('Kimi balance with no reading after a $kind check', async ({ kind, credits, meta, summary }) => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'kimi-key', provider_type: 'kimi_balance', provider_name: 'Kimi', status: 'unavailable',
+				last_error_kind: kind, last_attempt_at: Date.now() - 5 * 60_000 },
+		] });
+		const { container, getByRole } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-credits')?.textContent).toBe(credits);
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe(meta);
+		expect(container.textContent).not.toContain('Not checked yet');
+		expect(container.textContent).not.toContain('Billing access required');
+		await fireEvent.click(getByRole('button', { name: 'Kimi usage — collapse' }));
+		expect(container.querySelector('.sec-summary')?.textContent).toBe(summary);
+	});
+
+	it.each([
+		{ kind: 'billing_access_denied', meta: 'Key refused 5m ago' },
+		{ kind: 'unavailable', meta: 'Check failed 5m ago' },
+	] as const)('MiniMax plan with no reading after a $kind check', async ({ kind, meta }) => {
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'minimax-plan', provider_type: 'minimax_plan', provider_name: 'MiniMax', status: 'unavailable',
+				last_error_kind: kind, last_attempt_at: Date.now() - 5 * 60_000 },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe(meta);
+		expect(container.querySelector('.provider-status')).toBeNull();
+		expect(container.textContent).not.toContain('Not checked yet');
+		expect(container.textContent).not.toContain('Billing access required');
+	});
+
+	it('keeps the last good reading and its check time after a failed refresh', async () => {
+		const fetched = Date.now() - 3 * 3_600_000;
+		rateLimit.applySnapshot({ windows: [], available: false, providers: [
+			{ provider_id: 'kimi-key', provider_type: 'kimi_balance', provider_name: 'Kimi', status: 'stale',
+				last_error_kind: 'unavailable', fetched_at: fetched, last_attempt_at: Date.now() - 60_000,
+				credits: { balance_remaining: 7.25, currency: 'USD' } },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.usage-credits')?.textContent).toBe('$7.25 left');
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Checked 3h ago');
 	});
 });
 

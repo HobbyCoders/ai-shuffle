@@ -94,8 +94,13 @@ on a fresh install. Each choice has `provider_type`, plain `display_name`, `auth
 hint, not an invalid key. Prefixes are not used as credential validation.
 `usage_meter_available` is `true` only where the vendor documents a usage
 endpoint the saved key can read: the Kimi API balance (`kimi:key`) and the
-MiniMax M Plan remaining quota (`minimax:subscription`). The other four show
-no meter and link to the vendor's usage page instead.
+MiniMax M Plan remaining quota (`minimax:subscription`). The other four have
+no meter and no section in the usage popover; check their usage on the
+vendor's own page: Kimi Code on
+[My Quota](https://www.kimi.com/membership/subscription?tab=quota), the
+MiniMax API on [Balance](https://platform.minimax.io/user-center/payment/balance),
+and OpenCode Console and OpenCode Go on the
+[OpenCode console](https://opencode.ai/console).
 
 | Provider type / display | Plan label / slot | API label / slot |
 | --- | --- | --- |
