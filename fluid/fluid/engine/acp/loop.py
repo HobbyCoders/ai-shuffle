@@ -581,7 +581,16 @@ class AcpLoop:
         if isinstance(options, list):
             self._config_options = [o for o in options if isinstance(o, dict)]
         modes = result.get("modes") if isinstance(result.get("modes"), Mapping) else {}
-        self._modes = [str(m.get("id")) for m in modes.get("availableModes") or [] if isinstance(m, Mapping)]
+        available = [str(m.get("id")) for m in modes.get("availableModes") or [] if isinstance(m, Mapping)]
+        if not available:
+            # A session/resume reply names the modes only as the "mode" config
+            # option. Without this a resumed session never changes mode again.
+            for option in self._config_options:
+                if option.get("category") == "mode" or option.get("id") == "mode":
+                    available = [str(v.get("value")) for v in option.get("options") or []
+                                 if isinstance(v, Mapping)]
+                    break
+        self._modes = available
 
     def _current_config(self, config_id: str) -> str | None:
         for option in self._config_options:
@@ -940,9 +949,12 @@ class AcpLoop:
         fut: asyncio.Future[RespondQuestion] = asyncio.get_running_loop().create_future()
         self._pending_questions[request_id] = fut
         try:
+            # A blocking question the agent waits on. Named as fluid's AskUser,
+            # not the CLI's AskUserQuestion: hosts post an AskUserQuestion and
+            # deny it at once, which would answer the agent with nothing.
             await self._emit(QuestionRequest(
                 session_id=self.session_id, turn_id=mapper.turn_id if mapper else None,
-                request_id=request_id, tool_use_id=request_id, name="AskUserQuestion",
+                request_id=request_id, tool_use_id=request_id, name="AskUser",
                 message=message, schema=dict(schema) if schema else None,
             ))
             try:

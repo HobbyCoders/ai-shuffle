@@ -117,6 +117,10 @@ class Agent:
             if rid is not None:
                 await self.write({"jsonrpc": "2.0", "id": rid, "error": {"code": exc.code, "message": exc.message}})
             return
+        except Exception as exc:  # a broken command must fail its request, not hang it
+            if rid is not None:
+                await self.write({"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": repr(exc)}})
+            return
         if rid is not None:
             await self.write({"jsonrpc": "2.0", "id": rid, "result": result})
 
@@ -275,7 +279,8 @@ class Agent:
         env.update({e["name"]: e["value"] for e in server.get("env") or []})
         proc = await asyncio.create_subprocess_exec(
             server["command"], *server.get("args", []), env=env,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            limit=16 * 1024 * 1024)  # the app's full tools/list is one long line
 
         async def rpc(rid, method, params):
             proc.stdin.write((json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}) + "\n").encode())

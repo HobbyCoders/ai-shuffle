@@ -33,7 +33,9 @@ from fluid.events.model import (
     TurnComplete,
     Usage,
 )
-from fluid.events.ops import Interrupt, RespondPermission, RespondQuestion, Resume, SetModel, Steer, UserTurn
+from fluid.events.ops import (
+    Interrupt, RespondPermission, RespondQuestion, Resume, SetModel, SetPermissionMode, Steer, UserTurn,
+)
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
@@ -271,6 +273,25 @@ async def test_resume_after_restart_uses_session_resume(tmp_path: Path) -> None:
         await second.close()
 
 
+async def test_a_resumed_session_still_takes_mode_changes(tmp_path: Path) -> None:
+    """session/resume replies carry the mode as a config option, not a ``modes`` block."""
+    store = MemoryStore()
+    first = await _driver(tmp_path, store=store, session_id="s-1", permission_mode="plan")
+    await first.turn("hello")
+    await first.close()
+
+    second = await _driver(tmp_path, store=store, session_id="s-1", permission_mode="plan")
+    try:
+        assert isinstance(await second.turn("again"), TurnComplete)
+        assert _received(tmp_path, "session/resume")
+        await second.loop.submit(SetPermissionMode(mode="bypassPermissions"))
+        modes = [r["params"]["modeId"] for r in _received(tmp_path, "session/set_mode")]
+        # plan on the new session, plan again on the resumed one, then out of it.
+        assert modes == ["plan", "plan", "default"], modes
+    finally:
+        await second.close()
+
+
 async def test_replaced_spec_starts_a_fresh_process_that_resumes(tmp_path: Path) -> None:
     """A new key or agent setting: the next turn runs a new process on the same session."""
     d = await _driver(tmp_path, session_id="s-1", auth_mode="gemini-api-key", api_key="test-key-old")
@@ -361,6 +382,9 @@ async def test_elicitation_routes_to_a_question(tmp_path: Path) -> None:
         await d.loop.submit(UserTurn(content="ask"))
         question = await d.until(QuestionRequest)
         assert question.message == "Which colour?"
+        # The host waits for the owner on AskUser; AskUserQuestion would be
+        # posted and denied at once, answering the agent with nothing.
+        assert question.name == "AskUser" and not question.nonblocking
         await d.loop.submit(RespondQuestion(request_id=question.request_id, answer="blue"))
         assert isinstance(await d.until(TERMINAL), TurnComplete)
         assert 'answer={"colour": "blue"}' in d.text()
