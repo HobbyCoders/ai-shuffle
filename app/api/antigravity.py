@@ -8,6 +8,7 @@ pass through here.
 
 from __future__ import annotations
 
+import functools
 import logging
 import uuid
 from typing import Any, Dict, List, Literal, Optional
@@ -163,16 +164,24 @@ async def provider_status(provider_id: str, token: str = Depends(require_admin))
 async def set_guard(provider_id: str, body: GuardUpdate, token: str = Depends(require_admin)):
     """Lift or restore the interactive-only guard of a personal sign-in row."""
     # Read, change and write under the row's lock, like every other row
-    # writer: a concurrent edit of the row's settings is never lost.
+    # writer, and only over the revision read (a synced edit from another
+    # worker takes no local lock): a concurrent edit is never lost.
     async with operation_lock(provider_id):
-        row = await _row(provider_id)
-        if row.get("auth_mode") not in antigravity.GUARDED_AUTH_MODES:
-            raise HTTPException(status_code=400, detail="Only personal sign-in rows have this guard.")
-        env = dict(row.get("extra_env_json") or {}) if isinstance(row.get("extra_env_json"), dict) else {}
-        env.pop(antigravity.GUARD_OVERRIDE_KEY, None)
-        if body.allow_unattended:
-            env[antigravity.GUARD_OVERRIDE_KEY] = "1"
-        updated = await run_sync(db.update_model_provider, provider_id, extra_env_json=env)
+        for _attempt in range(3):
+            row = await _row(provider_id)
+            if row.get("auth_mode") not in antigravity.GUARDED_AUTH_MODES:
+                raise HTTPException(status_code=400, detail="Only personal sign-in rows have this guard.")
+            env = dict(row.get("extra_env_json") or {}) if isinstance(row.get("extra_env_json"), dict) else {}
+            env.pop(antigravity.GUARD_OVERRIDE_KEY, None)
+            if body.allow_unattended:
+                env[antigravity.GUARD_OVERRIDE_KEY] = "1"
+            updated = await run_sync(functools.partial(
+                db.update_model_provider, provider_id, expected_revision=row.get("revision"),
+                extra_env_json=env))
+            if updated is not None or row.get("revision") is None:
+                break
+        else:
+            raise HTTPException(status_code=409, detail="The provider changed on another worker. Try again.")
     if updated is None:
         raise HTTPException(status_code=404, detail="Antigravity provider not found")
     return _guard_view(updated)

@@ -732,7 +732,9 @@ def turn_row(provider_id: Optional[str], options: Any,
     from app.db import database as db
 
     try:
-        row = db.get_model_provider(provider_id, include_token=True) if provider_id else None
+        # The reader connect uses (a disabled account follows its slot sibling;
+        # Antigravity rows have no slot today, so it is the exact row).
+        row = db.resolve_model_provider(provider_id, include_token=True) if provider_id else None
     except Exception:  # noqa: BLE001 — fail closed, like the guard itself
         logger.debug("[antigravity] turn check could not read %s", provider_id, exc_info=True)
         return "Could not check this chat's Antigravity provider. Try again.", None
@@ -747,14 +749,15 @@ def turn_row(provider_id: Optional[str], options: Any,
 def spawn_binding(row: Mapping[str, Any]) -> str:
     """Digest of everything fixed into the agent process when it starts.
 
-    The key, the agent's extra environment and the installed binary go into
+    The row (its private home), the key, the agent's extra environment and
+    the installed binary go into
     its environment and argv at spawn; when any of them changes, the next
     turn starts a fresh process (resuming the agent's saved session).
     """
     import json
 
     material = json.dumps({
-        "auth_mode": row.get("auth_mode"), "key": row_api_key(row) or "",
+        "id": row.get("id"), "auth_mode": row.get("auth_mode"), "key": row_api_key(row) or "",
         "env": agent_extra_env(row), "binary": find_binary() or "",
     }, sort_keys=True)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()

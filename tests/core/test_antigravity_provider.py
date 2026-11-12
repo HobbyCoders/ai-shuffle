@@ -544,6 +544,25 @@ async def test_guard_write_does_not_lose_a_concurrent_edit(mock_db, fake_agy):
     assert env == {"OTHER_SETTING": "1", ag.GUARD_OVERRIDE_KEY: "1"}
 
 
+async def test_guard_write_does_not_lose_a_synced_edit(mock_db, fake_agy, monkeypatch):
+    # A synced edit takes no local lock: it lands between the read and the write.
+    row = await _personal_row()
+    real = api._row
+    calls = []
+
+    async def read_then_sync(provider_id, **kw):
+        found = await real(provider_id, **kw)
+        if not calls:
+            db.update_model_provider(provider_id, extra_env_json={"OTHER_SETTING": "1"})
+        calls.append(1)
+        return found
+    monkeypatch.setattr(api, "_row", read_then_sync)
+    await api.set_guard(row["id"], api.GuardUpdate(allow_unattended=True), token=None)
+    assert len(calls) == 2
+    env = db.get_model_provider(row["id"])["extra_env_json"]
+    assert env == {"OTHER_SETTING": "1", ag.GUARD_OVERRIDE_KEY: "1"}
+
+
 async def test_a_generic_edit_keeps_the_guard_and_the_type(mock_db, fake_agy):
     from fastapi import HTTPException
     from app.api import model_providers as providers_api
