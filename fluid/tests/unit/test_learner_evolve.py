@@ -306,6 +306,64 @@ def test_a_short_rule_closes_on_a_later_owner_memory_naming_all_its_terms(tmp_pa
     assert queue.open() == []
 
 
+def test_a_short_rule_stays_open_on_an_unrelated_memory_naming_its_terms(tmp_path):
+    store = SkillStore(tmp_path)
+    queue = PreferenceProposals(store)
+    assert queue.propose("subagent_models", "still dont use ModelX for now.", sessions=["s1"]) == "proposed"
+    # Both subject terms, but nothing of the topic (subagents, models).
+    store.save_memory("For ModelX API errors, dont retry rate-limited requests; wait for quota reset.",
+                      protected=True, when="When ModelX API calls fail", source_session="s1")
+    assert len(queue.open()) == 1
+
+
+def learner_reads_sessions(store, said: list[tuple[str, str, float]], proposal: str) -> Synthesizer:
+    for session, text, ts in said:
+        store.journal_context(session_id=session)
+        store.journal_append({"kind": "user", "text": text, "ts": ts})
+    return Synthesizer(Answer(f'<preference topic="pr_main_updates">{proposal}</preference>'),
+                       "gpt-test", store, min_new_entries=1)
+
+
+async def test_an_older_save_does_not_answer_a_later_correction_in_another_session(tmp_path):
+    store = SkillStore(tmp_path)
+    old_rule = "Sessions merge pull requests without bringing them up to current main."
+    now = time.time()
+    # s1 said the old rule and saved it; s2 later says the new one.
+    store.save_memory(old_rule, scope="project:fixture", protected=True, when=MAIN_WHEN,
+                      source_session="s1")
+    synth = learner_reads_sessions(
+        store, [("s1", old_rule, now - 100), ("s2", MAIN_RULE, now + 60)], MAIN_RULE)
+    assert await synth.run() == ["preference-proposal:pr_main_updates"]
+    assert [r["text"] for r in PreferenceProposals(store).open()] == [MAIN_RULE]
+
+
+async def test_only_sessions_that_gave_the_correction_can_answer_it(tmp_path):
+    store = SkillStore(tmp_path)
+    now = time.time()
+    synth = learner_reads_sessions(
+        store, [("s1", MAIN_RULE, now - 60), ("s9", "Check the website footer links.", now - 30)],
+        MAIN_RULE)
+    assert await synth.run() == ["preference-proposal:pr_main_updates"]
+    [record] = PreferenceProposals(store).open()
+    assert record["sessions"] == ["s1"]
+    # s9 never gave this correction: its project memory answers nothing globally.
+    store.save_memory(MAIN_MEMORY, scope="project:fixture", protected=True, when=MAIN_WHEN,
+                      source_session="s9")
+    assert len(PreferenceProposals(store).open()) == 1
+
+
+def test_a_rule_found_saved_also_closes_its_identical_open_proposal(tmp_path):
+    store = SkillStore(tmp_path)
+    queue = PreferenceProposals(store)
+    assert queue.propose("pr_main_updates", MAIN_RULE, sessions=["s1"]) == "proposed"
+    said = time.time()
+    store.save_memory(MAIN_MEMORY, scope="project:fixture", protected=True, when=MAIN_WHEN,
+                      source_session="s2")
+    assert queue.propose("pr_main_updates", MAIN_RULE, sessions=["s2"],
+                         corrected_at={"s2": said}) == "saved"
+    assert queue.open() == []
+
+
 async def test_a_correction_of_an_older_memory_is_still_proposed(tmp_path):
     store = SkillStore(tmp_path)
     # Saved earlier in the same session and in another one: both are stale

@@ -2083,7 +2083,8 @@ Never claim a workflow is installed because it was proposed."""
                         and len(words & said) / len(words) >= _PROVENANCE_MATCH):
                     session = str(e["session"])
                     corrected_at[session] = max(corrected_at.get(session, 0.0), float(e["ts"]))
-            sessions = list(dict.fromkeys([*corrected_at, *(str(e["session"]) for e in users)]))
+            # Only sessions that said it can answer it (newest first: the cap keeps them).
+            sessions = sorted(corrected_at, key=corrected_at.__getitem__, reverse=True)
             try:
                 outcome = queue.propose(
                     topic, body, scope=self._resolve_scope(attrs.get("scope")) or "global",

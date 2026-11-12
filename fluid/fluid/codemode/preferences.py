@@ -17,9 +17,10 @@ raise the question, both bounded so they cannot nag:
   memory on the same topic is saved after it: one keyed by the topic name,
   or one sharing the proposal's subject terms (:func:`same_topic`). No key
   convention is needed. The owner already answered it, in any scope, when
-  one of the sessions the correction came from saved such a memory after the
-  owner's words (the learner reads journals later, so that save may predate
-  the proposal); an older memory never suppresses a proposal that changes it.
+  a session whose owner messages carry the rule saved such a memory at or
+  after the latest time the owner said it (the learner reads journals later,
+  so that save may predate the proposal); an older memory never suppresses
+  a proposal that changes it.
   The guidance queue
   (``pending-proposals.jsonl``) is not reused: ``fluid evolve`` replays
   everything in it through the guidance gate.
@@ -98,8 +99,10 @@ def same_topic(topic: str, text: str, key: str | None, terms: set[str]) -> bool:
     mine = _salient(text)
     shared = len(mine & terms)
     # A short rule ("still no ModelX") has fewer subject terms than the
-    # minimum; naming every one of them (at least two) is the same subject.
-    return (len(mine) >= 2 and shared >= min(PROPOSAL_ANSWER_MIN_SHARED, len(mine))
+    # minimum: it needs all of them (at least two) plus a word of its topic.
+    if 2 <= len(mine) < PROPOSAL_ANSWER_MIN_SHARED and mine <= terms:
+        return bool(terms & _salient(name.replace("_", " ")))
+    return (shared >= PROPOSAL_ANSWER_MIN_SHARED
             and shared >= PROPOSAL_ANSWER_MIN_RATIO * max(1, min(len(mine), len(terms))))
 
 
@@ -178,14 +181,14 @@ class PreferenceProposals:
                 corrected_at: dict[str, float] | None = None) -> str:
         """Queue a proposed rule for ``topic``.
 
-        ``corrected_at`` maps a source session to when the owner said the
-        rule there (the latest such [user] entry).
+        ``corrected_at`` maps each session whose [user] entries carry the
+        rule to the latest time the owner said it there.
 
         Returns ``proposed`` (queued, or replaced the topic's older wording),
         ``duplicate`` (the same wording is already open), ``saved`` (a
-        user-kept fact in scope already says it word for word, or that session
-        saved a user-kept fact on the topic at or after the owner's words, in
-        any scope) or ``full`` (the
+        user-kept fact in scope already says it word for word, or one of those
+        sessions saved a user-kept fact on the topic, in any scope, at or after
+        the latest ``corrected_at``) or ``full`` (the
         queue holds MAX_OPEN_PREFERENCE_PROPOSALS other topics). Raises
         ValueError for a malformed topic, an empty or oversized text, a
         credential or an injection pattern."""
@@ -208,10 +211,23 @@ class PreferenceProposals:
             saved = self._saved_preferences(None)
             if any(s in (scope, "global") and fp == fingerprint for _, s, _, fp, _, _ in saved):
                 return "saved"
+            # Answered by a session that said it, saved at or after the latest
+            # time the owner said it in this batch; that session also becomes a
+            # source of an identical open row, so _is_open applies the same rule.
             corrected = corrected_at or {}
-            if any(source in corrected and at >= corrected[source]
-                   and same_topic(name, body, k, terms)
-                   for k, _, at, _, terms, source in saved):
+            cutoff = max(corrected.values(), default=None)
+            answering = [source for k, _, at, _, terms, source in saved
+                         if source in corrected and at >= cutoff and same_topic(name, body, k, terms)]
+            if answering:
+                rows, changed = self._read(), False
+                for r in rows:
+                    if (normalize_topic(r["topic"]) == name and (r.get("scope") or "global") == scope
+                            and _fingerprint(r["text"]) == fingerprint):
+                        merged = list(dict.fromkeys([*answering, *(r.get("sessions") or ())]))[:4]
+                        changed, r["sessions"] = changed or merged != r.get("sessions"), merged
+                if changed:
+                    atomic_write_text(self.path, "".join(
+                        json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
                 return "saved"
             records = [r for r in self._read() if self._is_open(r, saved, now)]
             same = [r for r in records if normalize_topic(r["topic"]) == name
