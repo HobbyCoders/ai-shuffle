@@ -269,7 +269,7 @@ def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict
     ttl = resolve_cache_ttl(
         leg, provider_type=row.get("provider_type"), auth_mode=row.get("auth_mode"),
         base_url=row.get("base_url"), model=model, last_usage=_cache_write_usage(last),
-    ) if leg in ("delegated", "anthropic", "openai_responses", "openrouter") else None
+    ) if leg in ("delegated", "anthropic", "openai_responses", "openrouter", "gemini") else None
     context_tokens: Optional[int] = None
     data: Dict[str, Any] = {}
     snapshot: Dict[str, Any] = {}

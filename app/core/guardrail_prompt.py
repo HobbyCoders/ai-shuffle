@@ -64,6 +64,7 @@ _NO_RETRY_CATEGORIES = frozenset({"reasoning_extraction"})
 _ROW_TYPE_LABEL = {
     "openrouter": "OpenRouter", "openai": "OpenAI", "chatgpt": "OpenAI",
     "xai": "xAI", "grok": "xAI", "kimi": "Kimi", "minimax": "MiniMax", "opencode": "OpenCode",
+    "google": "Google",
 }
 
 

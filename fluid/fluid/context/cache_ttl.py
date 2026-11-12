@@ -63,6 +63,10 @@ def resolve_cache_ttl(
         # Automatic vendor caching: no sourced idle-expiry guarantee. In
         # particular, do not inherit Claude's explicit-breakpoint 5m policy.
         return None
+    if kind == "gemini" or ptype == "google":
+        # Implicit caching: Google documents automatic cache hits and their
+        # discount, but no idle lifetime (aistudio.google.com/docs/caching).
+        return None
     if kind == "anthropic":
         # https://platform.claude.com/docs/en/build-with-claude/prompt-caching
         # We send cache_control ephemeral WITHOUT ttl: default 5m, not opt-in 1h.

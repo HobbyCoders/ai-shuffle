@@ -15,7 +15,7 @@
 
 import { api } from './client';
 
-export type NativeProviderId = 'kimi' | 'minimax' | 'opencode';
+export type NativeProviderId = 'kimi' | 'minimax' | 'opencode' | 'google';
 export interface NativeProviderOption {
 	provider_type: NativeProviderId;
 	display_name: string;
@@ -24,7 +24,8 @@ export interface NativeProviderOption {
 	credential_label: string;
 	slot: `${NativeProviderId}:${'subscription' | 'key'}`;
 	base_url: string;
-	api_dialect: 'anthropic';
+	/** Kimi, MiniMax and OpenCode speak Anthropic Messages; Google uses its own Gemini API (null). */
+	api_dialect: 'anthropic' | null;
 	key_page_url: string;
 	key_prefixes: string[];
 	usage_meter_available: boolean;
@@ -39,7 +40,7 @@ export function checkProviderKey(id: string): Promise<{ status: 'valid' | 'unava
 }
 
 export const isNativeProvider = (id: string): id is NativeProviderId =>
-	id === 'kimi' || id === 'minimax' || id === 'opencode';
+	id === 'kimi' || id === 'minimax' || id === 'opencode' || id === 'google';
 
 /** Kimi Code has no models endpoint; its preset is the catalog. */
 export const hasModelRefresh = (row: Pick<ModelProvider, 'provider_type' | 'auth_mode'>): boolean =>
