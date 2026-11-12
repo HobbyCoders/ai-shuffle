@@ -20,6 +20,11 @@ The prompt text picks the behaviour:
 Environment: FAKE_ACP_LOG (append every received message as JSON lines),
 FAKE_ACP_SIGNED_IN=1 (a stored sign-in exists), GEMINI_API_KEY,
 FAKE_ACP_STATE (directory remembering session ids across processes).
+
+Other entry points, like the real binary's: ``acp --login`` prints a sign-in
+link and reads the code on stdin (code ``good`` signs in by writing a marker
+in the agent's own HOME); ``-p /usage --output-format json`` prints
+FAKE_ACP_USAGE verbatim, or a quota reply in the community-reported shape.
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ INIT = {
         {"id": "agent-platform", "name": "Gemini Enterprise Agent Platform", "description": "x"},
     ],
 }
+_MARKER = os.path.join(os.environ.get("HOME") or ".", ".fake_acp_signed_in")
 TERMINAL_LOGIN = {"id": "terminal-login", "name": "Log in from the terminal", "description": "x",
                   "type": "terminal", "args": ["--login"]}
 
@@ -70,7 +76,7 @@ class Agent:
         self.out_lock = asyncio.Lock()
         self.next_id = 1000
         self.pending: dict[int, asyncio.Future] = {}
-        self.authed = os.environ.get("FAKE_ACP_SIGNED_IN") == "1"
+        self.authed = os.environ.get("FAKE_ACP_SIGNED_IN") == "1" or os.path.exists(_MARKER)
         self.sessions: dict[str, dict] = {}
         self.turn: dict | None = None
         self.terminal_client = False
@@ -320,5 +326,42 @@ async def main() -> None:
         task.add_done_callback(tasks.discard)
 
 
+def login() -> int:
+    print("Please visit the following URL to authorize the application:", flush=True)
+    print("https://accounts.google.com/o/oauth2/v2/auth?client_id=fake&state=x", flush=True)
+    print("Enter the authorization code: ", end="", flush=True)
+    code = sys.stdin.readline().strip()
+    if code != "good":
+        print("Authentication failed: invalid_grant", flush=True)
+        return 1
+    with open(_MARKER, "w", encoding="utf-8") as fh:
+        fh.write("1")
+    print("Authentication succeeded.", flush=True)
+    return 0
+
+
+def usage() -> int:
+    raw = os.environ.get("FAKE_ACP_USAGE")
+    if raw is not None:
+        print(raw, flush=True)
+        return 0
+    if not (os.environ.get("FAKE_ACP_SIGNED_IN") == "1" or os.path.exists(_MARKER)
+            or os.environ.get("GEMINI_API_KEY")):
+        print(json.dumps({"status": "ERROR", "error": {"message": "Authentication required"}}), flush=True)
+        return 1
+    print(json.dumps({"status": "OK", "quotas": [
+        {"model": "gemini-3.1-pro", "remainingFraction": 0.75, "resetTime": "2026-11-12T10:00:00Z"},
+        {"model": "gemini-3.8-flash", "remainingFraction": 1.0, "resetTime": "2026-11-12T10:00:00Z"},
+    ]}), flush=True)
+    return 0
+
+
 if __name__ == "__main__":
+    if "--version" in sys.argv:
+        print(INIT["agentInfo"]["version"], flush=True)
+        sys.exit(0)
+    if "--login" in sys.argv:
+        sys.exit(login())
+    if "-p" in sys.argv:
+        sys.exit(usage())
     asyncio.run(main())

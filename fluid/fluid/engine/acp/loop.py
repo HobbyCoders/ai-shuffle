@@ -66,6 +66,7 @@ from fluid.events.ops import (
     BackgroundTaskFinished,
     Interrupt,
     Op,
+    Resume,
     RespondPermission,
     RespondQuestion,
     SetModel,
@@ -309,7 +310,7 @@ class AcpLoop:
                 await task
 
     async def submit(self, op: Op) -> None:
-        if isinstance(op, UserTurn):
+        if isinstance(op, (UserTurn, Resume)):
             if self._closed:
                 raise RuntimeError("this engine was closed; start a new one")
             if self._turn_task is not None and not self._turn_task.done():
@@ -596,7 +597,7 @@ class AcpLoop:
                 blocks.append({"type": "text", "text": block})
         return blocks or [{"type": "text", "text": ""}]
 
-    async def _run_turn(self, op: UserTurn) -> None:
+    async def _run_turn(self, op: UserTurn | Resume) -> None:
         meta = await self._ensure_session()
         sid = meta.session_id
         turn_id = new_id("turn")
@@ -613,13 +614,29 @@ class AcpLoop:
                 await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
                                             message=f"Could not start the agent: {exc}"))
                 return
-            content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
-            user_node = SessionNode(
-                node_id=new_id("node"), parent_id=op.parent_node_id or meta.head_node_id,
-                message=Message(role="user", content=content, context_pin=op.context_pin),
-                **({"ts": op.accepted_at} if op.accepted_at is not None else {}),
-            )
-            await self.store.append(sid, user_node)
+            if isinstance(op, Resume):
+                # Retry: send the unanswered prompt at the head again.
+                head = await self.store.get_node(sid, meta.head_node_id) if meta.head_node_id else None
+                if (head is not None and head.message.role == "assistant" and head.parent_id
+                        and (head.message.provider_meta or {}).get("interrupted")):
+                    # A reply cut off by an error is not an answer (as in native.py).
+                    head = await self.store.get_node(sid, head.parent_id)
+                if head is None or head.message.role != "user":
+                    await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
+                                                message="Nothing to resume: the last message was answered."))
+                    return
+                user_node = head
+                content = [b for b in head.message.content if isinstance(b, (Text, Image))]
+                if op.context_note:
+                    content.append(Text(op.context_note))
+            else:
+                content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
+                user_node = SessionNode(
+                    node_id=new_id("node"), parent_id=op.parent_node_id or meta.head_node_id,
+                    message=Message(role="user", content=content, context_pin=op.context_pin),
+                    **({"ts": op.accepted_at} if op.accepted_at is not None else {}),
+                )
+                await self.store.append(sid, user_node)
             await self._emit(TurnStarted(session_id=sid, node_id=user_node.node_id, turn_id=turn_id,
                                          model=self.model or self._current_config("model") or "",
                                          provider=self.provider, source=op.source))

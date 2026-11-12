@@ -3658,6 +3658,8 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
         "endpoints": endpoints if endpoints is not None else _own_endpoints(),
         "capabilities": {nested_secret_sync.CAPABILITY: 1, native_providers.CAPABILITY: 1,
                          memory_records.CAPABILITY: 1,
+                         # Literal: importing app.core.antigravity pulls in fluid.
+                         "antigravity_acp_v1": 1,
                          **capabilities},
         "version": version,
         "source_revision": running_revision(),

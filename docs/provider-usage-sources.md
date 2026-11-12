@@ -39,6 +39,15 @@ popover keeps the rows it already shows.
 | `fal_billing` | `GET https://rest.alpha.fal.ai/billing/user_balance` | fal.ai API key (the media tools key: saved, or `FAL_KEY` / `FAL_API_KEY`) | Account | Provider-reported credit balance | Polled on demand, 300 s | Undocumented endpoint | [Billing](https://fal.ai/dashboard/billing) |
 | `claude_rate_limit_events` | Rate-limit events from the running Claude Code session | None beyond the session | Subscription | Subscription allowance (one window at a time) | Passive | Response metadata | [Usage](https://claude.ai/settings/usage) |
 | `grok_subscription` | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` and `/v1/settings` | SuperGrok sign-in (Grok CLI OAuth) | Subscription | Subscription allowance and plan | Polled on demand, 300 s per endpoint | Unofficial, subscription-specific | [Grok](https://grok.com/) |
+| `antigravity_usage` | The agent's own `agy -p /usage --output-format json` (no HTTP request by the app) | The Antigravity agent's sign-in or Gemini key on this worker; the app never reads it | Subscription | Subscription allowance (model quota windows) | On demand only (usage popover refresh), never on the background poll | Undocumented endpoint (the JSON shape is not documented) | [Antigravity FAQ](https://antigravity.google/docs/faq) |
+
+`antigravity_usage` runs Google's own binary in the row's private home, only when
+the usage popover refreshes (the 30 s forced-refresh cooldown applies). The
+reply's shape is unverified against a signed-in agent: the parser accepts
+per-window `remaining_fraction`/`remainingFraction` and a reset time, and any
+other reply, a timeout or a signed-out agent records `unavailable` with the
+dashboard link. Per-turn tokens and cost come only from what ACP reports in a
+turn; nothing is estimated.
 
 What each source cannot report is listed with it in the registry (for example,
 the OpenRouter key endpoint has no account balance). The popover shows these as "Not reported by

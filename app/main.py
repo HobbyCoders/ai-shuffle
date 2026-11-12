@@ -676,6 +676,8 @@ app.include_router(auth.router)
 from app.api import owner_login
 app.include_router(owner_login.router)
 app.include_router(model_providers.router)
+from app.api import antigravity as antigravity_api
+app.include_router(antigravity_api.router)
 app.include_router(agents.router)
 app.include_router(owner_services.router)
 app.include_router(watches.router)

@@ -373,6 +373,9 @@ class HarnessAdapter(ProviderAdapter):
         # Fluid turn source for the next send_query/send_resume; see
         # set_turn_source. Reset to "user" after each submit.
         self._next_turn_source: str = "user"
+        # The app source behind ``_next_turn_source`` (Antigravity's guard).
+        self._next_app_turn_source: Optional[str] = None
+        self._antigravity_row: Optional[Dict[str, Any]] = None
         # The next submit is the host's emergency compaction at the context
         # limit (set_emergency_compaction). Reset after each submit.
         self._next_emergency_compaction = False
@@ -645,7 +648,10 @@ class HarnessAdapter(ProviderAdapter):
             _effective_effort, options, options.effort, kind, fit=True
         )
 
-        self._registry = await self._build_registry(options, native=not self._is_delegated)
+        # Antigravity, like the claude CLI, ships its own file and shell tools.
+        self._registry = await self._build_registry(
+            options, native=not (self._is_delegated or kind == _ANTIGRAVITY_KIND)
+        )
 
         fluid_session_id = options.session_id or options.resume_session_id
         system, append_system = _system_parts(options.system_prompt)
@@ -667,7 +673,11 @@ class HarnessAdapter(ProviderAdapter):
             self._is_delegated and system is not None and not one_shot
         )
 
-        if self._is_delegated:
+        if kind == _ANTIGRAVITY_KIND:
+            await self._connect_antigravity(
+                options, store, fluid_session_id, system, append_system, one_shot
+            )
+        elif self._is_delegated:
             cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
             # A preset profile keeps Claude Code's own system prompt; the app's
             # text (profile append, agents index, fluid instruction files and
@@ -1864,6 +1874,8 @@ class HarnessAdapter(ProviderAdapter):
                     assert_proactive_allowed, proactive,
                     self._options.extra.get("app_session_id"),
                 )
+        if self._provider_kind == _ANTIGRAVITY_KIND:
+            self._check_antigravity_turn()
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
@@ -1967,6 +1979,94 @@ class HarnessAdapter(ProviderAdapter):
         """Host-only receipt for this submit, including pooled adapters."""
         self._owner_receipt = dict(receipt or {})
 
+    async def _connect_antigravity(
+        self, options: SessionOptions, store: Any, fluid_session_id: Optional[str],
+        system: Optional[str], append_system: Optional[str], one_shot: bool,
+    ) -> None:
+        """Build the ACP engine for a Google Antigravity row.
+
+        Google's own ``agy acp`` runs with the row's private home; the app's
+        tools reach it as MCP servers (the bundled bridge and the session's
+        external stdio servers) and the app's instructions through the
+        agent's system-prompt append. A personal Google sign-in is refused
+        here for unattended runs unless the owner lifted the guard.
+        """
+        from app.core import antigravity
+        from app.core.environment import ProviderConfigError
+        from fluid.engine.acp import AcpLoop
+
+        provider_id = (options.extra or {}).get("provider_id")
+        row = await run_sync(_lookup_provider_row, provider_id) if provider_id else None
+        if not row:
+            raise ProviderConfigError("This chat's Antigravity provider no longer exists.")
+        refusal = await run_sync(antigravity.guard_refusal, row, options)
+        if refusal:
+            raise ProviderConfigError(refusal)
+        self._antigravity_row = row
+        try:
+            spec = await run_sync(antigravity.build_spec, row, add_dirs=list(options.add_dirs or ()))
+        except FileNotFoundError as exc:
+            raise ProviderConfigError(str(exc)) from exc
+        self._workspace_card = None if one_shot else await run_sync(
+            self._build_workspace_card, options
+        )
+        instructions = None
+        if not one_shot:
+            append = await run_sync(
+                _delegated_append_text, append_system, options, self._registry,
+                worker=self._worker_identity, workspace_card=self._workspace_card,
+            )
+            # The agent keeps its own system prompt; ours can only be appended.
+            instructions = "\n\n".join(part for part in (system, append) if part) or None
+        blocked = _delegated_disallowed(options, self._registry)
+        _install_bridge_tool_filter(options)
+        surface = _delegated_allowed(options)
+
+        def bridge_filter(name: str) -> bool:
+            return _bridged_tool_permitted(name, surface, blocked)
+
+        self._engine = AcpLoop(
+            store=store,
+            spec=spec,
+            model=options.model,
+            effort=_valid_effort(getattr(options, "effort", None)),
+            permission_mode=options.permission_mode,
+            registry=self._registry,
+            ctx=self._with_away_hook(
+                ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id)
+            ),
+            session_id=fluid_session_id,
+            cwd=options.cwd,
+            add_dirs=list(options.add_dirs or ()),
+            mcp_servers=(
+                {} if options.extra.get("assistant_proactive") is not None
+                else _external_mcp_servers(options.mcp_servers)
+            ),
+            tool_filter=bridge_filter,
+            # As on the claude leg: no permission engine on the bridge; the
+            # agent asks before a tool runs and that ask reaches the owner.
+            permissions=None,
+            hooks=self._hooks,
+            tool_policy=self._delegated_policy_with_saved_rules(
+                _delegated_tool_policy(options, self._build_permissions(options), blocked)
+            ),
+            system_append=instructions,
+        )
+
+    def _check_antigravity_turn(self) -> None:
+        """Refuse an unattended turn on a guarded personal-sign-in row."""
+        from app.core import antigravity
+        from app.core.environment import ProviderConfigError
+        from app.core.turn_sources import PERSON_PRESENT_TURN_SOURCES
+
+        row = self._antigravity_row
+        # Like ``_next_turn_source``: it names the next submit only.
+        source, self._next_app_turn_source = self._next_app_turn_source, None
+        if row and antigravity.guarded(row) and source and source not in PERSON_PRESENT_TURN_SOURCES:
+            raise ProviderConfigError(
+                antigravity.GUARD_REFUSAL.format(reason="a scheduled or automatic turn")
+            )
+
     def set_turn_source(self, app_source: Optional[str]) -> None:
         """Name what starts the next turn, as an app ``turns.source``.
 
@@ -1975,6 +2075,7 @@ class HarnessAdapter(ProviderAdapter):
         that never sets it gets "user".
         """
         self._next_turn_source = fluid_turn_source(app_source)
+        self._next_app_turn_source = app_source
 
     def _take_turn_source(self) -> str:
         source, self._next_turn_source = self._next_turn_source, "user"
@@ -2755,6 +2856,8 @@ class HarnessAdapter(ProviderAdapter):
     async def send_resume(self) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
+        if self._provider_kind == _ANTIGRAVITY_KIND:
+            self._check_antigravity_turn()
         if self._options is not None and self._options.extra.get("assistant_proactive") is not None:
             from app.core.owner_services import assert_proactive_allowed
             await run_sync(assert_proactive_allowed,
@@ -6533,6 +6636,9 @@ _NO_APPROVER_DENIAL = (
 # How the delegated claude CLI names a tool served by fluid's bundled bridge.
 _BUNDLED_CLI_PREFIX = "mcp__fluid_bundled__"
 
+#: Leg kind of a Google Antigravity row (fluid.engine.acp, app/core/antigravity.py).
+_ANTIGRAVITY_KIND = "antigravity"
+
 
 def _delegated_disallowed(options: SessionOptions, registry: Any = None) -> list:
     """``--disallowed-tools`` for the delegated (claude CLI) leg.
@@ -7075,6 +7181,10 @@ def _provider_row_kind(
     ptype = (provider_type or "").strip().lower()
     mode = (auth_mode or "").strip().lower()
     dialect = (api_dialect or "").strip().lower()
+
+    # Google's Antigravity agent over ACP (app/core/antigravity.py).
+    if ptype == _ANTIGRAVITY_KIND:
+        return _ANTIGRAVITY_KIND
 
     # A ChatGPT/Codex or Grok/xAI row drives OpenAI Responses (api.openai.com,
     # the Codex backend, or api.x.ai — _build_provider_client picks the URL).

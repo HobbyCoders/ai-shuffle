@@ -401,7 +401,8 @@ async def get_usage_limits(
         return UsageSnapshot(providers=[])
     # A forced refresh inside the cooldown serves the cached rows (with
     # ``cooldown_until``); the request budget still limits each credential.
-    provider_usage_monitor.request_refresh(force=refresh, cooldown=FORCED_REFRESH_COOLDOWN_SECONDS)
+    provider_usage_monitor.request_refresh(force=refresh, cooldown=FORCED_REFRESH_COOLDOWN_SECONDS,
+                                           on_demand=refresh)
     if refresh:
         _request_claude_refresh()
     snapshot = await usage_limits_monitor.get_cluster_snapshot()

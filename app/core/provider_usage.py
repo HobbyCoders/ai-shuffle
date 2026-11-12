@@ -1140,6 +1140,7 @@ class ProviderUsageMonitor:
         # Seconds within which the running pass treats a snapshot as just
         # refreshed (0 for credential saves, which must probe the new key).
         self._recent_window: float = FORCED_REFRESH_COOLDOWN_SECONDS
+        self._on_demand = False
         self._network_refresh_queued = False
         self._stopping = False
 
@@ -1158,7 +1159,8 @@ class ProviderUsageMonitor:
     def refreshing(self) -> bool:
         return self._poll_task is not None and not self._poll_task.done()
 
-    def request_refresh(self, force: bool = False, *, cooldown: float = 0.0) -> Optional[asyncio.Task]:
+    def request_refresh(self, force: bool = False, *, cooldown: float = 0.0,
+                        on_demand: bool = False) -> Optional[asyncio.Task]:
         """Start (or join) one poll pass.
 
         Unforced reads start a pass at most every 300 s. A forced refresh skips
@@ -1172,6 +1174,9 @@ class ProviderUsageMonitor:
         if self._last_poll_finished is not None and time.monotonic() - self._last_poll_finished < spacing:
             return None
         self._recent_window = cooldown if force else FORCED_REFRESH_COOLDOWN_SECONDS
+        # The usage popover's refresh; sources read only on demand
+        # (Antigravity's /usage) poll in this pass alone.
+        self._on_demand = bool(on_demand)
         self._poll_task = asyncio.create_task(self._run_poll())
         return self._poll_task
 
@@ -1327,6 +1332,32 @@ class ProviderUsageMonitor:
                 f"openrouter-poll:{provider_id}",
                 "OpenRouter usage poll for provider %s failed: %s", provider_id, e,
             )
+
+    async def _poll_antigravity_provider(self, row: Dict[str, Any]) -> None:
+        """Read the agent's own ``/usage`` for one row, on demand only. Never raises.
+
+        The binary answers from its own sign-in; the app passes nothing but
+        the row's private home (and a key row's key in its environment).
+        """
+        from app.core import antigravity
+        from app.db import database as db
+
+        provider_id = row.get("id")
+        if not provider_id or not getattr(self, "_on_demand", False):
+            return
+        try:
+            payload = await antigravity.read_usage(row)
+            windows = antigravity.normalize_usage(payload)
+            if windows is None:
+                await run_sync(db.record_provider_usage_failure, provider_id, "antigravity",
+                               "unavailable")
+                return
+            await run_sync(
+                db.upsert_provider_usage_snapshot, provider_id, "antigravity", None, windows,
+                None, {"source": "antigravity_usage"}, int(time.time() * 1000),
+            )
+        except Exception:  # noqa: BLE001 — a usage read never breaks the pass
+            logger.warning("Antigravity usage read failed for provider %s", provider_id)
 
     async def _poll_grok_provider(self, row: Dict[str, Any]) -> None:
         """Fetch SuperGrok billing + settings and upsert a snapshot. Never raises.

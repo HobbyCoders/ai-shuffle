@@ -176,6 +176,11 @@ def is_official_openrouter_row(row: Mapping[str, Any] | None) -> bool:
         return False
 
 
+def is_antigravity_row(row: Mapping[str, Any] | None) -> bool:
+    """Google Antigravity rows (the ``agy`` agent; app/core/antigravity.py)."""
+    return (row or {}).get("provider_type") == "antigravity"
+
+
 def _is_openrouter_row(row: Mapping[str, Any] | None) -> bool:
     return (row or {}).get("provider_type") == "openrouter"
 
@@ -191,6 +196,7 @@ FAL_BALANCE_URL = "https://rest.alpha.fal.ai/billing/user_balance"
 GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+ANTIGRAVITY_USAGE_COMMAND = "agy -p /usage --output-format json"
 
 _SOURCES: tuple[UsageSource, ...] = (
     UsageSource(
@@ -359,6 +365,29 @@ _SOURCES: tuple[UsageSource, ...] = (
         poller="_poll_grok_provider",
         applies=is_grok_subscription_row,
     ),
+    UsageSource(
+        id="antigravity_usage",
+        snapshot_type="antigravity",
+        label="Antigravity CLI /usage command",
+        credential="The Antigravity agent's own sign-in or key on this worker (never read by the app)",
+        scope="subscription",
+        scope_label="Model quota windows Google's agent reports for its sign-in",
+        measure=SUBSCRIPTION_ALLOWANCE,
+        collection=POLLED,
+        support=UNDOCUMENTED,
+        dashboard_url="https://antigravity.google/docs/faq",
+        # Not HTTP: the binary's own ``agy -p /usage --output-format json``,
+        # run only when the usage popover asks (on-demand refresh).
+        endpoints=(Endpoint(ANTIGRAVITY_USAGE_COMMAND, 300),),
+        failure_policy=(
+            "Read only on an on-demand refresh, never on the background poll. A "
+            "reply that does not parse, a timeout or a signed-out agent records "
+            "'unavailable' and keeps the last reading."
+        ),
+        unavailable=("spend", "credit balance", "per-turn cost"),
+        poller="_poll_antigravity_provider",
+        applies=is_antigravity_row,
+    ),
 )
 
 SOURCES: dict[str, UsageSource] = {s.id: s for s in _SOURCES}
@@ -375,6 +404,7 @@ _SNAPSHOT_SOURCES = {
     "openrouter_account": "openrouter_credits",
     "fal": "fal_billing",
     "grok": "grok_subscription",
+    "antigravity": "antigravity_usage",
 }
 
 

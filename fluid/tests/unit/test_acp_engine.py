@@ -34,7 +34,7 @@ from fluid.events.model import (
     TurnComplete,
     Usage,
 )
-from fluid.events.ops import Interrupt, RespondPermission, RespondQuestion, SetModel, Steer, UserTurn
+from fluid.events.ops import Interrupt, RespondPermission, RespondQuestion, Resume, SetModel, Steer, UserTurn
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
@@ -259,6 +259,28 @@ async def test_resume_after_restart_uses_session_resume(tmp_path: Path) -> None:
         assert second.loop.cli_session_id == acp_sid
     finally:
         await second.close()
+
+
+async def test_resume_op_resends_an_unanswered_prompt(tmp_path: Path) -> None:
+    """The app's retry: the head prompt goes out again, with no new user node."""
+    d = await _driver(tmp_path, session_id="s-1")
+    try:
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        await d.loop.submit(Resume())
+        refused = await d.until(TERMINAL)
+        assert isinstance(refused, ErrorEvent) and "Nothing to resume" in refused.message
+        meta = await d.loop.store.get_session("s-1")
+        head = await d.loop.store.get_node("s-1", meta.head_node_id)
+        assert head is not None and head.parent_id
+        await d.loop.store.set_head("s-1", head.parent_id)  # as if the reply never landed
+        await d.loop.submit(Resume(context_note="(retry)"))
+        assert isinstance(await d.until(TERMINAL), TurnComplete)
+        prompts = _received(tmp_path, "session/prompt")
+        assert len(prompts) == 2
+        texts = [b.get("text") for b in prompts[1]["params"]["prompt"]]
+        assert texts == ["hello", "(retry)"]
+    finally:
+        await d.close()
 
 
 async def test_auth_required_is_a_clear_error(tmp_path: Path) -> None:
