@@ -869,6 +869,15 @@ class AcpLoop:
         denial = await self._policy_denial(name, data)
         if denial:
             logger.info("ACP permission for %s refused by policy: %s", name, denial)
+            if mapper is not None and call.get("toolCallId"):
+                # The card says why (as the delegated leg's PreToolUse denial
+                # does), not just "failed": the agent only hears "rejected".
+                for event in mapper.map_update({
+                    "sessionUpdate": "tool_call_update", "toolCallId": call["toolCallId"],
+                    "status": "failed",
+                    "content": [{"type": "content", "content": {"type": "text", "text": denial}}],
+                }):
+                    await self._emit(event)
             return chose("reject_once", "reject_always")
         if self.permission_mode == "bypassPermissions":
             return chose("allow_once", "allow_always")

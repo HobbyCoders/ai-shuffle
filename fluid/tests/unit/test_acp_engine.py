@@ -177,6 +177,9 @@ async def test_policy_denial_and_bypass_skip_the_prompt(tmp_path: Path) -> None:
         assert calls == ["Edit"]
         assert not [e for e in d.events if isinstance(e, PermissionRequest)]
         assert d.text().endswith("outcome=selected:deny")
+        # The card carries the reason, once, not a bare "failed".
+        results = [e for e in d.events if isinstance(e, ToolResult)]
+        assert [(r.output, r.is_error) for r in results] == [("blocked by rule", True)]
         d.loop.tool_policy = None
         d.loop.permission_mode = "bypassPermissions"
         await d.turn("tool")
