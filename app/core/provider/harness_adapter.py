@@ -2878,8 +2878,6 @@ class HarnessAdapter(ProviderAdapter):
     async def send_resume(self) -> None:
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
-        if self._provider_kind == _ANTIGRAVITY_KIND:
-            await self._check_antigravity_turn()
         if self._options is not None and self._options.extra.get("assistant_proactive") is not None:
             from app.core.owner_services import assert_proactive_allowed
             await run_sync(assert_proactive_allowed,
@@ -2895,8 +2893,11 @@ class HarnessAdapter(ProviderAdapter):
 
         note = await run_sync(self._away_note)
         if note and OWNER_BACK_NOTE in note:
+            # send_query runs the Antigravity turn check with this turn's source.
             await self.send_query("Resume the unfinished request above, using the current Away mode.", _source="wakeup")
             return
+        if self._provider_kind == _ANTIGRAVITY_KIND:
+            await self._check_antigravity_turn()
         self._memory_held_for_turn = await self._memory_held()
         self._native_scratch_held_for_turn = await self._native_scratch_held()
         try:

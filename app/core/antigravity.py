@@ -759,6 +759,15 @@ async def prune_orphan_homes() -> int:
 
 _CONNECT_SOURCE: Any = object()
 
+# The guard's own rule, by app ``turns.source``: only a turn the owner typed
+# or spoke in the app's own chat UI passes. Deliberately NOT
+# ``turn_sources.PERSON_PRESENT_TURN_SOURCES``: that set also admits "api"
+# (any public-API caller), "connector" (a chat connector message) and
+# "resume" (a Retry; decided below by the turn it re-runs). Voice in the app
+# is stamped "user" or "queue". Any other source, and no source, is refused.
+OWNER_UI_TURN_SOURCES = frozenset(("user", "queue", "worktree"))
+RETRY_TURN_SOURCE = "resume"
+
 # Why a turn the owner did not type was started, by app ``turns.source``.
 _SOURCE_REASONS = {
     "wakeup": "a scheduled wake-up",
@@ -767,7 +776,17 @@ _SOURCE_REASONS = {
     "automation_step": "an automation run",
     "unpark": "a background turn picked up again",
     "unpark_pump": "a background turn picked up again",
+    "api": "a request through the API",
+    "api_stream": "a request through the API",
+    "connector": "a message from a chat connector",
+    "provider_agent": "a Task or Swarm worker",
+    "failover": "an automatic retry on another account",
+    "watch": "a watch",
 }
+NO_SOURCE_REASON = "a run with no known origin"
+API_REQUEST_REASON = _SOURCE_REASONS["api"]
+#: ``X-Error-Code`` of a route that refuses a guarded row up front.
+GUARD_REFUSED_CODE = "antigravity_guarded"
 
 
 def _agent_message_reason(session_id: Optional[str]) -> str:
@@ -826,6 +845,46 @@ def unattended_run_refusal(provider_id: Optional[str], reason: str) -> Optional[
     return GUARD_REFUSAL.format(reason=reason)
 
 
+def _retried_source(session_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """``(source, refusal)`` for a Retry: the source of the turn it re-runs.
+
+    A Retry sent with an API key is a request through the API. Otherwise the
+    newest other turn of the chat that ran decides (a Retry of a Retry walks
+    back; a failover retry follows its parent). Unknown is a refusal.
+    """
+    unknown = (None, "a retry whose original turn could not be checked")
+    if not session_id:
+        return unknown
+    try:
+        from app.core.turn_scheduler import effective_turn_source
+        from app.db import turns
+
+        live = turns.get_live_turn(session_id) or {}
+        payload = live.get("payload") or {}
+        if isinstance(payload, dict) and payload.get("api_user_id"):
+            return None, _SOURCE_REASONS["api"]
+        with turns.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM turns WHERE session_id=%s AND id<>%s AND started_at IS NOT NULL "
+                "ORDER BY started_at DESC, insert_order DESC LIMIT 20",
+                (session_id, str(live.get("id") or "")),
+            )
+            rows = cursor.fetchall()
+        for row in turns._rows(rows):
+            if row.get("source") == RETRY_TURN_SOURCE:
+                if row["payload"].get("api_user_id"):
+                    return None, _SOURCE_REASONS["api"]
+                continue
+            source = turns.logical_source(row)
+            if source == "failover":
+                source = effective_turn_source(row)
+            return (source, None) if source else unknown
+    except Exception:  # noqa: BLE001 — fail closed
+        logger.debug("[antigravity] could not read the retried turn of %s", session_id, exc_info=True)
+    return unknown
+
+
 def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE) -> Optional[str]:
     """Why this run is not the owner typing in their own chat, or None.
 
@@ -840,9 +899,17 @@ def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE) -> Op
         return "a background call"
     if turn_source is _CONNECT_SOURCE:
         turn_source = getattr(options, "aih_turn_source", None)
-    from app.core.turn_sources import PERSON_PRESENT_TURN_SOURCES
     session_id = extra.get("app_session_id")
-    if turn_source and turn_source not in PERSON_PRESENT_TURN_SOURCES:
+    if turn_source == RETRY_TURN_SOURCE:
+        # A Retry runs with the provenance of the turn it re-runs.
+        turn_source, why = _retried_source(session_id)
+        if why:
+            return why
+    if not turn_source:
+        # Fail closed: the stateless REST queries and any future caller that
+        # names no source are not the owner typing in the app.
+        return NO_SOURCE_REASON
+    if turn_source not in OWNER_UI_TURN_SOURCES:
         if turn_source == "agent_message":
             return _agent_message_reason(session_id)
         return _SOURCE_REASONS.get(str(turn_source), "a scheduled or automatic turn")

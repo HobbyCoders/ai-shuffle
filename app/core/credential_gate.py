@@ -219,12 +219,16 @@ def provider_row_is_subscription(provider_type: Optional[str], auth_mode: Option
     ChatGPT/Codex (``chatgpt``) and SuperGrok (``grok``) rows, by type or auth
     mode, and any row whose auth mode is a subscription login
     (``fluid_credentials._SUBSCRIPTION_AUTH_MODES``, e.g. an Anthropic row on a
-    Claude plan, which runs on the CLI).
+    Claude plan, which runs on the CLI). An Antigravity row signed in with a
+    Google account (personal or business: either is the owner's own) counts
+    too; only its Gemini API-key mode does not.
     """
     from app.core.provider.fluid_credentials import _SUBSCRIPTION_AUTH_MODES
 
     ptype = (provider_type or "").strip().lower()
     mode = (auth_mode or "").strip().lower()
+    if ptype == "antigravity":
+        return mode != "gemini-api-key"
     return ptype in ("chatgpt", "grok") or mode in ("codex", "plan_key") or mode in _SUBSCRIPTION_AUTH_MODES
 
 

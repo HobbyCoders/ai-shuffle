@@ -64,7 +64,7 @@ def test_antigravity_rows_take_their_own_leg(mode):
 
 # --- the guard ----------------------------------------------------------------
 
-def _options(session_id="s1", turn_source=None, **extra):
+def _options(session_id="s1", turn_source="user", **extra):
     return SimpleNamespace(extra={"app_session_id": session_id, **extra}, aih_turn_source=turn_source)
 
 
@@ -83,6 +83,74 @@ def test_owner_typing_in_their_own_chat_is_allowed(session_row):
     assert ag.unattended_reason(_options()) is None
     assert ag.unattended_reason(_options(turn_source="user")) is None
     assert ag.unattended_reason(_options(turn_source="queue")) is None
+    assert ag.unattended_reason(_options(turn_source="worktree")) is None
+
+
+@pytest.mark.parametrize("source,reason", [
+    # Person-present elsewhere in the app, but not the owner in the app's UI.
+    ("api", "a request through the API"),
+    ("api_stream", "a request through the API"),
+    ("connector", "a message from a chat connector"),
+    ("provider_agent", "a Task or Swarm worker"),
+    ("failover", "an automatic retry on another account"),
+    ("watch", "a watch"),
+    ("held_peer_promotion", "a scheduled or automatic turn"),
+    ("some_future_source", "a scheduled or automatic turn"),
+    (None, "a run with no known origin"),
+    ("", "a run with no known origin"),
+])
+def test_only_the_owner_in_the_apps_chat_passes(session_row, source, reason):
+    assert ag.unattended_reason(_options(turn_source=source)) == reason
+
+
+class _TurnRows:
+    """``turns`` reads for a Retry: the live row and the chat's earlier rows."""
+
+    def __init__(self, monkeypatch, live, earlier):
+        from app.db import turns
+        self.earlier = earlier
+        monkeypatch.setattr(turns, "get_live_turn", lambda sid: live)
+        test = self
+
+        class _Cursor:
+            def execute(self, sql, params):
+                assert "started_at IS NOT NULL" in sql and params[1] == live.get("id")
+
+            def fetchall(self):
+                return test.earlier
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def cursor(self):
+                return _Cursor()
+
+        monkeypatch.setattr(turns, "get_db", lambda: _Conn())
+
+
+@pytest.mark.parametrize("earlier,reason", [
+    ([{"id": "t1", "source": "user"}], None),
+    ([{"id": "t2", "source": "resume"}, {"id": "t1", "source": "queue"}], None),
+    ([{"id": "t1", "source": "api"}], "a request through the API"),
+    ([{"id": "t1", "source": "wakeup"}], "a scheduled wake-up"),
+    ([{"id": "t1", "source": "agent_message"}], "a message from another agent"),
+    ([{"id": "t2", "source": "resume", "payload": {"api_user_id": "k"}}, {"id": "t1", "source": "user"}],
+     "a request through the API"),
+    ([], "a retry whose original turn could not be checked"),
+])
+def test_a_retry_keeps_the_origin_of_the_turn_it_reruns(session_row, monkeypatch, earlier, reason):
+    _TurnRows(monkeypatch, {"id": "t3", "source": "resume", "payload": {}}, earlier)
+    assert ag.unattended_reason(_options(turn_source="resume")) == reason
+
+
+def test_a_retry_sent_with_an_api_key_is_a_request_through_the_api(session_row, monkeypatch):
+    _TurnRows(monkeypatch, {"id": "t3", "source": "resume", "payload": {"api_user_id": "k"}},
+              [{"id": "t1", "source": "user"}])
+    assert ag.unattended_reason(_options(turn_source="resume")) == "a request through the API"
 
 
 @pytest.mark.parametrize("field,value,reason", [
@@ -252,7 +320,8 @@ async def test_guard_changes_apply_to_the_next_turn_of_a_connected_chat(client, 
     with pytest.raises(ProviderTurnRefused, match="refused for a scheduled wake-up"):
         await _turn(adapter, "wakeup")
     await _turn(adapter, "user")  # the owner's own turn still goes through
-    await _turn(adapter, None)  # the source names one submit only
+    with pytest.raises(ProviderTurnRefused, match="refused for a run with no known origin"):
+        await _turn(adapter, None)  # the source names one submit only; none is refused
     client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
     await _turn(adapter, "automation")
     # Session-level reasons are re-checked too once the guard is back on.
@@ -965,3 +1034,83 @@ async def test_a_cancelled_usage_read_ends_its_process(mock_db, fake_agy, monkey
         await task
     await asyncio.wait_for(procs[0].wait(), timeout=5)
     assert procs[0].returncode is not None
+
+
+# --- public API routes -------------------------------------------------------
+
+@pytest.mark.parametrize("endpoint,model", [
+    ("one_shot_query", "QueryRequest"),
+    ("stream_one_shot_query", "QueryRequest"),
+    ("conversation", "ConversationRequest"),
+    ("stream_conversation", "ConversationRequest"),
+    ("start_conversation", "ConversationRequest"),
+])
+async def test_every_public_api_route_refuses_a_guarded_row_before_the_engine(client, endpoint, model):
+    # POST /query, /query/stream (no turn source) and /conversation* (stamped
+    # "api") are requests through the API, never the owner typing in the app.
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+
+    from app.api import query
+    from app.core import models
+
+    row = _create(client)
+    pick = f"prov:{row['id']}:{row['default_model']}"
+    request = getattr(models, model)(prompt="Hi", profile="default",
+                                     overrides=models.QueryOverrides(model=pick))
+    with patch("app.core.query_engine.execute_query", new=AsyncMock()) as execute, \
+            patch("app.api.query._stream_query_with_failover") as stream, \
+            patch("app.api.query.start_background_query", new=AsyncMock()) as start, \
+            patch("app.core.turn_manager.submit_async", new=AsyncMock()) as submit:
+        with pytest.raises(HTTPException) as exc_info:
+            await getattr(query, endpoint)(request, {"id": None, "profile_ids": None})
+        assert exc_info.value.status_code == 403
+        assert "refused for a request through the API" in exc_info.value.detail
+        assert exc_info.value.headers == {"X-Error-Code": ag.GUARD_REFUSED_CODE}
+        execute.assert_not_awaited()
+        stream.assert_not_called()
+        start.assert_not_awaited()
+        submit.assert_not_awaited()
+
+        # Lifted, the same request reaches the engine (a key row never stops here).
+        client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+        assert await ag_route_passes(query, endpoint, request)
+
+
+async def ag_route_passes(query, endpoint, request):
+    from fastapi import HTTPException
+
+    try:
+        await getattr(query, endpoint)(request, {"id": None, "profile_ids": None})
+    except HTTPException as exc:
+        return exc.status_code != 403
+    except Exception:  # noqa: BLE001 — past the guard; the mocked engine may not fit
+        return True
+    return True
+
+
+def test_sign_in_rows_are_the_owners_own_and_key_rows_are_not():
+    from app.core import credential_gate
+
+    assert credential_gate.provider_row_is_subscription("antigravity", "oauth-personal")
+    assert credential_gate.provider_row_is_subscription("antigravity", "oauth-business")
+    assert credential_gate.provider_row_is_subscription("antigravity", "terminal-login")
+    assert not credential_gate.provider_row_is_subscription("antigravity", "gemini-api-key")
+    assert not credential_gate.provider_row_is_subscription("google", "api_key")
+
+
+@pytest.mark.parametrize("mode,refused", [
+    ("oauth-personal", True), ("oauth-business", True), ("gemini-api-key", False),
+])
+def test_an_api_user_cannot_run_the_owners_google_sign_in(client, mode, refused):
+    from app.core import credential_gate
+
+    key = {"api_key": "test-gemini-secret-value"} if mode == "gemini-api-key" else {}
+    row = _create(client, mode, **key)
+    options = SimpleNamespace(aih_provider_id=row["id"], aih_provider_type="antigravity",
+                              aih_provider_auth_mode=mode)
+    refusal = credential_gate.requester_refusal(options, "api-user-1")
+    assert (refusal == credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE) is refused
+    assert credential_gate.requester_refusal(options, None) is None  # the owner
+    assert credential_gate.selection_uses_subscription(f"prov:{row['id']}:{row['default_model']}") is refused
