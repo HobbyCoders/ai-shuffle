@@ -2350,6 +2350,51 @@ async def test_two_ended_senders_share_one_release_retry(release_setup, monkeypa
     assert "just started" in row["prompt"]
 
 
+async def test_a_release_that_joins_a_finished_retry_gets_a_new_one(release_setup, monkeypatch):
+    # S16: worker-1's retry delivers and its loop returns. Before its done
+    # callback runs, worker-2's release cannot decide and asks for a retry.
+    # The finished task must not absorb it: a new retry, owed for worker-2,
+    # delivers worker-2's note once, and the old callback clears nothing of it.
+    from app.core import turn_scheduler
+
+    setup, state, promoted, told = release_setup
+    setup()
+    loop = asyncio.get_running_loop()
+    seen = {}
+
+    def worker_2_joins():
+        # Runs after worker-1's loop returned, before its done callback.
+        old = turn_scheduler._held_release_retries["chat-ag"]
+        seen["old"] = old
+        seen["old_done"] = old.done()
+        _hold_note("worker-2", "second half")
+        turn_scheduler._retry_held_release("chat-ag", "worker-2")
+        seen["new"] = turn_scheduler._held_release_retries["chat-ag"]
+
+    async def promote(session_id, held, **kw):
+        promoted.append((session_id, held))
+        if len(promoted) == 1:
+            loop.call_soon(worker_2_joins)  # queued ahead of the done callback
+        return f"turn-{len(promoted)}"
+
+    monkeypatch.setattr(turn_scheduler, "promote_held_peer_messages", promote)
+    state["fail"] = 1
+    assert await turn_scheduler.release_held_progress_from("worker-1") == 0
+    for _ in range(200):
+        if "new" in seen:
+            break
+        await asyncio.sleep(0.005)
+    await asyncio.sleep(0)  # the old task's done callback runs now
+    assert seen["old_done"] is True and seen["new"] is not seen["old"]
+    assert turn_scheduler._held_release_retries.get("chat-ag") is seen["new"]
+    assert "worker-2" in turn_scheduler._held_release_owed["chat-ag"]
+    assert seen["old"] not in turn_scheduler._kick_tasks  # the old callback still ran
+    await _settle_retries()
+    assert len(promoted) == 2 and "halfway there" in promoted[0][1]
+    assert "second half" in promoted[1][1] and "halfway there" not in promoted[1][1]
+    assert _held_rows() == [] and told == [] and turn_scheduler._held_release_owed == {}
+
+
 async def test_a_release_retry_whose_owed_read_fails_keeps_trying(release_setup, monkeypatch):
     # The check for an owed note cannot read the store: that is "could not
     # decide", never "none left". Nothing is taken, the retry keeps going,

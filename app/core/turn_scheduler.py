@@ -1913,7 +1913,9 @@ def _retry_held_release(receiver: str, sender: str) -> None:
     owed because ``sender`` ended.
 
     One retry per receiver; a second ended sender whose release also cannot
-    decide joins it. It delivers only while the release is still owed:
+    decide joins it while it has not finished, and otherwise starts a new
+    one (a retry that finished but whose done callback is still pending is
+    replaced, never joined). It delivers only while the release is still owed:
     before each take it checks, under the receiver's terminal lock, that a
     note from one of its ended senders is still held. None left (the
     receiver's own turn took them, a Stop or deletion removed them): it ends
@@ -1928,7 +1930,11 @@ def _retry_held_release(receiver: str, sender: str) -> None:
     durable store, ride the receiver's next turn.
     """
     _held_release_owed.setdefault(receiver, set()).add(sender)
-    if receiver in _held_release_retries:
+    current = _held_release_retries.get(receiver)
+    # Join only a retry that will still read the owed set: one whose loop
+    # returned but whose done callback has not run yet is replaced (that
+    # callback then clears nothing, by the identity check in ``_done``).
+    if current is not None and not current.done():
         return
     task = asyncio.get_running_loop().create_task(_held_release_retry_loop(receiver))
     _held_release_retries[receiver] = task
