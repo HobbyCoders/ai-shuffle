@@ -14,6 +14,8 @@ import {
 } from '$lib/stores/rate-limit';
 import { usageSections } from '$lib/stores/expansion-preferences';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
+import { api } from '$lib/api/client';
+import { hydrateModelRegistry } from '$lib/constants/models';
 
 const mocks = vi.hoisted(() => {
 	const state = {
@@ -104,6 +106,34 @@ function metaLines(container: HTMLElement): string[] {
 	});
 }
 
+/** Every section header, in order, as "name · subtext". */
+function headers(container: HTMLElement): string[] {
+	return Array.from(container.querySelectorAll('.provider-header')).map((h) =>
+		[h.querySelector('.section-device')?.textContent, h.querySelector('.section-account')?.textContent]
+			.filter(Boolean).join(' · '),
+	);
+}
+
+/** Load the provider registry the way /models does. */
+async function registry(providers: unknown[]) {
+	const get = vi.spyOn(api, 'get').mockResolvedValue({ models: [], default: null, providers, claude: null });
+	try {
+		await hydrateModelRegistry();
+	} finally {
+		get.mockRestore();
+	}
+}
+
+const REGISTRY_ROWS = [
+	{ id: 'kimi-code', name: 'Sample Kimi Code', provider_type: 'kimi', auth_mode: 'plan_key', auth_kind: 'subscription', models: [] },
+	{ id: 'minimax-api', name: 'Sample MiniMax API', provider_type: 'minimax', auth_mode: null, auth_kind: 'api', models: [] },
+	{ id: 'opencode-go', name: 'Sample OpenCode Go', provider_type: 'opencode', auth_mode: 'plan_key', auth_kind: 'subscription', models: [] },
+	{ id: 'opencode-console', name: 'Sample OpenCode Console', provider_type: 'opencode', auth_mode: null, auth_kind: 'api', models: [] },
+];
+
+// Plans above API accounts; within each group Kimi before OpenCode, as Settings orders them.
+const LINK_HEADERS = ['Kimi · Subscription', 'OpenCode · Subscription', 'MiniMax · API', 'OpenCode · API'];
+
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
 	vi.setSystemTime(T0);
@@ -169,6 +199,48 @@ describe('usage links', () => {
 		});
 		const container = await open();
 		expect(container.querySelector(`a[href="${KIMI_CODE}"]`)).toBeNull();
+		expect(container.textContent).toContain('$12.50 left');
+	});
+
+	describe('headers and order', () => {
+		afterEach(async () => {
+			await registry([]);
+		});
+
+		it('come from the registry when it has the rows', async () => {
+			await registry(REGISTRY_ROWS);
+			rateLimit.applySnapshot({ available: false, windows: [], providers: [], usage_links: LINKS });
+			expect(headers(await open())).toEqual(LINK_HEADERS);
+		});
+
+		it('hold with the registry missing (/models failed or empty): the entry says plan or API', async () => {
+			await registry([]);
+			rateLimit.applySnapshot({ available: false, windows: [], providers: [], usage_links: LINKS });
+			expect(headers(await open())).toEqual(LINK_HEADERS);
+		});
+
+		it('hold when the registry lacks these rows (deleted between the two requests)', async () => {
+			await registry([{ id: 'other', name: 'Other', provider_type: 'kimi', auth_mode: null, auth_kind: 'api', models: [] }]);
+			rateLimit.applySnapshot({ available: false, windows: [], providers: [], usage_links: LINKS });
+			expect(headers(await open())).toEqual(LINK_HEADERS);
+		});
+
+		it('a metered row keeps its registry header', async () => {
+			await registry([{ id: 'kimi-api', name: 'Sample Kimi API', provider_type: 'kimi', auth_mode: null, auth_kind: 'api', models: [] }]);
+			rateLimit.applySnapshot({ available: false, windows: [], providers: [KIMI_API], usage_links: [] });
+			expect(headers(await open())).toEqual(['Kimi · API']);
+		});
+	});
+
+	it('a usage_snapshot broadcast (no providers, no usage_links) keeps the links', async () => {
+		rateLimit.applySnapshot({ available: false, windows: [], providers: [KIMI_API], usage_links: LINKS });
+		// The exact field set ws-message-handlers.ts builds for `usage_snapshot`.
+		rateLimit.applySnapshot({
+			windows: [], fetched_at: T0, available: false, generation: 2,
+			snapshots: undefined, self_instance_id: undefined, self_device_id: undefined,
+		});
+		const container = await open();
+		expect(metaLines(container).filter((l) => l.startsWith('No '))).toHaveLength(4);
 		expect(container.textContent).toContain('$12.50 left');
 	});
 

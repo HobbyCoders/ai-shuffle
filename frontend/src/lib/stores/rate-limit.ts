@@ -305,8 +305,10 @@ export interface UsageSnapshot {
 	 *  or provider-less installs; null when the backend could not read them. */
 	providers?: ProviderUsageEntry[] | null;
 	/** Provider rows whose key kind has no usage meter: a note and the vendor's
-	 *  usage page, decided by the backend. Additive: absent from older workers
-	 *  (no links); null when the backend could not read the rows (keep). */
+	 *  usage page, decided by the backend. REST /usage/limits only, like
+	 *  `providers` (a WS payload has neither key and keeps them). Additive:
+	 *  absent from older workers (no links); null when the backend could not
+	 *  read the rows (keep). */
 	usage_links?: ProviderUsageLinkEntry[] | null;
 }
 
@@ -1115,7 +1117,9 @@ export const rateLimit = {
 		// ── Rows with no usage meter — full replace when present ────────────────
 		// An authoritative `providers` list without the key comes from a worker
 		// that predates the field and has no links; null (rows unreadable) and a
-		// payload without either key keep the links already shown.
+		// payload without either key keep the links already shown. Like
+		// `providers`, the field is on the REST /usage/limits response only: a
+		// `usage_snapshot` broadcast carries neither key, so it keeps them.
 		if (Array.isArray(snapshot.usage_links)) {
 			_usageLinks.set(_linksFromSnapshot(snapshot.usage_links));
 		} else if (snapshot.usage_links === undefined && Array.isArray(snapshot.providers)) {

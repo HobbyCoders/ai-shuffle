@@ -68,6 +68,7 @@
 		getProviderDisplay,
 		getClaudeDisplay,
 		getClaudeAuth,
+		type ProviderAuthKind,
 		type ProviderDisplay
 	} from '$lib/constants/models';
 	import { classifyRow } from '$lib/components/settings/providers/providers-model';
@@ -836,14 +837,22 @@
 		providerName: string | null;
 		providerType: string | null;
 		planType: string | null;
+		/** Used only when the registry has no row for this provider. */
+		authKind?: ProviderAuthKind | null;
 	}): ProviderDisplay {
 		const entry = getProviders().find((p) => p.id === pb.providerId);
 		return getProviderDisplay({
 			name: entry?.name ?? pb.providerName ?? pb.providerType ?? 'Provider',
 			provider_type: entry?.provider_type ?? pb.providerType,
-			auth_kind: entry?.auth_kind ?? null,
+			auth_kind: entry?.auth_kind ?? pb.authKind ?? null,
 			plan_type: entry?.plan_type ?? pb.planType
 		});
+	}
+
+	/** A no-meter row's header: the usage entry says whether the key is a
+	 *  plan, so the label holds while the registry is missing or stale. */
+	function linkDisplay(link: UsageLink): ProviderDisplay {
+		return providerDisplayFor({ ...link, planType: null, authKind: link.subscription ? 'subscription' : 'api' });
 	}
 
 	// One order for every usage section, Claude included (#1845):
@@ -851,10 +860,6 @@
 	// OpenAI · API never sits next to OpenAI · prolite and reads as one section
 	// (#1087); within each group, the Settings > Providers order (OpenAI, xAI
 	// Grok, Claude, OpenRouter), then fal.ai and anything else, by name.
-	function linkDisplay(link: UsageLink): ProviderDisplay {
-		return providerDisplayFor({ ...link, planType: null });
-	}
-
 	function isSubscriptionProvider(pb: { providerType: string | null }): boolean {
 		const t = (pb.providerType || '').toLowerCase();
 		return t === 'chatgpt' || t === 'grok' || t === 'minimax_plan';
