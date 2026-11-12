@@ -96,7 +96,9 @@ hint, not an invalid key. Prefixes are not used as credential validation.
 `usage_meter_available` is `true` only where the vendor documents a usage
 endpoint the saved key can read: the Kimi API balance (`kimi:key`) and the
 MiniMax M Plan remaining quota (`minimax:subscription`). The other four have
-no meter and no section in the usage popover; check their usage on the
+no meter. On the default endpoint each gets a usage popover section with one
+line saying so ("No quota meter for this key" for the plans, "No balance meter
+for this key" for the pay-as-you-go keys) and a Dashboard link to the
 vendor's own page: Kimi Code on
 [My Quota](https://www.kimi.com/membership/subscription?tab=quota), the
 MiniMax API on [Balance](https://platform.minimax.io/user-center/payment/balance),
@@ -159,9 +161,13 @@ Messages API. OpenCode cash catalogs exclude IDs ending in `-free`.
 
 Usage is attributed as `billing: "subscription"` for plan keys and `api` for cash
 keys. Plans do not generate dollar estimates. Cash prices stay unknown unless a
-documented provider-specific price exists. No new balance/allowance meter or
-background polling is enabled: MiniMax's remains response shape is undocumented,
-and Kimi/OpenCode account meters need live-key verification. These accounts can
+documented provider-specific price exists. Kimi API keys (balance) and MiniMax
+M Plan keys (remaining quota) have usage meters, refreshed in the background like
+the other providers in [Usage Limits](/docs/api-reference/miscellaneous#usage-limits).
+Kimi Code, MiniMax API, OpenCode Go and OpenCode Console keys are never polled;
+the usage popover shows them a section with the no-meter line and the
+vendor's dashboard link described above. OpenCode Console turns still record
+their per-turn cost from responses. These accounts can
 be selected for automations without warnings. Plan rows participate in interactive
 defaults and unbound background selection just like ChatGPT and SuperGrok
 subscriptions, and a bound session may use its own helpers on that plan. Like

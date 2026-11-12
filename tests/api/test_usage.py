@@ -167,7 +167,7 @@ class TestUsageLimitsEndpoint:
         assert body == {
             "windows": [], "fetched_at": None, "available": False, "generation": None,
             "snapshots": [], "self_instance_id": None, "self_device_id": None, "accounts": [],
-            "providers": [],
+            "providers": [], "usage_links": [],
             "provider_refreshing": False, "attempted_at": None, "last_error_kind": None,
             "claude_source": body["claude_source"],
         }
