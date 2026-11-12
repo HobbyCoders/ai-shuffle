@@ -86,8 +86,8 @@ selections on subsequent startups.
 
 These text providers run on Fluid's native agent loop through Anthropic Messages;
 no vendor CLI or OAuth login is used. `GET /api/v1/model-providers/native-options`
-(owner only) returns `{ "providers": [...] }` with six enrollment choices, including
-on a fresh install. Each choice has `provider_type`, plain `display_name`, `auth_mode`,
+(owner only) returns `{ "providers": [...] }` with six enrollment choices for these providers
+(plus [Google Gemini](#native-google-gemini-key)), including on a fresh install. Each choice has `provider_type`, plain `display_name`, `auth_mode`,
 `credential_kind` (`subscription` or `api_key`), `credential_label`, `slot`, `base_url`,
 `api_dialect: "anthropic"`, `key_page_url`, `key_prefixes`, and
 `usage_meter_available: false`. An empty `key_prefixes` means no documented prefix
@@ -179,6 +179,48 @@ after an account already exists: upgrade every worker before joining. Sync
 preserves encrypted keys and accepts legacy rows missing optional metadata.
 New workers skip unsupported future rows in registry/capability enumeration and
 fail closed on execution instead of guessing Claude from a model ID.
+
+### Native Google Gemini key
+
+A `google` row holds one Google AI Studio API key and runs on Fluid's native agent
+loop through Google's Interactions API (`POST /v1beta/interactions` with
+`store: false`). It is not the `gemini_api_key` setting, which only feeds the
+image and video tools. `native-options` adds a seventh choice:
+`provider_type: "google"`, `display_name: "Google Gemini"`, `auth_mode: null`,
+`credential_kind: "api_key"`, `credential_label: "Google AI Studio API key"`,
+`slot: "google:key"`, `api_dialect: null` and `key_page_url`
+`https://aistudio.google.com/apikey`.
+
+```json
+{"name":"My Gemini key","provider_type":"google","auth_token":"<private key>","enabled":true}
+```
+
+The server fills `base_url` (`https://generativelanguage.googleapis.com`) and the
+preset models when omitted: `gemini-4-carbon`, `gemini-4-argon`,
+`gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite` and
+`gemini-3.1-flash-lite`, each with a 1,048,576-token context window. `auth_mode`
+must be omitted, `null` or `api_key`, and `api_dialect` must be omitted.
+
+Saving or replacing a key lists one model (`GET /v1beta/models?pageSize=1`), which
+spends no tokens. Only `401`, `403` or a `400` `API_KEY_INVALID` rejects it; outages
+and rate limits do not prevent saving. `POST /{id}/check-key` uses the same request.
+`POST /{id}/fetch-models` pages through Google's model list and keeps `gemini-*`
+text models (image, audio, TTS, Live and embedding models are left out).
+Requests never follow redirects and send the key in the `x-goog-api-key` header,
+never in the URL.
+
+Effort maps to Gemini's `thinking_level` per model: Gemini 4 and 3.8 Flash take
+low, medium or high; 3.6 Flash, 3.5 Flash-Lite and 3.1 Flash-Lite also take
+minimal. Usage is attributed as `billing: "api"`, with thinking counted as output
+and implicit cache hits as cache reads. Costs use Google's published Standard-tier
+prices (including the dated Gemini 4 and 3.8/3.6 Flash price changes); a model
+without a published price has no dollar estimate. Google documents no rate-limit
+response headers, so there is no allowance meter.
+
+Creating a `google` row returns `409` naming the workers to update when any current
+network member does not advertise Gemini support in its latest signed presence,
+with the same rules as the native Messages providers above. Provider type is
+immutable: a row cannot be converted into or out of `google`.
 
 ### Per-model local sampling and reasoning (backend/API)
 

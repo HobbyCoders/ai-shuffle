@@ -57,9 +57,10 @@ router.include_router(provider_balances.router)
 router.include_router(openrouter_billing.router)
 router.include_router(catalog_api.router)
 
-from app.core import native_providers
+from app.core import gemini_provider, native_providers
 
-_VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok", *native_providers.PROVIDERS)
+_VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok", *native_providers.PROVIDERS,
+                         gemini_provider.PROVIDER)
 
 # Wire formats a CUSTOM row's endpoint may speak. 'anthropic' (the default when
 # unset — the historic custom-row contract: Anthropic Messages at
@@ -241,6 +242,11 @@ def _validate_native_auth(provider_type, auth_mode, api_dialect) -> None:
             raise HTTPException(status_code=400, detail="Use api_key or plan_key for this provider.")
         if api_dialect not in (None, "anthropic"):
             raise HTTPException(status_code=400, detail="This provider uses native Anthropic Messages.")
+    elif provider_type == gemini_provider.PROVIDER:
+        if auth_mode not in (None, "api_key"):
+            raise HTTPException(status_code=400, detail="Google Gemini rows use an API key.")
+        if api_dialect is not None:
+            raise HTTPException(status_code=400, detail="Google Gemini rows use the native Gemini API.")
     elif auth_mode is not None:
         raise HTTPException(status_code=400, detail="auth_mode is managed by the provider's sign-in flow.")
 
@@ -258,6 +264,27 @@ async def _require_native_workers() -> None:
             + ", ".join(workers)))
 
 
+async def _require_gemini_workers() -> None:
+    try:
+        workers = await run_sync(gemini_provider.workers_requiring_update)
+    except Exception:
+        logger.exception("Could not check which workers support Google Gemini rows")
+        raise HTTPException(status_code=503, detail=(
+            "Could not check whether every worker is up to date. Try again in a moment."))
+    if workers:
+        raise HTTPException(status_code=409, detail=(
+            "Update these workers before adding a Google Gemini API key: " + ", ".join(workers)))
+
+
+async def _check_gemini_key(row, key) -> bool:
+    from app.core.http_client import get_http_client
+
+    try:
+        return await gemini_provider.check_key(key, client=get_http_client(), row=row)
+    except gemini_provider.KeyCheckError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
 async def _check_native_key(row, key) -> bool:
     from app.core.http_client import get_http_client
 
@@ -271,7 +298,7 @@ async def _check_native_key(row, key) -> bool:
 async def native_options(token: str = Depends(require_admin)):
     """Enrollment metadata; keys are submitted only to normal CRUD routes."""
     return {"providers": [native_providers.metadata(p, m) for p in native_providers.PROVIDERS
-                          for m in ("plan_key", "api_key")]}
+                          for m in ("plan_key", "api_key")] + [gemini_provider.metadata()]}
 
 
 def _validate_provider_type(provider_type: Optional[str]) -> None:
@@ -420,7 +447,9 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         enabled=bool(row.get("enabled")),
         slot=model_provider_slot(row),
         native_provider=(native_providers.metadata(row["provider_type"], row.get("auth_mode"))
-                         if row["provider_type"] in native_providers.PROVIDERS else None),
+                         if row["provider_type"] in native_providers.PROVIDERS
+                         else gemini_provider.metadata() if row["provider_type"] == gemini_provider.PROVIDER
+                         else None),
         auth_mode=row.get("auth_mode"),
         codex_account_id=row.get("codex_account_id"),
         needs_reauth=bool(row.get("needs_reauth")),
@@ -448,7 +477,7 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
     token = row.pop("auth_token", None)
     row["_auth_token_set"] = bool(token)
     row["_auth_token_masked"] = (("********" if token else "")
-                                 if row.get("provider_type") in native_providers.PROVIDERS
+                                 if row.get("provider_type") in (*native_providers.PROVIDERS, gemini_provider.PROVIDER)
                                  else _mask_stored_token(token))
     codex_access = row.pop("codex_access_token", None)
     codex_refresh = row.pop("codex_refresh_token", None)
@@ -938,6 +967,11 @@ async def check_native_provider_key(provider_id: str, token: str = Depends(requi
     row = await run_sync(db.get_model_provider, provider_id, include_token=True)
     if not row:
         raise HTTPException(status_code=404, detail="Model provider not found")
+    if row["provider_type"] == gemini_provider.PROVIDER:
+        accepted = await _check_gemini_key(row, _generic_auth_token(row))
+        if accepted:
+            await _record_credential_check(provider_id, accepted=True, row=row)
+        return {"status": "valid" if accepted else "unavailable"}
     if row["provider_type"] not in native_providers.PROVIDERS:
         raise HTTPException(status_code=400, detail="Use this provider's existing credential check.")
     accepted = await _check_native_key(row, _generic_auth_token(row))
@@ -950,10 +984,13 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
     """Create a new model provider."""
     _validate_provider_type(body.provider_type)
     native = body.provider_type in native_providers.PROVIDERS
+    google = body.provider_type == gemini_provider.PROVIDER
     if native:
         await _require_native_workers()
+    if google:
+        await _require_gemini_workers()
     _validate_native_auth(body.provider_type, body.auth_mode, body.api_dialect)
-    _validate_base_url(body.base_url, required=not native)
+    _validate_base_url(body.base_url, required=not (native or google))
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
     _validate_local_models(body.models, body.provider_type, body.api_dialect)
@@ -979,6 +1016,14 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
         await _check_native_key({"provider_type": body.provider_type, "auth_mode": auth_mode,
                                  "base_url": base_url, "models": models,
                                  "default_model": body.default_model}, raw_token)
+    if google:
+        base_url = base_url or gemini_provider.API_ROOT
+        models = models if models is not None else model_catalog_presets.preset_models_for(
+            {"provider_type": body.provider_type})
+        if not raw_token:
+            raise HTTPException(status_code=400, detail="A Google AI Studio API key is required.")
+        # Only a clear rejection refuses saving; an outage does not.
+        await _check_gemini_key({"base_url": base_url}, raw_token)
 
     async with operation_lock(provider_id):
         row = await run_sync(
@@ -1023,6 +1068,8 @@ async def update_provider(
     effective_type = body.provider_type or existing.get("provider_type")
     if effective_type in native_providers.PROVIDERS and existing.get("provider_type") not in native_providers.PROVIDERS:
         await _require_native_workers()
+    if (effective_type == gemini_provider.PROVIDER) != (existing.get("provider_type") == gemini_provider.PROVIDER):
+        raise HTTPException(status_code=400, detail="Create a separate row to change provider or credential kind.")
     effective_auth = body.auth_mode if "auth_mode" in body.model_fields_set else existing.get("auth_mode")
     _validate_native_auth(effective_type, effective_auth if effective_type in native_providers.PROVIDERS else body.auth_mode,
                           body.api_dialect)
@@ -1092,6 +1139,9 @@ async def update_provider(
     if effective_type in native_providers.PROVIDERS and (raw_token or body.base_url is not None):
         key = raw_token or _generic_auth_token(await run_sync(db.get_model_provider, provider_id, include_token=True))
         await _check_native_key({**existing, **updates}, key)
+    if effective_type == gemini_provider.PROVIDER and (raw_token or body.base_url is not None):
+        key = raw_token or _generic_auth_token(await run_sync(db.get_model_provider, provider_id, include_token=True))
+        await _check_gemini_key({**existing, **updates}, key)
     # A discovery snapshot belongs to the key and endpoint that produced it.
     # Treat an explicit nonblank replacement as a new binding conservatively.
     catalog_binding_changed = bool(raw_token) or any(
@@ -1286,6 +1336,37 @@ async def refresh_capabilities(body: RefreshCapabilitiesRequest, token: str = De
     return {"refreshed": refreshed, "failed": failed}
 
 
+async def _fetch_gemini_models(provider_id: str, row: dict, client) -> List[Dict[str, Any]]:
+    """Google's documented ``GET /v1beta/models`` (paged), text models only."""
+    url = gemini_provider.models_url(row)
+    headers = gemini_provider.request_headers(_generic_auth_token(row))
+    models: List[Dict[str, Any]] = []
+    page_token: Optional[str] = None
+    try:
+        for _ in range(10):
+            params: Dict[str, Any] = {"pageSize": 1000}
+            if page_token:
+                params["pageToken"] = page_token
+            response = await client.get(url, headers=headers, params=params,
+                                        timeout=_FETCH_TIMEOUT, follow_redirects=False)
+            if response.status_code >= 300:
+                if response.status_code in (401, 403) or (
+                        response.status_code == 400 and "API_KEY_INVALID" in response.text):
+                    await _record_credential_check(provider_id, accepted=False, row=row)
+                raise UpstreamModelsError(f"http_{response.status_code}")
+            payload = response.json()
+            models.extend(gemini_provider.parse_models(payload))
+            page_token = payload.get("nextPageToken") if isinstance(payload, dict) else None
+            if not page_token:
+                break
+    except httpx.HTTPError:
+        raise UpstreamModelsError("transport_error") from None
+    except ValueError:
+        raise UpstreamModelsError("invalid_json") from None
+    await _record_credential_check(provider_id, accepted=True, row=row)
+    return models
+
+
 # Upstream answers that mean "this key is not accepted". Anything else
 # (timeouts, 5xx, rate limits, DNS) is transient and never recorded, so a
 # working provider stays usable through an outage.
@@ -1327,6 +1408,7 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
         (one 401 refresh retry).
       * OpenAI / xAI API key / OpenRouter / custom → ``GET`` the
         OpenAI-compatible ``/models`` URL with the decrypted API key.
+      * Google Gemini → ``GET .../v1beta/models`` (paged) with ``x-goog-api-key``.
 
     Curation still belongs to ``PATCH /{id}``. Refresh only fills missing
     context windows on already-curated entries, guarded against concurrent edits.
@@ -1348,7 +1430,9 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
     from app.core.http_client import get_http_client
     client = get_http_client()
     try:
-        if row.get("provider_type") in native_providers.PROVIDERS:
+        if row.get("provider_type") == gemini_provider.PROVIDER:
+            models = await _fetch_gemini_models(provider_id, row, client)
+        elif row.get("provider_type") in native_providers.PROVIDERS:
             auth_token = _generic_auth_token(row)
             url = native_providers.catalog_url(row)
             if url is None:

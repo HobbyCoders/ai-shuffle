@@ -14,7 +14,7 @@ from typing import Any
 from fluid.context.steer_render import CURRENT_RENDER_VERSION
 
 # Provider kinds the engine factory knows how to build.
-PROVIDER_KINDS = ("anthropic", "openai_responses", "openrouter", "local", "delegated_claude")
+PROVIDER_KINDS = ("anthropic", "openai_responses", "openrouter", "local", "gemini", "delegated_claude")
 APPROVAL_POLICIES = ("never_ask", "on_write", "always_ask")
 # How the model calls tools: "native" = provider tool_calls (the default);
 # "text" = the <tool_call> text protocol for local models that can't do

@@ -542,4 +542,4 @@ def get_all_commands(working_dir: str, *, provider_kind: str = "delegated", sett
 
 
 #: Native legs whose engine runs a bare ``/compact`` as a compaction.
-NATIVE_COMPACT_KINDS = frozenset({"anthropic", "openai_responses", "openrouter"})
+NATIVE_COMPACT_KINDS = frozenset({"anthropic", "openai_responses", "openrouter", "gemini"})

@@ -413,7 +413,8 @@ def test_test_fixture_reexports_the_one_implementation() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     shared = __import__(module._NAME)
-    for name in ("FakeProviderServer", "Chat", "Messages", "Responses", "Reply", "error_reply"):
+    for name in ("FakeProviderServer", "Chat", "Messages", "Responses", "Interactions", "Reply",
+                 "error_reply"):
         assert getattr(module, name) is getattr(shared, name)
     assert Path(shared.__file__).resolve() == Path(fake_wire.__file__).resolve()
 
@@ -575,3 +576,41 @@ async def test_fluid_pauses_on_the_fake_refusal_and_continues_on_the_approved_mo
     finally:
         watcher.cancel()
         await loop.aclose()
+
+
+def test_interactions_dialect_counts_function_call_rounds() -> None:
+    entries = conversation("interactions", {"input": [
+        {"type": "user_input", "content": [{"type": "text", "text": "[script:tool-bash]"}]},
+        {"type": "thought", "signature": "c2ln"},
+        {"type": "function_call", "id": "a", "name": "Bash", "arguments": {}},
+        {"type": "function_result", "call_id": "a", "result": "ok"},
+    ]})
+    assert prompt_and_round(entries) == ("[script:tool-bash]", 1)
+
+
+def test_interactions_endpoint_streams_a_tool_round_with_a_thought_signature(fake: FakeAI) -> None:
+    from scripts.devloop.fake_ai import FAKE_THOUGHT_SIGNATURE
+
+    response = httpx.post(fake.url + "/v1beta/interactions", json={
+        "model": "gemini-3.8-flash", "stream": True, "store": False,
+        "tools": [{"type": "function", "name": "Bash", "parameters": {"type": "object"}}],
+        "input": [{"type": "user_input", "content": [{"type": "text", "text": "[script:tool-bash]"}]}],
+    }, headers={"x-goog-api-key": "fake-google-dev-key"}, timeout=10)
+    events = _sse(response.text)
+    kinds = [e["event_type"] for e in events]
+    assert kinds[0] == "interaction.created" and kinds[-1] == "interaction.completed"
+    deltas = [e["delta"] for e in events if e["event_type"] == "step.delta"]
+    assert {"type": "thought_signature", "signature": FAKE_THOUGHT_SIGNATURE} in deltas
+    starts = [e["step"] for e in events if e["event_type"] == "step.start"]
+    assert [s["type"] for s in starts] == ["thought", "model_output", "function_call"]
+    assert starts[2]["name"] == "Bash"
+    logged = json.loads(fake.log_path.read_text().splitlines()[-1])
+    assert logged["dialect"] == "interactions" and logged["headers"]["x-goog-api-key"] == "<redacted>"
+
+
+def test_gemini_models_list_keeps_only_gemini_names(fake: FakeAI) -> None:
+    from app.core.gemini_provider import parse_models
+
+    response = httpx.get(fake.url + "/v1beta/models?pageSize=1", timeout=10)
+    models = parse_models(response.json())
+    assert [m["id"] for m in models] == ["gemini-fake-ai"]

@@ -100,6 +100,16 @@ OPENCODE_API_MODELS = [dict(m) for m in OPENCODE_PLAN_MODELS] + [
     {"id": "gpt-6.1-sol", "label": "GPT 6.1 Sol"},
 ]
 
+# Google Gemini API (AI Studio key): text/agent models verified 2026-11-11
+# against aistudio.google.com/docs/models/<id> ("Input token limit"). The
+# deprecated gemini-3.7-flash / gemini-3.5-flash (rerouted to 3.8 / 3.6 Flash)
+# and media models are left out.
+GOOGLE_MODELS = [{"id": m, "label": label, "context_window": 1_048_576} for m, label in (
+    ("gemini-4-carbon", "Gemini 4 Carbon"), ("gemini-4-argon", "Gemini 4 Argon"),
+    ("gemini-3.8-flash", "Gemini 3.8 Flash"), ("gemini-3.6-flash", "Gemini 3.6 Flash"),
+    ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"), ("gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite"),
+)]
+
 # Preset kind → roster. The kind is the normalized provider classification
 # produced by :func:`preset_kind_for` (NOT the raw ``provider_type``: an
 # already-enrolled Codex row is ``provider_type='custom'`` +
@@ -113,6 +123,7 @@ _PRESET_ROSTERS: Dict[str, List[Dict[str, Any]]] = {
     "minimax": MINIMAX_MODELS,
     "opencode": OPENCODE_API_MODELS,
     "opencode_plan": OPENCODE_PLAN_MODELS,
+    "google": GOOGLE_MODELS,
 }
 
 

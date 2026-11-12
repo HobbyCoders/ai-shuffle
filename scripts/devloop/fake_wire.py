@@ -15,7 +15,7 @@ By default each request pops the next scripted :class:`Reply` (FIFO). A test
 states the exact frames it needs next to its assertions. A ``responder``
 callable replaces the queue with a stateless reply chosen from the request
 (the dev loop's scenarios). ``GET .../models`` always answers the model list
-and never consumes a scripted reply. The builders below speak the three wire
+and never consumes a scripted reply. The builders below speak the four wire
 formats the native engine uses:
 
 * :class:`Chat` — OpenAI chat/completions (OpenRouter, local, custom rows):
@@ -28,6 +28,9 @@ formats the native engine uses:
   ``response.created``, ``output_item.added``/``done``,
   ``output_text.delta``, ``function_call_arguments.delta``,
   ``response.completed``.
+* :class:`Interactions` — Gemini Interactions (Google rows): ``step.start``
+  / ``step.delta`` / ``step.stop`` with thought signatures, streamed
+  function-call arguments and ``interaction.completed``.
 
 Every request is recorded (:attr:`FakeProviderServer.requests`: path, headers,
 parsed JSON body), so a test also asserts on what the engine SENT: the tool
@@ -355,6 +358,94 @@ class Responses:
         return frames + [cls.completed(**usage)]
 
 
+class Interactions:
+    """Gemini Interactions API SSE builders (``store: false`` streams).
+
+    Shapes follow Google's streaming guide (aistudio.google.com/docs/streaming):
+    ``interaction.created``, ``step.start`` / ``step.delta`` / ``step.stop``
+    and ``interaction.completed``; a thought step's signature arrives as the
+    last delta before its ``step.stop``.
+    """
+
+    MODEL = "gemini-3.8-flash"
+
+    @staticmethod
+    def ev(kind: str, **body: Any) -> bytes:
+        return sse({"event_type": kind, **body}, event=kind)
+
+    @classmethod
+    def created(cls, model: str | None = None) -> bytes:
+        return cls.ev("interaction.created", interaction={
+            "id": "v1_fake", "status": "in_progress", "model": model or cls.MODEL})
+
+    @classmethod
+    def completed(cls, input_tokens: int = 10, output_tokens: int = 5, *,
+                  cached: int = 0, thought: int = 0, status: str = "completed",
+                  model: str | None = None) -> bytes:
+        return cls.ev("interaction.completed", interaction={
+            "id": "v1_fake", "status": status, "model": model or cls.MODEL,
+            "usage": {"total_input_tokens": input_tokens, "total_cached_tokens": cached,
+                      "total_output_tokens": output_tokens, "total_thought_tokens": thought,
+                      "total_tokens": input_tokens + output_tokens + thought},
+        })
+
+    @classmethod
+    def thought(cls, index: int, summary: str, signature: str, pieces: int = 2) -> list[bytes]:
+        frames = [cls.ev("step.start", index=index, step={"type": "thought"})]
+        frames += [cls.ev("step.delta", index=index, delta={
+            "type": "thought_summary", "content": {"type": "text", "text": piece}})
+            for piece in _split(summary, pieces) if summary]
+        frames.append(cls.ev("step.delta", index=index,
+                             delta={"type": "thought_signature", "signature": signature}))
+        frames.append(cls.ev("step.stop", index=index))
+        return frames
+
+    @classmethod
+    def output(cls, index: int, text: str, pieces: int = 2) -> list[bytes]:
+        frames = [cls.ev("step.start", index=index, step={"type": "model_output"})]
+        frames += [cls.ev("step.delta", index=index, delta={"type": "text", "text": piece})
+                   for piece in _split(text, pieces)]
+        frames.append(cls.ev("step.stop", index=index))
+        return frames
+
+    @classmethod
+    def function_call(cls, index: int, id: str, name: str, args: dict | str,
+                      pieces: int = 3) -> list[bytes]:
+        raw = args if isinstance(args, str) else json.dumps(args)
+        frames = [cls.ev("step.start", index=index, step={
+            "type": "function_call", "id": id, "name": name, "arguments": {}})]
+        frames += [cls.ev("step.delta", index=index,
+                          delta={"type": "arguments_delta", "arguments": piece})
+                   for piece in _split(raw, pieces)]
+        frames.append(cls.ev("step.stop", index=index))
+        return frames
+
+    @classmethod
+    def error(cls, code: str = "service_unavailable", message: str = "Overloaded") -> bytes:
+        return cls.ev("error", error={"code": code, "message": message})
+
+    @classmethod
+    def text(cls, text: str, **usage: Any) -> list[Any]:
+        return [cls.created(), *cls.output(0, text), cls.completed(**usage)]
+
+    @classmethod
+    def tool_calls(cls, calls: list[dict], *, text: str = "", pieces: int = 3,
+                   signature: str | None = None, **usage: Any) -> list[Any]:
+        frames: list[Any] = [cls.created()]
+        index = 0
+        if signature is not None:
+            frames += cls.thought(index, "Planning the call.", signature)
+            index += 1
+        if text:
+            frames += cls.output(index, text)
+            index += 1
+        for call in calls:
+            frames += cls.function_call(index, call["id"], call["name"], call["args"],
+                                        pieces=pieces)
+            index += 1
+        return frames + [cls.completed(**usage)]
+
+
 # ─── the server ─────────────────────────────────────────────────────────────
 
 
@@ -450,6 +541,15 @@ def models_reply(models: Sequence[str], context_window: int = 200_000) -> Reply:
                  content_type="application/json")
 
 
+def gemini_models_reply(models: Sequence[str], context_window: int = 1_048_576) -> Reply:
+    """A Gemini ``GET /v1beta/models`` page. Ids that are not ``gemini-*`` get
+    the prefix, since the app keeps only Gemini text models."""
+    rows = [{"name": "models/" + (m if m.startswith("gemini-") else "gemini-" + m),
+             "displayName": m, "inputTokenLimit": context_window, "outputTokenLimit": 65_536,
+             "supportedGenerationMethods": ["generateContent", "countTokens"]} for m in models]
+    return Reply(frames=[json.dumps({"models": rows})], content_type="application/json")
+
+
 class FakeProviderServer:
     """Loopback provider endpoint that plays scripted replies in order.
 
@@ -502,7 +602,10 @@ class FakeProviderServer:
 
     def _reply_for(self, recorded: Recorded) -> Reply:
         if recorded.method == "GET":
-            if recorded.path.split("?", 1)[0].rstrip("/").endswith("/models"):
+            path = recorded.path.split("?", 1)[0].rstrip("/")
+            if path.endswith("/v1beta/models"):
+                return gemini_models_reply(self.models)
+            if path.endswith("/models"):
                 return models_reply(self.models)
             return error_reply(404, f"fake provider: no GET {recorded.path}")
         if self.responder is not None:

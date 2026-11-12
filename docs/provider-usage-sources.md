@@ -46,6 +46,10 @@ this source" next to the dashboard link.
 
 Intervals are application limits, not provider-approved rate guarantees.
 
+Google Gemini API-key rows have no source: Google documents no rate-limit
+response headers and no key usage or balance endpoint for AI Studio keys
+(checked 2026-11-11). Their turns still record tokens and estimated cost.
+
 ## Remaining-first panel and setup
 
 The panel headlines remaining balances, never lifetime spending. OpenRouter

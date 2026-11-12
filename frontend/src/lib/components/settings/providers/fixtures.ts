@@ -5,7 +5,7 @@
 import type { ModelProvider, NativeProviderId, NativeProviderOption } from '$lib/api/model-providers';
 
 /** Deliberately different endpoints: enrollment UI must use server metadata. */
-export const nativeEnrollment: NativeProviderOption[] = (['kimi', 'minimax', 'opencode'] as NativeProviderId[]).flatMap((provider_type) => {
+export const nativeEnrollment: NativeProviderOption[] = (['kimi', 'minimax', 'opencode'] as const satisfies readonly NativeProviderId[]).flatMap((provider_type) => {
 	const display_name = { kimi: 'Kimi', minimax: 'MiniMax', opencode: 'OpenCode' }[provider_type];
 	return [true, false].map((plan) => ({
 		provider_type, display_name,
@@ -21,6 +21,13 @@ export const nativeEnrollment: NativeProviderOption[] = (['kimi', 'minimax', 'op
 		usage_meter_available: false
 	}));
 });
+
+/** The Google Gemini row's enrollment metadata: one API-key slot on its own (non-Anthropic) API. */
+export const googleEnrollment: NativeProviderOption = {
+	provider_type: 'google', display_name: 'Google Gemini', auth_mode: null, credential_kind: 'api_key',
+	credential_label: 'Google AI Studio API key', slot: 'google:key', base_url: 'https://fixture.example/google',
+	api_dialect: null, key_page_url: 'https://fixture.example/keys/google', key_prefixes: [], usage_meter_available: false
+};
 
 export function nativeRow(option: NativeProviderOption, partial: Partial<ModelProvider> = {}): ModelProvider {
 	return row({ id: `${option.provider_type}-${option.auth_mode ? 'plan' : 'api'}`, name: option.credential_label, provider_type: option.provider_type,

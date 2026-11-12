@@ -94,7 +94,8 @@ async def test_reject_invalid_key_and_do_not_use_public_catalog(client, provider
 
 def test_first_run_contract_and_unknown_modes(client):
     assert client.get(ROOT).json() == {"providers": []}
-    options = client.get(ROOT + "/native-options").json()["providers"]
+    options = [o for o in client.get(ROOT + "/native-options").json()["providers"]
+               if o["provider_type"] in native_providers.PROVIDERS]
     assert len(options) == 6
     assert {o["slot"] for o in options} == {f"{p}:{k}" for p in native_providers.PROVIDERS for k in ("key", "subscription")}
     bad = client.post(ROOT, json={"name": "Bad", "provider_type": "kimi", "auth_mode": "oauth"})

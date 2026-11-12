@@ -34,6 +34,7 @@ _wire = _load()
 CUT = _wire.CUT
 Chat = _wire.Chat
 FakeProviderServer = _wire.FakeProviderServer
+Interactions = _wire.Interactions
 Messages = _wire.Messages
 Recorded = _wire.Recorded
 Reply = _wire.Reply

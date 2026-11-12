@@ -25,6 +25,8 @@ def model_provider_slot(row: Mapping[str, Any]) -> Optional[str]:
     kind = row.get("provider_type")
     if kind in ("kimi", "minimax", "opencode"):
         return f"{kind}:subscription" if auth == "plan_key" else f"{kind}:key"
+    if kind == "google":
+        return "google:key"
     if auth == "chatgpt":
         return "openai:subscription"
     if auth == "grok" or kind == "grok":
