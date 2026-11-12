@@ -209,8 +209,8 @@ and rate limits do not prevent saving. `POST /{id}/check-key` uses the same requ
 `{"status": "valid"}`, `{"status": "unavailable"}` when Google could not be reached, or
 `400` when Google rejected the key. The worker records the verdict locally
 (`credential_status`: `ok` after an accepted check on save, check-key or model fetch,
-`rejected` after a rejection, unset when the key was never checked or the check could not
-finish). A rejected row stops counting as ready until a check passes or the key or
+`rejected` after a rejection, unset when the key was never checked or when the check on
+saving could not finish; a later check that cannot finish keeps the earlier verdict). A rejected row stops counting as ready until a check passes or the key or
 endpoint changes; a verdict about a key replaced while the check ran is dropped.
 `POST /{id}/fetch-models` pages through Google's model list and keeps `gemini-*`
 text models (image, audio, TTS, Live and embedding models are left out).
