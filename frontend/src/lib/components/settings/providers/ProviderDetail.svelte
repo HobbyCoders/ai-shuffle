@@ -26,6 +26,7 @@
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import {
 		addableKinds,
+		antigravityGuarded,
 		claudeGateNotice,
 		claudeHeaderStatus,
 		type CredentialView,
@@ -93,7 +94,8 @@
 
 	function hintFor(c: CredentialView): string {
 		const models = c.row && c.on && c.flavor !== 'fal' ? `, ${c.row.models.length} in picker` : '';
-		return `${c.kind}${models}`;
+		const guard = c.row && antigravityGuarded(c.row) ? ', interactive only' : '';
+		return `${c.kind}${models}${guard}`;
 	}
 </script>
 

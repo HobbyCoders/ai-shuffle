@@ -26,11 +26,12 @@ class AntigravityState {
 		return this.status?.install?.state === 'running';
 	}
 
+	/** `force` re-reads the install status (the metadata is static). */
 	async load(force = false): Promise<void> {
 		if (this.loading || (!force && this.meta && this.status)) return;
 		this.loading = true;
 		try {
-			const [meta, status] = await Promise.all([this.meta && !force ? this.meta : getAntigravityMeta(), getAntigravityStatus()]);
+			const [meta, status] = await Promise.all([this.meta ?? getAntigravityMeta(), getAntigravityStatus()]);
 			this.meta = meta;
 			this.status = status;
 			this.error = null;

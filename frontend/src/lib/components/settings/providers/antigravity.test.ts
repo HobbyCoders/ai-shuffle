@@ -68,6 +68,7 @@ describe('Google Antigravity rows', () => {
 	});
 
 	it('label per-model quota windows from the agent', () => {
-		expect(windowLabel('antigravity_gemini_3_1_pro')).toBe('Gemini 3 1 pro');
+		expect(windowLabel('antigravity_gemini_3_1_pro')).toBe('Gemini 3.1 Pro');
+		expect(windowLabel('antigravity_gemini_3_8_flash')).toBe('Gemini 3.8 Flash');
 	});
 });

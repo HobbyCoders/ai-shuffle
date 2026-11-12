@@ -115,9 +115,21 @@
 		}
 	}
 
+	// The forced read answers before the agent has replied; follow the pass
+	// (as the composer's usage popover does) until it lands.
+	let destroyed = false;
 	async function refreshUsage() {
 		usageBusy = true;
-		try { await providers.loadUsage(true); } finally { usageBusy = false; }
+		try {
+			await providers.loadUsage(true);
+			const deadline = Date.now() + 30_000;
+			while (!destroyed && providers.current.usage?.provider_refreshing && Date.now() < deadline) {
+				await new Promise((r) => setTimeout(r, 1_000));
+				await providers.loadUsage();
+			}
+		} finally {
+			usageBusy = false;
+		}
 	}
 
 	const usageEntry = $derived(providers.current.usage?.providers?.find((p) => p.provider_id === row.id) ?? null);
@@ -147,8 +159,10 @@
 	const position = $derived(
 		!row.enabled
 			? 'Not in the model picker'
-			: status && status.state !== 'signed_in'
-				? keyRow ? 'Check the key' : 'Sign in to use it'
+			: status?.state === 'not_installed'
+				? 'Install Antigravity to use it'
+				: status && status.state !== 'signed_in'
+					? keyRow ? 'Check the key' : 'Sign in to use it'
 				: `${row.models.length} models in picker`
 	);
 	const line = $derived(detailLine(position, personal ? (guarded ? 'Interactive only' : 'Unattended use allowed') : null));
@@ -170,9 +184,11 @@
 	]);
 
 	onMount(() => {
-		void antigravity.load();
+		// The agent can be installed or removed outside this screen.
+		void antigravity.load(true);
 		void loadStatus();
 		void providers.loadUsage();
+		return () => { destroyed = true; };
 	});
 </script>
 

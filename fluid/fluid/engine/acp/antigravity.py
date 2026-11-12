@@ -139,7 +139,7 @@ class AntigravitySpec(AcpAgentSpec):
 
     def auth_message(self, exc: AcpError) -> str:
         return ("Antigravity is not signed in on this worker. Sign in again from "
-                "Settings → Providers (Antigravity).")
+                "Settings → Providers → Google Antigravity.")
 
 
 def initialize_summary(raw: Mapping[str, Any]) -> dict[str, Any]:

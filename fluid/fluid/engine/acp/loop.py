@@ -597,6 +597,17 @@ class AcpLoop:
                 blocks.append({"type": "text", "text": block})
         return blocks or [{"type": "text", "text": ""}]
 
+    def _failure_event(self, sid: str, turn_id: str, exc: AcpError, *, prefix: str = "", **extra: Any) -> ErrorEvent:
+        if not exc.auth_required:
+            return ErrorEvent(session_id=sid, turn_id=turn_id, message=f"{prefix}{exc.message}", **extra)
+        # Hosts show the provider's own short text beside a status (the app
+        # renders "provider returned HTTP 401: <provider_message>"), so the
+        # sign-in guidance goes there too: the agent's bare "Authentication
+        # required" says nothing about how to fix it.
+        message = self.spec.auth_message(exc)
+        return ErrorEvent(session_id=sid, turn_id=turn_id, message=message, status=401,
+                          provider_message=message, **extra)
+
     async def _run_turn(self, op: UserTurn | Resume) -> None:
         meta = await self._ensure_session()
         sid = meta.session_id
@@ -605,10 +616,7 @@ class AcpLoop:
             try:
                 await self._ensure_process()
             except AcpError as exc:
-                message = self.spec.auth_message(exc) if exc.auth_required else f"Could not start the agent: {exc.message}"
-                await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=message,
-                                            status=401 if exc.auth_required else None,
-                                            provider_message=exc.message))
+                await self._emit(self._failure_event(sid, turn_id, exc, prefix="Could not start the agent: "))
                 return
             except Exception as exc:  # noqa: BLE001 — missing binary, spawn failure
                 await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
@@ -695,12 +703,7 @@ class AcpLoop:
                 return
             if not conn.alive:
                 await self._stop_process()
-            await self._emit(ErrorEvent(
-                session_id=sid, turn_id=turn_id,
-                message=self.spec.auth_message(failure) if failure.auth_required else failure.message,
-                status=401 if failure.auth_required else None, provider_message=failure.message,
-                usage=usage, cost_usd=cost,
-            ))
+            await self._emit(self._failure_event(sid, turn_id, failure, usage=usage, cost_usd=cost))
             return
         stop = str((result or {}).get("stopReason") or "end_turn") if isinstance(result, Mapping) else "end_turn"
         if stop == "cancelled" or (self._interrupted.is_set() and stop != "end_turn"):

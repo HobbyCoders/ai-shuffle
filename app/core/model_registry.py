@@ -429,6 +429,10 @@ def _is_subscription_row(row: ModelProviderRow) -> bool:
     return ptype in ("chatgpt", "grok") or mode in ("chatgpt", "grok", "plan_key")
 
 
+# Picker subtext for Antigravity sign-in rows (a label, not a billing tier).
+_ANTIGRAVITY_PLANS = {"oauth-personal": "Personal", "oauth-business": "Business"}
+
+
 def _provider_plan_types() -> Dict[str, Optional[str]]:
     """Latest known ``plan_type`` per provider id, from ``provider_usage_snapshots``.
 
@@ -535,8 +539,12 @@ def _providers_payload() -> List[Dict[str, object]]:
             "auth_kind": "subscription" if _is_subscription_row(row) or (
                 row.get("provider_type") == "antigravity"
                 and row.get("auth_mode") in ("oauth-personal", "oauth-business")) else "api",
+            # Antigravity sign-ins carry no plan string; personal and business
+            # rows would otherwise share one "Subscription" picker heading.
             "plan_type": (
-                plan_types.get(row.get("id", "")) if _is_subscription_row(row) else None
+                plan_types.get(row.get("id", "")) if _is_subscription_row(row)
+                else _ANTIGRAVITY_PLANS.get(row.get("auth_mode") or "")
+                if row.get("provider_type") == "antigravity" else None
             ),
             "models": [
                 {

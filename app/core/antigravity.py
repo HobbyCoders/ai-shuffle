@@ -106,6 +106,7 @@ DEFAULT_MODELS: List[Dict[str, Any]] = [
 ]
 
 _URL_RE = re.compile(r"https://accounts\.google\.com/\S+")
+_LOGIN_PROMPT_RE = re.compile(r"please visit the following url[^:]*:|enter the authorization code\s*:?", re.I)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # A line saying how the code went; the binary may keep running after it.
 _LOGIN_RESULT_RE = re.compile(r"succe|signed in|logged in|authenticated|fail|invalid|error", re.I)
@@ -453,7 +454,11 @@ async def _read_until_url(login: LoginSession) -> None:
 
 
 def _tail(login: LoginSession) -> str:
-    lines = [line for line in login.output if line and not _URL_RE.search(line)][-3:]
+    # Keep the agent's verdict, not its own prompts ("Please visit the
+    # following URL…", "Enter the authorization code:"), which share a line
+    # with the verdict because the code prompt ends without a newline.
+    lines = [_LOGIN_PROMPT_RE.sub("", line).strip() for line in login.output if line and not _URL_RE.search(line)]
+    lines = [line for line in lines if line][-3:]
     return (" " + " ".join(lines))[:400] if lines else ""
 
 

@@ -204,6 +204,36 @@ def test_rows_carry_gemini_models_with_thinking_levels(client):
     assert ids == [m["id"] for m in ag.DEFAULT_MODELS] and all(i.startswith("gemini-") for i in ids)
 
 
+def test_picker_tells_sign_in_rows_apart(client):
+    from app.core import model_registry
+
+    ids = {_create(client, mode)["id"]: mode for mode in ("oauth-personal", "oauth-business")}
+    ids[_create(client, "gemini-api-key", api_key="test-gemini-secret-value")["id"]] = "gemini-api-key"
+    shown = {r["id"]: (r["auth_kind"], r["plan_type"]) for r in model_registry._providers_payload()
+             if r["id"] in ids}
+    assert {ids[i]: v for i, v in shown.items()} == {
+        "oauth-personal": ("subscription", "Personal"),
+        "oauth-business": ("subscription", "Business"),
+        "gemini-api-key": ("api", None),
+    }
+
+
+@pytest.mark.parametrize("mode", ["oauth-personal", "oauth-business", "gemini-api-key"])
+def test_session_options_build_for_every_row(client, mode):
+    # A sign-in row stores no token or URL; the agent's env is built by
+    # app.core.antigravity, so the CLI overlay neither refuses the row nor
+    # copies the key or the guard setting into it.
+    from app.core.environment import apply_provider_env
+
+    key = {"api_key": "test-gemini-secret-value"} if mode == "gemini-api-key" else {}
+    row = _create(client, mode, **key)
+    if mode == "oauth-personal":
+        client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+    env = apply_provider_env({}, row["id"], "gemini-3.1-pro")
+    assert "test-gemini-secret-value" not in env.values()
+    assert ag.GUARD_OVERRIDE_KEY not in env
+
+
 def test_personal_rows_are_guarded_until_the_owner_lifts_it(client):
     row = _create(client)
     assert row["guard_applies"] and row["guarded"] and not row["allow_unattended"]
@@ -223,6 +253,9 @@ def test_personal_sign_in_runs_the_binary_flow(client):
     bad = client.post(f"{BASE}/providers/{row['id']}/login/{started['login_id']}/complete",
                       json={"code": "wrong"}).json()
     assert bad["state"] == "failed"
+    # The agent's verdict reaches the owner; its own prompts do not.
+    assert "invalid_grant" in bad["message"]
+    assert "authorization code" not in bad["message"] and "visit" not in bad["message"]
     started = client.post(f"{BASE}/providers/{row['id']}/login").json()
     done = client.post(f"{BASE}/providers/{row['id']}/login/{started['login_id']}/complete",
                        json={"code": "good"}).json()

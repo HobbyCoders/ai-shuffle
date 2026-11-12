@@ -297,6 +297,8 @@ async def test_auth_required_is_a_clear_error(tmp_path: Path) -> None:
         end = await d.turn("hello")
         assert isinstance(end, ErrorEvent) and end.status == 401
         assert "not signed in" in end.message
+        # The app shows provider_message beside the status; it carries the fix.
+        assert end.provider_message == end.message
         assert d.loop.pid is None  # nothing left running
     finally:
         await d.close()
