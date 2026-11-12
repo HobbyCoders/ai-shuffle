@@ -2182,7 +2182,7 @@ def release_setup(held_chat, monkeypatch):
     promoted = []
 
     def get_session(sid):
-        if sid == "worker-1":
+        if sid in ("worker-1", "worker-2", "worker-3"):
             return {"id": sid, "is_worker": True}
         if sid != "chat-ag":
             return None
@@ -2269,3 +2269,116 @@ async def test_release_retries_never_deliver_twice(release_setup, monkeypatch):
     assert "halfway there" in folded  # the receiver's own turn took them first
     await _settle_retries()
     assert promoted == [] and told == [] and _held_rows() == []
+
+
+def _hold_note(sender, text):
+    from app.core import wakeup_service
+
+    wakeup_service.restore_held_peer_messages(
+        "chat-ag", _held_text(sender, text), delay_seconds=None,
+        profile_id=None, project_id=None, model=None)
+
+
+async def test_a_release_retry_never_wakes_the_receiver_for_a_running_senders_note(
+        release_setup, monkeypatch):
+    # P3: worker-1 ended and its release could not decide. While the retry
+    # waits, the receiver's own turn takes worker-1's note, then worker-2
+    # (still running) leaves an ordinary note. The retry finds nothing owed
+    # and ends: the receiver is not woken, worker-2's note stays held until
+    # worker-2 ends (or the receiver's next turn).
+    from app.core import turn_scheduler
+
+    setup, state, promoted, told = release_setup
+    setup()
+    monkeypatch.setattr(turn_scheduler, "_HELD_RELEASE_RETRY_BASE_SECONDS", 0.2)
+    state["fail"] = 1
+    assert await turn_scheduler.release_held_progress_from("worker-1") == 0
+    assert turn_scheduler._held_release_owed == {"chat-ag": {"worker-1"}}
+    folded = await turn_scheduler.fold_held_peer_messages_for_turn(
+        "chat-ag", {"id": "t-owner", "source": "user", "payload": {}})
+    assert "halfway there" in folded
+    _hold_note("worker-2", "still digging")
+    await _settle_retries()
+    assert promoted == [] and told == []
+    [row] = _held_rows()
+    assert "still digging" in row["prompt"]  # still held for its own release
+    assert turn_scheduler._held_release_owed == {}
+    assert await turn_scheduler.release_held_progress_from("worker-2") == 1
+    assert len(promoted) == 1 and "still digging" in promoted[0][1] and _held_rows() == []
+
+
+async def test_a_release_retry_still_owed_delivers_every_held_note_once(release_setup, monkeypatch):
+    # worker-1's note is still held when the retry wakes: it takes and
+    # promotes all the receiver's held notes once, as the due release would
+    # have (worker-2's note, left meanwhile, rides along as on main).
+    from app.core import turn_scheduler
+
+    setup, state, promoted, told = release_setup
+    setup()
+    monkeypatch.setattr(turn_scheduler, "_HELD_RELEASE_RETRY_BASE_SECONDS", 0.1)
+    state["fail"] = 1
+    assert await turn_scheduler.release_held_progress_from("worker-1") == 0
+    _hold_note("worker-2", "still digging")
+    await _settle_retries()
+    assert len(promoted) == 1
+    assert "halfway there" in promoted[0][1] and "still digging" in promoted[0][1]
+    assert _held_rows() == [] and told == [] and turn_scheduler._held_release_owed == {}
+
+
+async def test_two_ended_senders_share_one_release_retry(release_setup, monkeypatch):
+    # Two workers ended and neither release could decide: one retry, owed for
+    # both. The receiver's own turn takes their notes; a third worker, still
+    # running, then leaves one. The shared retry ends without waking anyone.
+    from app.core import turn_scheduler
+
+    setup, state, promoted, told = release_setup
+    setup()
+    _hold_note("worker-2", "second half")
+    monkeypatch.setattr(turn_scheduler, "_HELD_RELEASE_RETRY_BASE_SECONDS", 0.2)
+    state["fail"] = 2
+    assert await turn_scheduler.release_held_progress_from("worker-1") == 0
+    assert await turn_scheduler.release_held_progress_from("worker-2") == 0
+    assert len(turn_scheduler._held_release_retries) == 1
+    assert turn_scheduler._held_release_owed == {"chat-ag": {"worker-1", "worker-2"}}
+    folded = await turn_scheduler.fold_held_peer_messages_for_turn(
+        "chat-ag", {"id": "t-owner", "source": "user", "payload": {}})
+    assert "halfway there" in folded and "second half" in folded
+    _hold_note("worker-3", "just started")
+    await _settle_retries()
+    assert promoted == [] and told == []
+    [row] = _held_rows()
+    assert "just started" in row["prompt"]
+
+
+async def test_a_release_retry_whose_owed_read_fails_keeps_trying(release_setup, monkeypatch):
+    # The check for an owed note cannot read the store: that is "could not
+    # decide", never "none left". Nothing is taken, the retry keeps going,
+    # and once the read works it delivers once.
+    from app.core import turn_scheduler
+    from app.db import wakeups as wakeups_db
+
+    setup, state, promoted, told = release_setup
+    setup()
+    monkeypatch.setattr(turn_scheduler, "_HELD_RELEASE_RETRY_BASE_SECONDS", 0.01)
+    real_read = wakeups_db.get_session_wakeups
+    reads = {"failed": 0, "broken": True}
+
+    def read(session_id, source=None):
+        if reads["broken"]:
+            reads["failed"] += 1
+            raise RuntimeError("database unavailable")
+        return real_read(session_id, source)
+
+    state["fail"] = 1
+    assert await turn_scheduler.release_held_progress_from("worker-1") == 0
+    monkeypatch.setattr(wakeups_db, "get_session_wakeups", read)
+    for _ in range(200):
+        if reads["failed"] >= 3:
+            break
+        await asyncio.sleep(0.01)
+    assert reads["failed"] >= 3
+    assert "chat-ag" in turn_scheduler._held_release_retries and promoted == []
+    reads["broken"] = False
+    assert len(_held_rows()) == 1  # nothing was taken
+    await _settle_retries()
+    assert len(promoted) == 1 and "halfway there" in promoted[0][1] and _held_rows() == []
