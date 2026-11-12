@@ -277,6 +277,9 @@ class AcpLoop:
         self._agent_mode: str | None = None
         self._turn_task: asyncio.Task[None] | None = None
         self._mapper: TurnMapper | None = None
+        # True while the running turn can still take a steer: from its mapper
+        # opening until the turn starts to store what it gathered.
+        self._steering_open = False
         self._interrupted = asyncio.Event()
         self._pending_permissions: dict[str, asyncio.Future[RespondPermission]] = {}
         self._pending_questions: dict[str, asyncio.Future[RespondQuestion]] = {}
@@ -780,6 +783,7 @@ class AcpLoop:
             logger.warning("ACP turn failed", exc_info=True)
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=repr(exc)))
         finally:
+            self._steering_open = False
             self._mapper = None
             self._steer_requests = []
             self._stop_reason = None
@@ -791,6 +795,7 @@ class AcpLoop:
         assert conn is not None and self._acp_session is not None
         mapper = TurnMapper(session_id=sid, turn_id=turn_id, bridged_name=self._bridged_name)
         self._mapper = mapper
+        self._steering_open = True
         failure: AcpError | None = None
         result: Any = None
         try:
@@ -799,12 +804,22 @@ class AcpLoop:
                 result = await conn.request("session/prompt", {
                     "sessionId": self._acp_session, "prompt": self._prompt_blocks(content),
                 })
-            # Steering prompts sent during the turn end with it.
-            for task in list(self._steer_requests):
+            # Steering prompts sent during the turn end with it, one that
+            # arrives while an earlier one is awaited included.
+            waited = 0
+            while waited < len(self._steer_requests):
+                task = self._steer_requests[waited]
+                waited += 1
                 with contextlib.suppress(BaseException):
                     await asyncio.wait_for(task, timeout=30)
         except AcpError as exc:
             failure = exc
+        # Nothing joins the turn from here: the mapper is drained next, and a
+        # message taken after that would get a receipt (so the host retires its
+        # copy) with no place left in the stored turn. ``_steer`` refuses it
+        # instead, and the host keeps it for when the turn has settled. No
+        # await sits between the last check above and this line.
+        self._steering_open = False
         trailing, segments = mapper.finish()
         for event in trailing:
             await self._emit(event)
@@ -890,7 +905,8 @@ class AcpLoop:
         from fluid.messages.content import SteerDelivery
 
         conn, sid = self._conn, self._acp_session
-        running = self._turn_task is not None and not self._turn_task.done() and self._mapper is not None
+        running = (self._turn_task is not None and not self._turn_task.done()
+                   and self._mapper is not None and self._steering_open)
         if not running or conn is None or not sid:
             raise RuntimeError("no running turn to steer")
         from fluid.tools.hardening import defang_harness_markers

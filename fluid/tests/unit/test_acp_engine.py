@@ -343,6 +343,41 @@ async def test_an_agent_message_with_no_live_turn_is_refused_not_dropped(tmp_pat
         await d.close()
 
 
+@pytest.mark.parametrize("kind", ["agent", "user"])
+async def test_a_message_arriving_while_the_turn_is_being_stored_is_refused(tmp_path: Path, kind: str) -> None:
+    """The reply is done and its nodes are being written: nothing joins now.
+
+    Taken here it would get a receipt (the host retires its queued copy) with
+    no node left to hold it, so it is refused and the host keeps it.
+    """
+    storing, release = asyncio.Event(), asyncio.Event()
+
+    class PausingStore(SerializingStore):
+        async def append(self, session_id, node):
+            if node.message.role == "assistant":
+                storing.set()
+                await release.wait()
+            await super().append(session_id, node)
+
+    d = await _driver(tmp_path, store=PausingStore())
+    try:
+        await d.loop.submit(UserTurn(content="hello"))
+        await asyncio.wait_for(storing.wait(), 30)
+        late = (AgentMessage(text="too late", sender="worker-7", id="row-late", wake=False)
+                if kind == "agent" else Steer(text="too late", id="s-late"))
+        with pytest.raises(RuntimeError, match="no running turn"):
+            await d.loop.submit(late)
+        release.set()
+        assert isinstance(await d.until(TERMINAL), TurnComplete)
+        assert len(_received(tmp_path, "session/prompt")) == 1
+        assert not [e for e in d.events if isinstance(e, SteerDelivered)]
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        assert [n.message.role for n in nodes] == ["user", "assistant"]
+    finally:
+        release.set()
+        await d.close()
+
+
 async def test_resume_after_restart_uses_session_resume(tmp_path: Path) -> None:
     store = MemoryStore()
     first = await _driver(tmp_path, store=store, session_id="s-1")
