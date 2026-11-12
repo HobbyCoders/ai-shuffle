@@ -496,6 +496,63 @@ async def test_a_sign_in_row_counts_as_ready_only_while_signed_in_here(mock_db, 
     assert row["id"] not in usable() and not ag.signed_in_here(row["id"])
 
 
+async def test_a_task_to_a_sign_in_row_follows_the_guard_and_the_sign_in_here(
+        client, monkeypatch, tmp_path):
+    """Task's real entry point: the credential pre-flight reads this worker's
+    sign-in marker, and a guarded row is refused with the guard's reason."""
+    from app.core import model_override, project_resolver, subagent_default
+    from app.core import task_dispatch
+    from app.core.agent_types import PermissionResultAllow
+    from app.core.permission_handler import permission_handler
+    from app.core.provider_agent import WorkerOutcome
+
+    row = _create(client)
+    db.create_profile("caller", "Caller", None, {"model": "opus"})
+    db.create_profile("helper", "Helper", None, {"model": "opus"})
+    db.create_session(session_id="parent", profile_id="caller", title="Parent")
+    monkeypatch.setattr(model_override, "_APPROVED", set())
+    monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda _row: str(tmp_path))
+    subagent_default.write("sonnet")
+    started = []
+
+    async def worker(**kwargs):
+        started.append(kwargs["provider_id"])
+        return WorkerOutcome(ok=True, session_id="worker", report="done")
+
+    monkeypatch.setattr("app.core.provider_agent.dispatch_worker", worker)
+
+    async def allow(**_kwargs):  # the owner approves the model pick each time
+        return PermissionResultAllow(updated_input={})
+
+    monkeypatch.setattr(permission_handler, "request_permission", allow)
+
+    async def task():
+        return await task_dispatch.dispatch_task_tool(
+            {"prompt": "go", "mode": "sync", "agent": "helper",
+             "model": f"prov:{row['id']}:gemini-3.1-pro"},
+            caller_session_id="parent", caller_provider_id=None)
+
+    def guard(allow):
+        client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": allow})
+
+    ag._note_signin(row["id"], "signed_in")
+    refused = await task()
+    assert not refused["ok"] and not started
+    assert ag.GUARD_REFUSAL.format(reason=ag.AGENT_RUN_REASON) in refused["error"]
+    guard(True)
+    ran = await task()
+    assert ran["ok"], ran
+    assert started == [row["id"]]
+    guard(False)
+    again = await task()
+    assert not again["ok"] and "Antigravity provider uses a personal Google sign-in" in again["error"]
+    guard(True)
+    ag._note_signin(row["id"], "signed_out")  # signed in on another worker or nowhere: not here
+    signed_out = await task()
+    assert not signed_out["ok"] and "not signed in to Google on this worker" in signed_out["error"]
+    assert started == [row["id"]]
+
+
 async def test_a_signed_out_answer_clears_ready_and_a_stale_answer_is_ignored(mock_db, fake_agy, monkeypatch):
     row = await _personal_row()
     ag._note_signin(row["id"], "signed_in")

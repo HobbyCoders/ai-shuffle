@@ -1314,6 +1314,12 @@ def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
     filesystem probe here could refuse a perfectly working install, so that leg
     is left to the runtime. Every lookup failure also fails OPEN — this gate may
     only ever turn a certain failure into a clear message, never invent one.
+
+    An Antigravity sign-in row holds no stored credential: it counts as ready
+    when the app's own marker says the binary is signed in on THIS worker,
+    and a guarded one is refused with the guard's wording, as its first turn
+    would be (every caller starts a run for another agent: Task, Swarm, a
+    subagent or StartSession).
     """
     if not provider_id:
         return None
@@ -1338,6 +1344,19 @@ def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
             "the worker would fail at connect. Re-enable it or pick another model."
         )
     label = row.get("name") or provider_id
+    from app.core import antigravity
+
+    if (row.get("provider_type") == antigravity.PROVIDER_TYPE
+            and row.get("auth_mode") in antigravity.STORED_SIGN_IN):
+        if not antigravity.signed_in_here(str(row.get("id") or provider_id)):
+            return (
+                f"Model provider '{label}' is not signed in to Google on this "
+                "worker, so the worker would fail at connect. Sign in under "
+                "Settings > Providers > Google Antigravity."
+            )
+        if antigravity.guarded(row):
+            return antigravity.GUARD_REFUSAL.format(reason=antigravity.AGENT_RUN_REASON)
+        return None
     has_api_key = bool(str(row.get("auth_token") or "").strip())
     has_codex = bool(str(row.get("codex_access_token") or "").strip())
     if not has_api_key and not has_codex:

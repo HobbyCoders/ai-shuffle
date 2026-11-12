@@ -775,6 +775,8 @@ _SOURCE_REASONS = {
     "watch": "a watch",
 }
 NO_SOURCE_REASON = "a run with no known origin"
+#: A run another agent starts (Task, Swarm, a subagent, StartSession).
+AGENT_RUN_REASON = "a run another agent starts"
 API_REQUEST_REASON = _SOURCE_REASONS["api"]
 #: ``X-Error-Code`` of a route that refuses a guarded row up front.
 GUARD_REFUSED_CODE = "antigravity_guarded"
