@@ -240,9 +240,12 @@ class GeminiClient:
                     yield StreamChunk("error", {"message": f"{type(exc).__name__}: {exc}", "retriable": True})
                     return
                 except httpx.TransportError as exc:
-                    # Pre-stream connection failures retry; once content has
-                    # flowed, or the 200 headers arrived (Google may bill the
-                    # call), the failure is reported instead.
+                    # This client retries a connection failure only before the
+                    # first chunk (and not once the 200 headers arrived: Google
+                    # may bill the call). After that the drop is reported with
+                    # transport evidence, and the engine applies its standard
+                    # bounded replay of the same stateless request, like the
+                    # other native legs (NativeLoop._is_replayable_drop).
                     retrying = (
                         not yielded
                         and attempt < self._retry.transport_retries

@@ -21,7 +21,7 @@ import pytest
 import fluid.engine.native as native_mod
 from fluid.engine.native import NativeLoop
 from fluid.events import ErrorEvent, TurnComplete, Usage, UserTurn
-from fluid.events.model import Interrupted
+from fluid.events.model import Interrupted, ProviderRetry
 from fluid.messages import Image, Message, Reasoning, Text, Thinking, ToolResultBlock, ToolUseBlock
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers._retry import RetryPolicy
@@ -369,6 +369,53 @@ async def test_context_overflow_text_is_recognized_by_the_engine(server):
     [error] = [c async for c in client.stream(request)]
     assert error.kind == "error" and error.payload["retriable"] is False
     assert any(marker in error.payload["message"].lower() for marker in native_mod._OVERFLOW_MARKERS)
+
+
+def _dropped_reply():
+    """Text has started streaming when the connection is cut (no completion)."""
+    return fps.Reply(frames=[Interactions.created(), *Interactions.output(0, "Partial"), fps.CUT],
+                     framing="chunked")
+
+
+@pytest.mark.parametrize("drops", [1, native_mod.TRANSPORT_DROP_MAX_RETRIES])
+async def test_a_drop_after_text_started_gets_the_engines_bounded_replay(server, drops):
+    """The client itself retries only before the first chunk. A stream cut
+    after content started is reported with transport evidence, and the engine
+    re-sends the same stateless request, as for every native leg."""
+    server.script(*[_dropped_reply() for _ in range(drops)], Interactions.text("Whole answer."))
+    loop = _loop(server, [])
+    try:
+        events = await _turn(loop, "hi")
+        stored = [n.message for n in await loop.store.load_path(loop.session_id)]
+    finally:
+        await loop.aclose()
+
+    assert isinstance(_terminal(events), TurnComplete)
+    assert len(server.requests) == 1 + drops
+    assert all(r.body == server.requests[0].body for r in server.requests)
+    retries = [e for e in events if isinstance(e, ProviderRetry)]
+    assert [r.cause for r in retries] == ["connection_dropped"] * drops
+    assert all(r.max_attempts == native_mod.TRANSPORT_DROP_MAX_RETRIES for r in retries)
+    # The partial text is discarded: the reply is the replayed call's answer only.
+    assert [m.role for m in stored] == ["user", "assistant"]
+    assert stored[1].text() == "Whole answer."
+    # Each failed call's usage is still recorded, with its drop evidence.
+    dropped = [u for u in events if isinstance(u, Usage) and u.raw.get("transport_failure")]
+    assert [u.raw["transport_drop_retry"] for u in dropped] == list(range(1, drops + 1))
+
+
+async def test_drops_beyond_the_replay_budget_end_the_turn(server):
+    server.script(*[_dropped_reply() for _ in range(2 + native_mod.TRANSPORT_DROP_MAX_RETRIES)])
+    loop = _loop(server, [])
+    try:
+        events = await _turn(loop, "hi")
+    finally:
+        await loop.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent) and not error.retriable
+    assert len(server.requests) == 1 + native_mod.TRANSPORT_DROP_MAX_RETRIES
+    assert len([e for e in events if isinstance(e, ProviderRetry)]) == native_mod.TRANSPORT_DROP_MAX_RETRIES
 
 
 def test_cut_stream_without_completion_is_reported():
