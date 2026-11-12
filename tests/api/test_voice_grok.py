@@ -82,16 +82,22 @@ async def test_grok_wire_transcripts_and_same_chat_delegation(monkeypatch):
         {"type": "input_audio_buffer.speech_started"},
         {"type": "input_audio_buffer.speech_stopped"},
     ]])
-    call.flush = AsyncMock()
+    from app.core import turn_recorder
+
     call.settle_speech = AsyncMock()
+    store = AsyncMock()
     delegate = AsyncMock(return_value="It is sunny.")
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", store)
     monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
     await call.receive_upstream()
     await call.delegation_task
     assert delegate.await_count == 1
     assert delegate.await_args.args[0] == "same-chat"
     assert "Look up the weather." in delegate.await_args.args[1]
-    assert call.pending["user"] == "Look up the weather."
+    # The request is stored when it is captured, under the identity it is sent with (#1265).
+    assert call.pending["user"] == ""
+    assert store.await_args_list[0].args[:2] == ("same-chat", "Look up the weather.")
+    assert store.await_args_list[0].kwargs["call_request_id"] == delegate.await_args.kwargs["request_id"]
     call.websocket.send_bytes.assert_awaited_once_with(b"\x01\x00")
     messages = [json.loads(e) for e in call.upstream.sent]
     assert any(e.get("item", {}).get("type") == "function_call_output" for e in messages)
@@ -220,14 +226,16 @@ async def test_grok_repeated_request_prefixes_are_stored_and_delegated_once(
     monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
     await call.receive_upstream()
     await call.delegation_task
+    request_id = delegate.await_args.kwargs["request_id"]
+    assert request_id
     store.assert_awaited_once_with(
-        "same-chat", request, None, model=model, user_source="voice",
+        "same-chat", request, None, model=model, user_source="voice", call_request_id=request_id,
     )
     delegate.assert_awaited_once_with(
         "same-chat",
         "Live conversation context (only the latest new request needs action):\n"
         f"user: {request}\n",
-        spoken=request, command=f"voice:{call.call_key}:tool-1", caller=None,
+        spoken=request, command=f"voice:{call.call_key}:tool-1", caller=None, request_id=request_id,
     )
 
 
