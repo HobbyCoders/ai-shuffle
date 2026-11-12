@@ -212,22 +212,18 @@ class PreferenceProposals:
             if any(s in (scope, "global") and fp == fingerprint for _, s, _, fp, _, _ in saved):
                 return "saved"
             # Answered by a session that said it, saved at or after the latest
-            # time the owner said it in this batch; that session also becomes a
-            # source of an identical open row, so _is_open applies the same rule.
+            # time the owner said it in this batch: an identical open row closes.
             corrected = corrected_at or {}
             cutoff = max(corrected.values(), default=None)
-            answering = [source for k, _, at, _, terms, source in saved
-                         if source in corrected and at >= cutoff and same_topic(name, body, k, terms)]
-            if answering:
-                rows, changed = self._read(), False
-                for r in rows:
-                    if (normalize_topic(r["topic"]) == name and (r.get("scope") or "global") == scope
-                            and _fingerprint(r["text"]) == fingerprint):
-                        merged = list(dict.fromkeys([*answering, *(r.get("sessions") or ())]))[:4]
-                        changed, r["sessions"] = changed or merged != r.get("sessions"), merged
-                if changed:
+            if any(source in corrected and at >= cutoff and same_topic(name, body, k, terms)
+                   for k, _, at, _, terms, source in saved):
+                rows = self._read()
+                kept = [r for r in rows if not (
+                    normalize_topic(r["topic"]) == name and (r.get("scope") or "global") == scope
+                    and _fingerprint(r["text"]) == fingerprint)]
+                if len(kept) != len(rows):
                     atomic_write_text(self.path, "".join(
-                        json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+                        json.dumps(r, ensure_ascii=False) + "\n" for r in kept))
                 return "saved"
             records = [r for r in self._read() if self._is_open(r, saved, now)]
             same = [r for r in records if normalize_topic(r["topic"]) == name

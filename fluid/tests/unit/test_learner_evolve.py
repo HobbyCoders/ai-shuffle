@@ -352,16 +352,22 @@ async def test_only_sessions_that_gave_the_correction_can_answer_it(tmp_path):
     assert len(PreferenceProposals(store).open()) == 1
 
 
-def test_a_rule_found_saved_also_closes_its_identical_open_proposal(tmp_path):
+@pytest.mark.parametrize("saved_before_the_row", [False, True])
+def test_a_rule_found_saved_also_closes_its_identical_open_proposal(tmp_path, saved_before_the_row):
     store = SkillStore(tmp_path)
     queue = PreferenceProposals(store)
-    assert queue.propose("pr_main_updates", MAIN_RULE, sessions=["s1"]) == "proposed"
     said = time.time()
-    store.save_memory(MAIN_MEMORY, scope="project:fixture", protected=True, when=MAIN_WHEN,
-                      source_session="s2")
-    assert queue.propose("pr_main_updates", MAIN_RULE, sessions=["s2"],
+    if saved_before_the_row:
+        store.save_memory(MAIN_MEMORY, scope="project:fixture", protected=True, when=MAIN_WHEN,
+                          source_session="s2")
+    assert queue.propose("pr_main_updates", MAIN_RULE, sessions=["s1"], now=said + 60) == "proposed"
+    assert queue.propose("deploy", "Deploy the website from main.", sessions=["s3"], now=said + 60) == "proposed"
+    if not saved_before_the_row:
+        store.save_memory(MAIN_MEMORY, scope="project:fixture", protected=True, when=MAIN_WHEN,
+                          source_session="s2")
+    assert queue.propose("pr_main_updates", MAIN_RULE, sessions=["s2"], now=said + 120,
                          corrected_at={"s2": said}) == "saved"
-    assert queue.open() == []
+    assert [r["topic"] for r in queue.open(now=said + 120)] == ["deploy"]
 
 
 async def test_a_correction_of_an_older_memory_is_still_proposed(tmp_path):
