@@ -1099,6 +1099,54 @@ async def test_a_reading_started_before_a_change_is_not_written(mock_db, fake_ag
     assert await _poll_with(monkeypatch, row, during, unparsed) is None
 
 
+@pytest.mark.parametrize("unparsed", [False, True], ids=["reading", "unavailable"])
+async def test_a_sign_out_during_the_write_leaves_no_reading(mock_db, fake_agy, monkeypatch, unparsed):
+    """The sign-out's own clear runs while the reading or failure is being
+    written: whichever lands, nothing is left behind afterwards."""
+    from app.db import provider_usage_snapshots as snapshots
+
+    row = await _personal_row()
+    name = "record_provider_usage_failure" if unparsed else "upsert_provider_usage_snapshot"
+    real = getattr(db, name)
+
+    def sign_out_lands(*args, **kwargs):
+        ag._signin_epochs[row["id"]] = ag.signin_epoch(row["id"]) + 1  # what forget_row does first
+        snapshots.delete_provider_usage_snapshot(row["id"])  # and its clear, before our write
+        return real(*args, **kwargs)
+    monkeypatch.setattr(db, name, sign_out_lands)
+
+    async def nothing():
+        return None
+    assert await _poll_with(monkeypatch, row, nothing, unparsed) is None
+
+
+@pytest.mark.parametrize("mode", ["oauth-personal", "oauth-business"])
+async def test_a_sign_in_reading_is_never_shared_between_workers(mock_db, fake_agy, monkeypatch, mode):
+    """Each worker has its own Google sign-in: a peer's reading is never
+    imported here and this worker's is never published."""
+    from app.core import provider_observations as observations
+    from app.core.usage_sources import SOURCES
+    from app.network import engine
+
+    monkeypatch.setattr(engine, "cached_context", lambda: SimpleNamespace(network_key=b"k" * 32))
+    monkeypatch.setattr(encryption, "_encryption_key", encryption.Fernet.generate_key())
+    source = SOURCES["antigravity_usage"]
+    row = await _personal_row()
+    db.update_model_provider(row["id"], auth_mode=mode)
+    assert observations._binding(source, row) is None
+    polled = []
+
+    async def poll(r):
+        polled.append(r["id"])
+    monkeypatch.setattr(observations, "_publish", lambda *a: pytest.fail("published"))
+    await observations.poll_shared(source, row, poll)
+    assert polled == [row["id"]]
+    key_row = db.create_model_provider(provider_id="key-row", name="Key", provider_type=ag.PROVIDER_TYPE,
+                                       base_url="", auth_mode="gemini-api-key", auth_token=None,
+                                       models=list(ag.DEFAULT_MODELS), default_model=None, enabled=True)
+    assert observations._binding(source, key_row) is not None  # one key: one reading for all
+
+
 async def test_a_cancelled_usage_read_ends_its_process(mock_db, fake_agy, monkeypatch):
     procs = []
     real = asyncio.create_subprocess_exec

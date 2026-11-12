@@ -144,8 +144,10 @@ def record_provider_usage_failure(
     expected_credential_generation: Optional[str] = None,
     denied_fingerprint: str | None = None,
     expected_provider_revision: Optional[tuple[str, str]] = None,
-) -> None:
+) -> bool:
     """Record a failed observation, keeping the last successful reading.
+
+    Returns whether it was written (False when a guard dropped it).
 
     ``denied_fingerprint`` (a digest, never a credential) marks the capability
     as refused for that credential revision so pollers skip re-probing it.
@@ -164,9 +166,9 @@ def record_provider_usage_failure(
             cursor.execute("SELECT revision, enabled FROM model_providers WHERE id = %s FOR UPDATE", (guard_id,))
             current_provider = cursor.fetchone() or {}
             if current_provider.get("revision") != revision or not current_provider.get("enabled"):
-                return
+                return False
         if provider_type in {"fal", "openrouter_account"} and not _lock_usage_generation(cursor, provider_id, provider_type, expected_credential_generation):
-            return
+            return False
         cursor.execute(
             "SELECT raw, credits, fetched_at FROM provider_usage_snapshots WHERE provider_id = %s",
             (provider_id,),
@@ -195,6 +197,7 @@ def record_provider_usage_failure(
             """,
             (provider_id, provider_type, "[]", raw, now.isoformat()),
         )
+    return True
 
 
 def _lock_usage_generation(cursor, provider_id, provider_type, expected: Optional[str]) -> bool:

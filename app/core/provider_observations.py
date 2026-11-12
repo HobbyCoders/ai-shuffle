@@ -97,6 +97,11 @@ def _binding(source, row):
     row = db.get_model_provider(row["id"], include_token=True) if row else None
     if source.id != "fal_billing" and (not row or not row.get("enabled", True)):
         return None
+    if row and row.get("provider_type") == "antigravity" and row.get("auth_mode") != "gemini-api-key":
+        # A Google sign-in lives on each worker (maybe a different account
+        # on each): a peer's reading is not this worker's, and a sign-out
+        # here must not be refilled from one. Key rows share as usual.
+        return None
     parts = [source.id]
     guards = {}
     if row:
