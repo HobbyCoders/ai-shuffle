@@ -802,13 +802,16 @@ def _agent_message_reason(session_id: Optional[str]) -> str:
     return f'a message from another agent ("{label}")' if label else "a message from another agent"
 
 
-def agent_message_refusal(session: Optional[Mapping[str, Any]]) -> Optional[str]:
+def agent_message_refusal(session: Optional[Mapping[str, Any]], *,
+                          fail_closed: bool = False) -> Optional[str]:
     """The MessageSession refusal for a chat on a guarded row, or None.
 
     Checked when a message is sent (and again when a queued one is
     delivered), so a refused message never starts a turn that fails the
-    chat. The turn-start guard still decides every turn; this read fails
-    open to it.
+    chat. At send time a failed read fails open to the turn-start guard,
+    which refuses an ``agent_message`` turn on its own. ``fail_closed``
+    (held messages that would ride the owner's turn, where that guard
+    cannot tell them apart) re-raises the failed read instead.
     """
     provider_id = (session or {}).get("provider_id")
     if not provider_id:
@@ -817,6 +820,8 @@ def agent_message_refusal(session: Optional[Mapping[str, Any]]) -> Optional[str]
         from app.db import model_providers
         row = model_providers.get_model_provider(str(provider_id))
     except Exception:  # noqa: BLE001 — the turn-start guard still applies
+        if fail_closed:
+            raise
         logger.debug("[antigravity] could not read %s for a message", provider_id, exc_info=True)
         return None
     if not row or row.get("provider_type") != PROVIDER_TYPE or not guarded(row):

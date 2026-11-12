@@ -1633,6 +1633,63 @@ async def test_a_held_message_is_refused_where_it_would_be_promoted(held_chat):
     assert told and told[0][0] == "worker-1"
 
 
+def _fail_read(monkeypatch, lookup):
+    """Make one of the screening's two lookups fail; return the undo."""
+    from app.db import model_providers, sessions
+
+    module, name = (sessions, "get_session") if lookup == "session" else (model_providers, "get_model_provider")
+    real = getattr(module, name)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(module, name, broken)
+    return lambda: monkeypatch.setattr(module, name, real)
+
+
+@pytest.mark.parametrize("lookup", ["session", "provider"])
+@pytest.mark.parametrize("allow", [False, True])
+async def test_an_inconclusive_screening_keeps_held_messages_back(held_chat, monkeypatch, lookup, allow):
+    # When the chat or its provider cannot be read, nobody can tell whether
+    # the row is guarded: the messages are not delivered and not dropped. The
+    # owner's turn starts without them; they ride a later turn once the
+    # check can be made (and only if the row allows it then).
+    from app.core import turn_scheduler
+
+    make, told = held_chat
+    make(allow=allow)
+    owner_turn = {"id": "t-owner", "source": "user", "payload": {}}
+    undo = _fail_read(monkeypatch, lookup)
+    assert await turn_scheduler.fold_held_peer_messages_for_turn("chat-ag", owner_turn) == ""
+    await asyncio.sleep(0.05)
+    assert told == []  # nothing refused either: the check never concluded
+    undo()
+    folded = await turn_scheduler.fold_held_peer_messages_for_turn(
+        "chat-ag", {"id": "t-owner-2", "source": "user", "payload": {}})
+    await asyncio.sleep(0.05)
+    if allow:
+        assert "halfway there" in folded and told == []
+    else:
+        assert folded == "" and len(told) == 1  # refused, its sender told, once
+
+
+@pytest.mark.parametrize("lookup", ["session", "provider"])
+async def test_an_inconclusive_screening_does_not_promote_held_messages(held_chat, monkeypatch, lookup):
+    from app.core import turn_scheduler
+    from app.db import turns as turns_db
+
+    make, told = held_chat
+    make(allow=True)
+    undo = _fail_read(monkeypatch, lookup)
+    held = _held_text("worker-1", "done now")
+    assert await turn_scheduler.promote_held_peer_messages("chat-ag", held, released=True) is None
+    assert turns_db.get_queued_turns("chat-ag") == []
+    undo()
+    folded = await turn_scheduler.fold_held_peer_messages_for_turn(
+        "chat-ag", {"id": "t-owner", "source": "user", "payload": {}})
+    assert "done now" in folded and "halfway there" in folded  # kept, not lost
+    assert told == []
+
+
 @pytest.mark.parametrize("mode,fields,allow", [
     ("oauth-personal", {}, True),           # the switch on
     ("oauth-business", {}, None),           # business sign-ins are not guarded

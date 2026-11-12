@@ -1518,7 +1518,7 @@ async def _take_held_peer_messages(session_id: str) -> str:
 
 
 async def _screen_held_for_guard(session_id: str, held: str) -> str:
-    """``held``, or "" when the session's chat now refuses agent messages.
+    """``held``, or "" when it may not be delivered to this chat now.
 
     A message held while a personal Google sign-in row allowed unattended
     use must not ride a later turn once the owner restored the guard: it is
@@ -1528,6 +1528,10 @@ async def _screen_held_for_guard(session_id: str, held: str) -> str:
     retried) and its sender, when still running, is told. The turn it would
     have ridden (the owner's own message included) runs without it. Every
     other row, and this row with unattended use allowed, keeps ``held``.
+
+    Fails closed: when the chat or its provider cannot be read, the check is
+    inconclusive and the messages go back to the store, held for the next
+    delivery point; the turn (the owner's own message) runs without them.
     """
     if not held.strip():
         return held
@@ -1536,10 +1540,14 @@ async def _screen_held_for_guard(session_id: str, held: str) -> str:
 
     try:
         row = await asyncio.to_thread(sessions.get_session, session_id)
-    except Exception:  # noqa: BLE001 — the turn-start guard still applies
-        logger.debug("turn_scheduler: could not read %s to screen held messages", session_id, exc_info=True)
-        return held
-    refusal = await asyncio.to_thread(antigravity.agent_message_refusal, row)
+        refusal = await asyncio.to_thread(antigravity.agent_message_refusal, row, fail_closed=True)
+    except Exception:  # noqa: BLE001 — inconclusive: never deliver, keep them held
+        logger.warning(
+            "turn_scheduler: could not check whether %s may receive its held agent "
+            "messages; they stay held for the next delivery", session_id, exc_info=True,
+        )
+        _restore_held_peer_messages(session_id, held)
+        return ""
     if not refusal:
         return held
     keys = _held_ids(held)
