@@ -297,6 +297,60 @@ async def test_rows_without_a_source_send_nothing(mock_db, upstream):
     assert db.get_all_provider_usage_snapshots() == []
 
 
+LINK_ONLY = {
+    ("kimi", "plan_key"): ("kimi_code", "https://www.kimi.com/membership/subscription?tab=quota"),
+    ("minimax", None): ("minimax_api", "https://platform.minimax.io/user-center/payment/balance"),
+    ("opencode", "plan_key"): ("opencode_go", "https://opencode.ai/console"),
+    ("opencode", None): ("opencode_console", "https://opencode.ai/console"),
+}
+
+
+def test_link_only_kinds_point_at_the_vendor_page_without_a_meter():
+    from pathlib import Path
+
+    def row(provider, mode=None, base_url=None):
+        return {"provider_type": provider, "auth_mode": mode, "base_url": base_url}
+
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "provider-usage-sources.md").read_text(encoding="utf-8")
+    for (provider, mode), (kind, url) in LINK_ONLY.items():
+        link = usage_sources.usage_link_for(row(provider, mode))
+        assert (link.id, link.dashboard_url) == (kind, url)
+        assert url in doc
+        # Subscriptions have a quota and no dollar figure; pay-as-you-go keys
+        # lack only a balance (OpenCode Console cost is still recorded per turn).
+        assert link.note == ("No quota meter for this key" if mode == "plan_key" else "No balance meter for this key")
+        assert link.subscription == (mode == "plan_key")
+        assert usage_sources.polled_sources(row(provider, mode)) == ()
+        assert not native_providers.usage_meter_available(provider, mode)
+    for other in (row("kimi"), row("minimax", "plan_key"), row("custom"),
+                  row("kimi", "plan_key", "https://gateway.example.test/coding"),
+                  row("minimax", None, "https://api.minimaxi.com/anthropic"),
+                  row("opencode", None, "http://opencode.ai/inference/anthropic")):
+        assert usage_sources.usage_link_for(other) is None
+
+
+async def test_link_only_rows_are_listed_but_send_and_store_nothing(mock_db, upstream):
+    from types import SimpleNamespace
+
+    from app.api.usage import _load_usage_links
+    from app.core.provider_usage import ProviderUsageMonitor
+
+    for provider, mode in LINK_ONLY:
+        make_row(f"{provider}-{mode or 'api'}", provider, mode, "sk-test-unused")
+    with patch("app.network.engine.cached_context", return_value=None), \
+            patch.object(usage_sources, "global_sources", return_value=()):
+        await ProviderUsageMonitor()._poll_providers()
+        links = await _load_usage_links([])
+        # A row that already has a reading keeps that section instead.
+        without_go = await _load_usage_links([SimpleNamespace(provider_id="opencode-plan_key")])
+    assert upstream.requests == []
+    assert db.get_all_provider_usage_snapshots() == []
+    assert {(link.provider_id, link.kind, link.dashboard_url) for link in links} == {
+        (f"{provider}-{mode or 'api'}", kind, url) for (provider, mode), (kind, url) in LINK_ONLY.items()
+    }
+    assert "opencode-plan_key" not in {link.provider_id for link in without_go}
+
+
 async def test_poll_failure_logs_never_carry_the_key(kimi, upstream, caplog):
     def boom(request):
         raise httpx.ConnectError(f"refused with {request.headers['authorization']}")

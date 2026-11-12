@@ -264,6 +264,12 @@ record cash spend.
 | MiniMax API (pay as you go) | None: no documented balance API. Compare on [Balance](https://platform.minimax.io/user-center/payment/balance). |
 | OpenCode Console and OpenCode Go | None: OpenCode documents no balance or Go usage API. Per-turn cost is recorded from responses; compare on the [OpenCode console](https://opencode.ai/console). |
 
+The four rows marked None are never polled and store no snapshot. On their
+default endpoint `usage_sources.USAGE_LINKS` names the kind, a one-line note
+and the vendor page above (My Quota for Kimi Code); `/usage/limits` lists the
+enabled ones in `usage_links`, and the usage popover shows each as a section
+with that line and a Dashboard link. A custom endpoint gets no section.
+
 A refused key (HTTP 401 or 403, or MiniMax business codes 1004 and 2049) is
 not probed again until the key changes. Response bodies are never logged or
 stored.

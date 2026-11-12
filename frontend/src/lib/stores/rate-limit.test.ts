@@ -22,6 +22,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	rateLimit,
+	usageLinks,
+	type UsageLink,
 	resolveBucket,
 	resolveBucketKey,
 	selfBucketKey,
@@ -779,6 +781,34 @@ describe('rateLimit.applySnapshot — provider buckets', () => {
 			windows: [{ type: 'five_hour', utilization: 5, resets_at: future() }],
 		});
 		expect(Object.keys(rateLimit.current.providerBuckets)).toEqual(['codex-1']);
+	});
+
+	it('a usage_snapshot broadcast keeps usage_links: like providers, they come from REST only', () => {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [],
+			usage_links: [{
+				provider_id: 'opencode-go', provider_type: 'opencode', kind: 'opencode_go',
+				note: 'No quota meter for this key', dashboard_url: 'https://opencode.ai/console', subscription: true,
+			}],
+		});
+		let links: Record<string, UsageLink> = {};
+		const stop = usageLinks.subscribe((v) => (links = v));
+		expect(Object.keys(links)).toEqual(['opencode-go']);
+		// The exact field set ws-message-handlers.ts builds for `usage_snapshot`.
+		rateLimit.applySnapshot({
+			windows: [{ type: 'five_hour', utilization: 5, resets_at: future() }],
+			fetched_at: Date.now(),
+			available: true,
+			generation: 1,
+			snapshots: undefined,
+			self_instance_id: undefined,
+			self_device_id: undefined,
+		});
+		expect(Object.keys(links)).toEqual(['opencode-go']);
+		expect(links['opencode-go'].dashboardUrl).toBe('https://opencode.ai/console');
+		stop();
 	});
 
 	it('empty providers[] clears the map (authoritative empty set)', () => {

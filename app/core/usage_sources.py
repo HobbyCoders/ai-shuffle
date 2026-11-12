@@ -458,6 +458,66 @@ def global_sources() -> tuple[UsageSource, ...]:
     return tuple(s for s in _SOURCES if s.poller and s.global_source)
 
 
+# ---------------------------------------------------------------------------
+# Key kinds with no meter: a note and the vendor's own usage page
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UsageLink:
+    """A key kind whose vendor documents no usage or balance API.
+
+    Never polled and never stored: the usage API lists the row with this note
+    and the vendor's page (URLs from docs/provider-usage-sources.md, "Kimi,
+    MiniMax and OpenCode keys").
+    """
+    id: str
+    label: str
+    #: The one line the usage popover shows; true for this kind of key.
+    note: str
+    dashboard_url: str
+    subscription: bool
+    applies: Callable[[Mapping[str, Any] | None], bool] = field(compare=False, repr=False)
+
+
+_LINKS: tuple[UsageLink, ...] = (
+    UsageLink(
+        id="kimi_code", label="Kimi Code membership", note="No quota meter for this key",
+        dashboard_url="https://www.kimi.com/membership/subscription?tab=quota", subscription=True,
+        applies=lambda row: _native_row_on(row, "kimi", True, "api.kimi.ai"),
+    ),
+    UsageLink(
+        id="minimax_api", label="MiniMax API (pay as you go)", note="No balance meter for this key",
+        dashboard_url="https://platform.minimax.io/user-center/payment/balance", subscription=False,
+        applies=lambda row: _native_row_on(row, "minimax", False, "api.minimax.io"),
+    ),
+    UsageLink(
+        id="opencode_go", label="OpenCode Go", note="No quota meter for this key",
+        dashboard_url="https://opencode.ai/console", subscription=True,
+        applies=lambda row: _native_row_on(row, "opencode", True, "opencode.ai"),
+    ),
+    # Per-turn cost is recorded from responses; only a balance is missing.
+    UsageLink(
+        id="opencode_console", label="OpenCode Console (pay as you go)", note="No balance meter for this key",
+        dashboard_url="https://opencode.ai/console", subscription=False,
+        applies=lambda row: _native_row_on(row, "opencode", False, "opencode.ai"),
+    ),
+)
+
+USAGE_LINKS: dict[str, UsageLink] = {link.id: link for link in _LINKS}
+
+
+def usage_link_for(row: Mapping[str, Any] | None) -> UsageLink | None:
+    """The link-only entry for a row with no usage source, else None.
+
+    A row with a polled source never gets one, and a key on a custom endpoint
+    or another vendor platform matches no kind.
+    """
+    if polled_sources(row):
+        return None
+    return next((link for link in _LINKS if link.applies(row)), None)
+
+
 def passive_snapshot_type(row: Mapping[str, Any] | None, codex_backend: bool) -> str | None:
     """Snapshot type for OpenAI-style response headers, or None to skip.
 

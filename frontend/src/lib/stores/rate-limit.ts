@@ -304,6 +304,34 @@ export interface UsageSnapshot {
 	 *  WS-only payload without providers can't wipe it). Additive; empty for old
 	 *  or provider-less installs; null when the backend could not read them. */
 	providers?: ProviderUsageEntry[] | null;
+	/** Provider rows whose key kind has no usage meter: a note and the vendor's
+	 *  usage page, decided by the backend. REST /usage/limits only, like
+	 *  `providers` (a WS payload has neither key and keeps them). Additive:
+	 *  absent from older workers (no links); null when the backend could not
+	 *  read the rows (keep). */
+	usage_links?: ProviderUsageLinkEntry[] | null;
+}
+
+/** One entry of the snapshot's `usage_links` array. */
+export interface ProviderUsageLinkEntry {
+	provider_id: string;
+	provider_name?: string | null;
+	provider_type?: string | null;
+	kind?: string | null;
+	note?: string | null;
+	dashboard_url?: string | null;
+	subscription?: boolean | null;
+}
+
+/** A provider row with no usage meter, as the popover renders it. */
+export interface UsageLink {
+	providerId: string;
+	providerName: string | null;
+	providerType: string | null;
+	kind: string | null;
+	note: string;
+	dashboardUrl: string;
+	subscription: boolean;
 }
 
 // Bumped to v3 when the backend started reporting Claude window utilization as
@@ -830,6 +858,28 @@ const _claudeSource = createStore<ClaudeUsageSourceState>({
 });
 export const claudeUsageSource = { subscribe: _claudeSource.subscribe };
 
+/** Runtime-only (not persisted): rows with no usage meter, keyed by provider id. */
+const _usageLinks = createStore<Record<string, UsageLink>>({});
+export const usageLinks = { subscribe: _usageLinks.subscribe };
+
+function _linksFromSnapshot(entries: ProviderUsageLinkEntry[]): Record<string, UsageLink> {
+	const links: Record<string, UsageLink> = {};
+	for (const e of entries) {
+		// The backend owns the wording and the URL; an entry missing either is skipped.
+		if (!e?.provider_id || !e.note || !e.dashboard_url) continue;
+		links[e.provider_id] = {
+			providerId: e.provider_id,
+			providerName: e.provider_name ?? null,
+			providerType: e.provider_type ?? null,
+			kind: e.kind ?? null,
+			note: e.note,
+			dashboardUrl: e.dashboard_url,
+			subscription: e.subscription === true,
+		};
+	}
+	return links;
+}
+
 const _loaded = _load();
 const _store = createStore<RateLimitState>({
 	buckets: _loaded.buckets,
@@ -1064,6 +1114,18 @@ export const rateLimit = {
 			});
 		}
 
+		// ── Rows with no usage meter — full replace when present ────────────────
+		// An authoritative `providers` list without the key comes from a worker
+		// that predates the field and has no links; null (rows unreadable) and a
+		// payload without either key keep the links already shown. Like
+		// `providers`, the field is on the REST /usage/limits response only: a
+		// `usage_snapshot` broadcast carries neither key, so it keeps them.
+		if (Array.isArray(snapshot.usage_links)) {
+			_usageLinks.set(_linksFromSnapshot(snapshot.usage_links));
+		} else if (snapshot.usage_links === undefined && Array.isArray(snapshot.providers)) {
+			_usageLinks.set({});
+		}
+
 		// ── Modern path: per-install snapshots MERGE into the buckets map ───────
 		// Require a non-empty array: an empty `snapshots: []` is not authoritative
 		// (e.g. a transient backend DB read failure), so we fall through to the
@@ -1232,6 +1294,7 @@ export const rateLimit = {
 			staleByInstance: {},
 		});
 		_claudeSource.set({ source: null, attemptedAt: null, lastErrorKind: null });
+		_usageLinks.set({});
 		_save(_store.current);
 	},
 };
