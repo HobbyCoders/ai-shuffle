@@ -826,6 +826,17 @@ def test_usage_that_does_not_parse_is_unavailable(payload):
     assert ag.normalize_usage(payload) is None
 
 
+@pytest.mark.parametrize("mode", ["oauth-personal", "oauth-business", "gemini-api-key"])
+def test_usage_is_the_agents_own_reading_never_a_link_only_entry(mode):
+    from app.core import usage_sources
+
+    row = {"id": "row-1", "provider_type": "antigravity", "auth_mode": mode, "enabled": True,
+           "base_url": ""}
+    assert [s.id for s in usage_sources.polled_sources(row)] == ["antigravity_usage"]
+    assert not any(link.applies(row) for link in usage_sources.USAGE_LINKS.values())
+    assert usage_sources.usage_link_for(row) is None
+
+
 async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
     from app.core.provider_usage import ProviderUsageMonitor
 
