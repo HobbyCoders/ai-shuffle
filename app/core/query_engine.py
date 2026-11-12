@@ -52,6 +52,7 @@ from app.db import turns as turns_db
 from app.db.async_database import run_sync
 from pathlib import Path
 from app.core.config import settings
+from app.core.environment import ProviderTurnRefused
 from app.core.provider import session_admission
 from app.core.provider.session_admission import Lease, SessionReplacedError
 from app.core.session_pool import (
@@ -1442,9 +1443,10 @@ async def _stream_query_turn(
             logger.error(f"Timed out connecting to Claude SDK for session {session_id} (60s)")
             yield {"type": "error", "message": "Connection timed out — an MCP server may be unreachable"}
             return
-        except ClaudeCliMissingError as e:
-            # Setup problem, not a crash: no traceback, the message is the fix.
-            logger.warning(f"Claude CLI missing for session {session_id}: {e}")
+        except (ClaudeCliMissingError, ProviderTurnRefused) as e:
+            # Setup problem or an owner rule, not a crash: no traceback, the
+            # message is the fix.
+            logger.warning(f"Could not start session {session_id}: {e}")
             yield {"type": "error", "message": str(e)}
             return
         except Exception as e:
@@ -2900,9 +2902,10 @@ async def _stream_to_websocket_turn(
                 await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             _connect_elapsed = time.monotonic() - _connect_start
             logger.info(f"[WS] SDK connect for session {session_id}: {_connect_elapsed:.1f}s (reuse=False)")
-        except ClaudeCliMissingError as e:
-            # Setup problem, not a crash: no traceback, the message is the fix.
-            logger.warning(f"[WS] Claude CLI missing for session {session_id}: {e}")
+        except (ClaudeCliMissingError, ProviderTurnRefused) as e:
+            # Setup problem or an owner rule, not a crash: no traceback, the
+            # message is the fix.
+            logger.warning(f"[WS] Could not start session {session_id}: {e}")
             yield {"type": "error", "message": str(e)}
             return
         except Exception as e:

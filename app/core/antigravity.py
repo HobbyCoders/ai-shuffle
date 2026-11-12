@@ -802,6 +802,25 @@ def agent_message_refusal(session: Optional[Mapping[str, Any]]) -> Optional[str]
     return AGENT_MESSAGE_REFUSAL.format(title=title)
 
 
+def unattended_run_refusal(provider_id: Optional[str], reason: str) -> Optional[str]:
+    """The refusal for an unattended run (``reason`` names it) on this row.
+
+    Lets an automation fail before it mints a session for a turn the guard
+    would refuse. None for any other row; fails open to the turn-start guard.
+    """
+    if not provider_id:
+        return None
+    try:
+        from app.db import model_providers
+        row = model_providers.get_model_provider(str(provider_id))
+    except Exception:  # noqa: BLE001 — the turn-start guard still applies
+        logger.debug("[antigravity] could not read %s for a run", provider_id, exc_info=True)
+        return None
+    if not row or row.get("provider_type") != PROVIDER_TYPE or not guarded(row):
+        return None
+    return GUARD_REFUSAL.format(reason=reason)
+
+
 def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE) -> Optional[str]:
     """Why this run is not the owner typing in their own chat, or None.
 

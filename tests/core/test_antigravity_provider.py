@@ -153,6 +153,35 @@ def test_a_message_to_a_guarded_chat_is_refused_before_it_is_queued(mock_db, mon
     assert so._target({"id": "sender"}, "r1", owner="owner")["id"] == "r1"
 
 
+async def test_an_automation_on_a_guarded_row_fails_before_a_session_is_minted(monkeypatch):
+    """The run fails with the guard's reason, logged as a warning with no
+    traceback (an owner rule, not a crash), and mints no empty chat."""
+    from app.core import automation_manager as am
+    from app.core import automation_service
+    from app.core.environment import ProviderTurnRefused
+    from app.db import model_providers
+
+    rows = {
+        "personal": {"id": "personal", "provider_type": "antigravity", "auth_mode": "oauth-personal"},
+        "key": {"id": "key", "provider_type": "antigravity", "auth_mode": "gemini-api-key"},
+    }
+    monkeypatch.setattr(model_providers, "get_model_provider", lambda pid, **_: rows.get(pid))
+    assert ag.unattended_run_refusal("personal", "an automation run") == ag.GUARD_REFUSAL.format(
+        reason="an automation run")
+    for pid in ("key", "missing", None):
+        assert ag.unattended_run_refusal(pid, "an automation run") is None
+
+    monkeypatch.setattr(automation_service, "resolve_automation_model", lambda a: {
+        "error": None, "selection": "prov:personal:gemini-3.8-flash", "provider_id": "personal"})
+    minted = []
+    monkeypatch.setattr(am.database, "create_session", lambda **kw: minted.append(kw))
+    manager = am.AutomationManager.__new__(am.AutomationManager)
+    monkeypatch.setattr(manager, "_shutdown_begun", lambda: False, raising=False)
+    with pytest.raises(ProviderTurnRefused, match="refused for an automation run"):
+        await manager._run_prompt_as_session({"id": "auto-1", "profile_id": "p1"}, "run-1", "hi", None)
+    assert minted == []
+
+
 def test_a_failed_check_counts_as_unattended(monkeypatch):
     from app.db import sessions
 

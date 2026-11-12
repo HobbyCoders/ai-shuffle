@@ -340,6 +340,13 @@ class ProviderConfigError(ValueError):
     """
 
 
+class ProviderTurnRefused(ProviderConfigError):
+    """A rule the owner controls refused this run (for example the
+    Antigravity guard on a personal Google sign-in). Expected, not a fault:
+    callers log it without a traceback and show the message, which says what
+    to change."""
+
+
 class ClaudeCloudSetupError(ProviderConfigError):
     """Cloud mode is on but the CLI environment for the saved method could not
     be prepared (a disk or database error, an unwritable key file). The run

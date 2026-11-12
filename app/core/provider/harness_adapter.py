@@ -1993,7 +1993,7 @@ class HarnessAdapter(ProviderAdapter):
         here for unattended runs unless the owner lifted the guard.
         """
         from app.core import antigravity
-        from app.core.environment import ProviderConfigError
+        from app.core.environment import ProviderConfigError, ProviderTurnRefused
         from fluid.engine.acp import AcpLoop
 
         from app.db import database as db
@@ -2005,7 +2005,7 @@ class HarnessAdapter(ProviderAdapter):
             raise ProviderConfigError("This chat's Antigravity provider no longer exists.")
         refusal = await run_sync(antigravity.guard_refusal, row, options)
         if refusal:
-            raise ProviderConfigError(refusal)
+            raise ProviderTurnRefused(refusal)
         try:
             spec = await run_sync(antigravity.build_spec, row, add_dirs=list(options.add_dirs or ()))
         except FileNotFoundError as exc:
@@ -2068,7 +2068,7 @@ class HarnessAdapter(ProviderAdapter):
         environment or binary restarts the agent process before the turn.
         """
         from app.core import antigravity
-        from app.core.environment import ProviderConfigError
+        from app.core.environment import ProviderConfigError, ProviderTurnRefused
 
         # Like ``_next_turn_source``: it names the next submit only.
         source, self._next_app_turn_source = self._next_app_turn_source, None
@@ -2076,7 +2076,7 @@ class HarnessAdapter(ProviderAdapter):
         provider_id = ((options.extra if options is not None else None) or {}).get("provider_id")
         refusal, row = await run_sync(antigravity.turn_row, provider_id, options, source)
         if refusal:
-            raise ProviderConfigError(refusal)
+            raise ProviderTurnRefused(refusal)
         assert row is not None
         binding = await run_sync(antigravity.spawn_binding, row)
         if binding != self._antigravity_binding and self._engine is not None:
