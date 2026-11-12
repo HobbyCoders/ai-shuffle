@@ -6,14 +6,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { installedElectron, NO_ELECTRON } from './helpers/electron-binary.mjs';
 
 const require = createRequire(import.meta.url);
 const { sourceLaunch } = require('../dist/main/installed-host.js');
 const desktop = fileURLToPath(new URL('..', import.meta.url));
+const electron = installedElectron();
 
 // Opt in because this exercises real Windows foreground activation.
 test('Windows source launches show the splash after closing and reopening', {
-  skip: process.platform !== 'win32' || process.env.SHUFFLE_DESKTOP_WINDOW_TEST !== '1',
+  skip: process.platform !== 'win32' || process.env.SHUFFLE_DESKTOP_WINDOW_TEST !== '1' || (electron ? false : NO_ELECTRON),
   timeout: 60000,
 }, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-window-test-'));
@@ -44,7 +46,7 @@ test('Windows source launches show the splash after closing and reopening', {
     }).catch(error => { console.error(error); app.exit(1); });
   `);
   const launch = sourceLaunch({
-    electron: require('electron'), desktopDir: entry, revision: 'a'.repeat(40),
+    electron, desktopDir: entry, revision: 'a'.repeat(40),
     node: process.execPath, python: process.execPath,
   }, root);
   // The fixture is an entry script, while production uses an application directory.

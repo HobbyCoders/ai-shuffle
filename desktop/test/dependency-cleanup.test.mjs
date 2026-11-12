@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
+import { installedElectron, NO_ELECTRON } from './helpers/electron-binary.mjs';
 const require = createRequire(import.meta.url);
 const { pruneDependencies } = require('../dist/main/dependency-cleanup.js');
 
@@ -292,12 +293,11 @@ test('an unused desktop npm set holding default_app.asar is removed and the lock
   await assertAsarSetRemoved(f, await pruneDependencies(f.root, R, quiet));
 });
 
-let electron = null;
-try { electron = require('electron'); if (typeof electron !== 'string' || !existsSync(electron)) electron = null; } catch { electron = null; }
+const electron = installedElectron();
 // The real archive the installed Electron ships (dist/resources on Windows and Linux, Resources in the macOS bundle).
 const realDefaultApp = electron && [path.join(path.dirname(electron), 'resources', 'default_app.asar'), path.join(path.dirname(electron), '..', 'Resources', 'default_app.asar')].find(existsSync);
 
-test('real Electron in node mode removes an unused desktop npm set holding a real default_app.asar and releases the lock', { skip: realDefaultApp ? false : 'no Electron binary installed' }, async t => {
+test('real Electron in node mode removes an unused desktop npm set holding a real default_app.asar and releases the lock', { skip: realDefaultApp ? false : NO_ELECTRON }, async t => {
   // Plain Node above has no asar patch; this runs the built cleanup inside Electron, where it has.
   const f = await fixture(t);
   await dir(path.dirname(f.d(UNUSED_DESKTOP, DEFAULT_APP)));
