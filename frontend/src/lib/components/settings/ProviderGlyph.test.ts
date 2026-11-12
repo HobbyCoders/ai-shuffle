@@ -6,13 +6,13 @@ import ProviderGlyph, { providerGlyphKind, type ProviderGlyphKind } from './Prov
 afterEach(() => cleanup());
 
 describe('ProviderGlyph', () => {
-	it.each(['kimi', 'minimax', 'opencode'] as const)('renders a monochrome neutral initial for %s', (kind) => {
+	it.each(['kimi', 'minimax', 'opencode', 'google'] as const)('renders a monochrome neutral initial for %s', (kind) => {
 		const { container } = render(ProviderGlyph, { kind });
 		expect(container.querySelector('svg')?.getAttribute('fill')).toBe('currentColor');
 			expect(container.querySelector('rect')?.getAttribute('opacity')).toBe('0.1');
 			expect(container.querySelector('rect')?.getAttribute('rx')).toBe('5');
 			expect(container.querySelector('text')?.getAttribute('y')).toBe('12');
-		expect(container.querySelector('text')?.textContent).toBe(kind === 'kimi' ? 'K' : kind === 'minimax' ? 'M' : 'O');
+		expect(container.querySelector('text')?.textContent).toBe({ kimi: 'K', minimax: 'M', opencode: 'O', google: 'G' }[kind]);
 	});
 	it.each([
 		['__native__', 'claude'],
@@ -27,6 +27,7 @@ describe('ProviderGlyph', () => {
 		['kimi', 'kimi'],
 		['minimax', 'minimax'],
 		['opencode', 'opencode'],
+		['google', 'google'],
 		['fal', 'custom'],
 		['fal-ai', 'custom'],
 		['custom', 'custom']

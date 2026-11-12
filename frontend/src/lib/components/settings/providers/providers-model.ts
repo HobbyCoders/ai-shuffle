@@ -263,6 +263,7 @@ const BUILT_IN: { id: BuiltInProviderId; name: string; glyph: ProviderGlyphKind;
 	{ id: 'kimi', name: 'Kimi', glyph: 'kimi', letter: 'K' },
 	{ id: 'minimax', name: 'MiniMax', glyph: 'minimax', letter: 'M' },
 	{ id: 'opencode', name: 'OpenCode', glyph: 'opencode', letter: 'O' },
+	{ id: 'google', name: 'Google Gemini', glyph: 'google', letter: 'G' },
 	{ id: 'fal', name: 'fal.ai', glyph: 'custom', letter: 'f' }
 ];
 
@@ -666,7 +667,10 @@ export function buildProviders(input: ProvidersInput): ProviderView[] {
 	for (const c of falCredential(input.fal)) push('fal', c);
 	for (const d of drafts) push(d.providerId, draftCredential(d));
 
-	const views: ProviderView[] = BUILT_IN.map((b) => view(b.id, nativeOption(b.id, false)?.display_name ?? b.name, b.glyph, b.letter, byProvider.get(b.id) ?? []));
+	// A native tile the worker does not offer (an older worker) and nothing saved under it: hide it.
+	const offered = (id: BuiltInProviderId) => !isNativeProvider(id) || !nativeOptions.loaded
+		|| nativeOptions.providers.some((p) => p.provider_type === id) || !!byProvider.get(id)?.length;
+	const views: ProviderView[] = BUILT_IN.filter((b) => offered(b.id)).map((b) => view(b.id, nativeOption(b.id, false)?.display_name ?? b.name, b.glyph, b.letter, byProvider.get(b.id) ?? []));
 	const claudeView = views.find((v) => v.claude);
 	if (claudeView) claudeView.claudeSubscriptions = !!input.claude?.accounts?.subscription_support?.supported;
 	if (input.claudePending && !input.claude) {

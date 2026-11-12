@@ -27,7 +27,7 @@ Auth per kind
   background/401 rotation is picked up immediately) and whose ``on_401`` drives
   the shared, per-provider-serialized ``refresh_on_401_once``. The client must
   also be pointed at the Codex backend (``use_codex_backend``).
-* ``openai_responses`` / ``openrouter`` / ``anthropic`` + an API-key row → the
+* ``openai_responses`` / ``openrouter`` / ``anthropic`` / ``gemini`` + an API-key row → the
   decrypted ``auth_token`` as ``api_key``.
 * No provider bound to the session → ``None``, and the adapter keeps its
   existing env-var fallback (dev mode).
@@ -376,6 +376,8 @@ async def resolve_provider_credentials(
     from fluid.providers.compatible import PROVIDERS, endpoint_root
 
     ptype = row.get("provider_type")
+    if (ptype == "google") != (kind == "gemini"):
+        raise ProviderCredentialError("A Google Gemini provider requires native Gemini routing.")
     compatible = ptype if ptype in PROVIDERS else None
     if compatible:
         if kind != "anthropic":

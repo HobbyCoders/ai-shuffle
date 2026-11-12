@@ -106,7 +106,7 @@ MAX_RESET_AHEAD_SECONDS = 8 * 24 * 3600.0
 
 #: Legs that carry out a ``/compact`` turn: Claude Code itself, and the native
 #: legs through the engine's own compaction (``NativeLoop`` manual compaction).
-COMPACTING_LEGS = frozenset({"delegated", "anthropic", "openai_responses", "openrouter"})
+COMPACTING_LEGS = frozenset({"delegated", "anthropic", "openai_responses", "openrouter", "gemini"})
 
 #: The continuation turn. Labelled, so it never reads as the owner's words.
 RESUME_PROMPT = (

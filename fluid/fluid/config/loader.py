@@ -720,6 +720,13 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
         client = LocalClient(
             api_key, base_url=pc.base_url, extra=pc.extra, **deadline
         )
+    elif pc.kind == "gemini":
+        from fluid.providers.gemini.client import GeminiClient
+
+        kwargs = {"api_key": api_key, **deadline}
+        if pc.base_url:
+            kwargs["base_url"] = pc.base_url
+        client = GeminiClient(**kwargs)
     else:
         raise ValueError(f"{pc.kind!r} is not a native provider kind")
 
