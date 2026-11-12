@@ -1100,10 +1100,26 @@ def effective_turn_source(turn: Dict[str, Any]) -> Optional[str]:
     stops at the first row it cannot read. Blocking DB reads; call it off
     the event loop.
     """
-    source = turn.get("source")
-    parent_id = turn.get("parent_turn_id")
+    return _retry_chain_origin(turn).get("source")
+
+
+def turn_provenance(turn: Dict[str, Any]) -> tuple[Optional[str], bool]:
+    """``(source, person_entered)`` of the row that began ``turn``'s retry chain.
+
+    Both come from that row's own admission (``turns.person_entered``), never
+    from an accounting origin, so an automatic answer or a parked turn's
+    automatic resume never reads as the owner typing. Blocking DB reads.
+    """
+    origin = _retry_chain_origin(turn)
+    return origin.get("source"), turns_db.person_entered(origin)
+
+
+def _retry_chain_origin(turn: Dict[str, Any]) -> Dict[str, Any]:
+    """The row a failover retry chain started from (``turn`` itself otherwise)."""
+    row = turn
     for _ in range(_MAX_RETRY_CHAIN):
-        if source not in RETRY_SOURCES or not parent_id:
+        parent_id = row.get("parent_turn_id")
+        if row.get("source") not in RETRY_SOURCES or not parent_id:
             break
         try:
             parent = turns_db.get_turn(parent_id)
@@ -1112,8 +1128,8 @@ def effective_turn_source(turn: Dict[str, Any]) -> Optional[str]:
             break
         if not parent:
             break
-        source, parent_id = parent.get("source"), parent.get("parent_turn_id")
-    return source
+        row = parent
+    return row
 
 
 def _enqueue(session_id: str, source: str, **kwargs: Any) -> Dict[str, Any]:

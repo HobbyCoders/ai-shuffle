@@ -64,8 +64,14 @@ def test_antigravity_rows_take_their_own_leg(mode):
 
 # --- the guard ----------------------------------------------------------------
 
-def _options(session_id="s1", turn_source="user", **extra):
-    return SimpleNamespace(extra={"app_session_id": session_id, **extra}, aih_turn_source=turn_source)
+def _options(session_id="s1", turn_source="user", person_entered=None, **extra):
+    """Run options as ``query_options`` builds them. By default an owner source
+    was entered by a person (the runtime's ``turn_provenance``) and any other
+    was not."""
+    if person_entered is None:
+        person_entered = turn_source in ag.OWNER_UI_TURN_SOURCES
+    return SimpleNamespace(extra={"app_session_id": session_id, **extra}, aih_turn_source=turn_source,
+                           aih_turn_person_entered=person_entered)
 
 
 @pytest.fixture
@@ -297,11 +303,14 @@ def _connected(row_id, session_id="s1"):
     adapter._engine = _Engine()
     adapter._antigravity_binding = ag.spawn_binding(db.get_model_provider(row_id, include_token=True))
     adapter._next_app_turn_source = None
+    adapter._next_turn_person_entered = False
     return adapter
 
 
-async def _turn(adapter, source):
-    adapter._next_app_turn_source = source
+async def _turn(adapter, source, entered=None):
+    # As the query engine hands a turn over: the source, then who entered it.
+    adapter.set_turn_source(source)
+    adapter.set_turn_person_entered(source in ag.OWNER_UI_TURN_SOURCES if entered is None else entered)
     await adapter._check_antigravity_turn()
 
 
@@ -334,11 +343,13 @@ async def test_guard_changes_apply_to_the_next_turn_of_a_connected_chat(client, 
     assert adapter._engine.specs == []
 
 
-@pytest.mark.parametrize("source,refused", [
-    ("user", False), ("queue", False), ("api", True), (None, True),
+@pytest.mark.parametrize("source,entered,refused", [
+    ("user", True, False), ("queue", True, False), ("worktree", True, False),
+    ("user", False, True),  # an answer Away mode gave: an owner source no person entered
+    ("api", False, True), (None, False, True),
 ])
 async def test_the_connect_check_uses_the_source_of_the_turn_it_serves(
-        client, session_row, monkeypatch, source, refused):
+        client, session_row, monkeypatch, source, entered, refused):
     # A new chat's first turn connects before it submits. SessionOptions has
     # no turn source, so the one ``connect_with_sdk_options`` was handed must
     # reach the connect-time guard: the owner's first typed turn runs on a
@@ -352,6 +363,7 @@ async def test_the_connect_check_uses_the_source_of_the_turn_it_serves(
 
     async def connect(opts):
         seen["source"] = adapter._connect_app_turn_source
+        seen["entered"] = adapter._connect_turn_person_entered
 
     async def nothing(*_args, **_kwargs):
         return None
@@ -360,10 +372,11 @@ async def test_the_connect_check_uses_the_source_of_the_turn_it_serves(
     monkeypatch.setattr(adapter, "prepare_background_completions", nothing, raising=False)
     monkeypatch.setattr(adapter, "reconcile_user_questions", nothing, raising=False)
     try:
-        await adapter.connect_with_sdk_options(SimpleNamespace(model="gemini-3.1-pro", aih_turn_source=source))
+        await adapter.connect_with_sdk_options(SimpleNamespace(
+            model="gemini-3.1-pro", aih_turn_source=source, aih_turn_person_entered=entered))
     except Exception:  # noqa: BLE001 — only the hand-over before connect is under test
         pass
-    assert seen["source"] == source
+    assert seen == {"source": source, "entered": entered}
 
     def no_binary(*_args, **_kwargs):
         raise FileNotFoundError("no agy here")  # past the guard: the next step
@@ -371,6 +384,7 @@ async def test_the_connect_check_uses_the_source_of_the_turn_it_serves(
     monkeypatch.setattr(ag, "build_spec", no_binary)
     options = SimpleNamespace(extra={"provider_id": row["id"], "app_session_id": "s1"}, add_dirs=[])
     adapter._connect_app_turn_source = source
+    adapter._connect_turn_person_entered = entered
     expected = ProviderTurnRefused if refused else ProviderConfigError
     with pytest.raises(expected) as caught:
         await adapter._connect_antigravity(options, None, None, None, None, False)
@@ -379,10 +393,177 @@ async def test_the_connect_check_uses_the_source_of_the_turn_it_serves(
     else:
         assert "no agy here" in str(caught.value)
     assert adapter._connect_app_turn_source is None
+    assert adapter._connect_turn_person_entered is False
     # A later bare connect has no source of its own: refused, not reused.
     if not refused:
         with pytest.raises(ProviderTurnRefused, match="no known origin"):
             await adapter._connect_antigravity(options, None, None, None, None, False)
+
+
+# --- provenance through the real enqueue and turn start -----------------------
+
+@pytest.fixture
+def guarded_chat(client):
+    """A real chat on a guarded personal sign-in row, and an adapter as a
+    connected chat leaves it. Rows go through ``enqueue_turn`` and
+    ``start_turn`` as the pump runs them; each turn's provenance is what
+    ``SessionRuntime._run_pump`` hands over (``turn_provenance``)."""
+    from app.db import sessions
+
+    row = _create(client)
+    sessions.create_session(session_id="chat-g", profile_id="default", title="Garden plan")
+    return row, _connected(row["id"], session_id="chat-g")
+
+
+def _start(turn_id, parked_resume=False):
+    from app.core.session_runtime import SessionRuntime
+    from app.db import turns
+
+    return turns.start_turn(turn_id, can_resume=SessionRuntime._can_resume_parked if parked_resume else None)
+
+
+async def _run(adapter, started):
+    """Hand ``started`` to the leg as the pump and the query engine do."""
+    from app.core.turn_scheduler import turn_provenance
+
+    source, entered = turn_provenance(started)
+    await _turn(adapter, source, entered)
+
+
+def _owner_turn_that_parks(prompt="Plan the beds"):
+    from app.db import turns
+
+    first = turns.enqueue_turn("chat-g", "user", prompt=prompt, profile_id="default")
+    first = _start(first["id"])
+    assert turns.park_turn(first["id"], ["monitor"])
+    return first
+
+
+def _answer(first, human_input):
+    """The question producer Away mode and the owner's own answer share."""
+    from app.db import interactions, turns
+
+    question = interactions.create_interaction("chat-g", "question", {"request_id": "q1"}, None)
+    assert interactions.answer_question_and_enqueue(
+        question, {"Raised beds?": "Yes"}, None, "Raised beds: Yes", first, human_input=human_input)
+    [answer] = turns.get_queued_turns("chat-g")
+    return answer
+
+
+@pytest.mark.parametrize("parked", [True, False])
+async def test_an_answer_away_mode_gives_is_refused_and_the_owners_own_passes(guarded_chat, parked):
+    # Away mode's answer is admitted with source "user"; the row records that
+    # no person gave it, and the guard reads that, parked resume or not.
+    from app.core.environment import ProviderTurnRefused
+    from app.db import turns
+
+    _, adapter = guarded_chat
+    first = _owner_turn_that_parks()
+    await _run(adapter, first)  # the owner's first message
+    if not parked:
+        turns.settle_turn(first["id"], "completed")
+    away = _start(_answer(first, human_input=False)["id"], parked_resume=parked)
+    assert away["source"] == "user" and (away["id"] == first["id"]) is parked
+    with pytest.raises(ProviderTurnRefused, match="refused for a reply sent for you automatically"):
+        await _run(adapter, away)
+    turns.settle_turn(away["id"], "completed")
+
+    second = _owner_turn_that_parks("And the paths?")
+    if not parked:
+        turns.settle_turn(second["id"], "completed")
+    mine = _start(_answer(second, human_input=True)["id"], parked_resume=parked)
+    await _run(adapter, mine)  # the owner answering themselves
+
+
+async def test_a_retry_replays_the_exact_row_it_reruns(guarded_chat, client):
+    # A parked owner turn resumed automatically ("unpark") while unattended use
+    # was allowed fails; the owner restores the guard and presses Retry. The
+    # Retry re-runs that row, which no person entered: refused, though the
+    # turn began as the owner's ("user" by ``logical_source``).
+    from app.core.environment import ProviderTurnRefused
+    from app.db import turns
+
+    row, adapter = guarded_chat
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+    first = _owner_turn_that_parks()
+    wake = turns.enqueue_turn("chat-g", "unpark", prompt="The monitor finished", profile_id="default")
+    resumed = _start(wake["id"], parked_resume=True)
+    assert resumed["id"] == first["id"] and resumed["source"] == "unpark"
+    assert turns.logical_source(resumed) == "user"  # the accounting origin, not who entered it
+    await _run(adapter, resumed)  # allowed while lifted
+    turns.settle_turn(resumed["id"], "aborted", error="the agent stopped")
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": False})
+
+    retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default")["id"])
+    with pytest.raises(ProviderTurnRefused, match="refused for a background turn picked up again"):
+        await _run(adapter, retry)
+    turns.settle_turn(retry["id"], "aborted", error="refused")
+
+    # A Retry of the owner's own typed turn passes, and a Retry of that Retry.
+    typed = _start(turns.enqueue_turn("chat-g", "user", prompt="Try again", profile_id="default")["id"])
+    turns.settle_turn(typed["id"], "aborted", error="the agent stopped")
+    for _ in range(2):
+        retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default")["id"])
+        await _run(adapter, retry)
+        turns.settle_turn(retry["id"], "aborted", error="the agent stopped")
+
+    # And a Retry of an Away answer is refused like the answer itself.
+    away = _start(_answer(_owner_turn_that_parks("Water?"), human_input=False)["id"], parked_resume=True)
+    turns.settle_turn(away["id"], "aborted", error="the agent stopped")
+    retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default")["id"])
+    with pytest.raises(ProviderTurnRefused, match="refused for a reply sent for you automatically"):
+        await _run(adapter, retry)
+
+
+@pytest.mark.parametrize("human_input", [False, True])
+async def test_a_compaction_written_for_an_answer_keeps_who_entered_it(guarded_chat, human_input):
+    # A compact-first send, and a compaction queued again before its
+    # continuation, are admitted with the answer's own source: who entered
+    # the answer travels with it, so an Away answer's compaction is refused
+    # on the row like the answer.
+    from app.core.environment import ProviderTurnRefused
+    from app.db import turns
+
+    _, adapter = guarded_chat
+    answer = turns.enqueue_turn("chat-g", "user", prompt="Raised beds: Yes", profile_id="default",
+                                payload={"compact_first": True, "question_answer_human_input": human_input})
+    compact = turns.get_turn(answer["payload"]["compact_before_turn_id"])
+    again = turns.retry_pair_compaction(answer["id"], attempt=2)
+    for row in (compact, again):
+        assert row["source"] == "user" and row["prompt"] == "/compact"
+        started = dict(row, state="running")
+        if human_input:
+            await _run(adapter, started)
+        else:
+            with pytest.raises(ProviderTurnRefused, match="refused for a reply sent for you automatically"):
+                await _run(adapter, started)
+
+
+@pytest.mark.parametrize("source,payload,joins", [
+    ("user", {}, True),                                         # the owner typing
+    ("queue", {}, True),                                        # the owner's queued message
+    ("user", {"question_answer_human_input": True}, True),      # the owner's own answer
+    ("user", {"question_answer_human_input": False}, False),    # Away mode's answer
+    ("unpark", {}, False),
+])
+def test_text_no_person_entered_never_joins_an_antigravity_turn(mock_db, monkeypatch, source, payload, joins):
+    from app.core import session_runtime
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.db import sessions, turns
+
+    sessions.create_session(session_id="chat-s", profile_id=None, title="Steer")
+    live = turns.start_turn(turns.enqueue_turn("chat-s", "user", prompt="Plan the beds")["id"])
+    runtime = session_runtime.SessionRuntime(live)
+    adapter = HarnessAdapter.__new__(HarnessAdapter)
+    adapter._antigravity_binding = None
+    monkeypatch.setattr(runtime, "_live_adapter", lambda: adapter)
+    refusal = runtime._steer_refusal
+    row = {"id": "t-steer", "source": source, "prompt": "hi", "payload": payload, "profile_id": None,
+           "overrides": {}}
+    # Another leg: the rule does not apply (the later binding checks may still).
+    assert refusal(row) != "text no person entered runs as its own turn here"
+    adapter._antigravity_binding = "binding"
+    assert (refusal(row) == "text no person entered runs as its own turn here") is not joins
 
 
 @pytest.mark.parametrize("kind,reason", [

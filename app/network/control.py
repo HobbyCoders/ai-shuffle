@@ -789,6 +789,11 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
     from app.core import turn_manager
     session_id = str(body.get("session_id") or "")
     row = _require_owned(session_id)
+    # Every sender names the turn's source (``submit_turn`` always does). A
+    # body without one is refused, never read as the owner typing ("user").
+    source = body.get("source")
+    if not isinstance(source, str) or not source:
+        raise ValueError("source is required")
     payload = dict(body.get("payload") or {})
     from app.core import session_handoff
     if session_handoff.drop_resume(session_id, payload):
@@ -816,7 +821,6 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
     payload.setdefault("forwarded_by_device", from_device)
     # Forwarded turns bypass the chat WebSocket's first-message title backfill.
     # Only the owner can persist a title that survives catalog replication.
-    source = str(body.get("source") or "user")
     prompt = body.get("prompt")
     if source in {"user", "worktree"} and isinstance(prompt, str) and not (row.get("title") or "").strip():
         from app.core.session_title import derive_session_title

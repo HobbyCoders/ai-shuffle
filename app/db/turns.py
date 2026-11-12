@@ -93,6 +93,28 @@ def _is_human_input(source: Optional[str], payload: Dict[str, Any]) -> bool:
     return source in HUMAN_INPUT_SOURCES and payload.get("question_answer_human_input") is not False
 
 
+#: Sources whose text a person enters in the app's own chat: typed or spoken
+#: (``user``), queued from the composer (``queue``), or the opening prompt of a
+#: new worktree or branch chat (``worktree``).
+OWNER_ENTRY_SOURCES = frozenset({"user", "queue", "worktree"})
+
+
+def person_entered(turn: Optional[Dict[str, Any]]) -> bool:
+    """Whether a person entered this row's text in the app's own chat.
+
+    Read from the row's OWN admission (its ``source`` column and payload),
+    never its accounting origin (``logical_source`` / ``birth_source``): a
+    parked turn that resumes as ``unpark`` is not the owner typing, whoever
+    began it. An owner source whose producer recorded that no person gave it
+    (Away mode's answer to a question, ``question_answer_human_input=False``)
+    is not either.
+    """
+    if not turn or turn.get("source") not in OWNER_ENTRY_SOURCES:
+        return False
+    payload = _parse_json(turn.get("payload")) or {}
+    return payload.get("question_answer_human_input") is not False
+
+
 def logical_source(turn: Optional[Dict[str, Any]]) -> Optional[str]:
     """The source that began the current work, not an in-place wake's source.
 
@@ -946,7 +968,9 @@ def enqueue_turn(
                 explicit_permission=explicit_permission,
                 payload={k: v for k, v in payload.items()
                          if k in ("api_user_id", "user_id", "forwarded_by_device", PERSON_INPUT_KEY,
-                                  COMPACTION_CONTINUATION_KEY, LIMIT_RESUME_KEY, WAKE_STOP_SEQ_KEY)},
+                                  COMPACTION_CONTINUATION_KEY, LIMIT_RESUME_KEY, WAKE_STOP_SEQ_KEY,
+                                  # Who entered it travels with its source.
+                                  "question_answer_human_input")},
                 instance_id=instance_id, _conn=conn,
             )
             payload["compact_before_turn_id"] = compact["id"]
@@ -2000,7 +2024,9 @@ def retry_pair_compaction(
             link["emergency"] = True
         compact_payload: Dict[str, Any] = {
             **{k: v for k, v in payload.items()
-               if k in ("api_user_id", "user_id", "forwarded_by_device", LIMIT_RESUME_KEY)},
+               if k in ("api_user_id", "user_id", "forwarded_by_device", LIMIT_RESUME_KEY,
+                        # Who entered it travels with its source.
+                        "question_answer_human_input")},
             COMPACTION_CONTINUATION_KEY: link,
         }
         if emergency:

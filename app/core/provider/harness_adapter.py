@@ -378,6 +378,10 @@ class HarnessAdapter(ProviderAdapter):
         self._next_app_turn_source: Optional[str] = None
         # The same, for the connect that serves the next turn (one-shot).
         self._connect_app_turn_source: Optional[str] = None
+        # Whether a person entered that turn in the app (the row's own
+        # admission; set_turn_person_entered). Same lifetimes as the sources.
+        self._next_turn_person_entered: bool = False
+        self._connect_turn_person_entered: bool = False
         self._antigravity_binding: Optional[str] = None
         # The next submit is the host's emergency compaction at the context
         # limit (set_emergency_compaction). Reset after each submit.
@@ -1512,6 +1516,7 @@ class HarnessAdapter(ProviderAdapter):
         # ``_connect_antigravity`` takes it, so a later bare ``connect()``
         # finds none and is refused rather than reusing an old source.
         self._connect_app_turn_source = getattr(sdk_options, "aih_turn_source", None)
+        self._connect_turn_person_entered = getattr(sdk_options, "aih_turn_person_entered", None) is True
         await self.connect(opts)
         await self.prepare_background_completions(
             getattr(sdk_options, "aih_background_task_completions", None)
@@ -2011,8 +2016,10 @@ class HarnessAdapter(ProviderAdapter):
         if not row:
             raise ProviderConfigError("This chat's Antigravity provider no longer exists.")
         source = getattr(self, "_connect_app_turn_source", None)
-        self._connect_app_turn_source = None
-        refusal = await run_sync(antigravity.guard_refusal, row, options, turn_source=source)
+        entered = getattr(self, "_connect_turn_person_entered", False) is True
+        self._connect_app_turn_source, self._connect_turn_person_entered = None, False
+        refusal = await run_sync(antigravity.guard_refusal, row, options,
+                                 turn_source=source, person_entered=entered)
         if refusal:
             raise ProviderTurnRefused(refusal)
         try:
@@ -2081,9 +2088,11 @@ class HarnessAdapter(ProviderAdapter):
 
         # Like ``_next_turn_source``: it names the next submit only.
         source, self._next_app_turn_source = self._next_app_turn_source, None
+        entered = getattr(self, "_next_turn_person_entered", False) is True
+        self._next_turn_person_entered = False
         options = self._options
         provider_id = ((options.extra if options is not None else None) or {}).get("provider_id")
-        refusal, row = await run_sync(antigravity.turn_row, provider_id, options, source)
+        refusal, row = await run_sync(antigravity.turn_row, provider_id, options, source, entered)
         if refusal:
             raise ProviderTurnRefused(refusal)
         assert row is not None
@@ -2107,6 +2116,20 @@ class HarnessAdapter(ProviderAdapter):
         """
         self._next_turn_source = fluid_turn_source(app_source)
         self._next_app_turn_source = app_source
+        # A new source never inherits an older turn's provenance.
+        self._next_turn_person_entered = False
+
+    def steers_need_a_person(self) -> bool:
+        """True on an Antigravity row: only text a person entered may join
+        its live turn. Any other row runs as its own turn, where the guard
+        decides it (``SessionRuntime._steer_refusal``)."""
+        return self._antigravity_binding is not None
+
+    def set_turn_person_entered(self, entered: Optional[bool]) -> None:
+        """Whether a person entered the next turn in the app (call after
+        ``set_turn_source``). Read from the turn row's own admission; only
+        ``True`` counts. Next submit only, like the source."""
+        self._next_turn_person_entered = entered is True
 
     def _take_turn_source(self) -> str:
         source, self._next_turn_source = self._next_turn_source, "user"

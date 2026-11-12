@@ -1522,10 +1522,13 @@ class SessionRuntime:
         # still counts as a wake.
         from app.core.generation_resolver import continues_approved_generation
         from app.core.provider.harness_adapter import fluid_turn_source
-        from app.core.turn_scheduler import effective_turn_source
+        from app.core.turn_scheduler import turn_provenance
 
-        app_source = await asyncio.to_thread(effective_turn_source, self.turn)
+        app_source, person_entered = await asyncio.to_thread(turn_provenance, self.turn)
         turn_overrides["turn_source"] = app_source
+        # Host-set from this row's own admission (never a client value): the
+        # Antigravity guard passes only a turn a person entered in the app.
+        turn_overrides["turn_person_entered"] = person_entered
         from app.core.time_awareness import owner_message_receipt
 
         owner_receipt = owner_message_receipt(self.turn)
@@ -2438,6 +2441,13 @@ class SessionRuntime:
                 return "peer message without an attributed sender"
             # The asynchronous sweep revalidates scope immediately before
             # hand-over; this predicate is also used by the startup probe.
+        if row.get("source") != "agent_message" and not turns_db.person_entered(row):
+            # Text no person entered (Away mode's answer to a question) never
+            # joins a live turn on an Antigravity row: it runs as its own turn,
+            # where the personal-sign-in guard decides it by its provenance.
+            steers_need_a_person = getattr(self._live_adapter(), "steers_need_a_person", None)
+            if callable(steers_need_a_person) and steers_need_a_person() is True:
+                return "text no person entered runs as its own turn here"
         if payload.get("upload_blob_ids") or payload.get("upload_references"):
             return "attachments need turn setup"
         if row.get("source") != "agent_message":

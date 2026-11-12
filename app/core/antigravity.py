@@ -750,13 +750,17 @@ async def prune_orphan_homes() -> int:
 
 _CONNECT_SOURCE: Any = object()
 
-# The guard's own rule, by app ``turns.source``: only a turn the owner typed
-# or spoke in the app's own chat UI passes. Deliberately NOT
-# ``turn_sources.PERSON_PRESENT_TURN_SOURCES``: that set also admits "api"
-# (any public-API caller), "connector" (a chat connector message) and
-# "resume" (a Retry; decided below by the turn it re-runs). Voice in the app
-# is stamped "user" or "queue". Any other source, and no source, is refused.
-OWNER_UI_TURN_SOURCES = frozenset(("user", "queue", "worktree"))
+# The guard's own rule: only a turn the owner typed or spoke in the app's own
+# chat UI passes. It reads the turn row's own provenance, two facts set by
+# the host from that row (``turn_scheduler.turn_provenance``): the source it
+# was admitted with, and whether a person entered it (``turns.person_entered``:
+# Away mode's answers and a parked turn's automatic resume are not). The
+# source must be one of these (deliberately NOT
+# ``turn_sources.PERSON_PRESENT_TURN_SOURCES``, which also admits "api", any
+# public-API caller, and "connector", a chat connector message) AND a person
+# must have entered it. "resume" (a Retry) takes both facts from the exact
+# row it re-runs. Any other source, no source, or no person: refused.
+OWNER_UI_TURN_SOURCES = frozenset(("user", "queue", "worktree"))  # == turns.OWNER_ENTRY_SOURCES
 RETRY_TURN_SOURCE = "resume"
 
 # Why a turn the owner did not type was started, by app ``turns.source``.
@@ -775,6 +779,8 @@ _SOURCE_REASONS = {
     "watch": "a watch",
 }
 NO_SOURCE_REASON = "a run with no known origin"
+#: An owner source no person entered (Away mode's answer, an automatic resume).
+NOT_ENTERED_REASON = "a reply sent for you automatically, such as an answer Away mode gave"
 #: A run another agent starts (Task, Swarm, a subagent, StartSession).
 AGENT_RUN_REASON = "a run another agent starts"
 API_REQUEST_REASON = _SOURCE_REASONS["api"]
@@ -838,24 +844,28 @@ def unattended_run_refusal(provider_id: Optional[str], reason: str) -> Optional[
     return GUARD_REFUSAL.format(reason=reason)
 
 
-def _retried_source(session_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """``(source, refusal)`` for a Retry: the source of the turn it re-runs.
+def _retried_provenance(session_id: Optional[str]) -> tuple[Optional[str], bool, Optional[str]]:
+    """``(source, person_entered, refusal)`` for a Retry: the turn it re-runs.
 
-    A Retry sent with an API key is a request through the API. Otherwise the
-    newest other turn of the chat that ran decides (a Retry of a Retry walks
-    back; a failover retry follows its parent). Unknown is a refusal.
+    A Retry re-runs the request the chat's newest started turn left
+    unanswered, so that exact row decides, by its own admission
+    (``turn_scheduler.turn_provenance``): its real source, never the
+    accounting origin of a parked turn's automatic resume, and whether a
+    person entered it. A Retry sent with an API key is a request through the
+    API; a Retry of a Retry walks back to the row it re-ran; a failover retry
+    follows its parent. Unknown is a refusal.
     """
-    unknown = (None, "a retry whose original turn could not be checked")
+    unknown = (None, False, "a retry whose original turn could not be checked")
     if not session_id:
         return unknown
     try:
-        from app.core.turn_scheduler import effective_turn_source
+        from app.core.turn_scheduler import turn_provenance
         from app.db import turns
 
         live = turns.get_live_turn(session_id) or {}
         payload = live.get("payload") or {}
         if isinstance(payload, dict) and payload.get("api_user_id"):
-            return None, _SOURCE_REASONS["api"]
+            return None, False, _SOURCE_REASONS["api"]
         with turns.get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -867,35 +877,38 @@ def _retried_source(session_id: Optional[str]) -> tuple[Optional[str], Optional[
         for row in turns._rows(rows):
             if row.get("source") == RETRY_TURN_SOURCE:
                 if row["payload"].get("api_user_id"):
-                    return None, _SOURCE_REASONS["api"]
+                    return None, False, _SOURCE_REASONS["api"]
                 continue
-            source = turns.logical_source(row)
-            if source == "failover":
-                source = effective_turn_source(row)
-            return (source, None) if source else unknown
+            source, entered = turn_provenance(row)
+            return (source, entered, None) if source else unknown
     except Exception:  # noqa: BLE001 — fail closed
         logger.debug("[antigravity] could not read the retried turn of %s", session_id, exc_info=True)
     return unknown
 
 
-def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE) -> Optional[str]:
+def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE,
+                      person_entered: Any = _CONNECT_SOURCE) -> Optional[str]:
     """Why this run is not the owner typing in their own chat, or None.
 
     Refused: automation runs, scheduled and other unattended turns, Task /
-    Swarm workers, subagent children, sessions another agent started, and
-    internal calls with no app session. Reads the session row; never raises
-    (a failed read counts as unattended). ``turn_source`` names the turn
-    being started; by default the source the session connected with.
+    Swarm workers, subagent children, sessions another agent started,
+    answers given for the owner, and internal calls with no app session.
+    Reads the session row; never raises (a failed read counts as
+    unattended). ``turn_source`` and ``person_entered`` describe the turn
+    being started (its row's own admission); by default what the session
+    connected with. Only ``person_entered is True`` counts.
     """
     extra = getattr(options, "extra", None) or {}
     if extra.get("one_shot") or extra.get("assistant_proactive") is not None:
         return "a background call"
     if turn_source is _CONNECT_SOURCE:
         turn_source = getattr(options, "aih_turn_source", None)
+    if person_entered is _CONNECT_SOURCE:
+        person_entered = getattr(options, "aih_turn_person_entered", None)
     session_id = extra.get("app_session_id")
     if turn_source == RETRY_TURN_SOURCE:
-        # A Retry runs with the provenance of the turn it re-runs.
-        turn_source, why = _retried_source(session_id)
+        # A Retry runs with the provenance of the exact turn it re-runs.
+        turn_source, person_entered, why = _retried_provenance(session_id)
         if why:
             return why
     if not turn_source:
@@ -906,6 +919,8 @@ def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE) -> Op
         if turn_source == "agent_message":
             return _agent_message_reason(session_id)
         return _SOURCE_REASONS.get(str(turn_source), "a scheduled or automatic turn")
+    if person_entered is not True:
+        return NOT_ENTERED_REASON
     if not session_id:
         return "a background call"
     try:
@@ -934,19 +949,20 @@ def unattended_reason(options: Any, *, turn_source: Any = _CONNECT_SOURCE) -> Op
 
 
 def guard_refusal(row: Mapping[str, Any], options: Any, *,
-                  turn_source: Any = _CONNECT_SOURCE) -> Optional[str]:
+                  turn_source: Any = _CONNECT_SOURCE,
+                  person_entered: Any = _CONNECT_SOURCE) -> Optional[str]:
     """The refusal text for this run on this row, or None to proceed."""
     if not guarded(row):
         return None
-    reason = unattended_reason(options, turn_source=turn_source)
+    reason = unattended_reason(options, turn_source=turn_source, person_entered=person_entered)
     return GUARD_REFUSAL.format(reason=reason) if reason else None
 
 
 MISSING_ROW = "This chat's Antigravity provider no longer exists."
 
 
-def turn_row(provider_id: Optional[str], options: Any,
-             turn_source: Optional[str]) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+def turn_row(provider_id: Optional[str], options: Any, turn_source: Optional[str],
+             person_entered: bool = False) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Re-read the row as a turn starts: ``(refusal, row)``.
 
     Every turn decides from the stored row, never from the copy a connected
@@ -968,7 +984,7 @@ def turn_row(provider_id: Optional[str], options: Any,
     if not row.get("enabled"):
         return (f"Model provider '{row.get('name') or provider_id}' is disabled. "
                 "Re-enable it in Settings or pick a different model."), None
-    return guard_refusal(row, options, turn_source=turn_source), row
+    return guard_refusal(row, options, turn_source=turn_source, person_entered=person_entered), row
 
 
 def spawn_binding(row: Mapping[str, Any]) -> str:

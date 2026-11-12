@@ -2225,6 +2225,9 @@ def build_options_from_profile(
     # The app turn source (user, unpark, wakeup, ...). The fluid adapter
     # records it on the turn's TurnStarted event; inert elsewhere.
     options.aih_turn_source = overrides.get("turn_source")
+    # Whether a person entered this turn in the app (the row's own admission,
+    # host-set by the runtime). The Antigravity guard reads it; None is "no".
+    options.aih_turn_person_entered = overrides.get("turn_person_entered") is True
     options.aih_owner_receipt = {key: overrides.get(key) for key in ("owner_message_at", "owner_input_id")}
     # The scheduler's emergency compaction at the context limit (a pair's
     # last-resort ``/compact``); the fluid adapter hands it to the engine.

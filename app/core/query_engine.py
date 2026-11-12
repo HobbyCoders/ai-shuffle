@@ -1547,6 +1547,9 @@ async def _stream_query_turn(
         set_turn_source = getattr(state.adapter, "set_turn_source", None)
         if callable(set_turn_source):
             set_turn_source(getattr(options, "aih_turn_source", None))
+        set_person_entered = getattr(state.adapter, "set_turn_person_entered", None)
+        if callable(set_person_entered):
+            set_person_entered(getattr(options, "aih_turn_person_entered", None))
         set_owner_receipt = getattr(state.adapter, "set_owner_receipt", None)
         if callable(set_owner_receipt):
             set_owner_receipt(getattr(options, "aih_owner_receipt", None))
@@ -3136,6 +3139,9 @@ async def _stream_to_websocket_turn(
         set_turn_source = getattr(state.adapter, "set_turn_source", None)
         if callable(set_turn_source):
             set_turn_source(getattr(options, "aih_turn_source", None))
+        set_person_entered = getattr(state.adapter, "set_turn_person_entered", None)
+        if callable(set_person_entered):
+            set_person_entered(getattr(options, "aih_turn_person_entered", None))
         set_owner_receipt = getattr(state.adapter, "set_owner_receipt", None)
         if callable(set_owner_receipt):
             set_owner_receipt(getattr(options, "aih_owner_receipt", None))
