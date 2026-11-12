@@ -1009,6 +1009,7 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
         encrypted_token = _encrypt_token_or_400(raw_token)
 
     provider_id = str(uuid.uuid4())
+    gemini_verified = False
 
     base_url = _normalize_base_url(body.provider_type, body.base_url)
     auth_mode = body.auth_mode
@@ -1029,8 +1030,9 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
             {"provider_type": body.provider_type})
         if not raw_token:
             raise HTTPException(status_code=400, detail="A Google AI Studio API key is required.")
-        # Only a clear rejection refuses saving; an outage does not.
-        await _check_gemini_key({"base_url": base_url}, raw_token)
+        # Only a clear rejection refuses saving; an outage does not (the
+        # row is saved with no verdict, distinct from a verified ``ok``).
+        gemini_verified = await _check_gemini_key({"base_url": base_url}, raw_token)
 
     async with operation_lock(provider_id):
         row = await run_sync(
@@ -1056,6 +1058,9 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
     if row is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail="Could not create model provider")
+    if google and gemini_verified:
+        await _record_credential_check(provider_id, accepted=True,
+                                       row={"auth_token": encrypted_token, "base_url": base_url})
 
     full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)
@@ -1146,9 +1151,14 @@ async def update_provider(
     if effective_type in native_providers.PROVIDERS and (raw_token or body.base_url is not None):
         key = raw_token or _generic_auth_token(await run_sync(db.get_model_provider, provider_id, include_token=True))
         await _check_native_key({**existing, **updates}, key)
+    gemini_verified: Optional[dict] = None
     if effective_type == gemini_provider.PROVIDER and (raw_token or body.base_url is not None):
-        key = raw_token or _generic_auth_token(await run_sync(db.get_model_provider, provider_id, include_token=True))
-        await _check_gemini_key({**existing, **updates}, key)
+        stored = None if raw_token else await run_sync(db.get_model_provider, provider_id, include_token=True)
+        checked = {**existing, **updates}
+        if await _check_gemini_key(checked, raw_token or _generic_auth_token(stored)):
+            # The key blob and endpoint Google accepted; recorded after the write.
+            gemini_verified = {"auth_token": updates.get("auth_token") or (stored or {}).get("auth_token"),
+                               "base_url": checked.get("base_url")}
     # A discovery snapshot belongs to the key and endpoint that produced it.
     # Treat an explicit nonblank replacement as a new binding conservatively.
     catalog_binding_changed = bool(raw_token) or any(
@@ -1167,6 +1177,8 @@ async def update_provider(
                                     detail="Model provider not found")
             if catalog_binding_changed:
                 await run_sync(model_catalogs.delete, provider_id)
+    if gemini_verified is not None:
+        await _record_credential_check(provider_id, accepted=True, row=gemini_verified)
 
     full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)

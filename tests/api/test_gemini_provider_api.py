@@ -228,12 +228,31 @@ def test_a_rejection_of_a_key_replaced_mid_check_is_not_recorded(client):
     assert _status(row["id"]) != "rejected"
 
 
+@pytest.mark.parametrize(("handler", "status"), [
+    (lambda _: httpx.Response(200, json={"models": []}), "ok"),
+    (lambda _: httpx.Response(503, json={"error": {"code": 503, "status": "UNAVAILABLE"}}), None),
+    (_drop, None),
+])
+def test_saving_stores_a_verified_key_apart_from_one_that_could_not_be_checked(client, handler, status):
+    created = create(client, handler, auth_token=f"  {KEY}  ")
+    assert created.status_code == 200, created.text
+    row_id = created.json()["id"]
+    assert _status(row_id) == status
+    # Surrounding spaces are trimmed before the key is checked and stored.
+    assert encryption.decrypt_value(db.get_model_provider(row_id, include_token=True)["auth_token"]) == KEY
+    with _respond(handler):
+        replaced = client.patch(f"{ROOT}/{row_id}", json={"auth_token": "fake-google-new-key"})
+    assert replaced.status_code == 200, replaced.text
+    assert _status(row_id) == status
+
+
 def test_a_rejected_fetch_is_cleared_by_saving_a_new_key(client):
     row = _checked_ok(client)
     with _respond(lambda _: httpx.Response(400, json=REJECTED)):
         assert client.post(f"{ROOT}/{row['id']}/fetch-models").status_code == 502
     assert _status(row["id"]) == "rejected"
-    with _respond(lambda _: httpx.Response(200, json={"models": []})):
+    # A new key whose check could not finish clears the old verdict without claiming ok.
+    with _respond(lambda _: httpx.Response(503)):
         assert client.patch(f"{ROOT}/{row['id']}", json={"auth_token": "fake-google-new-key"}).status_code == 200
     assert _status(row["id"]) is None
     with _respond(lambda _: httpx.Response(200, json={"models": []})):

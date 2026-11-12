@@ -86,8 +86,9 @@ selections on subsequent startups.
 
 These text providers run on Fluid's native agent loop through Anthropic Messages;
 no vendor CLI or OAuth login is used. `GET /api/v1/model-providers/native-options`
-(owner only) returns `{ "providers": [...] }` with six enrollment choices for these providers
-(plus [Google Gemini](#native-google-gemini-key)), including on a fresh install. Each choice has `provider_type`, plain `display_name`, `auth_mode`,
+(owner only) returns `{ "providers": [...] }` with seven enrollment choices, including on a
+fresh install: six for these providers and one for [Google Gemini](#native-google-gemini-key),
+which differs as described there. Each choice has `provider_type`, plain `display_name`, `auth_mode`,
 `credential_kind` (`subscription` or `api_key`), `credential_label`, `slot`, `base_url`,
 `api_dialect: "anthropic"`, `key_page_url`, `key_prefixes`, and
 `usage_meter_available: false`. An empty `key_prefixes` means no documented prefix
@@ -98,6 +99,7 @@ hint, not an invalid key. Prefixes are not used as credential validation.
 | `kimi` / Kimi | Kimi Code membership / `kimi:subscription` | Kimi API (pay as you go) / `kimi:key` |
 | `minimax` / MiniMax | MiniMax M Plan / `minimax:subscription` | MiniMax API (pay as you go) / `minimax:key` |
 | `opencode` / OpenCode | OpenCode Go / `opencode:subscription` | OpenCode Console (pay as you go) / `opencode:key` |
+| `google` / Google Gemini | none | Google AI Studio API key / `google:key` |
 
 Create through `POST /api/v1/model-providers`, for example:
 
@@ -203,7 +205,13 @@ must be omitted, `null` or `api_key`, and `api_dialect` must be omitted.
 
 Saving or replacing a key lists one model (`GET /v1beta/models?pageSize=1`), which
 spends no tokens. Only `401`, `403` or a `400` `API_KEY_INVALID` rejects it; outages
-and rate limits do not prevent saving. `POST /{id}/check-key` uses the same request.
+and rate limits do not prevent saving. `POST /{id}/check-key` uses the same request:
+`{"status": "valid"}`, `{"status": "unavailable"}` when Google could not be reached, or
+`400` when Google rejected the key. The worker records the verdict locally
+(`credential_status`: `ok` after an accepted check on save, check-key or model fetch,
+`rejected` after a rejection, unset when the key was never checked or the check could not
+finish). A rejected row stops counting as ready until a check passes or the key or
+endpoint changes; a verdict about a key replaced while the check ran is dropped.
 `POST /{id}/fetch-models` pages through Google's model list and keeps `gemini-*`
 text models (image, audio, TTS, Live and embedding models are left out).
 Requests never follow redirects and send the key in the `x-goog-api-key` header,
