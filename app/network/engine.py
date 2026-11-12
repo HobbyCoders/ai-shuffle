@@ -815,6 +815,10 @@ def materialize(
         record = coll.materialize_hook(record)
     nested_columns = _map_nested_secrets(coll, record, storing=True)
     encrypted_columns = [name for name in record.get("_enc") or [] if name not in nested_columns]
+    if coll.name == "model_providers":
+        # Provider row before its usage snapshot, the order every usage writer
+        # takes: deleting the snapshot first can deadlock against a poll.
+        cursor.execute(f"SELECT 1 FROM {coll.table} WHERE {where} FOR UPDATE", keys)
     previous = _read_row(cursor, coll, record_id) if coll.name == "model_providers" else None
     columns: List[str] = []
     values: List[Any] = []

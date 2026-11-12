@@ -363,6 +363,8 @@ def compatible_cost(provider: str, model: str, usage: Mapping[str, Any]) -> floa
 
         tokens_1h = usage.get(CACHE_WRITE_1H_KEY, 0) or 0
         if isinstance(tokens_1h, int) and not isinstance(tokens_1h, bool) and tokens_1h > 0:
+            # A share kept from message_start never exceeds the final total.
+            tokens_1h = min(tokens_1h, usage.get("cache_creation_input_tokens", 0) or 0)
             write_rate = price.cache_write if price.cache_write is not None else price.input
             cost += tokens_1h * (price.input * _KIMI_1H_WRITE - write_rate) / 1_000_000
     return cost

@@ -14,13 +14,13 @@ from fluid.providers.pricing import compatible_cost
 from fluid.store.base import MemoryStore
 
 
-def sse(start_usage, delta_usage):
+def sse(start_usage, *delta_usages):
     events = [
         {"type": "message_start", "message": {"id": "msg-test", "role": "assistant", "usage": start_usage}},
         {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
         {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hi"}},
         {"type": "content_block_stop", "index": 0},
-        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": delta_usage},
+        *({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": u} for u in delta_usages),
         {"type": "message_stop"},
     ]
     return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
@@ -135,3 +135,40 @@ async def test_output_only_delta_keeps_the_start_counts():
     usage, _ = await run_turn("minimax", "MiniMax-M3", sse({"input_tokens": 640, "cache_read_input_tokens": 60},
                                                          {"output_tokens": 9}))
     assert (usage.input_tokens, usage.cache_read_tokens, usage.output_tokens) == (640, 60, 9)
+
+
+# Kimi: message_start states the TTL split; whether the final delta repeats it varies.
+KIMI_1H_START = {"input_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 1000,
+                 "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 1000},
+                 "output_tokens": 1}
+BASE = (100 * 3.00 + 50 * 15.00) / 1_000_000  # kimi-k3 input and output
+
+
+@pytest.mark.parametrize("delta,expected", [
+    # No breakdown: the start's 1-hour count stands (1000 writes at 2x input).
+    ({"cache_creation_input_tokens": 1000}, BASE + 1000 * 6.00 / 1_000_000),
+    # An explicit zero 1-hour share: all writes at the 5-minute rate.
+    ({"cache_creation_input_tokens": 1000,
+      "cache_creation": {"ephemeral_5m_input_tokens": 1000, "ephemeral_1h_input_tokens": 0}},
+     BASE + 1000 * 3.00 / 1_000_000),
+    # Zero writes in total: no write cost and no 1-hour surcharge.
+    ({"cache_creation_input_tokens": 0}, BASE),
+    # A smaller final total than the start's 1-hour share caps the surcharge.
+    ({"cache_creation_input_tokens": 400}, BASE + 400 * 6.00 / 1_000_000),
+])
+async def test_kimi_final_delta_keeps_or_replaces_the_one_hour_share(delta, expected):
+    delta = {"input_tokens": 100, "cache_read_input_tokens": 0, "output_tokens": 50, **delta}
+    _, done = await run_turn("kimi", "kimi-k3", sse(KIMI_1H_START, delta))
+    assert done.cost_usd == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("costs,expected", [
+    ((0.002, 0.003), 0.003),  # cumulative: the later figure is the bill
+    ((0.003, 0.003), 0.003),  # a repeated figure is not charged twice
+    ((0.003, None), 0.003),   # a later delta without a cost adds nothing
+])
+async def test_opencode_cost_counts_once_per_stream(costs, expected):
+    deltas = [opencode_delta(c) if c is not None else {"input_tokens": 1200, "output_tokens": 300}
+              for c in costs]
+    _, done = await run_turn("opencode", "kimi-k3.1-pro", sse({"input_tokens": 1200}, *deltas))
+    assert done.cost_usd == pytest.approx(expected)
