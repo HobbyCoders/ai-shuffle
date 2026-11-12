@@ -156,6 +156,91 @@ def test_key_replacement_is_rechecked_and_a_rejected_key_keeps_the_old_one(clien
     assert checked.json() == {"status": "unavailable"}
 
 
+REJECTED = {"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.",
+                     "status": "INVALID_ARGUMENT", "details": [{"reason": "API_KEY_INVALID"}]}}
+
+
+def _status(row_id):
+    # Worker-local; the row getters do not select it.
+    with db.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT credential_status FROM model_providers WHERE id = %s", (row_id,))
+        return cursor.fetchone()["credential_status"]
+
+
+def _usable_ids():
+    return [r["id"] for r in db.list_usable_model_providers()]
+
+
+def _checked_ok(client):
+    row = create(client).json()
+    with _respond(lambda _: httpx.Response(200, json={"models": []})):
+        assert client.post(f"{ROOT}/{row['id']}/check-key").json() == {"status": "valid"}
+    assert _status(row["id"]) == "ok" and row["id"] in _usable_ids()
+    return row
+
+
+@pytest.mark.parametrize("answer", [
+    httpx.Response(400, json=REJECTED),
+    httpx.Response(401, json={"error": {"code": 401, "status": "UNAUTHENTICATED"}}),
+    httpx.Response(403, json={"error": {"code": 403, "status": "PERMISSION_DENIED"}}),
+])
+def test_check_key_records_googles_rejection_and_the_next_acceptance_clears_it(client, answer):
+    row = _checked_ok(client)
+    with _respond(lambda _: answer):
+        refused = client.post(f"{ROOT}/{row['id']}/check-key")
+    assert refused.status_code == 400 and "rejected" in refused.json()["detail"]
+    assert KEY not in refused.text
+    assert _status(row["id"]) == "rejected" and row["id"] not in _usable_ids()
+    with _respond(lambda _: httpx.Response(200, json={"models": []})):
+        assert client.post(f"{ROOT}/{row['id']}/check-key").json() == {"status": "valid"}
+    assert _status(row["id"]) == "ok" and row["id"] in _usable_ids()
+
+
+def _drop(_request):
+    raise httpx.ConnectError("offline")
+
+
+@pytest.mark.parametrize("handler", [
+    lambda _: httpx.Response(503, json={"error": {"code": 503, "status": "UNAVAILABLE"}}),
+    lambda _: httpx.Response(429, json={"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}}),
+    lambda _: httpx.Response(400, json={"error": {"code": 400, "status": "INVALID_ARGUMENT"}}),
+    _drop,
+])
+def test_a_check_that_could_not_reach_a_verdict_leaves_the_status_alone(client, handler):
+    row = _checked_ok(client)
+    with _respond(handler):
+        result = client.post(f"{ROOT}/{row['id']}/check-key")
+    assert result.status_code == 200 and result.json() == {"status": "unavailable"}
+    assert _status(row["id"]) == "ok" and row["id"] in _usable_ids()
+
+
+def test_a_rejection_of_a_key_replaced_mid_check_is_not_recorded(client):
+    row = _checked_ok(client)
+
+    def handler(_request):
+        # The owner saves a new key while Google is still answering for the old one.
+        db.update_model_provider(row["id"], auth_token=encryption.encrypt_value("fake-google-new-key"))
+        return httpx.Response(400, json=REJECTED)
+
+    with _respond(handler):
+        assert client.post(f"{ROOT}/{row['id']}/check-key").status_code == 400
+    assert _status(row["id"]) != "rejected"
+
+
+def test_a_rejected_fetch_is_cleared_by_saving_a_new_key(client):
+    row = _checked_ok(client)
+    with _respond(lambda _: httpx.Response(400, json=REJECTED)):
+        assert client.post(f"{ROOT}/{row['id']}/fetch-models").status_code == 502
+    assert _status(row["id"]) == "rejected"
+    with _respond(lambda _: httpx.Response(200, json={"models": []})):
+        assert client.patch(f"{ROOT}/{row['id']}", json={"auth_token": "fake-google-new-key"}).status_code == 200
+    assert _status(row["id"]) is None
+    with _respond(lambda _: httpx.Response(200, json={"models": []})):
+        assert client.post(f"{ROOT}/{row['id']}/fetch-models").status_code == 200
+    assert _status(row["id"]) == "ok"
+
+
 def test_fetch_models_pages_through_googles_list_and_keeps_text_models(client):
     row = create(client).json()
     pages = {

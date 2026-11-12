@@ -276,13 +276,22 @@ async def _require_gemini_workers() -> None:
             "Update these workers before adding a Google Gemini API key: " + ", ".join(workers)))
 
 
-async def _check_gemini_key(row, key) -> bool:
+async def _check_gemini_key(row, key, *, record_for: Optional[str] = None) -> bool:
+    """``record_for`` (a saved row's id) also stores the verdict: accepted or
+    rejected by Google. "Could not check" (False) never changes it."""
     from app.core.http_client import get_http_client
 
     try:
-        return await gemini_provider.check_key(key, client=get_http_client(), row=row)
+        accepted = await gemini_provider.check_key(key, client=get_http_client(), row=row)
+    except gemini_provider.KeyRejected as exc:
+        if record_for:
+            await _record_credential_check(record_for, accepted=False, row=row)
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except gemini_provider.KeyCheckError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
+    if accepted and record_for:
+        await _record_credential_check(record_for, accepted=True, row=row)
+    return accepted
 
 
 async def _check_native_key(row, key) -> bool:
@@ -968,9 +977,7 @@ async def check_native_provider_key(provider_id: str, token: str = Depends(requi
     if not row:
         raise HTTPException(status_code=404, detail="Model provider not found")
     if row["provider_type"] == gemini_provider.PROVIDER:
-        accepted = await _check_gemini_key(row, _generic_auth_token(row))
-        if accepted:
-            await _record_credential_check(provider_id, accepted=True, row=row)
+        accepted = await _check_gemini_key(row, _generic_auth_token(row), record_for=provider_id)
         return {"status": "valid" if accepted else "unavailable"}
     if row["provider_type"] not in native_providers.PROVIDERS:
         raise HTTPException(status_code=400, detail="Use this provider's existing credential check.")
@@ -1350,8 +1357,7 @@ async def _fetch_gemini_models(provider_id: str, row: dict, client) -> List[Dict
             response = await client.get(url, headers=headers, params=params,
                                         timeout=_FETCH_TIMEOUT, follow_redirects=False)
             if response.status_code >= 300:
-                if response.status_code in (401, 403) or (
-                        response.status_code == 400 and "API_KEY_INVALID" in response.text):
+                if gemini_provider.is_rejection(response.status_code, response.text):
                     await _record_credential_check(provider_id, accepted=False, row=row)
                 raise UpstreamModelsError(f"http_{response.status_code}")
             payload = response.json()

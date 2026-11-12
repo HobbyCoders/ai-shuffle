@@ -100,11 +100,25 @@ class KeyCheckError(ValueError):
     pass
 
 
+class KeyRejected(KeyCheckError):
+    """Google itself refused the key (not an outage or a missing key)."""
+
+
+def is_rejection(status_code: int, body: str) -> bool:
+    """Google's documented answers for a bad key: 400 ``API_KEY_INVALID``,
+    401 unauthenticated, 403 permission denied. Anything else (429, 5xx,
+    other 400s) says nothing about the key."""
+    if status_code in (401, 403):
+        return True
+    return status_code == 400 and ("API_KEY_INVALID" in body or "API key not valid" in body)
+
+
 async def check_key(key: str, *, client: httpx.AsyncClient, row: dict[str, Any] | None = None) -> bool:
     """Validate the key with the free models list (no inference spend).
 
-    Google returns 400 ``API_KEY_INVALID`` for a bad key and 403 for one
-    without access. Only those refuse saving; an outage does not erase a key.
+    Raises :class:`KeyRejected` on Google's refusal (:func:`is_rejection`);
+    only that refuses saving. Returns False when the key could not be
+    checked (outage, rate limit), so an outage does not erase a key.
     Upstream bodies are never surfaced (they may echo the request).
     """
     if not key:
@@ -119,6 +133,6 @@ async def check_key(key: str, *, client: httpx.AsyncClient, row: dict[str, Any] 
             body = response.text
         except Exception:  # noqa: BLE001 - only the classification matters
             body = ""
-        if response.status_code != 400 or "API_KEY_INVALID" in body or "API key not valid" in body:
-            raise KeyCheckError("Google rejected this API key. Check it in Google AI Studio and try again.")
+        if is_rejection(response.status_code, body):
+            raise KeyRejected("Google rejected this API key. Check it in Google AI Studio and try again.")
     return 200 <= response.status_code < 300
