@@ -609,21 +609,9 @@ def set_codex_token_bundle(
     with get_db() as conn:
         cursor = conn.cursor()
         lock_model_provider_slots(cursor)
-        cursor.execute(
-            "SELECT provider_type, auth_mode, extra_env_json FROM model_providers WHERE id = %s"
-            + (" FOR UPDATE" if keep_env_keys and "extra_env_json" in kwargs else ""),
-            (provider_id,),
-        )
+        cursor.execute("SELECT provider_type, auth_mode FROM model_providers WHERE id = %s", (provider_id,))
         previous = cursor.fetchone()
         previous_slot = model_provider_slot(previous) if previous else None
-        if keep_env_keys and "extra_env_json" in kwargs and previous:
-            stored = _parse_json_columns(row_to_dict(previous)).get("extra_env_json")
-            stored = stored if isinstance(stored, dict) else {}
-            sent = kwargs["extra_env_json"]
-            sent = json.loads(sent) if isinstance(sent, str) else (sent or {})
-            merged = {k: v for k, v in dict(sent).items() if k not in keep_env_keys}
-            merged.update({k: stored[k] for k in keep_env_keys if k in stored})
-            values[updates.index("extra_env_json = %s")] = _dump_json_value("extra_env_json", merged)
         if not preserve_refresh_stamp:
             # Serialize with sync's guarded UPSERT as well as other writers.
             cursor.execute("SELECT codex_last_refresh FROM model_providers WHERE id = %s FOR UPDATE", (provider_id,))
