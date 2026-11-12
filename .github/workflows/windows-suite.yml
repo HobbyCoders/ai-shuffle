@@ -99,7 +99,8 @@ jobs:
       - name: Build native desktop
         working-directory: desktop
         shell: bash
-        run: npm ci && npm run build
+        # Fetch Electron once here: the shard's parallel test files would otherwise race to download it (#1495).
+        run: npm ci && npm run build && node test/helpers/fetch-electron.mjs
       - name: Desktop shard
         working-directory: desktop
         shell: bash

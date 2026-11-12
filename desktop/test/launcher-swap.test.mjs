@@ -511,6 +511,7 @@ test('real Electron in node mode runs the restore helper over a real archive wit
  const f = install(t);
  assert.equal(await swap.replaceLauncher(f.options()), 'swapped');
  const result = spawnSync(electron, ['-e', swap.RESTORE_HELPER, '999999999', f.resources, sha(f.original), f.exe], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8' });
+ assert.equal(result.error?.code, undefined, `Electron could not run the restore helper: ${result.error?.message}`);
  assert.equal(result.status, 0, result.stderr);
  assert.deepEqual(f.asar(), f.original);
  await until(() => fs.existsSync(path.join(f.dir, 'Programs', 'AI Shuffle', 'relaunched')));

@@ -306,7 +306,9 @@ test('real Electron in node mode removes an unused desktop npm set holding a rea
     .then(result => process.stdout.write(JSON.stringify(result)), error => { console.error(error); process.exit(1); });`;
   const child = spawnSync(electron, ['-e', script, require.resolve('../dist/main/dependency-cleanup.js'), f.root, R],
     { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000, windowsHide: true });
-  assert.equal(child.error?.code, undefined, `the cleanup did not finish within 60 s: ${child.error?.message}`);
+  assert.equal(child.error?.code, undefined, child.error?.code === 'ETIMEDOUT'
+    ? `the cleanup did not finish within 60 s: ${child.error.message}`
+    : `Electron could not run the cleanup: ${child.error?.message}`);
   assert.equal(child.status, 0, child.stderr);
   assert.ok(child.stdout, `the cleanup never settled; stderr: ${child.stderr}`);
   await assertAsarSetRemoved(f, JSON.parse(child.stdout));
