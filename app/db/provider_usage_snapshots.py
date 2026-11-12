@@ -149,8 +149,8 @@ def record_provider_usage_failure(
 
     ``denied_fingerprint`` (a digest, never a credential) marks the capability
     as refused for that credential revision so pollers skip re-probing it.
-    ``expected_provider_revision`` drops a failure observed on an old binding,
-    like the same guard on ``upsert_provider_usage_snapshot``.
+    ``expected_provider_revision`` drops a failure that outlived the row's key
+    (replaced, disabled or deleted while the request was in flight).
     """
     if error_kind not in {
         "billing_access_denied", "missing_credentials", "timeout", "unavailable", "unsupported",
@@ -160,9 +160,8 @@ def record_provider_usage_failure(
     with get_db() as conn:
         cursor = conn.cursor()
         if expected_provider_revision is not None:
-            provider_id_guard, revision = expected_provider_revision
-            cursor.execute("SELECT revision, enabled FROM model_providers WHERE id = %s FOR UPDATE",
-                           (provider_id_guard,))
+            guard_id, revision = expected_provider_revision
+            cursor.execute("SELECT revision, enabled FROM model_providers WHERE id = %s FOR UPDATE", (guard_id,))
             current_provider = cursor.fetchone() or {}
             if current_provider.get("revision") != revision or not current_provider.get("enabled"):
                 return

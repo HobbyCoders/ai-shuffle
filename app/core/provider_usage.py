@@ -1267,6 +1267,16 @@ class ProviderUsageMonitor:
 
         await poll(row)
 
+    async def _poll_kimi_balance(self, row: Dict[str, Any]) -> None:
+        from app.core.native_usage import poll_kimi_balance
+
+        await poll_kimi_balance(row)
+
+    async def _poll_minimax_plan(self, row: Dict[str, Any]) -> None:
+        from app.core.native_usage import poll_minimax_plan
+
+        await poll_minimax_plan(row)
+
     async def _poll_provider(self, row: Dict[str, Any]) -> None:
         from app.db import database as db
 

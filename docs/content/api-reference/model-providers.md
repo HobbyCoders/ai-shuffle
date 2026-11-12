@@ -91,8 +91,17 @@ fresh install: six for these providers and one for [Google Gemini](#native-googl
 which differs as described there. Each choice has `provider_type`, plain `display_name`, `auth_mode`,
 `credential_kind` (`subscription` or `api_key`), `credential_label`, `slot`, `base_url`,
 `api_dialect: "anthropic"`, `key_page_url`, `key_prefixes`, and
-`usage_meter_available: false`. An empty `key_prefixes` means no documented prefix
+`usage_meter_available`. An empty `key_prefixes` means no documented prefix
 hint, not an invalid key. Prefixes are not used as credential validation.
+`usage_meter_available` is `true` only where the vendor documents a usage
+endpoint the saved key can read: the Kimi API balance (`kimi:key`) and the
+MiniMax M Plan remaining quota (`minimax:subscription`). The other four have
+no meter and no section in the usage popover; check their usage on the
+vendor's own page: Kimi Code on
+[My Quota](https://www.kimi.com/membership/subscription?tab=quota), the
+MiniMax API on [Balance](https://platform.minimax.io/user-center/payment/balance),
+and OpenCode Console and OpenCode Go on the
+[OpenCode console](https://opencode.ai/console).
 
 | Provider type / display | Plan label / slot | API label / slot |
 | --- | --- | --- |
