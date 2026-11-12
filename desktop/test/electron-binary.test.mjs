@@ -12,7 +12,7 @@ import { installedElectron } from './helpers/electron-binary.mjs';
 // downloads. This fake index.js leaves a marker and installs if it is ever run.
 test('the test-side Electron resolver never loads the package, so it never downloads', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shuffle-electron-binary-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const pkg = path.join(root, 'node_modules', 'electron');
   const marker = path.join(root, 'downloaded');
   const binary = process.platform === 'win32' ? 'electron.exe' : 'electron';
