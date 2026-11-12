@@ -1188,3 +1188,96 @@ async def test_a_mid_chat_permission_change_reaches_the_agent(fake_agy, tmp_path
     frames = [_json.loads(line) for line in log.read_text().splitlines() if line.strip()]
     modes = [f["params"]["modeId"] for f in frames if f.get("method") == "session/set_mode"]
     assert modes[-1] == agent_mode, modes
+
+
+# --- held agent messages after the guard is restored ------------------------
+
+def _held_text(sender, text):
+    from app.core import turn_scheduler
+    from fluid.context.peer import format_peer_message
+
+    return turn_scheduler._held_entry(format_peer_message(sender, text).strip(), sender=sender)
+
+
+@pytest.fixture
+def held_chat(client, monkeypatch):
+    """A chat on an Antigravity row with one held agent message, and the
+    notices its sender would get."""
+    from app.core import agent_messaging, session_runtime, turn_scheduler, wakeup_service
+    from app.db import sessions
+
+    turn_scheduler._delivered_held.clear()
+    told = []
+
+    async def deliver(target, sender, text, **kw):
+        told.append((target, sender, text))
+        return agent_messaging.DELIVERED, None
+
+    monkeypatch.setattr(agent_messaging, "deliver_message", deliver)
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: object() if sid == "worker-1" else None)
+
+    def make(mode="oauth-personal", allow=False, **fields):
+        row = _create(client, mode, **fields)
+        if allow is not None and mode == "oauth-personal":
+            client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+        chat = {"id": "chat-ag", "title": "Garden plan", "provider_id": row["id"]}
+        monkeypatch.setattr(sessions, "get_session", lambda sid: chat if sid == "chat-ag" else None)
+        wakeup_service.restore_held_peer_messages(
+            "chat-ag", _held_text("worker-1", "halfway there"), delay_seconds=None,
+            profile_id=None, project_id=None, model=None)
+        if mode == "oauth-personal" and not allow:
+            client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": False})
+        return row
+
+    yield make, told
+    for task in list(wakeup_service._timers.values()):
+        task.cancel()
+    wakeup_service._timers.clear()
+
+
+async def test_a_held_message_does_not_ride_the_owners_turn_after_the_guard_returns(held_chat):
+    from app.core import turn_scheduler
+
+    make, told = held_chat
+    make()  # held while lifted, then the owner restored the guard
+    owner_turn = {"id": "t-owner", "source": "user", "payload": {}}
+    assert await turn_scheduler.fold_held_peer_messages_for_turn("chat-ag", owner_turn) == ""
+    await asyncio.sleep(0.05)
+    assert len(told) == 1
+    target, receiver, text = told[0]
+    assert (target, receiver) == ("worker-1", "chat-ag")
+    assert text.startswith('Not sent: chat "Garden plan" runs on a personal Google sign-in')
+    # Handled once: not delivered later, not told twice.
+    assert await turn_scheduler.fold_held_peer_messages_for_turn("chat-ag", owner_turn) == ""
+    await asyncio.sleep(0.05)
+    assert len(told) == 1
+
+
+async def test_a_held_message_is_refused_where_it_would_be_promoted(held_chat):
+    from app.core import turn_scheduler
+    from app.db import turns as turns_db
+
+    make, told = held_chat
+    make()
+    held = _held_text("worker-1", "done now")
+    assert await turn_scheduler.promote_held_peer_messages("chat-ag", held, released=True) is None
+    assert turns_db.get_queued_turns("chat-ag") == []
+    await asyncio.sleep(0.05)
+    assert told and told[0][0] == "worker-1"
+
+
+@pytest.mark.parametrize("mode,fields,allow", [
+    ("oauth-personal", {}, True),           # the switch on
+    ("oauth-business", {}, None),           # business sign-ins are not guarded
+    ("gemini-api-key", {"api_key": "test-gemini-secret-value"}, None),
+])
+async def test_a_held_message_still_rides_when_the_row_allows_it(held_chat, mode, fields, allow):
+    from app.core import turn_scheduler
+
+    make, told = held_chat
+    make(mode, allow=allow, **fields)
+    folded = await turn_scheduler.fold_held_peer_messages_for_turn(
+        "chat-ag", {"id": "t-owner", "source": "user", "payload": {}})
+    assert "halfway there" in folded
+    await asyncio.sleep(0.05)
+    assert told == []

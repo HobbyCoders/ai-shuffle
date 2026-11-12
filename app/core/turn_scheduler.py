@@ -1490,13 +1490,69 @@ def _terminal_delivery_lock(session_id: str) -> asyncio.Lock:
 async def _take_held_peer_messages(session_id: str) -> str:
     """Remove the session's held messages from the durable store and return
     them, oldest first ("" when none). Messages already delivered to the
-    session are dropped. Caller holds the terminal lock."""
+    session are dropped, and so are messages the session may no longer
+    receive (:func:`_screen_held_for_guard`). Caller holds the terminal lock."""
     from app.core import wakeup_service
 
     rows = await wakeup_service.take_session_wakeups(
         session_id, wakeup_service.HELD_PEER_SOURCE,
     )
-    return _undelivered(session_id, _join_held(*(row.get("prompt") for row in rows)))
+    held = _undelivered(session_id, _join_held(*(row.get("prompt") for row in rows)))
+    return await _screen_held_for_guard(session_id, held)
+
+
+async def _screen_held_for_guard(session_id: str, held: str) -> str:
+    """``held``, or "" when the session's chat now refuses agent messages.
+
+    A message held while a personal Google sign-in row allowed unattended
+    use must not ride a later turn once the owner restored the guard: it is
+    checked again where it would be delivered, with the rule and refusal
+    its sender gets before queueing (``antigravity.agent_message_refusal``).
+    A refused message is recorded as handled (never delivered, never
+    retried) and its sender, when still running, is told. The turn it would
+    have ridden (the owner's own message included) runs without it. Every
+    other row, and this row with unattended use allowed, keeps ``held``.
+    """
+    if not held.strip():
+        return held
+    from app.core import antigravity
+    from app.db import sessions
+
+    try:
+        row = await asyncio.to_thread(sessions.get_session, session_id)
+    except Exception:  # noqa: BLE001 — the turn-start guard still applies
+        logger.debug("turn_scheduler: could not read %s to screen held messages", session_id, exc_info=True)
+        return held
+    refusal = await asyncio.to_thread(antigravity.agent_message_refusal, row)
+    if not refusal:
+        return held
+    keys = _held_ids(held)
+    _mark_held_delivered(session_id, keys)
+    senders = {key.split(" sender=", 1)[1] for key in keys if " sender=" in key}
+    logger.info(
+        "turn_scheduler: %d held agent message(s) for %s refused: its provider takes "
+        "turns only from the owner", len(keys), session_id,
+    )
+    for sender in senders:
+        # Off this lock: telling a sender is delivery to another session.
+        task = asyncio.get_running_loop().create_task(_tell_refused_sender(sender, session_id, refusal))
+        _kick_tasks.add(task)
+        task.add_done_callback(_kick_done)
+    return ""
+
+
+async def _tell_refused_sender(sender: str, receiver: str, refusal: str) -> None:
+    """Tell a still-running sender its held message was refused. A sender
+    that has ended is not woken for it; the refusal is logged above."""
+    from app.core import agent_messaging, session_runtime
+
+    if session_runtime.get_live_runtime(sender) is None:
+        logger.info("turn_scheduler: sender %s of a refused message to %s has ended", sender, receiver)
+        return
+    try:
+        await agent_messaging.deliver_message(sender, receiver, refusal, kind="alert")
+    except Exception:  # noqa: BLE001 — the refusal is logged; nothing to retry
+        logger.warning("turn_scheduler: could not tell %s its message was refused", sender, exc_info=True)
 
 
 async def _hold_in_queued_unpark(session_id: str, held: str) -> Optional[Dict[str, Any]]:
@@ -1597,7 +1653,7 @@ async def promote_held_peer_messages(
     them if one is waiting; otherwise they become a ``source="promotion"``
     context wake. Returns the turn id, or None when nothing could be queued.
     """
-    held = _undelivered(session_id, held)
+    held = await _screen_held_for_guard(session_id, _undelivered(session_id, held))
     if not held.strip():
         return None
     async with _terminal_delivery_lock(session_id):
