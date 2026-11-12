@@ -2966,5 +2966,15 @@
     "kind": "infra",
     "reason": "Installer npm userconfig input",
     "base_settings": true
+  },
+  "AI_SHUFFLE_ANTIGRAVITY_ALLOW_UNATTENDED": {
+    "kind": "internal",
+    "reason": "Reserved per-row extra_env key on Antigravity provider rows that lifts the interactive-only guard; set from Settings, never read from the process environment and never passed to the agent",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_ANTIGRAVITY_BIN": {
+    "kind": "internal",
+    "reason": "Test and dev-loop hook: run this executable instead of the installed Antigravity agent (the fake ACP agent)",
+    "base_settings": false
   }
 }
