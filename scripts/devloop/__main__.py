@@ -643,6 +643,12 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                               "log": str(fake_claude.log_path(directory))}
                 log.info("fake Claude Code CLI on the app's PATH only: %s (log %s)",
                          claude_cli["path"], claude_cli["log"])
+            if args.fake_antigravity:
+                from scripts.devloop import fake_agy
+
+                env["AI_SHUFFLE_ANTIGRAVITY_BIN"] = str(fake_agy.install(directory))
+                log.info("fake Antigravity agent (agy): %s (log %s)",
+                         env["AI_SHUFFLE_ANTIGRAVITY_BIN"], fake_agy.log_path(directory))
             database = runtime.Database(
                 SimpleNamespace(effective_data_dir=Path(env["DATA_DIR"])),
                 port=free_port(exclude=(port, protected, int(env["PORT"]), vite_port or 0)), disposable=True,
@@ -866,6 +872,9 @@ def main(argv: list[str] | None = None) -> int:
     start.add_argument("--claude-cli", choices=("fake", "none"), default="fake",
                        help="fake (default): a scripted claude CLI on the app's PATH, so Claude "
                             "Code chats run (scripts/devloop/fake_claude); none: leave PATH alone")
+    start.add_argument("--fake-antigravity", action="store_true",
+                       help="Run fluid's scripted ACP agent as Google's agy, so the Antigravity "
+                            "provider, its sign-in and its chats work (scripts/devloop/fake_agy.py)")
     start.add_argument("--poll", action="store_true",
                        help="Poll for source changes (for filesystems without inotify)")
     start.add_argument("--ci", action="store_true", default=os.environ.get("DEVLOOP_CI") == "1",
