@@ -726,6 +726,7 @@ Direct app and test dependencies declared in `android/app/build.gradle.kts` are 
 | androidx.test:runner | 1.6.2 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/test/runner/1.6.2/runner-1.6.2.pom |
 | androidx.webkit:webkit | 1.10.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/webkit/webkit/1.10.0/webkit-1.10.0.pom |
 | androidx.work:work-runtime-ktx | 2.9.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/work/work-runtime-ktx/2.9.1/work-runtime-ktx-2.9.1.pom |
+| androidx.work:work-testing | 2.9.1 | Apache-2.0 | https://dl.google.com/dl/android/maven2/androidx/work/work-testing/2.9.1/work-testing-2.9.1.pom |
 | com.google.android.material:material | 1.12.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/com/google/android/material/material/1.12.0/material-1.12.0.pom |
 | com.google.firebase:firebase-bom | 33.7.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/com/google/firebase/firebase-bom/33.7.0/firebase-bom-33.7.0.pom |
 | com.google.firebase:firebase-messaging | 24.1.0 | Apache-2.0 | https://dl.google.com/dl/android/maven2/com/google/firebase/firebase-messaging/24.1.0/firebase-messaging-24.1.0.pom |
