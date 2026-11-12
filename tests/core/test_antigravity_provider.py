@@ -1433,39 +1433,49 @@ async def test_every_public_api_route_refuses_a_guarded_row_before_the_engine(cl
     from app.api import query
     from app.core import models
 
+    class Reached(Exception):
+        """The engine entry ran: the request got past every route check."""
+
+    streamed = []
+
+    async def stream(**kwargs):
+        streamed.append(kwargs["prompt"])
+        yield {"type": "done"}
+
     row = _create(client)
     pick = f"prov:{row['id']}:{row['default_model']}"
     request = getattr(models, model)(prompt="Hi", profile="default",
                                      overrides=models.QueryOverrides(model=pick))
-    with patch("app.core.query_engine.execute_query", new=AsyncMock()) as execute, \
-            patch("app.api.query._stream_query_with_failover") as stream, \
-            patch("app.api.query.start_background_query", new=AsyncMock()) as start, \
-            patch("app.core.turn_manager.submit_async", new=AsyncMock()) as submit:
+    with patch("app.core.query_engine.execute_query", new=AsyncMock(side_effect=Reached)) as execute, \
+            patch("app.api.query._stream_query_with_failover", new=stream), \
+            patch("app.api.query.start_background_query", new=AsyncMock(side_effect=Reached)) as start, \
+            patch("app.core.turn_manager.submit_async", new=AsyncMock(side_effect=Reached)) as submit:
         with pytest.raises(HTTPException) as exc_info:
             await getattr(query, endpoint)(request, {"id": None, "profile_ids": None})
         assert exc_info.value.status_code == 403
         assert "refused for a request through the API" in exc_info.value.detail
         assert exc_info.value.headers == {"X-Error-Code": ag.GUARD_REFUSED_CODE}
-        execute.assert_not_awaited()
-        stream.assert_not_called()
-        start.assert_not_awaited()
-        submit.assert_not_awaited()
+        for entry in (execute, start, submit):
+            entry.assert_not_called()
+        assert streamed == []
 
-        # Lifted, the same request reaches the engine (a key row never stops here).
+        # Lifted, the same request reaches its engine entry (a key row never
+        # stops here): the entry is awaited with the prompt, or the stream is
+        # read to its end.
         client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
-        assert await ag_route_passes(query, endpoint, request)
-
-
-async def ag_route_passes(query, endpoint, request):
-    from fastapi import HTTPException
-
-    try:
-        await getattr(query, endpoint)(request, {"id": None, "profile_ids": None})
-    except HTTPException as exc:
-        return exc.status_code != 403
-    except Exception:  # noqa: BLE001 — past the guard; the mocked engine may not fit
-        return True
-    return True
+        reached = {"one_shot_query": execute, "conversation": submit, "start_conversation": start}
+        if endpoint in reached:
+            with pytest.raises(HTTPException) as exc_info:  # the route turns Reached into a 500
+                await getattr(query, endpoint)(request, {"id": None, "profile_ids": None})
+            assert exc_info.value.status_code == 500
+            reached[endpoint].assert_awaited_once()
+            assert reached[endpoint].await_args.kwargs["prompt"] == "Hi"
+        else:
+            response = await getattr(query, endpoint)(request, {"id": None, "profile_ids": None})
+            body = [chunk async for chunk in response.body_iterator]
+            assert streamed == ["Hi"]
+            assert body == ['event: done\ndata: {"type": "done"}\n\n']
+        assert sum(entry.await_count for entry in (execute, start, submit)) == (endpoint in reached)
 
 
 def test_sign_in_rows_are_the_owners_own_and_key_rows_are_not():
