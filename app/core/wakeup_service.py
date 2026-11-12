@@ -66,6 +66,19 @@ _RETRY_MAX_ATTEMPTS = 5
 # retries — the safe direction for a wake that has not run yet.
 _retry_attempts: "dict[str, int]" = {}
 
+# Per-wakeup count of held-message screenings that could not finish
+# (``turn_scheduler.held_delivery_refusal``), keyed like the above. Only
+# paces the re-check; it never counts toward _RETRY_MAX_ATTEMPTS, so a
+# screening that keeps failing never drops a message. Cleared once a
+# screening decides or the wake is retired; a restart resets it.
+_screen_attempts: "dict[str, int]" = {}
+
+
+def _forget_attempts(wakeup_id: Any) -> None:
+    """Retire both per-wakeup counters (the wake is done with)."""
+    _retry_attempts.pop(str(wakeup_id), None)
+    _screen_attempts.pop(str(wakeup_id), None)
+
 #: ``system.note`` subtype for the "this wake never ran" line.
 DROPPED_NOTE_SUBTYPE = "wakeup_dropped"
 
@@ -258,7 +271,7 @@ async def _rearm_after_failed_submit(row: Dict[str, Any], reason: str) -> None:
         return
     if attempt > _RETRY_MAX_ATTEMPTS:
         if wakeup_id:
-            _retry_attempts.pop(str(wakeup_id), None)
+            _forget_attempts(wakeup_id)
         logger.error(
             "wakeup %s (session %s, source %s) dropped after %d failed submit "
             "attempts: %s",
@@ -379,7 +392,7 @@ async def _fire(row: Dict[str, Any]) -> None:
     # stopped/archived chats. Never send it through the turn queue.
     if row.get("source") == "profile_cancelled":
         if await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id):
-            _retry_attempts.pop(str(wakeup_id), None)
+            _forget_attempts(wakeup_id)
             await announce_removed_agent_once(row, row.get("reason") or "agent profile was removed")
         return
 
@@ -397,7 +410,7 @@ async def _fire(row: Dict[str, Any]) -> None:
         )
         if wakeup_id:
             await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
-            _retry_attempts.pop(str(wakeup_id), None)
+            _forget_attempts(wakeup_id)
         return
 
     # A person's newer message outranks this wake even when its cancel failed
@@ -406,7 +419,7 @@ async def _fire(row: Dict[str, Any]) -> None:
         logger.info("wakeup %s (session %s, source %s) dropped: a person's newer message "
                     "superseded it", wakeup_id, session_id, row.get("source"))
         await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
-        _retry_attempts.pop(str(wakeup_id), None)
+        _forget_attempts(wakeup_id)
         return
 
     # An archived chat is read-only until the owner restores it (#1822).
@@ -419,7 +432,7 @@ async def _fire(row: Dict[str, Any]) -> None:
         )
         if wakeup_id:
             await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
-            _retry_attempts.pop(str(wakeup_id), None)
+            _forget_attempts(wakeup_id)
         return
 
     from app.core import session_handoff, turn_manager
@@ -428,7 +441,7 @@ async def _fire(row: Dict[str, Any]) -> None:
         if not await asyncio.to_thread(session_handoff.notice_owed, row):
             logger.info("wakeup %s (session %s): the hand-off notice is no longer owed", wakeup_id, session_id)
             await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
-            _retry_attempts.pop(str(wakeup_id), None)
+            _forget_attempts(wakeup_id)
             return
         await asyncio.to_thread(session_handoff.wait_released)  # after its move's held messages
         claimed = True
@@ -437,24 +450,26 @@ async def _fire(row: Dict[str, Any]) -> None:
         if row.get("source") == HELD_PEER_SOURCE:
             # Held agent messages: decide before the claim deletes them
             # (turn_scheduler.held_delivery_refusal). A check that cannot
-            # finish claims nothing; the row stays and its timer tries again.
+            # finish claims nothing; the row stays and its timer tries again,
+            # paced by its own count: never a submission attempt, never a drop.
             from app.core import turn_scheduler
 
             try:
                 held_refusal = await turn_scheduler.held_delivery_refusal(session_id)
             except Exception as exc:  # noqa: BLE001 — inconclusive: keep the row
-                attempt = _retry_attempts.get(str(wakeup_id), 0) + 1
-                _retry_attempts[str(wakeup_id)] = attempt
+                attempt = _screen_attempts.get(str(wakeup_id), 0) + 1
+                _screen_attempts[str(wakeup_id)] = attempt
                 delay = min(_RETRY_BASE_SECONDS * (2 ** min(attempt - 1, 8)), _RETRY_MAX_SECONDS)
                 logger.warning("wakeup %s (session %s): could not check its held messages (%s) — "
                                "kept, tried again in %.0fs", wakeup_id, session_id, exc, delay)
                 _arm(row, delay)
                 return
+            _screen_attempts.pop(str(wakeup_id), None)  # decided
         claimed = await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
         if claimed and held_refusal:
             from app.core import turn_scheduler
 
-            _retry_attempts.pop(str(wakeup_id), None)
+            _forget_attempts(wakeup_id)
             turn_scheduler.refuse_held_peer_messages(str(session_id), row.get("prompt") or "", held_refusal)
             return
     if not claimed:
@@ -462,6 +477,7 @@ async def _fire(row: Dict[str, Any]) -> None:
             "wakeup %s (session %s) already claimed/fired — skipping",
             wakeup_id, session_id,
         )
+        _screen_attempts.pop(str(wakeup_id), None)
         return
 
     # Validate before every consumer, including usage-limit resumes and held
@@ -477,7 +493,7 @@ async def _fire(row: Dict[str, Any]) -> None:
             "wakeup %s (session %s) has a missing/unresolvable agent %s — dropping the wake",
             wakeup_id, session_id, row.get("profile_id"),
         )
-        _retry_attempts.pop(str(wakeup_id), None)
+        _forget_attempts(wakeup_id)
         if _keeps_row(row):
             await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
         await _announce_dropped_wake(
@@ -492,7 +508,7 @@ async def _fire(row: Dict[str, Any]) -> None:
         from app.core import limit_resume
 
         if wakeup_id:
-            _retry_attempts.pop(str(wakeup_id), None)
+            _forget_attempts(wakeup_id)
         await limit_resume.fire(row)
         return
 
@@ -536,7 +552,7 @@ async def _fire(row: Dict[str, Any]) -> None:
         if _keeps_row(row):
             await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
         if wakeup_id:
-            _retry_attempts.pop(str(wakeup_id), None)
+            _forget_attempts(wakeup_id)
         return
     except Exception as exc:  # noqa: BLE001 — a raise must not lose the wake.
         logger.warning(
@@ -554,7 +570,7 @@ async def _fire(row: Dict[str, Any]) -> None:
     if _keeps_row(row):
         await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)  # retired once its turn exists
     if wakeup_id:
-        _retry_attempts.pop(str(wakeup_id), None)
+        _forget_attempts(wakeup_id)
     logger.info(
         "wakeup fired: id=%s session=%s source=%s -> turn %s",
         wakeup_id, session_id, row.get("source"), turn_id,
@@ -592,6 +608,7 @@ def _cancel_timer_task(task: "asyncio.Task") -> None:
 def _disarm(wakeup_ids: "list[str]") -> None:
     """Cancel the in-process timers for ``wakeup_ids`` (missing ids are fine)."""
     for wid in wakeup_ids:
+        _screen_attempts.pop(str(wid), None)  # its row was taken or cancelled
         task = _timers.pop(wid, None)
         if task is not None:
             _cancel_timer_task(task)

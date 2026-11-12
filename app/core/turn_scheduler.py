@@ -1504,18 +1504,18 @@ def _terminal_delivery_lock(session_id: str) -> asyncio.Lock:
     return _terminal_delivery_locks.setdefault(session_id, asyncio.Lock())
 
 
-async def _take_held_peer_messages(session_id: str) -> str:
+async def _take_held(session_id: str) -> Optional[str]:
     """Remove the session's held messages from the durable store and return
-    them, oldest first ("" when none). Messages already delivered to the
-    session are dropped. Caller holds the terminal lock.
+    them, oldest first. Three answers: the messages taken; "" when there is
+    nothing to deliver (none held, all delivered already, or refused); None
+    when it could not decide, with NOTHING taken. Messages already delivered
+    to the session are dropped. Caller holds the terminal lock.
 
     Decides first, takes second (:func:`held_delivery_refusal`): with nothing
     held nothing is read beyond the store (main's own reads, which raise as
     they always did); a refusal takes them and records them as refused; a
-    check that cannot finish takes NOTHING and returns "", so the messages
-    stay in the store for the next delivery point and the turn they would
-    have ridden runs without them. No path deletes a held message before it
-    is known to be delivered or refused.
+    check that cannot finish takes nothing, so the messages stay in the store.
+    No path deletes a held message before it is known to be delivered or refused.
     """
     from app.core import wakeup_service
     from app.db import wakeups as wakeups_db
@@ -1528,9 +1528,9 @@ async def _take_held_peer_messages(session_id: str) -> str:
     except Exception:  # noqa: BLE001 — inconclusive: take nothing, they stay held
         logger.warning(
             "turn_scheduler: could not check whether %s may receive its held agent "
-            "messages; they stay held for the next delivery", session_id, exc_info=True,
+            "messages; they stay held", session_id, exc_info=True,
         )
-        return ""
+        return None
     rows = await wakeup_service.take_session_wakeups(
         session_id, wakeup_service.HELD_PEER_SOURCE,
     )
@@ -1539,6 +1539,17 @@ async def _take_held_peer_messages(session_id: str) -> str:
         refuse_held_peer_messages(session_id, held, refusal)
         return ""
     return held
+
+
+async def _take_held_peer_messages(session_id: str) -> str:
+    """:func:`_take_held` for a delivery point that has a later one: a take
+    that cannot decide leaves the messages held and returns "", and the turn
+    they would have ridden runs without them. Its callers are the fold at a
+    turn start, an urgent message's wake and an unpark wake (each starts a
+    turn whose own fold takes them again) and a steer into a live turn (the
+    receiver's next turn takes them). The terminal release has no later one
+    and uses :func:`_take_held` itself (:func:`_release_held_to`)."""
+    return await _take_held(session_id) or ""
 
 
 async def held_delivery_refusal(session_id: str) -> Optional[str]:
@@ -1833,21 +1844,87 @@ async def release_held_progress_from(sender_id: str) -> int:
         if receiver == sender_id or await asyncio.to_thread(
                 task_registry.get_task, receiver, sender_id, durable=True) is not None:
             continue
-        async with _terminal_delivery_lock(receiver):
-            held = await _take_held_peer_messages(receiver)
-        if not held:
-            continue
-        try:
-            turn_id = await promote_held_peer_messages(receiver, held, released=True)
-        except Exception:  # noqa: BLE001
-            turn_id = None
-            logger.warning("turn_scheduler: releasing held notes for %s failed",
-                           receiver, exc_info=True)
-        if turn_id:
+        outcome = await _release_held_to(receiver)
+        if outcome is None:
+            # Due now, and nothing else may come for it: retry this release.
+            _retry_held_release(receiver)
+        elif outcome:
             woken += 1
-        else:
-            _restore_held_peer_messages(receiver, held)
     return woken
+
+
+#: Backoff of a terminal release that could not decide (:func:`_retry_held_release`).
+_HELD_RELEASE_RETRY_BASE_SECONDS = 5.0
+_HELD_RELEASE_RETRY_MAX_SECONDS = 120.0
+#: The one retrying release per receiver. In-process only (see the function).
+_held_release_retries: Dict[str, asyncio.Task] = {}
+
+
+async def _release_held_to(receiver: str) -> Optional[bool]:
+    """Wake ``receiver`` with its held notes now: True when a turn was
+    enqueued, False when there was nothing to deliver (or the promotion
+    failed and they were put back, as before), None when it could not
+    decide whether they may be delivered (nothing taken)."""
+    try:
+        async with _terminal_delivery_lock(receiver):
+            held = await _take_held(receiver)
+    except Exception:  # noqa: BLE001 — the store read failed: nothing was taken
+        logger.warning("turn_scheduler: could not take held notes for %s", receiver, exc_info=True)
+        return None
+    if held is None:
+        return None
+    if not held:
+        return False
+    try:
+        turn_id = await promote_held_peer_messages(receiver, held, released=True)
+    except Exception:  # noqa: BLE001
+        turn_id = None
+        logger.warning("turn_scheduler: releasing held notes for %s failed",
+                       receiver, exc_info=True)
+    if turn_id:
+        return True
+    _restore_held_peer_messages(receiver, held)
+    return False
+
+
+def _retry_held_release(receiver: str) -> None:
+    """Retry a terminal release for ``receiver`` that could not decide.
+
+    Only a release that was already due (its sender ended) gets here, so no
+    note is woken early. One retry per receiver; it backs off from
+    :data:`_HELD_RELEASE_RETRY_BASE_SECONDS` to
+    :data:`_HELD_RELEASE_RETRY_MAX_SECONDS` and ends once a take decides:
+    delivered, refused, or nothing left (the receiver's own next turn took
+    them, a Stop or deletion removed them). Every take runs under the
+    receiver's terminal lock and deletes what it takes, so a retry and any
+    other delivery never both deliver. In-process: a restart ends it, and
+    the notes, still in the durable store, ride the receiver's next turn.
+    """
+    if receiver in _held_release_retries:
+        return
+    task = asyncio.get_running_loop().create_task(_held_release_retry_loop(receiver))
+    _held_release_retries[receiver] = task
+    _kick_tasks.add(task)
+
+    def _done(done: asyncio.Task) -> None:
+        if _held_release_retries.get(receiver) is done:
+            _held_release_retries.pop(receiver, None)
+        _kick_done(done)
+
+    task.add_done_callback(_done)
+
+
+async def _held_release_retry_loop(receiver: str) -> None:
+    attempt = 0
+    while True:
+        attempt += 1
+        delay = min(_HELD_RELEASE_RETRY_BASE_SECONDS * (2 ** min(attempt - 1, 8)),
+                    _HELD_RELEASE_RETRY_MAX_SECONDS)
+        logger.info("turn_scheduler: held notes for %s could not be released; trying again "
+                    "in %.0fs (attempt %d)", receiver, delay, attempt)
+        await asyncio.sleep(delay)
+        if await _release_held_to(receiver) is not None:
+            return
 
 
 async def fold_held_peer_messages_for_turn(

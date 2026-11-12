@@ -330,6 +330,27 @@ def guarded(row: Mapping[str, Any]) -> bool:
     return (row.get("auth_mode") in GUARDED_AUTH_MODES) and not guard_lifted(row)
 
 
+def guarded_now(provider_id: Optional[str]) -> bool:
+    """Whether the guard applies to row ``provider_id`` right now, read fresh.
+
+    For a decision only a guarded row restricts (steering text no person
+    entered into its live turn). A row that cannot be read or is gone counts
+    as guarded: the text then waits for its own turn, where the turn-start
+    guard decides it. False for any other provider's row. Blocking DB read.
+    """
+    if not provider_id:
+        return False
+    try:
+        from app.db import model_providers
+        row = model_providers.get_model_provider(str(provider_id))
+    except Exception:  # noqa: BLE001 — cannot tell: the restrictive answer
+        logger.debug("[antigravity] could not read %s for a steer", provider_id, exc_info=True)
+        return True
+    if not row:
+        return True
+    return row.get("provider_type") == PROVIDER_TYPE and guarded(row)
+
+
 def agent_extra_env(row: Mapping[str, Any]) -> Dict[str, str]:
     """The row's extra environment for the agent, without app-reserved keys."""
     return {k: v for k, v in _row_extra_env(row).items() if k != GUARD_OVERRIDE_KEY}

@@ -2120,11 +2120,19 @@ class HarnessAdapter(ProviderAdapter):
         # A new source never inherits an older turn's provenance.
         self._next_turn_person_entered = False
 
-    def steers_need_a_person(self) -> bool:
-        """True on an Antigravity row: only text a person entered may join
-        its live turn. Any other row runs as its own turn, where the guard
-        decides it (``SessionRuntime._steer_refusal``)."""
-        return self._antigravity_binding is not None
+    def steering_guard_row(self) -> Optional[str]:
+        """The Antigravity provider row this live agent runs on, or None.
+
+        Not a decision: ``SessionRuntime._steer_refusal`` reads that row
+        fresh (``antigravity.guarded_now``) and restricts steering only while
+        it is guarded. Any other provider returns None."""
+        if self._antigravity_binding is None:
+            return None
+        options = self._options
+        provider_id = ((options.extra if options is not None else None) or {}).get("provider_id")
+        # An Antigravity agent with no row id cannot be checked: a non-empty
+        # marker the fresh read treats as unreadable (guarded).
+        return str(provider_id) if provider_id else "?"
 
     def set_turn_person_entered(self, entered: Optional[bool]) -> None:
         """Whether a person entered the next turn in the app (call after

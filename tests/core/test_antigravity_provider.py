@@ -662,7 +662,7 @@ async def test_a_forwarded_turn_carries_what_its_worker_stated(guarded_chat, mon
     import re
 
     from app.core.environment import ProviderTurnRefused
-    from app.db import database, turns
+    from app.db import database
     from app.network import control
 
     _, adapter = guarded_chat
@@ -709,7 +709,7 @@ async def test_submit_turn_always_states_who_entered_it(monkeypatch):
     ("user", {}, False),                                        # no key: not a person
     ("unpark", {"person_entered": True}, False),                # the key counts only on an owner source
 ])
-def test_text_no_person_entered_never_joins_an_antigravity_turn(mock_db, monkeypatch, source, payload, joins):
+def test_text_no_person_entered_never_joins_a_guarded_turn(client, monkeypatch, source, payload, joins):
     from app.core import session_runtime
     from app.core.provider.harness_adapter import HarnessAdapter
     from app.db import sessions, turns
@@ -719,14 +719,135 @@ def test_text_no_person_entered_never_joins_an_antigravity_turn(mock_db, monkeyp
     runtime = session_runtime.SessionRuntime(live)
     adapter = HarnessAdapter.__new__(HarnessAdapter)
     adapter._antigravity_binding = None
+    adapter._options = None
     monkeypatch.setattr(runtime, "_live_adapter", lambda: adapter)
     refusal = runtime._steer_refusal
     row = {"id": "t-steer", "source": source, "prompt": "hi", "payload": payload, "profile_id": None,
            "overrides": {}}
     # Another leg: the rule does not apply (the later binding checks may still).
-    assert refusal(row) != "text no person entered runs as its own turn here"
-    adapter._antigravity_binding = "binding"
-    assert (refusal(row) == "text no person entered runs as its own turn here") is not joins
+    assert refusal(row) != _NOT_ENTERED_STEER
+    adapter = _connected(_create(client)["id"], "chat-s")  # a guarded personal sign-in
+    assert (refusal(row) == _NOT_ENTERED_STEER) is not joins
+
+
+_NOT_ENTERED_STEER = "text no person entered runs as its own turn here"
+
+
+def _voice_follow_up(session_id):
+    from app.db import turns
+
+    return turns.enqueue_turn(session_id, "user", prompt="and the roses too",
+                              payload={"voice_delegation": True})
+
+
+@pytest.mark.parametrize("mode,fields,allow,steers", [
+    ("oauth-personal", {}, False, False),                                # guarded
+    ("oauth-personal", {}, True, True),                                  # unattended use allowed
+    ("oauth-business", {}, None, True),                                  # business sign-in
+    ("gemini-api-key", {"api_key": "test-gemini-secret-value"}, None, True),  # API key
+])
+def test_text_no_person_entered_steers_unless_the_row_is_guarded(client, mode, fields, allow, steers):
+    # S14: the restriction is the guard's, not the leg's. A voice follow-up
+    # joins a running turn on every unguarded Antigravity row, as on any
+    # other provider.
+    from app.core import session_runtime
+    from app.db import sessions, turns
+
+    row = _create(client, mode, **fields)
+    if allow:
+        client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+    sessions.create_session(session_id="chat-v", profile_id=None, title="Voice")
+    live = turns.start_turn(turns.enqueue_turn("chat-v", "user", prompt="Plan the beds")["id"])
+    runtime = session_runtime.SessionRuntime(live)
+    adapter = _connected(row["id"], "chat-v")
+    runtime._live_adapter = lambda: adapter
+    follow_up = _voice_follow_up("chat-v")
+    assert (runtime._steer_refusal(follow_up) == _NOT_ENTERED_STEER) is not steers
+    assert runtime._steering_guarded_now() is not steers
+
+
+def test_the_steer_rule_reads_the_guard_fresh_at_each_decision(client):
+    # Restored mid-turn: the next follow-up does not steer. Lifted mid-turn: it does.
+    from app.core import session_runtime
+    from app.db import sessions, turns
+
+    row = _create(client)
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+    sessions.create_session(session_id="chat-v", profile_id=None, title="Voice")
+    live = turns.start_turn(turns.enqueue_turn("chat-v", "user", prompt="Plan the beds")["id"])
+    runtime = session_runtime.SessionRuntime(live)
+    adapter = _connected(row["id"], "chat-v")  # connected while lifted
+    runtime._live_adapter = lambda: adapter
+    follow_up = _voice_follow_up("chat-v")
+    assert runtime._steer_refusal(follow_up) is None or runtime._steer_refusal(follow_up) != _NOT_ENTERED_STEER
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": False})  # restored
+    assert runtime._steer_refusal(follow_up) == _NOT_ENTERED_STEER
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})  # lifted again
+    assert runtime._steer_refusal(follow_up) != _NOT_ENTERED_STEER
+
+
+def test_a_steer_that_cannot_read_the_row_does_not_steer(client, monkeypatch):
+    # An unreadable row counts as guarded: the text waits for its own turn,
+    # where the turn-start guard decides it. Other providers never read it.
+    from app.core import session_runtime
+    from app.db import model_providers, sessions, turns
+
+    row = _create(client, "oauth-business")
+    sessions.create_session(session_id="chat-v", profile_id=None, title="Voice")
+    live = turns.start_turn(turns.enqueue_turn("chat-v", "user", prompt="Plan the beds")["id"])
+    runtime = session_runtime.SessionRuntime(live)
+    adapter = _connected(row["id"], "chat-v")
+    runtime._live_adapter = lambda: adapter
+
+    def broken(*_a, **_k):
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(model_providers, "get_model_provider", broken)
+    assert runtime._steer_refusal(_voice_follow_up("chat-v")) == _NOT_ENTERED_STEER
+    adapter._antigravity_binding = None  # as any other provider's agent
+    assert runtime._steer_refusal(_voice_follow_up("chat-v")) != _NOT_ENTERED_STEER
+
+
+@pytest.mark.parametrize("allow", [False, True])
+async def test_steer_pending_reads_the_guard_off_the_event_loop(client, monkeypatch, allow):
+    # Through the real sweep: the row is read in a worker thread, once, and
+    # only when a queued row lacks the key. Guarded, the follow-up waits for
+    # its own turn; with unattended use allowed it steers like any provider's.
+    import threading
+
+    from app.core import antigravity, session_runtime
+    from app.db import sessions, turns
+
+    row = _create(client)
+    if allow:
+        client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+    sessions.create_session(session_id="chat-v", profile_id=None, title="Voice")
+    live = turns.start_turn(turns.enqueue_turn("chat-v", "user", prompt="Plan the beds")["id"])
+    runtime = session_runtime.SessionRuntime(live)
+    adapter = _connected(row["id"], "chat-v")
+    steered = []
+
+    async def steer(prompt, **_kw):
+        steered.append(prompt)
+    adapter.steer = steer
+    monkeypatch.setattr(runtime, "_live_adapter", lambda: adapter)
+
+    async def alive():
+        return False
+    monkeypatch.setattr(runtime, "_turn_is_dying", alive)
+    reads = []
+    real = antigravity.guarded_now
+
+    def counted(provider_id):
+        reads.append(threading.current_thread() is threading.main_thread())
+        return real(provider_id)
+    monkeypatch.setattr(antigravity, "guarded_now", counted)
+    turns.enqueue_turn("chat-v", "queue", prompt="typed", person_entered=True)
+    await runtime.steer_pending()
+    assert reads == [] and steered == ["typed"]  # nobody needed the read
+    _voice_follow_up("chat-v")
+    await runtime.steer_pending()
+    assert reads == [False]  # one read, in a worker thread
+    assert (len(steered) == 2 and "and the roses too" in steered[1]) is allow
 
 
 @pytest.mark.parametrize("kind,reason", [
@@ -2006,3 +2127,145 @@ async def test_a_held_message_still_rides_when_the_row_allows_it(held_chat, mode
     assert "halfway there" in folded
     await asyncio.sleep(0.05)
     assert told == []
+
+
+async def test_failed_screenings_never_use_up_the_submit_retries(held_chat, monkeypatch):
+    # S13, the reviewer's sequence: five screenings that cannot finish, then
+    # one that decides, a claim, and ONE failed agent lookup. That is the
+    # first submission attempt: the wake is put back, never dropped.
+    from app.core import turn_scheduler, wakeup_service
+
+    make, _ = held_chat
+    make(allow=True)
+    [row] = _held_rows()
+    monkeypatch.setattr(wakeup_service, "_arm", lambda r, delay: None)
+    dropped = []
+
+    async def announce(r, reason):
+        dropped.append(reason)
+    monkeypatch.setattr(wakeup_service, "_announce_dropped_wake", announce)
+    screenings = []
+
+    async def screening(session_id):
+        screenings.append(session_id)
+        if len(screenings) <= 5:
+            raise RuntimeError("database unavailable")
+        return None
+    monkeypatch.setattr(turn_scheduler, "held_delivery_refusal", screening)
+    for _ in range(5):
+        await wakeup_service._fire(row)
+    assert wakeup_service._screen_attempts[str(row["id"])] == 5
+    assert str(row["id"]) not in wakeup_service._retry_attempts  # no submission tried yet
+    lookups = []
+
+    async def lookup(r):
+        lookups.append(r["id"])
+        raise wakeup_service.AgentLookupFailed("profile store unavailable")
+    monkeypatch.setattr(wakeup_service, "_resolve_profile_id", lookup)
+    await wakeup_service._fire(row)
+    assert lookups == [row["id"]]
+    assert wakeup_service._retry_attempts[str(row["id"])] == 1  # attempt 1 of the budget
+    assert str(row["id"]) not in wakeup_service._screen_attempts  # cleared once it decided
+    assert dropped == [] and [r["id"] for r in _held_rows()] == [row["id"]]  # put back
+    wakeup_service._retry_attempts.pop(str(row["id"]), None)
+
+
+@pytest.fixture
+def release_setup(held_chat, monkeypatch):
+    """A worker that ended, one receiver holding its note, a promotion that
+    records what it delivered, and a release retry with a short backoff."""
+    from app.core import turn_scheduler
+    from app.db import sessions
+
+    make, told = held_chat
+    state = {"provider_id": None, "fail": 0}
+    promoted = []
+
+    def get_session(sid):
+        if sid == "worker-1":
+            return {"id": sid, "is_worker": True}
+        if sid != "chat-ag":
+            return None
+        if state["fail"]:
+            state["fail"] -= 1
+            raise RuntimeError("database unavailable")
+        return {"id": sid, "title": "Garden plan", "provider_id": state["provider_id"]}
+
+    async def promote(session_id, held, **kw):
+        promoted.append((session_id, held))
+        return f"turn-{len(promoted)}"
+
+    def setup(provider="antigravity"):
+        if provider == "antigravity":
+            state["provider_id"] = make(allow=True)["id"]
+        else:
+            make(allow=True)
+            state["provider_id"] = None  # a chat on any other provider
+        monkeypatch.setattr(sessions, "get_session", get_session)
+
+    monkeypatch.setattr(turn_scheduler, "promote_held_peer_messages", promote)
+    monkeypatch.setattr(turn_scheduler, "_HELD_RELEASE_RETRY_BASE_SECONDS", 0.01)
+    monkeypatch.setattr(turn_scheduler, "_HELD_RELEASE_RETRY_MAX_SECONDS", 0.02)
+    yield setup, state, promoted, told
+    for task in list(turn_scheduler._held_release_retries.values()):
+        task.cancel()
+    turn_scheduler._held_release_retries.clear()
+
+
+async def _settle_retries():
+    from app.core import turn_scheduler
+
+    for _ in range(200):
+        if not turn_scheduler._held_release_retries:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the release retry never decided")
+
+
+@pytest.mark.parametrize("provider", ["antigravity", "other"])
+async def test_an_inconclusive_release_retries_until_it_delivers_once(release_setup, provider):
+    # S15: the worker ended; the receiver's screening could not finish. The
+    # release does not read that as "nothing pending": it retries until it
+    # decides, then delivers exactly once, on any provider.
+    from app.core import turn_scheduler
+
+    setup, state, promoted, told = release_setup
+    setup(provider)
+    state["fail"] = 3  # three screenings fail, the fourth decides
+    assert await turn_scheduler.release_held_progress_from("worker-1") == 0
+    assert promoted == [] and len(_held_rows()) == 1  # nothing taken yet
+    assert "chat-ag" in turn_scheduler._held_release_retries
+    await _settle_retries()
+    assert [sid for sid, _ in promoted] == ["chat-ag"] and "halfway there" in promoted[0][1]
+    assert _held_rows() == [] and told == []
+
+
+async def test_a_decided_release_does_not_retry(release_setup):
+    from app.core import turn_scheduler
+
+    setup, _, promoted, _ = release_setup
+    setup("other")
+    assert await turn_scheduler.release_held_progress_from("worker-1") == 1
+    assert turn_scheduler._held_release_retries == {} and len(promoted) == 1
+
+
+async def test_release_retries_never_deliver_twice(release_setup, monkeypatch):
+    # Two releases for one receiver share one retry, and a retry that loses
+    # to the receiver's own next turn finds nothing and ends: no second
+    # delivery, no "not sent".
+    from app.core import turn_scheduler
+
+    setup, state, promoted, told = release_setup
+    setup()
+    # The receiver's turn surely comes first.
+    monkeypatch.setattr(turn_scheduler, "_HELD_RELEASE_RETRY_BASE_SECONDS", 0.2)
+    state["fail"] = 2
+    await turn_scheduler.release_held_progress_from("worker-1")
+    await turn_scheduler.release_held_progress_from("worker-1")
+    assert len(turn_scheduler._held_release_retries) == 1
+    state["fail"] = 0
+    folded = await turn_scheduler.fold_held_peer_messages_for_turn(
+        "chat-ag", {"id": "t-owner", "source": "user", "payload": {}})
+    assert "halfway there" in folded  # the receiver's own turn took them first
+    await _settle_retries()
+    assert promoted == [] and told == [] and _held_rows() == []
