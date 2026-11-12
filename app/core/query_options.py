@@ -650,10 +650,16 @@ async def ensure_pending_checkout(
             # A switched checkout that exists still goes through the restore:
             # it publishes a restore whose Git add finished but whose record
             # did not, before this turn edits the folder.
-            missing = not Path(path).is_dir()
+            from app.core.checkout_manager import _is_empty_cleanup_remnant
+
+            def absent() -> bool:
+                # Includes the empty folder a Windows cwd lock leaves (#1481).
+                return not Path(path).is_dir() or _is_empty_cleanup_remnant(path, {"path": path})
+
+            missing = await asyncio.to_thread(absent)
             if switched or missing:
                 ok, note = await restore_worker_checkout_async(session_row["id"], follow_live_switch=False)
-                restored = ok and missing and Path(path).is_dir()
+                restored = ok and missing and not await asyncio.to_thread(absent)
                 if not ok:
                     logger.info("Checkout restore refused for %s: %s", session_row["id"], note)
     # Even after restoration, claim/wait for a queued operation below. Another

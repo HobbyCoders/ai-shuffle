@@ -18,9 +18,10 @@ afterEach(() => vi.useRealTimers());
 
 it("discloses the deadline and non-cancellation in both discovery surfaces", () => {
   const description = TOOL_CATALOG.find(tool => tool.name === "browser_eval")!.description;
-  // Fixed measured discovery payload (660 chars) + 1%; no duplicate paragraphs.
+  // Fixed measured discovery payload + 1%; no duplicate paragraphs. 660 chars
+  // until the recent_requests hint moved here from the server instructions (721).
   const tool = TOOL_CATALOG.find(tool => tool.name === "browser_eval")!;
-  expect(JSON.stringify(tool).length).toBeLessThanOrEqual(Math.floor(660 * 1.01));
+  expect(JSON.stringify(tool).length).toBeLessThanOrEqual(Math.floor(721 * 1.01));
   const paragraphs = description.split("\n\n").filter(Boolean);
   expect(new Set(paragraphs).size).toBe(paragraphs.length);
   for (const text of [description, evalSchema.properties.code.description]) {

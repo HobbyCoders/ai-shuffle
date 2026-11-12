@@ -144,6 +144,15 @@
           "how": "In a throwaway session with committed and uncommitted edits, open the Changes side panel on desktop and on the Android app. In each review scope, drag or shift-click line numbers on desktop and tap two lines on the phone, write a comment and send it; once more, use Edit message to change the text first. Repeat while the agent is replying, and try a binary and a truncated file. Compare the chat transcript, the session checkout's git status and the PR's comments before and after.",
           "pass_when": "Each send adds exactly one user message to the open chat, naming the file, old and new line range, review scope with base ref and merge base, a bounded excerpt and the comment (or the edited text). The checkout and the PR are unchanged. Binary and truncated diffs offer no selection.",
           "past_bug": "Review feedback could only be retyped into the composer by hand, without file or line context."
+        },
+        {
+          "id": "git-task-review.windows-untouched-checkout-followup",
+          "check": "On Windows, an untouched Task checkout is cleaned up fully and a follow-up restores it",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "On a disposable Windows candidate install, dispatch a throwaway Task worker that makes no changes and let it finish, so its untouched checkout is cleaned up while its pooled CLI is still alive. Check the checkout folder, git worktree list and the task branch. Then send that worker a follow-up message. Repeat with a worker that leaves an uncommitted edit. Never alter production checkouts.",
+          "pass_when": "The untouched checkout's folder, worktree entry and branch are all gone and cleanup is not reported as failed. The follow-up recreates the checkout at the same path on its own branch and runs. The checkout with an uncommitted edit is kept with the edit intact, and its follow-up runs in it.",
+          "past_bug": "#1481: Windows would not delete a folder the worker's live CLI used as its working directory, so cleanup left an empty folder and the branch, and the follow-up was refused as 'no longer on its assigned branch'."
         }
       ]
     },

@@ -67,7 +67,10 @@ describe("tool descriptions state the contract", () => {
     expect(SERVER_INSTRUCTIONS).toMatch(/Pass screenshot_id with coordinates/);
     expect(SERVER_INSTRUCTIONS).toMatch(/outcome unknown \(code outcome_unknown\)/);
     expect(SERVER_INSTRUCTIONS).toMatch(/never repeat it blindly/);
-    expect(SERVER_INSTRUCTIONS.match(/BATCHING/g)).toHaveLength(1);
+    // The batching rules belong to one tool, so they live in browser_batch's
+    // description (the whole server text must fit the CLI's 4,096-character cut).
+    expect(SERVER_INSTRUCTIONS).not.toMatch(/BATCHING/);
+    expect(desc("browser_batch")).toMatch(/Batch only steps whose inputs you already know/);
     expect(SERVER_INSTRUCTIONS).toMatch(/kind=accept_dialog/);
     // Written text avoids em dashes (plain punctuation reads the same everywhere).
     expect(SERVER_INSTRUCTIONS).not.toContain("\u2014");

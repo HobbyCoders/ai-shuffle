@@ -25,6 +25,7 @@ from contextvars import ContextVar
 import psycopg2
 import psycopg2.pool
 import psycopg2.extras
+import psycopg2.errors
 import psycopg2.extensions
 
 from app.core.config import settings
@@ -711,10 +712,21 @@ class _PgDictConnection:
         return self._conn.cursor(*args, cursor_factory=cursor_factory, **kwargs)
 
     def commit(self) -> None:
+        # PostgreSQL answers COMMIT of an aborted transaction with ROLLBACK and
+        # psycopg2 raises nothing. Refuse it, so get_db/transaction roll back,
+        # skip their post-commit callbacks and raise (#1452).
+        if self._conn.info.transaction_status == psycopg2.extensions.TRANSACTION_STATUS_INERROR:
+            raise psycopg2.errors.InFailedSqlTransaction(
+                "transaction aborted by an earlier error; nothing was committed")
         with bounded_commit(self._conn):
             self._conn.commit()
 
     def rollback(self) -> None:
+        # Nothing queued so far can commit any more.
+        callbacks = _callbacks_for_connection(self)
+        if callbacks is not None:
+            callbacks.clear()
+            callbacks.savepoints.clear()
         with bounded_commit(self._conn):
             self._conn.rollback()
 
@@ -1235,7 +1247,9 @@ def get_db():
     """Context manager for database connections.
 
     Yields a connection, commits on success, rolls back on error,
-    and always returns the connection to the pool.
+    and always returns the connection to the pool. A block that caught a
+    database error without a savepoint left the transaction aborted: it
+    raises ``InFailedSqlTransaction`` instead of committing.
     """
     conn = get_connection()
     started = time.monotonic()
