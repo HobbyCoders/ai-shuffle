@@ -364,7 +364,11 @@ class AcpLoop:
         elif isinstance(op, Steer):
             await self._steer(op.text, op.id, op.origin)
         elif isinstance(op, AgentMessage):
-            await self._steer(op.text, op.id, "peer")
+            # Another agent's words, as every other engine hands them over:
+            # defanged, in the peer marker with its sender and provenance.
+            from fluid.tools.hardening import defang_harness_markers
+
+            await self._steer(defang_harness_markers(op.text), op.id, op.provenance, sender=op.sender)
         elif isinstance(op, Interrupt):
             self._interrupted.set()
             for fut in [*self._pending_permissions.values(), *self._pending_questions.values()]:
@@ -873,18 +877,41 @@ class AcpLoop:
                 cost = float(value)
         return usage, cost
 
-    async def _steer(self, text: str, steer_id: str | None, origin: str) -> None:
+    async def _steer(self, text: str, steer_id: str | None, origin: str, *, sender: str | None = None) -> None:
+        """Send ``text`` into the running turn as a further prompt.
+
+        The user's own steer goes as their plain words: here it is a prompt of
+        its own, not text inside a tool result. A harness notice and another
+        agent's message go in the marker the other engines use for them
+        (``SteerDelivery.render``), so neither reads as the user speaking, and
+        the receipt has the same shape (``from`` names a peer).
+        """
+        from fluid.engine.native import _steer_receipt
+        from fluid.messages.content import SteerDelivery
+
         conn, sid = self._conn, self._acp_session
         running = self._turn_task is not None and not self._turn_task.done() and self._mapper is not None
         if not running or conn is None or not sid:
             raise RuntimeError("no running turn to steer")
+        from fluid.tools.hardening import defang_harness_markers
+
+        # A marked body is defanged first (delegated's ``_write_stdin_steer``
+        # does the same): part of a notice can be text a sub-agent wrote.
+        prompt = (text if sender is None and origin == "user"
+                  else SteerDelivery(text=defang_harness_markers(text), origin=origin,
+                                     sender=sender).render().strip())
         task = asyncio.create_task(conn.request("session/prompt", {
-            "sessionId": sid, "prompt": [{"type": "text", "text": text}],
+            "sessionId": sid, "prompt": [{"type": "text", "text": prompt}],
         }))
         self._steer_requests.append(task)
         mapper = self._mapper
+        if mapper is not None and sender is not None:
+            # Stored where it joined, as native stores a peer's message; the
+            # user's steer and a notice are placed from the receipt instead.
+            for event in mapper.interjection(prompt):
+                await self._emit(event)
         await self._emit(SteerDelivered(session_id=self.session_id, turn_id=mapper.turn_id if mapper else None,
-                                        steers=[{"id": steer_id, "text": text, "origin": origin}]))
+                                        steers=[_steer_receipt(steer_id, text, sender, origin)]))
 
     # ─── agent → client ─────────────────────────────────────────────────
 

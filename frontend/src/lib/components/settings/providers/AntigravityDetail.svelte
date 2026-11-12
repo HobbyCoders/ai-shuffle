@@ -289,7 +289,9 @@
 				<SettingRow label="Connection" hint={keyRow ? undefined : 'The agent keeps the sign-in on this worker; AI Shuffle never reads it'}>
 					<ValueText value={credential.kind === 'API key' ? 'Gemini API key' : personal ? 'Personal Google sign-in' : 'Business Google sign-in'} />
 				</SettingRow>
-				<SettingRow label="Status" hint={status?.message ?? undefined}>
+				<!-- The agent's own signed-out message points at this very page
+				     (it is written for a chat that failed), so it is not repeated here. -->
+				<SettingRow label="Status" hint={status?.state === 'signed_out' ? 'Not signed in on this worker' : status?.message ?? undefined}>
 					<ValueText status={stateTone as 'ok' | 'warn' | 'err' | undefined} value={stateText} />
 				</SettingRow>
 				{#if keyRow}

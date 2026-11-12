@@ -248,6 +248,16 @@ class TurnMapper:
                                 output=text, is_error=status == "failed"))
         return out
 
+    def interjection(self, text: str) -> list[Event]:
+        """Another agent's message joined the turn here: a user node of its own.
+
+        The reply so far closes first, so the transcript reads in the order
+        the agent saw it (as native's ``_finish_peer_messages`` stores one).
+        """
+        out = self._finish_assistant()
+        self._segments.append(("user", [Text(text=text)]))
+        return out
+
     def _finish_assistant(self) -> list[Event]:
         out = self.close_block()
         if self._assistant_blocks:
