@@ -967,6 +967,36 @@ async def test_a_generic_edit_keeps_the_guard_and_the_type(mock_db, fake_agy):
     assert db.get_model_provider(other["id"])["provider_type"] == "openrouter"
 
 
+async def test_a_generic_edit_keeps_a_guard_restored_after_its_read(mock_db, fake_agy, monkeypatch):
+    # Worker A reads the row with the guard lifted; worker B restores it and
+    # that update syncs in before A writes. A's edit (no expected_revision)
+    # must keep the stored value at write time, not the one it read.
+    from app.api import model_providers as providers_api
+
+    row = await _personal_row()
+    await api.set_guard(row["id"], api.GuardUpdate(allow_unattended=True), token=None)
+    real_update = db.update_model_provider
+    restored = []
+
+    def restore_then_write(provider_id, **kw):
+        # The synced restore commits after every read the edit made.
+        if not restored:
+            restored.append(1)
+            env = dict(db.get_model_provider(provider_id).get("extra_env_json") or {})
+            env.pop(ag.GUARD_OVERRIDE_KEY, None)
+            real_update(provider_id, extra_env_json=env)
+        return real_update(provider_id, **kw)
+
+    monkeypatch.setattr(providers_api.db, "update_model_provider", restore_then_write)
+    await providers_api.update_provider(row["id"], providers_api.ModelProviderUpdate(
+        extra_env={"OTHER_SETTING": "1", ag.GUARD_OVERRIDE_KEY: "1"}), token=None)
+    monkeypatch.setattr(providers_api.db, "update_model_provider", real_update)
+    assert restored
+    stored = db.get_model_provider(row["id"])
+    assert stored["extra_env_json"] == {"OTHER_SETTING": "1"}
+    assert ag.guarded(stored)
+
+
 # --- usage readings that must not land ------------------------------------------------
 
 async def _poll_with(monkeypatch, row, during, unparsed=False):

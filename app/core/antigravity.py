@@ -325,15 +325,6 @@ def guard_lifted(row: Mapping[str, Any]) -> bool:
     return _row_extra_env(row).get(GUARD_OVERRIDE_KEY) == "1"
 
 
-def with_guard_of(row: Mapping[str, Any], env: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    """``env`` with the guard setting as ``row`` stores it now."""
-    out = {k: v for k, v in dict(env or {}).items() if k != GUARD_OVERRIDE_KEY}
-    stored = row.get("extra_env_json")
-    if isinstance(stored, dict) and GUARD_OVERRIDE_KEY in stored:
-        out[GUARD_OVERRIDE_KEY] = stored[GUARD_OVERRIDE_KEY]
-    return out
-
-
 def guarded(row: Mapping[str, Any]) -> bool:
     """Whether the interactive-only guard applies to this row now."""
     return (row.get("auth_mode") in GUARDED_AUTH_MODES) and not guard_lifted(row)

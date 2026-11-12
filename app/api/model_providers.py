@@ -1184,13 +1184,15 @@ async def update_provider(
 
     if updates:
         async with operation_lock(provider_id):
+            keep: tuple = ()
             if "extra_env_json" in updates and existing.get("provider_type") == antigravity.PROVIDER_TYPE:
-                # The guard has its own endpoint: keep its current stored value,
-                # read under the lock, whatever a stale edit sends.
-                current = await run_sync(db.get_model_provider, provider_id) or {}
-                updates["extra_env_json"] = antigravity.with_guard_of(current, updates["extra_env_json"])
+                # The guard has its own endpoint: whatever a stale edit sends,
+                # the write keeps the value stored when it commits (read with
+                # the row locked in the same transaction, so a guard restored
+                # on another worker and synced in after our read still wins).
+                keep = (antigravity.GUARD_OVERRIDE_KEY,)
             row = await run_sync(db.update_model_provider, provider_id,
-                                 expected_revision=body.expected_revision, **updates)
+                                 expected_revision=body.expected_revision, keep_env_keys=keep, **updates)
             if row is None:
                 if body.expected_revision is not None and await run_sync(db.get_model_provider, provider_id):
                     raise HTTPException(status_code=409, detail="Models changed on another worker. Reload and try again.")
