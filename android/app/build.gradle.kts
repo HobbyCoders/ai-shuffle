@@ -22,6 +22,10 @@ val minifiedSmoke = project.findProperty("minifiedSmoke")?.toString() == "true"
 // A separate CI-only debug build exercises the real startup prompt without
 // publisher Firebase credentials. Release PUSH_ENABLED still depends on config.
 val notificationSmoke = project.findProperty("notificationSmoke")?.toString() == "true"
+// `-PpushEnabledDebug=true` turns push on for the debug build only, so PR checks
+// run the unit tests the way release builds (with Firebase config) do. Never
+// changes release; never needs google-services.json.
+val pushEnabledDebug = notificationSmoke || project.findProperty("pushEnabledDebug")?.toString() == "true"
 
 android {
     namespace = "com.hobbycoders.aishuffle"
@@ -67,7 +71,7 @@ android {
         }
     }
     buildTypes {
-        if (notificationSmoke) {
+        if (pushEnabledDebug) {
             getByName("debug").buildConfigField("boolean", "PUSH_ENABLED", "true")
         }
         release {
