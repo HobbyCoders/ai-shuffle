@@ -265,6 +265,34 @@ async def test_guard_changes_apply_to_the_next_turn_of_a_connected_chat(client, 
     assert adapter._engine.specs == []
 
 
+@pytest.mark.parametrize("kind,reason", [
+    ("task_or_swarm_worker", "a Task or Swarm worker"),
+    ("subagent", "a subagent"),
+    ("agent_started", "a session another agent started"),
+])
+async def test_child_and_agent_started_chats_go_through_the_turn_check(client, session_row, kind, reason):
+    # The per-turn check every submit and resume runs (``_check_antigravity_turn``),
+    # with the owner's own turn source: the session decides, guard on and off.
+    from app.core.environment import ProviderTurnRefused
+
+    chat, started = session_row
+    if kind == "task_or_swarm_worker":
+        chat["is_worker"] = True
+    elif kind == "subagent":
+        chat["parent_session_id"] = "parent"
+    else:
+        started["s1"] = {"id": "t-agent"}
+    row = _create(client)
+    adapter = _connected(row["id"])
+    with pytest.raises(ProviderTurnRefused, match=f"refused for {reason}"):
+        await _turn(adapter, "user")
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
+    await _turn(adapter, "user")
+    client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": False})
+    with pytest.raises(ProviderTurnRefused, match=f"refused for {reason}"):
+        await _turn(adapter, "user")
+
+
 async def test_key_rows_are_never_guarded_and_restart_on_a_new_key(client, session_row):
     row = _create(client, "gemini-api-key", api_key="test-gemini-secret-value")
     adapter = _connected(row["id"])
