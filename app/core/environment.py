@@ -1266,6 +1266,105 @@ WORKSPACE_FACTS_HEADER = "# Workspace facts"
 #: Hard ceiling on the card, in characters (~600 tokens).
 WORKSPACE_FACTS_MAX_CHARS = 2400
 
+# Keep-rank of each fact: when the card is over its ceiling, whole facts are
+# left out from the highest rank down (later lines first within a rank) and
+# a final line names what was left out. No fact is ever cut mid-line, so a
+# link or token is either present whole or absent. The order puts first the
+# facts whose absence makes the agent's first action fail or that it cannot
+# rediscover cheaply, and last the ones a single `ls` or doc read recovers:
+#   0 the preview-access link: minted for this session only, cannot be
+#     rediscovered, and the harness records its expiry next to this card;
+#   1 missing node dependencies and how to install them (a build or test
+#     fails first otherwise, and the wrong fix — npm ci without a lockfile,
+#     junctioned node_modules — is the usual guess);
+#   2 where the agent browser runs and which address reaches this machine
+#     (not discoverable from the shell);
+#   3 which Python has pytest and how to invoke the backend tests;
+#   4 the app's guard when this session has no preview link (saves futile
+#     attempts to open the UI);
+#   5 the branch-preview recipe (also in the preview-branch skill);
+#   6 the pg_shim caveat (only matters once a test fails);
+#   7 the Vite config file name (one `ls` away);
+#   8 installed node dependencies (implied by the absence of rank 1).
+_RANK_PREVIEW_LINK = 0
+_RANK_NODE_MISSING = 1
+_RANK_BROWSER = 2
+_RANK_PYTHON = 3
+_RANK_APP_NO_LINK = 4
+_RANK_BRANCH_PREVIEW = 5
+_RANK_PG_SHIM = 6
+_RANK_VITE = 7
+_RANK_NODE_INSTALLED = 8
+
+
+class _Fact(str):
+    """One card line (``"Label: …"``) carrying its keep-rank and the short
+    label the omission note names it by. A ``str``, so callers that join or
+    search the helpers' lists keep working."""
+
+    rank: int
+    label: str
+
+    def __new__(cls, text: str, rank: int, label: Optional[str] = None) -> "_Fact":
+        fact = super().__new__(cls, text)
+        fact.rank = rank
+        fact.label = label or text.split(":", 1)[0].strip()
+        return fact
+
+
+def _fact_rank(fact: str) -> int:
+    return getattr(fact, "rank", _RANK_NODE_INSTALLED)
+
+
+def _omission_note(omitted: list) -> str:
+    labels: list = []
+    for fact in omitted:
+        label = getattr(fact, "label", "") or fact.split(":", 1)[0].strip()
+        if label not in labels:
+            labels.append(label)
+    return "Left out to fit the size limit (probe if needed): " + ", ".join(labels) + "."
+
+
+def _fit_facts(head: str, facts: list) -> str:
+    """``head`` plus as many whole facts as fit in the ceiling, original order
+    kept. Leaves facts out from the highest rank down until the card fits,
+    then puts back any left-out fact that still fits in the room that frees
+    (best rank first), so no fact is ever dropped to keep a lower-ranked one.
+    The omission note counts against the ceiling: it names the left-out
+    facts, or only their count when even the names cannot fit (a ceiling far
+    below the real one)."""
+    limit = WORKSPACE_FACTS_MAX_CHARS
+
+    def render(kept: set, compact: bool) -> str:
+        lines = [f"- {fact}" for i, fact in enumerate(facts) if i in kept]
+        omitted = [fact for i, fact in enumerate(facts) if i not in kept]
+        if omitted:
+            lines.append(
+                f"Left out to fit the size limit: {len(omitted)} "
+                f"fact{'s' if len(omitted) != 1 else ''}." if compact
+                else _omission_note(omitted)
+            )
+        return head + "\n".join(lines)
+
+    def fit(compact: bool) -> str:
+        kept = set(range(len(facts)))
+        dropped = []
+        for i in sorted(kept, key=lambda i: (-_fact_rank(facts[i]), -i)):
+            if len(render(kept, compact)) <= limit:
+                break
+            kept.discard(i)
+            dropped.append(i)
+        for i in reversed(dropped):
+            if len(render(kept | {i}, compact)) <= limit:
+                kept.add(i)
+        return render(kept, compact)
+
+    for compact in (False, True):
+        card = fit(compact)
+        if len(card) <= limit:
+            return card
+    return head.rstrip("\n")
+
 
 def _package_dirs(cwd: Path) -> list:
     """Directories under ``cwd`` (root and one level of the usual names) that
@@ -1294,19 +1393,20 @@ def _node_dependency_facts(cwd: Path) -> list:
             lockless.append(rel)
     lines = []
     if missing:
-        lines.append("Node: node_modules MISSING in " + ", ".join(missing)
-                     + " — run `npm ci` there before its scripts (never junction "
-                     "or copy node_modules from another checkout).")
+        lines.append(_Fact("Node: node_modules MISSING in " + ", ".join(missing)
+                           + " — run `npm ci` there first; never junction or copy "
+                           "another checkout's node_modules.", _RANK_NODE_MISSING))
     if mobile_missing:
-        lines.append("Mobile: dependencies MISSING; install frontend in this SAME "
-                     "checkout, then run `npm run deps` in mobile (no lockfile: "
-                     "do not run npm ci in mobile).")
+        lines.append(_Fact("Mobile: dependencies MISSING; install frontend in this SAME "
+                           "checkout, then run `npm run deps` in mobile (no lockfile: "
+                           "do not run npm ci in mobile).", _RANK_NODE_MISSING))
     if lockless:
-        lines.append("Node: node_modules MISSING in " + ", ".join(lockless)
-                     + "; no lockfile — use the package's documented setup, "
-                     "not npm ci or another checkout's dependencies.")
+        lines.append(_Fact("Node: node_modules MISSING in " + ", ".join(lockless)
+                           + "; no lockfile — use the package's documented setup, "
+                           "not npm ci or another checkout's dependencies.", _RANK_NODE_MISSING))
     if present:
-        lines.append("Node: node_modules installed in " + ", ".join(present) + ".")
+        lines.append(_Fact("Node: node_modules installed in " + ", ".join(present) + ".",
+                           _RANK_NODE_INSTALLED, "Node (installed packages)"))
     return lines
 
 
@@ -1375,27 +1475,35 @@ def _python_facts(cwd: Path, is_shuffle: bool) -> list:
                     env=scrub_child_env(),
                 )
                 if result.returncode == 0:
-                    return [f"Python: pytest was not verified in worker interpreter "
-                            f"{sys.executable}, but verified pytest executable `{pytest_exe}` "
-                            "is available. Use it with the checkout's documented "
-                            "test environment; no install is needed for pytest."]
+                    return [_Fact(
+                        f"Python: pytest is unverified in worker interpreter "
+                        f"{sys.executable}, but the verified pytest executable "
+                        f"`{pytest_exe}` works: use it with the checkout's documented "
+                        "test environment (no install is needed for pytest).",
+                        _RANK_PYTHON,
+                    )]
             except (OSError, subprocess.SubprocessError):
                 pass
-        return [
+        return [_Fact(
             f"Python: no interpreter or executable with pytest was verified "
             f"(worker {sys.executable}); install pytest in a project venv "
-            "before running the backend suite."
-        ]
+            "before running the backend suite.",
+            _RANK_PYTHON,
+        )]
     own = os.path.normcase(exe) == os.path.normcase(sys.executable)
-    where = "this worker's own interpreter" if own else "on PATH"
-    line = f"Python: pytest is importable in `{exe}` ({where})."
     if is_shuffle:
-        line += (
-            f" Backend suite: `PYTHONPATH=fluid {exe} -m pytest tests/ -q -p "
-            "no:cacheprovider` from the checkout root (PYTHONPATH=fluid is "
-            "required; pytest-timeout is not installed, so drop --timeout)."
+        # The path appears once, inside the command an agent copies.
+        where = "this worker's own interpreter" if own else "this interpreter on PATH"
+        line = (
+            f"Python: {where} has pytest. Backend tests from the checkout "
+            f"root: `PYTHONPATH=fluid {exe} -m pytest <test files> -q -p "
+            "no:cacheprovider` (PYTHONPATH=fluid is required; no "
+            "pytest-timeout, so no --timeout)."
         )
-    return [line]
+    else:
+        where = "this worker's own interpreter" if own else "on PATH"
+        line = f"Python: pytest is importable in `{exe}` ({where})."
+    return [_Fact(line, _RANK_PYTHON)]
 
 
 def _is_ai_shuffle_checkout(cwd: Path) -> bool:
@@ -1407,46 +1515,49 @@ def _shuffle_facts(cwd: Path, app_port: Optional[int], preview_url: Optional[str
     lines = []
     port = app_port or 8000
     ui = (
-        f"This app: the worker listens on :{port} behind an owner-auth guard "
-        "that admits direct LAN peers only and rejects proxied/forwarded "
-        "requests."
+        f"This app: :{port} admits only direct LAN peers and rejects "
+        f"proxied/forwarded requests; the agent browser is refused :{port}"
     )
     if preview_url:
-        ui += (
-            f" The agent browser is refused :{port} itself. To open the UI "
-            f"from the agent browser, navigate ONCE to "
-            f"{preview_url} (the worker's preview-only port and a token bound "
-            "to this session; it sets the cookie the rest of the visit uses, "
-            "so stay on that port, and the cookie also passes through a "
-            "branch's Vite dev proxy). Mutations of auth, credentials, "
-            "settings and network config are refused on that cookie."
-        )
+        # The link is the one fact no probe can recover; it is never cut.
+        lines.append(_Fact(
+            ui + f". To open the UI, navigate the agent browser ONCE to "
+            f"{preview_url} (preview-only port, session-bound token): its "
+            "cookie carries the rest of the visit on that port, also through a "
+            "branch's Vite dev proxy, but cannot change auth, credentials, "
+            "settings or network config.",
+            _RANK_PREVIEW_LINK,
+        ))
     else:
-        ui += (
-            f" The agent browser is refused :{port}, and this session has no "
-            "preview link, so it cannot open the running UI."
-        )
-    lines.append(ui)
-    lines.append(
+        lines.append(_Fact(
+            ui + ", and this session has no preview link, so it cannot open "
+            "the running UI.",
+            _RANK_APP_NO_LINK,
+        ))
+    lines.append(_Fact(
         "Branch UI preview: build the frontend, run `python -m app.preview "
-        "stamp`. On Linux use `python -m app.preview run --port 18080 "
-        "--ttl-seconds 3600` under Monitor: it owns the app and disposable "
-        "PostgreSQL until the task/parent ends or its TTL expires. For a remote "
-        "browser add `--host 0.0.0.0 --browser-host <worker-IP>` with the "
-        "browser-reachable worker IP, then open the printed access "
-        "link once (the named port requires its token). Do not "
-        "daemonize it. Other platforms use an isolated AI_SHUFFLE_PREVIEW=1 "
-        "instance (see the preview-branch skill). Never start a second "
-        "worker against the running instance's data dir."
-    )
+        "stamp`, then on Linux `python -m app.preview run --port 18080 "
+        "--ttl-seconds 3600` under Monitor (Do not daemonize; it owns the app "
+        "and a disposable PostgreSQL until the task/parent ends or its TTL "
+        "expires). Remote browser: add `--host 0.0.0.0 --browser-host "
+        "<worker-IP>` and open the printed access link once (the named port "
+        "requires its token). Other platforms: an isolated AI_SHUFFLE_PREVIEW=1 "
+        "instance (preview-branch skill). Never start a second worker on the "
+        "running instance's data dir.",
+        _RANK_BRANCH_PREVIEW,
+    ))
     vite = "frontend/vite.config.js" if (cwd / "frontend" / "vite.config.js").is_file() else None
     if vite and not (cwd / "frontend" / "vite.config.ts").is_file():
-        lines.append(f"Frontend: the Vite config is `{vite}` — there is no vite.config.ts.")
+        lines.append(_Fact(
+            f"Frontend: the Vite config is `{vite}` (no vite.config.ts).",
+            _RANK_VITE,
+        ))
     if (cwd / "tests" / "pg_shim.py").is_file():
-        lines.append(
-            "Tests: tests/pg_shim.py cannot run `SET`; failures whose message "
-            "names SET syntax are pre-existing shim limits, not your change."
-        )
+        lines.append(_Fact(
+            "Tests: tests/pg_shim.py cannot run `SET`; failures naming SET "
+            "syntax are pre-existing shim limits, not your change.",
+            _RANK_PG_SHIM,
+        ))
     return lines
 
 
@@ -1473,38 +1584,36 @@ def workspace_facts_card(
             # The worker answers on loopback only (the desktop app), and its
             # agent browser runs on this same machine: loopback is the address
             # that works, and the preview link names it (#1789).
-            lines.append(
+            browser = (
                 "Agent browser: runs on this machine, and this worker listens on "
                 "loopback only. Open servers you start at "
                 "http://127.0.0.1:<port>."
             )
         elif browser_host:
-            lines.append(
-                "Agent browser: may run on a different host from this shell (it "
-                "does on the container and shared runners). Bind any server you "
-                f"start to 0.0.0.0 and open it at http://{browser_host}:<port> — "
-                "that address works whether the browser is local or not; "
-                "localhost only works when it is."
+            browser = (
+                "Agent browser: may run on a different host (as on containers "
+                "and shared runners). Bind servers you start "
+                f"to 0.0.0.0 and open them at http://{browser_host}:<port>, which "
+                "works either way; localhost works only when the browser is local."
             )
         else:
-            lines.append(
+            browser = (
                 "Agent browser: may run on a different host from this shell. Bind "
                 "servers to 0.0.0.0 and open them by this machine's LAN address, "
                 "which works whether the browser is local or not."
             )
+        lines.append(_Fact(browser, _RANK_BROWSER))
         if is_shuffle:
             lines.extend(_shuffle_facts(cwd, app_port, preview_url))
     except Exception:  # noqa: BLE001 — a card never fails a session
         logger.warning("workspace facts card failed", exc_info=True)
-    body = "\n".join(f"- {line}" for line in lines)
-    card = (
+    head = (
         f"{WORKSPACE_FACTS_HEADER}\n"
-        "Initial worker/checkout baseline, probed at session start. Current "
-        "turn receipts and verified setup changes supersede it. Do not "
-        "re-probe unchanged facts; use new setup results rather than stale "
-        "availability notes.\n"
-        f"{body}"
+        "Baseline probed at session start; later turn receipts and verified "
+        "setup results supersede it. Do not re-probe unchanged facts.\n"
     )
-    if len(card) > WORKSPACE_FACTS_MAX_CHARS:
-        card = card[:WORKSPACE_FACTS_MAX_CHARS - 1].rstrip() + "…"
-    return card
+    try:
+        return _fit_facts(head, lines)
+    except Exception:  # noqa: BLE001 — a card never fails a session
+        logger.warning("workspace facts card fitting failed", exc_info=True)
+        return head.rstrip("\n")

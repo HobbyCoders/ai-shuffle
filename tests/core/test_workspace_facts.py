@@ -136,3 +136,108 @@ def test_card_never_raises(monkeypatch):
     monkeypatch.setattr(env, "_node_dependency_facts", lambda cwd: (_ for _ in ()).throw(OSError("boom")))
     card = env.workspace_facts_card("/nowhere", browser_host="10.0.0.1", app_port=8000)
     assert card.startswith(env.WORKSPACE_FACTS_HEADER)
+
+
+# ─── Fitting the ceiling: whole facts only ───────────────────────────────────
+#
+# A real session on a container worker got a card cut mid-sentence at
+# "- Frontend: the Vite config is `…": the old code sliced the text at the
+# ceiling. These pin the realistic worst case (AI Shuffle checkout, node
+# dependencies missing in some packages, a long interpreter path, a remote
+# browser host and a preview link with a ~150-character token) and the
+# whole-line rule for any ceiling.
+
+_SAMPLE_TOKEN = "v1." + "Q" * 48 + ".1700000000." + "0" * 64
+_SAMPLE_TOKEN += "z" * (150 - len(_SAMPLE_TOKEN))
+_WORST_URL = f"http://10.0.0.30:8002/api/v1/auth/preview-access?token={_SAMPLE_TOKEN}&next=/"
+_LONG_PYTHON = "/opt/app-updates/versions/" + "0" * 40 + "/venv/bin/python"
+
+
+def _worst_case_checkout(tmp_path):
+    root = _shuffle_checkout(tmp_path)
+    for pkg in ("browser-mcp", "tools", "desktop"):
+        (root / pkg).mkdir()
+        (root / pkg / "package.json").write_text("{}")
+        (root / pkg / "package-lock.json").write_text("{}")
+    (root / "tools" / "node_modules" / ".bin").mkdir(parents=True)
+    (root / "mobile").mkdir()
+    (root / "mobile" / "package.json").write_text("{}")
+    return root
+
+
+def _render_worst(root, monkeypatch, ceiling=None):
+    monkeypatch.setattr(env, "_PYTEST_PROBE", {"value": _LONG_PYTHON})
+    if ceiling is not None:
+        monkeypatch.setattr(env, "WORKSPACE_FACTS_MAX_CHARS", ceiling)
+    return env.workspace_facts_card(
+        str(root), browser_host="10.0.0.30", app_port=8000, preview_url=_WORST_URL,
+    )
+
+
+def _fact_lines(card):
+    """The card's lines after the header and the baseline sentence."""
+    return card.split("\n")[2:]
+
+
+def test_worst_case_card_fits_whole_without_dropping_anything(tmp_path, monkeypatch):
+    root = _worst_case_checkout(tmp_path)
+    card = _render_worst(root, monkeypatch)
+    assert len(card) <= env.WORKSPACE_FACTS_MAX_CHARS
+    assert "Left out" not in card and not card.endswith("…")
+    lines = _fact_lines(card)
+    assert all(line.startswith("- ") for line in lines)
+    labels = [line[2:].split(":", 1)[0] for line in lines]
+    assert labels == ["Node", "Mobile", "Node", "Python", "Agent browser", "This app",
+                      "Branch UI preview", "Frontend", "Tests"]
+    link_line = next(line for line in lines if line.startswith("- This app:"))
+    assert _WORST_URL in link_line
+    # The interpreter path appears once, inside the copyable command.
+    assert card.count(_LONG_PYTHON) == 1
+    assert f"PYTHONPATH=fluid {_LONG_PYTHON} -m pytest" in card
+
+
+@pytest.mark.parametrize("ceiling", range(250, 2500, 41))
+def test_over_ceiling_card_drops_whole_facts_never_part_of_one(tmp_path, monkeypatch, ceiling):
+    root = _worst_case_checkout(tmp_path)
+    full = _fact_lines(_render_worst(root, monkeypatch, ceiling=10**6))
+    card = _render_worst(root, monkeypatch, ceiling=ceiling)
+    assert len(card) <= ceiling
+    assert card.startswith(env.WORKSPACE_FACTS_HEADER + "\n")
+    lines = _fact_lines(card)
+    kept = [line for line in lines if line.startswith("- ")]
+    # Every kept line is one of the produced facts, whole, in the same order.
+    assert kept == [line for line in full if line in kept]
+    assert set(kept) <= set(full)
+    rest = lines[len(kept):]
+    if len(kept) < len(full):
+        assert len(rest) == 1 and rest[0].startswith("Left out to fit the size limit")
+        assert lines[-1] == rest[0]
+    else:
+        assert rest == []
+    # The link is whole or absent: never a cut token.
+    if _SAMPLE_TOKEN[:20] in card:
+        assert _WORST_URL in card
+
+
+def test_over_ceiling_card_leaves_out_lowest_ranked_facts_first(tmp_path, monkeypatch):
+    root = _worst_case_checkout(tmp_path)
+    full = _render_worst(root, monkeypatch, ceiling=10**6)
+    branch = next(line for line in _fact_lines(full) if line.startswith("- Branch UI preview:"))
+    # Room for everything but the branch-preview recipe: the lower-ranked
+    # facts go first, and the link, node, browser and Python facts stay.
+    card = _render_worst(root, monkeypatch, ceiling=len(full) - len(branch) + 40)
+    assert _WORST_URL in card
+    for kept in ("- Node: node_modules MISSING", "- Mobile:", "- Agent browser:", "- Python:"):
+        assert kept in card
+    assert "- Branch UI preview:" not in card
+    note = card.split("\n")[-1]
+    assert note.startswith("Left out to fit the size limit")
+    assert "Branch UI preview" in note
+
+
+def test_link_line_is_never_partial_even_when_it_cannot_fit(tmp_path, monkeypatch):
+    root = _worst_case_checkout(tmp_path)
+    card = _render_worst(root, monkeypatch, ceiling=500)
+    assert len(card) <= 500
+    assert "token=" not in card and "preview-access" not in card
+    assert "This app" in card.split("\n")[-1]  # named as left out
