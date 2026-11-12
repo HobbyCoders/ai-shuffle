@@ -153,11 +153,13 @@ async def provider_status(provider_id: str, token: str = Depends(require_admin))
     """Ask this worker's binary whether the row can open sessions here.
 
     ``state``: signed_in | signed_out | not_installed | error. A stored
-    sign-in lives only on the worker where it was made.
+    sign-in lives only on the worker where it was made. ``login``: a sign-in
+    waiting for its code (started on any device), or null.
     """
     row = await _row(provider_id, include_token=True)
     result = await antigravity.probe(row)
-    return {**result, **_guard_view(row), "auth_mode": row.get("auth_mode")}
+    return {**result, **_guard_view(row), "auth_mode": row.get("auth_mode"),
+            "login": antigravity.pending_login(provider_id)}
 
 
 @router.put("/providers/{provider_id}/guard")
@@ -192,7 +194,8 @@ async def login_start(provider_id: str, token: str = Depends(require_admin)):
     """Start the binary's own sign-in; returns the link the owner opens.
 
     ``state``: awaiting_code (open ``url``, then complete with the code) |
-    failed | not_installed.
+    failed | not_installed | signed_in (already signed in here: nothing was
+    started; sign out first to change accounts).
     """
     row = await _row(provider_id)
     return await antigravity.start_login(row)

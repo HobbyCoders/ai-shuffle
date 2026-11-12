@@ -57,6 +57,7 @@
 	let saving = $state(false);
 	let usageBusy = $state(false);
 	let error = $state('');
+	let notice = $state('');
 
 	// Guard: the row's own setting wins until the worker's view loads.
 	const guarded = $derived(status ? status.guarded : antigravityGuarded(row));
@@ -117,6 +118,7 @@
 		error = '';
 		try {
 			await signOutAntigravity(row.id);
+			notice = '';
 			await loadStatus();
 			flashSaved();
 		} catch (e) {
@@ -197,6 +199,7 @@
 	// again whenever the pane is shown, including a reopen on a phone, where
 	// the pane stays mounted behind the list, and when the app regains focus.
 	function refresh() {
+		notice = '';
 		void antigravity.load(true);
 		void loadStatus();
 		void providers.loadUsage();
@@ -280,6 +283,7 @@
 		{:else}
 			{#if personal}<AntigravityWarning />{/if}
 			{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
+			{#if notice}<p class="pv-note" role="status">{notice}</p>{/if}
 			<RowGroup title="Account">
 				<SettingRow label="Name"><TextField value={row.name} width={220} maxlength={120} disabled={saving} onchange={rename} /></SettingRow>
 				<SettingRow label="Connection" hint={keyRow ? undefined : 'The agent keeps the sign-in on this worker; AI Shuffle never reads it'}>
@@ -304,13 +308,14 @@
 			</RowGroup>
 			{#if statusError}<p class="pv-msg err" role="alert">{statusError}</p>{/if}
 
-			{#if !keyRow && (signingIn || status?.state === 'signed_out')}
+			{#if !keyRow && (signingIn || status?.state === 'signed_out' || status?.login)}
 				{#if business}
 					<p class="pv-note">Antigravity offers business sign-in only through a browser on the worker. Sign in there with <code>agy</code>, or use a Gemini API key.</p>
 				{:else}
 					<AntigravitySignIn
 						rowId={row.id}
-						onSignedIn={() => { signingIn = false; void loadStatus(); flashSaved(); }}
+						pending={status?.login ?? null}
+						onSignedIn={(note) => { signingIn = false; notice = note ?? ''; void loadStatus(); if (!note) flashSaved(); }}
 						onCancel={signingIn ? () => (signingIn = false) : undefined}
 					/>
 				{/if}

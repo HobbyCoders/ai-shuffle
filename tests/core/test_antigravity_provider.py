@@ -483,23 +483,50 @@ def test_personal_rows_are_guarded_until_the_owner_lifts_it(client):
 
 def test_personal_sign_in_runs_the_binary_flow(client):
     row = _create(client)
-    assert client.get(f"{BASE}/providers/{row['id']}/status").json()["state"] == "signed_out"
+    status = client.get(f"{BASE}/providers/{row['id']}/status").json()
+    assert status["state"] == "signed_out" and status["login"] is None
     started = client.post(f"{BASE}/providers/{row['id']}/login").json()
     assert started["state"] == "awaiting_code", started
     assert started["url"].startswith("https://accounts.google.com/")
+    # A sign-in started elsewhere shows on every screen that asks.
+    assert client.get(f"{BASE}/providers/{row['id']}/status").json()["login"] == started
     bad = client.post(f"{BASE}/providers/{row['id']}/login/{started['login_id']}/complete",
                       json={"code": "wrong"}).json()
     assert bad["state"] == "failed"
-    # The agent's verdict reaches the owner; its own prompts do not.
-    assert "invalid_grant" in bad["message"]
-    assert "authorization code" not in bad["message"] and "visit" not in bad["message"]
+    # A plain message with the next step: not the agent's raw "invalid_grant"
+    # and none of its own prompts.
+    assert bad["message"] == ag.CODE_REJECTED
+    assert client.get(f"{BASE}/providers/{row['id']}/status").json()["login"] is None
     started = client.post(f"{BASE}/providers/{row['id']}/login").json()
     done = client.post(f"{BASE}/providers/{row['id']}/login/{started['login_id']}/complete",
                        json={"code": "good"}).json()
     assert done["state"] == "signed_in", done
     assert client.get(f"{BASE}/providers/{row['id']}/status").json()["state"] == "signed_in"
+    # Signed in already: nothing is started, and it says so.
+    again = client.post(f"{BASE}/providers/{row['id']}/login").json()
+    assert again["state"] == "signed_in" and again["login_id"] is None
+    assert again["message"] == ag.ALREADY_SIGNED_IN
+    assert client.get(f"{BASE}/providers/{row['id']}/status").json()["login"] is None
     assert client.post(f"{BASE}/providers/{row['id']}/sign-out").json() == {"state": "signed_out"}
     assert client.get(f"{BASE}/providers/{row['id']}/status").json()["state"] == "signed_out"
+
+
+async def test_a_wrong_code_on_a_signed_in_worker_is_not_a_sign_in(mock_db, fake_agy, monkeypatch):
+    """The agent's own refusal of the code wins over the check after it,
+    which still finds the earlier sign-in."""
+    row = {"id": "p1", "provider_type": "antigravity", "auth_mode": "oauth-personal"}
+    monkeypatch.setattr(ag, "signed_in_here", lambda row_id: False)
+    started = await ag.start_login(row)
+    assert started["state"] == "awaiting_code"
+
+    async def still_signed_in(r):
+        return {"state": "signed_in"}
+    monkeypatch.setattr(ag, "probe", still_signed_in)
+    login = ag.get_login(started["login_id"])
+    result = await ag.complete_login(login, "wrong", row)
+    await login.proc.wait()
+    assert result["state"] == "failed"
+    assert result["message"].startswith(ag.CODE_REJECTED) and "still signed in" in result["message"]
 
 
 def test_business_sign_in_has_no_headless_flow(client):

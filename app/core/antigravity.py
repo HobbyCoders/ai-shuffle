@@ -120,6 +120,12 @@ _LOGIN_PROMPT_RE = re.compile(r"please visit the following url[^:]*:|enter the a
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # A line saying how the code went; the binary may keep running after it.
 _LOGIN_RESULT_RE = re.compile(r"succe|signed in|logged in|authenticated|fail|invalid|error", re.I)
+# The agent's own verdict that Google refused the code (e.g. "invalid_grant").
+_LOGIN_REJECTED_RE = re.compile(r"invalid_grant|fail|invalid|denied|error", re.I)
+CODE_REJECTED = ("Google did not accept that code. A code works once and only for a few "
+                 "minutes: start the sign-in again, open the new link and paste the code it shows.")
+ALREADY_SIGNED_IN = ("Already signed in on this worker. To use a different Google account, "
+                     "sign out first.")
 _LOGIN_IDLE_SECONDS = 15 * 60
 _LOGIN_COMPLETE_SECONDS = 90
 _PROBE_SECONDS = 20
@@ -522,6 +528,11 @@ async def start_login(row: Mapping[str, Any]) -> Dict[str, Any]:
             "Antigravity offers business sign-in only through a browser on the worker. "
             "Use a Gemini API key here, or sign in from a desktop worker.")}
     row_id = str(row["id"])
+    if signed_in_here(row_id) and (await probe(row)).get("state") == "signed_in":
+        # Said plainly: a new sign-in would not replace the account, and any
+        # code would then read as "signed in".
+        return {"login_id": None, "provider_id": row_id, "state": "signed_in",
+                "url": None, "message": ALREADY_SIGNED_IN}
     async with _login_lock(row_id):
         await _stop_logins(row_id)
         binary = find_binary()
@@ -578,6 +589,15 @@ def get_login(login_id: str) -> Optional[LoginSession]:
     return _logins.get(login_id)
 
 
+def pending_login(row_id: str) -> Optional[Dict[str, Any]]:
+    """The row's sign-in waiting for its code, wherever it was started
+    (another device or tab), so the screen offers its code entry and a
+    cancel instead of a start that would replace it."""
+    waiting = [x for x in _logins.values()
+               if x.row_id == str(row_id) and x.state == "awaiting_code" and x.url]
+    return max(waiting, key=lambda x: x.created_at).public() if waiting else None
+
+
 async def complete_login(login: LoginSession, code: str, row: Mapping[str, Any]) -> Dict[str, Any]:
     """Hand the owner's authorization code to the binary and check the result."""
     code = (code or "").strip()
@@ -589,6 +609,7 @@ async def complete_login(login: LoginSession, code: str, row: Mapping[str, Any])
         login.state, login.message = "failed", "The sign-in expired. Start it again."
         return login.public()
     login.state = "completing"  # no await since the check: one completion per sign-in
+    mark = len(login.output)
     proc.stdin.write(code.encode() + b"\n")
     await proc.stdin.drain()
 
@@ -616,13 +637,22 @@ async def complete_login(login: LoginSession, code: str, row: Mapping[str, Any])
     _kill(login)
     # A sign-out, delete or newer start may end this sign-in meanwhile.
     result = await probe(row) if _logins.get(login.id) is login else {}
+    # The agent's own verdict on the code decides, not only the check after
+    # it: a worker still holding an earlier sign-in answers "signed in"
+    # whatever code was sent.
+    rejected = any(_LOGIN_REJECTED_RE.search(line) for line in login.output[mark:])
     if _logins.get(login.id) is not login:
         login.state, login.message = "failed", "The sign-in was cancelled."
+    elif rejected:
+        login.state, login.message = "failed", CODE_REJECTED
+        if result.get("state") == "signed_in":
+            login.message += " This worker is still signed in with the earlier account."
     elif result.get("state") == "signed_in":
         login.state, login.message = "signed_in", None
     else:
         login.state = "failed"
-        login.message = "Antigravity did not accept the sign-in." + _tail(login)
+        login.message = ("Antigravity did not accept the sign-in. Start the sign-in again; "
+                         "if it fails again, check the worker's connection to Google." + _tail(login))
     _drop(login)
     return login.public()
 

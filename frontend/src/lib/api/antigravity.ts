@@ -56,10 +56,12 @@ export interface AntigravityProviderStatus extends AntigravityGuardView {
 	message?: string | null;
 	agent?: Record<string, unknown> | null;
 	auth_mode: AntigravityAuthMode;
+	/** A sign-in waiting for its code, started on any device, or null. */
+	login?: AntigravityLogin | null;
 }
 
 export interface AntigravityLogin {
-	login_id?: string;
+	login_id?: string | null;
 	provider_id?: string;
 	state: 'awaiting_code' | 'failed' | 'not_installed' | 'signed_in';
 	url?: string | null;
