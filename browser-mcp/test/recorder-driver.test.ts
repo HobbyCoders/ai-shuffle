@@ -198,7 +198,10 @@ describe("browser_record wiring", () => {
     expect(validateInput(recordSchema, { action: "rewind" }).ok).toBe(false);
     expect(validateInput(recordSchema, { action: "start", cpu_throttle: 50 }).ok).toBe(false);
     expect(validateInput(recordSchema, { action: "start", network: "dialup" }).ok).toBe(false);
-    expect(SERVER_INSTRUCTIONS).toContain("FLIGHT RECORDER");
+    // The recorder guide moved from the server instructions into the tool
+    // description, which arrives whole with the schema.
+    expect(SERVER_INSTRUCTIONS).not.toContain("FLIGHT RECORDER");
+    expect(tool.description).toContain("Zero anomalies and a timeline that only moves forward is the pass condition");
   });
 
   it("labels acting steps without their typed values or URL queries", () => {
