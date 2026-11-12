@@ -147,6 +147,26 @@ async def test_a_failed_save_leaves_the_proposal_open(tmp_path):
     assert len(proposal_lines(store)) == 1
 
 
+async def test_a_save_that_returns_a_replaced_fact_leaves_the_proposal_open(tmp_path):
+    store = SkillStore(tmp_path)
+    old = store.save_memory(RULE, protected=True, when=WHEN)
+    new = store.save_memory("Release notes are written after the tag is pushed.", protected=True,
+                            when=WHEN, replaces=[old.id])
+    PreferenceProposals(store).propose("release_notes", RULE)
+    # Storage matches the archived rule and deliberately does not revive it.
+    out = await remember({"text": RULE, "when": WHEN, "user_requested": True,
+                          "proposal": "release_notes"}, ctx(store))
+    assert not out.is_error and [m.id for m in store.memories()] == [new.id]
+    assert f"stays open: [{old.id}] was replaced by [{new.id}]" in out.text
+    assert "Closed learner proposal" not in out.text and len(proposal_lines(store)) == 1
+    # The call the receipt names (correct the current successor) closes it.
+    [live] = store.memories()
+    out = await remember({"text": RULE, "memory_id": live.id, "expected_revision": live.revision,
+                          "user_requested": True, "proposal": "release_notes"}, ctx(store))
+    assert "Closed learner proposal 'release_notes' (saved)" in out.text
+    assert proposal_lines(store) == [] and [m.text for m in store.memories()] == [RULE]
+
+
 async def test_a_busy_queue_never_fails_the_save(tmp_path):
     store = SkillStore(tmp_path)
     queue = PreferenceProposals(store)

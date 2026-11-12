@@ -16,7 +16,7 @@ SPEC = ToolSpec(
     input_schema={"type": "object", "properties": {
         "memory_id": {"type": "string"},
         "expected_revision": {"type": "integer", "minimum": 1},
-        "confirm": {"type": "boolean", "description": "True only after the user's explicit request to forget this fact."},
+        "confirm": {"type": "boolean", "description": "For a fact, true only after the user's explicit request to forget it."},
         "proposal": {"type": "string", "description": "Proposal topic to dismiss; no memory_id."},
     }, "required": ["confirm"]},
 )
