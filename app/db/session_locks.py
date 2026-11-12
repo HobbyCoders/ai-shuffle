@@ -23,7 +23,9 @@ Who takes what (keep this table and the code in step):
     sorted family. Its FK cascade deletes the staged hand-off rows, so H must
     be held before S: reaching H through the cascade after S deadlocks
     (#1215). H locks only headers that exist, so X keeps a new header from
-    committing between the scan and the cascade.
+    committing between the scan and the cascade. The owner's deletion fact
+    (``network_session_deletions``, #1308) is written last, under S; its
+    tombstone is published after commit in its own N transaction.
   - project delete (``projects.delete_project``): each chat of the project
     through ``delete_session(expected_project_id=...)``, one transaction per
     chat, then the project row alone (its ``ON DELETE SET NULL`` touches only
@@ -36,7 +38,9 @@ Who takes what (keep this table and the code in step):
   - bulk membership / settlement: G, N, then R/C/S of the sorted sessions.
   - incoming sync: N first. A session tombstone takes X then H (whole batch,
     sorted, before any counter) and then S through its DELETE
-    (``engine.materialize``).
+    (``engine.materialize``). A session upsert takes S (``FOR UPDATE``)
+    before it reads the owner's deletion fact, so a delete still running is
+    waited for and its fact seen (#1308).
     Mirror events reserve C (``engine._lock_mirror_event_counters``).
   - hand-off publication / acceptance / finalize: W, H (+ hold runs), C, S.
     Staging cleanup (``handoff._discard_history``): H (+ hold runs), S.

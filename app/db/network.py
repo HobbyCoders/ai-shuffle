@@ -288,6 +288,18 @@ def create_schema(cursor) -> None:
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
+    # A chat this worker deleted as its owner (#1308): incoming sync never
+    # recreates it, and its tombstone is owed while the chat's sync record
+    # here is live (``owed_session_tombstones``). ``network_id`` is the
+    # network that authorized it: a fact of a network this worker has since
+    # left is ignored and pruned.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS network_session_deletions (
+            session_id TEXT PRIMARY KEY,
+            network_id TEXT NOT NULL DEFAULT '',
+            deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS network_catalog_cursors (
             session_id TEXT PRIMARY KEY,
@@ -1442,6 +1454,78 @@ def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_de
                content_hash = EXCLUDED.content_hash, deleted = EXCLUDED.deleted,
                order_seq = EXCLUDED.order_seq, updated_at = EXCLUDED.updated_at""",
         (collection, record_id, clock, origin_device_id, content_hash, bool(deleted), order_seq, _now()))
+
+
+def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:
+    """Record, in the owner's delete transaction, that it deleted this chat (#1308)."""
+    cursor.execute(
+        """INSERT INTO network_session_deletions (session_id, network_id, deleted_at)
+           VALUES (%s, %s, %s)
+           ON CONFLICT (session_id) DO UPDATE SET network_id = EXCLUDED.network_id,
+               deleted_at = EXCLUDED.deleted_at""",
+        (session_id, network_id, _now()))
+
+
+# Only a fact of the network this worker is in counts (#1308 review S8).
+_CURRENT_NETWORK = "d.network_id = (SELECT network_id FROM network_state WHERE id = 1)"
+_NO_ROW = "NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = d.session_id)"
+# The one rule for what is owed (#1308): a live version of the chat that this
+# worker knows of and that no tombstone it holds has beaten. The sync record
+# is the newest version this worker has seen, from anyone, by any route.
+_LIVE_RECORD = ("EXISTS (SELECT 1 FROM sync_records r WHERE r.collection = 'sessions' "
+                "AND r.record_id = d.session_id AND NOT r.deleted)")
+
+
+def deleted_session_ids(cursor, session_ids: List[str]) -> set:
+    """The chats among ``session_ids`` this worker deleted as owner and holds no row of."""
+    if not session_ids:
+        return set()
+    cursor.execute(
+        f"SELECT d.session_id FROM network_session_deletions d WHERE {_CURRENT_NETWORK} AND {_NO_ROW} "
+        "AND d.session_id IN (" + ", ".join(["%s"] * len(session_ids)) + ")", tuple(session_ids))
+    return {row["session_id"] for row in cursor.fetchall()}
+
+
+def owed_session_tombstones(cursor, session_ids: Optional[List[str]] = None, *, limit: int = 100) -> List[str]:
+    """Chats this worker deleted as owner whose sync record here is still live.
+
+    Derived from durable state on every call; nothing marks or clears it. A
+    tombstone this worker signed, or a peer's that won, makes the record
+    deleted and ends the obligation; a live version that arrives later and
+    outranks it makes the record live again (``engine._refuse_deleted_session``).
+    """
+    sql = (f"SELECT d.session_id FROM network_session_deletions d WHERE {_CURRENT_NETWORK} "
+           f"AND {_NO_ROW} AND {_LIVE_RECORD}")
+    params: tuple = ()
+    if session_ids is not None:
+        if not session_ids:
+            return []
+        sql += " AND d.session_id IN (" + ", ".join(["%s"] * len(session_ids)) + ")"
+        params = tuple(session_ids)
+    cursor.execute(sql + " ORDER BY d.session_id LIMIT %s", params + (limit,))
+    return [row["session_id"] for row in cursor.fetchall()]
+
+
+def forget_session_deletion(cursor, session_id: str) -> None:
+    cursor.execute("DELETE FROM network_session_deletions WHERE session_id = %s", (session_id,))
+
+
+def prune_session_deletions(cursor) -> int:
+    """Forget the deletion facts that no longer stand; never by age.
+
+    A fact lives as long as the chat's own deleted sync record (sessions
+    records are kept until this worker leaves the network, which clears
+    both): a peer offline for months can still deliver a live version above
+    the owner's tombstone, and only the fact refuses it (#1308 review S13).
+    Dropped: a fact of another network (a delete that raced leaving it), and
+    one whose chat has a row here again. The delete removed the row in the
+    fact's own transaction, so a row now means the chat was recreated
+    (whole-database recovery) since.
+    """
+    cursor.execute("DELETE FROM network_session_deletions WHERE session_id IN ("
+                   f"SELECT d.session_id FROM network_session_deletions d WHERE NOT ({_CURRENT_NETWORK}) "
+                   f"OR NOT {_NO_ROW})")
+    return cursor.rowcount or 0
 
 
 def records_for_collection(cursor, collection: str) -> Dict[str, dict]:
