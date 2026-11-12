@@ -240,15 +240,17 @@ async def _turn(adapter, source):
 async def test_guard_changes_apply_to_the_next_turn_of_a_connected_chat(client, session_row):
     # Each turn reads the stored row: the copy a chat took when it connected
     # decides nothing, in either direction.
-    from app.core.environment import ProviderConfigError
+    from app.core.environment import ProviderConfigError, ProviderTurnRefused
 
     row = _create(client)
     client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
     adapter = _connected(row["id"])
     await _turn(adapter, "automation")  # lifted: an automatic turn runs
     client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": False})
-    with pytest.raises(ProviderConfigError, match="scheduled or automatic"):
+    with pytest.raises(ProviderConfigError, match="refused for an automation run"):
         await _turn(adapter, "automation")
+    with pytest.raises(ProviderTurnRefused, match="refused for a scheduled wake-up"):
+        await _turn(adapter, "wakeup")
     await _turn(adapter, "user")  # the owner's own turn still goes through
     await _turn(adapter, None)  # the source names one submit only
     client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": True})
@@ -470,6 +472,15 @@ def test_rows_carry_gemini_models_with_thinking_levels(client):
     assert ids == [m["id"] for m in ag.DEFAULT_MODELS] and all(i.startswith("gemini-") for i in ids)
 
 
+@pytest.mark.parametrize("mode,billing", [
+    ("oauth-personal", "subscription"), ("oauth-business", "subscription"),
+    ("gemini-api-key", "api"),
+])
+def test_stats_bill_sign_in_rows_as_a_plan(mode, billing):
+    from app.core.usage_attribution import provider_billing
+    assert provider_billing("antigravity", mode) == billing
+
+
 def test_picker_tells_sign_in_rows_apart(client):
     from app.core import model_registry
 
@@ -602,7 +613,10 @@ async def test_install_does_nothing_when_that_version_is_installed(mock_db, fake
 def test_not_installed_is_reported(client, monkeypatch):
     row = _create(client)
     monkeypatch.setenv(ag.BINARY_ENV, "/nonexistent/agy")
-    assert client.get(f"{BASE}/providers/{row['id']}/status").json()["state"] == "not_installed"
+    status = client.get(f"{BASE}/providers/{row['id']}/status").json()
+    assert status["state"] == "not_installed"
+    # Read on the provider's own screen: it points below, not back to itself.
+    assert status["message"] == ag.NOT_INSTALLED_HERE and "Settings" not in status["message"]
     assert client.get(f"{BASE}/status").json()["installed"] is False
 
 

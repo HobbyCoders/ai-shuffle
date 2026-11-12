@@ -1159,7 +1159,7 @@
 		{#if credits}
 			<div class="row-reset usage-credits">{credits}</div>
 		{/if}
-		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, 'Dashboard', 'Compare on the provider dashboard')}
+		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, pb.sourceInfo?.dashboard_label ?? 'Dashboard', pb.sourceInfo?.dashboard_label && pb.sourceInfo.dashboard_label !== 'Dashboard' ? `Open the ${pb.sourceInfo.dashboard_label}` : 'Compare on the provider dashboard')}
 	{/if}
 {/snippet}
 

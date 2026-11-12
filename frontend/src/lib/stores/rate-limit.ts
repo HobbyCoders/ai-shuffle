@@ -127,6 +127,8 @@ export interface UsageSourceInfo {
 	support: UsageSupport;
 	support_label: string;
 	dashboard_url: string;
+	/** Link text for dashboard_url ("Dashboard" unless it is another page). */
+	dashboard_label?: string;
 	min_interval_seconds?: number | null;
 	freshness_seconds?: number | null;
 	/** Figures this source cannot report (shown as unavailable). */

@@ -67,10 +67,17 @@ def hosts(state):
 # Registry definitions
 # ---------------------------------------------------------------------------
 
+def test_a_link_that_is_not_a_usage_page_says_what_it_is():
+    # Google publishes no Antigravity usage page; the link is its FAQ.
+    assert usage_sources.SOURCES["antigravity_usage"].public()["dashboard_label"] == "Antigravity FAQ"
+    assert usage_sources.SOURCES["claude_rate_limit_events"].public()["dashboard_label"] == "Dashboard"
+
+
 def test_every_source_has_a_complete_capability_definition():
     for source in usage_sources.SOURCES.values():
         public = source.public()
         assert public["dashboard_url"].startswith("https://"), source.id
+        assert public["dashboard_label"], source.id
         assert source.scope in {"api_key", "project", "organization", "account", "subscription"}
         assert source.measure in usage_sources.MEASURE_LABELS
         assert source.support in usage_sources.SUPPORT_LABELS

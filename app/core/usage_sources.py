@@ -93,6 +93,8 @@ class UsageSource:
     support: str
     dashboard_url: str
     endpoints: tuple[Endpoint, ...] = ()
+    #: Link text for ``dashboard_url`` where it is not a usage dashboard.
+    dashboard_label: str = "Dashboard"
     failure_policy: str = STANDARD_FAILURE_POLICY
     #: Figures users often expect that this source cannot report.
     unavailable: tuple[str, ...] = ()
@@ -134,6 +136,7 @@ class UsageSource:
             "freshness_seconds": self.min_interval * 2 if self.id == "xai_management" else self.min_interval or None,
             "failure_policy": self.failure_policy,
             "dashboard_url": self.dashboard_url,
+            "dashboard_label": self.dashboard_label,
             "unavailable": list(self.unavailable),
         }
 
@@ -375,7 +378,10 @@ _SOURCES: tuple[UsageSource, ...] = (
         measure=SUBSCRIPTION_ALLOWANCE,
         collection=POLLED,
         support=UNDOCUMENTED,
+        # Google publishes no usage page for Antigravity plans; the FAQ
+        # explains its quotas, so the link says what it is.
         dashboard_url="https://antigravity.google/docs/faq",
+        dashboard_label="Antigravity FAQ",
         # Not HTTP: the binary's own ``agy -p /usage --output-format json``,
         # run only when the usage popover asks (on-demand refresh).
         endpoints=(Endpoint(ANTIGRAVITY_USAGE_COMMAND, 300),),

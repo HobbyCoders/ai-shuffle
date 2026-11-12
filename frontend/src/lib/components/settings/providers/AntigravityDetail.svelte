@@ -276,7 +276,7 @@
 			</RowGroup>
 			<div class="pv-acts">
 				{#if dashboard}
-					<a class="st-btn ghost" href={dashboard} target="_blank" rel="noopener noreferrer"><ExternalLink />Antigravity dashboard</a>
+					<a class="st-btn ghost" href={dashboard} target="_blank" rel="noopener noreferrer"><ExternalLink />{usageEntry?.source_info?.dashboard_label || 'Antigravity FAQ'}</a>
 				{/if}
 				<button type="button" class="st-btn" disabled={usageBusy} onclick={refreshUsage}><RefreshCw />{usageBusy ? 'Reading' : 'Refresh'}</button>
 			</div>

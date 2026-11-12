@@ -146,6 +146,7 @@ class UsageSourceInfo(BaseModel):
     support: str
     support_label: str
     dashboard_url: str
+    dashboard_label: str = "Dashboard"
     min_interval_seconds: int | None = None
     freshness_seconds: int | None = None
     unavailable: list[str] = []

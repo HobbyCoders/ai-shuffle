@@ -68,6 +68,10 @@ _ALLOWED_DOWNLOAD_HOSTS = ("storage.googleapis.com",)
 DASHBOARD_URL = "https://antigravity.google/docs/faq"
 TERMS_URL = "https://antigravity.google/terms"
 
+#: The status and sign-in answer: both are read on the provider's own screen.
+NOT_INSTALLED_HERE = ("Antigravity is not installed on this worker. "
+                      "Install it under Antigravity agent below.")
+
 WARNING_TEXT = (
     "Google's Antigravity terms (section 6) and FAQ restrict using a personal "
     "Google sign-in (consumer plans) through third-party software, and Google "
@@ -412,8 +416,9 @@ async def _probe(row: Mapping[str, Any]) -> Dict[str, Any]:
     """
     try:
         spec = build_spec(row)
-    except FileNotFoundError as exc:
-        return {"state": "not_installed", "message": str(exc)}
+    except FileNotFoundError:
+        # Read on the provider's own screen, which offers the install below.
+        return {"state": "not_installed", "message": NOT_INSTALLED_HERE}
     conn = AcpConnection(spec.argv, cwd=home_for(str(row.get("id") or "default")), env=spec.env)
     try:
         await conn.start()
@@ -537,7 +542,7 @@ async def start_login(row: Mapping[str, Any]) -> Dict[str, Any]:
         await _stop_logins(row_id)
         binary = find_binary()
         if not binary:
-            return {"state": "not_installed", "message": "Antigravity is not installed on this worker."}
+            return {"state": "not_installed", "message": NOT_INSTALLED_HERE}
         home = home_for(row_id)
         login = LoginSession(id=uuid.uuid4().hex, row_id=row_id)
         login.proc = await asyncio.create_subprocess_exec(
