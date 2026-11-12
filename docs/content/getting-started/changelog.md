@@ -8,6 +8,31 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.3.1 (2026-11-12)
+
+1.3.0 reached the in-app updater and the Windows installer, but its Android build failed, which also kept the Docker `latest` tag and the website's Linux and Android downloads on the previous version. 1.3.1 finishes that rollout. Everything listed under 1.3.0 is in this release.
+
+### Agents and providers
+
+- An agent can send up to 8 requests at once to a service you granted it access to. Each request is still checked and approved on its own, as before.
+- Guidance agents get at the start of a chat is no longer cut off. On Claude Code the browser's instructions arrive in full, including the rules for sign-in pages and passwords, and the workspace notes no longer stop mid-sentence.
+
+### Sessions and interface
+
+- The sidebar's **Needs you** no longer shows a "Memory needs attention" item that never went away. Memory health stays in Settings > System.
+
+### Hand-offs
+
+- A chat you delete on the worker it just moved to stays deleted on every worker, instead of staying on the worker it came from.
+
+### Desktop app
+
+- On Windows, a task agent that finished without changes cleans up its checkout, and a follow-up message to it no longer fails with "no longer on its assigned branch".
+
+### Fixed
+
+- When a database write fails part-way, the app no longer reports it as saved or acts as if it was.
+
 ## 1.3.0 (2026-11-10)
 
 New Cloud plans, direct sync between workers on the same network, Settings > Memory, one Away switch for every chat, three new providers, and steadier hand-offs, updates and chat.
