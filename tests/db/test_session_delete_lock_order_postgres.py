@@ -2014,3 +2014,312 @@ def test_project_delete_keeps_a_chat_moved_to_another_project(private_pool, monk
         cur = conn.cursor()
         cur.execute("SELECT id FROM projects WHERE id IN (%s,%s) ORDER BY id", (old, new))
         assert [row["id"] for row in cur.fetchall()] == [new]
+
+
+# The owner's deletion fact (#1308): the owner's delete writes
+# network_session_deletions in its own transaction; incoming sync never
+# recreates that chat and its tombstone outranks the record it refused.
+
+def _owned_chat(ctx, remote, prefix, *, record_clock=5):
+    """A chat this worker owns whose sync record the previous owner signed."""
+    from app.db import network as store
+
+    sid = prefix + uuid4().hex
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id,owner_device_id) VALUES (%s,%s)", (sid, ctx.device_id))
+        if record_clock is not None:
+            store.put_record(cur, "sessions", sid, clock=record_clock, origin_device_id=remote.device_id,
+                             content_hash="previous-owner", deleted=False)
+    return sid
+
+
+def _session_upsert(ctx, remote, sid, *, clock, seq=1, owner=None):
+    """The previous owner's record of the chat (its delayed hand-off commit)."""
+    from app.network import engine, envelope, policy
+
+    coll = policy.collection("sessions")
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
+        row = cur.fetchone()
+    row = dict(row) if row else {"id": sid}
+    row["owner_device_id"] = owner or ctx.device_id
+    record = engine.serialize_row(coll, row)
+    return envelope.build(
+        network_id=ctx.network_id, collection="sessions", record_id=sid,
+        op="upsert", clock=clock, origin_device_id=remote.device_id,
+        origin_incarnation=1, origin_seq=seq, schema_version=1, key_version=1,
+        network_key=ctx.network_key, signing_private=remote.signing_private,
+        record=record,
+    ).to_dict()
+
+
+def _session_record(sid):
+    from app.db import network as store
+
+    with base.get_db() as conn:
+        return store.get_record(conn.cursor(), "sessions", sid)
+
+
+def _session_row(sid):
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM sessions WHERE id=%s", (sid,))
+        return cur.fetchone()
+
+
+def _fact(sid):
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM network_session_deletions WHERE session_id=%s", (sid,))
+        return cur.fetchone()
+
+
+def _owed(sid):
+    from app.db import network as store
+
+    with base.get_db() as conn:
+        return store.owed_session_tombstones(conn.cursor(), [sid]) == [sid]
+
+
+def _waiting_query(observer, blocker_pid):
+    with observer.cursor() as probe:
+        probe.execute("SELECT pg_stat_clear_snapshot()")
+        probe.execute("SELECT query FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))", (blocker_pid,))
+        row = probe.fetchone()
+    return row[0] if row else ""
+
+
+def test_apply_arriving_while_the_owners_delete_is_open_cannot_recreate_the_chat(private_pool, monkeypatch):
+    """#1308: the source's delayed commit record reaches the receiver while its delete is open.
+
+    The apply holds network_state (N) and waits on the session row the open
+    delete holds; once the delete commits it reads the owner's deletion fact,
+    keeps the row deleted and the incoming version as its record, and the
+    delete's own publication (waiting on N) outranks it. Main recreated the chat here (its upsert ran after the delete committed).
+    """
+    from app.network import engine
+
+    ctx, remote = _remote_network("open-delete-")
+    monkeypatch.setattr(engine, "_context", ctx)
+    sid = _owned_chat(ctx, remote, "open-delete-")
+    env = _session_upsert(ctx, remote, sid, clock=50)
+    barriers = _Barriers(monkeypatch, {"delete": (
+        lambda sql, params: sql.startswith("DELETE FROM sessions WHERE id ="), False)})
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="incoming") as syncing:
+        observer.autocommit = True
+        deleting = deleter.submit(sessions.delete_session, sid)
+        try:
+            barriers.wait("delete", deleting)  # the row is deleted, nothing committed
+            applying = syncing.submit(engine.apply_batch, [env], ctx=ctx)
+            _wait_for_lock_wait(observer, barriers.pids["delete"], applying)
+            waited_on = _waiting_query(observer, barriers.pids["delete"])
+        finally:
+            barriers.release_all()
+        assert deleting.result(timeout=10) is True
+        applying.result(timeout=10)
+    assert _session_row(sid) is None, "the delayed commit record recreated the deleted chat"
+    record = _session_record(sid)
+    assert record["deleted"] and record["origin_device_id"] == ctx.device_id
+    assert record["clock"] > 50, "the owner's tombstone must outrank the record it refused"
+    assert not _owed(sid)
+    assert waited_on.startswith("SELECT id FROM sessions WHERE id ="), waited_on  # the refusal's row lock
+
+
+def test_apply_committed_first_then_the_owners_delete_outranks_it(private_pool, monkeypatch):
+    """#1308: the commit record is applied first (holding the row); the delete waits, then wins."""
+    from app.network import engine
+
+    ctx, remote = _remote_network("apply-first-")
+    monkeypatch.setattr(engine, "_context", ctx)
+    sid = _owned_chat(ctx, remote, "apply-first-")
+    env = _session_upsert(ctx, remote, sid, clock=50)
+    barriers = _Barriers(monkeypatch, {"incoming": (
+        lambda sql, params: sql.startswith("INSERT INTO sessions ("), False)})
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="incoming") as syncing, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
+        observer.autocommit = True
+        applying = syncing.submit(engine.apply_batch, [env], ctx=ctx)
+        try:
+            barriers.wait("incoming", applying)  # the upsert holds the row, uncommitted
+            deleting = deleter.submit(sessions.delete_session, sid)
+            _wait_for_lock_wait(observer, barriers.pids["incoming"], deleting)
+        finally:
+            barriers.release_all()
+        applying.result(timeout=10)
+        assert deleting.result(timeout=10) is True
+    assert _session_row(sid) is None
+    record = _session_record(sid)
+    assert record["deleted"] and record["origin_device_id"] == ctx.device_id
+    assert record["clock"] > 50
+
+
+def test_apply_reaching_an_already_deleted_chat_reads_the_fact_committed_just_before(private_pool, monkeypatch):
+    """#1308 review: the row is already gone when the apply's FOR UPDATE runs.
+
+    The apply holds N and pauses before its row lock; the whole delete commits
+    (row and fact) meanwhile, and only its post-commit publication waits on N.
+    The apply then finds no row, reads the committed fact, keeps the chat
+    deleted, and the tombstone published after it outranks the incoming clock.
+    """
+    from app.network import engine
+
+    ctx, remote = _remote_network("gone-first-")
+    monkeypatch.setattr(engine, "_context", ctx)
+    sid = _owned_chat(ctx, remote, "gone-first-")
+    env = _session_upsert(ctx, remote, sid, clock=50)
+    barriers = _Barriers(monkeypatch, {"incoming": (
+        lambda sql, params: sql.startswith("SELECT id FROM sessions WHERE id = %s FOR UPDATE"), True)})
+    with psycopg2.connect(**private_pool) as observer, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="incoming") as syncing, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter:
+        observer.autocommit = True
+        applying = syncing.submit(engine.apply_batch, [env], ctx=ctx)
+        try:
+            barriers.wait("incoming", applying)  # N held, the row lock not yet asked for
+            deleting = deleter.submit(sessions.delete_session, sid)
+            _wait_for_lock_wait(observer, barriers.pids["incoming"], deleting)
+            waited_on = _waiting_query(observer, barriers.pids["incoming"])
+            assert _session_row(sid) is None, "the delete committed before the apply's row lock"
+            assert _fact(sid) is not None
+        finally:
+            barriers.release_all()
+        applying.result(timeout=10)
+        assert deleting.result(timeout=10) is True
+    assert "network_state" in waited_on, waited_on  # only the post-commit publication waited, on N
+    assert _session_row(sid) is None, "the delayed commit record recreated the deleted chat"
+    record = _session_record(sid)
+    assert record["deleted"] and record["origin_device_id"] == ctx.device_id
+    assert record["clock"] > 50, "the owner's tombstone must outrank the record it refused"
+    assert not _owed(sid)
+
+def test_a_delete_waiting_on_its_chat_holds_no_network_state_lock(private_pool, monkeypatch):
+    """#1308 review S6: while the owner's delete waits, N is free and other chats still apply."""
+    from app.network import engine
+
+    ctx, remote = _remote_network("waiting-delete-")
+    monkeypatch.setattr(engine, "_context", ctx)
+    monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda sid, row=None: None)
+    monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda sid: None)
+    sid = _owned_chat(ctx, remote, "waiting-delete-")
+    other = "unrelated-" + uuid4().hex
+    env = _session_upsert(ctx, remote, other, clock=60, owner=remote.device_id)
+    with psycopg2.connect(**private_pool) as holder, psycopg2.connect(**private_pool) as observer, \
+            psycopg2.connect(**private_pool) as probe, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="delete") as deleter, \
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="incoming") as syncing:
+        observer.autocommit = True
+        held = holder.cursor()
+        held.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+        deleting = deleter.submit(sessions.delete_session, sid)
+        try:
+            _wait_for_lock_wait(observer, holder.get_backend_pid(), deleting)
+            with probe.cursor() as cur:
+                cur.execute("SET lock_timeout = '2s'")
+                cur.execute("SELECT clock FROM network_state WHERE id = 1 FOR UPDATE")
+                probe.rollback()
+            applying = syncing.submit(engine.apply_batch, [env], ctx=ctx)
+            applying.result(timeout=5)
+            assert _session_row(other) is not None, "an unrelated chat must apply while the delete waits"
+            assert not deleting.done()
+        finally:
+            holder.rollback()
+        assert deleting.result(timeout=10) is True
+    assert _session_row(sid) is None
+
+
+def test_a_networked_worker_that_cannot_read_its_identity_still_deletes(private_pool, monkeypatch, caplog):
+    """The deletion fact never fails a delete: no identity means main's delete, a warning, no fact."""
+    from app.network import engine, identity
+
+    ctx, remote = _remote_network("no-identity-")
+    sid = _owned_chat(ctx, remote, "no-identity-")
+    monkeypatch.setattr(engine, "_context", None)  # nothing cached: the engine never loaded
+
+    def missing(*, create=True):
+        raise identity.IdentityError("Device identity is missing.")
+
+    monkeypatch.setattr(identity, "load", missing)
+    with caplog.at_level("WARNING", logger=sessions.logger.name):
+        assert sessions.delete_session(sid) is True
+    assert _session_row(sid) is None
+    assert _fact(sid) is None
+    assert "identity could not be read" in caplog.text
+
+
+def test_a_failed_fact_statement_leaves_the_delete_committable(private_pool, monkeypatch, caplog):
+    """A failing statement while remembering the deletion is rolled back to its savepoint."""
+    from app.db import network as store
+    from app.network import engine
+
+    ctx, remote = _remote_network("bad-fact-")
+    monkeypatch.setattr(engine, "_context", ctx)
+    sid = _owned_chat(ctx, remote, "bad-fact-")
+
+    reached = []
+
+    def broken(cursor, session_id, *, network_id):  # production's signature
+        reached.append(session_id)
+        cursor.execute("INSERT INTO no_such_table_1308 VALUES (1)")  # poisons the transaction
+
+    monkeypatch.setattr(store, "remember_session_deletion", broken)
+    with caplog.at_level("WARNING", logger=sessions.logger.name):
+        assert sessions.delete_session(sid) is True
+    assert reached == [sid], "the failing SQL must run, not a TypeError before it"
+    assert "UndefinedTable" in caplog.text or "no_such_table_1308" in caplog.text
+    assert _session_row(sid) is None
+    _assert_deleted(sid)
+    assert "Could not remember the deletion" in caplog.text
+
+
+def _snapshot_item(coll_name, record_id, record, *, clock, origin):
+    from app.network import engine, policy
+
+    return {"record_id": record_id, "clock": clock, "origin_device_id": origin, "deleted": False,
+            "record": engine.serialize_row(policy.collection(coll_name), record)}
+
+
+def test_a_state_copy_with_a_deleted_chat_and_its_tag_commits_and_owes_the_tombstone(private_pool, monkeypatch):
+    """#1308 review S7: the refused chat's tag hit its session foreign key and rolled the copy back."""
+    from app.db import network as store
+    from app.network import engine, policy
+
+    ctx, remote = _remote_network("tagged-copy-")
+    monkeypatch.setattr(engine, "_context", ctx)
+    sid = _owned_chat(ctx, remote, "tagged-copy-", record_clock=None)  # never synced here
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
+        session_row = dict(cur.fetchone())
+    assert sessions.delete_session(sid) is True
+    assert _fact(sid) is not None and not _owed(sid)  # no live version known here yet
+    tag = {"id": "tag-" + sid, "name": "Tagged", "color": "#888888", "created_at": "2026-01-01T00:00:00+00:00",
+           "updated_at": "2026-01-01T00:00:00+00:00"}
+    pages = [
+        ("tags", [_snapshot_item("tags", tag["id"], tag, clock=40, origin=remote.device_id)]),
+        ("sessions", [_snapshot_item("sessions", sid, {**session_row, "owner_device_id": remote.device_id},
+                                     clock=41, origin=remote.device_id)]),
+        ("session_tags", [_snapshot_item("session_tags", f"{sid}|{tag['id']}",
+                                         {"session_id": sid, "tag_id": tag["id"], "created_at": tag["created_at"]},
+                                         clock=42, origin=remote.device_id)]),
+    ]
+    with base.get_db() as conn:  # one copy transaction, as peer_snapshot applies its pages
+        cur = conn.cursor()
+        store.lock_state(cur)
+        for name, items in pages:
+            engine.apply_snapshot_items(cur, policy.collection(name), items, ctx=ctx)
+    assert _session_row(sid) is None
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS n FROM session_tags WHERE session_id=%s", (sid,))
+        assert cur.fetchone()["n"] == 0
+    # The copy committed the refused version as the record: owed, from durable state alone.
+    assert _owed(sid) and _session_record(sid)["clock"] == 41
+    monkeypatch.setattr(engine, "kick", lambda: None)
+    assert engine.publish_session_deletions(ctx=ctx) == 1
+    record = _session_record(sid)
+    assert record["deleted"] and record["origin_device_id"] == ctx.device_id and record["clock"] > 42
