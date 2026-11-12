@@ -2079,6 +2079,7 @@ async def resume_session(
     if api_user:
         payload["api_user_id"] = api_user["id"]
 
+    from app.api.chat_query import request_person_entry
     profile_id = existing.get("profile_id")
     # Off-loop twin of ``submit``: the durable queue writes ride one thread hop
     # (``no_kick`` is unchanged — the NOTIFY below is the whole hand-off).
@@ -2086,6 +2087,8 @@ async def resume_session(
         session_id,
         "resume",
         prompt="",
+        # Whether the owner pressed Retry (an agent's preview link is not).
+        person_entered=await run_sync(request_person_entry, request),
         # The 'claude-code' no-profile sentinel is install-local and must never
         # ride a turn another install executes.
         profile_id=None if profile_id == "claude-code" else profile_id,

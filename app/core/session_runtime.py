@@ -3334,7 +3334,7 @@ class SessionRuntime:
             payload["requeued_from_turn_id"] = row_id
             try:
                 # The stranded steer's own admission, unchanged.
-                entered = await asyncio.to_thread(turns_db.person_entered, row)
+                entered = await asyncio.to_thread(turns_db.entry_provenance, row)
                 fresh = await asyncio.to_thread(
                     turns_db.enqueue_turn,
                     sid,

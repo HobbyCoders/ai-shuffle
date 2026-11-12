@@ -371,10 +371,19 @@ async def answer_permission(device_id: str, *, request_id: str, session_id: str,
 
 
 async def answer_question(device_id: str, *, request_id: str, session_id: str, answers: Dict[str, Any],
-                          answered_by_device: Optional[str], dismissed: bool, skipped: Optional[List[str]]) -> Dict[str, Any]:
+                          answered_by_device: Optional[str], dismissed: bool, skipped: Optional[List[str]],
+                          person_entered: Any = False) -> Dict[str, Any]:
+    """Forward a question-card answer to the session's owner device.
+
+    ``person_entered`` is whether the owner entered the answer here
+    (``session_modes.person_entry`` of this worker's chat socket). Always
+    sent, as :func:`submit_turn` sends it, so the owner can tell "no" from a
+    worker too old to say.
+    """
     return await call(device_id, "question", {
         "request_id": request_id, "session_id": session_id, "answers": answers,
-        "answered_by_device": answered_by_device, "dismissed": dismissed, "skipped": skipped})
+        "answered_by_device": answered_by_device, "dismissed": dismissed, "skipped": skipped,
+        "person_entered": person_entered is True})
 
 
 async def hydrate(device_id: str, session_id: str) -> Dict[str, Any]:
@@ -778,6 +787,19 @@ async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
         return await _submit_forwarded_turn(body, from_device, command_id)
 
 
+def _forwarded_entry(stated_entry: Any, body: Dict[str, Any]) -> Any:
+    """The ``person_entered`` of a forwarded turn: the sending worker's stated
+    bool, with a send it stamped as the agent browser's preview link keeping
+    that reason (``turns.ENTRY_PREVIEW``, never a pass)."""
+    if stated_entry is True:
+        return True
+    from app.core.session_modes import CALLER_PREVIEW
+    if _forwarded_caller(body) == CALLER_PREVIEW:
+        from app.db.turns import ENTRY_PREVIEW
+        return ENTRY_PREVIEW
+    return False
+
+
 def _forwarded_caller(body: Dict[str, Any]) -> Optional[str]:
     """The caller a forwarded turn states, when it is one this build knows.
 
@@ -861,7 +883,7 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
         # session's current mode.
         explicit_permission=body.get("owner_send") is True and source in _OWNER_SEND_SOURCES,
         payload=payload or None, command_id=command_id,
-        person_entered=stated_entry is True,
+        person_entered=_forwarded_entry(stated_entry, body),
         # Who sent it, as the sending worker authenticated them or a held
         # message recorded it (#641). A turn without one, or from a sender too
         # old to say, is stamped unknown and keeps the no-project ceiling.
@@ -1038,10 +1060,16 @@ async def _question(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     from app.core.user_question_handler import user_question_handler
     session_id = str(body.get("session_id") or "")
     _require_owned(session_id)
+    # Whether the owner entered the answer, as the answering worker stated it
+    # (the peer channel is worker-authenticated). A worker too old to state it
+    # is unstated, so a guarded row answers "update that worker".
+    stated_entry = body.get("person_entered")
+    from app.db.turns import ENTRY_UNSTATED
     result = await user_question_handler.respond(
         request_id=str(body.get("request_id") or ""), session_id=session_id, answers=body.get("answers") or {},
         answered_by_device=from_device, dismissed=bool(body.get("dismissed")),
-        skipped=body.get("skipped"))
+        skipped=body.get("skipped"),
+        person_entered=stated_entry if isinstance(stated_entry, bool) else ENTRY_UNSTATED)
     return {"success": bool(result)}
 
 

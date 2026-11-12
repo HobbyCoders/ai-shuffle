@@ -602,6 +602,7 @@ class UserQuestionHandler:
     async def _answer_nonblocking(
         self, row: Dict[str, Any], envelope: Dict[str, Any],
         answered_by_device: Optional[str], *, human_input: bool,
+        person_entered: Any = False,
     ) -> bool:
         from app.core import interaction_events, interaction_wait, turn_claim, turn_manager
         from app.core import turn_scheduler
@@ -641,6 +642,7 @@ class UserQuestionHandler:
         accepted = await run_sync(
             interactions.answer_question_and_enqueue, row, envelope,
             answered_by_device, prompt, context, human_input=human_input,
+            person_entered=person_entered,
             handoff_context_confirmed=bool(handoff_context),
         )
         if not accepted:
@@ -685,6 +687,7 @@ class UserQuestionHandler:
         dismissed: bool = False,
         skipped: Optional[List[str]] = None,
         *, human_input: bool = True,
+        person_entered: Any = False,
     ) -> bool:
         from app.core import interaction_wait
         from app.db import interactions
@@ -702,7 +705,8 @@ class UserQuestionHandler:
             return False
         envelope = build_answer_envelope(answers, dismissed=dismissed, skipped=skipped)
         if (row.get("payload") or {}).get("nonblocking"):
-            return await self._answer_nonblocking(row, envelope, answered_by_device, human_input=human_input)
+            return await self._answer_nonblocking(row, envelope, answered_by_device, human_input=human_input,
+                                                  person_entered=person_entered)
         answered = await run_sync(
             interactions.answer_interaction, row["id"], envelope, answered_by_device
         )
@@ -731,6 +735,7 @@ class UserQuestionHandler:
         dismissed: bool = False,
         skipped: Optional[List[str]] = None,
         *, human_input: bool = True,
+        person_entered: Any = False,
     ) -> bool:
         """
         Respond to a user question request.
@@ -748,6 +753,12 @@ class UserQuestionHandler:
                 form still submits cleanly.
             human_input: Server-side provenance, never read from the answer body.
                 Automated answers must pass False to preserve peer-chain limits.
+            person_entered: Whether the owner entered this answer, apart from
+                ``human_input``: only the chat socket passes it, as
+                ``session_modes.person_entry`` decided from the principal the
+                host authenticated, and the peer channel passes what the
+                answering worker stated. Omitted, the answer is not
+                person-entered (``turns.PERSON_ENTERED_KEY``).
 
         Returns:
             True if response was processed, False if request not found
@@ -760,6 +771,7 @@ class UserQuestionHandler:
             dismissed=dismissed,
             skipped=skipped,
             human_input=human_input,
+            person_entered=person_entered,
         )
 
     def get_pending_questions(self, session_id: str) -> List[Dict[str, Any]]:

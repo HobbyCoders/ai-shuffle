@@ -788,7 +788,13 @@ VOICE_REASON = "a request written by the voice assistant"
 #: Forwarded by a worker too old to say whether a person entered it.
 OUTDATED_WORKER_REASON = ("a message sent through a worker that needs updating (update that "
                           "worker, then send it again)")
-_NOT_ENTERED_REASONS = {"voice": VOICE_REASON, "unstated": OUTDATED_WORKER_REASON}
+#: Sent through the agent browser's preview link (an agent driving the app),
+#: not by the owner (``session_modes.person_entry``).
+PREVIEW_REASON = "a message sent through an agent's preview link"
+_NOT_ENTERED_REASONS = {"voice": VOICE_REASON, "unstated": OUTDATED_WORKER_REASON,
+                        "preview": PREVIEW_REASON}
+#: A Retry the owner did not ask for (no key on the Retry's own row).
+RETRY_NOT_OWNER_REASON = "a retry you did not ask for yourself"
 #: A run another agent starts (Task, Swarm, a subagent, StartSession).
 AGENT_RUN_REASON = "a run another agent starts"
 API_REQUEST_REASON = _SOURCE_REASONS["api"]
@@ -864,7 +870,9 @@ def _retried_provenance(session_id: Optional[str]) -> tuple[Optional[str], bool,
     unanswered, so that exact row decides, by its own admission
     (``turn_scheduler.turn_provenance``): its real source, never the
     accounting origin of a parked turn's automatic resume, and whether a
-    person entered it. A Retry sent with an API key is a request through the
+    person entered it. The Retry itself must be the owner's (its row's own
+    key): one asked for through a preview link or by nobody known is refused
+    whatever row it re-runs. A Retry sent with an API key is a request through the
     API; a Retry of a Retry walks back to the row it re-ran; a failover retry
     follows its parent. Unknown is a refusal.
     """
@@ -877,8 +885,16 @@ def _retried_provenance(session_id: Optional[str]) -> tuple[Optional[str], bool,
 
         live = turns.get_live_turn(session_id) or {}
         payload = live.get("payload") or {}
-        if isinstance(payload, dict) and payload.get("api_user_id"):
+        if not isinstance(payload, dict):
+            payload = {}
+        if payload.get("api_user_id"):
             return None, False, _SOURCE_REASONS["api"]
+        # Who asked for this Retry: only the owner (the key its own admission
+        # wrote, ``session_modes.person_entry``) may re-run the owner's turn.
+        if payload.get(turns.PERSON_ENTERED_KEY) is not True:
+            if payload.get(turns.PREVIEW_ENTRY_KEY):
+                return None, False, PREVIEW_REASON
+            return None, False, RETRY_NOT_OWNER_REASON
         with turns.get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(

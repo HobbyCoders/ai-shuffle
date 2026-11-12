@@ -99,17 +99,27 @@ def _is_human_input(source: Optional[str], payload: Dict[str, Any]) -> bool:
 #: person entered the row (automatic writers use these sources too); the
 #: positive :data:`PERSON_ENTERED_KEY` does.
 OWNER_ENTRY_SOURCES = frozenset({"user", "queue", "worktree"})
+#: Sources whose admission states whether the owner asked for them: the owner
+#: entry sources, and a Retry (``resume``), whose own row says whether the
+#: owner pressed it (the guard reads that beside the row it re-runs).
+ENTRY_STATING_SOURCES = OWNER_ENTRY_SOURCES | frozenset({"resume"})
 
 #: Set on a row's payload only by :func:`enqueue_turn`'s ``person_entered``
-#: argument, which only the host's admission points pass: the chat socket's
-#: composer send (sent, queued or steering), the owner's own question-card
-#: answer, and a worktree or branch chat's opening prompt. Any payload a caller
-#: hands in loses it. Retry, hand-off, re-queue and compaction pass the value of
-#: the row they copy, and never add it.
+#: argument, which only the host's admission points pass, each with the value
+#: ``session_modes.person_entry`` decided from the principal the host
+#: authenticated (the owner, not an API key, a preview link or nobody): the
+#: chat socket's composer send (sent, queued or steering), the owner's own
+#: question-card answer, and a worktree or branch chat's opening prompt. Any
+#: payload a caller hands in loses it. Retry, hand-off, re-queue and compaction
+#: pass the value of the row they copy, and never add it.
 PERSON_ENTERED_KEY = "person_entered"
 #: Set on a turn another worker forwarded without stating whether a person
 #: entered it: a worker from before :data:`PERSON_ENTERED_KEY` existed.
 UNSTATED_ENTRY_KEY = "person_entry_unstated"
+#: Set instead of :data:`PERSON_ENTERED_KEY` when an admission point's sender
+#: was the agent browser's preview link (``session_modes.CALLER_PREVIEW``). It
+#: only names the refusal; it never lets a row through.
+PREVIEW_ENTRY_KEY = "person_entry_preview"
 
 
 def person_entered(turn: Optional[Dict[str, Any]]) -> bool:
@@ -132,17 +142,21 @@ def person_entered(turn: Optional[Dict[str, Any]]) -> bool:
 #: (:func:`entry_provenance`). Never a pass: only ``True`` is.
 ENTRY_VOICE = "voice"          # a request the voice assistant wrote
 ENTRY_UNSTATED = "unstated"    # forwarded by a worker too old to say
+ENTRY_PREVIEW = "preview"      # sent through an agent's preview link
+_ENTRY_REASONS = (ENTRY_VOICE, ENTRY_UNSTATED, ENTRY_PREVIEW)
 
 
 def entry_provenance(turn: Optional[Dict[str, Any]]) -> Any:
     """``True`` when a person entered the row; otherwise why not, if known.
 
-    ``ENTRY_VOICE`` or ``ENTRY_UNSTATED`` name the reason; ``False`` is any
-    other row. Only the Antigravity guard reads the reason.
+    ``ENTRY_VOICE``, ``ENTRY_UNSTATED`` or ``ENTRY_PREVIEW`` name the reason;
+    ``False`` is any other row. Only the Antigravity guard reads the reason.
     """
     if person_entered(turn):
         return True
     payload = (_parse_json((turn or {}).get("payload")) or {}) if turn else {}
+    if payload.get(PREVIEW_ENTRY_KEY):
+        return ENTRY_PREVIEW
     if payload.get("voice_delegation"):
         return ENTRY_VOICE
     if payload.get(UNSTATED_ENTRY_KEY):
@@ -152,15 +166,34 @@ def entry_provenance(turn: Optional[Dict[str, Any]]) -> Any:
 
 def entry_state(value: Any) -> Any:
     """A carried :func:`entry_provenance` value, anything else read as ``False``."""
-    return value if value is True or value in (ENTRY_VOICE, ENTRY_UNSTATED) else False
+    return value if value is True or value in _ENTRY_REASONS else False
 
 
-def entry_payload(payload: Optional[Dict[str, Any]], person_entered: bool) -> Dict[str, Any]:
-    """``payload`` with :data:`PERSON_ENTERED_KEY` set only when the admission says so."""
-    out = {k: v for k, v in (payload or {}).items() if k != PERSON_ENTERED_KEY}
+def entry_payload(payload: Optional[Dict[str, Any]], person_entered: Any) -> Dict[str, Any]:
+    """``payload`` with the admission's own entry fact and no caller's.
+
+    ``person_entered`` is an admission point's ``session_modes.person_entry``
+    value, or the value a copy carries: only ``True`` writes
+    :data:`PERSON_ENTERED_KEY`; ``ENTRY_PREVIEW`` writes :data:`PREVIEW_ENTRY_KEY` and
+    ``ENTRY_UNSTATED`` :data:`UNSTATED_ENTRY_KEY` (reasons, never a pass).
+    Either key arriving in ``payload`` is dropped first.
+    """
+    out = {k: v for k, v in (payload or {}).items()
+           if k not in (PERSON_ENTERED_KEY, PREVIEW_ENTRY_KEY)}
     if person_entered is True:
         out[PERSON_ENTERED_KEY] = True
+    elif person_entered == ENTRY_PREVIEW:
+        out[PREVIEW_ENTRY_KEY] = True
+    elif person_entered == ENTRY_UNSTATED:
+        out[UNSTATED_ENTRY_KEY] = True
     return out
+
+
+def _carried_entry(payload: Dict[str, Any]) -> Any:
+    """The ``person_entered`` value a copy of a row with ``payload`` passes on."""
+    if payload.get(PERSON_ENTERED_KEY) is True:
+        return True
+    return ENTRY_PREVIEW if payload.get(PREVIEW_ENTRY_KEY) else False
 
 
 def logical_source(turn: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -941,7 +974,7 @@ def enqueue_turn(
     instance_id: Optional[str] = None,
     at_front: bool = False,
     explicit_permission: bool = False,
-    person_entered: bool = False,
+    person_entered: Any = False,
     _owner_receipt: Optional[Dict[str, Any]] = None,
     _conn: Any = None,
 ) -> Dict[str, Any]:
@@ -1002,7 +1035,7 @@ def enqueue_turn(
         # The automatic pairs (compact-then-continue, usage-reset resume) use
         # the same admission; their follow-up is the app's, not a message the
         # owner typed, so it is never written as one.
-        payload = entry_payload(payload, person_entered and source in OWNER_ENTRY_SOURCES)
+        payload = entry_payload(payload, person_entered if source in ENTRY_STATING_SOURCES else False)
         # Never trust client/payload timestamps. Only a host requeue may carry
         # the original receipt; normal recovery keeps the same durable row.
         payload.pop("owner_message_at", None)
@@ -1022,7 +1055,7 @@ def enqueue_turn(
                                   COMPACTION_CONTINUATION_KEY, LIMIT_RESUME_KEY, WAKE_STOP_SEQ_KEY,
                                   UNSTATED_ENTRY_KEY, "question_answer_human_input")},
                 # Who entered it travels with its source, never more.
-                person_entered=payload.get(PERSON_ENTERED_KEY) is True,
+                person_entered=_carried_entry(payload),
                 instance_id=instance_id, _conn=conn,
             )
             payload["compact_before_turn_id"] = compact["id"]
@@ -2088,7 +2121,7 @@ def retry_pair_compaction(
             overrides=row.get("overrides") or None,
             payload=compact_payload,
             # Who entered it travels with its source, never more.
-            person_entered=payload.get(PERSON_ENTERED_KEY) is True,
+            person_entered=_carried_entry(payload),
             command_id=command_id, parent_turn_id=row.get("parent_turn_id"),
             instance_id=row.get("instance_id"), at_front=True, _conn=conn,
         )

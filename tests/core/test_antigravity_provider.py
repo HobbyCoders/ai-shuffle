@@ -155,7 +155,23 @@ _TYPED = {"person_entered": True}  # what turns.enqueue_turn writes for the owne
     ([], "a retry whose original turn could not be checked"),
 ])
 def test_a_retry_keeps_the_origin_of_the_turn_it_reruns(session_row, monkeypatch, earlier, reason):
-    _TurnRows(monkeypatch, {"id": "t3", "source": "resume", "payload": {}}, earlier)
+    # The owner pressed this Retry (its own row carries the key the resume
+    # route writes from ``session_modes.person_entry``).
+    _TurnRows(monkeypatch, {"id": "t3", "source": "resume", "payload": _TYPED}, earlier)
+    assert ag.unattended_reason(_options(turn_source="resume")) == reason
+
+
+@pytest.mark.parametrize("retry_payload,reason", [
+    ({"person_entry_preview": True}, ag.PREVIEW_REASON),
+    ({}, ag.RETRY_NOT_OWNER_REASON),
+    ({"person_entered": "yes"}, ag.RETRY_NOT_OWNER_REASON),
+])
+def test_a_retry_the_owner_did_not_ask_for_is_refused_whatever_it_reruns(
+        session_row, monkeypatch, retry_payload, reason):
+    # An agent pressing Retry through its preview link re-runs the owner's own
+    # typed turn: the Retry is still an agent run.
+    _TurnRows(monkeypatch, {"id": "t3", "source": "resume", "payload": retry_payload},
+              [{"id": "t1", "source": "user", "payload": _TYPED}])
     assert ag.unattended_reason(_options(turn_source="resume")) == reason
 
 
@@ -445,13 +461,18 @@ def _owner_turn_that_parks(prompt="Plan the beds"):
     return first
 
 
-def _answer(first, human_input):
-    """The question producer Away mode and the owner's own answer share."""
+def _answer(first, human_input, person_entered=None):
+    """The question producer Away mode and the owner's own answer share. The
+    owner's own answer arrives with the socket's ``person_entry`` (True);
+    Away's states nothing."""
     from app.db import interactions, turns
 
+    if person_entered is None:
+        person_entered = human_input
     question = interactions.create_interaction("chat-g", "question", {"request_id": "q1"}, None)
     assert interactions.answer_question_and_enqueue(
-        question, {"Raised beds?": "Yes"}, None, "Raised beds: Yes", first, human_input=human_input)
+        question, {"Raised beds?": "Yes"}, None, "Raised beds: Yes", first, human_input=human_input,
+        person_entered=person_entered)
     [answer] = turns.get_queued_turns("chat-g")
     return answer
 
@@ -500,7 +521,7 @@ async def test_a_retry_replays_the_exact_row_it_reruns(guarded_chat, client):
     turns.settle_turn(resumed["id"], "aborted", error="the agent stopped")
     client.put(f"{BASE}/providers/{row['id']}/guard", json={"allow_unattended": False})
 
-    retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default")["id"])
+    retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default", person_entered=True)["id"])
     with pytest.raises(ProviderTurnRefused, match="refused for a background turn picked up again"):
         await _run(adapter, retry)
     turns.settle_turn(retry["id"], "aborted", error="refused")
@@ -510,14 +531,14 @@ async def test_a_retry_replays_the_exact_row_it_reruns(guarded_chat, client):
                                       person_entered=True)["id"])
     turns.settle_turn(typed["id"], "aborted", error="the agent stopped")
     for _ in range(2):
-        retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default")["id"])
+        retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default", person_entered=True)["id"])
         await _run(adapter, retry)
         turns.settle_turn(retry["id"], "aborted", error="the agent stopped")
 
     # And a Retry of an Away answer is refused like the answer itself.
     away = _start(_answer(_owner_turn_that_parks("Water?"), human_input=False)["id"], parked_resume=True)
     turns.settle_turn(away["id"], "aborted", error="the agent stopped")
-    retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default")["id"])
+    retry = _start(turns.enqueue_turn("chat-g", "resume", profile_id="default", person_entered=True)["id"])
     with pytest.raises(ProviderTurnRefused, match="refused for a reply sent for you automatically"):
         await _run(adapter, retry)
 
@@ -579,27 +600,46 @@ async def test_only_the_hosts_own_admission_marks_a_person(guarded_chat):
 
 
 def test_only_the_three_admission_points_mark_a_person():
-    # The composer send (sent, queued or steering: chat socket, and its
-    # forward to the owner worker), a worktree chat's opening prompt, and
-    # the owner's own question-card answer (``human_input``). Everything else
-    # carries a row's own value or passes nothing.
+    # The composer send (sent, queued or steering: chat socket, its HTTP
+    # transport and its forward to the owner worker), a worktree chat's
+    # opening prompt, the owner's own question-card answer, and the Retry
+    # route's statement of who pressed it. Each passes the value of ONE
+    # decision (``session_modes.person_entry``, from the principal the host
+    # authenticated); none writes a literal True. Everything else carries a
+    # row's own value or passes nothing.
     import re
 
     import app as app_pkg
 
     root = Path(app_pkg.__file__).parent
-    literal, keyed = {}, []
+    literal, keyed, decided, admitted = {}, [], {}, {}
     for path in sorted(root.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         name = path.relative_to(root.parent).as_posix()
-        if count := len(re.findall(r"person_entered=True\b", text)):
+        if count := len(re.findall(r"person_entered\s*(?::\s*\w+\s*)?=\s*True\b", text)):
             literal[name] = count
         if re.search(r"PERSON_ENTERED_KEY\]\s*=\s*True|[\"']person_entered[\"']\s*:\s*True", text):
             keyed.append(name)
-    assert literal == {"app/api/chat_ws_handler.py": 4, "app/api/sessions_worktree.py": 3}, literal
+        if name != "app/core/session_modes.py" and (count := len(re.findall(r"\bperson_entry\(", text))):
+            decided[name] = count
+        if name.startswith("app/api/"):
+            for value in re.findall(r"\bperson_entered=([^,)\n]+)", text):
+                admitted.setdefault(name, set()).add(value.strip())
+    assert literal == {}, literal
     assert keyed == ["app/db/turns.py"], keyed  # entry_payload, behind enqueue_turn's argument
+    # The decision is made in one place; the socket and REST read it from there.
+    assert decided == {"app/api/chat_ws_handler.py": 1, "app/api/chat_query.py": 1}, decided
+    assert admitted == {
+        "app/api/chat_ws_handler.py": {"self._person_entry"},
+        "app/api/sessions_worktree.py": {"entry"},
+        "app/api/sessions.py": {"await run_sync(request_person_entry"},
+    }, admitted
+    modes = (root / "core" / "session_modes.py").read_text(encoding="utf-8")
+    assert ('return caller == CALLER_AUTHENTICATED and (principal or {}).get("kind") in _OWNER_KINDS'
+            in modes)
+    assert '_OWNER_KINDS = frozenset({"admin", "paired"})' in modes
     interactions = (root / "db" / "interactions.py").read_text(encoding="utf-8")
-    assert "person_entered=human_input is True" in interactions
+    assert "person_entered=person_entered if human_input is True else False" in interactions
     # The voice assistant creates branch chats through the same intake, but
     # with no opening prompt (the intake submits only ``if prompt``): every
     # request it writes goes through the voice bridges, which mark nothing.
@@ -614,6 +654,7 @@ def test_only_the_three_admission_points_mark_a_person():
     (True, None),
     (False, ag.NOT_ENTERED_REASON),
     ("missing", ag.OUTDATED_WORKER_REASON),  # a worker from before the key: "update it"
+    ("preview", ag.PREVIEW_REASON),  # sent through the agent's preview link there
 ])
 async def test_a_forwarded_turn_carries_what_its_worker_stated(guarded_chat, monkeypatch, stated, reason):
     # The peer channel is worker-authenticated; the sending worker states
@@ -628,7 +669,9 @@ async def test_a_forwarded_turn_carries_what_its_worker_stated(guarded_chat, mon
     monkeypatch.setattr("app.core.turn_manager._kick", lambda session_id: None)
     monkeypatch.setattr(control, "_require_owned", lambda sid: database.get_session(sid))
     body = {"session_id": "chat-g", "source": "user", "prompt": "hi", "payload": {"person_entered": True}}
-    if stated != "missing":
+    if stated == "preview":
+        body.update(person_entered=False, caller="preview")
+    elif stated != "missing":
         body["person_entered"] = stated
     result = await control.handle("turns", body, from_device="paired-peer")
     started = _start(result["turn_id"])
@@ -651,7 +694,10 @@ async def test_submit_turn_always_states_who_entered_it(monkeypatch):
     monkeypatch.setattr(control, "call", call)
     await control.submit_turn("dev", "s", prompt="hi")
     await control.submit_turn("dev", "s", prompt="hi", person_entered=True)
-    assert [b["person_entered"] for b in sent] == [False, True]
+    # A preview-link send states no person (its reason travels as the caller).
+    await control.submit_turn("dev", "s", prompt="hi", person_entered="preview", caller="preview")
+    assert [b["person_entered"] for b in sent] == [False, True, False]
+    assert sent[2]["caller"] == "preview"
 
 
 @pytest.mark.parametrize("source,payload,joins", [

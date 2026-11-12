@@ -134,12 +134,16 @@ def _mark_handoff_resolved_on_target(cursor, interaction_id: str) -> None:
 def answer_question_and_enqueue(
     row: Dict[str, Any], answer: Dict[str, Any], answered_by_device: Optional[str],
     prompt: str, context: Dict[str, Any], *, human_input: bool = True,
+    person_entered: Any = False,
     handoff_context_confirmed: bool = False,
 ) -> bool:
     """Accept an answer and its user turn in one commit; retries cannot enqueue twice.
 
     Only an authenticated human answer grants a fresh peer-chain budget. Away
     answers retain ancestry, even though they use the same question producer.
+    ``person_entered`` is the admission's own statement that the owner entered
+    the answer (``user_question_handler.respond``), never inferred from
+    ``human_input``: omitted, the answer turn is not person-entered.
     """
     from app.db import turns
 
@@ -179,9 +183,10 @@ def answer_question_and_enqueue(
                      "question_answer_human_input": human_input,
                      "question_request_id": (row.get("payload") or {}).get("request_id")},
             command_id=f"question-answer-{row['id']}",
-            # The owner's own question-card answer is person-entered; Away's
-            # automatic answer is not (and a context turn's key never carries).
-            person_entered=human_input is True, _conn=conn,
+            # Only as the answering admission stated it (the owner's own card
+            # answer); Away's answer states nothing, and a context turn's key
+            # never carries.
+            person_entered=person_entered if human_input is True else False, _conn=conn,
         )
         if human_input and queued.get("id"):
             # enqueue_turn holds the session admission lock. Reset the saved
