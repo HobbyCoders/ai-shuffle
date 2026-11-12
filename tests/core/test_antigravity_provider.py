@@ -1144,3 +1144,47 @@ def test_an_api_user_cannot_run_the_owners_google_sign_in(client, mode, refused)
     assert (refusal == credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE) is refused
     assert credential_gate.requester_refusal(options, None) is None  # the owner
     assert credential_gate.selection_uses_subscription(f"prov:{row['id']}:{row['default_model']}") is refused
+
+
+# --- permission mode mid-chat -------------------------------------------------
+
+@pytest.mark.parametrize("start,to,agent_mode", [
+    ("acceptEdits", "default", "default"),
+    ("acceptEdits", "plan", "plan"),
+    ("default", "acceptEdits", "accept-edits"),
+    ("default", "plan", "plan"),
+    ("plan", "default", "default"),
+    ("plan", "acceptEdits", "accept-edits"),
+    ("acceptEdits", "auto", "default"),  # Auto is the Claude CLI's alone: Ask here
+])
+async def test_a_mid_chat_permission_change_reaches_the_agent(fake_agy, tmp_path, monkeypatch, start, to, agent_mode):
+    # Through the adapter's hot-change entry point, down to the frame the
+    # agent receives: the ACP engine must get a mode name, never a native
+    # approval policy it cannot map.
+    import json as _json
+
+    from app.core.provider.harness_adapter import _ANTIGRAVITY_KIND, HarnessAdapter
+    from fluid.engine.acp import AcpLoop
+    from fluid.store.base import MemoryStore
+
+    log = tmp_path / "agent.log"
+    spec = ag.build_spec({"id": "row-1", "provider_type": "antigravity", "auth_mode": "gemini-api-key",
+                          "auth_token": "test-gemini-not-a-key"})
+    # The agent's environment is built from scratch: the fake reads its own.
+    spec.env.update({"FAKE_ACP_LOG": str(log), "FAKE_ACP_STATE": str(tmp_path)})
+    loop = AcpLoop(store=MemoryStore(), spec=spec, cwd=str(tmp_path), permission_mode=start)
+    adapter = HarnessAdapter.__new__(HarnessAdapter)
+    adapter._engine = loop
+    adapter._is_delegated = False
+    adapter._provider_kind = _ANTIGRAVITY_KIND
+    adapter._options = SimpleNamespace(permission_mode=start)
+    adapter._record_applied = lambda *a: None
+    try:
+        await loop._ensure_session()
+        await loop._ensure_process()  # the agent and its session, as after a first turn
+        await adapter.set_permission_mode(to)
+    finally:
+        await loop.aclose()
+    frames = [_json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+    modes = [f["params"]["modeId"] for f in frames if f.get("method") == "session/set_mode"]
+    assert modes[-1] == agent_mode, modes

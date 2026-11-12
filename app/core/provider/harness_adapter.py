@@ -4276,13 +4276,16 @@ class HarnessAdapter(ProviderAdapter):
         mode = effective_permission_mode(mode, delegated=self._is_delegated)
         if self._engine is None:
             raise RuntimeError("Adapter not connected")
-        # The CLI speaks mode names. fluid's NativeLoop gets the policy: given
-        # the mode name it would install the ``acceptEdits`` edit-tool allow
-        # rules itself, ahead of the app's saved Deny rules (``_PERMISSION_POLICY``).
+        # The CLI and an ACP agent (Antigravity) speak mode names; the ACP
+        # engine maps them to the agent's own modes (``session/set_mode``).
+        # fluid's NativeLoop gets the policy: given the mode name it would
+        # install the ``acceptEdits`` edit-tool allow rules itself, ahead of
+        # the app's saved Deny rules (``_PERMISSION_POLICY``).
         policy = _PERMISSION_POLICY.get(mode, "on_write")
+        speaks_modes = self._is_delegated or self._provider_kind == _ANTIGRAVITY_KIND
         try:
             await self._engine.submit(
-                SetPermissionMode(mode=mode if self._is_delegated else policy)
+                SetPermissionMode(mode=mode if speaks_modes else policy)
             )
         except NotImplementedError:
             # An engine without the op: adjust the permission engine in place.
