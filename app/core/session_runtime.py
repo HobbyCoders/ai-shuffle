@@ -3333,6 +3333,8 @@ class SessionRuntime:
             payload["user_message_already_recorded"] = True
             payload["requeued_from_turn_id"] = row_id
             try:
+                # The stranded steer's own admission, unchanged.
+                entered = await asyncio.to_thread(turns_db.person_entered, row)
                 fresh = await asyncio.to_thread(
                     turns_db.enqueue_turn,
                     sid,
@@ -3344,8 +3346,7 @@ class SessionRuntime:
                     overrides=row.get("overrides") or None,
                     payload=payload,
                     _owner_receipt=owner_message_receipt(row),
-                    # The stranded steer's own admission, unchanged.
-                    person_entered=turns_db.person_entered(row),
+                    person_entered=entered,
                     command_id=row.get("command_id"),
                     instance_id=row.get("instance_id"),
                     at_front=True,
