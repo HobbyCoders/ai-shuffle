@@ -1186,6 +1186,9 @@ async def update_provider(
                                     detail="Model provider not found")
             if catalog_binding_changed:
                 await run_sync(model_catalogs.delete, provider_id)
+        if existing.get("provider_type") == antigravity.PROVIDER_TYPE:
+            # Turned off or given a new key: its running agents end now.
+            await antigravity.reconcile_agents([provider_id])
     if gemini_verified is not None:
         await _record_credential_check(provider_id, accepted=True, row=gemini_verified)
 
@@ -1245,6 +1248,8 @@ async def activate_provider(provider_id: str, token: str = Depends(require_admin
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
         full_row = await run_sync(_row_with_token_flags, provider_id)
+    from app.core import antigravity
+    await antigravity.reconcile_agents(antigravity.agent_row_ids())  # a sibling turned off
     return _public_provider(full_row)
 
 
@@ -1263,6 +1268,8 @@ async def toggle_provider(provider_id: str, token: str = Depends(require_admin))
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
+    from app.core import antigravity
+    await antigravity.reconcile_agents([provider_id])  # turned off: its agents end now
 
     full_row = await run_sync(_row_with_token_flags, provider_id)
     return _public_provider(full_row)

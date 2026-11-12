@@ -285,6 +285,27 @@ async def test_replaced_spec_starts_a_fresh_process_that_resumes(tmp_path: Path)
         await d.close()
 
 
+async def test_stop_agent_ends_the_process_between_and_during_turns(tmp_path: Path) -> None:
+    """A credential taken away: the process ends now, a running turn says why."""
+    d = await _driver(tmp_path, session_id="s-1")
+    try:
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        pid = d.loop.pid
+        await d.loop.stop_agent("unused: no turn is running")
+        assert pid is not None and d.loop.pid is None
+        await d.loop.submit(UserTurn(content="slow"))
+        await d.until(TextDelta)
+        await d.loop.stop_agent("Signed out here, so this turn was stopped.")
+        end = await d.until(TERMINAL)
+        assert isinstance(end, ErrorEvent) and end.message == "Signed out here, so this turn was stopped."
+        assert d.loop.pid is None
+        # The next turn starts a fresh process and is not told about the stop.
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        assert d.loop.pid not in (None, pid)
+    finally:
+        await d.close()
+
+
 async def test_resume_op_resends_an_unanswered_prompt(tmp_path: Path) -> None:
     """The app's retry: the head prompt goes out again, with no new user node."""
     d = await _driver(tmp_path, session_id="s-1")
@@ -311,9 +332,9 @@ async def test_auth_required_is_a_clear_error(tmp_path: Path) -> None:
     d = await _driver(tmp_path, signed_in=False)
     try:
         end = await d.turn("hello")
-        assert isinstance(end, ErrorEvent) and end.status == 401
-        assert "not signed in" in end.message
-        # The app shows provider_message beside the status; it carries the fix.
+        # No HTTP status: the owner reads the fix, not "HTTP 401".
+        assert isinstance(end, ErrorEvent) and end.status is None
+        assert "not signed in" in end.message and "HTTP" not in end.message
         assert end.provider_message == end.message
         assert d.loop.pid is None  # nothing left running
     finally:

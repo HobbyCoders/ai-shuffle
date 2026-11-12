@@ -512,6 +512,14 @@ def _on_applied(touched) -> None:
         if loop and not loop.is_closed():
             from app.core import antigravity
             asyncio.run_coroutine_threadsafe(antigravity.prune_orphan_homes(), loop)
+    changed_providers = [r for c, r, op in touched if c == "model_providers"]
+    if changed_providers:
+        # Turned off, deleted or given a new key on another worker: an
+        # Antigravity agent running here for that row ends now.
+        loop = getattr(global_events, "_loop", None)
+        if loop and not loop.is_closed():
+            from app.core import antigravity
+            asyncio.run_coroutine_threadsafe(antigravity.reconcile_agents(changed_providers), loop)
     if any(collection == "membership" for collection, _record, _op in touched):
         request_connector_reconcile()
     connector_ids = [r for c, r, _op in touched if c == "connectors"]

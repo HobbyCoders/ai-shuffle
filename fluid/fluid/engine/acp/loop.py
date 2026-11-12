@@ -245,6 +245,8 @@ class AcpLoop:
         self._bridge_token = secrets.token_urlsafe(24)
         self._start_lock = asyncio.Lock()
         self._closed = False
+        # Set by ``stop_agent`` while a turn runs: the text that turn ends with.
+        self._stop_reason: str | None = None
         self.last_init: dict[str, Any] | None = None
 
     # ─── ExecutionEngine surface ────────────────────────────────────────
@@ -380,6 +382,23 @@ class AcpLoop:
             raise RuntimeError("a turn is running; replace the spec between turns")
         async with self._start_lock:
             self.spec = spec
+            await self._stop_process()
+
+    async def stop_agent(self, reason: str) -> None:
+        """End the agent process now, also in the middle of a turn.
+
+        For a credential taken away (signed out, removed, disabled, key
+        replaced): a running turn ends with ``reason`` instead of going on
+        with the old process; the next turn starts a fresh process.
+        """
+        task = self._turn_task
+        if task is not None and not task.done():
+            self._stop_reason = reason
+            conn = self._conn
+            if conn is not None:
+                await conn.close()  # the pending prompt fails; ``_drive`` reports reason
+            return
+        async with self._start_lock:
             await self._stop_process()
 
     async def release_abandoned(self) -> None:
@@ -610,12 +629,11 @@ class AcpLoop:
     def _failure_event(self, sid: str, turn_id: str, exc: AcpError, *, prefix: str = "", **extra: Any) -> ErrorEvent:
         if not exc.auth_required:
             return ErrorEvent(session_id=sid, turn_id=turn_id, message=f"{prefix}{exc.message}", **extra)
-        # Hosts show the provider's own short text beside a status (the app
-        # renders "provider returned HTTP 401: <provider_message>"), so the
-        # sign-in guidance goes there too: the agent's bare "Authentication
-        # required" says nothing about how to fix it.
+        # The sign-in guidance replaces the agent's bare "Authentication
+        # required". No HTTP status: nothing here was an HTTP call, and a
+        # host would prefix one ("provider returned HTTP 401: ...").
         message = self.spec.auth_message(exc)
-        return ErrorEvent(session_id=sid, turn_id=turn_id, message=message, status=401,
+        return ErrorEvent(session_id=sid, turn_id=turn_id, message=message,
                           provider_message=message, **extra)
 
     async def _run_turn(self, op: UserTurn | Resume) -> None:
@@ -670,6 +688,7 @@ class AcpLoop:
         finally:
             self._mapper = None
             self._steer_requests = []
+            self._stop_reason = None
             with contextlib.suppress(Exception):
                 await flush_events(self.store, sid)
 
@@ -681,9 +700,11 @@ class AcpLoop:
         failure: AcpError | None = None
         result: Any = None
         try:
-            result = await conn.request("session/prompt", {
-                "sessionId": self._acp_session, "prompt": self._prompt_blocks(content),
-            })
+            # A stop that came while the process was starting: nothing is sent.
+            if self._stop_reason is None:
+                result = await conn.request("session/prompt", {
+                    "sessionId": self._acp_session, "prompt": self._prompt_blocks(content),
+                })
             # Steering prompts sent during the turn end with it.
             for task in list(self._steer_requests):
                 with contextlib.suppress(BaseException):
@@ -707,6 +728,12 @@ class AcpLoop:
                                    cache_read_tokens=usage.get("cache_read_tokens", 0),
                                    cache_creation_tokens=usage.get("cache_creation_tokens", 0),
                                    raw={"acp_usage": (result or {}).get("usage") if isinstance(result, Mapping) else None}))
+        stopped, self._stop_reason = self._stop_reason, None
+        if stopped:
+            await self._stop_process()
+            await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=stopped,
+                                        usage=usage, cost_usd=cost))
+            return
         if failure is not None:
             if self._interrupted.is_set():
                 await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id))

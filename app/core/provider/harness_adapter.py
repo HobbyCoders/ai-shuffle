@@ -2056,6 +2056,8 @@ class HarnessAdapter(ProviderAdapter):
             ),
             system_append=instructions,
         )
+        # Sign-out, delete, disable or a new key ends this engine's process.
+        antigravity.register_agent(str(row["id"]), self._engine, self._antigravity_binding)
 
     async def _check_antigravity_turn(self) -> None:
         """Decide this turn from the stored row, not the copy taken at connect.
@@ -2085,6 +2087,7 @@ class HarnessAdapter(ProviderAdapter):
                 raise ProviderConfigError(str(exc)) from exc
             await self._engine.replace_spec(spec)
             self._antigravity_binding = binding
+            antigravity.register_agent(str(row["id"]), self._engine, binding)
 
     def set_turn_source(self, app_source: Optional[str]) -> None:
         """Name what starts the next turn, as an app ``turns.source``.

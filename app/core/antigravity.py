@@ -32,6 +32,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
@@ -592,8 +593,9 @@ def _home_path(row_id: str) -> Path:
     return _root() / "homes" / re.sub(r"[^A-Za-z0-9_.-]", "_", str(row_id))
 
 
-async def forget_row(row_id: str) -> None:
-    """End the row's sign-in on this worker: pending sign-ins, then its home.
+async def forget_row(row_id: str, *, reason: Optional[str] = None) -> None:
+    """End the row's sign-in on this worker: its running agents, pending
+    sign-ins, then its home.
 
     The directory is the binary's; nothing in it is read. Removing it is the
     only way the app ends a stored sign-in without touching its contents.
@@ -603,6 +605,9 @@ async def forget_row(row_id: str) -> None:
     if not row_id:
         return
     _signin_epochs[str(row_id)] = signin_epoch(row_id) + 1
+    # A warm agent keeps the sign-in it read at start: end it, so the next
+    # turn cannot run on a credential that is gone.
+    await stop_agents(row_id, reason or STOPPED_REMOVED)
     async with _login_lock(str(row_id)):
         await _stop_logins(str(row_id))
         path = _home_path(str(row_id))
@@ -615,7 +620,7 @@ async def sign_out(row: Mapping[str, Any]) -> None:
     row_id = str(row.get("id") or "")
     if not row_id:
         return
-    await forget_row(row_id)
+    await forget_row(row_id, reason=STOPPED_SIGNED_OUT)
     from app.db.provider_usage_snapshots import delete_provider_usage_snapshot
     await asyncio.to_thread(delete_provider_usage_snapshot, row_id)
 
@@ -759,8 +764,81 @@ def spawn_binding(row: Mapping[str, Any]) -> str:
     material = json.dumps({
         "id": row.get("id"), "auth_mode": row.get("auth_mode"), "key": row_api_key(row) or "",
         "env": agent_extra_env(row), "binary": find_binary() or "",
+        # A sign-out or delete here: the next turn never reuses the process.
+        "signin": signin_epoch(str(row.get("id") or "")),
     }, sort_keys=True)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Running agents: ended when the row's credential is taken away
+# ---------------------------------------------------------------------------
+
+STOPPED_SIGNED_OUT = ("Antigravity was signed out on this worker, so this turn was stopped. "
+                      "Sign in again on the provider's page to continue.")
+STOPPED_REMOVED = "This chat's Antigravity provider was removed, so this turn was stopped."
+STOPPED_DISABLED = ("This chat's Antigravity provider was turned off, so this turn was stopped. "
+                    "Turn it back on or pick a different model.")
+STOPPED_KEY_CHANGED = ("This provider's Gemini API key was replaced, so this turn was stopped. "
+                       "Send the message again to continue with the new key.")
+
+# Row id -> live ACP engines and the spawn binding each runs with. Weak: an
+# engine that is gone drops out by itself; nothing here keeps one alive.
+_agents: Dict[str, "weakref.WeakKeyDictionary[Any, str]"] = {}
+
+
+def register_agent(row_id: str, engine: Any, binding: str) -> None:
+    """Record (or re-record after a respawn) an engine running for the row."""
+    _agents.setdefault(str(row_id), weakref.WeakKeyDictionary())[engine] = binding
+
+
+def agent_row_ids() -> List[str]:
+    """Rows with an engine on this worker (cheap: no database read)."""
+    return [row_id for row_id in list(_agents) if _engines(row_id)]
+
+
+def _engines(row_id: str) -> List[Any]:
+    return list((_agents.get(str(row_id)) or {}).keys())
+
+
+async def stop_agents(row_id: str, reason: str, *, keep_binding: Optional[str] = None) -> int:
+    """End the row's agent processes now (a running turn ends with ``reason``).
+
+    ``keep_binding`` spares the engines already running with that binding
+    (an edit that changed nothing the agent holds).
+    """
+    stopped = 0
+    entries = _agents.get(str(row_id)) or {}
+    for engine in list(entries.keys()):
+        if keep_binding is not None and entries.get(engine) == keep_binding:
+            continue
+        try:
+            await engine.stop_agent(reason)
+            stopped += 1
+        except Exception:  # noqa: BLE001 — one engine never blocks the others
+            logger.debug("[antigravity] could not stop an agent of %s", row_id, exc_info=True)
+    return stopped
+
+
+async def reconcile_agents(row_ids: Any) -> None:
+    """After a row changed (here or through sync): end every agent whose
+    row is gone or off, or that holds a key or setting the row no longer has."""
+    from app.db import database as db
+
+    for row_id in {str(r) for r in row_ids or () if r}:
+        if not _engines(row_id):
+            continue
+        try:
+            row = await asyncio.to_thread(db.get_model_provider, row_id, include_token=True)
+        except Exception:  # noqa: BLE001 — the next turn's own check still applies
+            logger.debug("[antigravity] could not re-read %s", row_id, exc_info=True)
+            continue
+        if not row or row.get("provider_type") != PROVIDER_TYPE:
+            await stop_agents(row_id, STOPPED_REMOVED)
+        elif not row.get("enabled"):
+            await stop_agents(row_id, STOPPED_DISABLED)
+        else:
+            await stop_agents(row_id, STOPPED_KEY_CHANGED, keep_binding=spawn_binding(row))
 
 
 # ---------------------------------------------------------------------------

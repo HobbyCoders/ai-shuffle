@@ -218,6 +218,87 @@ async def test_a_deleted_or_disabled_row_refuses_the_next_turn(client, session_r
         await _turn(adapter, "user")
 
 
+class _Running:
+    """A connected engine as the registry sees it: records each stop."""
+
+    def __init__(self):
+        self.stops = []
+
+    async def stop_agent(self, reason):
+        self.stops.append(reason)
+
+
+def _running(row_id):
+    engine = _Running()
+    ag.register_agent(row_id, engine, ag.spawn_binding(db.get_model_provider(row_id, include_token=True)))
+    return engine
+
+
+async def test_sign_out_and_delete_end_the_rows_running_agents(mock_db, fake_agy):
+    from app.api import model_providers as providers_api
+
+    row, other = await _personal_row(), await _personal_row("Other")
+    engine, bystander = _running(row["id"]), _running(other["id"])
+    before = ag.spawn_binding(row)
+    await ag.sign_out(row)
+    assert engine.stops == [ag.STOPPED_SIGNED_OUT] and bystander.stops == []
+    # A process started before the sign-out is never reused by the next turn.
+    assert ag.spawn_binding(row) != before
+    assert (await providers_api.delete_provider(row["id"], token=None)) == {"success": True}
+    assert engine.stops[-1] == ag.STOPPED_REMOVED and bystander.stops == []
+
+
+async def test_a_delete_from_another_worker_ends_the_rows_running_agents(mock_db, fake_agy, monkeypatch):
+    from app.core.global_events import global_events
+    from app.network import startup
+
+    row = await _personal_row()
+    engine = _running(row["id"])
+    db.delete_model_provider(row["id"])  # what materialize does for the tombstone
+    monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop(), raising=False)
+    startup._on_applied([("model_providers", row["id"], "delete")])
+    for _ in range(100):
+        if engine.stops:
+            break
+        await asyncio.sleep(0.05)
+    assert engine.stops and engine.stops[0] == ag.STOPPED_REMOVED
+
+
+async def test_turning_a_row_off_ends_its_running_agents(mock_db, fake_agy, monkeypatch):
+    from app.api import model_providers as providers_api
+    from app.core.global_events import global_events
+    from app.network import startup
+
+    row = await _personal_row()
+    engine = _running(row["id"])
+    await providers_api.toggle_provider(row["id"], token=None)
+    assert engine.stops == [ag.STOPPED_DISABLED]
+    await providers_api.toggle_provider(row["id"], token=None)  # back on: nothing to end
+    assert engine.stops == [ag.STOPPED_DISABLED]
+    # Turned off on another worker.
+    db.update_model_provider(row["id"], enabled=False)
+    monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop(), raising=False)
+    startup._on_applied([("model_providers", row["id"], "upsert")])
+    for _ in range(100):
+        if len(engine.stops) > 1:
+            break
+        await asyncio.sleep(0.05)
+    assert engine.stops == [ag.STOPPED_DISABLED, ag.STOPPED_DISABLED]
+
+
+async def test_a_new_key_ends_the_rows_running_agents_and_other_edits_do_not(client, session_row):
+    from app.api.model_providers import _encrypt_token_or_400
+
+    row = _create(client, "gemini-api-key", api_key="test-gemini-secret-value")
+    engine = _running(row["id"])
+    db.update_model_provider(row["id"], name="Renamed", models=list(ag.DEFAULT_MODELS[:1]))
+    await ag.reconcile_agents([row["id"]])
+    assert engine.stops == []  # nothing the agent holds changed
+    db.update_model_provider(row["id"], auth_token=_encrypt_token_or_400("test-gemini-other-value"))
+    await ag.reconcile_agents([row["id"]])
+    assert engine.stops == [ag.STOPPED_KEY_CHANGED]
+
+
 # --- API ----------------------------------------------------------------------
 
 def test_meta_carries_the_warning_and_guard_default(client):
