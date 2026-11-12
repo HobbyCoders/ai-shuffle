@@ -830,6 +830,17 @@
 		});
 	}
 
+	/**
+	 * A section's accessible name. Antigravity rows share one brand (one
+	 * section per key or sign-in), so each is named by its row as well.
+	 */
+	function providerAriaName(pb: ProviderUsageBucket, display: ProviderDisplay): string {
+		if (providerUsageType(pb) !== 'antigravity') return `${display.name} usage`;
+		const rowName = getProviders().find((p) => p.id === pb.providerId)?.name ?? pb.providerName;
+		const label = display.subtext ? `${display.name} · ${display.subtext}` : display.name;
+		return rowName && rowName !== display.name ? `${label} usage, ${rowName}` : `${label} usage`;
+	}
+
 	// One order for every usage section, Claude included (#1845):
 	// subscriptions (ChatGPT, SuperGrok, a Claude plan) above API accounts, so
 	// OpenAI · API never sits next to OpenAI · prolite and reads as one section
@@ -890,7 +901,8 @@
 	/**
 	 * Claude, ChatGPT and SuperGrok subscription sections present quota remaining.
 	 * SuperGrok billing reports used-%, which `remainingFromUsedPct` converts — so
-	 * grok rows and their collapsed summary render "% left" too. The remaining
+	 * grok rows and their collapsed summary render "% left" too. Antigravity's
+	 * own quota reading reads the same way, as in its Settings Usage tab. The remaining
 	 * provider feeds keep their used-quota convention: xAI API-key rows
 	 * (`provider_type === 'xai'`), other API-key headers, and OpenRouter credit
 	 * limits all expose utilization directly.
@@ -901,7 +913,7 @@
 	}): boolean {
 		const entry = getProviders().find((p) => p.id === pb.providerId);
 		const type = providerUsageType(pb);
-		if (type === 'grok' || type === 'openrouter') return true;
+		if (type === 'grok' || type === 'openrouter' || type === 'antigravity') return true;
 		if (type !== 'chatgpt') return false;
 		const kind = entry?.auth_kind ?? 'subscription';
 		return kind === 'subscription';
@@ -1138,7 +1150,7 @@
 			<span class="sec-summary sec-credits sec-empty">—</span>
 		{/if}
 	{/snippet}
-	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, `${pbDisplay.name} usage`, providerSummary)}
+	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, providerAriaName(pb, pbDisplay), providerSummary)}
 	{#if pbOpen}
 		{#each providerSlots(pb, pbWindows, pbShowsRemaining, pbNoFiveHour, now) as slot (slot.type)}
 			{@render windowRow(slot, suffix)}
