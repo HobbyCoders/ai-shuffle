@@ -894,7 +894,7 @@ def _instructions_section(p: PromptProfile) -> str | None:
                 + "; skills hold procedures; past sessions hold what happened."
             )
         if "Forget" in t:
-            bullet += " Use Forget only when the user explicitly asks to remove a fact; never as automatic cleanup."
+            bullet += " Forget a saved fact only when the user explicitly asks; never as automatic cleanup."
         bullets.append(bullet)
     if "SessionSearch" in t and "SessionView" in t:
         bullets.append(
