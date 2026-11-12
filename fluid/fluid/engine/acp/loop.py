@@ -793,6 +793,11 @@ class AcpLoop:
         }))
         self._steer_requests.append(task)
         mapper = self._mapper
+        # The agent answers a steer in the same turn: end the open text block
+        # here so the answer streams into a new block below the steer, not
+        # into the text written before it.
+        for event in mapper.close_block() if mapper else []:
+            await self._emit(event)
         await self._emit(SteerDelivered(session_id=self.session_id, turn_id=mapper.turn_id if mapper else None,
                                         steers=[{"id": steer_id, "text": text, "origin": origin}]))
 

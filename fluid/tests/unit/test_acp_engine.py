@@ -21,6 +21,7 @@ import pytest
 from fluid.engine.acp.antigravity import AntigravitySpec, split_model_id
 from fluid.engine.acp.loop import AcpLoop
 from fluid.events.model import (
+    BlockStop,
     ErrorEvent,
     Interrupted,
     PermissionRequest,
@@ -235,6 +236,14 @@ async def test_steer_during_a_turn_and_cancel(tmp_path: Path) -> None:
         end = await d.until(TERMINAL)
         assert isinstance(end, TurnComplete)
         assert "steered:go left" in d.text()
+        # The answer to the steer streams into a new block after the receipt,
+        # so it renders below the steer instead of joining the earlier text.
+        at = d.events.index(delivered)
+        before = {e.index for e in d.events[:at] if isinstance(e, TextDelta)}
+        after = [e for e in d.events[at:] if isinstance(e, TextDelta)]
+        assert any(isinstance(e, BlockStop) and e.index in before for e in d.events[:at])
+        assert after and "steered:go left" in "".join(e.text for e in after)
+        assert not before & {e.index for e in after}
         prompts = _received(tmp_path, "session/prompt")
         assert len(prompts) == 2 and prompts[1]["params"]["prompt"][0]["text"] == "go left"
 

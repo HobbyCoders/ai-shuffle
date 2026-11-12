@@ -1828,7 +1828,11 @@ function reduceInternal(
 			// discarded after it.
 			const startsAgentTurn = state.pendingAgentWake && !event.not_sent;
 			if (startsAgentTurn) state = { ...state, pendingAgentWake: false };
-			if (!syntheticTranscript && !event.not_sent) state = markAttemptBoundary(state, seq);
+			// The message ends the reply streamed before it: text the agent writes
+			// after a message steered into the running turn opens a new bubble
+			// below it, never joins the text above (an ACP agent answers a steer
+			// in the same stream, with no tool call in between).
+			if (!syntheticTranscript && !event.not_sent) state = closeOpen(markAttemptBoundary(state, seq));
 			const content = str(event.content);
 
 			// Background-task wake turns persist their synthesized prompt as a
