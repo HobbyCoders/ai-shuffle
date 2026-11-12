@@ -183,9 +183,12 @@ def test_fetch_models_pages_through_googles_list_and_keeps_text_models(client):
     assert result.status_code == 200, result.text
     models = result.json()["models"]
     assert [m["id"] for m in models] == ["gemini-4-carbon", "gemini-3.8-flash"]
-    assert models[0].get("context_length") == 1048576
+    assert models[0] == {"id": "gemini-4-carbon", "label": "Gemini 4 Carbon", "context_window": 1048576}
     assert len(calls) == 2 and all(c.headers["x-goog-api-key"] == KEY for c in calls)
     assert KEY not in result.text
+    # Curation saves the fetched entries as they are.
+    saved = client.patch(f"{ROOT}/{row['id']}", json={"models": models, "default_model": models[0]["id"]})
+    assert saved.status_code == 200, saved.text
 
 
 def test_creation_waits_for_every_member_to_advertise_gemini_support(client, monkeypatch):

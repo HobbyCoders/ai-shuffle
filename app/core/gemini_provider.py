@@ -86,10 +86,12 @@ def parse_models(payload: Any) -> list[dict[str, Any]]:
             continue
         if any(tag in name for tag in ("-image", "-tts", "-audio", "-live", "embedding")):
             continue
-        model: dict[str, Any] = {"id": name, "name": item.get("displayName") or name}
+        label = item.get("displayName")
+        # The same {id, label, context_window} entries every other fetch path returns.
+        model: dict[str, Any] = {"id": name, "label": label if isinstance(label, str) and label else name}
         limit = item.get("inputTokenLimit")
         if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
-            model["context_length"] = limit
+            model["context_window"] = limit
         out.append(model)
     return out
 
