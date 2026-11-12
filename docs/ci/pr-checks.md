@@ -85,7 +85,10 @@ Fork PRs use the ordinary read-only `pull_request` context, never
 
 ### Android native pull requests
 
-`android.yml` runs unsigned Gradle unit tests/lint, builds the debug and test APKs,
+`android.yml` runs unsigned Gradle unit tests/lint, runs the unit tests a second
+time with push turned on for the debug build (`-PpushEnabledDebug=true`, the code
+path release builds take once Firebase config is present; no `google-services.json`
+is needed or committed), builds the debug and test APKs,
 and exercises the full native instrumentation suite on API 34 and API 36 for PRs
 changing `android/**`, `mobile/**`, `frontend/**`, the workflow itself, or its CI
 cost/publication policy tests. The asset paths matter: the APK's offline demo is

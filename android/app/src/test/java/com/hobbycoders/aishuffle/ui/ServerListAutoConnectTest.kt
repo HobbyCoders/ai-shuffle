@@ -12,6 +12,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import androidx.core.app.ActivityCompat
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.model.Server
 import com.hobbycoders.aishuffle.presence.WorkerPresenceProbe
@@ -124,6 +126,16 @@ class ServerListAutoConnectTest {
     }
     private fun views(view: View): List<View> =
         listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { views(view.getChildAt(it)) } else emptyList()
+
+    /** With push on (release builds, `-PpushEnabledDebug=true`) resuming schedules registration; it never runs in a test. */
+    @Test fun theLauncherSchedulesPushRegistrationOnlyWhenTheBuildHasPush() {
+        notifications(enabled = true)
+        launcher().setup()
+        settle()
+        val work = WorkManager.getInstance(context).getWorkInfosForUniqueWork("needs-you-registration").get()
+        assertEquals(com.hobbycoders.aishuffle.BuildConfig.PUSH_ENABLED, work.isNotEmpty())
+        assertTrue(work.all { it.state == WorkInfo.State.ENQUEUED })
+    }
 
     @Test fun withNoRequestALauncherStartStillConnectsAtOnce() {
         notifications(enabled = true)
