@@ -13,10 +13,19 @@ raise the question, both bounded so they cannot nag:
   one line asking the agent to confirm it with the owner. At most
   :data:`MAX_OPEN_PREFERENCE_PROPOSALS` are open, one per topic (a newer
   wording replaces the older), and each expires after
-  :data:`PREFERENCE_PROPOSAL_TTL`. A proposal closes itself once a user-kept
-  memory on the same topic is saved after it: one keyed by the topic name,
-  or one sharing the proposal's subject terms (:func:`same_topic`). No key
-  convention is needed. The guidance queue
+  :data:`PREFERENCE_PROPOSAL_TTL`. A proposal closes exactly when a tool
+  call names its topic: a successful Remember with ``proposal=<topic>``
+  (the rule was saved) or Forget with ``proposal=<topic>`` and
+  ``confirm=true`` (the owner declined it, or a saved memory already states
+  it). Either closes every open proposal on that topic the calling session
+  sees (its project's or global; :meth:`PreferenceProposals.close`), and
+  the closed row stays as a tombstone for a TTL after closing so the
+  learner does not queue the same topic, scope and wording again. A
+  different wording is still queued. Tombstones are never open. The
+  queue file is local to this worker; it does not replicate. A proposal
+  also closes itself once a user-kept memory on the same topic is saved
+  after it: one keyed by the topic name, or one sharing the proposal's
+  subject terms (:func:`same_topic`). The guidance queue
   (``pending-proposals.jsonl``) is not reused: ``fluid evolve`` replays
   everything in it through the guidance gate.
 
@@ -30,7 +39,8 @@ raise the question, both bounded so they cannot nag:
   :data:`MAX_OPEN_CONFLICTS` questions are shown at once. An owner-kept
   Remember decision under the question's version-bound key records that
   both stand, replicates like any owner fact, and closes that pair until
-  either text (or its applicability) changes. No tool schema is extended.
+  either text (or its applicability) changes. No tool schema is extended
+  for conflicts (only proposals add the ``proposal`` parameter above).
 """
 from __future__ import annotations
 
@@ -82,6 +92,16 @@ def _fingerprint(text: str) -> str:
 
 def _scope_visible(scope: str, project: str | None) -> bool:
     return project is None or scope in ("global", project)
+
+
+def _closed(record: dict) -> bool:
+    """A tombstone: answered by a tool call naming its topic. Rows older
+    versions wrote carry no ``closed_at`` and stay ordinary proposals."""
+    return isinstance(record.get("closed_at"), (int, float)) and not isinstance(record["closed_at"], bool)
+
+
+def _live_tombstone(record: dict, now: float) -> bool:
+    return _closed(record) and now - float(record["closed_at"]) < PREFERENCE_PROPOSAL_TTL
 
 
 def same_topic(topic: str, text: str, key: str | None, terms: set[str]) -> bool:
@@ -145,7 +165,7 @@ class PreferenceProposals:
         return out
 
     def _is_open(self, record: dict, saved, now: float) -> bool:
-        if now - float(record["ts"]) >= PREFERENCE_PROPOSAL_TTL:
+        if _closed(record) or now - float(record["ts"]) >= PREFERENCE_PROPOSAL_TTL:
             return False
         scope = record.get("scope") or "global"
         # Answered: the owner's confirmation (or correction) of the topic was
@@ -169,9 +189,11 @@ class PreferenceProposals:
         """Queue a proposed rule for ``topic``.
 
         Returns ``proposed`` (queued, or replaced the topic's older wording),
-        ``duplicate`` (the same wording is already open), ``saved`` (a
-        user-kept fact in scope already says it word for word) or ``full`` (the
-        queue holds MAX_OPEN_PREFERENCE_PROPOSALS other topics). Raises
+        ``duplicate`` (the same wording is already open), ``closed`` (a
+        session already saved or dismissed this topic, scope and wording;
+        see :meth:`close`), ``saved`` (a user-kept fact in scope already
+        says it word for word) or ``full`` (the queue holds
+        MAX_OPEN_PREFERENCE_PROPOSALS other topics). Raises
         ValueError for a malformed topic, an empty or oversized text, a
         credential or an injection pattern."""
         from fluid.codemode.facts import validate_text
@@ -193,34 +215,54 @@ class PreferenceProposals:
             saved = self._saved_preferences(None)
             if any(s in (scope, "global") and fp == fingerprint for _, s, _, fp, _ in saved):
                 return "saved"
-            records = [r for r in self._read() if self._is_open(r, saved, now)]
+            rows = self._read()
+            records = [r for r in rows if self._is_open(r, saved, now)]
+            tombstones = [r for r in rows if _live_tombstone(r, now)]
             same = [r for r in records if normalize_topic(r["topic"]) == name
                     and (r.get("scope") or "global") == scope]
             if any(_fingerprint(r["text"]) == fingerprint for r in same):
                 return "duplicate"
+            if any(normalize_topic(r["topic"]) == name and (r.get("scope") or "global") == scope
+                   and _fingerprint(r["text"]) == fingerprint for r in tombstones):
+                return "closed"
             records = [r for r in records if r not in same]
             if not same and len(records) >= MAX_OPEN_PREFERENCE_PROPOSALS:
                 return "full"
             records.append({"ts": now, "topic": name, "text": body, "scope": scope,
                             "sessions": [str(s) for s in sessions if s][:4]})
-            atomic_write_text(self.path, "".join(
-                json.dumps(r, ensure_ascii=False) + "\n" for r in records))
+            self._write(atomic_write_text, tombstones + records)
         return "proposed"
 
-    def dismiss(self, topic: Any, *, scope: str | None = None) -> bool:
-        """Drop the open proposal for ``topic`` (any scope unless given)."""
+    def close(self, topic: Any, project: str | None, *, how: str,
+              now: float | None = None) -> list[dict]:
+        """Close every unexpired, not yet closed proposal on ``topic`` that a
+        session in ``project`` sees (scope ``global`` or ``project``; None
+        sees only global) and return them. Each stays as a tombstone
+        (``closed_at``, ``closed=how``) for PREFERENCE_PROPOSAL_TTL, which
+        :meth:`propose` reads to skip the same wording. Raises ValueError for
+        a malformed topic and TimeoutError when the queue lock stays busy;
+        nothing changes then."""
         from fluid.codemode.skills import atomic_write_text, journal_lock
         name = normalize_topic(topic)
+        if name is None:
+            raise ValueError(f"proposal {str(topic)[:40]!r} is not a short snake_case topic")
+        now = time.time() if now is None else now
         with journal_lock(self._lock, wait=1.0) as held:
-            if not held or name is None:
-                return False
-            records = self._read()
-            kept = [r for r in records if not (normalize_topic(r["topic"]) == name
-                                               and (scope is None or (r.get("scope") or "global") == scope))]
-            if len(kept) == len(records):
-                return False
-            atomic_write_text(self.path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept))
-            return True
+            if not held:
+                raise TimeoutError("preference proposals are busy")
+            rows = self._read()
+            closed = [r for r in rows if not _closed(r)
+                      and now - float(r["ts"]) < PREFERENCE_PROPOSAL_TTL
+                      and normalize_topic(r["topic"]) == name
+                      and (r.get("scope") or "global") in ("global", project)]
+            for r in closed:
+                r["closed_at"], r["closed"] = now, how
+            if closed:
+                self._write(atomic_write_text, rows)
+        return closed
+
+    def _write(self, atomic_write_text, rows: list[dict]) -> None:
+        atomic_write_text(self.path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
 
 
 def preference_proposal_lines(store: Any, project: str | None = None, *,
@@ -234,12 +276,38 @@ def preference_proposal_lines(store: Any, project: str | None = None, *,
     for record in records[:MAX_OPEN_PREFERENCE_PROPOSALS]:
         topic = normalize_topic(record["topic"])
         lines.append(
-            f"- [proposed, not saved; {topic}] {record['text']} (The learner read this in the "
-            f"owner's recent corrections. Confirm it with the owner, then save it with Remember, "
+            f"- [proposed, not saved; {topic}] {record['text']} (From the owner's recent "
+            f"corrections. Confirm it with the owner, then save it with Remember, proposal='{topic}', "
             f"correcting the memory on this topic (replaces=[older rows]); if the owner's current "
-            f"message already says it, save it without asking.)"
+            f"message already says it, save it without asking. If the owner declines or a saved "
+            f"memory already states it: Forget, proposal='{topic}', confirm=true.)"
         )
     return lines
+
+
+def valid_proposal(raw: Any) -> str | None:
+    """The topic a tool call's ``proposal`` names: "" when absent, None when
+    malformed (the call must then change nothing)."""
+    if raw is None or raw == "":
+        return ""
+    return normalize_topic(raw) if isinstance(raw, str) else None
+
+
+def close_proposal(store: Any, topic: str, project: str | None, *, how: str) -> str:
+    """Close the proposals ``topic`` names for a session in ``project`` and
+    describe it for the tool receipt. Raises TimeoutError/OSError when the
+    queue cannot be written; the caller decides what that means."""
+    closed = PreferenceProposals(store).close(topic, project, how=how)
+    if not closed:
+        return f"No open learner proposal has topic '{topic}'; nothing was closed."
+    rows = "; ".join(f"({r.get('scope') or 'global'}) {_clip(r['text']).rstrip('. ')}" for r in closed)
+    return (f"Closed learner proposal '{topic}' ({how}): {rows}. For "
+            f"{PREFERENCE_PROPOSAL_TTL // 86400:.0f} days the learner will not propose the same "
+            "wording again.")
+
+
+def _clip(text: str, limit: int = 80) -> str:
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
 # ─── conflict curation for user-kept facts ─────────────────────────────────

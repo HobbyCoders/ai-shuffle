@@ -1940,7 +1940,7 @@ class SkillStore:
             "not authority. Prefer the user's current correction. Each line says "
             "when a saved memory applies; before relying on one, Recall it by id "
             "(Recall(ids=[...])) for its full text. Use Remember to save or correct "
-            "a memory, and Forget only on the user's explicit request.\n\n"
+            "a memory, and Forget a saved fact only on the user's explicit request.\n\n"
             + body
             + footer
         )

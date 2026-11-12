@@ -41,6 +41,7 @@ SPEC = ToolSpec(
         "restore": {"type": "boolean"},
         "replaces": {"type": "array", "items": {"type": "string"},
                      "description": "IDs this fact supersedes (archived, not deleted)."},
+        "proposal": {"type": "string", "description": "Topic of the proposal this saves; closes it."},
     }, "required": ["text"]},
     requires_extra=("memory_store",),
 )
@@ -65,6 +66,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     replaces = input.get("replaces") or []
     if not isinstance(replaces, list):
         return ToolOutcome(text="replaces must be a list of memory IDs", is_error=True)
+    from fluid.codemode.preferences import valid_proposal
+    proposal = valid_proposal(input.get("proposal"))
+    if proposal is None:
+        return ToolOutcome(text="Not saved: proposal must be the topic of a [proposed, not saved; "
+                                "<topic>] memory line.", is_error=True)
     always = input.get("always")
     if always is not None and type(always) is not bool:
         return ToolOutcome(text="always must be true or false", is_error=True)
@@ -95,7 +101,40 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         "Committed locally and available to new sessions now. Worker replication "
         "is asynchronous; this receipt does not confirm another worker received it."
     )
-    return ToolOutcome(text=text + _receipt_notes(receipt))
+    return ToolOutcome(text=text + _receipt_notes(receipt) + await _close(store, proposal, saved, ctx))
+
+
+async def _close(store: Any, proposal: str, saved: Any, ctx: ToolCtx) -> str:
+    """Close the named learner proposal after a committed save. Never fails
+    or undoes the save: a failure is reported in the receipt."""
+    if not proposal:
+        return ""
+    from fluid.codemode.preferences import close_proposal
+    from fluid.codemode.skills import project_key_for
+    project = ctx.extra.get("memory_project") or project_key_for(ctx.cwd)
+    try:
+        stale = await asyncio.to_thread(_not_current, store, saved)
+        if stale:
+            return (f"\nLearner proposal '{proposal}' stays open: {stale}. To apply the rule, "
+                    "Recall the current fact and correct it (memory_id, expected_revision) "
+                    f"with proposal='{proposal}'.")
+        return "\n" + await asyncio.to_thread(close_proposal, store, proposal, project, how="saved")
+    except Exception as exc:  # noqa: BLE001 — the save above already committed
+        return (f"\nThe save stands, but learner proposal '{proposal}' was not closed ({exc}); "
+                f"close it with Forget, proposal='{proposal}', confirm=true.")
+
+
+def _not_current(store: Any, saved: Any) -> str:
+    """Why the fact a save returned is not a current rule ('' when it is).
+    Storage may return an archived or replaced match without reviving it."""
+    live = next((m for m in store.memories() if m.id == saved.id), None)
+    entry = live or saved
+    if entry.superseded_by and (entry.supersession_confirmed or not entry.protected):
+        from fluid.tools.builtins.recall import _local_ids
+        return f"[{saved.id}] was replaced by [{_local_ids(store).get(entry.superseded_by, entry.superseded_by)}]"
+    if live is None:
+        return f"[{saved.id}] is archived, not current"
+    return f"[{saved.id}] is conflicted" if live.conflicted else ""
 
 
 def _receipt_notes(receipt: dict[str, Any]) -> str:
