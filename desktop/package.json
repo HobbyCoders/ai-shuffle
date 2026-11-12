@@ -18,7 +18,7 @@
     "build:worker:stub": "node scripts/build-worker.mjs --stub",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "npm run build && electron .",
-    "test": "npm run build && node --test \"test/**/*.test.mjs\"",
+    "test": "npm run build && node test/helpers/fetch-electron.mjs && node --test \"test/**/*.test.mjs\"",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder --publish never",
     "dist:preview:win": "npm run build && electron-builder --config electron-builder.preview.yml --win nsis --x64 --publish never"

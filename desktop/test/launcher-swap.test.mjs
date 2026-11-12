@@ -13,6 +13,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { readLauncher } from '../scripts/launcher-contract.mjs';
+import { installedElectron, NO_ELECTRON } from './helpers/electron-binary.mjs';
 const require = createRequire(import.meta.url);
 const { packAsar, readAsarMember } = require('../dist/main/asar.js');
 const swap = require('../dist/main/launcher-swap.js');
@@ -489,10 +490,9 @@ test('the restore helper refuses a linked old archive', t => {
  assert.deepEqual(f.asar(), f.original);
 });
 
-// Electron's own asar support and node mode, where its binary is installed (not on CI runners that skip the download).
-let electron = null;
-try { electron = require('electron'); if (typeof electron !== 'string' || !fs.existsSync(electron)) electron = null; } catch { electron = null; }
-test('real Electron in node mode opens the packed app.new.asar and passes its self-test; a wrong archive fails', { skip: electron ? false : 'no Electron binary installed' }, async t => {
+// Electron's own asar support and node mode, where its binary is installed (npm test fetches it first).
+const electron = installedElectron();
+test('real Electron in node mode opens the packed app.new.asar and passes its self-test; a wrong archive fails', { skip: electron ? false : NO_ELECTRON }, async t => {
  const f = install(t, { desktop: realDesktop });
  const members = swap.launcherMembers(realDesktop, path.join(f.resources, 'app.asar'), fs);
  const candidate = path.join(f.resources, swap.NEW_ASAR);
@@ -507,10 +507,11 @@ test('real Electron in node mode opens the packed app.new.asar and passes its se
  fs.writeFileSync(candidate, packAsar(members.filter(m => !m.name.startsWith('node_modules/pend/'))));
  await assert.rejects(swap.selfTest(electron, candidate, realLauncher, f.root), /pend/);
 });
-test('real Electron in node mode runs the restore helper over a real archive with original-fs', { skip: process.platform === 'win32' ? 'relaunch fixture is a POSIX shell script, not a Windows executable' : electron ? false : 'no Electron binary installed' }, async t => {
+test('real Electron in node mode runs the restore helper over a real archive with original-fs', { skip: process.platform === 'win32' ? 'relaunch fixture is a POSIX shell script, not a Windows executable' : electron ? false : NO_ELECTRON }, async t => {
  const f = install(t);
  assert.equal(await swap.replaceLauncher(f.options()), 'swapped');
  const result = spawnSync(electron, ['-e', swap.RESTORE_HELPER, '999999999', f.resources, sha(f.original), f.exe], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8' });
+ assert.equal(result.error?.code, undefined, `Electron could not run the restore helper: ${result.error?.message}`);
  assert.equal(result.status, 0, result.stderr);
  assert.deepEqual(f.asar(), f.original);
  await until(() => fs.existsSync(path.join(f.dir, 'Programs', 'AI Shuffle', 'relaunched')));
