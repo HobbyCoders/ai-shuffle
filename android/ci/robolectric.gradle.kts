@@ -74,4 +74,11 @@ tasks.withType<Test>().configureEach {
     doFirst {
         logger.lifecycle("Robolectric offline=true; dependency.dir=${robolectricDependencyDir.get().asFile}")
     }
+    // Gradle prints a count only on failure; keep the totals in passing CI logs too.
+    val taskName = name
+    afterSuite(KotlinClosure2<TestDescriptor, TestResult, Unit>({ suite, result ->
+        if (suite.parent == null) logger.lifecycle(
+            "$taskName: ${result.testCount} tests, ${result.successfulTestCount} passed, " +
+                "${result.failedTestCount} failed, ${result.skippedTestCount} skipped")
+    }))
 }
