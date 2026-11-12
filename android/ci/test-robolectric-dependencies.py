@@ -73,6 +73,18 @@ class RobolectricDependenciesTests(unittest.TestCase):
             self.assertNotIn("||", step["run"])
             self.assertNotIn("retry", step.get("uses", ""))
 
+    def test_pr_checks_also_run_unit_tests_with_push_on(self):
+        # Release builds carry Firebase config (push on); PR builds do not.
+        workflow = yaml.load((ROOT / ".github/workflows/android.yml").read_text(), Loader=yaml.BaseLoader)
+        steps = workflow["jobs"]["build"]["steps"]
+        push_on = next(s for s in steps if s.get("name") == "Unit tests with push enabled")
+        self.assertNotIn("if", push_on)
+        self.assertNotIn("continue-on-error", push_on)
+        self.assertIn("-PpushEnabledDebug=true testDebugUnitTest", push_on["run"])
+        app = (ROOT / "android/app/build.gradle.kts").read_text()
+        self.assertIn('findProperty("pushEnabledDebug")', app)
+        self.assertIn('if (pushEnabledDebug) {\n            getByName("debug").buildConfigField("boolean", "PUSH_ENABLED", "true")', app)
+
 
 if __name__ == "__main__":
     unittest.main()
