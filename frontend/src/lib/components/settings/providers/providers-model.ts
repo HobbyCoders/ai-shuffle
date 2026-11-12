@@ -600,7 +600,7 @@ export function rowCredential(row: ModelProvider, usagePlan?: string | null): Cr
 			row
 		};
 	}
-	if (cls === 'antigravity') return antigravityCredential(row, flavor);
+	if (cls === 'antigravity') return antigravityCredential(row, antigravityFlavor(row.auth_mode));
 	const host = hostOf(row.base_url);
 	const native = isNativeProvider(row.provider_type) ? nativeOption(row.provider_type, row.auth_mode === 'plan_key') ?? row.native_provider : null;
 	return {

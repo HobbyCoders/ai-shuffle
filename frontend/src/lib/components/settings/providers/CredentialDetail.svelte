@@ -6,7 +6,8 @@
 	import DeviceDetail from './DeviceDetail.svelte';
 	import KeyDetail from './KeyDetail.svelte';
 	import FalDetail from './FalDetail.svelte';
-	import type { CredentialView, ProviderView } from './providers-model';
+	import AntigravityDetail from './AntigravityDetail.svelte';
+	import { isAntigravityFlavor, type CredentialView, type ProviderView } from './providers-model';
 
 	interface Props {
 		credential: CredentialView;
@@ -24,6 +25,8 @@
 	<ClaudeCloudDetail {credential} {provider} />
 {:else if credential.flavor === 'device'}
 	<DeviceDetail {credential} {provider} />
+{:else if isAntigravityFlavor(credential.flavor)}
+	<AntigravityDetail {credential} {provider} />
 {:else if credential.flavor === 'fal'}
 	<FalDetail {credential} {provider} />
 {:else}

@@ -18,8 +18,9 @@
 	import ClaudeCliSetup from './setup/ClaudeCliSetup.svelte';
 	import ClaudeSubscriptionAddSetup from './setup/ClaudeSubscriptionAddSetup.svelte';
 	import ClaudeCloudSetup from './setup/ClaudeCloudSetup.svelte';
+	import AntigravitySetup from './setup/AntigravitySetup.svelte';
 	import { providerDrafts, type Draft } from './drafts.svelte';
-	import { claudeAddsAnotherSubscription, rowItem, type ProviderView } from './providers-model';
+	import { claudeAddsAnotherSubscription, isAntigravityFlavor, rowItem, type ProviderView } from './providers-model';
 
 	interface Props {
 		draft: Draft;
@@ -46,7 +47,9 @@
 						? 'subscription'
 						: draft.flavor === 'cloud'
 							? 'cloud provider or gateway'
-							: 'API key'
+							: draft.flavor === 'agy-personal' || draft.flavor === 'agy-business'
+								? 'Google sign-in'
+								: 'API key'
 				}`
 	);
 
@@ -107,6 +110,8 @@
 		<ClaudeCloudSetup onFinish={finish} onCancel={cancel} />
 	{:else if draft.flavor === 'gateway'}
 		<GatewaySetup {draft} onFinish={finish} onCancel={cancel} />
+	{:else if isAntigravityFlavor(draft.flavor)}
+		<AntigravitySetup {draft} onFinish={finish} onCancel={cancel} />
 	{:else if draft.flavor === 'fal'}
 		<FalKeySetup onFinish={finish} onCancel={cancel} />
 	{:else}

@@ -27,15 +27,16 @@
 	import DeviceCodeSetup from '$lib/components/settings/providers/setup/DeviceCodeSetup.svelte';
 	import KeySetup from '$lib/components/settings/providers/setup/KeySetup.svelte';
 	import GatewaySetup from '$lib/components/settings/providers/setup/GatewaySetup.svelte';
+	import AntigravitySetup from '$lib/components/settings/providers/setup/AntigravitySetup.svelte';
 	import ModelCuration from '$lib/components/settings/providers/ModelCuration.svelte';
 	import { providerDrafts } from '$lib/components/settings/providers/drafts.svelte';
 	import {
-		kindsOf, type CredentialFlavor, type CredentialView, type ProviderId
+		flavorOfRow, isAntigravityFlavor, kindsOf, type CredentialFlavor, type CredentialView, type ProviderId
 	} from '$lib/components/settings/providers/providers-model';
 
 	interface Props {
 		/** `openai`, `grok`, `openrouter`, or `gateway` for a new custom gateway. */
-		provider: 'openai' | 'grok' | 'openrouter' | 'gateway' | NativeProviderId;
+		provider: 'openai' | 'grok' | 'openrouter' | 'antigravity' | 'gateway' | NativeProviderId;
 		/** Credentials this provider already has (names the new draft "API key 2"). */
 		existing?: Pick<CredentialView, 'name'>[];
 		/** A key or gateway row saved earlier that has no model yet: resumed at its models step. */
@@ -56,7 +57,7 @@
 	let rejection = $state('');
 
 	const DEVICE_LABEL: Record<string, string> = { openai: 'Sign in with ChatGPT', grok: 'Sign in with SuperGrok' };
-	const BRAND: Record<string, string> = { openai: 'OpenAI', grok: 'xAI', openrouter: 'OpenRouter' };
+	const BRAND: Record<string, string> = { openai: 'OpenAI', grok: 'xAI', openrouter: 'OpenRouter', antigravity: 'Google Antigravity' };
 	const brandName = $derived.by(() => {
 		if (provider !== 'gateway') return nativeOption(provider, false)?.display_name ?? BRAND[provider];
 		const rowId = draft?.rowId;
@@ -77,7 +78,7 @@
 		drop();
 		done = false;
 		rejection = '';
-		const d = provider === 'gateway' ? providerDrafts.addGateway() : providerDrafts.add(provider, row.auth_mode === 'plan_key' ? 'plan-key' : 'key', existing);
+		const d = provider === 'gateway' ? providerDrafts.addGateway() : providerDrafts.add(provider, provider === 'antigravity' ? flavorOfRow(row) : row.auth_mode === 'plan_key' ? 'plan-key' : 'key', existing);
 		providerDrafts.update(d.item, { rowId: row.id, ownsRow: false, step: 'models', name: row.name });
 		if (provider === 'gateway') providerDrafts.renameGateway(d.providerId, row.name);
 		draftItem = d.item;
@@ -179,7 +180,7 @@
 		<div class="kinds" role="group" aria-label="How to connect">
 			{#each kinds as k (k.flavor)}
 				<button type="button" class="kind" onclick={() => start(k.flavor)}>
-					{#if k.flavor === 'device'}<LogIn size={18} strokeWidth={1.75} />{:else if k.flavor === 'gateway'}<Plug size={18} strokeWidth={1.75} />{:else}<KeyRound size={18} strokeWidth={1.75} />{/if}
+					{#if k.flavor === 'device' || k.flavor === 'agy-personal' || k.flavor === 'agy-business'}<LogIn size={18} strokeWidth={1.75} />{:else if k.flavor === 'gateway'}<Plug size={18} strokeWidth={1.75} />{:else}<KeyRound size={18} strokeWidth={1.75} />{/if}
 					<span>
 						<span class="kind-title"
 							>{k.flavor === 'device' ? DEVICE_LABEL[provider] ?? k.label : k.label}</span
@@ -201,6 +202,8 @@
 				onRemove={draft.flavor === 'gateway' ? () => void remove() : undefined}
 			/>
 		{/key}
+	{:else if isAntigravityFlavor(draft.flavor)}
+		<AntigravitySetup {draft} onFinish={() => void finish()} onCancel={cancel} />
 	{:else if draft.flavor === 'device'}
 		<DeviceCodeSetup
 			kind={provider === 'openai' ? 'codex' : 'xai'}

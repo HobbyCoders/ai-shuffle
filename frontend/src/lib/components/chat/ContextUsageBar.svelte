@@ -673,9 +673,24 @@
 		return null;
 	}
 
+	/**
+	 * Google Antigravity's quota comes from its agent's own `/usage`, read only
+	 * when this popover refreshes, so say when there is no reading or an old one.
+	 */
+	function antigravityGuidance(pb: ProviderUsageBucket, nowMs: number): string | null {
+		if (pb.sourceInfo?.id !== 'antigravity_usage') return null;
+		const state = providerStatusAt(pb, nowMs);
+		if (pb.lastErrorKind === 'unavailable' || pb.lastErrorKind === 'timeout' || state === 'unavailable') {
+			return pb.fetchedAt != null ? 'Usage unavailable, last reading shown' : 'Usage unavailable';
+		}
+		if (pb.fetchedAt == null) return 'Refresh to read usage';
+		if (state === 'stale') return 'Old reading, refresh to read again';
+		return null;
+	}
+
 	function providerMeta(pb: ProviderUsageBucket, nowMs: number): MetaLine {
 		const checked = checkedText(pb.fetchedAt, nowMs) ?? 'Not checked yet';
-		const guidance = providerGuidance(pb);
+		const guidance = antigravityGuidance(pb, nowMs) ?? providerGuidance(pb);
 		if (guidance) return { text: guidance, guidance: true, title: `${guidance} · ${checked}` };
 		return { text: checked, guidance: false, title: checked };
 	}

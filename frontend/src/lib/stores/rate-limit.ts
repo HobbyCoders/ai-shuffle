@@ -362,6 +362,9 @@ export function windowLabel(type: string): string {
 	// Provider rolling windows come through as `window_<minutes>m`.
 	const m = /^window_(\d+)m$/.exec(type);
 	if (m) return `${m[1]}m window`;
+	// Google Antigravity's /usage names a quota per model: `antigravity_<name>`.
+	const ag = /^antigravity_(.+)$/.exec(type);
+	if (ag) return ag[1].replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
 	return type.replace(/_/g, ' ');
 }
 

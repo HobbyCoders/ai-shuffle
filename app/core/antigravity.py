@@ -79,7 +79,7 @@ GUARD_REFUSAL = (
     "This Antigravity provider uses a personal Google sign-in, which runs only in "
     "chats you type into yourself. It was refused for {reason}. Pick another "
     "provider for this run, or allow unattended use on the provider in "
-    "Settings → Providers (Antigravity)."
+    "Settings → Providers → Google Antigravity."
 )
 
 
@@ -322,7 +322,7 @@ def build_spec(row: Mapping[str, Any], *, add_dirs: Optional[List[str]] = None,
     if not binary:
         raise FileNotFoundError(
             "Antigravity is not installed on this worker. Install it from "
-            "Settings → Providers (Antigravity).")
+            "Settings → Providers → Google Antigravity.")
     from app import __version__ as app_version  # type: ignore[attr-defined]
     return agy_spec.AntigravitySpec.build(
         binary, auth_mode=str(row.get("auth_mode") or agy_spec.OAUTH_PERSONAL),
