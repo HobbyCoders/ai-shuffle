@@ -196,6 +196,8 @@ class Agent:
         await self.update(sid, {"sessionUpdate": kind, "content": {"type": "text", "text": text}})
 
     async def run(self, sid: str, text: str, images: list):
+        # The command is the first line; a host may append context after it.
+        text = text.split("\n", 1)[0].strip()
         word = text.split(" ", 1)[0]
         if word == "stream":
             await self.say(sid, "pondering", "agent_thought_chunk")

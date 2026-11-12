@@ -38,6 +38,14 @@ from fluid.events.ops import Interrupt, RespondPermission, RespondQuestion, Resu
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
+class SerializingStore(MemoryStore):
+    """A memory store that, like the app's PostgreSQL store, serializes every node."""
+
+    async def append(self, session_id, node):
+        node.message.to_dict()
+        await super().append(session_id, node)
+
+
 FAKE = str(Path(__file__).resolve().parents[1] / "fixtures" / "fake_acp_agent.py")
 TERMINAL = (TurnComplete, ErrorEvent, Interrupted)
 
@@ -105,7 +113,7 @@ class Driver:
 
 async def _driver(tmp_path: Path, **kw: Any) -> Driver:
     spec_kw = {k: kw.pop(k) for k in ("signed_in", "auth_mode", "api_key") if k in kw}
-    loop = AcpLoop(store=kw.pop("store", None) or MemoryStore(), spec=_spec(tmp_path, **spec_kw),
+    loop = AcpLoop(store=kw.pop("store", None) or SerializingStore(), spec=_spec(tmp_path, **spec_kw),
                    cwd=str(tmp_path), **kw)
     driver = Driver(loop)
     await driver.start()

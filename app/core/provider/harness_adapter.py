@@ -1995,14 +1995,17 @@ class HarnessAdapter(ProviderAdapter):
         from app.core.environment import ProviderConfigError
         from fluid.engine.acp import AcpLoop
 
+        from app.db import database as db
+
         provider_id = (options.extra or {}).get("provider_id")
-        row = await run_sync(_lookup_provider_row, provider_id) if provider_id else None
+        # With the token: a key row hands its key to the agent's environment.
+        row = await run_sync(db.resolve_model_provider, provider_id, include_token=True) if provider_id else None
         if not row:
             raise ProviderConfigError("This chat's Antigravity provider no longer exists.")
         refusal = await run_sync(antigravity.guard_refusal, row, options)
         if refusal:
             raise ProviderConfigError(refusal)
-        self._antigravity_row = row
+        self._antigravity_row = {k: v for k, v in row.items() if k != "auth_token"}
         try:
             spec = await run_sync(antigravity.build_spec, row, add_dirs=list(options.add_dirs or ()))
         except FileNotFoundError as exc:

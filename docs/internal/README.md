@@ -19,6 +19,7 @@ image excludes `docs/`, and the update source archive carries only
 | [acceptance-clean-box.md](acceptance-clean-box.md) | The phase 1 exit test: a stranger installs with Docker Compose on clean Ubuntu from the docs alone. |
 | [computer-use.md](computer-use.md) | Native computer use internals. |
 | [native-image-generation.md](native-image-generation.md) | Native Responses image generation. |
+| [antigravity-acp-spike.md](antigravity-acp-spike.md) | Google's Antigravity agent as a delegated leg over ACP: what the binary advertises, headless sign-in, design, and what stays unverified. |
 | [managed-worker-connections.md](managed-worker-connections.md) | Managed worker connection credentials. |
 | [managed-worker-credential-repair.md](managed-worker-credential-repair.md) | Reconnecting one revoked account worker on Android. |
 | [mobile-web-session-reservations.md](mobile-web-session-reservations.md) | Mobile web session reservations. |

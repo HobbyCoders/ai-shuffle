@@ -242,7 +242,7 @@ class TurnMapper:
                 text = "(failed)" if status == "failed" else "(done)"
             out.extend(self._finish_assistant())
             self._segments.append(("tool_results", [ToolResultBlock(
-                tool_use_id=tool_id, content=text, is_error=status == "failed",
+                tool_use_id=tool_id, content=[Text(text=text)], is_error=status == "failed",
             )]))
             out.append(self._ev(ToolResult, tool_use_id=tool_id, name=state.name,
                                 output=text, is_error=status == "failed"))
@@ -270,7 +270,7 @@ class TurnMapper:
         out.append(self._ev(ToolUse, tool_use_id=tool_id, name=PLAN_TOOL_NAME, input=data))
         out.extend(self._finish_assistant())
         result = "Plan updated."
-        self._segments.append(("tool_results", [ToolResultBlock(tool_use_id=tool_id, content=result)]))
+        self._segments.append(("tool_results", [ToolResultBlock(tool_use_id=tool_id, content=[Text(text=result)])]))
         out.append(self._ev(ToolResult, tool_use_id=tool_id, name=PLAN_TOOL_NAME, output=result))
         return out
 
