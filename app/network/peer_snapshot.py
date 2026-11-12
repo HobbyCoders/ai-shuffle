@@ -590,6 +590,7 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
                 page_touched = []
                 applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched)
                 touched.extend(t for t in page_touched if t[0] == "provider_billing" or
+                               (t[0] == "model_providers" and t[2] == "delete") or
                                (t[0] == "system_settings" and t[1].startswith("provider_observation:")))
                 index += 1
             if index >= len(pages):

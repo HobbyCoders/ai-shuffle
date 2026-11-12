@@ -1345,17 +1345,28 @@ class ProviderUsageMonitor:
         provider_id = row.get("id")
         if not provider_id or not getattr(self, "_on_demand", False):
             return
+        # A reading taken across a key change, disable or delete (the row's
+        # revision moves; the write locks the row first, then the snapshot)
+        # or a sign-out on this worker (its epoch moves) is not kept.
+        epoch = antigravity.signin_epoch(provider_id)
+        revision = (provider_id, row.get("revision"))
         try:
             payload = await antigravity.read_usage(row)
             windows = antigravity.normalize_usage(payload)
             if windows is None:
-                await run_sync(db.record_provider_usage_failure, provider_id, "antigravity",
-                               "unavailable")
+                if antigravity.signin_epoch(provider_id) == epoch:
+                    await run_sync(db.record_provider_usage_failure, provider_id, "antigravity",
+                                   "unavailable")
                 return
-            await run_sync(
+            written = await run_sync(
                 db.upsert_provider_usage_snapshot, provider_id, "antigravity", None, windows,
                 None, {"source": "antigravity_usage"}, int(time.time() * 1000),
+                expected_provider_revision=revision,
             )
+            if written and antigravity.signin_epoch(provider_id) != epoch:
+                # A sign-out landed while this was written: its own clear may
+                # have run first, so clear again.
+                await run_sync(db.delete_provider_usage_snapshot, provider_id)
         except Exception:  # noqa: BLE001 — a usage read never breaks the pass
             logger.warning("Antigravity usage read failed for provider %s", provider_id)
 

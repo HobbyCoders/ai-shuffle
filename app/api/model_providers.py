@@ -1030,6 +1030,10 @@ async def update_provider(
             or effective_type in native_providers.PROVIDERS):
         if effective_type != existing.get("provider_type") or (effective_auth or "api_key") != (existing.get("auth_mode") or "api_key"):
             raise HTTPException(status_code=400, detail="Create a separate row to change provider or credential kind.")
+    from app.core import antigravity
+    if existing.get("provider_type") == antigravity.PROVIDER_TYPE and effective_type != antigravity.PROVIDER_TYPE:
+        # Its sign-in lives with the agent on each worker, not in the row.
+        raise HTTPException(status_code=400, detail="Create a separate row to change provider or credential kind.")
     _validate_base_url(body.base_url, required=False)
     _validate_api_dialect(body.api_dialect)
     _validate_models(body.models)
@@ -1101,6 +1105,11 @@ async def update_provider(
 
     if updates:
         async with operation_lock(provider_id):
+            if "extra_env_json" in updates and existing.get("provider_type") == antigravity.PROVIDER_TYPE:
+                # The guard has its own endpoint: keep its current stored value,
+                # read under the lock, whatever a stale edit sends.
+                current = await run_sync(db.get_model_provider, provider_id) or {}
+                updates["extra_env_json"] = antigravity.with_guard_of(current, updates["extra_env_json"])
             row = await run_sync(db.update_model_provider, provider_id,
                                  expected_revision=body.expected_revision, **updates)
             if row is None:
@@ -1130,6 +1139,10 @@ async def delete_provider(provider_id: str, token: str = Depends(require_admin))
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Model provider not found")
         await run_sync(model_catalogs.delete, provider_id)
+        # An Antigravity row's sign-in on this worker goes with it (its pending
+        # sign-ins and private home); a no-op for every other row.
+        from app.core import antigravity
+        await antigravity.forget_row(provider_id)
     return {"success": True}
 
 

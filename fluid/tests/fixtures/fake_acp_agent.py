@@ -24,7 +24,8 @@ FAKE_ACP_STATE (directory remembering session ids across processes).
 Other entry points, like the real binary's: ``acp --login`` prints a sign-in
 link and reads the code on stdin (code ``good`` signs in by writing a marker
 in the agent's own HOME); ``-p /usage --output-format json`` prints
-FAKE_ACP_USAGE verbatim, or a quota reply in the community-reported shape.
+FAKE_ACP_USAGE verbatim, or a quota reply in the community-reported shape
+(after FAKE_ACP_USAGE_SLEEP seconds, when set).
 """
 
 from __future__ import annotations
@@ -343,6 +344,9 @@ def login() -> int:
 
 
 def usage() -> int:
+    if os.environ.get("FAKE_ACP_USAGE_SLEEP"):  # a read that does not answer
+        import time
+        time.sleep(float(os.environ["FAKE_ACP_USAGE_SLEEP"]))
     raw = os.environ.get("FAKE_ACP_USAGE")
     if raw is not None:
         print(raw, flush=True)

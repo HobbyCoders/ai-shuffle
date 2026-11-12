@@ -4,6 +4,7 @@ The agent is a scripted stand-in (fluid/tests/fixtures/fake_acp_agent.py)
 launched through the binary override, exactly as the real ``agy`` would be.
 """
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -406,7 +407,7 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
         return await real_read(r)
     monkeypatch.setattr(ag, "read_usage", counted)
     writes = []
-    monkeypatch.setattr(db, "upsert_provider_usage_snapshot", lambda *a: writes.append(("ok", a)))
+    monkeypatch.setattr(db, "upsert_provider_usage_snapshot", lambda *a, **kw: writes.append(("ok", a)))
     monkeypatch.setattr(db, "record_provider_usage_failure", lambda *a: writes.append(("fail", a)))
     monitor = ProviderUsageMonitor()
     await monitor._poll_antigravity_provider(row)
@@ -419,3 +420,221 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
     row["extra_env_json"]["FAKE_ACP_USAGE"] = "not json"
     await monitor._poll_antigravity_provider(row)
     assert writes[1] == ("fail", ("row-1", "antigravity", "unavailable"))
+
+
+# --- sign-in lifecycle: one per row, ended by sign-out, delete or idleness --------
+
+async def _personal_row(name="Antigravity"):
+    import uuid as _uuid
+    row = db.create_model_provider(provider_id=str(_uuid.uuid4()), name=name, provider_type=ag.PROVIDER_TYPE,
+                                   base_url="", auth_mode="oauth-personal", auth_token=None,
+                                   models=list(ag.DEFAULT_MODELS), default_model=None, enabled=True)
+    return db.get_model_provider(row["id"], include_token=True)
+
+
+def _row_logins(row_id):
+    return [x for x in ag._logins.values() if x.row_id == row_id]
+
+
+async def _ended(login):
+    await asyncio.wait_for(login.proc.wait(), timeout=5)
+    return login.proc.returncode is not None
+
+
+async def test_two_starts_leave_one_sign_in(mock_db, fake_agy):
+    row = await _personal_row()
+    first, second = await asyncio.gather(ag.start_login(row), ag.start_login(row))
+    assert {first["state"], second["state"]} == {"awaiting_code"}
+    live = _row_logins(row["id"])
+    assert len(live) == 1 and live[0].id == second["login_id"]
+    stale = ag.get_login(first["login_id"])
+    assert stale is None
+    await ag.cancel_login(second["login_id"])
+    assert await _ended(live[0]) and not _row_logins(row["id"])
+
+
+async def test_an_abandoned_sign_in_ends_on_its_own(mock_db, fake_agy, monkeypatch):
+    monkeypatch.setattr(ag, "_LOGIN_IDLE_SECONDS", 1.5)
+    row = await _personal_row()
+    started = await ag.start_login(row)
+    login = ag.get_login(started["login_id"])
+    assert login is not None and started["state"] == "awaiting_code"
+    await asyncio.sleep(2)  # no later start needed to clean it up
+    assert ag.get_login(started["login_id"]) is None and await _ended(login)
+
+
+async def test_sign_out_ends_a_pending_sign_in_and_its_reading(mock_db, fake_agy):
+    row = await _personal_row()
+    started = await ag.start_login(row)
+    login = ag.get_login(started["login_id"])
+    home = Path(ag.home_for(row["id"]))
+    db.upsert_provider_usage_snapshot(row["id"], "antigravity", None, [{"type": "x", "utilization": 1.0}],
+                                      None, {}, 1)
+    await ag.sign_out(row)
+    assert await _ended(login) and not _row_logins(row["id"]) and not home.exists()
+    assert db.get_provider_usage_raw(row["id"]) is None
+    late = await ag.complete_login(login, "good", row)
+    assert late["state"] == "failed" and not home.joinpath(".fake_acp_signed_in").exists()
+
+
+async def test_a_local_delete_removes_the_rows_sign_in(mock_db, fake_agy):
+    from app.api import model_providers as providers_api
+
+    row = await _personal_row()
+    keep = await _personal_row("Other")
+    started = await ag.start_login(row)
+    login = ag.get_login(started["login_id"])
+    home, other = Path(ag.home_for(row["id"])), Path(ag.home_for(keep["id"]))
+    (home / "agent-state").write_text("x")
+    assert (await providers_api.delete_provider(row["id"], token=None)) == {"success": True}
+    assert await _ended(login) and not _row_logins(row["id"]) and not home.exists()
+    assert other.is_dir()
+    await ag.forget_row(row["id"])  # already gone: nothing to do, no error
+
+
+async def test_a_delete_from_another_worker_removes_the_rows_sign_in(mock_db, fake_agy, monkeypatch):
+    from app.core.global_events import global_events
+    from app.network import startup
+
+    row = await _personal_row()
+    keep = await _personal_row("Other")
+    started = await ag.start_login(row)
+    login = ag.get_login(started["login_id"])
+    home, other = Path(ag.home_for(row["id"])), Path(ag.home_for(keep["id"]))
+    db.delete_model_provider(row["id"])  # what materialize does for the tombstone
+    monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop(), raising=False)
+    calls = []
+    real = ag.prune_orphan_homes
+
+    async def counted():
+        calls.append(1)
+        return await real()
+    monkeypatch.setattr(ag, "prune_orphan_homes", counted)
+    startup._on_applied([("model_providers", row["id"], "delete")])
+    for _ in range(100):
+        if calls and not home.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert calls and await _ended(login) and not _row_logins(row["id"]) and not home.exists()
+    assert other.is_dir()
+
+
+async def test_startup_prune_finishes_an_earlier_removal(mock_db, fake_agy):
+    keep = await _personal_row()
+    stale = Path(ag.home_for("row-deleted-while-down"))
+    (stale / "left").write_text("x")
+    assert await ag.prune_orphan_homes() == 1
+    assert not stale.exists() and Path(ag.home_for(keep["id"])).is_dir()
+
+
+# --- row writers: lock and type rule -------------------------------------------------
+
+async def test_guard_write_does_not_lose_a_concurrent_edit(mock_db, fake_agy):
+    from app.core.provider_locks import operation_lock
+
+    row = await _personal_row()
+    lock = operation_lock(row["id"])
+    await lock.acquire()
+    task = asyncio.create_task(api.set_guard(row["id"], api.GuardUpdate(allow_unattended=True), token=None))
+    await asyncio.sleep(0.05)
+    db.update_model_provider(row["id"], extra_env_json={"OTHER_SETTING": "1"})  # a writer holding the lock
+    lock.release()
+    await task
+    env = db.get_model_provider(row["id"])["extra_env_json"]
+    assert env == {"OTHER_SETTING": "1", ag.GUARD_OVERRIDE_KEY: "1"}
+
+
+async def test_a_generic_edit_keeps_the_guard_and_the_type(mock_db, fake_agy):
+    from fastapi import HTTPException
+    from app.api import model_providers as providers_api
+
+    row = await _personal_row()
+    await api.set_guard(row["id"], api.GuardUpdate(allow_unattended=True), token=None)
+    await providers_api.update_provider(row["id"], providers_api.ModelProviderUpdate(
+        extra_env={"OTHER_SETTING": "1"}), token=None)
+    env = db.get_model_provider(row["id"])["extra_env_json"]
+    assert env == {"OTHER_SETTING": "1", ag.GUARD_OVERRIDE_KEY: "1"}
+    await providers_api.update_provider(row["id"], providers_api.ModelProviderUpdate(
+        extra_env={ag.GUARD_OVERRIDE_KEY: "0"}), token=None)
+    assert ag.guard_lifted(db.get_model_provider(row["id"]))  # only the guard endpoint changes it
+    for other in ("openrouter", "custom", "google"):
+        with pytest.raises(HTTPException) as refused:
+            await providers_api.update_provider(row["id"], providers_api.ModelProviderUpdate(
+                provider_type=other), token=None)
+        assert refused.value.status_code == 400
+    assert db.get_model_provider(row["id"])["provider_type"] == ag.PROVIDER_TYPE
+    other = db.create_model_provider(provider_id="row-openrouter", name="OR", provider_type="openrouter",
+                                     base_url="https://openrouter.ai/api", auth_token=None, models=[],
+                                     default_model=None, enabled=True)
+    with pytest.raises(HTTPException) as refused:  # and nothing becomes an Antigravity row
+        await providers_api.update_provider(other["id"], providers_api.ModelProviderUpdate(
+            provider_type="antigravity"), token=None)
+    assert refused.value.status_code == 400
+    assert db.get_model_provider(other["id"])["provider_type"] == "openrouter"
+
+
+# --- usage readings that must not land ------------------------------------------------
+
+async def _poll_with(monkeypatch, row, during):
+    from app.core.provider_usage import ProviderUsageMonitor
+
+    async def read(r):
+        await during()
+        return {"status": "OK", "quotas": [{"model": "gemini-3.1-pro", "remainingFraction": 0.5,
+                                            "resetTime": "2026-11-12T10:00:00Z"}]}
+    monkeypatch.setattr(ag, "read_usage", read)
+    monitor = ProviderUsageMonitor()
+    monitor._on_demand = True
+    await monitor._poll_antigravity_provider(row)
+    return db.get_provider_usage_raw(row["id"])
+
+
+async def test_a_reading_is_written_when_nothing_changed(mock_db, fake_agy, monkeypatch):
+    row = await _personal_row()
+
+    async def nothing():
+        return None
+    assert await _poll_with(monkeypatch, row, nothing) is not None
+
+
+@pytest.mark.parametrize("change", ["key", "disable", "sign_out", "delete"])
+async def test_a_reading_started_before_a_change_is_not_written(mock_db, fake_agy, monkeypatch, change):
+    from app.api.model_providers import _encrypt_token_or_400
+
+    monkeypatch.setattr(encryption, "_encryption_key", encryption.Fernet.generate_key())
+    row = await _personal_row()
+
+    async def during():
+        if change == "key":
+            db.update_model_provider(row["id"], auth_token=_encrypt_token_or_400("test-gemini-other-value"))
+        elif change == "disable":
+            db.update_model_provider(row["id"], enabled=False)
+        elif change == "sign_out":
+            await ag.sign_out(row)
+        else:
+            db.delete_model_provider(row["id"])
+    assert await _poll_with(monkeypatch, row, during) is None
+
+
+async def test_a_cancelled_usage_read_ends_its_process(mock_db, fake_agy, monkeypatch):
+    procs = []
+    real = asyncio.create_subprocess_exec
+
+    async def spawn(*args, **kw):
+        proc = await real(*args, **kw)
+        procs.append(proc)
+        return proc
+    monkeypatch.setattr(ag.asyncio, "create_subprocess_exec", spawn)
+    row = {"id": "row-1", "provider_type": "antigravity", "auth_mode": "oauth-personal",
+           "extra_env_json": {"FAKE_ACP_SIGNED_IN": "1", "FAKE_ACP_USAGE_SLEEP": "60"}}
+    task = asyncio.create_task(ag.read_usage(row))
+    for _ in range(100):
+        if procs:
+            break
+        await asyncio.sleep(0.02)
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(procs[0].wait(), timeout=5)
+    assert procs[0].returncode is not None

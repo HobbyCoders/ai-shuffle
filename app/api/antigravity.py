@@ -162,14 +162,16 @@ async def provider_status(provider_id: str, token: str = Depends(require_admin))
 @router.put("/providers/{provider_id}/guard")
 async def set_guard(provider_id: str, body: GuardUpdate, token: str = Depends(require_admin)):
     """Lift or restore the interactive-only guard of a personal sign-in row."""
-    row = await _row(provider_id)
-    if row.get("auth_mode") not in antigravity.GUARDED_AUTH_MODES:
-        raise HTTPException(status_code=400, detail="Only personal sign-in rows have this guard.")
-    env = dict(row.get("extra_env_json") or {}) if isinstance(row.get("extra_env_json"), dict) else {}
-    env.pop(antigravity.GUARD_OVERRIDE_KEY, None)
-    if body.allow_unattended:
-        env[antigravity.GUARD_OVERRIDE_KEY] = "1"
+    # Read, change and write under the row's lock, like every other row
+    # writer: a concurrent edit of the row's settings is never lost.
     async with operation_lock(provider_id):
+        row = await _row(provider_id)
+        if row.get("auth_mode") not in antigravity.GUARDED_AUTH_MODES:
+            raise HTTPException(status_code=400, detail="Only personal sign-in rows have this guard.")
+        env = dict(row.get("extra_env_json") or {}) if isinstance(row.get("extra_env_json"), dict) else {}
+        env.pop(antigravity.GUARD_OVERRIDE_KEY, None)
+        if body.allow_unattended:
+            env[antigravity.GUARD_OVERRIDE_KEY] = "1"
         updated = await run_sync(db.update_model_provider, provider_id, extra_env_json=env)
     if updated is None:
         raise HTTPException(status_code=404, detail="Antigravity provider not found")
@@ -202,7 +204,7 @@ async def login_complete(provider_id: str, login_id: str, body: LoginComplete,
 async def login_cancel(provider_id: str, login_id: str, token: str = Depends(require_admin)):
     login = antigravity.get_login(login_id)
     if login is not None and login.row_id == provider_id:
-        antigravity.cancel_login(login_id)
+        await antigravity.cancel_login(login_id)
     return {"cancelled": True}
 
 

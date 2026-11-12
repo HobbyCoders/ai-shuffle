@@ -379,6 +379,10 @@ async def lifespan(app: FastAPI):
         bg_tasks.append(asyncio.create_task(cleanup_fsmonitor_once(), name="fsmonitor-cleanup"))
         from app.core.account_device_cleanup import cleanup_once as cleanup_duplicate_phones_once
         bg_tasks.append(asyncio.create_task(cleanup_duplicate_phones_once(), name="duplicate-phone-cleanup"))
+        # Antigravity homes of rows deleted while this process was down or
+        # before it finished removing them (a file held open on Windows).
+        from app.core import antigravity
+        bg_tasks.append(asyncio.create_task(antigravity.prune_orphan_homes(), name="antigravity-home-prune"))
 
     if settings.api_docs_enabled:
         logger.info(f"API docs: http://localhost:{settings.port}/docs")
@@ -448,6 +452,12 @@ async def lifespan(app: FastAPI):
     stop_loop_watchdog()
     from app.core import browser_runtime
     await browser_runtime.shutdown()
+    # Pending Antigravity sign-ins are this process's children.
+    try:
+        from app.core import antigravity
+        antigravity.shutdown_logins()
+    except Exception:
+        logger.exception("antigravity sign-in shutdown failed")
     # In-app terminals live in this process: kill every shell's process group
     # so none outlives the app (the list is empty after a restart).
     try:

@@ -505,6 +505,13 @@ def _on_applied(touched) -> None:
         if loop and not loop.is_closed():
             from app.core.provider_usage import provider_usage_monitor
             loop.call_soon_threadsafe(provider_usage_monitor.request_network_refresh)
+    if any(c == "model_providers" and op == "delete" for c, r, op in touched):
+        # A provider deleted on another worker: an Antigravity row's sign-in
+        # here (pending sign-ins, private home) goes with it.
+        loop = getattr(global_events, "_loop", None)
+        if loop and not loop.is_closed():
+            from app.core import antigravity
+            asyncio.run_coroutine_threadsafe(antigravity.prune_orphan_homes(), loop)
     if any(collection == "membership" for collection, _record, _op in touched):
         request_connector_reconcile()
     connector_ids = [r for c, r, _op in touched if c == "connectors"]

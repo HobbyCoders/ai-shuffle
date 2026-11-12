@@ -46,6 +46,7 @@ Connect at least one AI provider. You can add more later in **Settings → Provi
 | **OpenAI** | ChatGPT subscription sign-in, or an API key |
 | **xAI Grok** | SuperGrok subscription sign-in, or an API key |
 | **Claude** | Claude subscription (through the Claude Code CLI), or an Anthropic API key |
+| **Google Antigravity** | Google's Antigravity agent on the worker, with a Gemini API key or a Google sign-in. A personal sign-in carries an account risk under Google's terms and runs only in chats you type into |
 | **OpenRouter** | An OpenRouter API key |
 | **Your own gateway** | Its address, its API type and an optional token |
 

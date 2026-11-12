@@ -299,6 +299,15 @@ def guard_lifted(row: Mapping[str, Any]) -> bool:
     return _row_extra_env(row).get(GUARD_OVERRIDE_KEY) == "1"
 
 
+def with_guard_of(row: Mapping[str, Any], env: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """``env`` with the guard setting as ``row`` stores it now."""
+    out = {k: v for k, v in dict(env or {}).items() if k != GUARD_OVERRIDE_KEY}
+    stored = row.get("extra_env_json")
+    if isinstance(stored, dict) and GUARD_OVERRIDE_KEY in stored:
+        out[GUARD_OVERRIDE_KEY] = stored[GUARD_OVERRIDE_KEY]
+    return out
+
+
 def guarded(row: Mapping[str, Any]) -> bool:
     """Whether the interactive-only guard applies to this row now."""
     return (row.get("auth_mode") in GUARDED_AUTH_MODES) and not guard_lifted(row)
@@ -375,6 +384,7 @@ class LoginSession:
     message: Optional[str] = None
     output: List[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    timer: Any = None
 
     def public(self) -> Dict[str, Any]:
         return {"login_id": self.id, "provider_id": self.row_id, "state": self.state,
@@ -382,17 +392,23 @@ class LoginSession:
 
 
 _logins: Dict[str, LoginSession] = {}
+_login_locks: Dict[str, asyncio.Lock] = {}
 
 
-def _prune_logins() -> None:
-    cutoff = time.time() - _LOGIN_IDLE_SECONDS
-    for key, login in list(_logins.items()):
-        if login.created_at < cutoff:
-            _kill(login)
-            _logins.pop(key, None)
+def _login_lock(row_id: str) -> asyncio.Lock:
+    """Serializes one row's sign-in flow: start, cancel, sign-out, delete.
+
+    Separate from the row's ``operation_lock`` because a start waits up to
+    30 s for the link; a row writer that also needs this lock takes
+    ``operation_lock`` first (delete), never the other way round.
+    """
+    return _login_locks.setdefault(str(row_id), asyncio.Lock())
 
 
 def _kill(login: LoginSession) -> None:
+    timer = getattr(login, "timer", None)
+    if timer is not None:
+        timer.cancel()
     proc = login.proc
     if proc is not None and proc.returncode is None:
         try:
@@ -401,13 +417,45 @@ def _kill(login: LoginSession) -> None:
             pass
 
 
-async def start_login(row: Mapping[str, Any]) -> Dict[str, Any]:
-    """Run ``agy acp --login`` in the row's home and return its sign-in link."""
-    _prune_logins()
+def _drop(login: LoginSession) -> None:
+    """Forget and kill one sign-in (sync: timers and shutdown call it)."""
+    if _logins.get(login.id) is login:
+        _logins.pop(login.id, None)
+    _kill(login)
+
+
+async def _stop_logins(row_id: str) -> None:
+    """End every sign-in of the row and wait for its process to exit, so
+    nothing it writes lands after the caller goes on (a sign-out's removal)."""
+    for login in [x for x in _logins.values() if x.row_id == str(row_id)]:
+        _drop(login)
+        proc = login.proc
+        if proc is not None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                pass
+
+
+def _expire(login_id: str) -> None:
+    login = _logins.get(login_id)
+    if login is not None:
+        _drop(login)
+
+
+def shutdown_logins() -> None:
+    """App shutdown: no sign-in process outlives the app."""
     for login in list(_logins.values()):
-        if login.row_id == row.get("id"):
-            _kill(login)
-            _logins.pop(login.id, None)
+        _drop(login)
+
+
+async def start_login(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Run ``agy acp --login`` in the row's home and return its sign-in link.
+
+    At most one sign-in per row: a new start ends the previous one first,
+    under the row's sign-in lock, so two starts cannot both leave a process.
+    An abandoned sign-in is ended after ``_LOGIN_IDLE_SECONDS``.
+    """
     if row.get("auth_mode") not in STORED_SIGN_IN:
         return {"state": "failed", "message": "This provider signs in with an API key."}
     if row.get("auth_mode") == agy_spec.OAUTH_BUSINESS:
@@ -416,28 +464,35 @@ async def start_login(row: Mapping[str, Any]) -> Dict[str, Any]:
         return {"state": "failed", "message": (
             "Antigravity offers business sign-in only through a browser on the worker. "
             "Use a Gemini API key here, or sign in from a desktop worker.")}
-    binary = find_binary()
-    if not binary:
-        return {"state": "not_installed", "message": "Antigravity is not installed on this worker."}
-    home = home_for(str(row["id"]))
-    login = LoginSession(id=uuid.uuid4().hex, row_id=str(row["id"]))
-    login.proc = await asyncio.create_subprocess_exec(
-        binary, "acp", "--login", cwd=home, env=agy_spec.agent_env(home),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT, start_new_session=os.name == "posix",
-    )
-    _logins[login.id] = login
-    try:
-        await asyncio.wait_for(_read_until_url(login), timeout=30)
-    except asyncio.TimeoutError:
-        pass
-    if not login.url:
-        _kill(login)
-        login.state = "failed"
-        login.message = "Antigravity did not print a sign-in link." + _tail(login)
-    else:
-        login.state = "awaiting_code"
-    return login.public()
+    row_id = str(row["id"])
+    async with _login_lock(row_id):
+        await _stop_logins(row_id)
+        binary = find_binary()
+        if not binary:
+            return {"state": "not_installed", "message": "Antigravity is not installed on this worker."}
+        home = home_for(row_id)
+        login = LoginSession(id=uuid.uuid4().hex, row_id=row_id)
+        login.proc = await asyncio.create_subprocess_exec(
+            binary, "acp", "--login", cwd=home, env=agy_spec.agent_env(home),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT, start_new_session=os.name == "posix",
+        )
+        _logins[login.id] = login
+        login.timer = asyncio.get_running_loop().call_later(_LOGIN_IDLE_SECONDS, _expire, login.id)
+        try:
+            await asyncio.wait_for(_read_until_url(login), timeout=30)
+        except asyncio.TimeoutError:
+            pass
+        except BaseException:
+            _drop(login)  # cancelled (shutdown, client gone): no process left behind
+            raise
+        if not login.url:
+            _drop(login)
+            login.state = "failed"
+            login.message = "Antigravity did not print a sign-in link." + _tail(login)
+        else:
+            login.state = "awaiting_code"
+        return login.public()
 
 
 async def _read_until_url(login: LoginSession) -> None:
@@ -472,10 +527,11 @@ async def complete_login(login: LoginSession, code: str, row: Mapping[str, Any])
     if not code or len(code) > 4096 or "\n" in code:
         return {**login.public(), "state": "failed", "message": "Paste the code or the full URL."}
     proc = login.proc
-    if proc is None or proc.returncode is not None or proc.stdin is None:
+    if (_logins.get(login.id) is not login or login.state != "awaiting_code"
+            or proc is None or proc.returncode is not None or proc.stdin is None):
         login.state, login.message = "failed", "The sign-in expired. Start it again."
         return login.public()
-    login.state = "completing"
+    login.state = "completing"  # no await since the check: one completion per sign-in
     proc.stdin.write(code.encode() + b"\n")
     await proc.stdin.drain()
 
@@ -501,33 +557,103 @@ async def complete_login(login: LoginSession, code: str, row: Mapping[str, Any])
     except (OSError, RuntimeError):
         pass
     _kill(login)
-    result = await probe(row)
-    if result.get("state") == "signed_in":
+    # A sign-out, delete or newer start may end this sign-in meanwhile.
+    result = await probe(row) if _logins.get(login.id) is login else {}
+    if _logins.get(login.id) is not login:
+        login.state, login.message = "failed", "The sign-in was cancelled."
+    elif result.get("state") == "signed_in":
         login.state, login.message = "signed_in", None
     else:
         login.state = "failed"
         login.message = "Antigravity did not accept the sign-in." + _tail(login)
-    _logins.pop(login.id, None)
+    _drop(login)
     return login.public()
 
 
-def cancel_login(login_id: str) -> bool:
-    login = _logins.pop(login_id, None)
+async def cancel_login(login_id: str) -> bool:
+    login = _logins.get(login_id)
     if login is None:
         return False
-    _kill(login)
+    async with _login_lock(login.row_id):
+        _drop(login)
     return True
 
 
-async def sign_out(row: Mapping[str, Any]) -> None:
-    """Forget a row's sign-in by deleting its whole private home.
+_signin_epochs: Dict[str, int] = {}
+
+
+def signin_epoch(row_id: str) -> int:
+    """Bumped each time this worker forgets the row's sign-in (sign-out,
+    delete): a usage reading taken across a bump is not written."""
+    return _signin_epochs.get(str(row_id), 0)
+
+
+def _home_path(row_id: str) -> Path:
+    return _root() / "homes" / re.sub(r"[^A-Za-z0-9_.-]", "_", str(row_id))
+
+
+async def forget_row(row_id: str) -> None:
+    """End the row's sign-in on this worker: pending sign-ins, then its home.
 
     The directory is the binary's; nothing in it is read. Removing it is the
     only way the app ends a stored sign-in without touching its contents.
+    Missing or partly removed is fine; a file another process holds open
+    (Windows) stays until ``prune_orphan_homes`` runs again.
     """
-    path = _root() / "homes" / re.sub(r"[^A-Za-z0-9_.-]", "_", str(row.get("id") or ""))
-    if row.get("id") and path.is_dir():
-        await asyncio.to_thread(shutil.rmtree, path, True)
+    if not row_id:
+        return
+    _signin_epochs[str(row_id)] = signin_epoch(row_id) + 1
+    async with _login_lock(str(row_id)):
+        await _stop_logins(str(row_id))
+        path = _home_path(str(row_id))
+        if path.is_dir():
+            await asyncio.to_thread(shutil.rmtree, path, True)
+
+
+async def sign_out(row: Mapping[str, Any]) -> None:
+    """Forget a row's sign-in on this worker and its last usage reading."""
+    row_id = str(row.get("id") or "")
+    if not row_id:
+        return
+    await forget_row(row_id)
+    from app.db.provider_usage_snapshots import delete_provider_usage_snapshot
+    await asyncio.to_thread(delete_provider_usage_snapshot, row_id)
+
+
+def _antigravity_row_ids() -> set:
+    from app.db.database import get_db
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM model_providers WHERE provider_type = %s", (PROVIDER_TYPE,))
+        return {str(r["id"]) for r in cursor.fetchall()}
+
+
+async def prune_orphan_homes() -> int:
+    """Remove the home and sign-ins of every row that no longer exists here.
+
+    Runs at startup and after a sync delete: covers a delete from another
+    worker, one applied by a snapshot, a removal a previous process did not
+    finish (killed, or a file held open on Windows). Lists the folders before
+    reading the rows, so a row created meanwhile is never pruned.
+    """
+    homes = _root() / "homes"
+    try:
+        names = [p.name for p in homes.iterdir() if p.is_dir()] if homes.is_dir() else []
+    except OSError:
+        names = []
+    pending = {x.row_id for x in _logins.values()}
+    if not names and not pending:
+        return 0
+    try:
+        live = await asyncio.to_thread(_antigravity_row_ids)
+    except Exception:  # noqa: BLE001 — try again on the next delete or start
+        logger.debug("[antigravity] could not list rows to prune homes", exc_info=True)
+        return 0
+    gone = (set(names) | pending) - {re.sub(r"[^A-Za-z0-9_.-]", "_", r) for r in live} - live
+    for row_id in gone:
+        await forget_row(row_id)
+    return len(gone)
 
 
 # ---------------------------------------------------------------------------
@@ -658,11 +784,15 @@ async def read_usage(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=_USAGE_SECONDS)
     except asyncio.TimeoutError:
         # Signed out, it prints a sign-in link and waits: never left waiting.
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
         return None
+    finally:
+        # Also when the read is cancelled (shutdown, the caller gone): the
+        # process ends with the read, never left until the timeout.
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
     text = out.decode("utf-8", "replace").strip()
     start = text.find("{")
     try:
