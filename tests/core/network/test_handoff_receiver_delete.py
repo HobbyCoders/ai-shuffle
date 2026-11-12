@@ -7,15 +7,12 @@ scan. The owner-only scan retracts only records this worker originated, so a
 delete on the receiver before that scan published no tombstone, and the
 previous owner kept the chat for good.
 
-When the source's commit record reaches the receiver only after that delete,
-it must not outrank the tombstone and bring the chat back on both workers:
-the receiver observes the commit's clock from the commit reply, or from the
-source's finalize-wakes when every reply was lost.
-
-Whatever the route, the owner's delete writes a durable fact in its own
-transaction: incoming sync never recreates that chat, and its tombstone is
-published, over whichever worker signed the chat's record, once it can be
-(outbox held, no local record yet, ownership taken by abandoning a transfer).
+The owner's delete writes a durable fact in its own transaction. Incoming
+sync never recreates that chat: a live version that arrives is refused but
+kept as the chat's sync record, and the tombstone is owed while that record
+is live (fact + no row + live record). Signing the tombstone, or a peer's
+winning tombstone, ends it; a newer live version (the source's commit record
+arriving after the delete) owes it again, over a higher clock.
 """
 import time
 
@@ -81,15 +78,34 @@ async def _delete_on_receiver(b):
 
 def _fact(worker, sid=SID):
     with worker.active(), get_db() as conn:
-        return store.session_deletion(conn.cursor(), sid)
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM network_session_deletions WHERE session_id=%s", (sid,))
+        return cur.fetchone()
+
+
+def _owed(worker, sid=SID):
+    with worker.active(), get_db() as conn:
+        return store.owed_session_tombstones(conn.cursor(), [sid]) == [sid]
+
+
+def _settle(workers):
+    """Sync and run the owner scan (the scanner, every few seconds) until quiet."""
+    for _ in range(3):
+        converge(workers)
+        for worker in workers:
+            with worker.active():
+                catalog.publish_owned()
+    converge(workers)
 
 
 def _assert_deleted_everywhere(a, b):
-    converge([a, b])
+    _settle([a, b])
     for worker in (a, b):
         with worker.active():
             assert database.get_session(SID) is None, worker.name
+            assert engine.publish_session_deletions() == 0, "published once, not on every scan"
         assert _record(worker)["deleted"], worker.name
+        assert not _owed(worker)
     assert _fact(a) is None  # the previous owner only applied the tombstone
 
 
@@ -122,12 +138,19 @@ async def test_commit_record_arriving_right_after_the_delete_commits_cannot_undo
     with b.active():
         await sessions_api._delete_session(database.get_session(SID), BackgroundTasks())
         assert database.get_session(SID) is None
-        catalog.publish_owned()
+    # The refused commit record became B's record, so the delete's own
+    # publication outranked it rather than the version B held before.
+    commit = _record(a)
+    assert not commit["deleted"] and commit["origin_device_id"] == a.device_id
+    tombstone = _record(b)
+    assert tombstone["deleted"] and tombstone["origin_device_id"] == b.device_id
+    assert tombstone["clock"] > commit["clock"]
     _assert_deleted_everywhere(a, b)
 
 
 @pytest.mark.asyncio
 async def test_receiver_delete_after_finalize_recovers_a_lost_commit_reply(pair, monkeypatch):  # noqa: F811
+    """B owns the chat through finalize-wakes; A's commit record, far ahead of B's clock, arrives later."""
     a, b, _, _ = pair
     _prepare(a, b)
     with a.active():
@@ -165,22 +188,38 @@ async def test_receiver_delete_of_a_chat_moved_from_an_unsynced_mirror(pair, mon
     _assert_deleted_everywhere(a, b)
 
 
-def test_a_chat_the_network_never_knew_gets_one_harmless_tombstone(pair):  # noqa: F811
-    """Review S9: no record here is no proof no peer holds it, so the owner scan publishes one tombstone."""
-    a, b, _, _ = pair
+def test_a_chat_the_network_never_knew_publishes_nothing(pair):  # noqa: F811
+    """No live version known here: nothing is owed; the fact still refuses one that arrives."""
+    _, b, _, _ = pair
     with b.active():
         database.create_session("local-only", "default", title="Local")
         assert _record(b, "local-only") is None
         assert database.delete_session("local-only")
-        assert not _fact(b, "local-only")["pending"]  # nothing to publish at once
-        catalog.publish_owned()
-    assert _record(b, "local-only")["deleted"] and not _fact(b, "local-only")["pending"]
-    with b.active():
-        assert engine.publish_session_deletions() == 0, "published once, not on every scan"
-    converge([a, b])
-    with a.active():
-        assert database.get_session("local-only") is None
-    assert _record(a, "local-only")["deleted"]
+        assert _fact(b, "local-only") is not None
+        assert engine.publish_session_deletions() == 0
+    assert _record(b, "local-only") is None
+
+
+def test_both_owners_deleting_settle_on_one_tombstone(pair):  # noqa: F811
+    """Review S12: a transfer abandoned while the source was offline leaves both owner; both delete."""
+    a, b, _, _ = pair
+    exchange(a, b)
+    with b.active(), get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET owner_device_id=%s WHERE id=%s", (b.device_id, SID))
+    for worker in (a, b):
+        with worker.active():
+            assert database.delete_session(SID)
+            assert _fact(worker) is not None
+    _settle([a, b])
+    # The winning tombstone is each worker's record: neither owes anything,
+    # so neither republishes over the other on the next scans.
+    version = lambda w: (_record(w)["clock"], _record(w)["origin_device_id"])  # noqa: E731
+    assert version(a) == version(b)
+    for worker in (a, b):
+        assert _record(worker)["deleted"] and not _owed(worker)
+        with worker.active():
+            assert engine.publish_session_deletions() == 0
+            assert database.get_session(SID) is None
 
 
 @pytest.mark.asyncio
@@ -193,11 +232,11 @@ async def test_receiver_delete_while_the_outbox_is_held_is_published_later(pair,
         try:
             await _delete_on_receiver(b)
             assert _record(b)["origin_device_id"] == a.device_id and not _record(b)["deleted"]
-            assert _fact(b)["pending"]
+            assert _owed(b)
         finally:
             engine.hold_outbox(False)
         catalog.publish_owned()
-    assert not _fact(b)["pending"]
+    assert not _owed(b)
     _assert_deleted_everywhere(a, b)
 
 
@@ -236,10 +275,10 @@ async def test_receiver_delete_of_an_unsynced_mirror_moved_then_unpinned(pair, m
         sessions_db.unpin_session(SID, "")  # placement (and its hand-off receipt) is gone
         assert database.get_session(SID)["placement"] in (None, {}, "null")
     await _delete_on_receiver(b)
-    # No record here: the owner scan publishes the tombstone anyway (review S9).
-    assert _record(b)["deleted"] and _record(b)["origin_device_id"] == b.device_id
-    assert not _fact(b)["pending"]
+    assert _record(b) is None and not _owed(b)  # nothing known here to outrank yet
+    # A's record of the chat reaches B, is refused and owes the tombstone.
     _assert_deleted_everywhere(a, b)
+    assert _record(b)["origin_device_id"] == b.device_id
 
 
 @pytest.mark.asyncio
@@ -259,18 +298,20 @@ async def test_a_worker_that_does_not_own_the_chat_never_writes_the_fact(pair, m
     assert _fact(b) is None
 
 
-def test_a_pending_deletion_outlives_retention_and_a_published_one_does_not(pair):  # noqa: F811
+def test_an_owed_deletion_outlives_retention_and_a_settled_one_does_not(pair):  # noqa: F811
     _, b, _, _ = pair
     with b.active(), get_db() as conn:
         cur = conn.cursor()
         network_id = store.get_state(conn)["network_id"]
-        for sid, pending in (("old-published", False), ("old-pending", True), ("recent", False)):
-            store.remember_session_deletion(cur, sid, pending=pending, network_id=network_id)
+        for sid in ("old-settled", "old-owed", "recent"):
+            store.remember_session_deletion(cur, sid, network_id=network_id)
+        store.put_record(cur, "sessions", "old-owed", clock=5, origin_device_id="dev_other", content_hash="",
+                         deleted=False)
         cur.execute("UPDATE network_session_deletions SET deleted_at = %s WHERE session_id <> 'recent'",
                     ("2000-01-01T00:00:00+00:00",))
         assert store.prune_session_deletions(cur) == 1
         cur.execute("SELECT session_id FROM network_session_deletions ORDER BY session_id")
-        assert [row["session_id"] for row in cur.fetchall()] == ["old-pending", "recent"]
+        assert [row["session_id"] for row in cur.fetchall()] == ["old-owed", "recent"]
 
 
 @pytest.mark.asyncio
@@ -282,7 +323,7 @@ async def test_a_fact_of_a_network_this_worker_left_never_refuses_its_new_networ
     with b.active(), get_db() as conn:
         # What the delete in flight while B left X committed: X's fact, no row.
         cur = conn.cursor()
-        store.remember_session_deletion(cur, SID, pending=True, network_id="a-network-this-worker-left")
+        store.remember_session_deletion(cur, SID, network_id="a-network-this-worker-left")
         cur.execute("DELETE FROM sessions WHERE id=%s", (SID,))
         cur.execute("DELETE FROM sync_records WHERE collection='sessions' AND record_id=%s", (SID,))
     with a.active(), get_db() as conn:
@@ -327,7 +368,7 @@ async def _delete_unsynced_on_receiver(a, b, monkeypatch):
         conn.cursor().execute("DELETE FROM sync_records WHERE collection='sessions' AND record_id=%s", (SID,))
     with b.active():
         assert database.delete_session(SID)
-    assert not _fact(b)["pending"]
+    assert _fact(b) is not None and not _owed(b)
 
 
 @pytest.mark.asyncio
@@ -347,8 +388,10 @@ async def test_a_state_copy_carrying_a_deleted_chat_and_its_tag_completes_and_ow
     with b.active():
         assert database.get_session(SID) is None
         assert _rows("SELECT * FROM session_tags WHERE session_id=%s") == []
-        assert _fact(b)["pending"], "the copy committed, and with it the tombstone it owes"
-        monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)  # a restart forgets it
+    # The copy committed, and with it A's live version as B's record: owed,
+    # from durable state alone (nothing in memory survives a restart).
+    assert _owed(b) and _record(b)["origin_device_id"] == a.device_id
+    with b.active():
         assert engine.publish_session_deletions() == 1
     converge([a, b])
     _assert_deleted_everywhere(a, b)
@@ -368,7 +411,6 @@ async def test_a_snapshot_after_restart_stores_no_events_of_a_deleted_chat(pair,
     assert engine.open_snapshot_chunk(chunks[1], ctx=a_ctx(a))["items"], "the snapshot carries the events"
     with session_locks._deleted_lock:
         session_locks._DELETED.clear()  # a restart
-    monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)
     _copy_state(b, chunks[1:])  # the events page alone first: the parent is refused, not late
     _copy_state(b, chunks)
     with b.active():
@@ -396,48 +438,9 @@ def test_the_owner_scan_drops_the_fact_of_a_chat_recreated_here(pair):  # noqa: 
     _, b, _, _ = pair
     with b.active(), get_db() as conn:
         cur = conn.cursor()
-        store.remember_session_deletion(cur, SID, pending=False, network_id=store.get_state(conn)["network_id"])
-        assert store.session_deletion(cur, SID) is not None
+        store.remember_session_deletion(cur, SID, network_id=store.get_state(conn)["network_id"])
+    assert _fact(b) is not None
     with b.active():
         assert database.get_session(SID) is not None  # the row is here
         assert engine.publish_session_deletions() == 0
-    with b.active(), get_db() as conn:
-        assert store.session_deletion(conn.cursor(), SID) is None
-
-
-@pytest.mark.asyncio
-async def test_a_lost_refusal_still_owes_the_tombstone_when_another_peer_moves_the_frontier(
-        pair, tmp_path, monkeypatch):  # noqa: F811
-    """Review S9: the refusing copy rolled back and B restarted; C's snapshot then says 'deleted at A's version'."""
-    from tests.core.network.harness import Worker, join
-
-    a, b, _, _ = pair
-    c = Worker("c", tmp_path)
-    join(a, c)
-    exchange(a, b)  # B learns C is a member
-    await _delete_unsynced_on_receiver(a, b, monkeypatch)  # a fact with nothing to publish yet
-    exchange(a, c)
-    a_version = _record(a)
-    assert not a_version["deleted"]
-    with c.active(), get_db() as conn:
-        # C purges its mirror: the chat is a tombstone at A's version there.
-        cur = conn.cursor()
-        cur.execute("DELETE FROM sessions WHERE id=%s", (SID,))
-        cur.execute("UPDATE sync_records SET deleted=TRUE, content_hash='' "
-                    "WHERE collection='sessions' AND record_id=%s", (SID,))
-    # The refusing copy from A rolled back, and B restarted: no pending fact, no hint.
-    monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)
-    assert not _fact(b)["pending"]
-    with c.active():
-        manifest = engine.snapshot_manifest()
-    _copy_state(b, _snapshot(c, "sessions"))
-    with b.active():
-        engine.adopt_watermarks(manifest["watermarks"])  # B acknowledges A's stream through C
-        catalog.publish_owned()
-    converge([a, b, c])
-    with a.active():
-        assert database.get_session(SID) is None, "A kept the chat its owner deleted"
-    record = _record(a)
-    assert record["deleted"] and record["origin_device_id"] == b.device_id
-    assert record["clock"] > a_version["clock"], "an equal-version tombstone does not replace a live record"
-    c.close()
+    assert _fact(b) is None

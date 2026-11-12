@@ -1929,10 +1929,9 @@ def _remember_owner_deletion(cursor, session_id: str, row: dict, worker: tuple) 
     legacy row, this instance), the catalog publisher's rule. A forwarded
     delete runs on the owner; a mirror, a materialized tombstone or a stale row
     of another owner writes nothing. Incoming sync never recreates a chat with
-    this fact (``engine._refuse_deleted_session``) and the tombstone stays
-    pending until it is recorded (``engine.publish_session_deletions``). It is
-    pending at once when the network already holds a record of the chat; a
-    chat it never knew has none, and gets a tombstone only if one arrives.
+    this fact (``engine._refuse_deleted_session``), and its tombstone is owed
+    while a live version of it is this worker's sync record
+    (``engine.publish_session_deletions``). Returns whether it was written.
 
     Writing it can never fail the delete. One read of network_state on the
     delete's own connection (no lock) names the network that authorizes the
@@ -1958,13 +1957,11 @@ def _remember_owner_deletion(cursor, session_id: str, row: dict, worker: tuple) 
 
     try:
         with _savepoint(cursor, "sp_owner_deletion"):
-            known = network_store.get_record(cursor, "sessions", session_id) is not None
-            network_store.remember_session_deletion(cursor, session_id, pending=known,
-                                                    network_id=network["network_id"])
+            network_store.remember_session_deletion(cursor, session_id, network_id=network["network_id"])
     except Exception:  # noqa: BLE001 - rolled back to the savepoint; the delete goes on
         logger.warning("Could not remember the deletion of session %s for sync", session_id, exc_info=True)
         return False
-    return known
+    return True
 
 
 def _publish_owner_deletion(session_id: str) -> None:

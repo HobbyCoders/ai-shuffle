@@ -86,6 +86,14 @@ class _KeepObservation(Exception):
     """Reject a value without adopting its clock/origin as our record's source."""
 
 
+class _RefusedDeletedSession(_KeepObservation):
+    """A live version of a chat this worker deleted as owner (#1308).
+
+    Unlike other rejections, its version IS adopted as the local sync record
+    (live, no row): that record is what makes the owner's tombstone owed.
+    """
+
+
 class NotEnrolled(RuntimeError):
     """This worker has no network yet."""
 
@@ -1150,16 +1158,13 @@ def record_after_commit(collection: str, record_id: str) -> None:
 # Chats this worker deleted as their owner (#1308)
 # ---------------------------------------------------------------------------
 # The owner's delete writes ``network_session_deletions`` in its own
-# transaction. The fact, not the state of the moment (outbox, local sync
-# record, placement, the route by which this worker became owner), decides:
-# incoming sync never recreates the chat, and its tombstone is published until
-# it is recorded, over whichever worker signed the chat's record.
-
-# Chats whose record or child sync refused here because of the fact: only a
-# hint that publishes sooner after an apply. The obligation itself is derived
-# from durable state by ``store.owe_session_tombstones`` on every owner scan.
-_refused_session_ids: set = set()
-_refused_lock = threading.Lock()
+# transaction. The rule: a chat its owner deleted stays deleted, and the
+# owner's tombstone must outrank every live version of it this worker has
+# seen. Nothing else is tracked: incoming live versions are refused but kept
+# as the chat's sync record, so "owed" is simply fact + no row + live record
+# (``store.owed_session_tombstones``). Signing the tombstone makes the record
+# deleted; a peer's winning tombstone does too; a newer live version makes
+# it live again.
 
 # Session children sync applies through ``materialize``; their parent is
 # ``record["session_id"]``. Transcript events are checked in bulk by
@@ -1168,21 +1173,14 @@ _SESSION_CHILD_COLLECTIONS = frozenset({"session_tags", "session_runtime", "sess
                                         "pending_interactions"})
 
 
-def _note_refused_sessions(session_ids: Iterable[str]) -> None:
-    with _refused_lock:
-        _refused_session_ids.update(session_ids)
-
-
 def _refuse_child_of_deleted_session(cursor, record: Mapping[str, Any]) -> None:
     """Consume a child of a chat this worker deleted as owner: store nothing, raise no error.
 
     A session foreign key would otherwise abort the whole page or copy, and a
-    table without one would keep an orphan. The child proves the network
-    still knows the chat, so its tombstone is owed.
+    table without one would keep an orphan.
     """
     session_id = record.get("session_id")
     if isinstance(session_id, str) and store.deleted_session_ids(cursor, [session_id]):
-        _note_refused_sessions([session_id])
         raise _KeepObservation
 
 
@@ -1192,72 +1190,45 @@ def _refuse_deleted_session(cursor, session_id: str) -> None:
     Runs under the apply's N and before the row is written. S first: a delete
     of this chat that is still running holds the row, so this waits for it and
     then reads its committed fact. A row present again was recreated here (the
-    fact is stale and dropped). Otherwise the incoming record is kept for
-    forwarding but not materialized, and the tombstone is marked for
-    publication: it is signed after this clock was observed, so it outranks it.
+    fact is stale and dropped). Otherwise the caller stores the incoming
+    version as the live record, which owes the tombstone.
     """
     cursor.execute("SELECT id FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
-    present = cursor.fetchone() is not None
-    fact = store.session_deletion(cursor, session_id)
-    if fact is None:
-        return
-    if present:
+    if cursor.fetchone() is not None:
         store.forget_session_deletion(cursor, session_id)
         return
-    store.set_session_deletion_pending(cursor, session_id, True)
-    _note_refused_sessions([session_id])
-    raise _KeepObservation
+    if store.deleted_session_ids(cursor, [session_id]):
+        raise _RefusedDeletedSession
 
 
 def publish_session_deletions(*, ctx: Optional[NetworkContext] = None,
                               session_ids: Optional[Iterable[str]] = None) -> int:
-    """Publish the pending tombstones of chats this worker deleted as owner.
+    """Sign the owed tombstones of chats this worker deleted as owner.
 
-    One short transaction per chat, N first then the fact, so no delete or
-    apply waits behind the batch. A tombstone that cannot be recorded yet
-    (outbox held, bootstrap not ready) stays pending for the next owner scan.
+    One short transaction per chat, N first, then the condition again. A
+    tombstone that cannot be recorded yet (outbox held, bootstrap not ready)
+    stays owed for the next owner scan.
     """
     ctx = ctx or context()
     if ctx is None:
         return 0
-    refused: List[str] = []
-    if session_ids is None:
-        with _refused_lock:
-            refused = sorted(_refused_session_ids)
-            _refused_session_ids.clear()
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            # A refusal whose transaction rolled back still owes its tombstone.
-            for session_id in sorted(store.deleted_session_ids(cursor, refused)):
-                store.set_session_deletion_pending(cursor, session_id, True)
-            if session_ids is None:
-                store.owe_session_tombstones(cursor, ctx.device_id)  # the durable obligation (S9)
-            ids = store.pending_session_deletions(cursor, None if session_ids is None else sorted(set(session_ids)))
-            if session_ids is None:
-                store.prune_session_deletions(cursor)
-    except BaseException:
-        _note_refused_sessions(refused)
-        raise
+    wanted = None if session_ids is None else sorted(set(session_ids))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        ids = store.owed_session_tombstones(cursor, wanted)
+        if wanted is None:
+            store.prune_session_deletions(cursor)
     published = 0
     for session_id in ids:
         with get_db() as conn:
             cursor = conn.cursor()
             store.lock_state(cursor)
-            fact = store.session_deletion(cursor, session_id)
-            if fact is None or not fact["pending"]:
-                continue
-            cursor.execute("SELECT 1 FROM sessions WHERE id = %s", (session_id,))
-            if cursor.fetchone() is not None:
-                store.forget_session_deletion(cursor, session_id)  # recreated here since
+            if not store.owed_session_tombstones(cursor, [session_id]):
                 continue
             existing = store.get_record(cursor, "sessions", session_id)
-            if existing is not None:  # outrank the version seen, not tie it
-                store.observe_clock(cursor, int(existing["clock"]))
-            if record(cursor, "sessions", session_id, None, ctx=ctx, force=True) is None:
-                continue
-            store.set_session_deletion_pending(cursor, session_id, False)
-            published += 1
+            store.observe_clock(cursor, int(existing["clock"]))  # outrank the version seen, not tie it
+            if record(cursor, "sessions", session_id, None, ctx=ctx, force=True) is not None:
+                published += 1
     if published:
         kick()
     return published
@@ -1810,12 +1781,8 @@ def _lock_mirror_event_counters(cursor, record_ids: Iterable[str], *,
     absent = [sid for sid in session_ids if sid not in present]
     if absent:
         # A chat this worker deleted as owner may have no record at all
-        # (refused, never synced here): its fact is the durable answer, and
-        # its children prove the network still knows it (#1308).
-        refused = store.deleted_session_ids(cursor, absent)
-        if refused:
-            _note_refused_sessions(refused)
-            gone |= refused
+        # (never synced here): its fact is the durable answer (#1308).
+        gone |= store.deleted_session_ids(cursor, absent)
     if gone:
         # Carry the fact to a later reservation in this batch (per-op apply)
         # without another lookup.
@@ -2068,7 +2035,11 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         refresh_billing = _billing_refresh_needed(cursor, coll, env.record_id, plaintext)
         try:
             row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
-        except _KeepObservation:
+        except _KeepObservation as kept:
+            if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
+                store.put_record(cursor, env.collection, env.record_id, clock=env.clock,
+                                 origin_device_id=env.origin_device_id, content_hash="", deleted=False,
+                                 order_seq=env.order_seq)
             # Consume/forward the origin stream without relabelling the value
             # we kept. A snapshot must still carry that value's original source.
             store.insert_op(cursor, env.to_dict(), _lane(coll))
@@ -2794,11 +2765,6 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
     try:
         result = _apply_batch(envelopes, ctx=ctx, _pending_streams=_pending_streams,
                               _pending_chunk_limit=_pending_chunk_limit)
-        if _refused_session_ids:
-            try:
-                publish_session_deletions(ctx=ctx)
-            except Exception:  # noqa: BLE001 — the owner scan retries
-                logger.warning("Could not publish refused session deletions", exc_info=True)
         if result._pending_more:
             _wake_pending()
         return result
@@ -3236,7 +3202,11 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             try:
                 row = materialize(cursor, coll, item["record_id"], prepared,
                                   origin_device_id=item["origin_device_id"])
-            except _KeepObservation:
+            except _KeepObservation as kept:
+                if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
+                    store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
+                                     origin_device_id=item["origin_device_id"], content_hash="", deleted=False,
+                                     order_seq=item.get("order_seq"))
                 continue
             _after_mirror(cursor, coll, prepared)
             # Snapshot items have no per-item signature. In particular,

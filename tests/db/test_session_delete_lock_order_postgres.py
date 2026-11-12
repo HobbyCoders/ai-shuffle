@@ -2069,6 +2069,20 @@ def _session_row(sid):
         return cur.fetchone()
 
 
+def _fact(sid):
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM network_session_deletions WHERE session_id=%s", (sid,))
+        return cur.fetchone()
+
+
+def _owed(sid):
+    from app.db import network as store
+
+    with base.get_db() as conn:
+        return store.owed_session_tombstones(conn.cursor(), [sid]) == [sid]
+
+
 def _waiting_query(observer, blocker_pid):
     with observer.cursor() as probe:
         probe.execute("SELECT pg_stat_clear_snapshot()")
@@ -2082,8 +2096,8 @@ def test_apply_arriving_while_the_owners_delete_is_open_cannot_recreate_the_chat
 
     The apply holds network_state (N) and waits on the session row the open
     delete holds; once the delete commits it reads the owner's deletion fact,
-    keeps the row deleted, and the tombstone outranks the incoming clock.
-    Main recreated the chat here (its upsert ran after the delete committed).
+    keeps the row deleted and the incoming version as its record, and the
+    delete's own publication (waiting on N) outranks it. Main recreated the chat here (its upsert ran after the delete committed).
     """
     from app.network import engine
 
@@ -2111,8 +2125,7 @@ def test_apply_arriving_while_the_owners_delete_is_open_cannot_recreate_the_chat
     record = _session_record(sid)
     assert record["deleted"] and record["origin_device_id"] == ctx.device_id
     assert record["clock"] > 50, "the owner's tombstone must outrank the record it refused"
-    with base.get_db() as conn:
-        assert not engine.store.session_deletion(conn.cursor(), sid)["pending"]
+    assert not _owed(sid)
     assert waited_on.startswith("SELECT id FROM sessions WHERE id ="), waited_on  # the refusal's row lock
 
 
@@ -2172,8 +2185,7 @@ def test_apply_reaching_an_already_deleted_chat_reads_the_fact_committed_just_be
             _wait_for_lock_wait(observer, barriers.pids["incoming"], deleting)
             waited_on = _waiting_query(observer, barriers.pids["incoming"])
             assert _session_row(sid) is None, "the delete committed before the apply's row lock"
-            with base.get_db() as conn:
-                assert engine.store.session_deletion(conn.cursor(), sid) is not None
+            assert _fact(sid) is not None
         finally:
             barriers.release_all()
         applying.result(timeout=10)
@@ -2183,8 +2195,7 @@ def test_apply_reaching_an_already_deleted_chat_reads_the_fact_committed_just_be
     record = _session_record(sid)
     assert record["deleted"] and record["origin_device_id"] == ctx.device_id
     assert record["clock"] > 50, "the owner's tombstone must outrank the record it refused"
-    with base.get_db() as conn:
-        assert not engine.store.session_deletion(conn.cursor(), sid)["pending"]
+    assert not _owed(sid)
 
 def test_a_delete_waiting_on_its_chat_holds_no_network_state_lock(private_pool, monkeypatch):
     """#1308 review S6: while the owner's delete waits, N is free and other chats still apply."""
@@ -2236,8 +2247,7 @@ def test_a_networked_worker_that_cannot_read_its_identity_still_deletes(private_
     with caplog.at_level("WARNING", logger=sessions.logger.name):
         assert sessions.delete_session(sid) is True
     assert _session_row(sid) is None
-    with base.get_db() as conn:
-        assert engine.store.session_deletion(conn.cursor(), sid) is None
+    assert _fact(sid) is None
     assert "identity could not be read" in caplog.text
 
 
@@ -2252,7 +2262,7 @@ def test_a_failed_fact_statement_leaves_the_delete_committable(private_pool, mon
 
     reached = []
 
-    def broken(cursor, session_id, *, pending, network_id):  # production's signature
+    def broken(cursor, session_id, *, network_id):  # production's signature
         reached.append(session_id)
         cursor.execute("INSERT INTO no_such_table_1308 VALUES (1)")  # poisons the transaction
 
@@ -2286,8 +2296,7 @@ def test_a_state_copy_with_a_deleted_chat_and_its_tag_commits_and_owes_the_tombs
         cur.execute("SELECT * FROM sessions WHERE id=%s", (sid,))
         session_row = dict(cur.fetchone())
     assert sessions.delete_session(sid) is True
-    with base.get_db() as conn:
-        assert store.session_deletion(conn.cursor(), sid)["pending"] is False
+    assert _fact(sid) is not None and not _owed(sid)  # no live version known here yet
     tag = {"id": "tag-" + sid, "name": "Tagged", "color": "#888888", "created_at": "2026-01-01T00:00:00+00:00",
            "updated_at": "2026-01-01T00:00:00+00:00"}
     pages = [
@@ -2298,7 +2307,6 @@ def test_a_state_copy_with_a_deleted_chat_and_its_tag_commits_and_owes_the_tombs
                                          {"session_id": sid, "tag_id": tag["id"], "created_at": tag["created_at"]},
                                          clock=42, origin=remote.device_id)]),
     ]
-    monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)
     with base.get_db() as conn:  # one copy transaction, as peer_snapshot applies its pages
         cur = conn.cursor()
         store.lock_state(cur)
@@ -2309,8 +2317,8 @@ def test_a_state_copy_with_a_deleted_chat_and_its_tag_commits_and_owes_the_tombs
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) AS n FROM session_tags WHERE session_id=%s", (sid,))
         assert cur.fetchone()["n"] == 0
-        assert store.session_deletion(cur, sid)["pending"] is True, "the copy committed the owed tombstone"
-    monkeypatch.setattr(engine, "_refused_session_ids", set(), raising=False)  # a restart
+    # The copy committed the refused version as the record: owed, from durable state alone.
+    assert _owed(sid) and _session_record(sid)["clock"] == 41
     monkeypatch.setattr(engine, "kick", lambda: None)
     assert engine.publish_session_deletions(ctx=ctx) == 1
     record = _session_record(sid)
