@@ -224,7 +224,7 @@
 		};
 	}
 
-	// A Settings target (Needs you's memory item, #1042) pushes its own history
+	// A Settings target (a deep link into one setting) pushes its own history
 	// step. The drawer's pop above is asynchronous and would land after that
 	// step and undo it, leaving Settings on its index, so open it only once
 	// that pop is seen. Never on elapsed time: a slow pop would still undo it.
