@@ -10,15 +10,20 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ## 1.3.1 (2026-11-12)
 
-1.3.0 reached the in-app updater and the Windows installer, but its Android build failed, which also kept the Docker `latest` tag and the website's Linux and Android downloads on the previous version. 1.3.1 finishes that rollout. Everything listed under 1.3.0 is in this release.
+1.3.0 reached the in-app updater and the Windows installer, but its Android build failed, which also kept the Docker `latest` tag and the website's Linux and Android downloads on the previous version. 1.3.1 finishes that rollout and adds Google as a provider, Google's own Antigravity agent, and usage readings for Kimi, MiniMax and OpenCode. Everything listed under 1.3.0 is in this release.
 
 ### Agents and providers
 
+- Google is a built-in provider. Set it up with a Google AI Studio API key in Settings or first-run setup.
+- Google Antigravity runs Google's own Antigravity agent on the worker, connected with a Google AI Studio API key or a Google sign-in. Install the agent from **Settings > Providers > Google Antigravity**. Google's terms restrict using a personal Google sign-in through other software, and Google has suspended accounts for it: the app warns you before a personal sign-in starts, and a personal sign-in runs only in chats you type into unless you turn on **Allow unattended use** for that row.
+- Turns on a Kimi API key or an OpenCode Console key record their cost, and MiniMax turns no longer count cached input twice.
+- The usage popover shows the balance left on a Kimi API key and the 5-hour and weekly quota left on a MiniMax M Plan. Kimi Code, MiniMax API, OpenCode Go and OpenCode Console keys have no meter, so the popover links to the vendor's own dashboard for them.
 - An agent can send up to 8 requests at once to a service you granted it access to. Each request is still checked and approved on its own, as before.
 - Guidance agents get at the start of a chat is no longer cut off. On Claude Code the browser's instructions arrive in full, including the rules for sign-in pages and passwords, and the workspace notes no longer stop mid-sentence.
 
 ### Sessions and interface
 
+- A rule an agent suggests saving as a memory goes away once you save it or turn it down, or when a memory already says the same thing. The same wording is not suggested again for 14 days.
 - The sidebar's **Needs you** no longer shows a "Memory needs attention" item that never went away. Memory health stays in Settings > System.
 
 ### Hand-offs
