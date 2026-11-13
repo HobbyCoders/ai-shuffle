@@ -1690,8 +1690,20 @@ def turn_failed(turn: Optional[Dict[str, Any]]) -> bool:
     return state in ("completed", "parked") and bool(turn.get("error"))
 
 
+def turn_stopped(turn: Optional[Dict[str, Any]]) -> bool:
+    """Whether a person's Stop ended this turn, not a failure or a finish (#1340)."""
+    turn = turn or {}
+    return turn.get("state") == "aborted" and not abort_was_failure(turn.get("stop_reason"))
+
+
 def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
-    """Of ``session_ids``, those whose latest turn that ran ended in a failure.
+    """Of ``session_ids``, those whose latest turn that ran ended in a failure."""
+    return {sid for sid, outcome in latest_turn_outcomes(session_ids).items() if outcome == "failed"}
+
+
+def latest_turn_outcomes(session_ids: List[str]) -> Dict[str, str]:
+    """Of ``session_ids``, those whose latest turn that ran ended in a failure
+    (``"failed"``) or was stopped (``"stopped"``). A finish leaves the session out.
 
     Read from ``turns`` because every way a turn ends writes there, including the
     ones no client watches: the reap sweep, a dead worker, a chat nobody has open.
@@ -1699,7 +1711,7 @@ def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
     baseline speak; with none, the baseline's own outcome stands. See
     :func:`set_outcome_baseline`.
     """
-    failed: set = set()
+    outcomes: Dict[str, str] = {}
     skip = ", ".join(["%s"] * len(_NEVER_ANSWERED_STOP_REASONS))
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1720,11 +1732,17 @@ def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
                 f"WHERE s.id IN ({ids})",
                 (*chunk, *_NEVER_ANSWERED_STOP_REASONS, *chunk),
             )
-            failed.update(
-                row["session_id"] for row in cursor.fetchall()
-                if (turn_failed(row) if row["state"] else row["outcome_baseline_failed"])
-            )
-    return failed
+            for row in cursor.fetchall():
+                # With no turn past the baseline, the baseline's outcome stands;
+                # it records failures only, so it never reads as stopped.
+                if row["state"] is None:
+                    if row["outcome_baseline_failed"]:
+                        outcomes[row["session_id"]] = "failed"
+                elif turn_failed(row):
+                    outcomes[row["session_id"]] = "failed"
+                elif turn_stopped(row):
+                    outcomes[row["session_id"]] = "stopped"
+    return outcomes
 
 
 def set_outcome_baseline(cursor: Any, session_id: str, failed: bool) -> None:

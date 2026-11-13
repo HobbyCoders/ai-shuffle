@@ -633,16 +633,18 @@ async def _broadcast_work_time(session_id: str) -> None:
         started = row.get("work_started_at")
         if hasattr(started, "isoformat"):
             started = started.isoformat()
-        # Every turn start and end comes through here, and a sidebar not watching
-        # the chat has no other way to learn that its latest turn failed (#1032).
-        failed = await asyncio.to_thread(turns_db.sessions_with_failed_latest_turn, [session_id])
+        # Every turn start and end comes through here, and a sidebar not watching the
+        # chat has no other way to learn its latest turn failed (#1032) or was stopped.
+        outcome = (await asyncio.to_thread(turns_db.latest_turn_outcomes, [session_id])).get(session_id)
         await sync_engine.broadcast_user_session_updated(
             user_id=row.get("api_user_id") or "admin",
             session_id=session_id,
             updates={
                 "work_ms": int(row.get("work_ms") or 0),
                 "work_started_at": started,
-                "last_turn_failed": session_id in failed,
+                "last_turn_failed": outcome == "failed",
+                # A Stop, before any reply text or after it, reads Stopped (#1340).
+                "last_turn_stopped": outcome == "stopped",
             },
         )
     except Exception:  # noqa: BLE001
