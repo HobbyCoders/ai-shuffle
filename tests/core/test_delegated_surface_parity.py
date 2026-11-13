@@ -183,7 +183,7 @@ async def test_guidance_describes_the_picked_app_tools(tmp_path, builtins_server
     assert "__Remember" in app_tools and "__Recall" in app_tools
     assert ha._MEMORY_BLOCK_CORE in blocks
     # PICKED has no Edit: the block would forbid the only permitted way to edit.
-    assert ha.DELEGATED_TOOL_USE_BLOCK not in blocks
+    assert ha.DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(blocks)
 
 
 def test_unrestricted_sessions_are_unchanged(tmp_path):
@@ -385,7 +385,7 @@ def test_blocklist_reaches_the_cli_spellings_of_blocked_tools(tmp_path):
     assert not permit("mcp__builtins__Remember")
     assert permit("mcp__builtins__Recall")
     # No permitted shell is left, so the Bash-vs-dedicated-tools block is moot.
-    assert ha.DELEGATED_TOOL_USE_BLOCK not in ha._delegated_guidance_blocks(options, None)
+    assert ha.DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(ha._delegated_guidance_blocks(options, None))
 
     loop = _loop(options)
     assert not loop._bridge_tool_permitted("mcp__builtins__Remember")

@@ -2189,19 +2189,28 @@ async def test_delegated_chat_does_not_gain_filesystem_search(cli_lacks_search):
 
 @pytest.mark.asyncio
 async def test_delegated_search_guidance_names_only_permitted_bridge_tools(cli_lacks_search):
-    from app.core.provider.harness_adapter import _delegated_guidance_blocks
+    from app.core.provider.harness_adapter import (
+        DELEGATED_BATCHING_RULE,
+        DELEGATED_TOOL_USE_HEADER,
+        _delegated_guidance_blocks,
+    )
 
     adapter = HarnessAdapter()
     options = SessionOptions(model="fable")
     registry = await adapter._build_registry(options, native=False)
     text = "\n".join(_delegated_guidance_blocks(options, registry))
+    # The file-tool rule already says to search with Glob and Grep, so the
+    # note only names the bundled fallbacks.
     assert (
-        "Search files with Glob and Grep rather than find/grep through Bash. If "
-        "Claude Code's own Glob and Grep are not in your tool list, use "
+        "If Claude Code's own Glob and Grep are not in your tool list, use "
         "mcp__fluid_bundled__Glob and mcp__fluid_bundled__Grep."
     ) in text
+    assert "rather than find/grep through Bash" not in text
     options.tool_allowlist = ["Read"]
-    assert not _delegated_guidance_blocks(options, registry)
+    # Only the batching rule, which names no tool, is left.
+    assert _delegated_guidance_blocks(options, registry) == [
+        DELEGATED_TOOL_USE_HEADER + DELEGATED_BATCHING_RULE
+    ]
 
 
 # ─── Delegated tool-use guidance (Bash-first behaviour, session 42595afe) ────
@@ -2214,9 +2223,9 @@ def test_delegated_code_session_carries_the_tool_use_block():
     )
 
     unrestricted = SessionOptions(model="opus")
-    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(unrestricted, None)
+    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_guidance_blocks(unrestricted, None))
     picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
-    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(picked, None)
+    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_guidance_blocks(picked, None))
     assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK
 
 
@@ -2230,13 +2239,13 @@ def test_delegated_tool_use_block_leaves_search_to_bash_without_grep_or_glob():
     # Bash is the only permitted way to search here, so the block must not
     # forbid grep and find through it.
     picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit"])
-    blocks = _delegated_guidance_blocks(picked, None)
+    blocks = "\n\n".join(_delegated_guidance_blocks(picked, None))
     assert DELEGATED_TOOL_USE_BLOCK not in blocks
     assert DELEGATED_TOOL_USE_BLOCK_NO_SEARCH in blocks
     assert "grep" not in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
     assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
     globbed = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Glob"])
-    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(globbed, None)
+    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_guidance_blocks(globbed, None))
 
 
 def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools():
@@ -2246,18 +2255,18 @@ def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools():
     )
 
     chat = SessionOptions(model="opus", extra={"session_mode": "chat"})
-    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(chat, None)
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(chat, None))
     no_file_tools = SessionOptions(model="opus", tool_allowlist=["Bash", "Grep", "Glob"])
-    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(no_file_tools, None)
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(no_file_tools, None))
     no_shell = SessionOptions(model="opus", tool_allowlist=["Read", "Edit"])
-    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(no_shell, None)
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(no_shell, None))
     # Without Edit the block would forbid the only permitted way to edit.
     read_only = SessionOptions(model="opus", tool_allowlist=["Bash", "Read"])
-    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(read_only, None)
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(read_only, None))
     shell_and_files = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
-    assert DELEGATED_TOOL_USE_BLOCK in _delegated_guidance_blocks(shell_and_files, None)
+    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_guidance_blocks(shell_and_files, None))
     blocked = SessionOptions(model="opus", disallowed_tools=["Bash", "PowerShell"])
-    assert DELEGATED_TOOL_USE_BLOCK not in _delegated_guidance_blocks(blocked, None)
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(blocked, None))
 
 
 @pytest.mark.asyncio

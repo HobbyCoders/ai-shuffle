@@ -46,6 +46,8 @@ def _isolated_home(monkeypatch, tmp_path):
     # and finds whatever AGENTS.md files the machine has above the temp dir.
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # The skills list reads Claude Code's own folder to skip what it lists.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     from app.core import guidance_surface
 
     monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
@@ -150,7 +152,17 @@ def test_delegated_append_drops_guidance_for_tools_off_the_surface(tmp_path):
     text = ha._delegated_append_text("APPEND TEXT", options, _memory_registry())
     # Incoming peer work is independent of the receiver's outgoing tool surface.
     from fluid.context.peer import PROMPT_BLOCK
-    assert text == "APPEND TEXT\n\n" + PROMPT_BLOCK
+    # The batching rule names no tool, so it rides every surface.
+    batching = ha.DELEGATED_TOOL_USE_HEADER + ha.DELEGATED_BATCHING_RULE
+    assert text == "APPEND TEXT\n\n" + PROMPT_BLOCK + "\n\n" + batching
+
+
+def test_batching_rule_follows_the_file_tool_rule_on_a_code_session(tmp_path):
+    options = _preset_options(tmp_path)
+    blocks = ha._delegated_guidance_blocks(options, _memory_registry())
+    assert blocks[0] == f"{ha.DELEGATED_TOOL_USE_BLOCK}\n{ha.DELEGATED_BATCHING_RULE}"
+    # The file-tool rule already says to search with Glob and Grep.
+    assert "rather than find/grep through Bash" not in "\n".join(blocks)
 
 
 @pytest.mark.asyncio
@@ -705,6 +717,61 @@ def test_delegated_skills_block_marks_plugin_skills_opt_in():
     assert "- unslop:unslop: Humanize prose (/u/SKILL.md)" in mixed
 
     assert ha._delegated_skills_block([hidden]) is None
+
+
+def test_delegated_skills_block_is_one_short_line_per_skill():
+    """Descriptions are cut near 100 characters, and skills sharing a folder
+    are listed under one line naming it instead of repeating the path."""
+    from fluid.context.instructions import Skill
+
+    long = "word " * 60
+    a = Skill(name="alpha", description=long, path="/s/alpha/SKILL.md", scope="global")
+    b = Skill(name="beta", description="Short one", path="/s/beta/SKILL.md", scope="global")
+    lone = Skill(name="gamma", description="Elsewhere", path="/o/gamma/SKILL.md", scope="project")
+    text = ha._delegated_skills_block([a, b, lone])
+    lines = text.splitlines()
+    assert "- gamma: Elsewhere (/o/gamma/SKILL.md)" in lines
+    at = lines.index("In /s/<name>/SKILL.md:")
+    assert lines[at + 1].startswith("- alpha: word") and lines[at + 1].endswith("…")
+    assert len(lines[at + 1]) <= len("- alpha: ") + ha.DELEGATED_SKILL_SUMMARY_CHARS
+    assert lines[at + 2] == "- beta: Short one"
+    assert "/s/alpha/SKILL.md" not in text
+
+
+def test_delegated_skills_skip_what_claude_code_lists(tmp_path, _isolated_home):
+    """A skill Claude Code already lists is not listed again: same name in
+    its skills folder, the same skill under another name (same description),
+    or a skill from a plugin Claude Code has enabled."""
+    import json as _json
+
+    from fluid.context.instructions import Skill
+
+    claude = _isolated_home / ".claude"
+    (claude / "skills" / "unnslop").mkdir(parents=True)
+    (claude / "skills" / "unnslop" / "SKILL.md").write_text(
+        "---\nname: unnslop\ndescription: Remove AI writing patterns\n---\nbody", encoding="utf-8",
+    )
+    (claude / "settings.json").write_text(
+        _json.dumps({"enabledPlugins": {"tidy@market": True, "off@market": False}}),
+        encoding="utf-8",
+    )
+    skills = [
+        Skill(name="unnslop", description="Remove AI writing patterns", path="/f/unnslop/SKILL.md"),
+        Skill(name="unslop:unslop", description="Remove  AI writing\npatterns", path="/p/SKILL.md", scope="plugin"),
+        Skill(name="tidy:clean", description="Tidy", path="/t/SKILL.md", scope="plugin"),
+        Skill(name="off:thing", description="Off", path="/x/SKILL.md", scope="plugin"),
+        Skill(name="deploy", description="Ship a build", path="/d/deploy/SKILL.md"),
+    ]
+    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=True, project_on=True)
+    assert [s.name for s in kept] == ["off:thing", "deploy"]
+    # Without the user scope Claude Code's user folder is not consulted.
+    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=False, project_on=True)
+    assert len(kept) == len(skills)
+    # A project skill in the working folder's .claude/skills counts too.
+    (tmp_path / ".claude" / "skills" / "deploy").mkdir(parents=True)
+    (tmp_path / ".claude" / "skills" / "deploy" / "SKILL.md").write_text("no frontmatter", encoding="utf-8")
+    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=False, project_on=True)
+    assert "deploy" not in [s.name for s in kept]
 
 
 # ─── Claude Code compactions become the chat's compaction card ──────────────

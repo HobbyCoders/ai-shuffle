@@ -764,12 +764,15 @@ class HarnessAdapter(ProviderAdapter):
 
             # Never put Claude cloud credentials in SessionOptions.env, which
             # also feeds tools and MCPs. This private copy is for claude only.
-            from app.core.environment import inject_claude_code_auth
+            from app.core.environment import (
+                apply_delegated_cli_limits,
+                inject_claude_code_auth,
+            )
 
-            cli_env = await run_sync(
+            cli_env = apply_delegated_cli_limits(await run_sync(
                 inject_claude_code_auth, dict(options.env or {}),
                 options.extra.get("provider_id"),
-            )
+            ))
             # The learning journal, as on the native JSON-mode leg (#687).
             delegated_journal, delegated_bus = await self._delegated_journal(
                 options, fluid_session_id
@@ -8224,6 +8227,13 @@ _DELEGATED_STAND_INS = (
 # Bash calls as file reads, searches and edits (sed -n, cat, grep, sed -i,
 # python write_text) against 7 dedicated-tool calls. Static text: it must stay
 # byte-identical across turns so the CLI's prompt cache keeps hitting.
+# Claude chats averaged about one tool call per step against about 2.5 in
+# native code-mode chats (Nov 2026), and every step re-sends the whole context.
+DELEGATED_TOOL_USE_HEADER = "# Tool use on this session\n"
+DELEGATED_BATCHING_RULE = (
+    "Send independent tool calls (reads, searches, checks) together in one "
+    "step; make them one at a time only when a call needs an earlier result."
+)
 DELEGATED_TOOL_USE_BLOCK = (
     "# Tool use on this session\n"
     "Use Claude Code's dedicated tools for file work: Read to read files "
@@ -8313,16 +8323,23 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     blocks: List[str] = []
     # Both Read and Edit: the block forbids file work through Bash, so a
     # session without either would be left with no permitted way to do it.
+    # The full block forbids grep/find through Bash, so it needs a permitted
+    # Grep or Glob to search with.
+    file_rule = None
     if _session_mode(options) != "chat" and (
         permitted("Bash") or permitted("PowerShell")
     ) and permitted("Read") and permitted("Edit"):
-        # The full block forbids grep/find through Bash, so it needs a
-        # permitted Grep or Glob to search with.
-        blocks.append(
+        file_rule = (
             DELEGATED_TOOL_USE_BLOCK
             if permitted("Grep") or permitted("Glob")
             else DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
         )
+    # The batching rule rides every session, with the file-tool rule when
+    # there is one.
+    blocks.append(
+        f"{file_rule}\n{DELEGATED_BATCHING_RULE}" if file_rule
+        else DELEGATED_TOOL_USE_HEADER + DELEGATED_BATCHING_RULE
+    )
     notes: List[str] = []
     # The bundled Glob/Grep are only registered where the CLI may lack its own
     # (_registers_bundled_search), so the note exists only there.
@@ -8330,9 +8347,13 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     if search:
         own = _joined(search)
         verb = "are" if len(search) > 1 else "is"
+        # The full file-tool rule already says to search with Glob and Grep.
+        prefer = (
+            "" if file_rule == DELEGATED_TOOL_USE_BLOCK
+            else f"Search files with {own} rather than find/grep through Bash. "
+        )
         notes.append(
-            f"Search files with {own} rather than find/grep through Bash. If "
-            f"Claude Code's own {own} {verb} not in your tool list, use "
+            f"{prefer}If Claude Code's own {own} {verb} not in your tool list, use "
             + _joined([f"{_BUNDLED_CLI_PREFIX}{tool}" for tool in search]) + "."
         )
     if recall or memory:
@@ -8377,16 +8398,16 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
 
 DELEGATED_INSTRUCTIONS_HEADER = (
     "# AGENTS.md instructions\n"
-    "Claude Code loads CLAUDE.md files itself. These are the AGENTS.md-family "
-    "files the workspace also carries (fluid's instruction stack); follow them "
-    "the same way."
+    "The workspace's AGENTS.md files, which Claude Code does not load: follow "
+    "them as you follow CLAUDE.md."
 )
 DELEGATED_SKILLS_HEADER = (
     "# More skills\n"
-    "These skills live outside .claude/skills, so the Skill tool cannot load "
-    "them. Read a skill's SKILL.md at the path shown before doing a task it "
-    "covers."
+    "The Skill tool cannot load these. Before a task one covers, Read its "
+    "SKILL.md at the path shown."
 )
+# One short line per skill: the description cut near this many characters.
+DELEGATED_SKILL_SUMMARY_CHARS = 100
 
 
 def _delegated_fluid_context(options: SessionOptions) -> List[str]:
@@ -8417,7 +8438,10 @@ def _delegated_fluid_context(options: SessionOptions) -> List[str]:
             ]
             if files:
                 blocks.append("\n\n".join([DELEGATED_INSTRUCTIONS_HEADER, *files]))
-            skills = discover_skills(cwd, include_global=user_on, include_project=project_on)
+            skills = _not_listed_by_claude(
+                discover_skills(cwd, include_global=user_on, include_project=project_on),
+                cwd, user_on=user_on, project_on=project_on,
+            )
             skills_block = _delegated_skills_block(skills) if skills else None
             if skills_block:
                 blocks.append(skills_block)
@@ -8432,17 +8456,140 @@ def _delegated_skills_block(skills: Any) -> Optional[str]:
     Same rules as fluid's ``skills_index``: a ``disable-model-invocation``
     skill is left out, and fluid's plugin opt-in note follows the header when
     a plugin skill is listed (#2003). None when nothing is left to list.
+
+    One short line per skill. Two or more skills kept as
+    ``<folder>/<name>/SKILL.md`` under the same folder are listed under one
+    line naming that folder, so the long path is not repeated on each line.
     """
     from fluid.context.compiler import skill_summary, skills_header
 
     shown = [skill for skill in skills if getattr(skill, "model_invocable", True)]
     if not shown:
         return None
-    lines = "\n".join(
-        f"- {skill.name}: {skill_summary(skill.description)} ({skill.path})"
-        for skill in shown
-    )
-    return f"{skills_header(DELEGATED_SKILLS_HEADER, shown)}\n{lines}"
+
+    def summary(skill: Any) -> str:
+        return skill_summary(skill.description, DELEGATED_SKILL_SUMMARY_CHARS)
+
+    def folder(skill: Any) -> Optional[str]:
+        path = str(skill.path)
+        sep = "\\" if "\\" in path else "/"
+        parts = path.rsplit(sep, 2)
+        if len(parts) == 3 and parts[1] == skill.name and parts[2] == "SKILL.md" and parts[0]:
+            return parts[0]
+        return None
+
+    counts: Dict[str, int] = {}
+    for skill in shown:
+        key = folder(skill)
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    single: List[str] = []
+    grouped: Dict[str, List[str]] = {}
+    for skill in shown:
+        key = folder(skill)
+        if key and counts[key] > 1:
+            grouped.setdefault(key, []).append(f"- {skill.name}: {summary(skill)}")
+        else:
+            single.append(f"- {skill.name}: {summary(skill)} ({skill.path})")
+    lines = list(single)
+    for key, entries in grouped.items():
+        sep = "\\" if "\\" in key else "/"
+        lines.append(f"In {key}{sep}<name>{sep}SKILL.md:")
+        lines.extend(entries)
+    return f"{skills_header(DELEGATED_SKILLS_HEADER, shown)}\n" + "\n".join(lines)
+
+
+def _claude_listed_skills(
+    cwd: str, *, user_on: bool, project_on: bool
+) -> Tuple[set, set, set]:
+    """What Claude Code's own skill listing already holds for this session.
+
+    Returns ``(names, descriptions, plugins)``: skill folder and frontmatter
+    names under ``.claude/skills`` (the CLI's folder for the user scope, the
+    working folder for the project scope), their one-line
+    descriptions, and the names of the plugins enabled in Claude Code's
+    settings. Saved sign-in folders link ``skills``, ``plugins`` and
+    ``settings.json`` to the CLI's own folder, so that folder serves them all.
+    An unreadable file is skipped.
+    """
+    from app.core import claude_cli_home
+    from fluid.context.instructions import parse_frontmatter
+
+    names: set = set()
+    descriptions: set = set()
+    plugins: set = set()
+    bases: List[Path] = []
+    if user_on:
+        try:
+            bases.append(claude_cli_home.default_dir())
+        except Exception:  # noqa: BLE001 — a prompt block never fails a connect
+            pass
+    if project_on:
+        # The working folder only: a skill wrongly left out is lost to the
+        # session, while one listed twice costs a line.
+        bases.append(Path(cwd) / ".claude")
+    for base in bases:
+        try:
+            skill_files = list(base.glob("skills/*/SKILL.md"))
+        except OSError:
+            skill_files = []
+        for skill_file in skill_files:
+            names.add(skill_file.parent.name)
+            try:
+                fields, _ = parse_frontmatter(skill_file.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if isinstance(fields.get("name"), str) and fields["name"].strip():
+                names.add(fields["name"].strip())
+            if isinstance(fields.get("description"), str):
+                text = " ".join(fields["description"].split())
+                if text:
+                    descriptions.add(text)
+        for settings_name in ("settings.json", "settings.local.json"):
+            try:
+                data = json.loads((base / settings_name).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            enabled = data.get("enabledPlugins") if isinstance(data, dict) else None
+            if isinstance(enabled, dict):
+                plugins.update(
+                    str(key).split("@", 1)[0] for key, on in enabled.items() if on
+                )
+    return names, descriptions, plugins
+
+
+def _not_listed_by_claude(
+    skills: Any, cwd: str, *, user_on: bool, project_on: bool
+) -> List[Any]:
+    """``skills`` without those Claude Code's own skill listing already shows.
+
+    A skill is dropped when Claude Code lists one of the same name, the same
+    description (the same skill installed under another name, such as
+    ``unnslop`` and ``unslop:unslop``), or when it comes from a plugin of the
+    same name that Claude Code has enabled.
+    """
+    skills = list(skills or [])
+    if not skills:
+        return skills
+    try:
+        names, descriptions, plugins = _claude_listed_skills(
+            cwd, user_on=user_on, project_on=project_on
+        )
+    except Exception:  # noqa: BLE001 — a failed scan keeps the full list
+        logger.warning("[HarnessAdapter] Claude Code skill scan failed", exc_info=True)
+        return skills
+    if not (names or descriptions or plugins):
+        return skills
+
+    def listed(skill: Any) -> bool:
+        name = str(getattr(skill, "name", ""))
+        if name in names:
+            return True
+        if ":" in name and name.split(":", 1)[0] in plugins:
+            return True
+        return " ".join(str(getattr(skill, "description", "") or "").split()) in descriptions
+
+    return [skill for skill in skills if not listed(skill)]
 
 
 def _delegated_skills_index(options: SessionOptions) -> Optional[str]:
@@ -8475,6 +8622,7 @@ def _delegated_skills_index(options: SessionOptions) -> Optional[str]:
     except Exception:  # noqa: BLE001 — a prompt block never fails a connect
         logger.warning("[HarnessAdapter] delegated skills index failed", exc_info=True)
         return None
+    skills = _not_listed_by_claude(skills, cwd, user_on=user_on, project_on=project_on)
     if not skills:
         return None
     return _delegated_skills_block(sorted(skills, key=lambda skill: skill.name))

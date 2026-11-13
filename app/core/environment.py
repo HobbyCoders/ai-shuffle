@@ -459,6 +459,32 @@ def inject_claude_code_auth(
     return env
 
 
+# Context limits for the delegated Claude Code CLI (checked against 2.1.323).
+# Every tool result stays in the chat until compaction, and the CLI's defaults
+# (30,000 characters of Bash output inline, 25,000 tokens of MCP output) fill a
+# 200k window fast. Bash output past the cap is saved to a file and the model
+# gets a short preview and the path. Auto-memory is Claude Code's own
+# MEMORY.md under ~/.claude/projects, loaded on top of the app's "# Memory"
+# snapshot; turning it off leaves CLAUDE.md and AGENTS.md loading and leaves
+# the files on disk alone.
+DELEGATED_CLI_ENV_DEFAULTS: Dict[str, str] = {
+    "BASH_MAX_OUTPUT_LENGTH": "12000",
+    "MAX_MCP_OUTPUT_TOKENS": "8000",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+}
+
+
+def apply_delegated_cli_limits(env: Dict[str, str]) -> Dict[str, str]:
+    """Add :data:`DELEGATED_CLI_ENV_DEFAULTS` to a delegated CLI's spawn env.
+
+    ``setdefault``: a value the profile or the provider's extra env already
+    set wins, so an owner can still raise a cap for one agent.
+    """
+    for key, value in DELEGATED_CLI_ENV_DEFAULTS.items():
+        env.setdefault(key, value)
+    return env
+
+
 # Native legs with no explicit user choice set NO context-window env and
 # inherit the CLI's own per-model defaults. An explicit per-session window from
 # the composer uses the helper below and is deliberately authoritative over
