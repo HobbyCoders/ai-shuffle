@@ -244,7 +244,8 @@ async def test_a_bridged_tool_that_asks_finishes_with_the_owners_answer(tmp_path
     try:
         await d.loop.submit(UserTurn(content='mcp CallTool {"name": "Ask", "input": {"text": "x"}}'))
         question = await d.until(QuestionRequest)
-        assert question.message == "Which colour?" and question.name == "mcp__fluid_bundled__Ask"
+        # Posted as AskUser (hosts answer only that name), naming the tool.
+        assert question.message == "Ask asks: Which colour?" and question.name == "AskUser"
         assert question.schema == {"type": "string"}
         await d.loop.submit(RespondQuestion(request_id=question.request_id, answer="blue"))
         end = await d.until(TERMINAL, timeout=60)

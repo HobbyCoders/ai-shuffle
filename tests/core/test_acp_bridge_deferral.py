@@ -124,7 +124,10 @@ async def _run_turn(engine, text, timeout=60, answer=None):
     return "".join(e.text for e in events if isinstance(e, TextDelta)), events
 
 
-async def _connected(tmp_path, client, monkeypatch, *, defer=True, **restrictions):  # noqa: F811
+async def _connected(tmp_path, client, monkeypatch, *, defer=True, mode="bypassPermissions",
+                     register=None, **restrictions):  # noqa: F811
+    """``register(registry)`` adds tools to the session registry before the
+    bridge is built, as the app's own in-proc servers are."""
     from fluid.store.base import MemoryStore
 
     if not defer:
@@ -133,7 +136,7 @@ async def _connected(tmp_path, client, monkeypatch, *, defer=True, **restriction
     servers = _servers(str(tmp_path))
     servers["weather"] = {"type": "stdio", "command": sys.executable, "args": ["-I", FAKE_MCP],
                           "env": {"FLUID_FAKE_INSTRUCTIONS": "Weather server rules: cite the city."}}
-    options = SessionOptions(model="gemini-3.1-pro", cwd=str(tmp_path), permission_mode="bypassPermissions",
+    options = SessionOptions(model="gemini-3.1-pro", cwd=str(tmp_path), permission_mode=mode,
                              mcp_servers=servers, extra={"provider_id": row["id"], "app_session_id": "s-acp"},
                              **restrictions)
     adapter = ha.HarnessAdapter()
@@ -142,6 +145,8 @@ async def _connected(tmp_path, client, monkeypatch, *, defer=True, **restriction
     adapter._acp_deferred = ha._acp_bridge_deferral(options)
     adapter._registry = await adapter._build_registry(
         options, native=False, host_mcp=adapter._acp_deferred is not None)
+    if register is not None:
+        register(adapter._registry)
     await adapter._connect_antigravity(options, MemoryStore(), "fs-acp", None, "Be brief.", False)
     return adapter
 
@@ -223,21 +228,161 @@ async def test_the_session_policy_judges_call_tool_by_the_real_tool(
         await adapter._registry.aclose()
 
 
+def _register_asking_tool(registry):
+    """``Colour`` pauses on input_required and finishes only with the answer
+    it is re-run with, so a lost answer cannot pass."""
+    from fluid.tools.registry import InputRequired, ToolCtx, ToolOutcome, ToolSpec
+
+    async def run(args: dict, ctx: ToolCtx) -> ToolOutcome:
+        answers = args.get("__input_responses__")
+        if answers is not None:
+            return ToolOutcome(text=f"painted {answers['colour']}")
+        return ToolOutcome(text="", input_required=InputRequired(
+            server="", tool="Colour", request_state="s1",
+            requests={"colour": {"method": "elicitation/create", "message": "Which colour?",
+                                 "schema": {"type": "string"}}},
+        ))
+
+    registry.register_builtin(ToolSpec(name="Colour", description="Paint in a colour.",
+                                       input_schema={"type": "object", "properties": {}}), run)
+
+
+async def _turn_through_app_questions(adapter, text, can_use_tool, timeout=60):
+    """One turn, its question cards routed the way ``receive_events`` routes
+    them: ``_translate`` then ``_bridge_question`` into ``can_use_tool``."""
+    from fluid.events.model import (
+        ErrorEvent,
+        Interrupted,
+        QuestionRequest,
+        TextDelta,
+        TurnComplete,
+    )
+    from fluid.events.ops import UserTurn
+
+    engine = adapter._engine
+    adapter._can_use_tool = can_use_tool
+    events = []
+    await engine._ensure_session()
+
+    async def pump():
+        async for event in engine.events():
+            events.append(event)
+            if isinstance(event, QuestionRequest):
+                for translated in adapter._translate(event):
+                    asyncio.ensure_future(adapter._bridge_question(translated))
+            if isinstance(event, (TurnComplete, ErrorEvent, Interrupted)):
+                return
+
+    task = asyncio.create_task(pump())
+    await asyncio.sleep(0)
+    await engine.submit(UserTurn(content=text))
+    await asyncio.wait_for(task, timeout)
+    return "".join(e.text for e in events if isinstance(e, TextDelta)), events
+
+
+class PermissionResultAllow:
+    """The adapter recognises an allow by its class name."""
+
+    def __init__(self, updated_input):
+        self.updated_input = updated_input
+
+
+def _app_question_answers(answer):
+    """The approver's contract (query_engine.can_use_tool_callback): a
+    question tool gets the owner's answer back under ``FLUID_ANSWER_KEY``; any
+    other name is a permission card, whose approval carries no answer."""
+    from app.core.user_question_handler import (
+        FLUID_ANSWER_KEY,
+        HOST_USER_ANSWERED_KEY,
+        QUESTION_TOOLS,
+        questions_from_tool_input,
+    )
+
+    seen = []
+
+    async def can_use_tool(name, tool_input, ctx):
+        seen.append((name, questions_from_tool_input(tool_input)))
+        if name in QUESTION_TOOLS:
+            return PermissionResultAllow(updated_input={**tool_input, FLUID_ANSWER_KEY: answer,
+                                                        HOST_USER_ANSWERED_KEY: True})
+        return PermissionResultAllow(updated_input=tool_input)
+
+    return can_use_tool, seen
+
+
 @pytest.mark.asyncio
+async def test_a_bridged_tool_that_asks_gets_the_owners_answer_through_the_app(
+        tmp_path, client, monkeypatch):  # noqa: F811
+    adapter = await _connected(tmp_path, client, monkeypatch, register=_register_asking_tool)
+    engine = adapter._engine
+    try:
+        from fluid.events.model import QuestionAnswered
+
+        assert "Colour" in engine.deferred_tools()
+        can_use_tool, seen = _app_question_answers("teal")
+        text, events = await _turn_through_app_questions(
+            adapter, 'mcp CallTool {"name": "Colour", "input": {}}', can_use_tool)
+        # The card reaches the app as a question, naming the tool that asks.
+        [(name, questions)] = seen
+        assert name == "AskUser"
+        assert questions and "Colour asks: Which colour?" in json.dumps(questions)
+        answered = [e for e in events if isinstance(e, QuestionAnswered)]
+        assert [(e.answer, e.user_answered) for e in answered] == [("teal", True)]
+        assert "painted teal" in text, text
+    finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="#1560: the pinned mcp SDK drops inputResponses on the retry")
 async def test_an_external_tool_that_asks_the_owner_finishes_through_call_tool(
         tmp_path, client, monkeypatch):  # noqa: F811
     adapter = await _connected(tmp_path, client, monkeypatch)
     engine = adapter._engine
     try:
-        from fluid.events.model import QuestionAnswered, QuestionRequest
-
-        text, events = await _run_turn(engine, _call("mcp__weather__need_input"), answer={"ok": True})
-        [question] = [e for e in events if isinstance(e, QuestionRequest)]
-        assert question.message == "Confirm before continuing?"
-        assert question.name == "mcp__fluid_bundled__mcp__weather__need_input"
-        assert [e.answer for e in events if isinstance(e, QuestionAnswered)] == [{"ok": True}]
-        assert "confirmed" in text and "NOT asked" not in text, text
+        can_use_tool, seen = _app_question_answers("yes")
+        text, _events = await _turn_through_app_questions(
+            adapter, _call("mcp__weather__need_input"), can_use_tool)
+        assert seen and seen[0][0] == "AskUser"
+        assert "confirmed" in text, text
     finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_saved_deny_on_the_real_tool_refuses_its_call_tool_call(
+        tmp_path, client, monkeypatch):  # noqa: F811
+    """Saved rules key on the registry name the card shows; a CallTool call
+    reaches the policy in the bridge's spelling and must still match."""
+    from app.core.permission_handler import (
+        PermissionDecision,
+        PermissionRule,
+        permission_handler,
+    )
+    from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
+
+    monkeypatch.setattr(ha.DelegatedLoop, "supports_async_tool_policy", True, raising=False)
+    permission_handler._session_rules.setdefault("s-acp", []).append(PermissionRule(
+        id="rule-acp-deny", session_id="s-acp", profile_id=None, tool_name="mcp__weather__write_note",
+        tool_pattern=None, decision=PermissionDecision("deny")))
+    adapter = await _connected(
+        tmp_path, client, monkeypatch, mode="auto",
+        tool_allowlist=["ToolSearch", "mcp__weather__get_weather", "mcp__weather__write_note"])
+    engine = adapter._engine
+    try:
+        bundled = "mcp__fluid_bundled__mcp__weather__write_note"
+        assert adapter._permission_tool_name(bundled) == "mcp__weather__write_note"
+        # Names the bridge does not resolve stay as they are.
+        for name in ("mcp__fluid_bundled__CallTool", "mcp__fluid_bundled__mcp__weather__nope", "read_file"):
+            assert adapter._permission_tool_name(name) == name
+        assert await engine._policy_denial(bundled, {"text": "x"}) == SAVED_RULE_DENIAL
+        assert await engine._policy_denial("mcp__fluid_bundled__mcp__weather__get_weather", {"city": "Oslo"}) is None
+        text, _events = await _run_turn(engine, _call("mcp__weather__write_note", ask=True, text="x"))
+        assert "mcp denied" in text and "note saved" not in text, text
+    finally:
+        permission_handler.clear_session_rules("s-acp")
         await engine.aclose()
         await adapter._registry.aclose()
 

@@ -577,6 +577,18 @@ class AcpLoop:
             return name, data
         return f"mcp__{BUNDLED_SERVER_NAME}__{real}", args
 
+    def _registry_spec(self, tool_name: str) -> Any | None:
+        """The registry spec behind a bridged card name, as DelegatedLoop has.
+
+        Hosts judge saved rules and owner checks by the registry name
+        (mcp__weather__write_note), not the bridge's spelling. Only the bridge
+        prefix resolves: agy's own tools and the proxies stay as they are.
+        """
+        prefix = f"mcp__{BUNDLED_SERVER_NAME}__"
+        if self.registry is None or not tool_name.startswith(prefix):
+            return None
+        return self.registry.get(tool_name[len(prefix):])
+
     def _bridged_name(self, call: Mapping[str, Any]) -> str | None:
         title = str(call.get("title") or "")
         meta = call.get("_meta") if isinstance(call.get("_meta"), Mapping) else {}
@@ -1166,10 +1178,13 @@ class AcpLoop:
             try:
                 if self._interrupted.is_set():
                     return None
+                # Posted as AskUser, as _elicit does: hosts answer questions
+                # only for that name and treat any other as a permission card,
+                # whose approval carries no answer. The text names the tool.
                 await self._emit(QuestionRequest(
                     session_id=self.session_id, turn_id=mapper.turn_id, request_id=request_id,
-                    tool_use_id=request_id, name=f"mcp__{BUNDLED_SERVER_NAME}__{name}",
-                    message=str(desc.get("message") or f"{marker.server} needs input for {name}"),
+                    tool_use_id=request_id, name="AskUser",
+                    message=f"{name} asks: {desc.get('message') or 'it needs input to continue.'}",
                     schema=dict(desc["schema"]) if isinstance(desc.get("schema"), Mapping) else None,
                 ))
                 # Interrupt cancels the future; wait() never raises for that.
