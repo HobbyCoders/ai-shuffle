@@ -141,16 +141,16 @@
 		}
 	}
 
+	/** A failure throws, worded like the other sign-in errors, to the Danger zone by Remove. */
 	async function remove() {
 		if (!account) return;
 		const back = provider.item;
-		accountError = '';
 		try {
 			await providers.deleteClaudeSubscriptionAccount(account.id);
-			settingsNav.selectItem(back, 'providers');
 		} catch (e) {
-			accountError = accountErrorText(e, 'Could not remove this sign-in');
+			throw new Error(accountErrorText(e, 'Could not remove this sign-in'));
 		}
+		settingsNav.selectItem(back, 'providers');
 	}
 
 	const removeAction = $derived<DangerAction | null>(

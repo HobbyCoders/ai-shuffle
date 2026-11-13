@@ -36,14 +36,12 @@
 		} finally { saving = false; }
 	}
 
+	/** A failure throws through to the Danger zone, which shows it by Remove. */
 	async function remove() {
 		const back = provider.item;
-		error = '';
-		try {
-			if (account) await providers.deleteAnthropicAccount(account.id);
-			else { await providers.clearAnthropicKey(); await providers.loadClaude(); }
-			settingsNav.selectItem(back, 'providers');
-		} catch (e) { error = getErrorMessage(e, 'Could not remove this account'); }
+		if (account) await providers.deleteAnthropicAccount(account.id);
+		else { await providers.clearAnthropicKey(); await providers.loadClaude(); }
+		settingsNav.selectItem(back, 'providers');
 	}
 
 	const danger = $derived<DangerAction[]>(account || providers.current.anthropicKeySet ? [{

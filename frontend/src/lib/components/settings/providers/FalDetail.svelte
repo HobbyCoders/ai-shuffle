@@ -66,13 +66,11 @@
 			hint: 'Media generation stops',
 			button: 'Remove',
 			question: 'Remove the media key?',
+			// A failure throws through to the Danger zone, which shows it by Remove.
 			onConfirm: async () => {
-				try {
-					await providers.clearFalKey();
-					settingsNav.selectItem(provider.item, 'providers');
-				} catch (e) {
-					error = e instanceof Error ? e.message : 'Remove failed';
-				}
+				const back = provider.item;
+				await providers.clearFalKey();
+				settingsNav.selectItem(back, 'providers');
 			}
 		}
 	]);
