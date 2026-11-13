@@ -68,8 +68,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fluid.tools.mrtr import unresolved_notice
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
+from fluid.tools.mrtr import resolve_input_required, unresolved_notice
+from fluid.tools.registry import InputRequired, ToolCtx, ToolOutcome, ToolRegistry
 
 if TYPE_CHECKING:
     from fluid.hooks.bus import HookBus
@@ -88,6 +88,9 @@ STREAM_LINE_LIMIT = 16 * 1024 * 1024
 # A hook answered ``continue: false`` on a bridge-served call; the loop that
 # owns the CLI decides what ending the turn means.
 OnStop = Callable[[str], Awaitable[None]]
+# Asks the user an input_required tool's questions: (tool name, marker) ->
+# {server request id: answer}, or None when interrupted or unanswered.
+OnInputRequired = Callable[[str, InputRequired], Awaitable[dict[str, Any] | None]]
 # Environment entry the child reads its bridge token from.
 TOKEN_ENV = "FLUID_BUNDLED_TOKEN"
 _UNAUTHORIZED = {"error": "unauthorized: bridge token missing or wrong"}
@@ -170,6 +173,8 @@ async def serve_registry_socket(
     http_routes: dict[str, HttpRoute | JsonHttpRoute] | None = None,
     deferred: Callable[[str], bool] | None = None,
     agent_id_for_tool: Callable[[str | None], str | None] | None = None,
+    call_through: Callable[[str], bool] | None = None,
+    on_input_required: OnInputRequired | None = None,
 ) -> asyncio.AbstractServer:
     """Serve ``list``/``call`` requests against ``registry`` over a socket.
 
@@ -189,6 +194,16 @@ async def serve_registry_socket(
     ``deferred`` names the tools the CLI should keep behind its ToolSearch:
     each is still listed and callable, with ``_meta`` ``anthropic/alwaysLoad``
     false so only its name reaches the prompt until the model loads it.
+
+    ``call_through`` is for a client with no deferral of its own (an ACP
+    agent): the tools it names are left off the list, announced by
+    ``LoadTools`` and run through ``CallTool`` (see ``_answer`` and
+    ``fluid.tools.mcp.call_through``).
+
+    ``on_input_required`` is for a client with a user behind it (an ACP
+    agent): a tool that pauses on ``input_required`` has its questions asked
+    through it and is re-run with the answers. Without it the client is told
+    the user was not asked (the delegated CLI owns its own loop).
 
     ``http_routes`` (with ``http_token``, required for them) maps a path to
     the handler of a JSON ``POST`` there; see ``_serve_http``.
@@ -233,7 +248,8 @@ async def serve_registry_socket(
                 resp = await _answer(
                     registry, call_ctx, req,
                     tool_filter=tool_filter, permissions=permissions, hooks=hooks,
-                    on_stop=on_stop, deferred=deferred,
+                    on_stop=on_stop, deferred=deferred, call_through=call_through,
+                    on_input_required=on_input_required,
                 )
                 writer.write((json.dumps(resp) + "\n").encode())
                 await writer.drain()
@@ -433,6 +449,7 @@ async def _gate_call(
     hooks: HookBus | None,
     on_stop: OnStop | None = None,
     tool_use_id: str | None = None,
+    on_input_required: OnInputRequired | None = None,
 ) -> ToolOutcome:
     """PreToolUse hook → PermissionEngine → dispatch → PostToolUse, the order
     ``NativeLoop._gated_call`` uses, for a caller with no user on the far
@@ -450,6 +467,9 @@ async def _gate_call(
     ``tool_use_id`` is the CLI's id for the call when its request carried
     one. It goes into every hook payload and into the handler's
     ``ctx.extra["tool_use_id"]``.
+
+    ``on_input_required``: an ``input_required`` pause is resolved here, before
+    PostToolUse, by re-running the same tool with the answers (fluid.tools.mrtr).
     """
     from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, hook_reminder
     from fluid.permissions.engine import non_interactive_denial
@@ -510,7 +530,16 @@ async def _gate_call(
             "session_id": ctx.session_id, "name": name, "input": args,
             "tool_use_id": tool_use_id, **identity,
         })
-    outcome = await registry.dispatch(name, args, _call_ctx(ctx, tool_use_id))
+    call_ctx = _call_ctx(ctx, tool_use_id)
+    outcome = await registry.dispatch(name, args, call_ctx)
+    if on_input_required is not None:
+        outcome = await resolve_input_required(
+            outcome, name=name,
+            collect=lambda marker: on_input_required(name, marker),
+            redispatch=lambda answers, request_state: registry.dispatch(
+                name, args, call_ctx, input_responses=answers, request_state=request_state,
+            ),
+        )
     if hooks is not None:
         decision = await hooks.emit(
             POST_TOOL_USE,
@@ -538,6 +567,32 @@ async def _gate_call(
     return outcome
 
 
+def served_specs(
+    registry: ToolRegistry, ctx: ToolCtx,
+    tool_filter: Callable[[str], bool] | None = None,
+    *,
+    call_through: bool = False,
+) -> list[Any]:
+    """The registry tools this bridge serves to its client.
+
+    Without ``call_through``: the loaded in-proc and builtin tools. With it,
+    also the deferred tier and the host-connected MCP servers' tools, which
+    the client reaches through the call-through proxy (``call_through``).
+    """
+    sources = ("inproc", "builtin", "mcp") if call_through else ("inproc", "builtin")
+    return [
+        s for s in registry.list_tools(loaded_only=not call_through)
+        if s.source in sources
+        # Same rule as the native request schemas: a tool whose host
+        # capability is not wired on this ctx is invisible, not
+        # advertised-and-erroring.
+        and all(key in ctx.extra for key in (s.requires_extra or ()))
+        # The session tool restriction: a filtered tool is not listed,
+        # not merely refused when called.
+        and _permitted(tool_filter, s.name)
+    ]
+
+
 async def _answer(
     registry: ToolRegistry, ctx: ToolCtx, req: dict[str, Any],
     *,
@@ -546,43 +601,67 @@ async def _answer(
     hooks: HookBus | None = None,
     on_stop: OnStop | None = None,
     deferred: Callable[[str], bool] | None = None,
+    call_through: Callable[[str], bool] | None = None,
+    on_input_required: OnInputRequired | None = None,
 ) -> dict[str, Any]:
+    """One socket request.
+
+    ``call_through`` (for a client with no deferral of its own, see
+    ``fluid.tools.mcp.call_through``) names the served tools to keep off the
+    tool list: they are announced by ``LoadTools`` and run through
+    ``CallTool``, which is unwrapped here so the filter, hooks and
+    permissions below see the real tool.
+    """
+    from fluid.tools.mcp import call_through as proxy
+
     op = req.get("op")
     if op == "list":
-        specs = [
-            s for s in registry.list_tools(loaded_only=True)
-            if s.source in ("inproc", "builtin")
-            # Same rule as the native request schemas: a tool whose host
-            # capability is not wired on this ctx is invisible, not
-            # advertised-and-erroring.
-            and all(key in ctx.extra for key in (s.requires_extra or ()))
-            # The session tool restriction: a filtered tool is not listed,
-            # not merely refused when called.
-            and _permitted(tool_filter, s.name)
-        ]
+        specs = served_specs(registry, ctx, tool_filter, call_through=call_through is not None)
         tools: list[dict[str, Any]] = []
+        hidden: list[str] = []
         for s in specs:
+            if call_through is not None and call_through(s.name):
+                hidden.append(s.name)
+                continue
             entry: dict[str, Any] = {
                 "name": s.name, "description": s.description, "input_schema": s.input_schema,
             }
             if deferred is not None and deferred(s.name):
                 entry["meta"] = {ALWAYS_LOAD_META_KEY: False}
             tools.append(entry)
+        if hidden:
+            tools.extend(proxy.proxy_tools(hidden))
         return {"tools": tools}
     if op == "call":
         name = req.get("name", "")
+        args = req.get("arguments") or {}
+        if call_through is not None and name in proxy.PROXY_TOOLS:
+            served = {
+                s.name: s for s in served_specs(registry, ctx, tool_filter, call_through=True)
+            }
+            if name == proxy.LOAD_TOOL:
+                return _load_answer(registry, served, args)
+            name, args = proxy.unwrap_call(args)
+            if name not in served:
+                return {
+                    "text": f"tool not available in this session: {name or '(no name)'}. "
+                            f"{proxy.LOAD_TOOL} lists the tools you can run.",
+                    "is_error": True,
+                }
         if not _permitted(tool_filter, name):
             return {"text": f"tool not available in this session: {name}", "is_error": True}
         tool_use_id = req.get("tool_use_id")
         outcome = await _gate_call(
-            registry, ctx, name, req.get("arguments") or {},
+            registry, ctx, name, args,
             permissions=permissions, hooks=hooks, on_stop=on_stop,
             tool_use_id=tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None,
+            on_input_required=on_input_required,
         )
         # MRTR: the tool paused on input_required (an MCP server or a
-        # builtin/in-proc tool). This bridge is a request/response socket with no event
-        # bus and no user on the far end — the delegated CLI owns the loop — so
-        # the round-trip cannot happen here. Its first leg is an EMPTY result
+        # builtin/in-proc tool) and no ``on_input_required`` resolved it. This
+        # bridge is a request/response socket with no event bus and no user on
+        # the far end — the delegated CLI owns the loop — so the round-trip
+        # cannot happen here. Its first leg is an EMPTY result
         # carrying the marker; forwarding that text would tell the CLI's model
         # the question was answered with silence. Say what happened instead.
         if outcome.input_required is not None:
@@ -597,6 +676,38 @@ async def _answer(
         return _call_answer(outcome)
     return {"error": f"unknown op: {op!r}"}
 
+
+def _load_answer(registry: ToolRegistry, served: dict[str, Any], args: Any) -> dict[str, Any]:
+    """``LoadTools``: the schemas of named or matching served tools, as text.
+
+    Only tools this session is served (filtered and wired) are found; any
+    other name reads as one that does not exist.
+    """
+    from fluid.tools.mcp import call_through as proxy
+
+    args = args if isinstance(args, dict) else {}
+    raw = args.get("names")
+    names = [raw] if isinstance(raw, str) else [n for n in raw or () if isinstance(n, str)]
+    found: list[Any] = []
+    missing: list[str] = []
+    for asked in names:
+        name = proxy.real_name(asked)
+        spec = served.get(name)
+        if spec is None:
+            # A bare tool name without its server, when exactly one matches.
+            tails = [s for n, s in served.items() if n.rsplit("__", 1)[-1] == name]
+            spec = tails[0] if len(tails) == 1 else None
+        if spec is None:
+            missing.append(asked)
+        elif spec not in found:
+            found.append(spec)
+    query = args.get("query")
+    if isinstance(query, str) and query.strip():
+        matches = [s for s in registry.search_tools(query) if s.name in served]
+        found.extend(s for s in matches[:5] if s not in found)
+    if not names and not (isinstance(query, str) and query.strip()):
+        return {"text": "Pass `names` or `query`.", "is_error": True}
+    return {"text": proxy.load_text(found, missing), "is_error": not found}
 
 def _call_answer(outcome: ToolOutcome) -> dict[str, Any]:
     """The socket reply for one call: text, error flag and any images.

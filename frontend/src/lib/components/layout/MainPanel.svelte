@@ -1070,9 +1070,11 @@
 
 {#snippet headerActions()}
 	<!-- A running session without a project: the pill opens the one-way
-	     attach sheet (#371 step 4). It hides itself everywhere else. -->
-	{#if $activeView?.type === 'session' && activeTab?.sessionId}
-		<NoProjectPill compact={!!header || phoneLayout.active} />
+	     attach sheet (#371 step 4). It hides itself everywhere else. The
+	     desktop shows it under the composer (ContextPillBar); only the phone,
+	     whose composer has no context row, keeps it in the top bar. -->
+	{#if $activeView?.type === 'session' && activeTab?.sessionId && (!!header || phoneLayout.active)}
+		<NoProjectPill variant="compact" />
 	{/if}
 	<!-- Not in a subagent's chat: its requests and approvals show in its main
 	     chat's panel, labelled with the subagent. -->

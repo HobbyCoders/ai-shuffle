@@ -551,7 +551,7 @@ Check a Grok sign-in once. Same statuses and errors as the ChatGPT poll. On `com
 
 ## Google Antigravity
 
-Google Antigravity runs Google's own Antigravity agent (`agy`) on the worker and drives it over the Agent Client Protocol. The agent does its own file and shell work and asks AI Shuffle before it acts; AI Shuffle's tools reach it as an MCP server. Only Gemini models are offered. Rows have `provider_type: "antigravity"` and one of three `auth_mode` values:
+Google Antigravity runs Google's own Antigravity agent (`agy`) on the worker and drives it over the Agent Client Protocol. The agent does its own file and shell work and asks AI Shuffle before it acts; AI Shuffle's tools, and the MCP servers the session connects, reach it through one MCP server. To keep the prompt small, that server lists only a few everyday tools in full; the agent sees the rest by name and runs them through `LoadTools` and `CallTool`, with the same approval card and rules as calling the tool directly. Only Gemini models are offered. Rows have `provider_type: "antigravity"` and one of three `auth_mode` values:
 
 | `auth_mode` | In Settings | How it connects |
 | --- | --- | --- |
