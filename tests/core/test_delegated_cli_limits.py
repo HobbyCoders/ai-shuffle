@@ -32,12 +32,44 @@ def test_a_profile_value_wins():
     assert env["FOO"] == "bar"
 
 
-def test_a_profile_change_respawns_a_provider_session():
-    from app.core.session_pool import provider_env_requires_reconnect
+def _reasons(old_env, new_env, kind="delegated"):
+    from types import SimpleNamespace
 
-    old = {"ANTHROPIC_BASE_URL": "https://gw", "MAX_MCP_OUTPUT_TOKENS": "8000"}
-    new = {"ANTHROPIC_BASE_URL": "https://gw", "MAX_MCP_OUTPUT_TOKENS": "20000"}
-    assert provider_env_requires_reconnect(old, new)
+    from app.core.agent_types import AgentOptions
+    from app.core.session_pool import SessionState, reconnect_option_names
+
+    state = SessionState(
+        adapter=SimpleNamespace(provider_kind=kind), connect_options=AgentOptions(env=old_env),
+    )
+    return reconnect_option_names(state, AgentOptions(env=new_env))
+
+
+@pytest.mark.parametrize("key,old,new", [
+    ("BASH_MAX_OUTPUT_LENGTH", "12000", "40000"),
+    ("MAX_MCP_OUTPUT_TOKENS", None, "20000"),
+    ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1", "0"),
+])
+@pytest.mark.parametrize("gateway", [False, True], ids=["subscription", "gateway"])
+def test_a_profile_change_respawns_a_delegated_session(key, old, new, gateway):
+    base = {"ANTHROPIC_BASE_URL": "https://gw"} if gateway else {}
+    old_env = {**base, **({key: old} if old is not None else {})}
+    assert "delegated_cli_limits" in _reasons(old_env, {**base, key: new})
+
+
+@pytest.mark.parametrize("old_env,new_env", [
+    ({}, {}),
+    (None, {"BASH_MAX_OUTPUT_LENGTH": "12000", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}),
+    ({"BASH_MAX_OUTPUT_LENGTH": "12000"}, {"BASH_MAX_OUTPUT_LENGTH": " 12000 "}),
+    ({"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}, {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "TRUE"}),
+    ({"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}, {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "off"}),
+    ({"FOO": "a"}, {"FOO": "b"}),
+], ids=["absent", "explicit-default", "spacing", "truthy-spelling", "falsy-spelling", "unrelated"])
+def test_the_same_effective_limits_keep_the_session(old_env, new_env):
+    assert _reasons(old_env, new_env) == []
+
+
+def test_a_native_lane_session_ignores_the_limits():
+    assert _reasons({}, {"BASH_MAX_OUTPUT_LENGTH": "40000"}, kind="native") == []
 
 
 @pytest.mark.asyncio

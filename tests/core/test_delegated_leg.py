@@ -739,37 +739,50 @@ def test_delegated_skills_block_is_one_short_line_per_skill():
 
 
 def test_delegated_skills_skip_what_claude_code_lists(tmp_path, _isolated_home):
-    """A skill Claude Code already lists is not listed again: same name in
-    its skills folder, the same skill under another name (same description),
-    or a skill from a plugin Claude Code has enabled."""
+    """Only a skill whose SKILL.md matches one Claude Code lists (apart from
+    the name) is left out. A shared name or description, an enabled plugin, a
+    skill Claude Code hides from the model or an unreadable file keeps it."""
     import json as _json
 
     from fluid.context.instructions import Skill
 
+    def put(path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    same = "---\nname: {}\ndescription: Remove AI writing patterns\n---\nbody\n"
     claude = _isolated_home / ".claude"
-    (claude / "skills" / "unnslop").mkdir(parents=True)
-    (claude / "skills" / "unnslop" / "SKILL.md").write_text(
-        "---\nname: unnslop\ndescription: Remove AI writing patterns\n---\nbody", encoding="utf-8",
-    )
-    (claude / "settings.json").write_text(
-        _json.dumps({"enabledPlugins": {"tidy@market": True, "off@market": False}}),
-        encoding="utf-8",
-    )
+    put(claude / "skills" / "unnslop" / "SKILL.md", same.format("unnslop"))
+    put(claude / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\ndescription: Ship\n---\nold steps\n")
+    put(claude / "skills" / "quiet" / "SKILL.md",
+        "---\nname: quiet\ndescription: Q\ndisable-model-invocation: true\n---\nq\n")
+    put(claude / "settings.json", _json.dumps({"enabledPlugins": {"tidy@market": True}}))
+    fluid = tmp_path / "f"
     skills = [
-        Skill(name="unnslop", description="Remove AI writing patterns", path="/f/unnslop/SKILL.md"),
-        Skill(name="unslop:unslop", description="Remove  AI writing\npatterns", path="/p/SKILL.md", scope="plugin"),
-        Skill(name="tidy:clean", description="Tidy", path="/t/SKILL.md", scope="plugin"),
-        Skill(name="off:thing", description="Off", path="/x/SKILL.md", scope="plugin"),
-        Skill(name="deploy", description="Ship a build", path="/d/deploy/SKILL.md"),
+        Skill(name="unnslop", description="Remove AI writing patterns",
+              path=put(fluid / "unnslop" / "SKILL.md", same.format("unnslop"))),
+        Skill(name="unslop:unslop", description="Remove AI writing patterns", scope="plugin",
+              path=put(fluid / "p" / "unslop" / "SKILL.md", same.format("unslop"))),
+        Skill(name="deploy", description="Ship",
+              path=put(fluid / "deploy" / "SKILL.md", "---\nname: deploy\ndescription: Ship\n---\nnew steps\n")),
+        Skill(name="other", description="Remove AI writing patterns",
+              path=put(fluid / "other" / "SKILL.md", same.format("other").replace("body", "different"))),
+        Skill(name="tidy:clean", description="Tidy", scope="plugin",
+              path=put(fluid / "t" / "clean" / "SKILL.md", "---\nname: clean\ndescription: Tidy\n---\nt\n")),
+        Skill(name="quiet", description="Q",
+              path=put(fluid / "quiet" / "SKILL.md",
+                       "---\nname: quiet\ndescription: Q\ndisable-model-invocation: true\n---\nq\n")),
+        Skill(name="gone", description="Remove AI writing patterns", path=str(fluid / "gone" / "SKILL.md")),
     ]
     kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=True, project_on=True)
-    assert [s.name for s in kept] == ["off:thing", "deploy"]
+    assert [s.name for s in kept] == ["deploy", "other", "tidy:clean", "quiet", "gone"]
     # Without the user scope Claude Code's user folder is not consulted.
     kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=False, project_on=True)
     assert len(kept) == len(skills)
     # A project skill in the working folder's .claude/skills counts too.
-    (tmp_path / ".claude" / "skills" / "deploy").mkdir(parents=True)
-    (tmp_path / ".claude" / "skills" / "deploy" / "SKILL.md").write_text("no frontmatter", encoding="utf-8")
+    put(tmp_path / ".claude" / "skills" / "ship" / "SKILL.md",
+        "---\nname: ship\ndescription: Ship\n---\nnew steps\n")
     kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=False, project_on=True)
     assert "deploy" not in [s.name for s in kept]
 

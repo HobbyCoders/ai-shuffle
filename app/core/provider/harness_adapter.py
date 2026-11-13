@@ -8497,25 +8497,33 @@ def _delegated_skills_block(skills: Any) -> Optional[str]:
     return f"{skills_header(DELEGATED_SKILLS_HEADER, shown)}\n" + "\n".join(lines)
 
 
-def _claude_listed_skills(
-    cwd: str, *, user_on: bool, project_on: bool
-) -> Tuple[set, set, set]:
-    """What Claude Code's own skill listing already holds for this session.
-
-    Returns ``(names, descriptions, plugins)``: skill folder and frontmatter
-    names under ``.claude/skills`` (the CLI's folder for the user scope, the
-    working folder for the project scope), their one-line
-    descriptions, and the names of the plugins enabled in Claude Code's
-    settings. Saved sign-in folders link ``skills``, ``plugins`` and
-    ``settings.json`` to the CLI's own folder, so that folder serves them all.
-    An unreadable file is skipped.
+def _skill_fingerprint(text: str) -> Optional[Tuple[str, str]]:
+    """A SKILL.md's content apart from its ``name`` field, or None when a model
+    may not invoke it (``disable-model-invocation``). The same skill installed
+    under two names (``unnslop`` and the ``unslop`` plugin's ``unslop:unslop``)
+    differs only in that field.
     """
-    from app.core import claude_cli_home
     from fluid.context.instructions import parse_frontmatter
 
-    names: set = set()
-    descriptions: set = set()
-    plugins: set = set()
+    # Callers read with Path.read_text, which already folds CRLF into LF.
+    fields, body = parse_frontmatter(text)
+    hidden = fields.get("disable-model-invocation")
+    if hidden is True or str(hidden).strip().lower() == "true":
+        return None
+    rest = {str(k): str(v) for k, v in fields.items() if k != "name"}
+    return json.dumps(rest, sort_keys=True), body.strip()
+
+
+def _claude_listed_skills(cwd: str, *, user_on: bool, project_on: bool) -> set:
+    """Fingerprints (:func:`_skill_fingerprint`) of the skills Claude Code
+    itself lists to the model this session: readable, model-invocable
+    ``skills/*/SKILL.md`` under the CLI's own folder for the user scope and
+    the working folder's ``.claude`` for the project scope. Saved sign-in
+    folders link ``skills`` to the CLI's own folder, so it serves them too.
+    """
+    from app.core import claude_cli_home
+
+    found: set = set()
     bases: List[Path] = []
     if user_on:
         try:
@@ -8532,28 +8540,13 @@ def _claude_listed_skills(
         except OSError:
             skill_files = []
         for skill_file in skill_files:
-            names.add(skill_file.parent.name)
             try:
-                fields, _ = parse_frontmatter(skill_file.read_text(encoding="utf-8"))
+                fingerprint = _skill_fingerprint(skill_file.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError):
                 continue
-            if isinstance(fields.get("name"), str) and fields["name"].strip():
-                names.add(fields["name"].strip())
-            if isinstance(fields.get("description"), str):
-                text = " ".join(fields["description"].split())
-                if text:
-                    descriptions.add(text)
-        for settings_name in ("settings.json", "settings.local.json"):
-            try:
-                data = json.loads((base / settings_name).read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            enabled = data.get("enabledPlugins") if isinstance(data, dict) else None
-            if isinstance(enabled, dict):
-                plugins.update(
-                    str(key).split("@", 1)[0] for key, on in enabled.items() if on
-                )
-    return names, descriptions, plugins
+            if fingerprint is not None:
+                found.add(fingerprint)
+    return found
 
 
 def _not_listed_by_claude(
@@ -8561,33 +8554,30 @@ def _not_listed_by_claude(
 ) -> List[Any]:
     """``skills`` without those Claude Code's own skill listing already shows.
 
-    A skill is dropped when Claude Code lists one of the same name, the same
-    description (the same skill installed under another name, such as
-    ``unnslop`` and ``unslop:unslop``), or when it comes from a plugin of the
-    same name that Claude Code has enabled.
+    A skill is dropped only when Claude Code lists a skill with the same
+    SKILL.md content apart from the name. A skill that shares only a name or a
+    description with one of Claude Code's is kept: its own file is reachable
+    only through this list.
     """
     skills = list(skills or [])
     if not skills:
         return skills
     try:
-        names, descriptions, plugins = _claude_listed_skills(
-            cwd, user_on=user_on, project_on=project_on
-        )
+        listed = _claude_listed_skills(cwd, user_on=user_on, project_on=project_on)
     except Exception:  # noqa: BLE001 — a failed scan keeps the full list
         logger.warning("[HarnessAdapter] Claude Code skill scan failed", exc_info=True)
         return skills
-    if not (names or descriptions or plugins):
+    if not listed:
         return skills
 
-    def listed(skill: Any) -> bool:
-        name = str(getattr(skill, "name", ""))
-        if name in names:
-            return True
-        if ":" in name and name.split(":", 1)[0] in plugins:
-            return True
-        return " ".join(str(getattr(skill, "description", "") or "").split()) in descriptions
+    def shown(skill: Any) -> bool:
+        try:
+            text = Path(str(getattr(skill, "path", "") or "")).read_text(encoding="utf-8")
+            return _skill_fingerprint(text) in listed
+        except Exception:  # noqa: BLE001 — an unreadable skill stays listed
+            return False
 
-    return [skill for skill in skills if not listed(skill)]
+    return [skill for skill in skills if not shown(skill)]
 
 
 def _delegated_skills_index(options: SessionOptions) -> Optional[str]:
