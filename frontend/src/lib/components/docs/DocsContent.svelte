@@ -9,35 +9,31 @@
 	 * - In-panel navigation for `/docs/<category>/<slug>#anchor` and `#anchor` links
 	 * - Existing .prose CSS styling
 	 */
-	import { tick } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { marked, type Renderer, type Tokens } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { layout } from '$lib/stores/layout.svelte';
-	import type { DocSection } from '$lib/docs/types';
+	import { createSlugger, DOC_MARKED_OPTIONS } from '$lib/docs/markdown';
+	import { matchTerms } from '$lib/docs/search';
 
 	interface Props {
 		content: string;
 		/** DetailPane provides the article title; retain its anchor without a duplicate heading. */
 		framed?: boolean;
-		onHeadingsExtracted?: (headings: DocSection[]) => void;
+		/** A search to reveal: the first match is scrolled to and marked. A new `key` repeats it. */
+		find?: { query: string; key: number } | null;
 	}
 
-	let { content, framed = false, onHeadingsExtracted }: Props = $props();
+	let { content, framed = false, find = null }: Props = $props();
 
 	let contentEl = $state<HTMLDivElement | null>(null);
 
-	// Custom renderer for heading IDs
+	// Heading anchors are unique per document (#1475); a fresh slugger per parse.
+	let slug = createSlugger();
 	const renderer = new marked.Renderer();
 	renderer.heading = function (this: Renderer, { text, tokens, depth }: Tokens.Heading) {
-		const slug = text
-			.toLowerCase()
-			.replace(/<[^>]*>/g, '')
-			.replace(/[^\w\s-]/g, '')
-			.replace(/\s+/g, '-')
-			.replace(/-+/g, '-')
-			.trim();
 		// Inline markup renders: a heading's `curl` is code, not literal backticks.
-		return `<h${depth} id="${slug}">${this.parser.parseInline(tokens)}</h${depth}>`;
+		return `<h${depth} id="${slug(text)}">${this.parser.parseInline(tokens)}</h${depth}>`;
 	};
 
 	// Enhanced code blocks with copy button. The markup goes through the
@@ -107,27 +103,52 @@
 
 	const renderedHtml = $derived.by(() => {
 		if (!content) return '';
-		return marked.parse(content, { renderer, gfm: true, breaks: true }) as string;
+		slug = createSlugger();
+		return marked.parse(content, { renderer, ...DOC_MARKED_OPTIONS }) as string;
 	});
 
-	// Extract headings after render for ToC
+	/** Text the reader sees: not the hidden duplicate title or a code block's Copy button. */
+	function readableTextNodes(root: HTMLElement): Text[] {
+		const hiddenTitle = framed && root.firstElementChild?.tagName === 'H1' ? root.firstElementChild : null;
+		const nodes: Text[] = [];
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+			const parent = node.parentElement;
+			if (!parent || (hiddenTitle && hiddenTitle.contains(parent)) || parent.closest('.code-block-header')) continue;
+			nodes.push(node as Text);
+		}
+		return nodes;
+	}
+
+	/** Scroll to and mark the first match of a search: the whole query, else its first word found (#1478). */
+	function revealMatch(query: string) {
+		if (!contentEl) return;
+		for (const old of contentEl.querySelectorAll('mark.doc-find-hit')) old.replaceWith(...old.childNodes);
+		contentEl.normalize();
+		const nodes = readableTextNodes(contentEl);
+		for (const term of matchTerms(query)) {
+			for (const node of nodes) {
+				const at = (node.nodeValue ?? '').toLowerCase().indexOf(term);
+				if (at === -1) continue;
+				const range = document.createRange();
+				range.setStart(node, at);
+				range.setEnd(node, at + term.length);
+				const mark = document.createElement('mark');
+				mark.className = 'doc-find-hit';
+				range.surroundContents(mark);
+				mark.scrollIntoView?.({ block: 'center' });
+				return;
+			}
+		}
+	}
+
+	let foundKey: number | null = null;
 	$effect(() => {
-		if (!contentEl || !onHeadingsExtracted) return;
-		// Track new article content for the table of contents.
-		void renderedHtml;
-		requestAnimationFrame(() => {
-			if (!contentEl) return;
-			const headingEls = contentEl.querySelectorAll('h2, h3');
-			const headings: DocSection[] = [];
-			headingEls.forEach((el) => {
-				headings.push({
-					id: el.id,
-					title: el.textContent || '',
-					level: parseInt(el.tagName[1])
-				});
-			});
-			onHeadingsExtracted?.(headings);
-		});
+		void renderedHtml; // Runs after the new document is in the DOM.
+		const target = find;
+		if (!target || !contentEl || target.key === foundKey) return;
+		foundKey = target.key;
+		untrack(() => revealMatch(target.query));
 	});
 </script>
 
@@ -167,4 +188,5 @@
  .docs-content :global(th) { text-align:left; font-weight:500; padding:10px 12px; color:var(--muted-foreground); border-bottom:1px solid var(--border); }
  .docs-content :global(td) { overflow-wrap:anywhere; padding:10px 12px; border-bottom:1px solid var(--border); }
  .docs-content :global(img) { max-width:100%; height:auto; }
+ .docs-content :global(mark.doc-find-hit) { background:var(--st-primary-soft); color:inherit; border-radius:2px; box-shadow:0 0 0 2px var(--st-primary-soft); }
 </style>

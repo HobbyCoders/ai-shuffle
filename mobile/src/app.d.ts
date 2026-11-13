@@ -15,6 +15,8 @@ declare global {
 			mobileControls?: boolean;
 			/** The Chat controls page (Model, Agent…) whose own Back entry is on the stack. */
 			mobileControlsPage?: string;
+			/** The Docs document a Back/Forward step onto this entry opens (`category/slug`). */
+			docsDoc?: string;
 		}
 		// interface Platform {}
 	}

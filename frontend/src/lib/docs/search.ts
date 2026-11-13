@@ -6,10 +6,33 @@
  */
 
 import type { DocEntry, SearchResult } from './types';
+import { markdownToPlainText } from './markdown';
+
+/** Words of a query as the index splits them. */
+function tokenize(text: string): string[] {
+	return text
+		.toLowerCase()
+		.replace(/[^\w\s-]/g, ' ')
+		.split(/\s+/)
+		.filter((t) => t.length > 2);
+}
+
+/**
+ * What a query matches in a document, best first: the whole query as typed,
+ * then each of its words. The snippet and the jump into the opened document
+ * both take the first of these that occurs, so they show the same place.
+ */
+export function matchTerms(query: string): string[] {
+	const phrase = query.trim().toLowerCase().replace(/\s+/g, ' ');
+	const terms = phrase.length >= 2 ? [phrase] : [];
+	for (const token of tokenize(query)) if (!terms.includes(token)) terms.push(token);
+	return terms;
+}
 
 export class DocsSearchEngine {
 	private index = new Map<string, Set<string>>(); // token -> full slugs
 	private docs = new Map<string, DocEntry>(); // full slug -> entry
+	private plain = new Map<string, string>(); // full slug -> readable text
 	private built = false;
 
 	constructor(private entries: DocEntry[]) {}
@@ -19,6 +42,7 @@ export class DocsSearchEngine {
 		for (const entry of this.entries) {
 			const key = `${entry.category}/${entry.slug}`;
 			this.docs.set(key, entry);
+			this.plain.set(key, markdownToPlainText(entry.content));
 			this.indexDoc(key, entry);
 		}
 		this.built = true;
@@ -87,41 +111,28 @@ export class DocsSearchEngine {
 					title: entry.title,
 					category: entry.category,
 					score,
-					snippets: this.extractSnippets(entry, queryTokens)
+					snippets: this.extractSnippets(this.plain.get(key) ?? '', query)
 				};
 			});
 	}
 
-	private extractSnippets(entry: DocEntry, tokens: string[]): string[] {
-		const snippets: string[] = [];
-		const contentLower = entry.content.toLowerCase();
-
-		for (const token of tokens) {
-			const idx = contentLower.indexOf(token);
+	/** One readable snippet around the first match (see `matchTerms`), never raw Markdown (#1478). */
+	private extractSnippets(text: string, query: string): string[] {
+		const lower = text.toLowerCase();
+		for (const term of matchTerms(query)) {
+			const idx = lower.indexOf(term);
 			if (idx === -1) continue;
-
 			const start = Math.max(0, idx - 50);
-			const end = Math.min(entry.content.length, idx + token.length + 50);
-			let snippet = entry.content.slice(start, end).trim();
-
-			// Clean up markdown syntax
-			snippet = snippet.replace(/[#*`_\[\]]/g, '');
-
+			const end = Math.min(text.length, idx + term.length + 50);
+			let snippet = text.slice(start, end).trim();
 			if (start > 0) snippet = '...' + snippet;
-			if (end < entry.content.length) snippet = snippet + '...';
-
-			snippets.push(snippet);
-			if (snippets.length >= 2) break;
+			if (end < text.length) snippet = snippet + '...';
+			return [snippet];
 		}
-
-		return snippets;
+		return [];
 	}
 
 	private tokenize(text: string): string[] {
-		return text
-			.toLowerCase()
-			.replace(/[^\w\s-]/g, ' ')
-			.split(/\s+/)
-			.filter((t) => t.length > 2);
+		return tokenize(text);
 	}
 }

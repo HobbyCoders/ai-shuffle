@@ -14,6 +14,42 @@ describe('DocsContent headings', () => {
 		expect(heading.querySelector('code')?.textContent).toBe('curl');
 		expect(heading.id).toBe('scripts-and-curl');
 	});
+
+	it('gives repeated headings unique anchors that match the contents list (#1475)', async () => {
+		const { extractHeadings } = await import('$lib/docs/markdown');
+		const md = '## 1.1\n\n### Removed\n\n## 1.0\n\n### Removed';
+		const { container } = render(DocsContent, { content: md });
+		const ids = [...container.querySelectorAll('h2, h3')].map((h) => h.id);
+		expect(ids).toEqual(['11', 'removed', '10', 'removed-1']);
+		expect(extractHeadings(md).map((h) => h.id)).toEqual(ids);
+	});
+});
+
+describe('DocsContent find (#1478)', () => {
+	it('marks and scrolls to the first readable match, once per search', async () => {
+		const scrolled: string[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this.textContent ?? ''); };
+		try {
+			const content = '# Away for all chats\n\n```sh\naway\n```\n\n| Mode | Note |\n| --- | --- |\n| Quiet | Away for all chats pauses replies |';
+			const view = render(DocsContent, { content, framed: true, find: { query: 'away for all', key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit')).toHaveLength(1));
+			const mark = view.container.querySelector('mark.doc-find-hit')!;
+			// Not the hidden duplicate title, and the whole phrase before a lone word in code.
+			expect(mark.closest('td')).not.toBeNull();
+			expect(mark.textContent).toBe('Away for all');
+			expect(scrolled).toEqual(['Away for all']);
+
+			await view.rerender({ content, framed: true, find: { query: 'away for all', key: 1 } });
+			expect(scrolled).toHaveLength(1);
+			await view.rerender({ content, framed: true, find: { query: 'pauses', key: 2 } });
+			await waitFor(() => expect(scrolled).toEqual(['Away for all', 'pauses']));
+			expect([...view.container.querySelectorAll('mark.doc-find-hit')].map((m) => m.textContent)).toEqual(['pauses']);
+			expect(view.container.querySelector('td:last-child')!.textContent).toBe('Away for all chats pauses replies');
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+	});
 });
 
 describe('DocsContent code copy', () => {
@@ -168,7 +204,7 @@ describe('DocsContent anchor links', () => {
 		const { scroll, restore } = captureScroll();
 		try {
 			const { container } = render(DocsContent, { content: '[Hooks](/docs/features/hooks#exit-codes)\n\n## Exit codes' });
-			frames.length = 0; // drop the heading-extraction frame from mount
+			frames.length = 0; // only the click's frame counts
 			container.querySelector('a')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
 			expect(open).toHaveBeenCalledExactlyOnceWith('docs', 'features/hooks');
 			// The target page renders after the panel switches, so the scroll waits a frame.

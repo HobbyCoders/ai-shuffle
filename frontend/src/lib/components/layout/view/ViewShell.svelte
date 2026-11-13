@@ -62,9 +62,11 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		/** Identity of the open item. The detail keeps scrolling on its own beside the
 		 *  list, so when this changes the new item opens at its top. */
 		detailKey?: unknown;
+		/** Extra `page.state` for the phone Back step into the detail, e.g. which item it opened. */
+		historyState?: Record<string, unknown>;
 	}
 	let { panel, main, label, detailOpen = false, onBack, manageHistory = true, inheritScope = false, nestedPanes = false, contentFirst = false,
-		stacked = $bindable(false), detailKey }: Props = $props();
+		stacked = $bindable(false), detailKey, historyState }: Props = $props();
 	const contexts = getAllContexts();
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	const active = $derived(feature?.active ?? true);
@@ -121,7 +123,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 				if (cancelled || detailHistory.retiring) return;
 				try {
 					if ((page.state as { viewPanelDetail?: string }).viewPanelDetail !== historyKey) {
-						pushState('', { ...page.state, viewPanelDetail: historyKey } as App.PageState);
+						pushState('', { ...page.state, ...historyState, viewPanelDetail: historyKey } as App.PageState);
 					}
 					pushed = true;
 				} catch { /* Routerless tests still have an in-page back. */ }
