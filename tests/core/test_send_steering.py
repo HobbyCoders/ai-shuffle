@@ -1317,9 +1317,10 @@ def test_the_voice_note_is_static_text():
     assert voice_turn_note(DELEGATION_INSTRUCTIONS) == voice_turn_note(DELEGATION_INSTRUCTIONS)
     assert voice_turn_note("").startswith("<system-reminder>\n# Voice call\n")
     assert DELEGATION_INSTRUCTIONS in voice_turn_note("")
-    for guidance in ("listening, not reading", "Never end a turn silently",
+    for guidance in ("write it for the ear", "Lead with the answer", "about 60 words", "Never end a turn silently",
                      "say in your reply what you are waiting on", "not only in a question card",
-                     "Keep code, tables", "Write them in the first person"):
+                     "no markdown, lists, headings, code, paths or links", "ask if they want the rest",
+                     "Write them in the first person", "one short plain progress sentence"):
         assert guidance in DELEGATION_INSTRUCTIONS
 
 
