@@ -73,6 +73,16 @@ describe('the words', () => {
 			: 'Recommendation: Compact first for the lower estimated total');
 	});
 
+	it('prints a compact total equal to the sum of the printed parts (#1500)', () => {
+		const text = coldSendText(state({ cost_comparison: {
+			model: 'claude-sonnet-5', cold_resume_usd: 3.1, compaction_usd: 2.04624,
+			continued_usd: 0.486655, compact_continue_usd: 2.04624 + 0.486655,
+			compacted_context_tokens: 82_400, reply_tokens: 4_000, summary_tokens: 8_000,
+			recommendation: 'compact'
+		} }))!;
+		expect(text).toContain('Compact and continue total: ~$2.54 ($2.05 compaction + $0.49 continuation)');
+	});
+
 	it('describes five-minute writes when the last real call used credits', () => {
 		const text = coldSendText(state({ cache_write_ttl: '5m', cache_ttl_seconds: 300, cost_comparison: {
 			model: 'claude-sonnet-5', cold_resume_usd: 1.02, compaction_usd: 1.08,
