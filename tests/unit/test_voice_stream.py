@@ -498,6 +498,18 @@ async def test_attached_webrtc_binding_delegates_with_realtime_options(monkeypat
     assert payload["voice_instructions"] == voice_stream.DELEGATION_INSTRUCTIONS
 
 
+def test_live_prompt_stays_short_and_states_each_rule_once():
+    """A realtime voice model follows a short prompt more reliably than a long
+    list of rules. The default was cut from 1165 words to about 750 by stating
+    each rule once and leaving to the app's notes what they already say."""
+    from app.core.voice_prompts import LIVE_INSTRUCTIONS
+    assert len(LIVE_INSTRUCTIONS.split()) <= 800
+    for rule in ("Never make up", "acknowledgement such as", "fewer updates", "check_work", "greet"):
+        assert LIVE_INSTRUCTIONS.count(rule) <= 1, rule
+    sentences = [part.strip().lower() for part in LIVE_INSTRUCTIONS.replace("\n", " ").split(". ") if len(part.split()) > 4]
+    assert len(sentences) == len(set(sentences))
+
+
 def test_live_prompt_forbids_backchannels_and_waiting_filler():
     from app.core.voice_prompts import LIVE_INSTRUCTIONS
     # The old default asked for "moderate" backchannels.
@@ -506,7 +518,9 @@ def test_live_prompt_forbids_backchannels_and_waiting_filler():
     assert "Keep listening while the user pauses" in LIVE_INSTRUCTIONS
     assert "do not resume or repeat the sentence you were cut off in" in LIVE_INSTRUCTIONS
     assert "still on the call" in LIVE_INSTRUCTIONS and "gets nothing or one word" in LIVE_INSTRUCTIONS
-    assert "applies for the rest of the call" in LIVE_INSTRUCTIONS
+    assert "applies for the rest of the call." in LIVE_INSTRUCTIONS
+    # Only a request for fewer updates quiets unprompted updates, not any request about how the voice talks.
+    assert "If the user asked for fewer updates, speak up unprompted only for a result or a blocker." in LIVE_INSTRUCTIONS
 
 
 def test_live_prompt_is_one_first_person_voice_that_tells_results():
@@ -521,7 +535,7 @@ def test_live_prompt_is_one_first_person_voice_that_tells_results():
     assert "then stop and let them react" in LIVE_INSTRUCTIONS
     assert "Never shorten it to an acknowledgement" in LIVE_INSTRUCTIONS
     # The safety contract stays.
-    for rule in ("once per request", "RequestChatAccess", "never said aloud", "The app decides approvals from the user's own voice",
+    for rule in ("once per request", "RequestChatAccess", "credentials and approvals are entered on screen", "never said aloud", "The app decides approvals from the user's own voice",
                  "never a request to carry out", "do not start new work just to check status"):
         assert rule in LIVE_INSTRUCTIONS
     # No contradiction left: the old "silence is fine" waiting rule is gone,
