@@ -1281,12 +1281,12 @@
         },
         {
           "id": "harness-basics.delegated-cli-context-limits",
-          "check": "Delegated Claude chats get the CLI context limits, no auto-memory and a deduplicated skills list",
+          "check": "Delegated Claude chats get the CLI context limits, no auto-memory and every skill in the compact list",
           "kind": "owner",
           "needs": ["provider"],
-          "how": "In a throwaway delegated chat on the cheapest Claude model on the subscription (never an API key), confirm the CLI child's env carries BASH_MAX_OUTPUT_LENGTH=12000, MAX_MCP_OUTPUT_TOKENS=8000 and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1. Plant a canary line in the project's ~/.claude/projects/<project>/memory/MEMORY.md and a codeword in its CLAUDE.md, and ask for both. Read the appended prompt's # More skills section. Change BASH_MAX_OUTPUT_LENGTH in the agent profile's env and send a message, then send one more with nothing changed. Remove the canary and settle the explicitly hidden chat.",
-          "pass_when": "The child env has the three values. The model sees the CLAUDE.md codeword but not the canary. A Fluid skill whose SKILL.md matches a ~/.claude/skills one apart from its name is absent; one that only shares a name with a different copy is listed. The profile change gives one fresh client with reason delegated_cli_limits, and the unchanged message reuses it.",
-          "past_bug": "#1540: PR #1536's limits, memory switch and skills filter were checked only by unit tests and direct CLI probes."
+          "how": "In a throwaway delegated chat on the cheapest Claude model on the subscription (never an API key), confirm the CLI child's env carries BASH_MAX_OUTPUT_LENGTH=12000, MAX_MCP_OUTPUT_TOKENS=8000 and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1. Plant a canary line in the project's ~/.claude/projects/<project>/memory/MEMORY.md and a codeword in its CLAUDE.md, and ask for both. Read the appended prompt's # More skills section. Change BASH_MAX_OUTPUT_LENGTH in the agent profile's env and send a message, then send one more with nothing changed. Then restart the disposable worker with BASH_MAX_OUTPUT_LENGTH=40000 in its own environment and no profile value, and check the child env again. Remove the canary and settle the explicitly hidden chat.",
+          "pass_when": "The child env has the three values. The model sees the CLAUDE.md codeword but not the canary. Every Fluid skill is listed, one short line each with shared folders named once, including skills Claude Code also lists. The profile change gives one fresh client with reason delegated_cli_limits, and the unchanged message reuses it. With the worker's own 40000 and no profile value, the child env keeps 40000.",
+          "past_bug": "#1540: PR #1536's limits, memory switch and compact skills list were checked only by unit tests and direct CLI probes."
         },
         {
           "id": "harness-basics.generation-conversation-preferences",

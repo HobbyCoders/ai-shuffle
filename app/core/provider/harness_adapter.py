@@ -80,7 +80,6 @@ import math
 import os
 import re
 import ssl
-import sys
 import time
 import weakref
 from dataclasses import replace
@@ -8437,10 +8436,7 @@ def _delegated_fluid_context(options: SessionOptions) -> List[str]:
             ]
             if files:
                 blocks.append("\n\n".join([DELEGATED_INSTRUCTIONS_HEADER, *files]))
-            skills = _not_listed_by_claude(
-                discover_skills(cwd, include_global=user_on, include_project=project_on),
-                cwd, user_on=user_on, project_on=project_on,
-            )
+            skills = discover_skills(cwd, include_global=user_on, include_project=project_on)
             skills_block = _delegated_skills_block(skills) if skills else None
             if skills_block:
                 blocks.append(skills_block)
@@ -8498,127 +8494,6 @@ def _delegated_skills_block(skills: Any) -> Optional[str]:
     return f"{skills_header(DELEGATED_SKILLS_HEADER, shown)}\n" + "\n".join(lines)
 
 
-def _claude_managed_skills_dir() -> Path:
-    """Claude Code's managed (policy) skills folder on this platform."""
-    if sys.platform == "win32":
-        base = Path("C:/Program Files/ClaudeCode")
-    elif sys.platform == "darwin":
-        base = Path("/Library/Application Support/ClaudeCode")
-    else:
-        base = Path("/etc/claude-code")
-    return base / ".claude" / "skills"
-
-
-def _claude_project_skills_dirs(cwd: str) -> List[Path]:
-    """The ``.claude/skills`` folders Claude Code reads for a project: the
-    working folder and its parents up to the git root, never the home folder."""
-    home = Path.home().resolve()
-    folder = Path(cwd).resolve()
-    found: List[Path] = []
-    while folder != home:
-        found.append(folder / ".claude" / "skills")
-        if (folder / ".git").exists() or folder.parent == folder:
-            break
-        folder = folder.parent
-    return found
-
-
-def _claude_skill_entries(skills_dir: Path) -> List[Tuple[Path, set, bool]]:
-    """``(directory, names, listed)`` for each ``<skills_dir>/<name>/SKILL.md``.
-
-    ``names`` holds the folder name and the ``name`` field, lower-cased.
-    ``listed`` is True only for a readable skill Claude Code shows the model
-    up front: not ``disable-model-invocation`` and not path-conditional.
-    """
-    from fluid.context.instructions import parse_frontmatter
-
-    entries: List[Tuple[Path, set, bool]] = []
-    try:
-        skill_files = sorted(skills_dir.glob("*/SKILL.md"))
-    except OSError:
-        return entries
-    for skill_file in skill_files:
-        names = {skill_file.parent.name.lower()}
-        try:
-            fields, _ = parse_frontmatter(skill_file.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError):
-            entries.append((skill_file.parent, names, False))
-            continue
-        if fields.get("name"):
-            names.add(str(fields["name"]).strip().lower())
-        hidden = str(fields.get("disable-model-invocation", "")).strip().lower() == "true"
-        entries.append((skill_file.parent, names, not hidden and not fields.get("paths")))
-    return entries
-
-
-def _claude_listed_skill_dirs(cwd: str, *, user_on: bool, project_on: bool) -> Dict[str, Path]:
-    """Real directories of the skills Claude Code itself lists this session,
-    keyed by normalized real path.
-
-    A directory counts only when its skill is listed (see
-    :func:`_claude_skill_entries`) and no other skill Claude Code reads (the
-    managed, user, account-synced and project folders) shares its name, so
-    no other copy can shadow it or be shadowed by it.
-    """
-    from app.core import claude_cli_home
-
-    folders: List[Path] = [_claude_managed_skills_dir()]
-    if user_on:
-        user_skills = claude_cli_home.default_dir() / "skills"
-        folders.append(user_skills)
-        try:
-            # Account-synced skills: <user skills>/synced/<account>/<name>/.
-            folders.extend(sorted(p for p in (user_skills / "synced").glob("*") if p.is_dir()))
-        except OSError:
-            pass
-    if project_on:
-        folders.extend(_claude_project_skills_dirs(cwd))
-    entries = [entry for folder in folders for entry in _claude_skill_entries(folder)]
-    seen: Dict[str, int] = {}
-    for _, names, _ in entries:
-        for name in names:
-            seen[name] = seen.get(name, 0) + 1
-    listed: Dict[str, Path] = {}
-    for directory, names, shown in entries:
-        if shown and all(seen[name] == 1 for name in names):
-            listed[os.path.normcase(os.path.realpath(directory))] = directory
-    return listed
-
-
-def _not_listed_by_claude(
-    skills: Any, cwd: str, *, user_on: bool, project_on: bool
-) -> List[Any]:
-    """``skills`` without those Claude Code's own skill listing already shows.
-
-    A skill is dropped only when its directory is the very directory Claude
-    Code lists (the same path, or a symlink or junction to it). Another copy,
-    however alike, is kept: its files may differ, and this list is the only
-    way to reach them.
-    """
-    skills = list(skills or [])
-    if not skills:
-        return skills
-    try:
-        listed = _claude_listed_skill_dirs(cwd, user_on=user_on, project_on=project_on)
-    except Exception:  # noqa: BLE001 — a failed scan keeps the full list
-        logger.warning("[HarnessAdapter] Claude Code skill scan failed", exc_info=True)
-        return skills
-    if not listed:
-        return skills
-
-    def shown(skill: Any) -> bool:
-        try:
-            directory = Path(str(getattr(skill, "path", "") or "")).parent
-            match = listed.get(os.path.normcase(os.path.realpath(directory)))
-            # samefile compares the file system's own identity, so a
-            # case-only difference on a case-sensitive folder is not a match.
-            return match is not None and os.path.samefile(directory, match)
-        except Exception:  # noqa: BLE001 — an unreadable skill stays listed
-            return False
-
-    return [skill for skill in skills if not shown(skill)]
-
-
 def _delegated_skills_index(options: SessionOptions) -> Optional[str]:
     """The full-replace compiled prompt's skills section, for the delegated leg.
 
@@ -8649,7 +8524,6 @@ def _delegated_skills_index(options: SessionOptions) -> Optional[str]:
     except Exception:  # noqa: BLE001 — a prompt block never fails a connect
         logger.warning("[HarnessAdapter] delegated skills index failed", exc_info=True)
         return None
-    skills = _not_listed_by_claude(skills, cwd, user_on=user_on, project_on=project_on)
     if not skills:
         return None
     return _delegated_skills_block(sorted(skills, key=lambda skill: skill.name))

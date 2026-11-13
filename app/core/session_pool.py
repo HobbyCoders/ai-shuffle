@@ -84,19 +84,25 @@ PROVIDER_OVERLAY_ENV_KEYS = (
 def _delegated_cli_limit_values(env: Optional[Dict[str, str]]) -> Dict[str, Any]:
     """What the delegated CLI will make of its context limits for this env.
 
-    The CLI's spawn env gets environment.DELEGATED_CLI_ENV_DEFAULTS under any
-    value the profile or provider sets, so an absent key and an explicit default
-    are the same CLI. Values are read the way Claude Code reads them: the two
-    sizes as integers, the auto-memory switch as off / forced on / unset.
+    Same precedence as the spawn (environment.apply_delegated_cli_limits): a
+    profile or provider value, then the worker's own environment, then
+    DELEGATED_CLI_ENV_DEFAULTS. So an absent key, an explicit default and an
+    inherited value the profile leaves alone each compare as the CLI sees them.
+    Values are read the way Claude Code reads them: the two sizes as integers,
+    the auto-memory switch as off / forced on / unset.
     """
+    from fluid.tools.child_env import UNSET_ENV
+
     from app.core.environment import DELEGATED_CLI_ENV_DEFAULTS, apply_delegated_cli_limits
 
     env = env or {}
-    effective = apply_delegated_cli_limits(
-        {key: env[key] for key in DELEGATED_CLI_ENV_DEFAULTS if key in env}
-    )
+    overlay = {key: env[key] for key in (*DELEGATED_CLI_ENV_DEFAULTS, UNSET_ENV) if key in env}
+    # An inherited value the CLI keeps is what it reads; one the overlay
+    # unsets was replaced by the default above.
+    sources = {**os.environ, **apply_delegated_cli_limits(overlay)}
     values: Dict[str, Any] = {}
-    for key, raw in effective.items():
+    for key in DELEGATED_CLI_ENV_DEFAULTS:
+        raw = sources.get(key, "")
         text = str(raw).strip().lower()
         if key == "CLAUDE_CODE_DISABLE_AUTO_MEMORY":
             values[key] = (

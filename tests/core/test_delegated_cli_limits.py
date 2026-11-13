@@ -2,7 +2,8 @@
 
 The Bash and MCP output caps and the auto-memory switch go into the env of
 the CLI process only, never into SessionOptions.env (which also feeds tools
-and MCP servers), and a value the profile already set wins.
+and MCP servers). A value the profile sets wins, and so does one the worker
+itself was started with.
 """
 
 from unittest.mock import patch
@@ -19,6 +20,12 @@ EXPECTED = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _no_inherited_limits(monkeypatch):
+    for key in EXPECTED:
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_defaults_are_added_to_an_empty_env():
     env = {}
     assert apply_delegated_cli_limits(env) is env
@@ -30,6 +37,28 @@ def test_a_profile_value_wins():
     assert env["BASH_MAX_OUTPUT_LENGTH"] == "40000"
     assert env["MAX_MCP_OUTPUT_TOKENS"] == "8000"
     assert env["FOO"] == "bar"
+
+
+def test_a_value_the_worker_inherited_wins(monkeypatch):
+    """The worker started with BASH_MAX_OUTPUT_LENGTH=40000 and no profile
+    override: the CLI inherits 40000, so no default goes on top of it."""
+    monkeypatch.setenv("BASH_MAX_OUTPUT_LENGTH", "40000")
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "0")
+    env = apply_delegated_cli_limits({})
+    assert env == {"MAX_MCP_OUTPUT_TOKENS": "8000"}
+    # One the overlay drops from the inherited env gets the default back.
+    env = apply_delegated_cli_limits({"FLUID_CHILD_ENV_UNSET": "BASH_MAX_OUTPUT_LENGTH"})
+    assert env["BASH_MAX_OUTPUT_LENGTH"] == "12000"
+    assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in env
+
+
+def test_the_inherited_value_reaches_the_cli_child(monkeypatch):
+    from fluid.tools.child_env import claude_cli_env_with_overlay
+
+    monkeypatch.setenv("BASH_MAX_OUTPUT_LENGTH", "40000")
+    child = claude_cli_env_with_overlay(apply_delegated_cli_limits({}))
+    assert child["BASH_MAX_OUTPUT_LENGTH"] == "40000"
+    assert child["MAX_MCP_OUTPUT_TOKENS"] == "8000"
 
 
 def _reasons(old_env, new_env, kind="delegated"):
@@ -66,6 +95,15 @@ def test_a_profile_change_respawns_a_delegated_session(key, old, new, gateway):
 ], ids=["absent", "explicit-default", "spacing", "truthy-spelling", "falsy-spelling", "unrelated"])
 def test_the_same_effective_limits_keep_the_session(old_env, new_env):
     assert _reasons(old_env, new_env) == []
+
+
+def test_an_inherited_value_compares_as_the_cli_sees_it(monkeypatch):
+    monkeypatch.setenv("BASH_MAX_OUTPUT_LENGTH", "40000")
+    # Absent, or written out the same as the inherited value: the same CLI.
+    assert _reasons({}, {}) == []
+    assert _reasons({}, {"BASH_MAX_OUTPUT_LENGTH": "40000"}) == []
+    # A profile that now sets the default replaces the inherited 40000.
+    assert "delegated_cli_limits" in _reasons({}, {"BASH_MAX_OUTPUT_LENGTH": "12000"})
 
 
 def test_a_native_lane_session_ignores_the_limits():

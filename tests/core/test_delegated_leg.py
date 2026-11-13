@@ -46,8 +46,6 @@ def _isolated_home(monkeypatch, tmp_path):
     # and finds whatever AGENTS.md files the machine has above the temp dir.
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    # The skills list reads Claude Code's own folder to skip what it lists.
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     from app.core import guidance_surface
 
     monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
@@ -738,100 +736,20 @@ def test_delegated_skills_block_is_one_short_line_per_skill():
     assert "/s/alpha/SKILL.md" not in text
 
 
-def _dir_link(link, target):
-    """A directory symlink, or a junction on Windows when symlinks need a
-    privilege the test user lacks; None when neither can be made."""
-    import os as _os
+def test_delegated_append_lists_every_skill_the_same_way_each_turn(tmp_path, _isolated_home):
+    """Every fluid skill stays in "More skills", even one Claude Code also
+    lists from its own skills folder, and the appended text is byte-identical
+    across builds when nothing on disk changed, so the prompt cache holds."""
+    project = tmp_path / "proj"
+    for folder in (project / ".fluid" / "skills", _isolated_home / ".claude" / "skills"):
+        (folder / "deploy").mkdir(parents=True)
+        (folder / "deploy" / "SKILL.md").write_text(
+            "---\nname: deploy\ndescription: Ship a build\n---\nbody", encoding="utf-8",
+        )
 
-    try:
-        _os.symlink(target, link, target_is_directory=True)
-        return link
-    except (OSError, NotImplementedError):
-        pass
-    if sys.platform == "win32":
-        import _winapi
-
-        try:
-            _winapi.CreateJunction(str(target), str(link))
-            return link
-        except OSError:
-            return None
-    return None
-
-
-def test_delegated_skills_skip_only_the_directory_claude_code_lists(tmp_path, _isolated_home, monkeypatch):
-    """A skill is left out only when its directory is the very directory
-    Claude Code lists: the same path or a link to it, readable, shown to the
-    model and not sharing its name with another skill Claude Code reads. A
-    copy elsewhere is kept, however alike its SKILL.md."""
-    from fluid.context.instructions import Skill
-
-    monkeypatch.setattr(ha, "_claude_managed_skills_dir", lambda: tmp_path / "managed")
-
-    def put(folder, name, extra="", body="steps\n"):
-        path = folder / name / "SKILL.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"---\nname: {name}\ndescription: D\n{extra}---\n{body}", encoding="utf-8")
-        return path
-
-    def skill(path, name=None):
-        return Skill(name=name or path.parent.name, description="D", path=str(path))
-
-    user = _isolated_home / ".claude" / "skills"
-    project = tmp_path / ".claude" / "skills"
-    other = tmp_path / "fluid"
-    same = put(user, "unnslop")
-    (same.parent / "references").mkdir()
-    (same.parent / "references" / "rules.md").write_text("r", encoding="utf-8")
-    copy = put(other, "copy-of-unnslop")  # identical SKILL.md, no references/
-    shadow_user = put(user, "deploy", body="procedure A\n")
-    shadow_project = put(project, "deploy", body="procedure B\n")
-    hidden = put(user, "quiet", extra="disable-model-invocation: true\n")
-    conditional = put(user, "scoped", extra="paths: src/**\n")
-    same_project = put(project, "ship")
-    skills = [
-        skill(same), skill(copy, "unslop:unslop"), skill(shadow_user), skill(shadow_project, "deploy"),
-        skill(hidden), skill(conditional), skill(same_project),
-        Skill(name="gone", description="D", path=str(other / "gone" / "SKILL.md")),
-    ]
-
-    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=True, project_on=True)
-    assert [s.path for s in kept] == [str(p) for p in (copy, shadow_user, shadow_project, hidden, conditional)] + [
-        str(other / "gone" / "SKILL.md")]
-    # Without the user scope Claude Code does not read that folder, so its
-    # skills stay listed and project/deploy is no longer shadowed.
-    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=False, project_on=True)
-    assert str(same) in [s.path for s in kept]
-    assert str(shadow_project) not in [s.path for s in kept]
-
-    # A managed skill of the same name shadows the user's copy.
-    put(tmp_path / "managed", "unnslop", body="policy\n")
-    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=True, project_on=True)
-    assert str(same) in [s.path for s in kept]
-    # So does an account-synced skill of the same name, over a project one.
-    assert str(same_project) not in [s.path for s in kept]
-    put(user / "synced" / "account", "ship", body="synced\n")
-    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=True, project_on=True)
-    assert str(same_project) in [s.path for s in kept]
-
-
-def test_a_linked_skill_directory_is_the_same_directory(tmp_path, _isolated_home, monkeypatch):
-    from fluid.context.instructions import Skill
-
-    monkeypatch.setattr(ha, "_claude_managed_skills_dir", lambda: tmp_path / "managed")
-    real = _isolated_home / ".claude" / "skills" / "unnslop"
-    real.mkdir(parents=True)
-    (real / "SKILL.md").write_text("---\nname: unnslop\ndescription: D\n---\nb\n", encoding="utf-8")
-    (tmp_path / "fluid").mkdir()
-    link = _dir_link(tmp_path / "fluid" / "unnslop", real)
-    if link is None:
-        pytest.skip("this machine can make neither a symlink nor a junction")
-    linked = Skill(name="unnslop", description="D", path=str(link / "SKILL.md"))
-    assert ha._not_listed_by_claude([linked], str(tmp_path), user_on=True, project_on=True) == []
-    if sys.platform == "win32":
-        # Windows paths ignore case: another spelling is the same directory.
-        upper = Skill(name="unnslop", description="D", path=str(real / "SKILL.md").upper())
-        assert ha._not_listed_by_claude([upper], str(tmp_path), user_on=True, project_on=True) == []
+    first = ha._delegated_append_text("APPEND TEXT", _preset_options(project), ToolRegistry())
+    assert "- deploy: Ship a build (" in first
+    assert ha._delegated_append_text("APPEND TEXT", _preset_options(project), ToolRegistry()) == first
 
 
 # ─── Claude Code compactions become the chat's compaction card ──────────────
