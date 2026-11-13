@@ -41,8 +41,9 @@ export function createSlugger(): (text: string) => string {
 export function inlineText(tokens: Token[] | undefined): string {
 	let out = '';
 	for (const token of tokens ?? []) {
+		// A line break separates words, whether `breaks: true` made it or the source wrote `<br>`.
+		if (token.type === 'br' || (token.type === 'html' && /^<br\s*\/?>$/i.test(token.raw.trim()))) { out += ' '; continue; }
 		if (token.type === 'html') continue;
-		if (token.type === 'br') { out += ' '; continue; }
 		const children = (token as { tokens?: Token[] }).tokens;
 		out += children ? inlineText(children) : ((token as { text?: string }).text ?? '');
 	}

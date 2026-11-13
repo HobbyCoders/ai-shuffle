@@ -107,15 +107,20 @@
 		return marked.parse(content, { renderer, ...DOC_MARKED_OPTIONS }) as string;
 	});
 
-	/** Text the reader sees: not the hidden duplicate title or a code block's Copy button. */
-	function readableTextNodes(root: HTMLElement): Text[] {
+	/**
+	 * Text the reader sees, in order: not the hidden duplicate title or a code
+	 * block's Copy button. Line breaks (`<br>`, which `breaks: true` makes of
+	 * every wrapped source line) are kept, since they separate words.
+	 */
+	function readableTextNodes(root: HTMLElement): (Text | HTMLBRElement)[] {
 		const hiddenTitle = framed && root.firstElementChild?.tagName === 'H1' ? root.firstElementChild : null;
-		const nodes: Text[] = [];
-		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		const nodes: (Text | HTMLBRElement)[] = [];
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
 		for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+			if (node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName !== 'BR') continue;
 			const parent = node.parentElement;
 			if (!parent || (hiddenTitle && hiddenTitle.contains(parent)) || parent.closest('.code-block-header')) continue;
-			nodes.push(node as Text);
+			nodes.push(node as Text | HTMLBRElement);
 		}
 		return nodes;
 	}
@@ -125,18 +130,20 @@
 	/**
 	 * The readable text as one string, the way the search snippet reads it
 	 * (`markdownToPlainText`): lower case, each run of spaces one space, and a
-	 * space between blocks, so a phrase matches across inline markup such as a
-	 * bold label. `at[i]` is the text node and offset that character came from,
-	 * or null for the space between blocks.
+	 * space between blocks or at a line break, so a phrase matches across inline
+	 * markup such as a bold label and across a wrapped source line. `at[i]` is the
+	 * text node and offset that character came from, or null for such a space.
 	 */
-	function readableText(nodes: Text[]) {
+	function readableText(nodes: (Text | HTMLBRElement)[]) {
 		let text = '';
 		const at: ([Text, number] | null)[] = [];
 		let block: Element | null = null;
 		for (const node of nodes) {
 			const own = node.parentElement?.closest(BLOCKS) ?? null;
-			if (text && own !== block && !text.endsWith(' ')) { text += ' '; at.push(null); }
+			const isText = node instanceof Text;
+			if (text && (!isText || own !== block) && !text.endsWith(' ')) { text += ' '; at.push(null); }
 			block = own;
+			if (!isText) continue;
 			const value = node.nodeValue ?? '';
 			for (let i = 0; i < value.length; i++) {
 				let ch = value[i];

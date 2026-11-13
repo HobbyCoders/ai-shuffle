@@ -78,6 +78,47 @@ describe('DocsContent find (#1478)', () => {
 			Element.prototype.scrollIntoView = original;
 		}
 	});
+
+	it('finds the whole phrase across a wrapped source line, as the search snippet does', async () => {
+		await preloadAllDocs();
+		const { DocsSearchEngine } = await import('$lib/docs/search');
+		const scrolled: Element[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this); };
+		try {
+			const query = 'balance access separately';
+			const doc = getDocByFullSlug('api-reference/model-providers')!;
+			// The source wraps between "access" and "separately"; `breaks: true` renders a <br> there.
+			expect(doc.content).toContain('balance access\nseparately');
+			const [hit] = new DocsSearchEngine([doc]).search(query);
+			expect(hit.snippets[0].toLowerCase()).toContain(query);
+
+			const view = render(DocsContent, { content: doc.content, framed: true, find: { query, key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit').length).toBeGreaterThan(0));
+			const marks = [...view.container.querySelectorAll('mark.doc-find-hit')];
+			expect(marks.map((m) => m.textContent).join(' ')).toBe(query);
+			const paragraph = marks[0].closest('p')!;
+			expect(marks.every((m) => m.closest('p') === paragraph)).toBe(true);
+			expect(paragraph.innerHTML).toContain('<mark class="doc-find-hit">balance access</mark><br><mark class="doc-find-hit">separately</mark>');
+			expect(paragraph.previousElementSibling?.textContent).toBe('Provider-reported API balances');
+			expect(scrolled).toEqual([marks[0]]);
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+	});
+
+	it('reads a line break as a space next to inline code, links and a raw <br>', async () => {
+		const { markdownToPlainText } = await import('$lib/docs/markdown');
+		const content = '- run `git`\n  [pull](/docs/x) now\n\n| A | B |\n| --- | --- |\n| one<br>two | `x`<br/>`y` |';
+		expect(markdownToPlainText(content)).toBe('run git pull now A B one two x y');
+		for (const [query, expected] of [['git pull now', ['git', 'pull', 'now']], ['one two', ['one', 'two']], ['x y', ['x', 'y']]] as const) {
+			const view = render(DocsContent, { content, find: { query, key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit').length).toBeGreaterThan(0));
+			const marks = [...view.container.querySelectorAll('mark.doc-find-hit')];
+			expect(marks.map((m) => m.textContent?.trim())).toEqual(expected);
+			view.unmount();
+		}
+	});
 });
 
 describe('DocsContent code copy', () => {
