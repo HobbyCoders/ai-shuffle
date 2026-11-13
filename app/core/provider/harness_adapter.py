@@ -80,6 +80,7 @@ import math
 import os
 import re
 import ssl
+import sys
 import time
 import weakref
 from dataclasses import replace
@@ -8497,56 +8498,91 @@ def _delegated_skills_block(skills: Any) -> Optional[str]:
     return f"{skills_header(DELEGATED_SKILLS_HEADER, shown)}\n" + "\n".join(lines)
 
 
-def _skill_fingerprint(text: str) -> Optional[Tuple[str, str]]:
-    """A SKILL.md's content apart from its ``name`` field, or None when a model
-    may not invoke it (``disable-model-invocation``). The same skill installed
-    under two names (``unnslop`` and the ``unslop`` plugin's ``unslop:unslop``)
-    differs only in that field.
+def _claude_managed_skills_dir() -> Path:
+    """Claude Code's managed (policy) skills folder on this platform."""
+    if sys.platform == "win32":
+        base = Path("C:/Program Files/ClaudeCode")
+    elif sys.platform == "darwin":
+        base = Path("/Library/Application Support/ClaudeCode")
+    else:
+        base = Path("/etc/claude-code")
+    return base / ".claude" / "skills"
+
+
+def _claude_project_skills_dirs(cwd: str) -> List[Path]:
+    """The ``.claude/skills`` folders Claude Code reads for a project: the
+    working folder and its parents up to the git root, never the home folder."""
+    home = Path.home().resolve()
+    folder = Path(cwd).resolve()
+    found: List[Path] = []
+    while folder != home:
+        found.append(folder / ".claude" / "skills")
+        if (folder / ".git").exists() or folder.parent == folder:
+            break
+        folder = folder.parent
+    return found
+
+
+def _claude_skill_entries(skills_dir: Path) -> List[Tuple[Path, set, bool]]:
+    """``(directory, names, listed)`` for each ``<skills_dir>/<name>/SKILL.md``.
+
+    ``names`` holds the folder name and the ``name`` field, lower-cased.
+    ``listed`` is True only for a readable skill Claude Code shows the model
+    up front: not ``disable-model-invocation`` and not path-conditional.
     """
     from fluid.context.instructions import parse_frontmatter
 
-    # Callers read with Path.read_text, which already folds CRLF into LF.
-    fields, body = parse_frontmatter(text)
-    hidden = fields.get("disable-model-invocation")
-    if hidden is True or str(hidden).strip().lower() == "true":
-        return None
-    rest = {str(k): str(v) for k, v in fields.items() if k != "name"}
-    return json.dumps(rest, sort_keys=True), body.strip()
+    entries: List[Tuple[Path, set, bool]] = []
+    try:
+        skill_files = sorted(skills_dir.glob("*/SKILL.md"))
+    except OSError:
+        return entries
+    for skill_file in skill_files:
+        names = {skill_file.parent.name.lower()}
+        try:
+            fields, _ = parse_frontmatter(skill_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            entries.append((skill_file.parent, names, False))
+            continue
+        if fields.get("name"):
+            names.add(str(fields["name"]).strip().lower())
+        hidden = str(fields.get("disable-model-invocation", "")).strip().lower() == "true"
+        entries.append((skill_file.parent, names, not hidden and not fields.get("paths")))
+    return entries
 
 
-def _claude_listed_skills(cwd: str, *, user_on: bool, project_on: bool) -> set:
-    """Fingerprints (:func:`_skill_fingerprint`) of the skills Claude Code
-    itself lists to the model this session: readable, model-invocable
-    ``skills/*/SKILL.md`` under the CLI's own folder for the user scope and
-    the working folder's ``.claude`` for the project scope. Saved sign-in
-    folders link ``skills`` to the CLI's own folder, so it serves them too.
+def _claude_listed_skill_dirs(cwd: str, *, user_on: bool, project_on: bool) -> Dict[str, Path]:
+    """Real directories of the skills Claude Code itself lists this session,
+    keyed by normalized real path.
+
+    A directory counts only when its skill is listed (see
+    :func:`_claude_skill_entries`) and no other skill Claude Code reads (the
+    managed, user, account-synced and project folders) shares its name, so
+    no other copy can shadow it or be shadowed by it.
     """
     from app.core import claude_cli_home
 
-    found: set = set()
-    bases: List[Path] = []
+    folders: List[Path] = [_claude_managed_skills_dir()]
     if user_on:
+        user_skills = claude_cli_home.default_dir() / "skills"
+        folders.append(user_skills)
         try:
-            bases.append(claude_cli_home.default_dir())
-        except Exception:  # noqa: BLE001 — a prompt block never fails a connect
+            # Account-synced skills: <user skills>/synced/<account>/<name>/.
+            folders.extend(sorted(p for p in (user_skills / "synced").glob("*") if p.is_dir()))
+        except OSError:
             pass
     if project_on:
-        # The working folder only: a skill wrongly left out is lost to the
-        # session, while one listed twice costs a line.
-        bases.append(Path(cwd) / ".claude")
-    for base in bases:
-        try:
-            skill_files = list(base.glob("skills/*/SKILL.md"))
-        except OSError:
-            skill_files = []
-        for skill_file in skill_files:
-            try:
-                fingerprint = _skill_fingerprint(skill_file.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError):
-                continue
-            if fingerprint is not None:
-                found.add(fingerprint)
-    return found
+        folders.extend(_claude_project_skills_dirs(cwd))
+    entries = [entry for folder in folders for entry in _claude_skill_entries(folder)]
+    seen: Dict[str, int] = {}
+    for _, names, _ in entries:
+        for name in names:
+            seen[name] = seen.get(name, 0) + 1
+    listed: Dict[str, Path] = {}
+    for directory, names, shown in entries:
+        if shown and all(seen[name] == 1 for name in names):
+            listed[os.path.normcase(os.path.realpath(directory))] = directory
+    return listed
 
 
 def _not_listed_by_claude(
@@ -8554,16 +8590,16 @@ def _not_listed_by_claude(
 ) -> List[Any]:
     """``skills`` without those Claude Code's own skill listing already shows.
 
-    A skill is dropped only when Claude Code lists a skill with the same
-    SKILL.md content apart from the name. A skill that shares only a name or a
-    description with one of Claude Code's is kept: its own file is reachable
-    only through this list.
+    A skill is dropped only when its directory is the very directory Claude
+    Code lists (the same path, or a symlink or junction to it). Another copy,
+    however alike, is kept: its files may differ, and this list is the only
+    way to reach them.
     """
     skills = list(skills or [])
     if not skills:
         return skills
     try:
-        listed = _claude_listed_skills(cwd, user_on=user_on, project_on=project_on)
+        listed = _claude_listed_skill_dirs(cwd, user_on=user_on, project_on=project_on)
     except Exception:  # noqa: BLE001 — a failed scan keeps the full list
         logger.warning("[HarnessAdapter] Claude Code skill scan failed", exc_info=True)
         return skills
@@ -8572,8 +8608,11 @@ def _not_listed_by_claude(
 
     def shown(skill: Any) -> bool:
         try:
-            text = Path(str(getattr(skill, "path", "") or "")).read_text(encoding="utf-8")
-            return _skill_fingerprint(text) in listed
+            directory = Path(str(getattr(skill, "path", "") or "")).parent
+            match = listed.get(os.path.normcase(os.path.realpath(directory)))
+            # samefile compares the file system's own identity, so a
+            # case-only difference on a case-sensitive folder is not a match.
+            return match is not None and os.path.samefile(directory, match)
         except Exception:  # noqa: BLE001 — an unreadable skill stays listed
             return False
 

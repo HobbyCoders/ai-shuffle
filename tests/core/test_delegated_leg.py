@@ -738,53 +738,100 @@ def test_delegated_skills_block_is_one_short_line_per_skill():
     assert "/s/alpha/SKILL.md" not in text
 
 
-def test_delegated_skills_skip_what_claude_code_lists(tmp_path, _isolated_home):
-    """Only a skill whose SKILL.md matches one Claude Code lists (apart from
-    the name) is left out. A shared name or description, an enabled plugin, a
-    skill Claude Code hides from the model or an unreadable file keeps it."""
-    import json as _json
+def _dir_link(link, target):
+    """A directory symlink, or a junction on Windows when symlinks need a
+    privilege the test user lacks; None when neither can be made."""
+    import os as _os
 
+    try:
+        _os.symlink(target, link, target_is_directory=True)
+        return link
+    except (OSError, NotImplementedError):
+        pass
+    if sys.platform == "win32":
+        import _winapi
+
+        try:
+            _winapi.CreateJunction(str(target), str(link))
+            return link
+        except OSError:
+            return None
+    return None
+
+
+def test_delegated_skills_skip_only_the_directory_claude_code_lists(tmp_path, _isolated_home, monkeypatch):
+    """A skill is left out only when its directory is the very directory
+    Claude Code lists: the same path or a link to it, readable, shown to the
+    model and not sharing its name with another skill Claude Code reads. A
+    copy elsewhere is kept, however alike its SKILL.md."""
     from fluid.context.instructions import Skill
 
-    def put(path, text):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        return str(path)
+    monkeypatch.setattr(ha, "_claude_managed_skills_dir", lambda: tmp_path / "managed")
 
-    same = "---\nname: {}\ndescription: Remove AI writing patterns\n---\nbody\n"
-    claude = _isolated_home / ".claude"
-    put(claude / "skills" / "unnslop" / "SKILL.md", same.format("unnslop"))
-    put(claude / "skills" / "deploy" / "SKILL.md", "---\nname: deploy\ndescription: Ship\n---\nold steps\n")
-    put(claude / "skills" / "quiet" / "SKILL.md",
-        "---\nname: quiet\ndescription: Q\ndisable-model-invocation: true\n---\nq\n")
-    put(claude / "settings.json", _json.dumps({"enabledPlugins": {"tidy@market": True}}))
-    fluid = tmp_path / "f"
+    def put(folder, name, extra="", body="steps\n"):
+        path = folder / name / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\nname: {name}\ndescription: D\n{extra}---\n{body}", encoding="utf-8")
+        return path
+
+    def skill(path, name=None):
+        return Skill(name=name or path.parent.name, description="D", path=str(path))
+
+    user = _isolated_home / ".claude" / "skills"
+    project = tmp_path / ".claude" / "skills"
+    other = tmp_path / "fluid"
+    same = put(user, "unnslop")
+    (same.parent / "references").mkdir()
+    (same.parent / "references" / "rules.md").write_text("r", encoding="utf-8")
+    copy = put(other, "copy-of-unnslop")  # identical SKILL.md, no references/
+    shadow_user = put(user, "deploy", body="procedure A\n")
+    shadow_project = put(project, "deploy", body="procedure B\n")
+    hidden = put(user, "quiet", extra="disable-model-invocation: true\n")
+    conditional = put(user, "scoped", extra="paths: src/**\n")
+    same_project = put(project, "ship")
     skills = [
-        Skill(name="unnslop", description="Remove AI writing patterns",
-              path=put(fluid / "unnslop" / "SKILL.md", same.format("unnslop"))),
-        Skill(name="unslop:unslop", description="Remove AI writing patterns", scope="plugin",
-              path=put(fluid / "p" / "unslop" / "SKILL.md", same.format("unslop"))),
-        Skill(name="deploy", description="Ship",
-              path=put(fluid / "deploy" / "SKILL.md", "---\nname: deploy\ndescription: Ship\n---\nnew steps\n")),
-        Skill(name="other", description="Remove AI writing patterns",
-              path=put(fluid / "other" / "SKILL.md", same.format("other").replace("body", "different"))),
-        Skill(name="tidy:clean", description="Tidy", scope="plugin",
-              path=put(fluid / "t" / "clean" / "SKILL.md", "---\nname: clean\ndescription: Tidy\n---\nt\n")),
-        Skill(name="quiet", description="Q",
-              path=put(fluid / "quiet" / "SKILL.md",
-                       "---\nname: quiet\ndescription: Q\ndisable-model-invocation: true\n---\nq\n")),
-        Skill(name="gone", description="Remove AI writing patterns", path=str(fluid / "gone" / "SKILL.md")),
+        skill(same), skill(copy, "unslop:unslop"), skill(shadow_user), skill(shadow_project, "deploy"),
+        skill(hidden), skill(conditional), skill(same_project),
+        Skill(name="gone", description="D", path=str(other / "gone" / "SKILL.md")),
     ]
+
     kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=True, project_on=True)
-    assert [s.name for s in kept] == ["deploy", "other", "tidy:clean", "quiet", "gone"]
-    # Without the user scope Claude Code's user folder is not consulted.
+    assert [s.path for s in kept] == [str(p) for p in (copy, shadow_user, shadow_project, hidden, conditional)] + [
+        str(other / "gone" / "SKILL.md")]
+    # Without the user scope Claude Code does not read that folder, so its
+    # skills stay listed and project/deploy is no longer shadowed.
     kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=False, project_on=True)
-    assert len(kept) == len(skills)
-    # A project skill in the working folder's .claude/skills counts too.
-    put(tmp_path / ".claude" / "skills" / "ship" / "SKILL.md",
-        "---\nname: ship\ndescription: Ship\n---\nnew steps\n")
-    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=False, project_on=True)
-    assert "deploy" not in [s.name for s in kept]
+    assert str(same) in [s.path for s in kept]
+    assert str(shadow_project) not in [s.path for s in kept]
+
+    # A managed skill of the same name shadows the user's copy.
+    put(tmp_path / "managed", "unnslop", body="policy\n")
+    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=True, project_on=True)
+    assert str(same) in [s.path for s in kept]
+    # So does an account-synced skill of the same name, over a project one.
+    assert str(same_project) not in [s.path for s in kept]
+    put(user / "synced" / "account", "ship", body="synced\n")
+    kept = ha._not_listed_by_claude(skills, str(tmp_path), user_on=True, project_on=True)
+    assert str(same_project) in [s.path for s in kept]
+
+
+def test_a_linked_skill_directory_is_the_same_directory(tmp_path, _isolated_home, monkeypatch):
+    from fluid.context.instructions import Skill
+
+    monkeypatch.setattr(ha, "_claude_managed_skills_dir", lambda: tmp_path / "managed")
+    real = _isolated_home / ".claude" / "skills" / "unnslop"
+    real.mkdir(parents=True)
+    (real / "SKILL.md").write_text("---\nname: unnslop\ndescription: D\n---\nb\n", encoding="utf-8")
+    (tmp_path / "fluid").mkdir()
+    link = _dir_link(tmp_path / "fluid" / "unnslop", real)
+    if link is None:
+        pytest.skip("this machine can make neither a symlink nor a junction")
+    linked = Skill(name="unnslop", description="D", path=str(link / "SKILL.md"))
+    assert ha._not_listed_by_claude([linked], str(tmp_path), user_on=True, project_on=True) == []
+    if sys.platform == "win32":
+        # Windows paths ignore case: another spelling is the same directory.
+        upper = Skill(name="unnslop", description="D", path=str(real / "SKILL.md").upper())
+        assert ha._not_listed_by_claude([upper], str(tmp_path), user_on=True, project_on=True) == []
 
 
 # ─── Claude Code compactions become the chat's compaction card ──────────────
