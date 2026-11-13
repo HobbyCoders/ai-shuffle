@@ -1990,7 +1990,7 @@ def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> li
     # switch stays a hot-swap (see provider_env_requires_reconnect).
     if provider_env_requires_reconnect(old.env, new_options.env):
         changed.append("provider_env")
-    if adapter_lane(state.adapter) == DELEGATED_LANE and delegated_cli_limits_require_reconnect(
+    if adapter_lane(getattr(state, "adapter", None)) == DELEGATED_LANE and delegated_cli_limits_require_reconnect(
         old.env, new_options.env
     ):
         changed.append("delegated_cli_limits")
