@@ -1812,6 +1812,12 @@
 		}
 		.provider-header:hover .section-device { transform: translateX(2px); }
 	}
+	/* Wherever the button is not hover-revealed, a finger reaches it: the icon
+	   stays 13px and the button around it is 44px (#1528). */
+	@media (max-width: 768px), (hover: none), (pointer: coarse) {
+		.provider-hide { min-width: 44px; min-height: 44px; }
+		.provider-restore { min-height: 44px; }
+	}
 	@media (prefers-reduced-motion: reduce) {
 		.provider-header, .provider-hide, .provider-header .section-device, .row-fill {
 			transition: none;

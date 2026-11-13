@@ -285,6 +285,13 @@
 	.r-btn.pressing { transform: scale(0.92); }
 	.r-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
+	/* The rail in a narrow drawer, or under a finger: the icons keep their 36px
+	   but sit a finger apart, and each answers across 44px (#1528). */
+	@media (max-width: 600px), (pointer: coarse) {
+		.rail:not(.phone) { gap: 8px; }
+		.rail:not(.phone) .r-btn::after { content: ''; position: absolute; inset: -4px; }
+	}
+
 	.r-new { color: var(--sidebar-foreground); }
 
 	.r-sep { flex: none; width: 24px; height: 1px; margin: 4px 0; background: var(--sidebar-border); }
