@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createSlugger, extractHeadings, markdownToPlainText } from './markdown';
-import { DocsSearchEngine, matchTerms } from './search';
+import { DocsSearchEngine, findMatch, matchTerms } from './search';
 import type { DocEntry } from './types';
 
 describe('docs heading anchors (#1475)', () => {
@@ -49,5 +49,23 @@ describe('docs plain text (#1478)', () => {
 		expect(matchTerms('  Away  for all ')).toEqual(['away for all', 'away', 'for', 'all']);
 		expect(matchTerms('pro')).toEqual(['pro']);
 		expect(matchTerms('x')).toEqual([]);
+	});
+
+	it('takes a whole word, else the start of a word, before a match inside one', () => {
+		const text = 'your subscription renews. scripts run, and so does your own script.';
+		expect(findMatch(text, '<script>')).toEqual({ at: text.lastIndexOf('script'), term: 'script' });
+		expect(findMatch('your subscription renews. scripts run', 'script')).toEqual({ at: 26, term: 'script' });
+		expect(findMatch('your subscription renews', 'script')).toEqual({ at: 8, term: 'script' });
+		expect(findMatch('nothing here', 'script')).toBeNull();
+	});
+
+	it('centres the search snippet on that same match', () => {
+		const entry = {
+			slug: 'overview', category: 'getting-started', title: 'Overview', description: '', order: 1,
+			content: `Pay for a subscription. ${'Filler words. '.repeat(10)}Run your own script before a turn.`
+		} as DocEntry;
+		const [result] = new DocsSearchEngine([entry]).search('<script>');
+		expect(result.snippets[0]).toContain('Run your own script');
+		expect(result.snippets[0]).not.toContain('subscription');
 	});
 });

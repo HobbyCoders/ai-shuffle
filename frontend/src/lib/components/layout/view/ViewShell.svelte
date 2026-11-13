@@ -40,7 +40,6 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	import { platform } from '$lib/stores/platform.svelte';
 	import { viewPanel } from '$lib/stores/view-panel.svelte';
 	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '../feature-panel-context';
-	import { leaveDetail } from './detail-history';
 	import PanelContext from './PanelContext.svelte';
 	import '../../settings/shell/settings.css';
 
@@ -63,11 +62,9 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		/** Identity of the open item. The detail keeps scrolling on its own beside the
 		 *  list, so when this changes the new item opens at its top. */
 		detailKey?: unknown;
-		/** Extra `page.state` for the phone Back step into the detail, e.g. which item it opened. */
-		historyState?: Record<string, unknown>;
 	}
 	let { panel, main, label, detailOpen = false, onBack, manageHistory = true, inheritScope = false, nestedPanes = false, contentFirst = false,
-		stacked = $bindable(false), detailKey, historyState }: Props = $props();
+		stacked = $bindable(false), detailKey }: Props = $props();
 	const contexts = getAllContexts();
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	const active = $derived(feature?.active ?? true);
@@ -107,15 +104,14 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		// Leaving a retained destination must remove its invisible Back stop.
 		if (!active && pushed) {
 			pushed = false;
-			const entry = untrack(() => page.state);
-			if ((entry as { viewPanelDetail?: string }).viewPanelDetail === historyKey) {
+			if (untrack(() => (page.state as { viewPanelDetail?: string }).viewPanelDetail) === historyKey) {
 				detailHistory.retiring = historyKey;
-				leaveDetail(entry); // With any steps the destination added inside it.
+				history.back();
 			}
 		}
 		if (active && stacked && !detailOpen && previousOpen && pushed) {
 			pushed = false;
-			leaveDetail(untrack(() => page.state));
+			history.back();
 		}
 		previousOpen = open;
 		if (open && !pushed && !retiring) {
@@ -125,7 +121,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 				if (cancelled || detailHistory.retiring) return;
 				try {
 					if ((page.state as { viewPanelDetail?: string }).viewPanelDetail !== historyKey) {
-						pushState('', { ...page.state, ...historyState, viewPanelDetail: historyKey } as App.PageState);
+						pushState('', { ...page.state, viewPanelDetail: historyKey } as App.PageState);
 					}
 					pushed = true;
 				} catch { /* Routerless tests still have an in-page back. */ }

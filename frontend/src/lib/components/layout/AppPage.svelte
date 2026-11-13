@@ -31,6 +31,7 @@
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { followChatHistory, openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
+	import { followDocsHistory } from '$lib/docs/history';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
@@ -107,15 +108,20 @@
 	});
 	// Back/Forward onto a chat link's history entry (breadcrumb, transcript
 	// link) reopens that chat. The first run is the page's initial state, not a step.
+	// A step onto a Docs entry reopens Docs (lib/docs/history.ts).
 	let firstChatHistory = true;
 	$effect(() => {
 		const state = page.state;
 		void (state as { chatSession?: string })?.chatSession;
 		if (firstChatHistory) {
 			firstChatHistory = false;
+			untrack(() => followDocsHistory(state, true));
 			return;
 		}
-		untrack(() => followChatHistory(state));
+		untrack(() => {
+			followChatHistory(state);
+			followDocsHistory(state);
+		});
 	});
 	function handleNewSession() {
 		navigationClaimed = true;

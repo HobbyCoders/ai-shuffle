@@ -1,12 +1,13 @@
 <script lang="ts">
- import { getContext, onMount, untrack } from 'svelte';
+ import { getContext, untrack } from 'svelte';
  import { page } from '$app/state';
- import { pushState } from '$app/navigation';
+ import { pushState, replaceState } from '$app/navigation';
  import { layout } from '$lib/stores/layout.svelte';
  import { platform } from '$lib/stores/platform.svelte';
- import { ViewShell, ViewPanel, DetailPane, ListItem, ListGroupLabel, EmptyDetail, nestedDetailStep } from '$lib/components/layout/view';
+ import { ViewShell, ViewPanel, DetailPane, ListItem, ListGroupLabel, EmptyDetail } from '$lib/components/layout/view';
  import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
  import { categories, docs, getDocsByCategory, getDocBySlug } from '$lib/docs/index';
+ import { ENTRY_KEY, currentEntryId, keptEntry, type DocsEntry } from '$lib/docs/history';
  import { extractHeadings } from '$lib/docs/markdown';
  import { DocsSearchEngine } from '$lib/docs/search';
  import DocsContent from './DocsContent.svelte';
@@ -29,29 +30,39 @@
  const active = $derived(feature?.active ?? true);
  const searchEngine = new DocsSearchEngine(docs);
  const docsByCategory = Object.fromEntries(categories.map(cat => [cat.id, getDocsByCategory(cat.id)]));
- const currentDoc = $derived(getDocBySlug(activeCategory, activeSlug) || null);
+ const currentDoc = $derived(detailOpen ? getDocBySlug(activeCategory, activeSlug) || null : null);
  // From the Markdown itself, with the renderer's anchors: present on the first
  // paint and on every reopen of the same document (#1476).
  const headings = $derived(currentDoc ? extractHeadings(currentDoc.content) : []);
- const openSlug = $derived(activeSlug ? `${activeCategory}/${activeSlug}` : '');
+ /** What Docs shows: a document, or '' for the list. */
+ const shown = $derived(currentDoc ? `${activeCategory}/${activeSlug}` : '');
 
  /**
-  * Browser history (#1477). Each document opened in place of another is its own
-  * Back step, carrying `docsDoc`. On a phone the step into a document from the
-  * list is ViewShell's, which carries `docsDoc` too. An entry without it (wide
-  * screens) shows `baseDoc`, the document that was open when Docs added no step.
-  * On a phone the steps after the first carry their depth, so leaving Docs takes
-  * them all off the stack (see detail-history.ts).
-  * The open document is kept per tab so a reload, or Forward back into the app,
-  * reopens it.
+  * Browser history (#1477, see lib/docs/history.ts). The entry Docs stands on
+  * always says what it shows. A document chosen in place of what that entry
+  * shows (another document, or the list) is a new entry; opening Docs or a
+  * deep link relabels the entry it opens on, so Docs adds no step nobody asked
+  * for. Back and Forward onto a Docs entry show what it says, at any width, and
+  * reopen Docs from another destination (AppPage). The tab remembers what is
+  * open and the entry it is on, so a reload restores that entry instead of
+  * adding one.
   */
  const OPEN_KEY = 'docs.open';
- let baseDoc = '';
- function remember(slug: string) {
-  try { sessionStorage.setItem(OPEN_KEY, slug); } catch { /* Storage blocked: a reload starts over. */ }
+ function save(key: string, value: string) {
+  try { sessionStorage.setItem(key, value); } catch { /* Storage blocked: a reload starts over. */ }
  }
- function recall(): string {
-  try { return sessionStorage.getItem(OPEN_KEY) ?? ''; } catch { return ''; }
+ function load(key: string): string {
+  try { return sessionStorage.getItem(key) ?? ''; } catch { return ''; }
+ }
+ function entry(): DocsEntry {
+  return (page.state ?? {}) as DocsEntry;
+ }
+ /** Remember what is open and, when Docs stands on it, which entry says so. */
+ function note() {
+  save(OPEN_KEY, shown);
+  seen = entry().docsDoc;
+  const id = currentEntryId();
+  if (id !== null && seen === shown) save(ENTRY_KEY, JSON.stringify({ id, doc: shown, step: !!entry().docsStep }));
  }
  function known(slug: string): [string, string] | null {
   const [cat, name] = slug.split('/');
@@ -63,46 +74,74 @@
   tocOpen = false;
   detailOpen = true;
   find = query ? { query, key: ++searches } : null;
-  remember(`${category}/${slug}`);
   const scroll = articleEl?.closest('.view-main-slot');
   if (scroll) scroll.scrollTop = 0;
  }
+ /** Show what an entry says: a known document, else the list. */
+ function showEntry(doc: string) {
+  const target = known(doc);
+  if (!target) detailOpen = false;
+  else if (target.join('/') !== shown) show(...target);
+ }
+ /** Make the current entry say what Docs shows; `step` when Docs pushed it. */
+ function label(step = !!entry().docsStep) {
+  try { replaceState('', { ...page.state, docsDoc: shown, docsStep: step } as App.PageState); } catch { /* Routerless tests. */ }
+  note();
+ }
  /** A document the reader chose: a list row, a search result or a link in a document. */
  function selectDoc(category: string, slug: string, query = '') {
-  const target = `${category}/${slug}`;
-  const open = detailOpen && !!openSlug;
-  const replacing = open && openSlug !== target;
-  // The open document chosen again (a search inside it) adds no step and keeps the base.
-  if (!open) baseDoc = target;
+  if (`${category}/${slug}` === shown) { show(category, slug, query); return; } // A search inside it adds no step.
+  // A new step in place of what this entry showed (a document, or the list);
+  // a first document when Docs stood on no entry of its own relabels it.
+  const step = active && entry().docsDoc === shown;
   show(category, slug, query);
-  if (!replacing) return;
-  try { pushState('', { ...page.state, ...nestedDetailStep(page.state), docsDoc: target } as App.PageState); } catch { /* Routerless tests. */ }
+  if (!step) { label(false); return; }
+  try { pushState('', { ...page.state, docsDoc: shown, docsStep: true } as App.PageState); } catch { /* Routerless tests. */ }
+  note();
  }
- onMount(() => {
+ /** First paint: the entry Docs opened on, else the entry a reload kept, else the last document. */
+ function start(doc: string | undefined) {
   if (activeSlug || initialItemId) return;
-  const saved = known(recall());
-  if (saved) { baseDoc = saved.join('/'); show(...saved); return; }
-  if (!mobile && !platform.isMobile && window.innerWidth > 600) {
-   const first = docsByCategory[activeCategory]?.[0];
-   if (first) selectDoc(activeCategory, first.slug);
+  if (doc !== undefined) { showEntry(doc); if (entry().docsDoc === shown) note(); else label(); return; }
+  const kept = keptEntry();
+  if (kept) {
+   // A reload: SvelteKit emptied this entry's state; it was ours, so it says the same again.
+   showEntry(kept.docsDoc);
+   label(kept.docsStep);
+   return;
   }
- });
- // Back and Forward onto a Docs entry open its document.
- let seenEntry = untrack(() => (page.state as { docsDoc?: string } | undefined)?.docsDoc);
+  const last = known(load(OPEN_KEY)); // A plain slug, also from before entries were kept.
+  if (last) show(...last);
+  else if (!mobile && !platform.isMobile && window.innerWidth > 600) {
+   const first = docsByCategory[activeCategory]?.[0];
+   if (first) show(activeCategory, first.slug);
+  }
+  label(false);
+ }
+ let started = false;
+ let seen: string | undefined;
+ let wasOn = false;
  $effect(() => {
-  const entry = (page.state as { docsDoc?: string } | undefined)?.docsDoc;
+  const doc = entry().docsDoc;
+  const on = active;
   untrack(() => {
-   if (entry === seenEntry) return;
-   seenEntry = entry;
-   if (!active) return;
-   const target = known(entry ?? (stacked ? '' : baseDoc));
-   if (!target || (target.join('/') === openSlug && detailOpen)) return;
-   show(...target);
+   const stepped = doc !== seen; // Back or Forward, maybe while another destination was shown.
+   seen = doc;
+   const opened = on && !wasOn;
+   wasOn = on;
+   if (!on || (!stepped && !opened)) return;
+   if (!started) { started = true; start(doc); return; }
+   // Docs opened on an entry that names no document: that entry now stands for it.
+   if (doc === undefined) { if (opened) label(false); return; }
+   showEntry(doc);
+   if (entry().docsDoc === shown) note(); else label();
   });
  });
+ /** The detail's own Back on a phone: one step down when Docs pushed this entry, else the list. */
  function backToList() {
+  if (entry().docsStep && entry().docsDoc === shown) { history.back(); return; }
   detailOpen = false;
-  remember('');
+  label();
  }
  function handleSearchResult(fullSlug: string, query = '') {
   const target = known(fullSlug);
@@ -117,7 +156,7 @@
   }
  });
 </script>
-<ViewShell label="Docs" {detailOpen} bind:stacked onBack={backToList} historyState={{ docsDoc: openSlug }}>
+<ViewShell label="Docs" {detailOpen} bind:stacked manageHistory={false} onBack={backToList}>
  {#snippet panel()}
   <ViewPanel title="Docs">
    {#snippet search()}<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />{/snippet}
@@ -127,7 +166,7 @@
       <ListGroupLabel label={cat.label} compact />
       <div class="docs-group">
       {#each docsByCategory[cat.id] as doc}
-       <ListItem variant="plain" id={`${cat.id}/${doc.slug}`} name={doc.title} selected={activeCategory === cat.id && activeSlug === doc.slug} onselect={() => selectDoc(cat.id, doc.slug)} />
+       <ListItem variant="plain" id={`${cat.id}/${doc.slug}`} name={doc.title} selected={shown === `${cat.id}/${doc.slug}`} onselect={() => selectDoc(cat.id, doc.slug)} />
       {/each}
       </div>
      {/if}

@@ -14,7 +14,7 @@
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { createSlugger, DOC_MARKED_OPTIONS } from '$lib/docs/markdown';
-	import { matchTerms } from '$lib/docs/search';
+	import { findMatch } from '$lib/docs/search';
 
 	interface Props {
 		content: string;
@@ -185,18 +185,14 @@
 		return marks;
 	}
 
-	/** Scroll to and mark the first match of a search: the whole query, else its first word found (#1478). */
+	/** Scroll to and mark the match the search snippet shows (`findMatch`, #1478). */
 	function revealMatch(query: string) {
 		if (!contentEl) return;
 		for (const old of contentEl.querySelectorAll('mark.doc-find-hit')) old.replaceWith(...old.childNodes);
 		contentEl.normalize();
 		const { text, at } = readableText(readableTextNodes(contentEl));
-		for (const term of matchTerms(query)) {
-			const from = text.indexOf(term);
-			if (from === -1) continue;
-			markSpan(at, from, from + term.length)[0]?.scrollIntoView?.({ block: 'center' });
-			return;
-		}
+		const match = findMatch(text, query);
+		if (match) markSpan(at, match.at, match.at + match.term.length)[0]?.scrollIntoView?.({ block: 'center' });
 	}
 
 	let foundKey: number | null = null;

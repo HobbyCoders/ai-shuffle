@@ -107,6 +107,23 @@ describe('DocsContent find (#1478)', () => {
 		}
 	});
 
+	it('marks a whole word, not the same letters inside another word', async () => {
+		const scrolled: string[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this.textContent ?? ''); };
+		try {
+			const content = 'Pay for a subscription.\n\nRun your own script before a turn.';
+			const view = render(DocsContent, { content, find: { query: '<script>', key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit')).toHaveLength(1));
+			const mark = view.container.querySelector('mark.doc-find-hit')!;
+			expect(mark.textContent).toBe('script');
+			expect(mark.closest('p')?.textContent).toBe('Run your own script before a turn.');
+			expect(scrolled).toEqual(['script']);
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+	});
+
 	it('reads a line break as a space next to inline code, links and a raw <br>', async () => {
 		const { markdownToPlainText } = await import('$lib/docs/markdown');
 		const content = '- run `git`\n  [pull](/docs/x) now\n\n| A | B |\n| --- | --- |\n| one<br>two | `x`<br/>`y` |';

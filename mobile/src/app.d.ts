@@ -15,8 +15,10 @@ declare global {
 			mobileControls?: boolean;
 			/** The Chat controls page (Model, Agent…) whose own Back entry is on the stack. */
 			mobileControlsPage?: string;
-			/** The Docs document a Back/Forward step onto this entry opens (`category/slug`). */
+			/** What Docs showed on this entry: a document (`category/slug`), or '' for the list (see lib/docs/history.ts). */
 			docsDoc?: string;
+			/** Docs pushed this entry, so the one below it is a Docs entry too. */
+			docsStep?: boolean;
 		}
 		// interface Platform {}
 	}

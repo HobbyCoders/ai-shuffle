@@ -21,4 +21,3 @@ export { default as Switch } from '../../settings/rows/Switch.svelte';
 export { default as Segmented } from '../../settings/rows/Segmented.svelte';
 export { default as Tile } from '../../settings/rows/Tile.svelte';
 export { default as InlineBanner } from '../../settings/rows/InlineBanner.svelte';
-export { nestedDetailStep } from './detail-history';

@@ -29,6 +29,38 @@ export function matchTerms(query: string): string[] {
 	return terms;
 }
 
+const WORD = /[\p{L}\p{N}_]/u;
+
+/** Where `term` best occurs in `text`: 2 a whole word, 1 the start of a word, 0 inside one. */
+function bestOccurrence(text: string, term: string): [rank: number, at: number] | null {
+	let best: [number, number] | null = null;
+	for (let at = text.indexOf(term); at !== -1; at = text.indexOf(term, at + 1)) {
+		const end = at + term.length;
+		const head = !WORD.test(term[0]) || !WORD.test(text[at - 1] ?? '');
+		const tail = !WORD.test(term[term.length - 1]) || !WORD.test(text[end] ?? '');
+		const rank = head ? (tail ? 2 : 1) : 0;
+		if (!best || rank > best[0]) best = [rank, at];
+		if (rank === 2) break;
+	}
+	return best;
+}
+
+/**
+ * The place a query matches in lower-case readable text: the first of
+ * `matchTerms` found as a whole word, else at the start of a word (as the index
+ * matches a prefix), else anywhere. The snippet and the jump into the opened
+ * document both use this, so they show the same place.
+ */
+export function findMatch(text: string, query: string): { at: number; term: string } | null {
+	let best: { rank: number; at: number; term: string } | null = null;
+	for (const term of matchTerms(query)) {
+		const hit = bestOccurrence(text, term);
+		if (hit && (!best || hit[0] > best.rank)) best = { rank: hit[0], at: hit[1], term };
+		if (best?.rank === 2) break;
+	}
+	return best && { at: best.at, term: best.term };
+}
+
 export class DocsSearchEngine {
 	private index = new Map<string, Set<string>>(); // token -> full slugs
 	private docs = new Map<string, DocEntry>(); // full slug -> entry
@@ -116,20 +148,16 @@ export class DocsSearchEngine {
 			});
 	}
 
-	/** One readable snippet around the first match (see `matchTerms`), never raw Markdown (#1478). */
+	/** One readable snippet around the best match (see `findMatch`), never raw Markdown (#1478). */
 	private extractSnippets(text: string, query: string): string[] {
-		const lower = text.toLowerCase();
-		for (const term of matchTerms(query)) {
-			const idx = lower.indexOf(term);
-			if (idx === -1) continue;
-			const start = Math.max(0, idx - 50);
-			const end = Math.min(text.length, idx + term.length + 50);
-			let snippet = text.slice(start, end).trim();
-			if (start > 0) snippet = '...' + snippet;
-			if (end < text.length) snippet = snippet + '...';
-			return [snippet];
-		}
-		return [];
+		const match = findMatch(text.toLowerCase(), query);
+		if (!match) return [];
+		const start = Math.max(0, match.at - 50);
+		const end = Math.min(text.length, match.at + match.term.length + 50);
+		let snippet = text.slice(start, end).trim();
+		if (start > 0) snippet = '...' + snippet;
+		if (end < text.length) snippet = snippet + '...';
+		return [snippet];
 	}
 
 	private tokenize(text: string): string[] {

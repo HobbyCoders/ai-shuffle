@@ -1,6 +1,7 @@
-// Docs history and search (#1477, #1478): each document is its own Back step,
-// leaving Docs takes all of them off the stack, and every search result opened
-// marks and shows its phrase, also across inline markup.
+// Docs history and search (#1477, #1478): each document is its own Back step;
+// after Docs is left, Back keeps visibly stepping (a Docs step reopens Docs on
+// its document); a reload keeps the whole chain; and every search result opened
+// marks and shows its match, a whole word before letters inside another word.
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -49,7 +50,7 @@ await runJourney({
 	name: 'docs-history',
 	allow: DEV_INSTANCE_NOISE,
 	cases: [{
-		name: 'phone-document-steps-retire-for-agents',
+		name: 'phone-docs-steps-after-agents',
 		viewports: ['phone'],
 		async setup({ page, status }) {
 			await gotoApp(page, status);
@@ -74,12 +75,15 @@ await runJourney({
 			await page.locator('[data-view-shell="Agents"][data-pane="detail"]').waitFor();
 			await page.waitForTimeout(300);
 			const inAgents = await detailMarker(page);
-			expect(inAgents.viewPanelDetail && !inAgents.docsDoc, `the agent detail is the current Back step, not a Docs one (${JSON.stringify(inAgents)})`);
-			await mark('Back closes the agent detail and leaves no hidden Docs step');
+			expect(inAgents.viewPanelDetail, `the agent detail is the current Back step (${JSON.stringify(inAgents)})`);
+			await mark('Back closes the agent detail in one step');
 			await page.locator('.topbar').getByRole('button', { name: 'Back to Agents', exact: true }).click();
 			await page.locator('[data-view-shell="Agents"][data-pane="panel"]').waitFor({ timeout: 5000 });
-			const after = await detailMarker(page);
-			expect(!after.viewPanelDetail && !after.docsDoc, `no hidden detail step remains after Agents Back (${JSON.stringify(after)})`);
+			await mark('the next Back reopens Docs on the document before, and the one after shows the list');
+			await page.goBack();
+			await waitTitle(page, 'AI Shuffle documentation');
+			await page.goBack();
+			await page.locator('[data-view-shell="Docs"][data-pane="panel"]').waitFor({ timeout: 5000 });
 		}
 	}, {
 		name: 'desktop-reselect-keeps-back',
@@ -98,6 +102,43 @@ await runJourney({
 			await waitTitle(page, 'AI Shuffle documentation');
 			await page.goForward();
 			await waitTitle(page, 'Frequently asked questions');
+		}
+	}, {
+		name: 'desktop-reload-keeps-chain',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await openDestination(page, 'Docs');
+			await waitTitle(page, 'AI Shuffle documentation');
+		},
+		async act({ page, mark }) {
+			await mark('three documents, then Back twice');
+			for (const [name, title] of [['Updates', 'Updates'], ['FAQ', 'Frequently asked questions'], ['Changelog', 'Changelog']]) {
+				await docsList(page).getByText(name, { exact: true }).click();
+				await waitTitle(page, title);
+			}
+			await page.goBack();
+			await page.goBack();
+			await waitTitle(page, 'Updates');
+			const length = await page.evaluate(() => history.length);
+			await mark('reload');
+			await page.reload({ waitUntil: 'domcontentloaded' });
+			await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+			await mark('the reload keeps the document and adds no entry');
+			await waitTitle(page, 'Updates');
+			const after = await page.evaluate(() => history.length);
+			expect(after === length, `a reload adds no history entry (${length} before, ${after} after)`);
+			await mark('after leaving Docs, Back reopens it on the document before; Forward steps through the rest');
+			await openDestination(page, 'Agents');
+			await page.locator('[data-view-shell="Agents"]').waitFor();
+			await page.goBack();
+			await waitTitle(page, 'AI Shuffle documentation');
+			await page.goForward();
+			await waitTitle(page, 'Updates');
+			await page.goForward();
+			await waitTitle(page, 'Frequently asked questions');
+			await page.goForward();
+			await waitTitle(page, 'Changelog');
 		}
 	}, {
 		name: 'desktop-repeated-search',
@@ -123,6 +164,15 @@ await runJourney({
 			await page.waitForTimeout(300);
 			const second = await hit(page);
 			expect(second.text === 'Away for all chats (the moon' && second.visible, `the second search marks and shows the whole phrase (${JSON.stringify(second)})`);
+
+			await mark('a one-word search marks the whole word, not the same letters inside another word');
+			await openResult(page, '<script>', 'Overview');
+			await waitTitle(page, 'AI Shuffle');
+			await page.locator('mark.doc-find-hit').first().waitFor();
+			await page.waitForTimeout(300);
+			const word = await hit(page);
+			const around = await page.evaluate(() => document.querySelector('mark.doc-find-hit')?.parentElement?.textContent ?? '');
+			expect(word.text === 'script' && word.visible && around.includes('your own script'), `the mark is the word "script" (${JSON.stringify({ ...word, around })})`);
 		}
 	}]
 });
