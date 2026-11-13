@@ -4,8 +4,8 @@
  import { platform } from '$lib/stores/platform.svelte';
  import { ViewShell, ViewPanel, DetailPane, ListItem, ListGroupLabel, EmptyDetail } from '$lib/components/layout/view';
  import { categories, docs, getDocsByCategory, getDocBySlug } from '$lib/docs/index';
+ import { extractHeadings } from '$lib/docs/markdown';
  import { DocsSearchEngine } from '$lib/docs/search';
- import type { DocSection } from '$lib/docs/types';
  import DocsContent from './DocsContent.svelte';
  import DocsTableOfContents from './DocsTableOfContents.svelte';
  import DocsSearch from './DocsSearch.svelte';
@@ -15,31 +15,56 @@
  let activeCategory = $state(categories[0]?.id || 'getting-started');
  let activeSlug = $state('');
  let detailOpen = $state(false);
- let headings = $state<DocSection[]>([]);
  let tocOpen = $state(false);
+ let find = $state<{ query: string; key: number } | null>(null);
+ // Never reused: DocsContent reveals each search once per key, across documents chosen in between.
+ let searches = 0;
  const tocId = $props.id();
  let articleEl = $state<HTMLElement>();
  const searchEngine = new DocsSearchEngine(docs);
  const docsByCategory = Object.fromEntries(categories.map(cat => [cat.id, getDocsByCategory(cat.id)]));
  const currentDoc = $derived(getDocBySlug(activeCategory, activeSlug) || null);
+ // From the Markdown itself, with the renderer's anchors: present on the first
+ // paint and on every reopen of the same document (#1476).
+ const headings = $derived(currentDoc ? extractHeadings(currentDoc.content) : []);
+ // The tab remembers the open document, so a reload reopens it. Docs keeps no
+ // browser history of its own: this is a plain read on mount, and only where
+ // list and document show side by side. A phone opens on the list, as before,
+ // because opening the stacked detail on load would add ViewShell's Back entry
+ // on top of the one the reloaded page already stands on.
+ const OPEN_KEY = 'docs.open';
+ function remember(doc: string) {
+  try { sessionStorage.setItem(OPEN_KEY, doc); } catch { /* Storage blocked: a reload starts over. */ }
+ }
+ function known(fullSlug: string): [string, string] | null {
+  const [cat, slug] = fullSlug.split('/');
+  return cat && slug && getDocBySlug(cat, slug) ? [cat, slug] : null;
+ }
+ function lastOpen(): [string, string] | null {
+  try { return known(sessionStorage.getItem(OPEN_KEY) ?? ''); } catch { return null; }
+ }
  onMount(() => {
-  if (!activeSlug && !mobile && !platform.isMobile && window.innerWidth > 600) {
-   const first = docsByCategory[activeCategory]?.[0];
-   if (first) selectDoc(activeCategory, first.slug);
-  }
+  if (activeSlug || initialItemId || mobile || platform.isMobile || window.innerWidth <= 600) return;
+  const [category, slug] = lastOpen() ?? [activeCategory, docsByCategory[activeCategory]?.[0]?.slug];
+  if (slug) selectDoc(category, slug);
  });
- function selectDoc(category: string, slug: string) {
+ function selectDoc(category: string, slug: string, query = '') {
   activeCategory = category;
   activeSlug = slug;
-  headings = [];
   tocOpen = false;
   detailOpen = true;
+  find = query ? { query, key: ++searches } : null;
+  remember(`${category}/${slug}`);
   const scroll = articleEl?.closest('.view-main-slot');
   if (scroll) scroll.scrollTop = 0;
  }
- function handleSearchResult(fullSlug: string) {
-  const [cat, slug] = fullSlug.split('/');
-  if (cat && slug) selectDoc(cat, slug);
+ function backToList() {
+  detailOpen = false;
+  remember('');
+ }
+ function handleSearchResult(fullSlug: string, query = '') {
+  const target = known(fullSlug);
+  if (target) selectDoc(target[0], target[1], query);
  }
  $effect(() => {
   if (!initialItemId) { consumedItemId = null; return; }
@@ -50,7 +75,7 @@
   }
  });
 </script>
-<ViewShell label="Docs" {detailOpen} onBack={() => detailOpen = false}>
+<ViewShell label="Docs" {detailOpen} onBack={backToList}>
  {#snippet panel()}
   <ViewPanel title="Docs">
    {#snippet search()}<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />{/snippet}
@@ -79,7 +104,7 @@
         {#if tocOpen}<div id={tocId} class="doc-inline-list"><DocsTableOfContents {headings} showTitle={false} onSelect={() => tocOpen = false} scrollContainer={articleEl?.closest('.view-main-slot') as HTMLElement | null} /></div>{/if}
        </div>
       {/if}
-      <DocsContent framed content={currentDoc.content} onHeadingsExtracted={h => headings = h} />
+      <DocsContent framed content={currentDoc.content} {find} />
      {:else}<EmptyDetail title="Choose a document" message="Browse the guides or search the docs to get started." />{/if}
     </article>
     <aside class="doc-toc"><DocsTableOfContents {headings} scrollContainer={articleEl?.closest('.view-main-slot') as HTMLElement | null} /></aside>

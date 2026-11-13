@@ -14,6 +14,128 @@ describe('DocsContent headings', () => {
 		expect(heading.querySelector('code')?.textContent).toBe('curl');
 		expect(heading.id).toBe('scripts-and-curl');
 	});
+
+	it('gives repeated headings unique anchors that match the contents list (#1475)', async () => {
+		const { extractHeadings } = await import('$lib/docs/markdown');
+		const md = '## 1.1\n\n### Removed\n\n## 1.0\n\n### Removed';
+		const { container } = render(DocsContent, { content: md });
+		const ids = [...container.querySelectorAll('h2, h3')].map((h) => h.id);
+		expect(ids).toEqual(['11', 'removed', '10', 'removed-1']);
+		expect(extractHeadings(md).map((h) => h.id)).toEqual(ids);
+	});
+});
+
+describe('DocsContent find (#1478)', () => {
+	it('marks and scrolls to the first readable match, once per search', async () => {
+		const scrolled: string[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this.textContent ?? ''); };
+		try {
+			const content = '# Away for all chats\n\n```sh\naway\n```\n\n| Mode | Note |\n| --- | --- |\n| Quiet | Away for all chats pauses replies |';
+			const view = render(DocsContent, { content, framed: true, find: { query: 'away for all', key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit')).toHaveLength(1));
+			const mark = view.container.querySelector('mark.doc-find-hit')!;
+			// Not the hidden duplicate title, and the whole phrase before a lone word in code.
+			expect(mark.closest('td')).not.toBeNull();
+			expect(mark.textContent).toBe('Away for all');
+			expect(scrolled).toEqual(['Away for all']);
+
+			await view.rerender({ content, framed: true, find: { query: 'away for all', key: 1 } });
+			expect(scrolled).toHaveLength(1);
+			await view.rerender({ content, framed: true, find: { query: 'pauses', key: 2 } });
+			await waitFor(() => expect(scrolled).toEqual(['Away for all', 'pauses']));
+			expect([...view.container.querySelectorAll('mark.doc-find-hit')].map((m) => m.textContent)).toEqual(['pauses']);
+			expect(view.container.querySelector('td:last-child')!.textContent).toBe('Away for all chats pauses replies');
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+	});
+
+	it('finds the whole phrase across inline markup, as the search snippet does', async () => {
+		await preloadAllDocs();
+		const scrolled: Element[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this); };
+		try {
+			const query = 'Away for all chats (the moon';
+			const { content } = getDocByFullSlug('getting-started/changelog')!;
+			const view = render(DocsContent, { content, framed: true, find: { query, key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit').length).toBeGreaterThan(1));
+			const marks = [...view.container.querySelectorAll('mark.doc-find-hit')];
+			expect(marks.map((m) => m.textContent).join('')).toBe(query);
+			expect(marks[0].closest('strong')?.textContent).toBe('Away for all chats');
+			expect(new Set(marks.map((m) => m.closest('li')))).toHaveLength(1);
+			expect(scrolled).toEqual([marks[0]]);
+
+			// Clearing the marks restores the item's text exactly.
+			const item = marks[0].closest('li')!;
+			const text = item.textContent;
+			await view.rerender({ content, framed: true, find: { query: 'qzxqzx', key: 2 } });
+			expect(item.querySelector('mark')).toBeNull();
+			expect(item.textContent).toBe(text);
+			expect(item.querySelector('strong')?.textContent).toBe('Away for all chats');
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+	});
+
+	it('finds the whole phrase across a wrapped source line, as the search snippet does', async () => {
+		await preloadAllDocs();
+		const { DocsSearchEngine } = await import('$lib/docs/search');
+		const scrolled: Element[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this); };
+		try {
+			const query = 'balance access separately';
+			const doc = getDocByFullSlug('api-reference/model-providers')!;
+			// The source wraps between "access" and "separately"; `breaks: true` renders a <br> there.
+			expect(doc.content).toContain('balance access\nseparately');
+			const [hit] = new DocsSearchEngine([doc]).search(query);
+			expect(hit.snippets[0].toLowerCase()).toContain(query);
+
+			const view = render(DocsContent, { content: doc.content, framed: true, find: { query, key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit').length).toBeGreaterThan(0));
+			const marks = [...view.container.querySelectorAll('mark.doc-find-hit')];
+			expect(marks.map((m) => m.textContent).join(' ')).toBe(query);
+			const paragraph = marks[0].closest('p')!;
+			expect(marks.every((m) => m.closest('p') === paragraph)).toBe(true);
+			expect(paragraph.innerHTML).toContain('<mark class="doc-find-hit">balance access</mark><br><mark class="doc-find-hit">separately</mark>');
+			expect(paragraph.previousElementSibling?.textContent).toBe('Provider-reported API balances');
+			expect(scrolled).toEqual([marks[0]]);
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+	});
+
+	it('marks a whole word, not the same letters inside another word', async () => {
+		const scrolled: string[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this.textContent ?? ''); };
+		try {
+			const content = 'Pay for a subscription.\n\nRun your own script before a turn.';
+			const view = render(DocsContent, { content, find: { query: '<script>', key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit')).toHaveLength(1));
+			const mark = view.container.querySelector('mark.doc-find-hit')!;
+			expect(mark.textContent).toBe('script');
+			expect(mark.closest('p')?.textContent).toBe('Run your own script before a turn.');
+			expect(scrolled).toEqual(['script']);
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+	});
+
+	it('reads a line break as a space next to inline code, links and a raw <br>', async () => {
+		const { markdownToPlainText } = await import('$lib/docs/markdown');
+		const content = '- run `git`\n  [pull](/docs/x) now\n\n| A | B |\n| --- | --- |\n| one<br>two | `x`<br/>`y` |';
+		expect(markdownToPlainText(content)).toBe('run git pull now A B one two x y');
+		for (const [query, expected] of [['git pull now', ['git', 'pull', 'now']], ['one two', ['one', 'two']], ['x y', ['x', 'y']]] as const) {
+			const view = render(DocsContent, { content, find: { query, key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit').length).toBeGreaterThan(0));
+			const marks = [...view.container.querySelectorAll('mark.doc-find-hit')];
+			expect(marks.map((m) => m.textContent?.trim())).toEqual(expected);
+			view.unmount();
+		}
+	});
 });
 
 describe('DocsContent code copy', () => {
@@ -168,7 +290,7 @@ describe('DocsContent anchor links', () => {
 		const { scroll, restore } = captureScroll();
 		try {
 			const { container } = render(DocsContent, { content: '[Hooks](/docs/features/hooks#exit-codes)\n\n## Exit codes' });
-			frames.length = 0; // drop the heading-extraction frame from mount
+			frames.length = 0; // only the click's frame counts
 			container.querySelector('a')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
 			expect(open).toHaveBeenCalledExactlyOnceWith('docs', 'features/hooks');
 			// The target page renders after the panel switches, so the scroll waits a frame.

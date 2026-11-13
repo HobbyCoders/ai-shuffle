@@ -1,13 +1,13 @@
 <script lang="ts">
  import { PanelSearch, ListItem, EmptyDetail } from '$lib/components/layout/view';
  import type { DocsSearchEngine } from '$lib/docs/search';
- let { searchEngine, onSelectResult }: { searchEngine: DocsSearchEngine; onSelectResult: (slug:string) => void } = $props();
+ let { searchEngine, onSelectResult }: { searchEngine: DocsSearchEngine; onSelectResult: (slug:string, query:string) => void } = $props();
  let query = $state('');
  let input = $state<HTMLInputElement>();
  function clear() { query = ''; selectedIndex = -1; input?.focus(); }
  let selectedIndex = $state(-1);
  const results = $derived(query.trim().length >= 2 ? searchEngine.search(query) : []);
- function select(slug: string) { onSelectResult(slug); query = ''; selectedIndex = -1; }
+ function select(slug: string) { onSelectResult(slug, query.trim()); query = ''; selectedIndex = -1; }
  function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'ArrowDown') { e.preventDefault(); selectedIndex = Math.min(selectedIndex + 1,results.length - 1); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIndex = Math.max(selectedIndex - 1,-1); }

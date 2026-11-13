@@ -9,35 +9,31 @@
 	 * - In-panel navigation for `/docs/<category>/<slug>#anchor` and `#anchor` links
 	 * - Existing .prose CSS styling
 	 */
-	import { tick } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { marked, type Renderer, type Tokens } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { layout } from '$lib/stores/layout.svelte';
-	import type { DocSection } from '$lib/docs/types';
+	import { createSlugger, DOC_MARKED_OPTIONS } from '$lib/docs/markdown';
+	import { findMatch } from '$lib/docs/search';
 
 	interface Props {
 		content: string;
 		/** DetailPane provides the article title; retain its anchor without a duplicate heading. */
 		framed?: boolean;
-		onHeadingsExtracted?: (headings: DocSection[]) => void;
+		/** A search to reveal: the first match is scrolled to and marked. A new `key` repeats it. */
+		find?: { query: string; key: number } | null;
 	}
 
-	let { content, framed = false, onHeadingsExtracted }: Props = $props();
+	let { content, framed = false, find = null }: Props = $props();
 
 	let contentEl = $state<HTMLDivElement | null>(null);
 
-	// Custom renderer for heading IDs
+	// Heading anchors are unique per document (#1475); a fresh slugger per parse.
+	let slug = createSlugger();
 	const renderer = new marked.Renderer();
 	renderer.heading = function (this: Renderer, { text, tokens, depth }: Tokens.Heading) {
-		const slug = text
-			.toLowerCase()
-			.replace(/<[^>]*>/g, '')
-			.replace(/[^\w\s-]/g, '')
-			.replace(/\s+/g, '-')
-			.replace(/-+/g, '-')
-			.trim();
 		// Inline markup renders: a heading's `curl` is code, not literal backticks.
-		return `<h${depth} id="${slug}">${this.parser.parseInline(tokens)}</h${depth}>`;
+		return `<h${depth} id="${slug(text)}">${this.parser.parseInline(tokens)}</h${depth}>`;
 	};
 
 	// Enhanced code blocks with copy button. The markup goes through the
@@ -107,27 +103,105 @@
 
 	const renderedHtml = $derived.by(() => {
 		if (!content) return '';
-		return marked.parse(content, { renderer, gfm: true, breaks: true }) as string;
+		slug = createSlugger();
+		return marked.parse(content, { renderer, ...DOC_MARKED_OPTIONS }) as string;
 	});
 
-	// Extract headings after render for ToC
+	/**
+	 * Text the reader sees, in order: not the hidden duplicate title or a code
+	 * block's Copy button. Line breaks (`<br>`, which `breaks: true` makes of
+	 * every wrapped source line) are kept, since they separate words.
+	 */
+	function readableTextNodes(root: HTMLElement): (Text | HTMLBRElement)[] {
+		const hiddenTitle = framed && root.firstElementChild?.tagName === 'H1' ? root.firstElementChild : null;
+		const nodes: (Text | HTMLBRElement)[] = [];
+		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+		for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+			if (node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName !== 'BR') continue;
+			const parent = node.parentElement;
+			if (!parent || (hiddenTitle && hiddenTitle.contains(parent)) || parent.closest('.code-block-header')) continue;
+			nodes.push(node as Text | HTMLBRElement);
+		}
+		return nodes;
+	}
+
+	const BLOCKS = 'p,li,h1,h2,h3,h4,h5,h6,td,th,pre,blockquote,dt,dd,caption,figcaption,div';
+
+	/**
+	 * The readable text as one string, the way the search snippet reads it
+	 * (`markdownToPlainText`): lower case, each run of spaces one space, and a
+	 * space between blocks or at a line break, so a phrase matches across inline
+	 * markup such as a bold label and across a wrapped source line. `at[i]` is the
+	 * text node and offset that character came from, or null for such a space.
+	 */
+	function readableText(nodes: (Text | HTMLBRElement)[]) {
+		let text = '';
+		const at: ([Text, number] | null)[] = [];
+		let block: Element | null = null;
+		for (const node of nodes) {
+			const own = node.parentElement?.closest(BLOCKS) ?? null;
+			const isText = node instanceof Text;
+			if (text && (!isText || own !== block) && !text.endsWith(' ')) { text += ' '; at.push(null); }
+			block = own;
+			if (!isText) continue;
+			const value = node.nodeValue ?? '';
+			for (let i = 0; i < value.length; i++) {
+				let ch = value[i];
+				if (/\s/.test(ch)) {
+					if (!text || text.endsWith(' ')) continue;
+					ch = ' ';
+				} else {
+					const lower = ch.toLowerCase();
+					if (lower.length === 1) ch = lower;
+				}
+				text += ch;
+				at.push([node, i]);
+			}
+		}
+		return { text, at };
+	}
+
+	/** Mark characters `from`..`to` of `readableText`: one mark per text node they cross. */
+	function markSpan(at: ([Text, number] | null)[], from: number, to: number): HTMLElement[] {
+		const spans = new Map<Text, [number, number]>();
+		for (let i = from; i < to; i++) {
+			if (!at[i]) continue;
+			const [node, offset] = at[i]!;
+			const span = spans.get(node);
+			spans.set(node, span ? [span[0], offset + 1] : [offset, offset + 1]);
+		}
+		const marks: HTMLElement[] = [];
+		for (const [node, [start, end]] of spans) {
+			// Spacing between rows or items is no text to mark, and a mark there would break the table or list.
+			if (!node.data.slice(start, end).trim()) continue;
+			const range = document.createRange();
+			range.setStart(node, start);
+			range.setEnd(node, end);
+			const mark = document.createElement('mark');
+			mark.className = 'doc-find-hit';
+			range.surroundContents(mark);
+			marks.push(mark);
+		}
+		return marks;
+	}
+
+	/** Scroll to and mark the match the search snippet shows (`findMatch`, #1478). */
+	function revealMatch(query: string) {
+		if (!contentEl) return;
+		for (const old of contentEl.querySelectorAll('mark.doc-find-hit')) old.replaceWith(...old.childNodes);
+		contentEl.normalize();
+		const { text, at } = readableText(readableTextNodes(contentEl));
+		const match = findMatch(text, query);
+		if (match) markSpan(at, match.at, match.at + match.term.length)[0]?.scrollIntoView?.({ block: 'center' });
+	}
+
+	let foundKey: number | null = null;
 	$effect(() => {
-		if (!contentEl || !onHeadingsExtracted) return;
-		// Track new article content for the table of contents.
-		void renderedHtml;
-		requestAnimationFrame(() => {
-			if (!contentEl) return;
-			const headingEls = contentEl.querySelectorAll('h2, h3');
-			const headings: DocSection[] = [];
-			headingEls.forEach((el) => {
-				headings.push({
-					id: el.id,
-					title: el.textContent || '',
-					level: parseInt(el.tagName[1])
-				});
-			});
-			onHeadingsExtracted?.(headings);
-		});
+		void renderedHtml; // Runs after the new document is in the DOM.
+		const target = find;
+		if (!target || !contentEl || target.key === foundKey) return;
+		foundKey = target.key;
+		untrack(() => revealMatch(target.query));
 	});
 </script>
 
@@ -167,4 +241,5 @@
  .docs-content :global(th) { text-align:left; font-weight:500; padding:10px 12px; color:var(--muted-foreground); border-bottom:1px solid var(--border); }
  .docs-content :global(td) { overflow-wrap:anywhere; padding:10px 12px; border-bottom:1px solid var(--border); }
  .docs-content :global(img) { max-width:100%; height:auto; }
+ .docs-content :global(mark.doc-find-hit) { background:var(--st-primary-soft); color:inherit; border-radius:2px; box-shadow:0 0 0 2px var(--st-primary-soft); }
 </style>
