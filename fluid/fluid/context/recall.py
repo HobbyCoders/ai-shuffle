@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from fluid.context.trim import image_source_path
 from fluid.events.model import ContextArchived
@@ -32,11 +33,13 @@ from fluid.store.base import (
 _REF_RE = re.compile(r"^(node_[0-9a-f]+)(?:\.\.(node_[0-9a-f]+))?$")
 _REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
-DEFAULT_EXPAND_CHARS = 20_000
-MAX_EXPAND_CHARS = 50_000
+# A window, not a cap: the header names the next offset, so a long original
+# is read in pages and only as far as the agent needs.
+DEFAULT_EXPAND_CHARS = 8_000
+MAX_EXPAND_CHARS = 16_000
 DEFAULT_SEARCH_RESULTS = 8
 _SNIPPET_RADIUS = 160
-_SEARCH_OUTPUT_CAP = 20_000
+_SEARCH_OUTPUT_CAP = 8_000
 
 
 @dataclass
@@ -418,7 +421,9 @@ def search_path(
     return [hit for _t, _o, _p, hit in scored[: max(1, max_results)]]
 
 
-def render_hits(hits: list[Hit], query: str, zone: str | None = "UTC") -> str:
+def render_hits(
+    hits: list[Hit], query: str, zone: str | None = "UTC", *, ctx: Any = None,
+) -> str:
     if not hits:
         return f'no matches for "{query}" anywhere in this session\'s history'
     lines = [
@@ -432,7 +437,8 @@ def render_hits(hits: list[Hit], query: str, zone: str | None = "UTC") -> str:
             f"- {hit.node_id} ({hit.role}, {hit.matches} occurrence(s)): "
             f"[sent {absolute_time(hit.ts, zone) if hit.ts else 'unknown time'}] {hit.snippet}"
         )
-    out = "\n".join(lines)
-    if len(out) > _SEARCH_OUTPUT_CAP:
-        out = out[:_SEARCH_OUTPUT_CAP] + "\n[output capped — narrow your query]"
-    return out
+    # Over the cap: the best-ranked head and the tail inline, the whole
+    # listing in a spill file the marker names (a plain cut without a ctx).
+    from fluid.tools.spill import cut
+
+    return cut("\n".join(lines), _SEARCH_OUTPUT_CAP, ctx=ctx, tool="HistorySearch", head_share=0.75)

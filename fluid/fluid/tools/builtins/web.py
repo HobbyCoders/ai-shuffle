@@ -33,8 +33,10 @@ from fluid.tools.fragments import WEB_UNTRUSTED
 from fluid.tools.hardening import fence_untrusted
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
-DEFAULT_FETCH_CHARS = 20_000
-MAX_FETCH_CHARS = 50_000
+# One page per call; the rest stays one `offset` away (the footer names it), so
+# a larger window only moves text the agent may not need into the context.
+DEFAULT_FETCH_CHARS = 16_000
+MAX_FETCH_CHARS = 16_000
 _MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 _TIMEOUT_S = 30.0
 _MAX_SAME_HOST_REDIRECTS = 5
@@ -427,8 +429,8 @@ FETCH_SPEC = ToolSpec(
             "max_chars": {
                 "type": "integer",
                 "description": (
-                    f"Characters to return (default {DEFAULT_FETCH_CHARS}, "
-                    f"max {MAX_FETCH_CHARS})."
+                    f"Characters to return (default and max {MAX_FETCH_CHARS:,}); "
+                    "page with offset for more."
                 ),
             },
         },
