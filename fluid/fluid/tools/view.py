@@ -63,7 +63,14 @@ GONE_MARK = "[no longer in view:"
 #: characters, so on a short result it would save little and could confuse.
 MIN_POINTED_CHARS = 1_000
 
-_TARGET_RE = re.compile(r"\(earlier result ([^\s()]+)\)")
+#: A tool-use id a pointer can name and settlement can read back. A call
+#: whose id has spaces or parentheses gets its content in full instead.
+_ID_RE = re.compile(r"[^\s()]+")
+
+#: Every pointer opens with the mark and the target, before any label the
+#: tool interpolates (a path, a Grep pattern), so a label can never stand in
+#: for the target.
+_HEAD_RE = re.compile(re.escape(POINTER_MARK) + r" \(earlier result ([^\s()]+)\) ")
 
 
 def verbatim_tool_results(
@@ -140,30 +147,34 @@ def answer_from_view(
     if seen == version and target not in (ctx.view_results or ()):
         return None
     del ctx.deliveries[key]
-    return target if seen == version else None
+    return target if seen == version and _ID_RE.fullmatch(target) else None
 
 
 #: Closing words of every pointer: settlement rewrites the text up to and
 #: including them and keeps whatever the engine appended after (a steer, hook
-#: context).
+#: context). A label that contains them is neutralized in :func:`pointer`, so
+#: the first occurrence after the head is always the real end.
 _POINTER_END = "make the same call again and the full result comes back.]"
+_NEUTRAL_END = _POINTER_END[:-1] + ")"
 
 
 def pointer(what: str, where: str, target: str) -> str:
     """The text that replaces a repeat result: what is not repeated, where the
     earlier copy is, and how to get the content back if it is gone."""
+    what = what.replace(_POINTER_END, _NEUTRAL_END)
+    where = where.replace(_POINTER_END, _NEUTRAL_END)
     return (
-        f"{POINTER_MARK} {what} is unchanged since {where} (earlier result "
-        f"{target}), which is still above in this conversation, so it is not "
+        f"{POINTER_MARK} (earlier result {target}) {what} is unchanged since "
+        f"{where}, which is still above in this conversation, so it is not "
         f"repeated here. If you cannot find it, {_POINTER_END}"
     )
 
 
 def _gone(target: str) -> str:
     return (
-        f"{GONE_MARK} this call matched an earlier result (earlier result "
-        f"{target}), but that result has since been trimmed or summarized out "
-        "of the conversation. Make the same call again and the full result "
+        f"{GONE_MARK} (earlier result {target}) this call matched an earlier "
+        "result, but that result has since been trimmed or summarized out of "
+        "the conversation. Make the same call again and the full result "
         "comes back.]"
     )
 
@@ -181,15 +192,15 @@ def _settled(block: ToolResultBlock, in_view: frozenset[str]) -> ToolResultBlock
     if block.is_error or not block.content:
         return block
     first = block.content[0]
-    if not isinstance(first, Text) or not first.text.startswith(POINTER_MARK):
+    if not isinstance(first, Text):
         return block
-    end = first.text.find(_POINTER_END)
+    match = _HEAD_RE.match(first.text)
+    if match is None or match.group(1) in in_view:
+        return block
+    end = first.text.find(_POINTER_END, match.end())
     if end < 0:
         return block
     end += len(_POINTER_END)
-    match = _TARGET_RE.search(first.text, 0, end)
-    if match is None or match.group(1) in in_view:
-        return block
     text = _gone(match.group(1)) + first.text[end:]
     return replace(block, content=[replace(first, text=text), *block.content[1:]])
 

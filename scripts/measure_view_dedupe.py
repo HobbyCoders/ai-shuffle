@@ -115,7 +115,7 @@ def _project(root: Path) -> Path:
 CALLS = [
     ("Skill", {"name": "deploy"}),
     ("Read", {"file_path": "src/engine.py"}),
-    ("Grep", {"pattern": "advance"}),
+    ("Grep", {"pattern": "VALUE"}),
     ("Glob", {"pattern": "src/**/*.py"}),
 ]
 
