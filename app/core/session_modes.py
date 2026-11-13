@@ -92,7 +92,12 @@ CHAT_MODE_BASIC_TOOL_SURFACE: List[str] = [
     # artifacts in chat mode, never local paths.
     "GenerateNativeImage", "GenerateNativeVideo",
     *[f"mcp__ai-tools__{name}" for name in ("generateImage", "generateVideo", "generateAudio", "textTo3D", "searchModels")],
-    *CHAT_MODE_QUESTION_TOOLS, *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS
+    *CHAT_MODE_QUESTION_TOOLS, *CHAT_MODE_MEMORY_TOOLS, *CHAT_MODE_RESOURCE_TOOLS,
+    # Loads a deferred tool's schema (app-config, ai-tools and the rarely used
+    # tools stay out of the prompt). It reads the session's own filtered view:
+    # a tool outside this ceiling is neither found nor loaded. The delegated
+    # chat lane still bans the CLI's copy (``_delegated_disallowed``).
+    "ToolSearch",
 ]
 
 # Owner top-level chats coordinate work without acquiring worker execution.
