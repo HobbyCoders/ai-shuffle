@@ -1461,12 +1461,17 @@
 	/* Healthy usage is neutral, not the theme's primary: a usage meter only
 	   changes colour when it means something (warning, then danger). It is
 	   the text colour's lightness with no hue: --muted-foreground is tinted in
-	   some presets, and in others the text colour itself is the accent. The
-	   color-mix line is the fallback for engines without relative colours. */
+	   some presets, and in others the text colour itself is the accent.
+	   Engines without relative colours keep the color-mix. The relative form
+	   must sit behind @supports: with var() inside, an unsupported engine only
+	   rejects it at computed-value time, too late to fall back to the line
+	   above, and the fill would vanish. */
 	.ring-progress {
 		stroke: color-mix(in oklch, var(--foreground) 80%, transparent);
-		stroke: oklch(from var(--foreground) l 0 h / 0.8);
 		transition: stroke-dashoffset 0.3s ease, stroke 0.2s ease;
+	}
+	@supports (color: oklch(from red l 0 h / 0.8)) {
+		.ring-progress { stroke: oklch(from var(--foreground) l 0 h / 0.8); }
 	}
 	.usage-ring.warning .ring-progress {
 		stroke: var(--warning);
@@ -1615,7 +1620,9 @@
 	/* Collapsed state: one plain severity-coloured fill (same vars as the ring/pct). */
 	.ctx-seg.solid {
 		background: color-mix(in oklch, var(--foreground) 80%, transparent);
-		background: oklch(from var(--foreground) l 0 h / 0.8);
+	}
+	@supports (color: oklch(from red l 0 h / 0.8)) {
+		.ctx-seg.solid { background: oklch(from var(--foreground) l 0 h / 0.8); }
 	}
 	.ctx-seg.solid.warning {
 		background: var(--warning);
@@ -1747,9 +1754,11 @@
 	.row-fill {
 		height: 100%;
 		background: color-mix(in oklch, var(--foreground) 80%, transparent);
-		background: oklch(from var(--foreground) l 0 h / 0.8);
 		border-radius: 999px;
 		transition: width 0.3s ease;
+	}
+	@supports (color: oklch(from red l 0 h / 0.8)) {
+		.row-fill { background: oklch(from var(--foreground) l 0 h / 0.8); }
 	}
 	.row-fill.warning {
 		background: var(--warning);

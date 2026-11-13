@@ -1546,9 +1546,14 @@
 	.mcp-ring { display: block; flex: none; transform: rotate(-90deg); }
 	.mcp-ring .ring-track { stroke: color-mix(in oklch, var(--foreground) 28%, transparent); }
 	/* Healthy usage is neutral, not the theme's primary (same rule as ContextUsageBar). */
-	.mcp-ring .ring-progress { stroke: color-mix(in oklch, var(--foreground) 80%, transparent); stroke: oklch(from var(--foreground) l 0 h / 0.8); transition: stroke-dashoffset 0.3s ease; }
+	.mcp-ring .ring-progress { stroke: color-mix(in oklch, var(--foreground) 80%, transparent); transition: stroke-dashoffset 0.3s ease; }
 	/* Empty is still a meter: the arc's starting point at 12 o'clock. */
-	.mcp-ring .ring-cap { fill: color-mix(in oklch, var(--foreground) 80%, transparent); fill: oklch(from var(--foreground) l 0 h / 0.8); }
+	.mcp-ring .ring-cap { fill: color-mix(in oklch, var(--foreground) 80%, transparent); }
+	/* Hue-free where supported; see ContextUsageBar for why this needs @supports. */
+	@supports (color: oklch(from red l 0 h / 0.8)) {
+		.mcp-ring .ring-progress { stroke: oklch(from var(--foreground) l 0 h / 0.8); }
+		.mcp-ring .ring-cap { fill: oklch(from var(--foreground) l 0 h / 0.8); }
+	}
 	.mcp-ring.warning .ring-progress { stroke: var(--warning); }
 	.mcp-ring.danger .ring-progress { stroke: var(--destructive); }
 	.mcp-ring.unknown .ring-track { stroke-dasharray: 3 2.7; }
