@@ -498,6 +498,18 @@ async def test_attached_webrtc_binding_delegates_with_realtime_options(monkeypat
     assert payload["voice_instructions"] == voice_stream.DELEGATION_INSTRUCTIONS
 
 
+def test_live_prompt_stays_short_and_states_each_rule_once():
+    """A realtime voice model follows a short prompt more reliably than a long
+    list of rules. The default was cut from 1165 words to about 750 by stating
+    each rule once and leaving to the app's notes what they already say."""
+    from app.core.voice_prompts import LIVE_INSTRUCTIONS
+    assert len(LIVE_INSTRUCTIONS.split()) <= 800
+    for rule in ("Never make up", "acknowledgement such as", "fewer updates", "check_work", "greet"):
+        assert LIVE_INSTRUCTIONS.count(rule) <= 1, rule
+    sentences = [part.strip().lower() for part in LIVE_INSTRUCTIONS.replace("\n", " ").split(". ") if len(part.split()) > 4]
+    assert len(sentences) == len(set(sentences))
+
+
 def test_live_prompt_forbids_backchannels_and_waiting_filler():
     from app.core.voice_prompts import LIVE_INSTRUCTIONS
     # The old default asked for "moderate" backchannels.

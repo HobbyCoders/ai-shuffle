@@ -150,10 +150,12 @@ def test_spoken_notes_ask_for_the_whole_reply_and_no_additions():
 
 
 def test_call_prompt_forbids_acknowledgement_for_reply_and_invented_claims():
-    assert "An acknowledgement is never the answer" in LIVE_INSTRUCTIONS
-    assert "even if you already acknowledged or never did" in LIVE_INSTRUCTIONS
+    assert 'Never shorten it to an acknowledgement such as "Done.", even if you already acknowledged' in LIVE_INSTRUCTIONS
     assert "Never make up a status, plan, promise, reason or confirmation" in LIVE_INSTRUCTIONS
-    assert "say you're checking or still working on it; once it arrives, tell the answer" in LIVE_INSTRUCTIONS
+    # No holding line to fall back on: a real call (2026-11-12) answered a
+    # finished reply with "I'm still working on it".
+    assert "When you do not have the answer yet, say so in a few words" in LIVE_INSTRUCTIONS
+    assert "still working on it" not in LIVE_INSTRUCTIONS
     assert "hand it off instead of saying it is so" in LIVE_INSTRUCTIONS
 
 
