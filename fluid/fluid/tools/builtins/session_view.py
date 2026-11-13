@@ -17,7 +17,7 @@ from fluid.context.time_awareness import absolute_time
 from fluid.tools.time_context import history_zone
 from typing import Any
 
-from fluid.store.base import clip_text
+from fluid.store.base import HARNESS_NOTE_ROLE, clip_text
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 _DEFAULT_COUNT = 10
@@ -167,11 +167,15 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 f"(offset {start})."
             )
         )
-    if text_offset is not None:
-        return _text_page(window, int(text_offset), title, stamp, zone)
     show = str(input.get("show") or "all").strip().lower()
     if show not in _SHOW_MODES:
         show = "all"
+    if text_offset is not None:
+        if show == "conversation" and window.messages[0].role == HARNESS_NOTE_ROLE:
+            return ToolOutcome(text=(
+                f"message {window.start} is a harness note (the session plan), not part "
+                "of the conversation; read it with show='all'."))
+        return _text_page(window, int(text_offset), title, stamp, zone)
     blocks = [
         (window.start + i, block)
         for i, msg in enumerate(window.messages)
@@ -248,7 +252,10 @@ def _render(index: int, msg: Any, show: str, zone: str | None = "UTC") -> list[s
     if text and len(msg.text) > _TEXT_CAP and show != "tools":
         text += f" [text preview clipped — read with offset={index}, count=1, text_offset=0]"
     if show == "conversation":
-        return [f"[{index} {msg.role}] [sent {sent}] {text}"] if text else []
+        # A stored plan note is harness context, not part of the conversation.
+        if not text or msg.role == HARNESS_NOTE_ROLE:
+            return []
+        return [f"[{index} {msg.role}] [sent {sent}] {text}"]
     if show == "tools":
         if not msg.tools:
             return []

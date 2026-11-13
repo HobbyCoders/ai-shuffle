@@ -91,7 +91,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.messages.content import SteerDelivery
+from fluid.messages.content import SteerDelivery, is_harness_note
 from fluid.store.base import SessionNode
 
 SPAN_DIGEST = "digest"
@@ -518,8 +518,9 @@ def _chars_of(
 
 def is_turn_start(node: SessionNode) -> bool:
     """A real user turn: user-role with any non-tool-result content. Tool
-    result nodes are user-role too, but carry only ToolResultBlocks."""
-    return node.message.role == "user" and any(
+    result nodes are user-role too, but carry only ToolResultBlocks. A stored
+    harness note (the plan reminder) is context inside the current turn."""
+    return node.message.role == "user" and not is_harness_note(node.message) and any(
         not isinstance(b, ToolResultBlock) for b in node.message.content
     )
 
@@ -1263,7 +1264,9 @@ def render_span_digest(
                         f"  ✓ result {size} chars ({node.node_id})"
                         + (f'; last line: "{last}"' if last else "")
                     )
-            user_text = _user_text(node)
+            # A plan note is not a request; the loop re-adds the live plan
+            # whenever a fold drops it, so a digest never needs the old one.
+            user_text = "" if is_harness_note(message) else _user_text(node)
             if user_text:
                 cap = config.user_text_cap
                 if steer_cfg is not None and not is_wake_text(user_text):
@@ -1798,6 +1801,11 @@ class Compactor:
         calls: dict[str, Any] | None = None,
         elide: frozenset[str] | None = None,
     ) -> Message:
+        if is_harness_note(node.message):
+            # The stored plan note renders exactly as first sent, at any size
+            # or age: a size stub would change cached bytes and hide the plan.
+            # Its size is bounded by the Plan tool's payload cap.
+            return node.message
         message = (
             self.trimmer._render([node], trimmed, consumed, calls)[0]
             if self.trimmer.config.enabled

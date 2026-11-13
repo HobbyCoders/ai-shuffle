@@ -77,6 +77,7 @@ from fluid.store.base import (
     SessionSummary,
     message_texts,
     recall_message,
+    recall_role,
 )
 
 logger = logging.getLogger(__name__)
@@ -1228,7 +1229,7 @@ def _search_sync(
         for row in native:
             message = _as_dict(row["message"])
             _accumulate(
-                acc, row["session_id"], str(message.get("role") or "?"),
+                acc, row["session_id"], recall_role(message),
                 message_texts(message), float(row["ts"] or 0.0), terms,
             )
 

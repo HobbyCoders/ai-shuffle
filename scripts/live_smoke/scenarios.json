@@ -1460,6 +1460,17 @@
           "past_bug": "#533: the 30-second FAST deadline killed a shutdown checkpoint that needed slightly longer under same-volume fsync pressure."
         },
         {
+          "id": "harness-basics.plan-reminder-cache-prefix",
+          "check": "An active Plan keeps the prompt cache growing through a tool loop",
+          "kind": "owner",
+          "needs": [
+            "provider"
+          ],
+          "how": "On the candidate revision, start a disposable native chat on gpt 6.1 sol through a ChatGPT subscription (never an API key). Ask it to make a Plan with two tasks, then run at least five tool calls in one turn (for example read five small files) and mark the first task completed after the second call. Read the per-call Usage telemetry for the turn. Settle the explicitly hidden chat.",
+          "pass_when": "From the second call on, cache_read_input_tokens rises with the prompt on every call (about 90% or more of the previous call's input). No call is a harness_mutation miss with reason prefix_changed. The plan update reaches the call right after the Plan tool result. Unit tests alone do not pass this row.",
+          "past_bug": "PR #1535: the plan reminder rode the newest user message of every call without being stored, so each call changed bytes the provider had cached; cache reads stayed at 28.8k while the prompt grew from 42k to 162k."
+        },
+        {
           "id": "harness-basics.pool-pressure-turn-finish",
           "check": "Turn finish survives brief DB pool exhaustion",
           "kind": "owner",
