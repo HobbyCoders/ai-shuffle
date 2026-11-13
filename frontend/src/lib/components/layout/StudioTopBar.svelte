@@ -23,7 +23,7 @@
 	import AwayAllChatsSwitch from './AwayAllChatsSwitch.svelte';
 	import { unreadCount } from '$lib/stores/notifications';
 	import { NEW_CHAT_LABEL } from './chat-empty-state';
-	import { workerInstalls } from '$lib/stores/worker-presence';
+	import { workerInstalls, refreshWorkerPresence } from '$lib/stores/worker-presence';
 	import { selfWorkerName } from '$lib/components/ui/worker-name';
 	import { platform } from '$lib/stores/platform.svelte';
 
@@ -74,6 +74,11 @@
 		if (!phoneWidth) return;
 		phoneBack.host = phoneHost;
 		return () => { if (phoneBack.host === phoneHost) phoneBack.host = null; };
+	});
+	// The worker line names this worker: load the list once, or it reads "Local" (#1498).
+	const showsWorkerLine = $derived(phoneWidth && !phoneBack.onclick && (newChat || !!sessionId));
+	$effect(() => {
+		if (showsWorkerLine && !$workerInstalls) void refreshWorkerPresence().catch(() => {});
 	});
 </script>
 
