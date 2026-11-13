@@ -211,10 +211,32 @@ _STATUS_PATTERNS = tuple(re.compile(p) for p in (
 ))
 
 
+def _normal(text: str) -> str:
+    normal = " ".join(re.sub(r"[^\w\s']", " ", str(text or "").lower().replace("’", "'")).split())
+    return _LEADING_FILLER.sub("", normal).strip()
+
+
 def is_status_question(text: str) -> bool:
     """True when ``text`` is only a question about current work."""
-    normal = " ".join(re.sub(r"[^\w\s']", " ", str(text or "").lower().replace("’", "'")).split())
-    normal = _LEADING_FILLER.sub("", normal).strip()
+    normal = _normal(text)
     if not normal or len(normal.split()) > 12:
         return False
     return any(pattern.match(normal) for pattern in _STATUS_PATTERNS)
+
+
+# The caller asks the voice to stop telling progress on long work. Unlike a
+# status question it can sit inside a longer sentence ("that's fine, just tell
+# me when it's done"), so these are searched for, not matched whole.
+_FEWER_UPDATES_PATTERNS = tuple(re.compile(p) for p in (
+    r"\b(?:only|just) (?:tell|let) me (?:know )?(?:when|once|if) (?:it's|it is|that's|that is|you're|you are|you've|everything's|it has|it's all) "
+    r"(?:done|finished|ready|complete|completed)\b",
+    r"\b(?:stop|no more|enough|quit|skip|hold) (?:with )?(?:the )?(?:progress )?(?:updates|update|status updates|play by play|narration|narrating)\b",
+    r"\bfewer (?:progress )?updates\b",
+    r"\b(?:don't|do not|no need to) (?:need to |have to )?(?:keep )?(?:give|giving|tell|telling|update|updating) (?:me )?(?:the )?(?:progress|updates|every step|each step|as you go)\b",
+))
+
+
+def wants_fewer_updates(text: str) -> bool:
+    """True when the caller asks for no spoken progress until the work is done."""
+    normal = _normal(text)
+    return bool(normal) and any(pattern.search(normal) for pattern in _FEWER_UPDATES_PATTERNS)

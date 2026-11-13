@@ -1490,6 +1490,8 @@ class VoiceBridge:
             text = _clean(event.get("transcript"))
             if text:
                 self._pending_user.append(text)
+                if self._conversation_progress is not None:
+                    self._conversation_progress.heard(text)
                 self._maybe_hear_approval(event.get("item_id"), text)
             return
 
