@@ -120,8 +120,13 @@
 	function reconcile() {
 		const stored = current?.models ?? [];
 		const listed = catalog ? rowsFromFetch(stored, catalog) : rowsFromStored(stored);
-		// An empty fixed-preset selection is deliberate, not an uncurated default.
-		rows = canRefresh ? listed : listed.map((r) => ({ ...r, checked: stored.some((m) => m.id === r.id) }));
+		// A stored row's ticks are exactly what the pickers offer: its saved list.
+		// An empty one is deliberate (every model unticked), not an uncurated
+		// default to draw the preset roster as ticked over, which left the
+		// presets impossible to tick again (#1524). Setup keeps the pre-tick.
+		rows = canRefresh && mode === 'setup'
+			? listed
+			: listed.map((r) => ({ ...r, checked: stored.some((m) => m.id === r.id) }));
 		selectionRevision = current?.revision;
 		hiddenMedia = catalog?.hidden ?? [];
 		if (candidate) typeable = canRefresh && !!catalog && catalog.models.length === 0;
@@ -199,9 +204,13 @@
 			if (wizard) {
 				failure = describeFetchFailure(detail, providerName);
 				if (failure.kind === 'rejected') onRejected?.(failure.message);
-			} else {
+			} else if (refresh || mode === 'setup' || describeFetchFailure(detail, providerName).kind === 'rejected') {
 				error = detail;
 			}
+			// A stored row's own background read (opening the tab, a sync) fails
+			// quietly unless the key was refused: the saved list still works, and
+			// an outage would come back on every reopen and push the list down on
+			// a phone (#1524). Refresh says why.
 			if (mode === 'manage') reconcile();
 		} finally {
 			loading = false;

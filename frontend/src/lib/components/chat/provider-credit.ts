@@ -3,13 +3,28 @@ export function creditNumber(credits: Record<string, unknown> | null, key: strin
  const value = credits?.[key];
  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
-export function creditText(credits: Record<string, unknown> | null, type: string | null): { short: string; detail: string } | null {
+
+/** Dollars with the sign before the currency sign and grouped thousands: `-$1,234.50`. */
+export function formatUsd(value: number): string {
+ const text = Math.abs(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+ // An amount that rounds to zero reads as zero, never "-$0.00".
+ return value < 0 && text !== '0.00' ? `-$${text}` : `$${text}`;
+}
+
+export interface CreditText {
+ short: string;
+ detail: string;
+ /** A balance or key limit at or below zero: nothing left to spend. */
+ exhausted?: boolean;
+}
+
+export function creditText(credits: Record<string, unknown> | null, type: string | null): CreditText | null {
  // Ignore readings from workers that still send retired OpenAI billing data.
  if (type === 'openai') return null;
  const balance = creditNumber(credits, 'balance_remaining');
  if (balance != null) {
-  const left = `$${balance.toFixed(2)} left`;
-  return { short: left, detail: left };
+  const left = `${formatUsd(balance)} left`;
+  return { short: left, detail: left, exhausted: balance <= 0 };
  }
  if (type === 'chatgpt') {
   const extra = creditNumber(credits, 'balance');
@@ -20,12 +35,12 @@ export function creditText(credits: Record<string, unknown> | null, type: string
  if (credits?.unlimited === true && type !== 'openrouter' && type !== 'openrouter_account') return { short: 'Credits: unlimited', detail: 'Credits: unlimited' };
  const left = creditNumber(credits, 'limit_remaining');
  if (left != null) {
-  const text = `$${left.toFixed(2)} left on this key`;
-  return { short: text, detail: text };
+  const text = `${formatUsd(left)} left on this key`;
+  return { short: text, detail: text, exhausted: left <= 0 };
  }
  // Org costs and lifetime key spend are not balances. Keep optional spend
  // detail for legacy integrations, but never headline it as allowance left.
  const spend = creditNumber(credits, 'spend_month');
- if (spend != null) return { short: 'Balance unavailable', detail: `$${spend.toFixed(2)} organization spend this month (UTC); balance unavailable` };
+ if (spend != null) return { short: 'Balance unavailable', detail: `${formatUsd(spend)} organization spend this month (UTC); balance unavailable` };
  return null;
 }

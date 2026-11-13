@@ -57,17 +57,21 @@
 	const gateway = $derived(credential.flavor === 'gateway');
 	const native = $derived(isNativeProvider(row.provider_type));
 	const option = $derived(nativeOption(row.provider_type, row.auth_mode === 'plan_key') ?? row.native_provider);
+	// The key's own results (Check key, a replaced key) show under the key row,
+	// next to the button that produced them, not at the end of the form.
+	const KEY_VALID = 'Key is valid';
 	let keyStatus = $state('');
+	let keyError = $state('');
 	let checking = $state(false);
 	async function checkKey() {
 		if (checking) return;
 		checking = true;
 		keyStatus = '';
-		error = '';
+		keyError = '';
 		try {
 			const result = await checkProviderKey(row.id);
-			keyStatus = result.status === 'valid' ? 'Key is valid' : 'Saved, but unverified. Try checking again later.';
-		} catch (e) { error = getErrorMessage(e, 'Could not check key'); }
+			keyStatus = result.status === 'valid' ? KEY_VALID : 'Saved, but unverified. Try checking again later.';
+		} catch (e) { keyError = getErrorMessage(e, 'Could not check key'); }
 		finally { checking = false; }
 	}
 	const dialect = $derived<Dialect>(row.api_dialect === 'openai' ? 'openai' : 'anthropic');
@@ -115,6 +119,7 @@
 		}
 		saving = true;
 		error = '';
+		keyError = '';
 		try {
 			const body: ModelProviderCreate = native ? { name: next.name, provider_type: row.provider_type, ...patch } : {
 				name: next.name,
@@ -134,7 +139,9 @@
 			flashSaved();
 			return true;
 		} catch (e) {
-			error = getErrorMessage(e, 'Save failed');
+			const message = getErrorMessage(e, 'Save failed');
+			if (patch.auth_token) keyError = message;
+			else error = message;
 		} finally {
 			saving = false;
 		}
@@ -229,19 +236,23 @@
 						onchange={(v) => save({ base_url: v })}
 					/>
 				</SettingRow>
+				<!-- One stored key, one row: a native provider's labelled key carries Check key beside Replace. -->
 				<SavedSecretRow
-					label="Auth token"
+					label={native ? (option?.credential_label ?? credential.kind) : 'Auth token'}
 					saved={row.auth_token_set}
 					placeholder="Provider API key"
-					busy={saving}
+					busy={saving || checking}
+					hint={native ? 'Saving a replacement checks the key' : undefined}
 					onsave={(value) => save({ auth_token: value }).then(Boolean)}
-				/>
-				{#if native}
-					<SettingRow label={option?.credential_label ?? credential.kind} hint="Saving a replacement checks the key; a blank key leaves it unchanged">
-						<button type="button" class="st-btn" disabled={checking || saving || !row.auth_token_set} onclick={checkKey}>{checking ? 'Checking…' : 'Check key'}</button>
-					</SettingRow>
-					{#if keyStatus}<p class="pv-msg" role="status">{keyStatus}</p>{/if}
-				{/if}
+				>
+					{#snippet actions()}
+						{#if native}
+							<button type="button" class="st-btn" disabled={checking || saving} onclick={checkKey}>{checking ? 'Checking…' : 'Check key'}</button>
+						{/if}
+					{/snippet}
+				</SavedSecretRow>
+				{#if keyStatus}<p class="pv-msg key-msg" class:ok={keyStatus === KEY_VALID} role="status">{keyStatus}</p>{/if}
+				{#if keyError}<p class="pv-msg key-msg err" role="alert">{keyError}</p>{/if}
 				{#if gateway}
 					<SettingRow label="API dialect">
 						<Segmented
@@ -284,3 +295,10 @@
 		{/if}
 	{/snippet}
 </DetailPane>
+
+<style>
+	/* The key check result sits inside the card, lined up with the row text. */
+	.pv-msg.key-msg {
+		margin: 4px 16px 12px;
+	}
+</style>

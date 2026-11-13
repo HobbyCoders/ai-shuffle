@@ -197,6 +197,24 @@ it('keeps the warning on the page while the method is on, and Remove deletes it'
 	await waitFor(() => expect(settingsNav.selectedItem('providers')).toBe('provider:claude'));
 });
 
+it('a failed Remove on a saved method shows why beside Remove and keeps the page (#1523)', async () => {
+	cloud = savedGateway();
+	worker.state.claude = claudeSummary({ cloud: cloud.status });
+	await show(CLAUDE_CLOUD_ITEM);
+	vi.stubGlobal('fetch', fakeWorker(worker.state, {
+		'GET /settings/claude-auth/cloud': () => cloud,
+		'DELETE /settings/claude-auth/cloud': () => { throw { status: 500, detail: 'Database is busy' }; }
+	}).fetch);
+
+	await fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+	await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+	const alert = await screen.findByRole('alert');
+	expect(alert.textContent).toContain('Database is busy');
+	expect(alert.closest('.st-grp.danger')).toBeTruthy();
+	expect(settingsNav.selectedItem('providers')).toBe(CLAUDE_CLOUD_ITEM);
+	expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy();
+});
+
 it('Remove returns to Claude when the model refresh finishes after the detail has closed', async () => {
 	// In a real browser the model refresh is a network round trip, so the
 	// cloud row (and its detail) is gone before Remove moves on.

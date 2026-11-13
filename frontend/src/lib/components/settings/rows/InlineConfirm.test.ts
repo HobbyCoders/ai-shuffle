@@ -25,6 +25,23 @@ describe('InlineConfirm', () => {
 		expect(screen.getByRole('button', { name: 'Revoke' })).toBeTruthy();
 	});
 
+	it('gives focus back to the trigger when the action leaves it on the page', async () => {
+		render(InlineConfirm, { label: 'Remove', question: 'Remove this key?', onConfirm: vi.fn(async () => {}) });
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		const confirm = screen.getByRole('button', { name: 'Remove' });
+		confirm.focus();
+		await fireEvent.click(confirm);
+		await waitFor(() => expect(screen.queryByText('Remove this key?')).toBeNull());
+		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Remove' })));
+	});
+
+	it('calls onArm as the question opens', async () => {
+		const onArm = vi.fn();
+		render(InlineConfirm, { label: 'Remove', question: 'Remove this key?', onConfirm: vi.fn(), onArm });
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		expect(onArm).toHaveBeenCalledOnce();
+	});
+
 	it('cancels with Esc and gives focus back to the trigger', async () => {
 		const onConfirm = vi.fn();
 		const onCancel = vi.fn();

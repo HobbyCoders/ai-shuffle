@@ -2,7 +2,9 @@
 	/**
 	 * InlineConfirm: the one confirm for destructive or risky actions. The
 	 * trigger swaps in place for "question [Confirm] [Cancel]"; focus moves to
-	 * Cancel, Esc cancels and returns focus to the trigger.
+	 * Cancel, Esc cancels and returns focus to the trigger. After Confirm, focus
+	 * returns to the trigger while it is still on the page (a failed action).
+	 * `onArm` runs as the question opens.
 	 *
 	 * Default trigger is a button labelled `label`. For a guarded switch, pass
 	 * `trigger` and call the `arm` it receives:
@@ -27,6 +29,7 @@
 		size?: 'md' | 'sm';
 		onConfirm: () => void | Promise<void>;
 		onCancel?: () => void;
+		onArm?: () => void;
 		disabled?: boolean;
 		armed?: boolean;
 		trigger?: Snippet<[arm: () => void]>;
@@ -41,6 +44,7 @@
 		size = 'md',
 		onConfirm,
 		onCancel,
+		onArm,
 		disabled = false,
 		armed = $bindable(false),
 		trigger,
@@ -56,8 +60,13 @@
 	async function arm() {
 		if (off) return;
 		armed = true;
+		onArm?.();
 		await tick();
 		cancelButton?.focus();
+	}
+
+	function focusTrigger() {
+		wrap?.querySelector<HTMLElement>('button:not([disabled]), [role="switch"]')?.focus();
 	}
 
 	async function disarm(refocus: boolean) {
@@ -65,18 +74,27 @@
 		onCancel?.();
 		if (!refocus) return;
 		await tick();
-		wrap?.querySelector<HTMLElement>('button:not([disabled]), [role="switch"]')?.focus();
+		focusTrigger();
 	}
 
 	async function confirm() {
 		if (busy) return;
 		busy = true;
+		const hadFocus = !!wrap && wrap.contains(document.activeElement);
 		try {
 			await onConfirm();
 		} finally {
 			busy = false;
 			armed = false;
+			if (hadFocus) void refocusAfterConfirm();
 		}
+	}
+
+	/** The confirm buttons are gone; without this focus drops to the page. */
+	async function refocusAfterConfirm() {
+		await tick();
+		const lost = !document.activeElement || document.activeElement === document.body;
+		if (lost && wrap?.isConnected) focusTrigger();
 	}
 
 	function onkeydown(event: KeyboardEvent) {

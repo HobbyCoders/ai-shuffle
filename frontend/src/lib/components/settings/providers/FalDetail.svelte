@@ -37,6 +37,7 @@
 	});
 	const checked = $derived(entry?.fetched_at ? formatAsOf(entry.fetched_at, Date.now()) : null);
 
+	let toggleError = $state('');
 	let key = $state('');
 	let saving = $state(false);
 	let message = $state('');
@@ -65,13 +66,11 @@
 			hint: 'Media generation stops',
 			button: 'Remove',
 			question: 'Remove the media key?',
+			// A failure throws through to the Danger zone, which shows it by Remove.
 			onConfirm: async () => {
-				try {
-					await providers.clearFalKey();
-					settingsNav.selectItem(provider.item, 'providers');
-				} catch (e) {
-					error = e instanceof Error ? e.message : 'Remove failed';
-				}
+				const back = provider.item;
+				await providers.clearFalKey();
+				settingsNav.selectItem(back, 'providers');
 			}
 		}
 	]);
@@ -87,9 +86,12 @@
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
+		<span class="onoff-wrap">
 		<span class="onoff">
 			<span class="onoff-state">{s.falEnabled ? 'On' : 'Off'}</span>
-			<Switch checked={s.falEnabled} label="fal.ai on" onchange={(v) => setCredentialEnabled(credential, v)} />
+			<Switch checked={s.falEnabled} label="fal.ai on" onchange={async (v) => { toggleError = (await setCredentialEnabled(credential, v)) ?? ''; }} />
+		</span>
+		{#if toggleError}<span class="onoff-err" role="alert">{toggleError}</span>{/if}
 		</span>
 	{/snippet}
 	<RowGroup title="Key">
@@ -125,6 +127,7 @@
 
 <style>
 	.onoff-state { font-size: 12px; color: var(--st-mfg); white-space: nowrap; }
+	.onoff-wrap { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 100%; }
 	.onoff {
 		display: inline-flex;
 		align-items: center;
@@ -132,4 +135,6 @@
 		font-size: 13px;
 		color: var(--st-mfg);
 	}
+	/* Capped: on phone the switch sits in the More menu, which sizes to its content. */
+	.onoff-err { max-width: min(18rem, 70vw); text-align: right; font-size: 12px; color: var(--st-destructive); overflow-wrap: anywhere; }
 </style>
