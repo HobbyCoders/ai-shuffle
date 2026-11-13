@@ -50,6 +50,7 @@ from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import new_id
+from fluid.tools import spill
 from fluid.tools.fragments import CODE_MODE_ERROR_RULE, DEPENDENCY_AWARE_BATCHING
 from fluid.tools.hardening import fence_shell_output
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
@@ -229,9 +230,7 @@ def _spill_cell_stdout(full: str, ctx: Any) -> str:
     """
     if not full or ctx is None:
         return ""
-    from fluid.tools.spill import write_spill
-
-    path = write_spill(full, ctx=ctx, tool="run_python")
+    path = spill.write_spill(full, ctx=ctx, tool="run_python")
     if path is None:
         return ""
     return (

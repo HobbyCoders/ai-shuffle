@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from fluid.state import project_state_root, safe_key, scratch_dir
 from fluid.tools.registry import ToolCtx
 
 _log = logging.getLogger(__name__)
@@ -50,8 +51,6 @@ def spill_dir(ctx: ToolCtx | None) -> Path | None:
     if ctx is None or not ctx.session_id:
         return None
     try:
-        from fluid.state import scratch_dir
-
         return scratch_dir(ctx) / SPILL_SUBDIR
     except Exception:  # noqa: BLE001 — no state root means no spill
         return None
@@ -135,8 +134,6 @@ def cut(
 
 def _stats_path(ctx: ToolCtx) -> Path | None:
     try:
-        from fluid.state import project_state_root, safe_key
-
         return project_state_root(ctx) / STATS_DIR / f"{safe_key(ctx.session_id)}.json"
     except Exception:  # noqa: BLE001
         return None

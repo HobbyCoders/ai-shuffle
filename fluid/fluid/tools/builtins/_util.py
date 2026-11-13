@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 
+from fluid.tools import spill
 from fluid.tools.child_env import scrub_child_env
 from fluid.tools.registry import ToolCtx
 
@@ -86,9 +87,7 @@ def truncate(
     With ``ctx`` the full text is first spilled to the session's scratch
     folder and the marker names the file (see :mod:`fluid.tools.spill`).
     """
-    from fluid.tools.spill import cut
-
-    return cut(text, limit, ctx=ctx, tool=tool, head_share=head_share)
+    return spill.cut(text, limit, ctx=ctx, tool=tool, head_share=head_share)
 
 
 @dataclass
