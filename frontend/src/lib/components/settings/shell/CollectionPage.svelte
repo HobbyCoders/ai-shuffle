@@ -114,6 +114,37 @@
 		lastScrolled = current;
 	});
 
+	// Where the detail replaces the list (stacked on a phone, or one pane at a
+	// time), both scroll in the page's own scroller. An opened detail starts at
+	// its top, not at the list's offset, and Back returns to where the list was.
+	// Pre-effect: the list's offset is read before the detail replaces it.
+	// Stacked Back keeps the item selected and only steps back to the list, so
+	// the item on screen, not the selection, is what changes.
+	const shownItem = $derived(
+		settingsNav.stacked ? (settingsNav.view === 'detail' ? (openItem ?? null) : null) : (openItem ?? null)
+	);
+	let listTop = 0;
+	let lastSwapped: string | null | undefined;
+	$effect.pre(() => {
+		const current = shownItem;
+		const previous = lastSwapped;
+		lastSwapped = current;
+		if (previous === undefined || previous === current) return;
+		if (!untrack(() => replace || settingsNav.stacked)) return;
+		const scroller = el && scrollParent(el);
+		if (!scroller) return;
+		if (previous === null) listTop = scroller.scrollTop;
+		const top = current === null ? listTop : 0;
+		void tick().then(() => scroller.scrollTo?.({ top }));
+	});
+	function scrollParent(node: HTMLElement): HTMLElement | null {
+		for (let p = node.parentElement; p; p = p.parentElement) {
+			const overflow = getComputedStyle(p).overflowY;
+			if (overflow === 'auto' || overflow === 'scroll') return p;
+		}
+		return null;
+	}
+
 	// The list and the detail swap in place, so focus has to move with them:
 	// into the detail's title, or back to the row it was opened from.
 	let lastOpen: string | null | undefined;

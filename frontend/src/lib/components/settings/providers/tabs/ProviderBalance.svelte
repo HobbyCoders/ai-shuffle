@@ -3,6 +3,7 @@
  import { getErrorMessage } from '$lib/api/client';
  import { getProviderBalance, saveProviderBalance, removeProviderBalance, type ProviderBalance } from '$lib/api/provider-balances';
  import { getSettingsAccess } from '$lib/settings/access.svelte';
+ import { formatUsd } from '$lib/components/chat/provider-credit';
  import RowGroup from '../../rows/RowGroup.svelte';
  import SettingRow from '../../rows/SettingRow.svelte';
  import TextField from '../../rows/TextField.svelte';
@@ -49,13 +50,13 @@
 
 <RowGroup title="xAI Management API balance">
  <SettingRow label="Remaining" hint={status?.source ?? 'Provider-reported prepaid credit'}>
-  <ValueText value={reading ? `$${reading.balance_remaining.toFixed(2)}` : status?.configured ? 'Balance unavailable' : 'Not reported yet'} />
+  <ValueText value={reading ? formatUsd(reading.balance_remaining) : status?.configured ? 'Balance unavailable' : 'Not reported yet'} />
  </SettingRow>
  {#if status?.fetched_at}<p class="balance-note">Last fetched: {new Date(status.fetched_at).toLocaleString()} · {status.status}</p>{/if}
  {#if status?.needs_reauth}<p role="status">Management access refused. Replace or re-save the management key.</p>
  {:else if status?.configured && !reading}<p role="status">Balance unavailable; no current reading. Refresh after polling completes.</p>{/if}
- {#if reading?.spend_month !== undefined}<SettingRow label="Cycle usage"><ValueText value={`$${reading.spend_month.toFixed(2)}`} /></SettingRow>{/if}
- {#if reading?.spending_limit !== undefined}<SettingRow label="Postpaid spending limit"><ValueText value={`$${reading.spending_limit.toFixed(2)}`} /></SettingRow>{/if}
+ {#if reading?.spend_month !== undefined}<SettingRow label="Cycle usage"><ValueText value={formatUsd(reading.spend_month)} /></SettingRow>{/if}
+ {#if reading?.spending_limit !== undefined}<SettingRow label="Postpaid spending limit"><ValueText value={formatUsd(reading.spending_limit)} /></SettingRow>{/if}
  <p class="balance-note">Create a management key in console.x.ai → Settings → Management Keys with billing read access. The normal API key resolves its team; the management key reads prepaid balance and invoice preview.</p>
  <SettingRow label="Management key" hint="Write-only · synced encrypted">
   <div class="access-controls">

@@ -221,3 +221,45 @@ describe('CollectionPage with an item that is only a state', () => {
 		expect(pageBack(coll)).toBeNull();
 	});
 });
+
+describe('CollectionPage scroll on a phone (#1582)', () => {
+	/** The page's own scroller, as the stacked settings shell provides it. */
+	function inScroller() {
+		const scroller = document.createElement('div');
+		scroller.style.overflowY = 'auto';
+		document.body.appendChild(scroller);
+		let top = 0;
+		Object.defineProperty(scroller, 'scrollTop', { get: () => top, set: (v: number) => (top = v), configurable: true });
+		const scrollTo = vi.fn((o: ScrollToOptions) => (top = o.top ?? top));
+		scroller.scrollTo = scrollTo as unknown as typeof scroller.scrollTo;
+		render(CollectionPage, { target: scroller, props: { category: 'hooks', list, detail } });
+		return { scroller, scrollTo, setTop: (v: number) => (top = v) };
+	}
+
+	it('opens a detail at its top and Back returns to where the list was', async () => {
+		settingsNav.stacked = true;
+		const { scroller, scrollTo, setTop } = inScroller();
+		setTop(300);
+		settingsNav.selectItem('a');
+		flushSync();
+		await tick();
+		expect(scrollTo).toHaveBeenLastCalledWith({ top: 0 });
+		expect(scroller.scrollTop).toBe(0);
+
+		// Stacked Back keeps the selection and only shows the list again.
+		settingsNav.view = 'page';
+		flushSync();
+		await tick();
+		expect(scrollTo).toHaveBeenLastCalledWith({ top: 300 });
+		expect(settingsNav.selectedItem('hooks')).toBe('a');
+	});
+
+	it('leaves the scroll alone where the list and the detail sit side by side', async () => {
+		const { scrollTo, setTop } = inScroller();
+		setTop(300);
+		settingsNav.selectItem('a');
+		flushSync();
+		await tick();
+		expect(scrollTo).not.toHaveBeenCalled();
+	});
+});

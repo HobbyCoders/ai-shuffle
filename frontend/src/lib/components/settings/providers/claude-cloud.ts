@@ -114,6 +114,18 @@ export function placeholderFor(
  * The worker's warning, shown before the method can be saved or turned on
  * and kept on the page while it is on. Used until the worker's own copy loads.
  */
-export const CLOUD_WARNING =
-	'Agents on this worker can run shell commands and can read these credentials, including the Vertex AI key file on this worker\'s disk, with their own tools and in terminals. A project\'s or your own .claude/settings.json can still change where Claude connects, and this worker\'s proxy and certificate settings still apply. Use an account with the smallest permissions that work, and only on a worker you trust.';
+const WARNING_REST =
+	'A project\'s or your own .claude/settings.json can still change where Claude connects, and this worker\'s proxy and certificate settings still apply. Use an account with the smallest permissions that work, and only on a worker you trust.';
+export const CLOUD_WARNING = `Agents on this worker can run shell commands and can read these credentials with their own tools and in terminals. ${WARNING_REST}`;
+/** Only Vertex AI writes a key file (the service account JSON) to the worker's disk. */
+export const VERTEX_CLOUD_WARNING = `Agents on this worker can run shell commands and can read these credentials, including the Vertex AI key file on this worker's disk, with their own tools and in terminals. ${WARNING_REST}`;
+
+/**
+ * The warning for one method, the worker's copy first. An older worker sends
+ * one warning for every method, and that stays what it shows.
+ */
+export function cloudWarning(config: ClaudeCloudConfig | null, method: ClaudeCloudMethodId | null | undefined): string {
+	const own = method ? config?.method_warnings?.[method] : undefined;
+	return own ?? config?.warning ?? (method === 'vertex' ? VERTEX_CLOUD_WARNING : CLOUD_WARNING);
+}
 export const GATEWAY_WARNING = 'All Claude traffic from this worker goes to the address you enter. The browser tool also receives this address and token.';

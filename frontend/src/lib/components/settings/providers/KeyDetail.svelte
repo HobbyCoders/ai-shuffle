@@ -38,7 +38,8 @@
 	import { hostOf, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
 	import CredentialControl from './CredentialControl.svelte';
 	import SavedSecretRow from './SavedSecretRow.svelte';
-	import { detailLine } from './credential-display';
+	import { balanceDisplay } from './credential-display';
+	import DetailLine from './DetailLine.svelte';
 
 	interface Props {
 		credential: CredentialView;
@@ -82,21 +83,9 @@
 	let credits = $state<OpenRouterUsageStatus | null>(null);
 
 	const openRouter = $derived(supportsOpenRouterBilling(row));
-	const balance = $derived(
-		openRouter && credits?.credits
-			? `$${credits.credits.balance_remaining.toFixed(2)}`
-			: null
-	);
+	const balance = $derived(openRouter ? balanceDisplay(credits?.credits?.balance_remaining, ' left') : null);
 
 	const title = $derived(row.name?.trim() || credential.name);
-	const line = $derived(
-		detailLine(
-			`${row.models.length} ${row.models.length === 1 ? 'model' : 'models'}`,
-			gateway ? (dialect === 'openai' ? 'OpenAI chat' : 'Anthropic Messages') : hostOf(row.base_url),
-			balance && `${balance} left`,
-			!row.auth_token_set && 'No token'
-		)
-	);
 
 	/** Positive integer or null; '' is null; anything else is invalid. */
 	function parseOptionalInt(value: string): number | null | 'invalid' {
@@ -200,9 +189,20 @@
 	const rowValue = (r: ModelProvider, f: 'context_window' | 'max_output_tokens') => (r[f] != null ? String(r[f]) : '');
 </script>
 
+{#snippet subtitle()}
+	<DetailLine
+		parts={[
+			`${row.models.length} ${row.models.length === 1 ? 'model' : 'models'}`,
+			gateway ? (dialect === 'openai' ? 'OpenAI chat' : 'Anthropic Messages') : hostOf(row.base_url),
+			balance,
+			!row.auth_token_set && 'No token'
+		]}
+	/>
+{/snippet}
+
 <DetailPane
 	name={title}
-	subtitle={line}
+	{subtitle}
 	tabs={gateway ? (tuning ? ['Overview', 'Models', 'Tuning'] : ['Overview', 'Models']) : row.provider_type === 'openai' || native ? ['Overview', 'Models'] : ['Overview', 'Models', 'Usage']}
 	{danger}
 	item={credential.item}
