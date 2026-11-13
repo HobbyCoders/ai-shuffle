@@ -286,6 +286,24 @@ def test_paths_outside_this_sessions_folder_are_not_counted(tmp_path) -> None:
     assert "read_back" not in spill.session_stats(_ctx(tmp_path, "sess-2"))
 
 
+def test_a_tilde_path_is_not_expanded(tmp_path, monkeypatch) -> None:
+    # The readers open ``~/...`` as a literal folder under the cwd, so the
+    # counter must not expand it to this session's spill folder under $HOME.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ctx = ToolCtx(
+        cwd=str(repo), session_id="sess-1",
+        extra={"harness_state_root": tmp_path / "state"},
+    )
+    path = spill.write_spill("data", ctx=ctx, tool="Bash")
+    assert path is not None
+    tilde = Path("~") / path.relative_to(tmp_path)
+    spill.note_access("Read", {"file_path": str(tilde)}, ctx)
+    assert "read_back" not in spill.session_stats(ctx)
+
+
 # ── the file holds what the marker says ─────────────────────────────────────
 
 

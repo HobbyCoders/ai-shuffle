@@ -198,7 +198,10 @@ def note_access(name: str, input: Any, ctx: ToolCtx | None) -> None:
     if directory is None:
         return
     try:
-        target = Path(raw).expanduser()
+        # Resolved exactly as Read, Grep and Glob resolve it: no ``~``
+        # expansion, so a literal ``~`` folder under the cwd is not mistaken
+        # for this session's spill folder under the home directory.
+        target = Path(raw)
         if not target.is_absolute():
             target = Path(ctx.cwd) / target
         target, root = target.resolve(), directory.resolve()
