@@ -40,9 +40,10 @@ async def test_resume_replays_or_restores_memory_at_the_tail(monkeypatch, state)
     assert [n.message.text() for n in after[:len(before)]] == old_text
     kinds = [kind for message in provider.requests[-1].messages
              for kind, _ in mr.memory_blocks(message.text() or "")]
-    assert kinds == (["full", "changes"] if state == "changed" else
-                     ["full", "full"] if state == "model_switch" else ["full"])
-    if state == "unchanged":
+    # A native model switch renders the same stored path, so the snapshot it
+    # already holds is not appended a second time.
+    assert kinds == (["full", "changes"] if state == "changed" else ["full"])
+    if state in ("unchanged", "model_switch"):
         # No user node or reminder is appended on the ordinary Retry path.
         assert len(after) == len(before) + 1  # only the assistant's answer
     else:

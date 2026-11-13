@@ -101,6 +101,15 @@ class ToolCtx:
     was handed to a code-mode cell as a ResultRef stub the cell never printed.
     ``result_budget`` is what the surface declares about itself — the largest
     result it delivers verbatim (None = no ceiling, the JSON tool path).
+
+    ``view_results`` and ``deliveries`` let a repeat call be answered with a
+    pointer instead of a second copy (see :mod:`fluid.tools.view`). The engine
+    that renders a request publishes the ids of the tool results it carries
+    verbatim in ``view_results`` (None = it cannot tell, so nothing is
+    deduplicated); ``deliveries`` maps a handler's key to the call that last
+    delivered it in full and the version it delivered; ``staged_delivery`` is
+    the current call's offer, which the engine commits into ``deliveries``
+    only once that call's final result is known to be a success.
     """
 
     cwd: str = "."
@@ -115,6 +124,9 @@ class ToolCtx:
     )
     grep_seen: dict[tuple[Any, ...], str] = field(default_factory=dict)
     result_budget: int | None = None
+    view_results: frozenset[str] | None = None
+    deliveries: dict[Any, tuple[str, Any]] = field(default_factory=dict)
+    staged_delivery: tuple[str, Any, Any, str] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
