@@ -3975,15 +3975,22 @@ class NativeLoop(BackgroundLifecycleMixin):
             history = self._with_resume_clock(nodes, rendered)
             # Compaction can retire the anchor. Account for only the clock
             # actually sent, including on later calls of this same Resume.
-            overhead_tokens = self._context_overhead_tokens() + (estimate_tokens_of_text(plan_note) if plan_note else 0)
+            # The plan note is history once written (below), not overhead.
+            overhead_tokens = self._context_overhead_tokens()
             history = sanitize_assistant_history(repair_dangling_tool_calls(history))
+            plan_node: SessionNode | None = None
             if plan_note and not any(plan_note in message.text() for message in history):
-                # Ephemeral tail, not a system-prefix change or a transcript write.
-                # Keep tool-result pairing by extending the final user message.
-                if history and history[-1].role == "user":
-                    history[-1] = replace(history[-1], content=[*history[-1].content, Text(plan_note)])
-                else:
-                    history.append(Message(role="user", content=[Text(plan_note)]))
+                # A transcript write, never an unstored tail on the newest
+                # message: the next call would move that tail and change bytes
+                # the provider already cached. Written only when the plan text
+                # changed or a fold removed it from the view, so history stays
+                # append-only. Serializers fold it into the tool-result turn
+                # where the dialect needs alternating roles.
+                plan_node = SessionNode(
+                    node_id=new_id("node"), parent_id=parent.node_id,
+                    message=Message(role="user", content=[Text(plan_note)]),
+                )
+                history.append(plan_node.message)
             if self._encrypted_reasoning_poisoned:
                 # A prior call proved the history holds reasoning blobs the
                 # current model+account cannot decrypt; render without them
@@ -4027,6 +4034,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     usage=partial, cost_usd=partial_cost, num_model_calls=num_calls,
                 ))
                 return
+            if plan_node is not None:
+                # Stored only for a call that is really made; a retry of this
+                # call re-renders it from the path instead of writing again.
+                await self._append_node(sid, plan_node)
+                parent = plan_node
             projected_prompt = self._estimate_request_input_tokens(history)
             drops_sticky = self._drops_sticky_on_empty()
             call_was_sticky = not self._sticky_poisoned and (
