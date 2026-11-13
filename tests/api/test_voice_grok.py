@@ -10,7 +10,7 @@ import pytest
 from websockets.exceptions import ConnectionClosedError
 
 from app.core import voice_grok, voice_stream
-from app.core.voice_grok import GROK_SESSION_S, GrokVoiceStream, SuperGrokVoiceStream, grok_session
+from app.core.voice_grok import APP_NOTE_LEAD, GROK_SESSION_S, GrokVoiceStream, SuperGrokVoiceStream, grok_session
 from app.core.voice_models import (
     GROK_MODEL, GROK_VOICES, LIVE_VOICES, SUPERGROK_MODEL, transport_for,
 )
@@ -48,7 +48,7 @@ def test_grok_producing_path(authenticated_client, mock_db):
     assert sent["instructions"].startswith("Be brief.")
     assert sent["turn_detection"] == {"type": "server_vad"}
     assert sent["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
-    assert [t["name"] for t in sent["tools"]] == ["delegate_to_chat_agent"]
+    assert [t["name"] for t in sent["tools"]] == ["delegate_to_chat_agent", "check_work"]
     assert c.post(f"{VOICE_ROOT}/sessions/{sid}/secret").status_code == 200
     assert c.put(VOICE_SETTINGS, json={"voice_model": "gpt-live-1"}).json()["voice_voice"] == "marin"
     assert c.get(f"{VOICE_ROOT}/sessions/{sid}/config").json() == binding
@@ -478,8 +478,10 @@ async def test_grok_labels_every_piece_from_long_progress_result():
     assert len(messages) >= 3
     for message in messages:
         text = message["content"][0]["text"]
-        # Spoken: the app's request to tell it, with the quoted text as data.
-        assert text.startswith(SPOKEN_NOTE_PREFIX)
+        # Spoken: an app note (never the caller's words) asking to tell it,
+        # with the quoted text as data.
+        assert message["role"] == "user"
+        assert text.startswith(APP_NOTE_LEAD + SPOKEN_NOTE_PREFIX)
         assert text.count("Work update") == 1
 
 
@@ -637,7 +639,7 @@ async def test_grok_work_note_sent_during_a_renewal_reaches_the_new_session(grok
     await until(lambda: grok_call.call.connected and second.started())
     await until(lambda: any(e["type"] == "response.create" for e in second.sent))
 
-    assert SPOKEN_NOTE_PREFIX + "Result." in second.context()
+    assert APP_NOTE_LEAD + SPOKEN_NOTE_PREFIX + "Result." in second.context()
     assert not [e for e in second.sent if e["type"] == "input_audio_buffer.append"]  # Audio is not replayed.
     assert grok_call.browser.events("status") == [{"type": "status", "state": "reconnecting"},
                                                   {"type": "status", "state": "live"}]

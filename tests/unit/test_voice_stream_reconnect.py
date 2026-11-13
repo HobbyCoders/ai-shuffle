@@ -91,6 +91,9 @@ class FakeProgress:
     def __init__(self, session_id, send, **_transport):
         self.send = send
 
+    def heard(self, _transcript):
+        pass
+
     async def open(self):
         pass
 

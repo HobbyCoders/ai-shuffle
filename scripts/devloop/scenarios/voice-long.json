@@ -1,0 +1,10 @@
+{
+  "description": "Long work for voice calls: a progress sentence, then a 14-second command, then a short spoken answer. The progress sentence is said once (no sooner than 8 seconds after the handoff) unless the caller asked for fewer updates; the answer follows.",
+  "steps": [
+    {
+      "text": "I'm reading through the test logs now.",
+      "tool_calls": [{"name": "Bash", "input": {"command": "sleep 14 && echo 'logs read'"}}]
+    },
+    {"text": "One test is flaky, the upload retry test. Everything else passed. Should I mark it flaky?"}
+  ]
+}

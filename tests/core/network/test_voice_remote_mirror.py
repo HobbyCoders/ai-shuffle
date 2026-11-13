@@ -74,7 +74,7 @@ async def test_a_streamed_exchange_on_a_mirror_writes_nothing(workers, monkeypat
         call = voice_stream.VoiceStream(socket, {"id": "peer-chat"}, {"model": "gpt-live-1", "voice": "marin"}, "k", 5)
         call.remote_owner = voice_remote.owner_of(database.get_session("peer-chat"))
         call.upstream = SimpleNamespace(send=AsyncMock())
-        call.progress = SimpleNamespace(submitted=AsyncMock())
+        call.progress = SimpleNamespace(submitted=AsyncMock(), heard=lambda _words: None)
         await call.caption("user", "Make the rail icons bigger.")
 
         await call.run_delegation("delegation-1")
