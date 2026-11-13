@@ -35,10 +35,24 @@ export interface AntigravityMeta {
 	default_models: ProviderModelEntry[];
 }
 
+/** The worker's one install / Check for update job. */
+export interface AntigravityInstallJob {
+	kind: 'install' | 'update' | string;
+	state: 'idle' | 'running' | 'succeeded' | 'failed' | string;
+	version?: string | null;
+	error?: string | null;
+	/** What finished: "Antigravity is up to date (1.5.7).", "… updated from X to Y.", or the failure. */
+	message?: string | null;
+}
+
 export interface AntigravityInstallStatus {
 	installed: boolean;
 	version: string | null;
-	install: { state: 'idle' | 'running' | 'succeeded' | 'failed' | string; version?: string | null; error?: string | null };
+	/** `app` (installed by AI Shuffle), `path` (an agy on PATH), `override` (env var), or null. */
+	source?: 'app' | 'path' | 'override' | null;
+	/** Google publishes a build for this worker's platform. */
+	can_install?: boolean;
+	install: AntigravityInstallJob;
 	/** Peer workers that must update before a row can be added. */
 	workers_requiring_update: string[];
 }
@@ -82,6 +96,8 @@ const BASE = '/antigravity';
 export const getAntigravityMeta = (): Promise<AntigravityMeta> => api.get(`${BASE}/meta`);
 export const getAntigravityStatus = (): Promise<AntigravityInstallStatus> => api.get(`${BASE}/status`);
 export const installAntigravity = (): Promise<AntigravityInstallStatus['install']> => api.post(`${BASE}/install`);
+/** Check for update: the same job; installs Google's newer release only when there is one. */
+export const updateAntigravity = (): Promise<AntigravityInstallJob> => api.post(`${BASE}/update`);
 export const createAntigravityProvider = (body: AntigravityCreate): Promise<ModelProvider & AntigravityGuardView> =>
 	api.post(`${BASE}/providers`, body);
 export const getAntigravityProviderStatus = (id: string): Promise<AntigravityProviderStatus> =>

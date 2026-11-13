@@ -562,3 +562,23 @@ def test_agent_env_passes_only_its_own_settings(monkeypatch: pytest.MonkeyPatch)
     env = agent_env("/h", api_key="k", source={"PATH": "/bin", "DATABASE_URL": "x", "OPENAI_API_KEY": "y"})
     assert env["HOME"] == "/h" and env["GEMINI_API_KEY"] == "k" and env["PATH"] == "/bin"
     assert "DATABASE_URL" not in env and "OPENAI_API_KEY" not in env
+
+
+def test_agent_env_keeps_windows_app_data_in_the_rows_home(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """On Windows the agent's APPDATA and LOCALAPPDATA live in the row's own
+    home, so one row's sign-in never lands in another's (or the user's) profile."""
+    import os
+
+    from fluid.engine.acp.antigravity import agent_env
+
+    home = str(tmp_path / "row-1")
+    source = {"PATH": "/bin", "APPDATA": "C:/Users/someone/AppData/Roaming",
+              "LOCALAPPDATA": "C:/Users/someone/AppData/Local"}
+    monkeypatch.setattr(sys, "platform", "win32")
+    env = agent_env(home, source=source)
+    assert env["USERPROFILE"] == env["HOME"] == home
+    assert env["APPDATA"] == os.path.join(home, "AppData", "Roaming")
+    assert env["LOCALAPPDATA"] == os.path.join(home, "AppData", "Local")
+    assert os.path.isdir(env["APPDATA"]) and os.path.isdir(env["LOCALAPPDATA"])
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert "APPDATA" not in agent_env(home, source=source)

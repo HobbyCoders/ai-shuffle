@@ -8,6 +8,7 @@ import {
 	getAntigravityMeta,
 	getAntigravityStatus,
 	installAntigravity,
+	updateAntigravity,
 	type AntigravityInstallStatus,
 	type AntigravityMeta
 } from '$lib/api/antigravity';
@@ -43,14 +44,16 @@ class AntigravityState {
 		}
 	}
 
-	async install(): Promise<void> {
+	/** Install, or `update` (Check for update): one job on the worker either way. */
+	async install(kind: 'install' | 'update' = 'install'): Promise<void> {
 		try {
-			const install = await installAntigravity();
+			const install = await (kind === 'update' ? updateAntigravity() : installAntigravity());
 			if (this.status) this.status = { ...this.status, install };
 			this.error = null;
 			this.schedule();
 		} catch (e) {
-			this.error = getErrorMessage(e, 'Could not start the Antigravity install');
+			this.error = getErrorMessage(e, kind === 'update'
+				? 'Could not check for an Antigravity update' : 'Could not start the Antigravity install');
 		}
 	}
 
