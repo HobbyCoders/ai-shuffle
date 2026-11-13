@@ -21,9 +21,11 @@ twice:
 
 * **When the pointer is read.** The pointer reaches the model in the NEXT
   request, and a size-pressure trim or fold may run in between. The pointer
-  names the result it points at, and :func:`settle_pointers` shows it as a
-  "no longer above, call again" note in any request that does not carry that
-  result verbatim. The target always sits before the pointer, so this only
+  names the result it points at, and :func:`settle_pointers` rewrites the
+  pointer's own words as a "no longer above, call again" note in any request
+  that does not carry that result verbatim; a steer, hook context or any
+  other block riding on the same result is kept as it was. The target always
+  sits before the pointer, so this only
   changes the pointer's bytes in a request that already rewrote the target:
   bytes the provider has cached are never disturbed by it.
 
@@ -141,14 +143,19 @@ def answer_from_view(
     return target if seen == version else None
 
 
+#: Closing words of every pointer: settlement rewrites the text up to and
+#: including them and keeps whatever the engine appended after (a steer, hook
+#: context).
+_POINTER_END = "make the same call again and the full result comes back.]"
+
+
 def pointer(what: str, where: str, target: str) -> str:
     """The text that replaces a repeat result: what is not repeated, where the
     earlier copy is, and how to get the content back if it is gone."""
     return (
         f"{POINTER_MARK} {what} is unchanged since {where} (earlier result "
         f"{target}), which is still above in this conversation, so it is not "
-        "repeated here. If you cannot find it, make the same call again and "
-        "the full result comes back.]"
+        f"repeated here. If you cannot find it, {_POINTER_END}"
     )
 
 
@@ -161,14 +168,30 @@ def _gone(target: str) -> str:
     )
 
 
-def _pointer_target(block: ToolResultBlock) -> str | None:
-    if block.is_error or len(block.content) != 1:
-        return None
-    only = block.content[0]
-    if not isinstance(only, Text) or not only.text.startswith(POINTER_MARK):
-        return None
-    match = _TARGET_RE.search(only.text)
-    return match.group(1) if match else None
+def _settled(block: ToolResultBlock, in_view: frozenset[str]) -> ToolResultBlock:
+    """``block`` with its pointer rewritten as gone when the pointer's target
+    is not in ``in_view``; otherwise ``block`` itself.
+
+    The handler's pointer is always the start of the result's first text
+    block. Only that span is rewritten: text the engine appended to it (a
+    delivered steer, PostToolUse hook context) and every other block (a
+    nested-instruction reminder, the reflection nudge, question answers,
+    images) are kept, as are the delivery records.
+    """
+    if block.is_error or not block.content:
+        return block
+    first = block.content[0]
+    if not isinstance(first, Text) or not first.text.startswith(POINTER_MARK):
+        return block
+    end = first.text.find(_POINTER_END)
+    if end < 0:
+        return block
+    end += len(_POINTER_END)
+    match = _TARGET_RE.search(first.text, 0, end)
+    if match is None or match.group(1) in in_view:
+        return block
+    text = _gone(match.group(1)) + first.text[end:]
+    return replace(block, content=[replace(first, text=text), *block.content[1:]])
 
 
 def settle_pointers(
@@ -193,10 +216,9 @@ def settle_pointers(
                 isinstance(block, ToolResultBlock)
                 and names.get(block.tool_use_id) in POINTER_TOOLS
             ):
-                target = _pointer_target(block)
-                if target is not None and target not in in_view:
-                    block = replace(block, content=[Text(_gone(target))])
-                    changed = True
+                settled = _settled(block, in_view)
+                changed = changed or settled is not block
+                block = settled
             content.append(block)
         out.append(replace(message, content=content) if changed else message)
     return out

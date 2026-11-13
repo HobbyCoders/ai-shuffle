@@ -373,6 +373,89 @@ async def test_native_loop_points_only_at_a_result_its_request_carries(
     assert loop.ctx.view_results is None
 
 
+async def test_a_gone_pointer_keeps_the_steer_and_blocks_riding_on_it(source, monkeypatch):
+    """A steer the user sent during the repeat call is appended to the
+    pointer's text, and a reminder rides as a second block. When a later trim
+    drops the earlier result, only the pointer's own words become the "gone"
+    note: the user's instruction, the other block and the delivery record are
+    all still in the request."""
+    from fluid.engine import native
+    from fluid.events import UserTurn
+    from fluid.events.ops import Steer
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.store.base import MemoryStore
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.registry import ToolRegistry
+
+    real_view = native.verbatim_tool_results
+    computed = []
+
+    def view_of(nodes, history):
+        computed.append(None)
+        # Requests 1 and 2 see the real view; from request 3 on, a trim
+        # has rewritten the earlier result t1.
+        return real_view(nodes, history) if len(computed) < 3 else frozenset()
+
+    monkeypatch.setattr(native, "verbatim_tool_results", view_of)
+    registry = ToolRegistry()
+    register_builtins(registry)
+    args = {"file_path": str(source)}
+
+    class _Steering(_Scripted):
+        async def stream(self, request):
+            if len(self.requests) == 1:  # serving request 2: t2 is next
+                await loop.submit(Steer(text="Do not deploy", id="s1"))
+            async for chunk in super().stream(request):
+                yield chunk
+
+    provider = _Steering([_chunks("t1", args), _chunks("t2", args), _chunks(None)])
+    loop = native.NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", registry=registry,
+        permissions=PermissionEngine("never_ask"), ctx=ToolCtx(cwd=str(source.parent)),
+    )
+    nudges = iter([None, "REFLECTION-BLOCK"])
+    monkeypatch.setattr(loop, "_reflection_nudge", lambda: next(nudges, None))
+    await loop.submit(UserTurn(content="read it twice"))
+    await loop.wait_turn()
+
+    final = provider.requests[-1]
+    block = next(
+        b for m in final.messages for b in m.content
+        if isinstance(b, ToolResultBlock) and b.tool_use_id == "t2"
+    )
+    first = block.content[0].text
+    assert first.startswith(view.GONE_MARK) and "(earlier result t1)" in first
+    assert view.POINTER_MARK not in first and "still above" not in first
+    assert "Do not deploy" in first
+    assert [p.text for p in block.content[1:]] == ["REFLECTION-BLOCK"]
+    assert [d.id for d in block.delivered_steers] == ["s1"]
+    # The stored transcript still holds the pointer: settlement is render-only.
+    stored = [
+        b for n in await loop.store.load_path(loop.session_id) for b in n.message.content
+        if isinstance(b, ToolResultBlock) and b.tool_use_id == "t2"
+    ]
+    assert stored[0].content[0].text.startswith(view.POINTER_MARK)
+
+
+def test_settlement_rewrites_only_the_pointer_span():
+    a_use, a_res = _pair("toolu_a", "Read", "alpha body")
+    p_text = view.pointer("x lines 1-3", "your earlier Read", "toolu_a")
+    p_use = Message(role="assistant", content=[ToolUseBlock(id="toolu_p", name="Read", input={})])
+    appended = "\n\n<hook context>keep me</hook context>"
+    p_res = Message(role="user", content=[ToolResultBlock(
+        tool_use_id="toolu_p",
+        content=[Text(p_text + appended), Text("answer to your question")],
+    )])
+    settled = view.settle_pointers([a_use, a_res, p_use, p_res], frozenset())
+    parts = settled[3].content[0].content
+    assert parts[0].text.startswith(view.GONE_MARK)
+    assert parts[0].text.endswith(appended)
+    assert parts[1].text == "answer to your question"
+    # A pointer whose target is still carried is left as the same object.
+    kept = view.settle_pointers([a_use, a_res, p_use, p_res], frozenset({"toolu_a"}))
+    assert kept[3] is p_res
+
+
 # ---------------------------------------------------------------------------
 # Telemetry
 # ---------------------------------------------------------------------------
