@@ -421,7 +421,7 @@ async def _dispatch_remote(
 
     # A capability-gated provider row cannot run on that worker (#1519).
     gap = await asyncio.to_thread(provider_capability.picks_refusal, worker["device_id"],
-                                  [provider_id, model_id], profile_id=profile_id)
+                                  [provider_id], [model_id], profile_id=profile_id)
     if gap:
         return {"ok": False, "error": f"{gap} Omit worker to run it here; {NOT_DISPATCHED}."}
     from app.core import spending_limits
@@ -1363,11 +1363,16 @@ def _retry_at(attempts: Optional[int]) -> str:
 
 def _parent_refusal(worker_id: str, parent_device_id: str) -> Optional[str]:
     """Why the parent worker cannot take ``worker_id``'s report yet: it lacks a
-    provider capability the caller's chat names (#1519). Blocking."""
+    provider capability the caller's chat names (#1519). None when that chat
+    was deleted: the parent stores the report without waking anyone
+    (``handle_task_report``). Blocking."""
     from app.core import provider_capability
+    from app.core.session_orchestration import _starter_deleted
 
-    parent = remote_parent(worker_id)
-    return provider_capability.session_refusal(parent_device_id, (parent or {}).get("owner_session_id"))
+    owner = (remote_parent(worker_id) or {}).get("owner_session_id")
+    if owner and _starter_deleted(owner):
+        return None
+    return provider_capability.session_refusal(parent_device_id, owner)
 
 
 async def deliver_due() -> int:

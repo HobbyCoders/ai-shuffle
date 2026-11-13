@@ -610,3 +610,182 @@ def test_a_revoked_member_loses_its_recorded_gap(workers, monkeypatch):
         assert provider_capability._last_gaps == {}
         assert sent == [("settings",)]
         assert provider_capability.recheck() == {}
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: a bound row outranks a shared bare model id; deferred
+# reports leave the hot retry set on deletion or revocation; a deferred first
+# report is never sent twice
+# ---------------------------------------------------------------------------
+
+def test_a_model_id_a_gated_row_also_lists_does_not_move_bound_work(workers):
+    """``gemini-2.5-pro`` is listed by the gated Gemini row and is also a model
+    of a bound OpenRouter row: every build keeps the bound row."""
+    a, b = _network_with_old_worker(workers)
+    refused = provider_capability.session_refusal
+    with a.active():
+        db.create_model_provider("or", "OpenRouter", "openrouter", "https://openrouter.ai/api")
+        db.create_session("s-or", "default", provider_id="or", model="gemini-2.5-pro",
+                          derive_provider_from_profile=False)
+        with db.get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET launched_model='gemini-2.5-pro' WHERE id='s-or'")
+        assert refused(b.device_id, "s-or") is None
+        assert refused(b.device_id, "s-or", {"model": "gemini-2.5-pro"}) is None
+        # The turn's provider binds it too.
+        db.create_session("s-none", "default", derive_provider_from_profile=False)
+        assert refused(b.device_id, "s-none", {"provider": "or", "model": "gemini-2.5-pro"}) is None
+        # Still refused: the bare id with nothing bound (or a value that names
+        # no row), and a gated row named outright next to a bound one.
+        assert "needs an update" in refused(b.device_id, "s-none", {"model": "gemini-2.5-pro"})
+        assert "needs an update" in refused(b.device_id, "s-none",
+                                            {"provider": "nope", "model": "gemini-2.5-pro"})
+        assert "needs an update" in refused(b.device_id, "s-or", {"model": "prov:gem:gemini-2.5-pro"})
+        with db.get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET launched_model='gemini-2.5-pro' WHERE id='s-none'")
+        assert "needs an update" in refused(b.device_id, "s-none")
+        # The start and dispatch picks follow the same rule.
+        assert provider_capability.picks_refusal(b.device_id, ["or"], ["gemini-2.5-pro"]) is None
+        assert "needs an update" in provider_capability.picks_refusal(b.device_id, [], ["gemini-2.5-pro"])
+
+
+def _deferred_first_report(orch, monkeypatch, b, frame):
+    monkeypatch.setattr(orch, "build_started_report", lambda *args: (None, b.device_id, frame))
+    monkeypatch.setattr(orch, "_report_sender", lambda session_id: "s-gem")
+    asyncio.run(orch.report_settled_start(frame["task_id"], {"id": "t9"}, "completed"))
+    assert [r["report_of"] for r in _outbox(orch._FORWARD_PENDING)] == [frame["task_id"]]
+
+
+def test_a_deferred_report_for_a_deleted_assistant_chat_stays_on_the_started_chat(workers, monkeypatch):
+    from app.core import session_orchestration as orch
+
+    from app.core import credential_gate
+
+    a, b = _network_with_old_worker(workers)
+    sent = _no_send(monkeypatch)
+    monkeypatch.setattr(credential_gate, "default_run_model", lambda **kw: ("gem", "gemini-2.5-pro"))
+    frame = {"task_id": "c2", "agent_message_turn_id": "t9", "status": "completed", "summary": "done"}
+    with a.active():
+        _gemini_session(owner=b.device_id)
+        db.create_session("c2", "default", derive_provider_from_profile=False)
+        _deferred_first_report(orch, monkeypatch, b, frame)
+        assert db.delete_session("s-gem")
+        with db.get_db() as conn:
+            from app.db import sessions
+            sessions.record_deleted_chat(conn.cursor(), "s-gem")
+        asyncio.run(orch.deliver_forwarded_reports(force=True))
+        assert _outbox(orch._FORWARD_PENDING) == [] and _outbox(orch._FORWARD_REFUSED) == []
+        with db.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT session_id FROM session_events WHERE event_type='orchestration.report_deferred'")
+            assert [row["session_id"] for row in cursor.fetchall()] == ["c2"]
+    assert sent == []
+
+
+def test_reports_for_a_removed_worker_leave_the_capability_wait(workers, monkeypatch):
+    """A removed worker is not judged on capabilities: its reports take the
+    path any report to it takes (unreachable, retried with backoff), and are
+    delivered if it is admitted again."""
+    from app.core import remote_task
+    from app.core import session_orchestration as orch
+    from app.db import remote_tasks
+    from app.network import control
+
+    a, b = _network_with_old_worker(workers)
+    frame = {"task_id": "c2", "agent_message_turn_id": "t9", "status": "completed", "summary": "done"}
+    tried = []
+
+    async def call(device_id, action, body=None, **kwargs):
+        tried.append(action)
+        raise control.RunnerUnreachable("The owning worker was removed from this network")
+
+    with a.active():
+        _gemini_session(owner=b.device_id)
+        _gemini_session("main", owner=b.device_id)
+        _deferred_first_report(orch, monkeypatch, b, frame)
+        with db.get_db() as conn:
+            remote_tasks.record_child("child", b.device_id, conn=conn)
+        assert remote_tasks.owe_report("child", "c1", {"worker_session_id": "child"})
+        monkeypatch.setattr(remote_task, "remote_parent", lambda session_id: {
+            "device_id": b.device_id, "owner_session_id": "main", "parent_session_id": "main"})
+        engine.revoke_device(b.device_id)
+        assert provider_capability.session_refusal(b.device_id, "s-gem") is None
+        monkeypatch.setattr(control, "call", call)
+        asyncio.run(orch.deliver_forwarded_reports(force=True))
+        asyncio.run(remote_task.deliver_due())
+        assert tried == [orch.REPORT_ACTION, remote_task.TASK_REPORT_ACTION]
+        kept = _outbox(orch._FORWARD_PENDING)
+        assert kept[0]["attempts"] == 1 and "deferred" not in kept[0]
+        assert kept[0]["next_attempt_at"] > 0
+        with db.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT attempts, state FROM remote_task_children WHERE worker_session_id='child'")
+            owed = cursor.fetchone()
+        assert owed["state"] == remote_tasks.OWED and int(owed["attempts"] or 0) == 1
+
+
+def test_a_task_report_for_a_deleted_caller_goes_to_its_worker(workers, monkeypatch):
+    """The parent stores a report for a deleted caller without waking anyone
+    (``handle_task_report``): nothing waits for a capability, even when the
+    default run model (what a missing chat would fall back to) is gated."""
+    from app.core import credential_gate, remote_task
+    from app.db import remote_tasks
+    from app.network import control
+
+    a, b = _network_with_old_worker(workers)
+    sent = []
+
+    async def call(device_id, action, body=None, **kwargs):
+        sent.append(action)
+        return {"delivered": True}
+
+    monkeypatch.setattr(control, "call", call)
+    monkeypatch.setattr(credential_gate, "default_run_model", lambda **kw: ("gem", "gemini-2.5-pro"))
+    monkeypatch.setattr(remote_task, "remote_parent", lambda session_id: {
+        "device_id": b.device_id, "owner_session_id": "main", "parent_session_id": "main"})
+    with a.active():
+        _gemini_session("main", owner=b.device_id)
+        with db.get_db() as conn:
+            remote_tasks.record_child("child", b.device_id, conn=conn)
+        assert remote_tasks.owe_report("child", "c1", {"worker_session_id": "child"})
+        assert asyncio.run(remote_task.deliver_due()) == 0
+        assert db.delete_session("main")
+        with db.get_db() as conn:
+            from app.db import sessions
+            sessions.record_deleted_chat(conn.cursor(), "main")
+        assert asyncio.run(remote_task.deliver_due()) == 1
+        assert remote_tasks.due_reports() == []
+    assert sent == [remote_task.TASK_REPORT_ACTION]
+
+
+def test_a_deferred_first_report_that_may_have_arrived_is_not_sent_again(workers, monkeypatch):
+    """A first report may steer into a live turn there, which keeps no
+    receipt: after a lost reply it is not resent. One that never left (no
+    route) is, and so is a forwarded report (its receiver keeps a receipt)."""
+    from app.core import session_orchestration as orch
+    from app.network import control
+
+    a, b = _network_with_old_worker(workers)
+    frame = {"task_id": "c2", "agent_message_turn_id": "t9", "status": "completed", "summary": "done"}
+    sent = []
+    failure = [control.RunnerUnreachable("no route")]
+
+    async def call(device_id, action, body=None, **kwargs):
+        sent.append(action)
+        raise failure[0]
+
+    with a.active():
+        _gemini_session(owner=b.device_id)
+        _deferred_first_report(orch, monkeypatch, b, frame)
+        orch._owe_forward("s-gem", b.device_id, dict(frame, task_id="child"), 0)
+        _set_presence(b.device_id, {gemini_provider.CAPABILITY: 1})
+        monkeypatch.setattr(control, "call", call)
+        asyncio.run(orch.deliver_forwarded_reports(force=True))
+        assert len(_outbox(orch._FORWARD_PENDING)) == 2
+        failure[0] = control.MaybeApplied("did not answer in time")
+        asyncio.run(orch.deliver_forwarded_reports(force=True))
+        kept = _outbox(orch._FORWARD_PENDING)
+        assert [r["report"]["task_id"] for r in kept] == ["child"]
+        assert kept[0]["attempts"] == 2
+        asyncio.run(orch.deliver_forwarded_reports(force=True))
+    assert sent.count(orch.REPORT_ACTION) == 2
+    assert sent.count(orch.FORWARD_REPORT_ACTION) == 3

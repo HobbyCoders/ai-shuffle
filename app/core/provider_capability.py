@@ -105,16 +105,21 @@ def needs_update_message(names: List[str], what: str = "this") -> str:
 
 def _other_worker(device_id: Optional[str]) -> Optional[str]:
     """``device_id`` as a member device id (a legacy instance id is resolved),
-    or None outside a network, for no target and for this worker."""
+    or None outside a network, for no target, for this worker and for a
+    removed member: like the re-check, the rule judges members only, and
+    ``control.call`` already refuses to send a removed one anything."""
     if not device_id:
         return None
-    from app.network import engine, runners
+    from app.network import engine, membership, runners
 
     ctx = engine.context()
     if ctx is None:
         return None
     device_id = runners.resolve_runner_id(device_id) or device_id
-    return None if device_id == ctx.device_id else device_id
+    member = ctx.member(device_id)
+    if device_id == ctx.device_id or (member is not None and member.status != membership.STATUS_ACTIVE):
+        return None
+    return device_id
 
 
 def refusal(device_id: Optional[str], provider_id: Optional[str] = None, *,
@@ -161,9 +166,9 @@ def session_refusal(device_id: Optional[str], session_id: Optional[str],
                     overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
     """Why ``device_id`` must not be sent work that can run a turn of
     ``session_id`` (with ``overrides``), or None: :func:`picks_refusal` over
-    the session's provider, model and launched model and the turn's
-    ``provider`` and ``model``. Reads nothing for this worker or outside a
-    network. Blocking: call off the event loop."""
+    the session's and the turn's provider (bound rows) and the session's
+    model and launched model and the turn's model. Reads nothing for this
+    worker or outside a network. Blocking: call off the event loop."""
     if _other_worker(device_id) is None:
         return None
     session: Mapping[str, Any] = {}
@@ -172,43 +177,48 @@ def session_refusal(device_id: Optional[str], session_id: Optional[str],
 
         session = sessions.get_session(session_id) or {}
     overrides = overrides or {}
-    return picks_refusal(device_id, [session.get("provider_id"), session.get("model"),
-                                     session.get("launched_model"), overrides.get("provider"),
-                                     overrides.get("model")],
+    return picks_refusal(device_id, [session.get("provider_id"), overrides.get("provider")],
+                         [session.get("model"), session.get("launched_model"), overrides.get("model")],
                          profile_id=session.get("profile_id"))
 
 
-def picks_refusal(device_id: Optional[str], picks: Iterable[Any], *,
+def picks_refusal(device_id: Optional[str], providers: Iterable[Any], models: Iterable[Any], *,
                   profile_id: Optional[str] = None) -> Optional[str]:
-    """Why ``device_id`` must not run work that names ``picks`` (provider row
-    ids and model values), or None.
+    """Why ``device_id`` must not run work bound to ``providers`` (provider
+    row ids) that names ``models`` (model values), or None.
 
     Conservative on purpose: the worker refused is an older build, whose own
     binding rule differs (v1.2.1 guesses the provider from the model name),
     so nothing here predicts which row a turn would bind. Refused when ANY
-    pick names a gated row that worker cannot run: the row id, a ``prov:``
-    value, or a bare model id the row lists. With no pick at all, the
-    agent's (``profile_id``) provider and model and the default run model
-    count instead. Refusing too much costs an update of that worker;
-    refusing too little runs gated work on it. Never refuses this worker,
-    outside a network, or with no gated row. Blocking.
+    pick names a gated row that worker cannot run: a bound row id, a
+    ``prov:`` model, or a bare model id the row lists. A bare model counts
+    only while no provider row is bound: a bound row outranks a guess from
+    the model name on every build, so a model id another gated row also
+    lists does not move the work there. With no pick at all, the agent's
+    (``profile_id``) provider and model and the default run model count
+    instead. Refusing too much costs an update of that worker; refusing too
+    little runs gated work on it. Never refuses this worker, outside a
+    network, or with no gated row. Blocking.
     """
     if _other_worker(device_id) is None:
         return None
     from app.db import model_providers as provider_db
 
-    gated = [r for r in provider_db.get_all_model_providers() if capability_for(r.get("provider_type"))]
+    rows = provider_db.get_all_model_providers()
+    gated = [r for r in rows if capability_for(r.get("provider_type"))]
     if not gated:
         return None
-    picks = list(picks)
-    if not any(picks):
-        picks = _unbound_picks(profile_id)
-    values = {v for v in picks if isinstance(v, str) and v}
-    named = {provider_of_model(v) or v for v in values}
+    providers = [p for p in providers if isinstance(p, str) and p]
+    models = [m for m in models if isinstance(m, str) and m]
+    if not providers and not models:
+        providers, models = [], [v for v in _unbound_picks(profile_id) if isinstance(v, str) and v]
+    named = set(providers) | {provider_of_model(m) for m in models} | set(models)
+    bound = set(providers) & {r["id"] for r in rows}
+    bare = set() if bound else set(models)
     from app.core.provider_agent import curated_model_ids
 
     for row in gated:
-        if row["id"] in named or values & set(curated_model_ids(row)):
+        if row["id"] in named or bare & set(curated_model_ids(row)):
             reason = refusal(device_id, row=row)
             if reason:
                 return reason
@@ -217,7 +227,8 @@ def picks_refusal(device_id: Optional[str], picks: Iterable[Any], *,
 
 def _unbound_picks(profile_id: Optional[str]) -> List[Optional[str]]:
     """What work bound to nothing may still run on: its agent's provider and
-    model and the default run model (both ways it is picked)."""
+    model and the default run model (both ways it is picked). All count as
+    unbound picks, bare models included."""
     from app.core.credential_gate import default_run_model
     from app.db import database
 

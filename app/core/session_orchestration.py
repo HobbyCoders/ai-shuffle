@@ -1968,7 +1968,7 @@ async def _start_remote(plan, sender_id, sender_generation):
         from app.core import provider_capability
         refusal = await asyncio.to_thread(
             provider_capability.picks_refusal, remote["device_id"],
-            [plan["body"].get("provider_id"), plan["body"].get("model")],
+            [plan["body"].get("provider_id")], [plan["body"].get("model")],
             profile_id=plan["body"].get("profile_id"))
         if refusal:
             await release()
@@ -2559,7 +2559,10 @@ async def deliver_forwarded_reports(*, force=False):
     every 30 s). An unreachable or older owner is retried with backoff; one
     that lacks a provider capability the chat names is re-checked on every
     pass and sent once it reports it (#1519); a refusal by that worker is
-    final and kept as ``report_forward_refused``. Returns how many
+    final and kept as ``report_forward_refused``. A started chat's deferred
+    first report (``report_of``) goes the way its direct send would: when it
+    may have arrived, it is not sent again; when the assistant's chat was
+    deleted, it stays on the started chat. Returns how many
     were delivered or passed on."""
     async with _report_lock("outbox"):
         return await _deliver_forwarded_locked(force)
@@ -2577,8 +2580,19 @@ async def _deliver_forwarded_locked(force):
         home, frame = payload.get("home"), payload.get("report") or {}
         attempts = int(payload.get("attempts") or 0) + 1
         device = payload.get("device_id")
+        on_wire = False
         try:
             if payload.get("report_of"):
+                if await asyncio.to_thread(_starter_deleted, home):
+                    # The assistant's chat was deleted: the report stays on
+                    # the started chat, as for a local starter.
+                    outcome = await _absent_starter(home, frame)
+                    if outcome in _DELIVERED:
+                        await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
+                        delivered += 1
+                    else:
+                        await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts)
+                    continue
                 # A started chat's first report, kept for the worker it reports
                 # to: sent as that chat's own report, which follows the
                 # assistant there if it moved (#1443).
@@ -2613,6 +2627,7 @@ async def _deliver_forwarded_locked(force):
                                 frame.get("task_id"), home, reason)
                 await asyncio.to_thread(_settle_forward, row["id"], device=device, deferred=reason)
                 continue
+            on_wire = True
             answer = await asyncio.wait_for(
                 control.call(device, action, body, timeout=REMOTE_TIMEOUT),
                 timeout=REMOTE_TIMEOUT)
@@ -2626,6 +2641,15 @@ async def _deliver_forwarded_locked(force):
             await asyncio.to_thread(_settle_forward, row["id"], refused=str(exc))
             continue
         except Exception as exc:  # noqa: BLE001 — unreachable or a lost reply: retry later
+            if (payload.get("report_of") and on_wire and not (
+                    isinstance(exc, control.RunnerUnreachable) and not isinstance(exc, control.MaybeApplied))):
+                # A first report may steer into a live turn there, which keeps
+                # no receipt: like its direct send, one that may have arrived
+                # is never sent again, so nothing wakes twice.
+                log.info("Report of started chat %s for %s may have been delivered; not sent again: %s",
+                         frame.get("task_id"), home, exc or type(exc).__name__)
+                await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
+                continue
             log.info("Report of started chat %s for %s not delivered yet: %s",
                      frame.get("task_id"), home, exc or type(exc).__name__)
             await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts, device=device)
