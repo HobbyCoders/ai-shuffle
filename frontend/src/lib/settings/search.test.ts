@@ -64,6 +64,29 @@ describe('settings search query', () => {
 		expect(query('key', index).map((r) => r.title)).toEqual(['Key rotation reminder', 'Rotate API key', 'API key']);
 	});
 
+	it('ranks a whole-word keyword match above a match inside a longer word (#1461)', () => {
+		const providers = Array.from({ length: 20 }, (_, i) => item(`Model ${i}`, 'Providers, Not connected', 'provider api key'));
+		const index = [
+			item('Providers', 'AI'),
+			...providers,
+			item('Hotkey prompts', 'Chats'),
+			item('Upgrade', 'Cloud, Plan', 'pricing paid plan pro ultimate'),
+			item('Approval', 'Security'),
+			item('Cloud account', 'Cloud, Account', 'Pro: 10 remote workers')
+		];
+		expect(query('pro', index).slice(0, 4).map((r) => r.title)).toEqual(['Providers', 'Hotkey prompts', 'Upgrade', 'Cloud account']);
+		// A title that only contains the word still beats a breadcrumb-only match.
+		expect(query('pro', index).slice(4, 5).map((r) => r.title)).toEqual(['Approval']);
+		expect(query('pro', index)).toHaveLength(MAX_RESULTS);
+		// Regex characters in a query are literal.
+		expect(query('c++', [item('Compilers', 'System', 'c++ toolchain'), item('C++ notes')]).map((r) => r.title)).toEqual(['C++ notes', 'Compilers']);
+	});
+
+	it('reaches the Cloud plan entries for "pro" in the real index (#1461)', () => {
+		const titles = query('pro', buildIndex({ desktopApp: false })).map((r) => `${r.where}: ${r.title}`);
+		expect(titles).toEqual(expect.arrayContaining(['Cloud, Account: Cloud account', 'Cloud, Plan: Upgrade']));
+	});
+
 	it('drops duplicates and caps the list', () => {
 		const index = [item('Theme'), item('Theme'), ...Array.from({ length: 30 }, (_, i) => item(`Thing ${i}`))];
 		expect(query('theme', index)).toHaveLength(1);

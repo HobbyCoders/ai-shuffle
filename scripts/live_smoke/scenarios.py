@@ -32,6 +32,7 @@ NEEDS = {
     "provider": "a real model provider, paid or subscription account, or outside service",
     "install": "a disposable candidate install or worker pair (restarts, upgrades, faults, containers)",
     "owner": "the owner's own data, history or decision",
+    "owner-login": "an owner sign-in: an agent preview login cannot start or message a chat another worker runs, or use terminals",
     "dev-instance": "could be a UI journey on the dev instance with the fake AI; not written yet",
 }
 OPS = ("workers", "start", "message", "await", "compact", "tool_catalog", "peer_delivery")

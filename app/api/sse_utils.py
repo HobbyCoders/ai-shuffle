@@ -28,6 +28,18 @@ class PassiveEventResponse(StreamingResponse):
     async def stream_response(self, send):
         if self._shutdown_event is None:
             return await super().stream_response(send)
+        # Send the response start outside the shutdown scope. A drain that
+        # cancels before it has gone out (a reconnect while stopping, or a
+        # checkpointing send such as BaseHTTPMiddleware's stream) would
+        # otherwise leave the final body below with no start: Starlette's
+        # middleware then fails `message["type"] == "http.response.start"` (#1532).
+        await send({"type": "http.response.start", "status": self.status_code,
+                    "headers": self.raw_headers})
+
+        async def send_body(message):
+            if message["type"] != "http.response.start":
+                await send(message)
+
         completed = False
         async with anyio.create_task_group() as group:
             async def stop_on_shutdown():
@@ -36,7 +48,7 @@ class PassiveEventResponse(StreamingResponse):
 
             group.start_soon(stop_on_shutdown)
             try:
-                await super().stream_response(send)
+                await super().stream_response(send_body)
                 completed = True
             finally:
                 group.cancel_scope.cancel()
