@@ -266,22 +266,19 @@ _MORE_UPDATES_PATTERNS = tuple(re.compile(p + _TAIL + "$") for p in (
 def progress_preference(text: str) -> str | None:
     """"fewer" when the caller asks for no spoken progress until the work is
     done, "more" when they ask to be kept posted again, else None."""
+    clauses = [c for c in map(_normal, _CLAUSE_SPLIT.split(str(text or "").lower().replace("’", "'"))) if c]
+    fewer = [any(pattern.match(c) for pattern in _FEWER_UPDATES_PATTERNS) for c in clauses]
+    more = [any(pattern.match(c) for pattern in _MORE_UPDATES_PATTERNS) for c in clauses]
+    bare = [bool(_BARE_FEWER.match(c)) for c in clauses]
+    # "Stop the updates and revert the config" is a work request: beside any
+    # other clause a bare "the updates" states no preference at all.
+    work = any(not (f or m or b or _ACKNOWLEDGEMENT.match(c)) for c, f, m, b in zip(clauses, fewer, more, bare))
     found = None
-    bare = other = False
-    for clause in _CLAUSE_SPLIT.split(str(text or "").lower().replace("’", "'")):
-        normal = _normal(clause)
-        if not normal:
-            continue
-        if any(pattern.match(normal) for pattern in _FEWER_UPDATES_PATTERNS):
-            found, bare = "fewer", False
-        elif any(pattern.match(normal) for pattern in _MORE_UPDATES_PATTERNS):
-            found, bare = "more", False
-        elif _BARE_FEWER.match(normal):
-            found, bare = "fewer", True
-        elif not _ACKNOWLEDGEMENT.match(normal):
-            other = True
-    if bare and other:
-        return None  # "Stop the updates and revert the config": a work request.
+    for f, m, b in zip(fewer, more, bare):
+        if f or (b and not work):
+            found = "fewer"
+        elif m:
+            found = "more"
     return found
 
 

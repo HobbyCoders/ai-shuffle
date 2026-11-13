@@ -19,7 +19,7 @@ from app.core.voice_progress import NOTE_PREFIX, SPOKEN_NOTE_PREFIX, STATUS_NOTE
 from app.core.voice_prompts import LIVE_INSTRUCTIONS
 from app.core.voice_status import CHECK_WORK_TOOL
 from app.core.voice_stream import (
-    RECONNECT_ATTEMPT_S, STATUS_TOLD_NOTE, VoiceStream, _workers, connect, is_noise, renew_subscription_login,
+    RECONNECT_ATTEMPT_S, STATUS_TOLD_NOTE, VoiceStream, _workers, connect, newest_utterance, renew_subscription_login,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,26 +162,10 @@ class GrokVoiceStream(VoiceStream):
                     or (task is not None and not task.done())
                     or (self.progress is not None and self.progress.has_open_handoff()))
 
-    def words_since_handoff(self) -> str:
-        """The caller's words not yet handed off (approval answers excluded)."""
-        return " ".join(e["text"].strip() for e in self.transcript
-                        if e.get("seq", 0) > self.delegated_seq and e["role"] == "user"
-                        and e.get("seq") not in self.approval_consumed and not is_noise(e["text"])).strip()
-
     def words_this_turn(self) -> str:
-        """The caller's newest utterance alone: their words back to the voice's
-        last spoken words. Earlier turns the voice already answered (a status
-        question, small talk) are not part of the question check_work answers."""
-        words = []
-        for e in reversed(self.transcript):
-            if e.get("seq", 0) <= self.delegated_seq:
-                break
-            if e["role"] != "user":
-                if words and e["text"].strip():
-                    break
-            elif e.get("seq") not in self.approval_consumed and not is_noise(e["text"]):
-                words.append(e["text"].strip())
-        return " ".join(reversed(words)).strip()
+        """The caller's newest utterance not yet handed off (approval answers excluded)."""
+        return newest_utterance([e for e in self.transcript if e.get("seq", 0) > self.delegated_seq
+                                 and e.get("seq") not in self.approval_consumed])
 
     async def awaited_words(self) -> str:
         """The caller's newest utterance, once their words have settled."""
@@ -240,7 +224,7 @@ class GrokVoiceStream(VoiceStream):
         just_handed_off = self.settling is not None or (
             self.delegation_task is not None and self.settling_turn == turn)
         if status is not None and just_handed_off:
-            if not voice_status.is_status_question(self.words_since_handoff()):
+            if not voice_status.is_status_question(self.words_this_turn()):
                 output += " " + CHECK_WORK_JUST_HANDED_OFF
         elif status is not None and self.work_in_flight(status):
             output += " " + CHECK_WORK_NEW_REQUEST

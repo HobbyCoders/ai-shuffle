@@ -161,6 +161,24 @@ def is_noise(text: str) -> bool:
     return all(word in _NOISE_WORDS for word in re.findall(r"\w+", text.lower()))
 
 
+def newest_utterance(entries) -> str:
+    """The caller's newest utterance in ``entries``: their words back to the
+    voice's last spoken words.
+
+    The one place a caller turn is read as a status question, for the handoff
+    shortcut and Grok's check_work alike: turns the voice already answered
+    (small talk, an earlier status question) are not part of the question.
+    Voice words after the caller's (spoken with the tool call) do not end it."""
+    words = []
+    for e in reversed(entries):
+        if e["role"] != "user":
+            if words and e["text"].strip():
+                break
+        elif not is_noise(e["text"]):
+            words.append(e["text"].strip())
+    return " ".join(reversed(words)).strip()
+
+
 def live_session_config(config: dict, history: list[dict]) -> dict:
     from app.core.query_options import decode_provider_model
     model = config.get("model") if config.get("model") in LIVE_MODELS else LIVE_MODEL
@@ -1057,7 +1075,7 @@ class VoiceStream:
             return
         if self.progress is not None:
             from app.core.voice_status import is_status_question
-            spoken = "".join(e["text"] for e in entries if e["role"] == "user")
+            spoken = newest_utterance(entries)  # Older words are context, not the question.
             if self.has_check_work and self.status_told_turn == turn and (
                     is_status_question(spoken) or not spoken.strip()):
                 # check_work answered this caller turn's status question (and

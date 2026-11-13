@@ -418,6 +418,21 @@ async def test_small_talk_the_voice_answered_is_not_part_of_a_status_question(mo
 
 
 @pytest.mark.asyncio
+async def test_small_talk_the_voice_answered_is_not_part_of_a_status_question_on_the_handoff_route(
+        monkeypatch, delegate):
+    # Review round 3: the handoff shortcut judged "How's your day going? Is it done yet?".
+    call = idle_call(monkeypatch)
+    status_question(call, "How's your day going?")
+    call.transcript_seq += 1
+    call.transcript.append({"role": "assistant", "text": "Pretty good, thanks.", "seq": call.transcript_seq})
+    status_question(call, "Is it done yet?")
+    call.settle_speech = AsyncMock()
+    await receive(call, [COMMIT, HANDOFF])
+    assert delegate == []
+    assert any("Nothing is running." in note for note in user_notes(call.upstream))
+
+
+@pytest.mark.asyncio
 async def test_a_new_request_after_an_answered_status_question_is_handed_off(monkeypatch, delegate):
     call = idle_call(monkeypatch)
     status_question(call, "Is it done yet?")

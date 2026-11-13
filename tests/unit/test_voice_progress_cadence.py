@@ -243,6 +243,21 @@ def test_the_last_stated_preference_wins():
     assert progress_preference("Stop the updates. No wait, keep me posted.") == "more"
 
 
+def test_a_bare_updates_clause_in_a_work_request_keeps_the_stated_preference():
+    # Review round 3: the ambiguous clause used to wipe out "keep me posted".
+    assert progress_preference("Keep me posted, skip the updates and reboot the server.") == "more"
+    assert progress_preference("Only tell me when it's done. Skip the updates and reboot the server.") == "fewer"
+
+
+@pytest.mark.asyncio
+async def test_keep_me_posted_beside_a_software_update_request_unmutes(clock):
+    p, send, _ = await call(clock)
+    p.heard("Just tell me when it's done.")
+    assert p.fewer_updates
+    p.heard("Keep me posted, skip the updates and reboot the server.")
+    assert not p.fewer_updates
+
+
 @pytest.mark.asyncio
 async def test_a_work_request_saying_update_does_not_mute_progress(clock):
     p, send, _ = await call(clock)
