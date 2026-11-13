@@ -118,20 +118,12 @@ await runJourney({
 	cases: [
 		{ name: 'composer-then-panel', viewports: ['desktop'], ...composerThenPanel },
 		{
-			// The phone's Git panel is a bottom sheet: Resolve's refusal note,
-			// arriving with the composer's send, grows it upward (#1465).
+			// The phone's Git panel is a bottom sheet: Resolve's refusal, arriving
+			// with the composer's send, takes its "Sending…" line rather than adding
+			// one, so the sheet's rows hold still (#1465).
 			name: 'composer-then-panel-phone',
 			viewports: ['phone'],
-			...composerThenPanel,
-			// Only that one move of the sheet's own rows, in that step, up to
-			// 0.12 (measured 0.095); any other shift, the composer's included,
-			// is still judged.
-			expectShift: [{
-				step: 'send from the composer, then Resolve with agent',
-				moved: /^(?:div\.gp-(?:rows|pipe|files|foot)|p\.gp-why)$/,
-				maxValue: 0.12,
-				reason: 'known bug #1465: a late Git action note shifts the phone sheet\'s rows'
-			}]
+			...composerThenPanel
 		}
 	],
 	allow: DEV_INSTANCE_NOISE

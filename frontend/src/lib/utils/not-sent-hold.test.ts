@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatMessage, QueuedMessage } from '$lib/stores/types';
+import { createTurnHandoffHold, PARKED_SETTLE_HOLD_MS } from './settle-hold';
+import { latestTurnKey } from './work-log';
 import {
 	createNotSentHold,
 	createNotSentRowsArrival,
@@ -9,6 +11,7 @@ import {
 	nameStopRecovery,
 	stopRecoveryAppliesToTurn,
 	restingOnNotSentRows,
+	restingOnNotSentTurn,
 	STOP_TURN_NOT_NAMED,
 	stopPressedOn,
 	withHeldBubbles
@@ -235,6 +238,47 @@ describe('restingOnNotSentRows', () => {
 
 	it('ends once a later prompt is the newest', () => {
 		expect(restingOnNotSentRows([row('1'), prompt, reply])).toBe(false);
+	});
+});
+
+describe('restingOnNotSentTurn', () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	const prompt: ChatMessage = { id: 'p', role: 'user', type: 'text', content: 'prompt', turnId: 'turn-p' };
+	// A held peer promoted into a turn of its own (reducer: system-role receipt with agent_wake).
+	const wake: ChatMessage = {
+		id: 'w', role: 'system', type: 'system', content: 'peer note', systemSubtype: 'agent_message',
+		systemData: { sender: 'peer', content: 'peer note', delivery: 'held' }, metadata: { agent_wake: true },
+	};
+	const wakeReply: ChatMessage = { id: 'wr', role: 'assistant', type: 'text', content: 'on it' };
+
+	it('rests on the trailing rows, several of them included', () => {
+		expect(restingOnNotSentTurn([prompt, reply, row('1'), row('2')])).toBe(true);
+	});
+
+	it('ends once an agent wake opens a newer turn below the rows', () => {
+		expect(restingOnNotSentTurn([prompt, reply, row('1'), wake, wakeReply])).toBe(false);
+		// A peer note that only lands in a running turn opens nothing.
+		const steer = { ...wake, metadata: {} };
+		expect(restingOnNotSentTurn([prompt, reply, row('1'), steer])).toBe(true);
+	});
+
+	it('lets the stopped turn fold when an agent wake opens a newer turn (#1147)', () => {
+		const handoff = createTurnHandoffHold(() => {});
+		const step = (messages: ChatMessage[], unsettled: boolean) => [...handoff.update({
+			sessionId: 's1', latestTurnKey: latestTurnKey(messages), unsettled, parked: false,
+			pinned: restingOnNotSentTurn(messages),
+		})];
+		step([prompt, reply], true);
+		// Stop: the Not sent rows open a newer turn; the stopped one stays unfolded.
+		const stopped = [prompt, reply, row('1')];
+		expect(step(stopped, false)).toEqual(['p']);
+		vi.advanceTimersByTime(PARKED_SETTLE_HOLD_MS);
+		expect(step(stopped, false)).toEqual(['p']);
+		// A held peer's promotion opens a turn through a system-role wake: the pin lifts.
+		expect(step([...stopped, wake], true)).toEqual([]);
+		expect(step([...stopped, wake, wakeReply], false)).toEqual([]);
 	});
 });
 
