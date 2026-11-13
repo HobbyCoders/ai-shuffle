@@ -9,6 +9,9 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # Baselines move only by a measured reason.
 # Nov 2026: Remember and Forget gain the learner-proposal parameter (deferred
 # on the delegated leg): delegated combined_full +371 (103,336 -> 103,707).
+# Nov 2026: finer agent edits in the deferred app-config profile/subagent docs
+# (see test_prompt_catalog_budget.py): combined_full +2,867 on both legs
+# (native 133,602 -> 136,469; delegated 104,716 -> 107,583). Eager unchanged.
 FIXTURE = json.loads((Path(__file__).parents[1] / "fixtures" / "agent_tool_prefix_budget.json").read_text())
 
 
