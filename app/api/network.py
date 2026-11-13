@@ -640,12 +640,15 @@ async def peer_ops(body: OpsRequest, device_id: str = Depends(tokens.require_dev
 
 @router.get("/peer/ops/{origin}/{incarnation}/{seq}")
 async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = False,
-                  device_id: str = Depends(tokens.require_device)) -> dict:
+                  highest: bool = False, device_id: str = Depends(tokens.require_device)) -> dict:
     """One signed envelope, optionally the first retained op at or after seq.
 
     Rollback detection needs an op past the caller's watermark, not necessarily
     the advertised head: pruning can remove that head after another origin
-    replaces its record. A bare watermark is never rollback proof.
+    replaces its record. A bare watermark is never rollback proof. With
+    ``highest`` the last retained op at or after seq answers instead: within a
+    stream the clock grows with seq, so a restored worker learns the newest
+    clock it signed before the restore (#1506). Older workers ignore it.
     """
     with request_metrics.metrics.measure("tunnel", "GET /peer/ops/{param}/{param}/{param}"):
         transport.note_contact(device_id)
@@ -656,7 +659,7 @@ async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = F
             with store.get_db() as conn:
                 from app.network import nested_secret_sync
                 cursor = conn.cursor()
-                op = store.get_op(cursor, origin, incarnation, seq, at_or_after=at_or_after)
+                op = store.get_op(cursor, origin, incarnation, seq, at_or_after=at_or_after, highest=highest)
                 return op if op and nested_secret_sync.ops_compatible([op], device_id, cursor) else None
 
         op = await run_sync(_work)
