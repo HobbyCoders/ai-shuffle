@@ -482,12 +482,15 @@ class TestSubagentToolsSetTheMode:
 
     @pytest.mark.asyncio
     async def test_rest_put_sets_the_mode_too(self, mock_db):
-        _agent("worker", {"tool_selection_mode": "allow", "allowed_tools": ["Read"]})
-        await _rest_put("worker", description="d", prompt="")  # tools omitted: inherit all
-        assert _stored("worker")["tool_selection_mode"] == "all"
-        assert _access("worker") == (None, None)
+        _agent("worker", {"tool_selection_mode": "none"})
+        await _rest_put("worker", description="d", prompt="")  # tools omitted: unchanged
+        assert _stored("worker")["tool_selection_mode"] == "none"
+        assert _access("worker") == (None, ["*"])
         await _rest_put("worker", description="d", prompt="", tools=["Grep"])
         assert _access("worker") == (["Grep"], None)
+        await _rest_put("worker", description="d", prompt="", tools=None)  # explicit null: all
+        assert _stored("worker")["tool_selection_mode"] == "all"
+        assert _access("worker") == (None, None)
 
 
 class TestClearingWithNull:
