@@ -640,7 +640,7 @@ async def peer_ops(body: OpsRequest, device_id: str = Depends(tokens.require_dev
 
 @router.get("/peer/ops/{origin}/{incarnation}/{seq}")
 async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = False,
-                  highest: bool = False, device_id: str = Depends(tokens.require_device)) -> dict:
+                  device_id: str = Depends(tokens.require_device), highest: bool = False) -> dict:
     """One signed envelope, optionally the first retained op at or after seq.
 
     Rollback detection needs an op past the caller's watermark, not necessarily
