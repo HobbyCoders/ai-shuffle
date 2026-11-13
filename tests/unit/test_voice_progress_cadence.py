@@ -209,6 +209,8 @@ def test_not_fewer_updates(text):
     "That's fine, stop the updates.",
     "Okay, no more updates, thanks.",
     "Stop the progress updates and reboot the server.",
+    "That's fine, stop the updates, just keep working.",
+    "Yeah, no, stop the updates.",
 ])
 def test_a_bare_stop_the_updates_mutes_only_when_it_is_the_whole_request(text):
     assert wants_fewer_updates(text)

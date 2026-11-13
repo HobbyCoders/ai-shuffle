@@ -251,7 +251,9 @@ _FEWER_UPDATES_PATTERNS = tuple(re.compile(p + _TAIL + "$") for p in (
 _BARE_FEWER = re.compile(r"^(?:please )?(?:stop|no more|enough|quit|skip|hold|cut|drop)(?: with)? "
                          r"(?:the |your |all the |these |those |any )?updates" + _TAIL + "$")
 _ACKNOWLEDGEMENT = re.compile(r"^(?:that's fine|that is fine|fine|thanks|thank you|got it|sounds good|yeah|yes|yep|"
-                              r"sure|great|cool|perfect|please|no worries|no problem|all good|i'm good)$")
+                              r"no|nah|okay|ok|alright|right|"
+                              r"sure|great|cool|perfect|please|no worries|no problem|all good|i'm good|"
+                              r"(?:just )?(?:keep going|keep working|keep at it|carry on|continue|go on))$")
 _MORE_UPDATES_PATTERNS = tuple(re.compile(p + _TAIL + "$") for p in (
     r"^(?:please )?keep me (?:posted|updated|informed|in the loop)(?: as you go)?",
     r"^(?:please |you can )?(?:give|tell) me (?:the )?(?:progress )?updates (?:again|as you go)",
