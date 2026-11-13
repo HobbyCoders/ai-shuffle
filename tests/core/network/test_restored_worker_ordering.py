@@ -5,6 +5,8 @@ Versions this worker signed after the backup still live on its peers, so its
 next write, a tombstone included, must be ordered after them. A snapshot must
 not turn a live record whose row is missing into a deletion nobody signed.
 """
+import json
+
 import httpx
 import pytest
 
@@ -98,6 +100,30 @@ def test_own_op_returned_in_a_batch_moves_the_clock_past_it(workers, monkeypatch
         assert result.own_ahead == max(op["origin_seq"] for op in ahead)
         assert engine.context().identity.incarnation == 2
     assert _clock(b) >= max(op["clock"] for op in ahead)
+
+
+@pytest.mark.asyncio
+async def test_lan_proof_request_carries_highest_and_the_caller(workers, monkeypatch):
+    """The LAN route answers the rollback proof like the HTTP one."""
+    from app.api import network as network_api
+    a, b = _network(workers, "a", "b")
+    for n in range(3):
+        set_owner_pref(b, "theme", f"v{n}")
+    converge([a, b])
+    contacts = []
+    monkeypatch.setattr(transport, "note_contact", contacts.append)
+    with a.active():
+        with get_db() as conn:
+            head = store.local_watermarks(conn)[b.device_id]["1"]
+        path = f"{network_api._LAN_PREFIX}/ops/{b.device_id}/1/1"
+        answers = {}
+        for name, query in (("first", {"at_or_after": "true"}),
+                            ("highest", {"at_or_after": "true", "highest": "true"})):
+            status, _, body = await network_api._dispatch_lan({"m": "GET", "p": path, "q": query}, b.device_id)
+            assert status == 200
+            answers[name] = json.loads(body)["op"]["origin_seq"]
+    assert answers == {"first": 1, "highest": head} and head > 1
+    assert contacts == [b.device_id, b.device_id]
 
 
 def _items(worker, collection="sessions"):
