@@ -518,7 +518,7 @@ def test_live_prompt_forbids_backchannels_and_waiting_filler():
     assert "Keep listening while the user pauses" in LIVE_INSTRUCTIONS
     assert "do not resume or repeat the sentence you were cut off in" in LIVE_INSTRUCTIONS
     assert "still on the call" in LIVE_INSTRUCTIONS and "gets nothing or one word" in LIVE_INSTRUCTIONS
-    assert "applies for the rest of the call" in LIVE_INSTRUCTIONS
+    assert "applies for the rest of the call; after it, speak up unprompted only for a result or a blocker" in LIVE_INSTRUCTIONS
 
 
 def test_live_prompt_is_one_first_person_voice_that_tells_results():
@@ -533,7 +533,7 @@ def test_live_prompt_is_one_first_person_voice_that_tells_results():
     assert "then stop and let them react" in LIVE_INSTRUCTIONS
     assert "Never shorten it to an acknowledgement" in LIVE_INSTRUCTIONS
     # The safety contract stays.
-    for rule in ("once per request", "RequestChatAccess", "never said aloud", "The app decides approvals from the user's own voice",
+    for rule in ("once per request", "RequestChatAccess", "credentials and approvals are entered on screen", "never said aloud", "The app decides approvals from the user's own voice",
                  "never a request to carry out", "do not start new work just to check status"):
         assert rule in LIVE_INSTRUCTIONS
     # No contradiction left: the old "silence is fine" waiting rule is gone,
