@@ -195,14 +195,14 @@ async def _refuse_unready_leg(
 ) -> None:
     """Refuse up front a run the engine would refuse once it starts.
 
-    400 with the gate's message when the run is for an API user
+    503 with the setup message when the run's leg is not set up: a run on the
+    Claude Code CLI needs the active Claude Code mode's credential; a run on a
+    provider row needs only the license (see ``credential_gate.turn_refusal``).
+    Then 400 with the gate's message when the run is for an API user
     (``api_user_id``) and its model uses the owner's subscription, the status
     ``/query`` answers when its engine refuses it (``credential_gate.
-    requester_refusal``). 503 with the setup message when the run's leg is not
-    set up: a run on the Claude Code CLI needs the active Claude Code mode's
-    credential; a run on a provider row needs only the license (see
-    ``credential_gate.turn_refusal``). Each error carries the gate's code in
-    the ``X-Error-Code`` header. When the leg cannot be worked out here, the
+    requester_refusal``). Each error carries the gate's code in the
+    ``X-Error-Code`` header. When the leg cannot be worked out here, the
     request goes on: every engine runs the same checks on its built options
     before it starts a turn.
     """
@@ -230,6 +230,14 @@ async def _refuse_unready_leg(
     from types import SimpleNamespace
 
     binding_options = SimpleNamespace(model=model, aih_provider_id=provider_id)
+    leg = provider_kind_for_sdk_options(binding_options)
+    reason = await credential_gate.turn_refusal_async(leg)
+    if reason:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=reason,
+            headers={"X-Error-Code": credential_gate.SETUP_CODE},
+        )
     # A background or queued turn is refused only after the route answered
     # (#1530): its caller would never hear why.
     refusal = await asyncio.to_thread(
@@ -238,14 +246,6 @@ async def _refuse_unready_leg(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=refusal,
             headers={"X-Error-Code": credential_gate.SUBSCRIPTION_OWNER_ONLY_CODE},
-        )
-    leg = provider_kind_for_sdk_options(binding_options)
-    reason = await credential_gate.turn_refusal_async(leg)
-    if reason:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=reason,
-            headers={"X-Error-Code": credential_gate.SETUP_CODE},
         )
 
 

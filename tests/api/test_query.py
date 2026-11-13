@@ -78,11 +78,10 @@ class TestRequireClaudeAuth:
 @pytest.mark.real_agent_gate
 class TestPerLegCredentialGate:
     """Subscription mode with the Claude Code CLI signed out: a run on a
-    ChatGPT provider row starts, a run on a Claude model is refused, and a
-    missing Cloud plan does not refuse either provider. Every caller here is an
-    API user, so a Claude run in subscription mode is refused for using the
-    owner's subscription first, as the engine refuses it; with Claude on an
-    API key that is not set it is refused with the setup message."""
+    ChatGPT provider row starts, a run on a Claude model is refused with the
+    setup message, and a missing Cloud plan does not refuse either provider.
+    Once the CLI is signed in, a Claude run is still refused for this API user,
+    for using the owner's subscription (#1530)."""
 
     @pytest.fixture
     def signed_out(self, mock_db):
@@ -131,29 +130,30 @@ class TestPerLegCredentialGate:
         assert result["status"] == "started"
         start.assert_awaited_once()
 
-    async def test_a_claude_agent_is_refused_with_the_subscription_message(self, signed_out):
+    async def test_a_claude_agent_is_refused_with_the_setup_message(self, signed_out):
         from fastapi import HTTPException
         from app.core import credential_gate
 
         _, start = signed_out
         with pytest.raises(HTTPException) as exc_info:
             await self._start("claude-agent")
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == credential_gate.NOT_SIGNED_IN_MESSAGE
+        assert exc_info.value.headers == {"X-Error-Code": credential_gate.SETUP_CODE}
+        start.assert_not_awaited()
+
+    async def test_a_signed_in_claude_agent_is_refused_with_the_subscription_message(self, signed_out):
+        from fastapi import HTTPException
+        from app.core import claude_cli_status, credential_gate
+
+        _, start = signed_out
+        signed_in = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True)
+        with patch.object(claude_cli_status, "get_status", return_value=signed_in), \
+                pytest.raises(HTTPException) as exc_info:
+            await self._start("claude-agent")
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE
         assert exc_info.value.headers == {"X-Error-Code": credential_gate.SUBSCRIPTION_OWNER_ONLY_CODE}
-        start.assert_not_awaited()
-
-    async def test_a_claude_agent_is_refused_with_the_setup_message(self, signed_out):
-        from fastapi import HTTPException
-        from app.core import claude_auth_mode, credential_gate
-
-        _, start = signed_out
-        claude_auth_mode.set_mode("api_key")  # no key stored
-        with pytest.raises(HTTPException) as exc_info:
-            await self._start("claude-agent")
-        assert exc_info.value.status_code == 503
-        assert exc_info.value.detail == credential_gate.NO_KEY_MESSAGE
-        assert exc_info.value.headers == {"X-Error-Code": credential_gate.SETUP_CODE}
         start.assert_not_awaited()
 
     async def test_a_claude_pick_on_a_provider_agent_is_refused(self, signed_out):
@@ -162,7 +162,7 @@ class TestPerLegCredentialGate:
         _, start = signed_out
         with pytest.raises(HTTPException) as exc_info:
             await self._start("gpt-agent", {"model": "sonnet"})
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 503
         start.assert_not_awaited()
 
     async def test_a_missing_cloud_plan_still_starts(self, signed_out):
@@ -192,8 +192,7 @@ class TestPerLegCredentialGate:
                 patch("app.core.turn_manager.submit_async", new=AsyncMock()) as submit:
             with pytest.raises(HTTPException) as exc_info:
                 await getattr(query, endpoint)(request, {"id": "u1", "profile_ids": None})
-        # #1530: each route answers with the engine's refusal, never "started".
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 503
         execute.assert_not_awaited()
         stream.assert_not_called()
         submit.assert_not_awaited()
