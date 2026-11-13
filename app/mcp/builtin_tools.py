@@ -2567,6 +2567,14 @@ def create_builtin_tools_server(
         include_finished = args.get("include_finished", True)
         if include_finished:
             tasks = task_registry.get_all(session_id)
+            # get_all keeps the 50 most recently updated records, so a
+            # long-running task can sit behind 50 newer finished ones. Every
+            # running task is listed (and counted) whatever that window holds.
+            listed = {t.get("id") or t.get("task_id") for t in tasks}
+            tasks = [
+                t for t in task_registry.get_active(session_id)
+                if (t.get("id") or t.get("task_id")) not in listed
+            ] + tasks
         else:
             tasks = task_registry.get_active(session_id)
         running_count = sum(1 for t in tasks if t.get("status") == "running")

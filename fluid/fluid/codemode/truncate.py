@@ -167,6 +167,8 @@ def bounded_full_stdout(text: str, limit: int = FULL_STDOUT_MAX) -> str:
     half = limit // 2
     dropped = len(text) - 2 * half
     return f"{text[:half]}\n…[{dropped:,} chars of cell stdout not kept]…\n{text[-half:]}"
+
+
 _NAMED_DROPS = 2  # how many of the heaviest drops the notice names
 # How many kernel handles the notice names. Refs are created for every result
 # of a truncated cell (see ``SPILL_MIN``), so the list has to be able to name

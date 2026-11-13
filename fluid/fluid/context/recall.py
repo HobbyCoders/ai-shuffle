@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from fluid.context.trim import image_source_path
 from fluid.events.model import ContextArchived
@@ -413,7 +414,9 @@ def search_path(
     return [hit for _t, _o, _p, hit in scored[: max(1, max_results)]]
 
 
-def render_hits(hits: list[Hit], query: str, zone: str | None = "UTC") -> str:
+def render_hits(
+    hits: list[Hit], query: str, zone: str | None = "UTC", *, ctx: Any = None,
+) -> str:
     if not hits:
         return f'no matches for "{query}" anywhere in this session\'s history'
     lines = [
@@ -427,7 +430,8 @@ def render_hits(hits: list[Hit], query: str, zone: str | None = "UTC") -> str:
             f"- {hit.node_id} ({hit.role}, {hit.matches} occurrence(s)): "
             f"[sent {absolute_time(hit.ts, zone) if hit.ts else 'unknown time'}] {hit.snippet}"
         )
-    out = "\n".join(lines)
-    if len(out) > _SEARCH_OUTPUT_CAP:
-        out = out[:_SEARCH_OUTPUT_CAP] + "\n[output capped — narrow your query]"
-    return out
+    # Over the cap: the best-ranked head and the tail inline, the whole
+    # listing in a spill file the marker names (a plain cut without a ctx).
+    from fluid.tools.spill import cut
+
+    return cut("\n".join(lines), _SEARCH_OUTPUT_CAP, ctx=ctx, tool="HistorySearch", head_share=0.75)

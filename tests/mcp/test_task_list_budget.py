@@ -47,3 +47,32 @@ def test_running_tasks_are_always_kept():
     ids = {t["id"] for t in out["tasks"]}
     assert {f"bg-{100 + i}" for i in range(4)} <= ids
     assert not any(t["status"] == "running" for t in tasks if t["id"] in out["omitted_task_ids"])
+
+
+def test_task_list_lists_a_running_task_behind_fifty_newer_finished_ones(mock_db):
+    """The real caller, the real registry: get_all keeps only the 50 most
+    recently updated records, so an old running task fell out of that window
+    before the budget ran and running_count read 0."""
+    import asyncio
+
+    from app.core.task_registry import task_registry
+    from tests.mcp.test_task_polling_nudge import _builtin_handlers
+    from tests.mcp.tool_helpers import tool_result_json
+
+    sid = "sess-tasklist-window"
+    task_registry.start_task(sid, "old-run", "shell", "long build")
+    for i in range(55):
+        task_registry.start_task(sid, f"done-{i}", "shell", f"step {i}")
+        task_registry.complete_task(sid, f"done-{i}", "completed", notify=False)
+    # Oldest update of all, whatever the clock resolution.
+    task_registry._tasks[sid]["old-run"]["updated_at"] = "2000-01-01T00:00:00+00:00"
+    assert "old-run" not in {t["id"] for t in task_registry.get_all(sid)}
+    try:
+        body = tool_result_json(asyncio.run(_builtin_handlers(sid)["TaskList"].handler({})))
+    finally:
+        task_registry.clear_session(sid)
+
+    assert body["running_count"] == 1
+    running = [t for t in body["tasks"] if t["status"] == "running"]
+    assert [t["id"] for t in running] == ["old-run"]
+    assert "old-run" not in body.get("omitted_task_ids", [])

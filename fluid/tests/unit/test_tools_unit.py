@@ -214,7 +214,7 @@ def _full_output(text: str) -> str:
     import re
     from pathlib import Path
 
-    match = re.search(r"saved to (.+?\.txt);", text)
+    match = re.search(r"saved to (.+?\.txt)", text)
     return Path(match.group(1)).read_text(encoding="utf-8") if match else text
 
 

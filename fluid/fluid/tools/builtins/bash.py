@@ -12,7 +12,7 @@ from typing import Any
 
 from fluid.context.settings_stack import layered_env
 from fluid.tools import agent_runner
-from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
+from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
 from fluid.tools.child_env import scrub_child_env
@@ -24,6 +24,7 @@ from fluid.tools.priority import (
 )
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 from fluid.tools.shell import resolve_shell
+from fluid.tools.spill import SpillStream, cut_streamed
 
 DEFAULT_TIMEOUT_S = 120.0
 MIN_TIMEOUT_S = 1.0
@@ -255,13 +256,14 @@ def clamp_timeout(value: Any) -> float:
     return min(max(timeout, MIN_TIMEOUT_S), MAX_TIMEOUT_S)
 
 
-async def _read_capped(stream: asyncio.StreamReader) -> bytes:
+async def _read_capped(stream: asyncio.StreamReader, sink: SpillStream | None = None) -> bytes:
     """Drain ``stream`` keeping the first and last ``MAX_CAPTURE_BYTES // 2``.
 
     ``communicate()`` buffers everything a command prints, so a runaway
     command (a build in a loop, a log tail) grows the host without bound.
     Only head and tail can reach the model anyway (see ``truncate``), so the
-    middle is dropped as it streams past.
+    middle is dropped from memory as it streams past; ``sink``, when given,
+    writes every chunk to the spill file so the middle stays recoverable.
     """
     half = MAX_CAPTURE_BYTES // 2
     head = bytearray()
@@ -271,6 +273,8 @@ async def _read_capped(stream: asyncio.StreamReader) -> bytes:
         chunk = await stream.read(65536)
         if not chunk:
             break
+        if sink is not None:
+            sink.feed(chunk)
         if len(head) < half:
             take = min(len(chunk), half - len(head))
             head += chunk[:take]
@@ -326,9 +330,14 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # And the first thing the kernel kills when the host runs out of memory.
     raise_oom_score_adj(proc.pid)
     assert proc.stdout is not None
+    # Writes the whole output to the spill file as it streams (nothing on disk
+    # until it outgrows the inline cap); discarded on every early exit below.
+    sink = SpillStream(ctx, "Bash", open_after=_TRUNCATE_LIMIT, transform=strip_ansi)
+    finished = False
     try:
-        stdout = await asyncio.wait_for(_read_capped(proc.stdout), timeout=timeout)
+        stdout = await asyncio.wait_for(_read_capped(proc.stdout, sink), timeout=timeout)
         await asyncio.wait_for(proc.wait(), timeout=timeout)
+        finished = True
     except TimeoutError:
         await kill_tree(proc)
         # Killed, so nothing partial survives — say what the retry should
@@ -353,11 +362,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     finally:
         # Any other abnormal exit (an exception out of communicate, a second
         # cancellation) must not orphan a live process either.
+        if not finished:
+            sink.discard()
         if proc.returncode is None:
             await kill_tree(proc)
-    text = truncate(
+    text = cut_streamed(
         strip_ansi(stdout.decode(errors="replace")),
-        ctx=ctx, tool="Bash", head_share=_HEAD_SHARE,
+        _TRUNCATE_LIMIT, sink, head_share=_HEAD_SHARE,
     )
     code = proc.returncode or 0
     if not text.strip():

@@ -46,6 +46,7 @@ from fluid.codemode.kernel import HostReply
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+from fluid.codemode.truncate import FULL_STDOUT_MAX
 from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
@@ -117,7 +118,7 @@ def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
         f"{_RUN_PYTHON_DESC}\n"
         "\n"
         f"A cell's stdout is capped at {stdout_cap:,} characters, fair-shared "
-        "across its prints; a cut cell's full stdout is saved to a file the "
+        "across its prints; a cut cell's stdout is saved to a file the "
         "closing notice names. Filter and summarize inside the cell (matching "
         "lines, counts, the lines around an error) and print only that, never "
         "whole files or big structures. A tool result too large to print is "
@@ -222,21 +223,29 @@ class _HumanWait:
         return self._total + (self._now() - self._since)
 
 
-def _spill_cell_stdout(full: str, ctx: Any) -> str:
-    """Spill a cut cell's whole stdout; the one-line pointer, or "" without one.
+def _spill_cell_stdout(full: str, ctx: Any, total: int = 0) -> str:
+    """Spill a cut cell's stdout; the one-line pointer, or "" without one.
 
     The inline text is already the fair-shared cut (``…[-N chars]`` markers);
     this only adds where the rest went. A failed write leaves the cut as is.
+    Over ``FULL_STDOUT_MAX`` the kernel sent only head and tail, and the
+    pointer names the char range that was not kept.
     """
     if not full or ctx is None:
         return ""
     path = spill.write_spill(full, ctx=ctx, tool="run_python")
     if path is None:
         return ""
-    return (
-        f"[cell stdout cut to the cap; all {len(full):,} chars saved to {path} — "
-        "Read it with offset/limit or Grep it instead of re-running]"
-    )
+    hint = "Read it with offset/limit or Grep it instead of re-running"
+    if total > FULL_STDOUT_MAX:
+        half = FULL_STDOUT_MAX // 2
+        return (
+            f"[cell stdout cut to the cap; it was {total:,} chars, over the "
+            f"{FULL_STDOUT_MAX // (1024 * 1024)} MiB spill limit: chars 1-{half:,} and "
+            f"{total - half + 1:,}-{total:,} saved to {path} (session scratch), chars "
+            f"{half + 1:,}-{total - half:,} were not kept — {hint}]"
+        )
+    return f"[cell stdout cut to the cap; all {len(full):,} chars saved to {path} (session scratch) — {hint}]"
 
 
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
@@ -683,7 +692,8 @@ class CodeModeSession:
         parts: list[str] = []
         if result.stdout.strip():
             parts.append(result.stdout.rstrip("\n"))
-        spill_note = _spill_cell_stdout(result.stdout_full, getattr(loop, "ctx", None))
+        spill_note = _spill_cell_stdout(
+            result.stdout_full, getattr(loop, "ctx", None), result.stdout_total)
         if spill_note:
             parts.append(spill_note)
         if result.value_repr:

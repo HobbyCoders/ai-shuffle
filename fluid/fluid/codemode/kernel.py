@@ -87,6 +87,9 @@ class KernelResult:
     # The cell's whole stdout when ``stdout`` was cut to the cap ("" when it
     # fit); the host spills it to a file the model can Read or Grep.
     stdout_full: str = ""
+    # Chars of the cell's whole stdout; above truncate.FULL_STDOUT_MAX,
+    # ``stdout_full`` holds only its head and tail.
+    stdout_total: int = 0
 
 
 # The host-call callback: (tool_name, kwargs) -> HostReply. Awaited by the

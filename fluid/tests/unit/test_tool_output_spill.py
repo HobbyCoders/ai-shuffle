@@ -10,7 +10,10 @@ Pinned here:
 - command output keeps the larger share for its tail, so a trailing error
   survives, and a big single print in a cell keeps its tail too;
 - a later Read/Grep/Bash of a spill file is counted per session and per
-  producing tool.
+  producing tool, a search over the whole folder once per producer it covers;
+- the file never holds less than the marker claims: Bash streams the whole
+  output to disk (to a ceiling the marker names), a cell over the 2 MiB
+  hand-off names the range it lost, and search listings spill too.
 """
 
 from __future__ import annotations
@@ -238,7 +241,8 @@ async def test_reading_a_spill_file_back_is_counted(tmp_path) -> None:
     await registry.dispatch("Read", {"file_path": str(other)}, ctx)
 
     stats = spill.session_stats(ctx)
-    assert stats["read_back"] == {"Bash": 1, "folder": 1}
+    # The folder Grep counts for the tool whose spill files it covered.
+    assert stats["read_back"] == {"Bash": 2}
     assert stats["read_back_by"] == {"Read": 1, "Grep": 1}
     assert stats["spilled"] == {"Bash": 1}
     # Per session: another session's ledger is untouched.
@@ -252,3 +256,131 @@ def test_bash_naming_a_spill_file_counts_with_any_slash_or_case(tmp_path) -> Non
     windowsy = str(path.parent).replace("/", "\\").upper() + "\\" + path.name
     spill.note_readback("Bash", {"command": f"sed -n 1,40p '{windowsy}'"}, ctx)
     assert spill.session_stats(ctx)["read_back"] == {"run_python": 1}
+
+
+def test_a_folder_search_counts_once_per_producer_it_covers(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+    for tool in ("Bash", "Bash", "run_python", "Grep"):
+        spill.write_spill(f"{tool} {len(spill.session_stats(ctx).get('spilled', {}))} " * 9, ctx=ctx, tool=tool)
+    directory = spill.spill_dir(ctx)
+    assert directory is not None
+    spill.note_readback("Grep", {"pattern": "x", "path": str(directory)}, ctx)
+    assert spill.session_stats(ctx)["read_back"] == {"Bash": 1, "Grep": 1, "run_python": 1}
+    # A glob filter narrows the attribution to the files it names.
+    spill.note_readback("Grep", {"pattern": "x", "path": str(directory), "glob": "run_python-*"}, ctx)
+    assert spill.session_stats(ctx)["read_back"] == {"Bash": 1, "Grep": 1, "run_python": 2}
+    assert "folder" not in spill.session_stats(ctx)["read_back"]
+
+
+# ── the file holds what the marker says ─────────────────────────────────────
+
+_GREEN, _RESET = "\x1b[32m", "\x1b[0m"
+
+
+def _feed(stream: spill.SpillStream, text: str, step: int = 7_000) -> None:
+    data = text.encode()
+    for i in range(0, len(data), step):
+        stream.feed(data[i:i + step])
+
+
+def test_a_streamed_spill_holds_the_middle_the_memory_copy_dropped(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+    text = "".join(f"{_GREEN}row {i:06d}{_RESET}\n" for i in range(40_000))
+
+    def strip(t: str) -> str:
+        return t.replace(_GREEN, "").replace(_RESET, "")
+
+    stream = spill.SpillStream(ctx, "Bash", open_after=1_000, transform=strip)
+    _feed(stream, text)
+    clean = strip(text)
+    # What the caller kept in memory: head and tail only, the middle gone.
+    kept = clean[:5_000] + clean[-5_000:]
+    out = spill.cut_streamed(kept, 2_000, stream)
+    path = _spill_path(out)
+    assert path.read_text(encoding="utf-8") == clean
+    assert "full output saved" in out
+    assert f"of {40_000:,}" in out
+    assert spill.session_stats(ctx)["spilled"] == {"Bash": 1}
+    assert not list(path.parent.glob("*.part"))
+
+
+def test_a_streamed_spill_over_its_ceiling_names_what_was_not_kept(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+    text = "".join(f"row {i:06d}\n" for i in range(10_000))  # 110,000 chars
+    stream = spill.SpillStream(ctx, "Bash", open_after=100, ceiling=20_000)
+    _feed(stream, text)
+    out = spill.cut_streamed(text[:3_000] + text[-3_000:], 1_200, stream, head_share=1 / 3)
+    path = _spill_path(out)
+    assert path.read_text(encoding="utf-8") == text[:20_000]
+    assert "full output" not in out
+    assert "the first 20,000 chars saved" in out
+    m = re.search(r"chars ([\d,]+)-([\d,]+) of ([\d,]+) were not kept", out)
+    assert m, out
+    lost_from, lost_to, total = (int(g.replace(",", "")) for g in m.groups())
+    assert (lost_from, total) == (20_001, len(text))
+    # Everything after the lost range is in the inline tail.
+    assert out.endswith(text[lost_to:])
+
+
+def test_short_streamed_output_writes_nothing(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+    stream = spill.SpillStream(ctx, "Bash", open_after=12_000)
+    _feed(stream, "ok\n" * 100)
+    assert spill.cut_streamed("ok\n" * 100, 12_000, stream) == "ok\n" * 100
+    assert spill.session_stats(ctx) == {}
+    directory = spill.spill_dir(ctx)
+    assert directory is not None
+    assert not directory.exists() or not any(directory.iterdir())
+
+
+def test_a_streamed_spill_that_cannot_write_falls_back(tmp_path, monkeypatch) -> None:
+    ctx = _ctx(tmp_path)
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("file in the way")
+    monkeypatch.setattr(spill, "spill_dir", lambda _ctx: blocker / "tool-output")
+    stream = spill.SpillStream(ctx, "Bash", open_after=10)
+    text = "a" * 3_000 + "TRAILING ERROR"
+    _feed(stream, text)
+    out = spill.cut_streamed(text, 1_000, stream)
+    assert "saved to" not in out and "chars truncated" in out
+    assert out.endswith("TRAILING ERROR")
+
+
+def test_cell_stdout_over_the_handoff_limit_names_the_lost_range(tmp_path) -> None:
+    from fluid.codemode.session import _spill_cell_stdout
+    from fluid.codemode.truncate import FULL_STDOUT_MAX, bounded_full_stdout
+
+    ctx = _ctx(tmp_path)
+    total = FULL_STDOUT_MAX + 500_000
+    sent = bounded_full_stdout("q" * total)
+    note = _spill_cell_stdout(sent, ctx, total)
+    half = FULL_STDOUT_MAX // 2
+    assert "all " not in note
+    assert f"chars {half + 1:,}-{total - half:,} were not kept" in note
+    assert f"{total - half + 1:,}-{total:,}" in note
+    _spill_path(note)
+
+
+def test_session_search_listing_over_the_cap_spills(tmp_path) -> None:
+    from fluid.tools.builtins import session_search
+
+    ctx = _ctx(tmp_path)
+    listing = "".join(f"hit {i:04d} some matched text here\n" for i in range(1_000))
+    out = session_search._capped(listing, ctx)
+    assert len(out) < session_search._OUTPUT_CAP + 400
+    assert out.startswith("hit 0000")
+    assert _spill_path(out).read_text(encoding="utf-8") == listing
+
+
+def test_history_search_listing_over_the_cap_spills(tmp_path) -> None:
+    from fluid.context import recall
+
+    ctx = _ctx(tmp_path)
+    hits = [
+        recall.Hit(node_id=f"node_{i:012x}", role="user", snippet=f"needle number {i} " * 6, matches=1)
+        for i in range(400)
+    ]
+    out = recall.render_hits(hits, "needle", ctx=ctx)
+    assert len(out) < recall._SEARCH_OUTPUT_CAP + 400
+    assert "needle number 399" in _spill_path(out).read_text(encoding="utf-8")
+    assert spill.session_stats(ctx)["spilled"] == {"HistorySearch": 1}

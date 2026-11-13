@@ -32,10 +32,13 @@ from typing import Any
 from fluid.store.base import project_root_for, same_project
 from fluid.tools.builtins._util import repeat_search_pointer, result_digest
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.spill import cut
 
 _SNIPPET_RADIUS = 160
 _MAX_MATCHES_PER_SESSION = 3
 _OUTPUT_CAP = 8_000
+# A ranked listing's best hits come first, so the head gets most of the cap.
+_LISTING_HEAD_SHARE = 0.75
 _DEFAULT_RECENT = 10
 
 # Rows the recent-listing asks the backend for when scoping to this project:
@@ -197,6 +200,12 @@ def _elsewhere_note(hidden: int) -> str:
     )
 
 
+def _capped(text: str, ctx: ToolCtx) -> str:
+    """A listing over the cap: its best-ranked head and its tail inline, the
+    whole listing in a spill file the marker names (plain cut without one)."""
+    return cut(text, _OUTPUT_CAP, ctx=ctx, tool="SessionSearch", head_share=_LISTING_HEAD_SHARE)
+
+
 def _is_repeat(
     terms: list[str], limit: int, scope: str, text: str, ctx: ToolCtx
 ) -> bool:
@@ -260,8 +269,7 @@ async def _list_recent(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         if row.preview:
             lines.append(f"  last: {row.preview}")
     text = "\n".join(lines)
-    if len(text) > _OUTPUT_CAP:
-        text = text[:_OUTPUT_CAP] + "\n[output capped — lower the limit]"
+    text = _capped(text, ctx)
     return ToolOutcome(text=text)
 
 
@@ -321,8 +329,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         )
         lines.extend(_snippet_lines(hit.texts, terms, getattr(hit, "text_times", ()), zone))
     text = "\n".join(lines)
-    if len(text) > _OUTPUT_CAP:
-        text = text[:_OUTPUT_CAP] + "\n[output capped — narrow the query]"
+    text = _capped(text, ctx)
     if _is_repeat(terms, limit, scope, text, ctx):
         # Identical query, identical listing: point at the copy already in the
         # conversation rather than paying for a second one.
