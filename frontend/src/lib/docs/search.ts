@@ -47,18 +47,20 @@ function bestOccurrence(text: string, term: string): [rank: number, at: number] 
 
 /**
  * The place a query matches in lower-case readable text: the first of
- * `matchTerms` found as a whole word, else at the start of a word (as the index
- * matches a prefix), else anywhere. The snippet and the jump into the opened
- * document both use this, so they show the same place.
+ * `matchTerms` that starts a word (as the index matches a prefix, so a phrase
+ * still being typed counts), as a whole word where it is one; else the first
+ * found anywhere. The snippet and the jump into the opened document both use
+ * this, so they show the same place.
  */
 export function findMatch(text: string, query: string): { at: number; term: string } | null {
-	let best: { rank: number; at: number; term: string } | null = null;
+	let anywhere: { at: number; term: string } | null = null;
 	for (const term of matchTerms(query)) {
 		const hit = bestOccurrence(text, term);
-		if (hit && (!best || hit[0] > best.rank)) best = { rank: hit[0], at: hit[1], term };
-		if (best?.rank === 2) break;
+		if (!hit) continue;
+		if (hit[0] > 0) return { at: hit[1], term };
+		anywhere ??= { at: hit[1], term };
 	}
-	return best && { at: best.at, term: best.term };
+	return anywhere;
 }
 
 export class DocsSearchEngine {

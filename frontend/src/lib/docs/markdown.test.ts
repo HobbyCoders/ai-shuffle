@@ -59,6 +59,10 @@ describe('docs plain text (#1478)', () => {
 		expect(findMatch('nothing here', 'script')).toBeNull();
 	});
 
+	it('keeps the phrase being typed ahead of one of its words found whole', () => {
+		expect(findMatch('a remote host. turn on remote access', 'remote acc')).toEqual({ at: 23, term: 'remote acc' });
+	});
+
 	it('centres the search snippet on that same match', () => {
 		const entry = {
 			slug: 'overview', category: 'getting-started', title: 'Overview', description: '', order: 1,
