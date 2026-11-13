@@ -163,6 +163,9 @@ def block_from_dict(d: dict[str, Any]) -> ContentBlock:
 #: (the stored session-plan reminder). It is context, not a request: it never
 #: opens a turn for compaction or turn counting. Serializers ignore it.
 HARNESS_NOTE_META_KEY = "harness_note"
+#: The plan revision a stored plan note carries, so the loop can tell whether
+#: the newest note in view is current without matching rendered text.
+PLAN_REVISION_META_KEY = "plan_revision"
 
 
 def is_harness_note(message: Message) -> bool:

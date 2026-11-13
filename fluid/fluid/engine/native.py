@@ -56,6 +56,7 @@ explicit later resume.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -199,7 +200,12 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.messages.content import HARNESS_NOTE_META_KEY, SteerDelivery, is_harness_note
+from fluid.messages.content import (
+    HARNESS_NOTE_META_KEY,
+    PLAN_REVISION_META_KEY,
+    SteerDelivery,
+    is_harness_note,
+)
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
@@ -806,6 +812,24 @@ LOST_TOOL_RESULT_TEXT = (
     "[interrupted: this tool call never completed (e.g. the server restarted "
     "mid-call); its result was lost]"
 )
+
+
+def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) -> bool:
+    """Whether the newest plan statement in the view is the current plan.
+
+    Newest first, the first stored plan note or message carrying the plan
+    decides. A note is matched on the revision it was stored with, never on
+    rendered text: a fold replaces it with a summary that has no flag, and a
+    plan that changes back to older text still needs restating after the
+    newer note. The plan a turn's own request carries (added at turn start)
+    is matched on its text.
+    """
+    for message in reversed(history):
+        if is_harness_note(message):
+            return message.provider_meta.get(PLAN_REVISION_META_KEY) == revision
+        if plan_note in message.text():
+            return True
+    return False
 
 
 def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
@@ -3980,7 +4004,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             overhead_tokens = self._context_overhead_tokens()
             history = sanitize_assistant_history(repair_dangling_tool_calls(history))
             plan_node: SessionNode | None = None
-            if plan_note and not any(plan_note in message.text() for message in history):
+            plan_revision = (
+                hashlib.sha256(plan_note.encode()).hexdigest()[:16] if plan_note else None
+            )
+            if plan_note and not _plan_in_view(history, plan_note, plan_revision):
                 # A transcript write, never an unstored tail on the newest
                 # message: the next call would move that tail and change bytes
                 # the provider already cached. Written only when the plan text
@@ -3994,7 +4021,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     node_id=new_id("node"), parent_id=parent.node_id,
                     message=Message(
                         role="user", content=[Text(plan_note)],
-                        provider_meta={HARNESS_NOTE_META_KEY: True},
+                        provider_meta={
+                            HARNESS_NOTE_META_KEY: True,
+                            PLAN_REVISION_META_KEY: plan_revision,
+                        },
                     ),
                 )
                 history.append(plan_node.message)

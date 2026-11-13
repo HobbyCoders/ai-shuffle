@@ -1801,6 +1801,11 @@ class Compactor:
         calls: dict[str, Any] | None = None,
         elide: frozenset[str] | None = None,
     ) -> Message:
+        if is_harness_note(node.message):
+            # The stored plan note renders exactly as first sent, at any size
+            # or age: a size stub would change cached bytes and hide the plan.
+            # Its size is bounded by the Plan tool's payload cap.
+            return node.message
         message = (
             self.trimmer._render([node], trimmed, consumed, calls)[0]
             if self.trimmer.config.enabled

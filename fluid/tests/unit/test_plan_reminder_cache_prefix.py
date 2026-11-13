@@ -17,10 +17,14 @@ from itertools import pairwise
 
 from fluid.context.compaction import CompactionConfig, Compactor, is_turn_start
 from fluid.context.trim import TrimConfig
-from fluid.engine.native import NativeLoop
+from fluid.engine.native import NativeLoop, _plan_in_view
 from fluid.events import UserTurn
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
-from fluid.messages.content import HARNESS_NOTE_META_KEY, is_harness_note
+from fluid.messages.content import (
+    HARNESS_NOTE_META_KEY,
+    PLAN_REVISION_META_KEY,
+    is_harness_note,
+)
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers.anthropic.serialize import build_request_body as anthropic_body
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
@@ -105,7 +109,7 @@ def _weather_server():
 
 
 async def _run(scripts: list[list[StreamChunk]], *, backend: _PlanBackend | None = None,
-               prompts: tuple[str, ...] = ("go",)):
+               prompts: tuple[str, ...] = ("go",), intake_stub_chars: int | None = None):
     provider = ScriptedProvider(scripts)
     store = MemoryStore()
     sid = (await store.create_session()).session_id
@@ -116,6 +120,8 @@ async def _run(scripts: list[list[StreamChunk]], *, backend: _PlanBackend | None
                       registry=registry, permissions=PermissionEngine("never_ask"))
     backend = backend or _PlanBackend()
     loop.ctx.extra["session_plan"] = backend
+    if intake_stub_chars is not None:
+        loop._compactor.config.intake_stub_chars = intake_stub_chars
     for prompt in prompts:
         await loop.submit(UserTurn(content=prompt))
         await asyncio.wait_for(loop.wait_turn(), timeout=10)
@@ -352,3 +358,65 @@ def test_other_readers_never_take_the_reminder_for_the_request() -> None:
     assert "Session plan" not in digest
     assert _render_node(note).startswith("harness note (plan): # Session plan")
     assert _render_node(span[0]).startswith("user (u1): fix the bug")
+
+
+def _long_plan(revision: int, status: str) -> dict:
+    # Goal and acceptance near their caps: the rendered note is well over the
+    # 500-char intake-stub preview.
+    args = _plan_update(revision, status)
+    if revision == 0:
+        args.update(goal="Fix the cache bug. " * 30, done_when="The prefix test passes. " * 40)
+    return args
+
+
+async def test_a_long_plan_note_is_never_stubbed_so_the_prefix_holds() -> None:
+    # Before: the first send carried the whole note, the next render showed
+    # the stored node as a "large user attachment" stub (bytes already sent
+    # changed), and the text match then stored the same revision again.
+    provider, store, sid, backend = await _run([
+        _tool_call("t1", "Plan", _long_plan(0, "in_progress")),
+        _tool_call("t2", "mcp__wx__get_weather", {"city": "Oslo"}),
+        _tool_call("t3", "mcp__wx__get_weather", {"city": "Rome"}),
+        _tool_call("t4", "Plan", _long_plan(1, "completed")),
+        _tool_call("t5", "mcp__wx__get_weather", {"city": "Lima"}),
+        _text("done"),
+    ], intake_stub_chars=200)
+    note = plan.render_reminder(backend.document)
+    assert note is not None and len(note) > 1_000
+    _assert_append_only(provider.requests, _responses_input)
+    _assert_append_only(provider.requests, _anthropic_messages)
+    sent = "".join(m.text() for m in provider.requests[-1].messages)
+    assert "large user attachment" not in sent and sent.count(note) == 1
+    notes = [n for n in await store.load_path(sid) if is_harness_note(n.message)]
+    revisions = [n.message.provider_meta[PLAN_REVISION_META_KEY] for n in notes]
+    assert len(notes) == 2 and len(set(revisions)) == 2
+
+
+def test_compaction_renders_a_plan_note_exactly_as_stored() -> None:
+    # Every live-render transform keyed on user size or age (intake stub,
+    # trim) leaves the note alone, so a later view is byte-identical.
+    note = _sn("p", "user", [Text("# Session plan " + "x" * 5_000)],
+               {HARNESS_NOTE_META_KEY: True, PLAN_REVISION_META_KEY: "r1"})
+    paste = _sn("u2", "user", [Text("y" * 5_000)])
+    nodes = [_sn("u1", "user", [Text("go")]), _sn("a1", "assistant", [Text("ok")]), note, paste]
+    compactor = Compactor(config=CompactionConfig(intake_stub_chars=200, trim=TrimConfig(enabled=True)))
+    view = compactor.view(nodes)
+    assert view[2] is note.message
+    assert "large user attachment" in view[3].text()  # ordinary pastes still stub
+
+
+def test_the_plan_check_matches_the_stored_revision_not_rendered_text() -> None:
+    plan_text = "# Session plan (revision 2; ...)"
+    stored = Message(role="user", content=[Text("[rendered differently]")],
+                     provider_meta={HARNESS_NOTE_META_KEY: True, PLAN_REVISION_META_KEY: "r2"})
+    older = Message(role="user", content=[Text(plan_text)],
+                    provider_meta={HARNESS_NOTE_META_KEY: True, PLAN_REVISION_META_KEY: "r1"})
+    request = Message(role="user", content=[Text("go"), Text(plan_text)])
+    summary = Message(role="user", content=[Text("[summary of earlier work]")])
+    assert _plan_in_view([older, stored], plan_text, "r2")
+    # The newest note decides, even when an older one carries the same text.
+    assert not _plan_in_view([older, stored], plan_text, "r3")
+    # A fold leaves a summary with no flag: the plan must be stated again.
+    assert not _plan_in_view([summary], plan_text, "r2")
+    # The plan a turn's own request carries counts, newer than any note.
+    assert _plan_in_view([stored, request], plan_text, "r9")
