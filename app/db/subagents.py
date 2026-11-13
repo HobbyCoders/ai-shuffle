@@ -145,6 +145,7 @@ def create_subagent(
     is_builtin: bool = False,
     store_defaults: bool = False,
     if_absent: bool = False,
+    provider_models: Optional[Dict[str, str]] = None,
 ) -> SubagentRow:
     """Create an agent row from subagent-shaped fields.
 
@@ -155,6 +156,8 @@ def create_subagent(
     ``if_absent`` keeps an existing row with this id (see ``create_profile``).
     """
     config = _subagent_config(prompt, tools, model, skills, memory, mcp_servers)
+    if provider_models:
+        config["provider_models"] = provider_models
     definition = _code_defaults(subagent_id) if store_defaults else None
     if definition:
         from app.core.builtin_subagents import DEFAULTS_RECORD_KEY, defaults_record
@@ -179,10 +182,12 @@ def update_subagent(
     memory: Optional[str] = ...,  # type: ignore[assignment]
     mcp_servers: Optional[List[Any]] = ...,  # type: ignore[assignment]
     defaults_record: Optional[Dict[str, Any]] = None,
+    provider_models: Optional[Dict[str, str]] = ...,  # type: ignore[assignment]
 ) -> Optional[SubagentRow]:
     """Update the agent row behind a subagent-shaped view.
 
-    Uses Ellipsis (...) to distinguish "not provided" from "explicitly None".
+    Uses Ellipsis (...) to distinguish "not provided" from "explicitly None"
+    (an empty ``provider_models`` clears the map too).
     ``defaults_record`` replaces the built-in's shipped-defaults record.
     """
     agent = _agents_db.get_profile(subagent_id)
@@ -198,6 +203,11 @@ def update_subagent(
         mcp_servers=current["mcp_servers"] if mcp_servers is ... else mcp_servers,
         base=agent.get("config"),
     )
+    if provider_models is not ...:
+        if provider_models:
+            config["provider_models"] = provider_models
+        else:
+            config.pop("provider_models", None)
     if defaults_record is not None:
         from app.core.builtin_subagents import DEFAULTS_RECORD_KEY
 

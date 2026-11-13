@@ -209,6 +209,8 @@ The tool names that may appear in `allowed_tools` / `disallowed_tools` are not a
 
 `ai_tools` and `app_config_tools` are legacy: those tools are now granted through the same list as everything else. Both fields are still accepted so older exports import cleanly.
 
+Owner sessions with app configuration tools enabled can edit agents with `mcp__app-config__updateProfile` and nested agents with `mcp__app-config__updateSubagent` without resending whole values. `prompt_edits` is an ordered list of `{old, new}` items (an exact replace; `old` must occur exactly once, otherwise the call reports the match count and saves nothing) and `{append}` items (a new paragraph at the end). `add` and `remove` change single entries of `allowed_tools`, `disallowed_tools`, `enabled_agents`, `enabled_plugins`, `add_dirs` (agents) or `tools`, `skills` (nested agents), and single `provider_models` keys. `updateProfile` also takes `reset_system_prompt: true` to go back to the preset prompt. Both tools and `createProfile` / `createSubagent` can set `provider_models`; the agent tools also set `enabled_agents`, `agent_invoke_mode`, `enabled_plugins`, `add_dirs` and `avatar_color`. Values pass the same checks as this API, the tool rules above still apply (an `allow` list cannot be emptied), and a failed call changes nothing.
+
 
 ## Nested Agents (formerly "subagents")
 

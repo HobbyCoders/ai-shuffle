@@ -9,9 +9,39 @@ import logging
 from typing import Any, cast
 
 from app.core.model_registry import model_values
+from app.mcp.config_agent_edits import (
+    PROMPT_EDITS_SCHEMA,
+    apply_list_ops,
+    apply_map_ops,
+    apply_prompt_edits,
+    list_ops_for,
+    list_ops_schema,
+    pruned_provider_models,
+    unknown_op_fields,
+    validate_profile_fields,
+)
 from app.mcp.config_helpers import _tool_result, _error
 
 logger = logging.getLogger(__name__)
+
+_PROVIDER_MODELS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": {"type": "string"},
+    "description": (
+        "Task model per caller provider (__native__ = Claude, __voice__ = voice, "
+        "else a provider id); replaces the map."
+    ),
+}
+_SUBAGENT_LIST_FIELDS = ("tools", "skills")
+
+
+def _provider_models_arg(value: Any) -> tuple[Any, str | None]:
+    """``provider_models`` pruned of blank entries and checked like REST."""
+    if value is None:
+        return None, None
+    value = pruned_provider_models(value)
+    error, _ = validate_profile_fields({"provider_models": value}, ["provider_models"])
+    return value, error
 
 
 def _create_subagent_tools(is_admin: bool) -> list:
@@ -111,6 +141,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
                     "type": "array",
                     "description": "MCP servers the subagent can access.",
                 },
+                "provider_models": _PROVIDER_MODELS_SCHEMA,
             },
             "required": ["name", "description", "prompt"],
         },
@@ -118,6 +149,9 @@ def _create_subagent_tools(is_admin: bool) -> list:
     async def create_subagent(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
+        provider_models, models_error = _provider_models_arg(args.get("provider_models"))
+        if models_error:
+            return _error(models_error)
 
         import re
         # Generate ID from name using same logic as createProfile
@@ -151,6 +185,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 skills=args.get("skills"),
                 memory=args.get("memory"),
                 mcp_servers=args.get("mcp_servers"),
+                provider_models=provider_models,
             )
 
         error, subagent = await run_sync(_check_and_create)
@@ -172,14 +207,15 @@ def _create_subagent_tools(is_admin: bool) -> list:
 
     @tool(
         "updateSubagent",
-        "Update configuration of an existing subagent.",
+        "Update configuration of an existing subagent. Omitted fields stay unchanged.",
         {
             "type": "object",
             "properties": {
                 "subagent_id": {"type": "string"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
-                "prompt": {"type": "string"},
+                "prompt": {"type": "string", "description": "Replaces the whole prompt."},
+                "prompt_edits": PROMPT_EDITS_SCHEMA,
                 "tools": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -202,6 +238,11 @@ def _create_subagent_tools(is_admin: bool) -> list:
                     "type": "array",
                     "description": "MCP servers the subagent can access.",
                 },
+                "provider_models": {
+                    **_PROVIDER_MODELS_SCHEMA,
+                    "description": _PROVIDER_MODELS_SCHEMA["description"] + " null clears it.",
+                },
+                **list_ops_schema(_SUBAGENT_LIST_FIELDS),
             },
             "required": ["subagent_id"],
         },
@@ -212,6 +253,14 @@ def _create_subagent_tools(is_admin: bool) -> list:
         from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
         if args.get("subagent_id") == ASSISTANT_AGENT_ID:
             return _error("The assistant's built-in agent cannot be changed or deleted.")
+        op_error = unknown_op_fields(args, (*_SUBAGENT_LIST_FIELDS, "provider_models"))
+        if op_error:
+            return _error(op_error)
+        if "prompt" in args and args.get("prompt_edits") is not None:
+            return _error("Pass prompt (replace) or prompt_edits (patch), not both.")
+        provider_models, models_error = _provider_models_arg(args.get("provider_models"))
+        if models_error:
+            return _error(models_error)
 
         def _read_validate_write():
             """READ-MODIFY-WRITE — must stay in ONE hop.
@@ -223,11 +272,15 @@ def _create_subagent_tools(is_admin: bool) -> list:
             coexisted with the fields it just wrote — or write to a subagent
             deleted after the check.
 
-            Returns ``(error_message, updated_row, existing_row, updated_fields)``.
+            Prompt patches and list add/remove read the stored value, so
+            they are applied here as well.
+
+            Returns ``(error_message, updated_row, existing_row, updated_fields,
+            details)``.
             """
             existing = database.get_subagent(args["subagent_id"])
             if not existing:
-                return f"Subagent not found: {args['subagent_id']}", None, None, None
+                return f"Subagent not found: {args['subagent_id']}", None, None, None, None
 
             # Built-in subagents remain editable via MCP (mirrors REST behavior).
             # Use revertSubagent / built-in revert flow to undo unwanted changes.
@@ -236,24 +289,64 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 "name", "description", "prompt", "tools",
                 "model", "skills", "memory", "mcp_servers",
             )
-            fields = [k for k in updatable_fields if k in args]
-
-            if not fields:
-                return "No fields provided to update.", None, None, None
-
             # Build kwargs only for keys explicitly supplied. Omitted keys fall
             # through to the DB layer's Ellipsis sentinel default, which means
             # "leave unchanged". Explicit None clears the field.
             update_kwargs: dict[str, Any] = {
                 k: args[k] for k in updatable_fields if k in args
             }
+            if "provider_models" in args:
+                update_kwargs["provider_models"] = provider_models
+            details: dict[str, Any] = {}
+
+            if args.get("prompt_edits") is not None:
+                text, edit_error, excerpts = apply_prompt_edits(
+                    existing.get("prompt") or "", args["prompt_edits"])
+                if edit_error:
+                    return edit_error, None, None, None, None
+                update_kwargs["prompt"] = text
+                details["prompt"] = {"length": len(text), "changes": excerpts}
+
+            unmatched: dict[str, Any] = {}
+            for field in (*_SUBAGENT_LIST_FIELDS, "provider_models"):
+                add, remove = list_ops_for(args, field)
+                if add is None and remove is None:
+                    continue
+                apply = apply_map_ops if field == "provider_models" else apply_list_ops
+                current = update_kwargs.get(field, existing.get(field))
+                value, op_error, missing = apply(current, add, remove, field)
+                if op_error:
+                    return op_error, None, None, None, None
+                if field == "tools" and not value:
+                    # An empty list reads as "no tools"; inheriting is null.
+                    return (
+                        "Removing every tool would leave this subagent with no "
+                        "tools. Pass tools: null to inherit all tools instead."
+                    ), None, None, None, None
+                update_kwargs[field] = value
+                details.setdefault("lists", {})[field] = value
+                if missing:
+                    unmatched[field] = missing
+            if unmatched:
+                details["not_found_for_remove"] = unmatched
+
+            tool_list = update_kwargs.get("tools")
+            if tool_list is not None:
+                list_error, _ = validate_profile_fields(
+                    {"allowed_tools": tool_list}, ["allowed_tools"])
+                if list_error:
+                    return list_error, None, None, None, None
+
+            fields = [k for k in (*updatable_fields, "provider_models") if k in update_kwargs]
+            if not fields:
+                return "No fields provided to update.", None, None, None, None
 
             return None, database.update_subagent(
                 args["subagent_id"],
                 **update_kwargs,
-            ), existing, fields
+            ), existing, fields, details
 
-        error, updated, existing, updated_fields = await run_sync(_read_validate_write)
+        error, updated, existing, updated_fields, details = await run_sync(_read_validate_write)
         if error:
             return _error(error)
 
@@ -262,6 +355,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
             "success": True,
             "subagent_id": args["subagent_id"],
             "updated_fields": updated_fields,
+            **details,
             "message": f"Subagent '{updated_name}' updated.",
         })
 

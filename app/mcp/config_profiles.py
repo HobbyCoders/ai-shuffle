@@ -8,9 +8,76 @@ permission mode, system prompt, etc.).
 import logging
 from typing import Any, Dict, Optional, cast
 
+from app.core.models import AGENT_AVATAR_COLORS
+from app.mcp.config_agent_edits import (
+    PROMPT_EDITS_SCHEMA,
+    apply_list_ops,
+    apply_map_ops,
+    apply_prompt_edits,
+    list_ops_for,
+    list_ops_schema,
+    pruned_provider_models,
+    unknown_op_fields,
+    validate_profile_fields,
+)
 from app.mcp.config_helpers import _tool_result, _error
 
 logger = logging.getLogger(__name__)
+
+
+_STRINGS = {"type": "array", "items": {"type": "string"}}
+
+# Agent settings an agent may set on create/update. Deliberately absent: model,
+# provider, permission_mode and effort (chosen per chat, v79); env, extra_args,
+# cwd and setting_sources (machine-specific or secret-bearing); and the retired
+# ai_tools / computer_use switches, which the runtime no longer reads for access
+# (app.core.tool_access.fold_retired_tool_switches; the computer-use toggle is
+# app-wide), so setting them would report success and change nothing.
+_AGENT_SETTINGS_SCHEMA: Dict[str, Any] = {
+    "enabled_agents": {**_STRINGS, "description": "Agent ids for 'custom' mode."},
+    "agent_invoke_mode": {
+        "type": "string",
+        "enum": ["all", "custom", "none"],
+        "description": "Subagents it may call: every agent, enabled_agents only, or none.",
+    },
+    "provider_models": {
+        "type": "object",
+        "additionalProperties": {"type": "string"},
+        "description": (
+            "Its model when run as a subagent, by caller provider "
+            "(__native__ Claude, __voice__ voice, else a provider id)."
+        ),
+    },
+    "enabled_plugins": {**_STRINGS, "description": "Plugins to load."},
+    "add_dirs": {**_STRINGS, "description": "Extra directories it may access."},
+    "avatar_color": {"type": "string", "enum": list(AGENT_AVATAR_COLORS)},
+}
+_AGENT_SETTINGS = ("enabled_agents", "agent_invoke_mode", "provider_models",
+                   "enabled_plugins", "add_dirs")
+_PROFILE_LIST_FIELDS = ("allowed_tools", "disallowed_tools", "enabled_agents",
+                        "enabled_plugins", "add_dirs")
+_PROMPT_ONLY_ONE = (
+    "Pass only one way to change the system prompt: system_prompt_content, "
+    "system_prompt_append, reset_system_prompt or prompt_edits."
+)
+
+
+def _avatar_color_error(value: Any) -> Optional[str]:
+    from app.core.models import _check_avatar_color
+
+    try:
+        _check_avatar_color(value)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _masked_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Hide env values (they may hold secrets); keys stay visible."""
+    env = config.get("env")
+    if isinstance(env, dict) and env:
+        config = {**config, "env": {k: "••••••••" if v else v for k, v in env.items()}}
+    return config
 
 
 _TOOL_MODE_SCHEMA = {
@@ -107,7 +174,7 @@ def _create_profile_tools(is_admin: bool) -> list:
             return _error(f"Profile not found: {args['profile_id']}")
         from app.core.builtin_subagents import DEFAULTS_RECORD_KEY  # internal seeding record
         config = {k: v for k, v in (profile.get("config") or {}).items() if k != DEFAULTS_RECORD_KEY}
-        return _tool_result(cast(dict, {**profile, "config": config}))
+        return _tool_result(cast(dict, {**profile, "config": _masked_config(config)}))
 
     tools.append(get_profile)
 
@@ -166,6 +233,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                     "type": "boolean",
                     "description": "Enable app configuration tools on this profile.",
                 },
+                **_AGENT_SETTINGS_SCHEMA,
             },
             "required": ["name"],
         },
@@ -182,6 +250,19 @@ def _create_profile_tools(is_admin: bool) -> list:
                         if args.get(key)}
         if _allow_list_empty(stored_tools):
             return _error(_ALLOW_EMPTY_ERROR)
+        # The new agent settings pass the same ProfileConfig check as the
+        # Agents page before anything is written.
+        settings = {key: args[key] for key in _AGENT_SETTINGS
+                    if args.get(key) is not None}
+        if "provider_models" in settings:
+            settings["provider_models"] = pruned_provider_models(settings["provider_models"])
+        settings_error, normalized = validate_profile_fields(settings, settings)
+        if settings_error:
+            return _error(settings_error)
+        settings.update(normalized)
+        color_error = _avatar_color_error(args.get("avatar_color"))
+        if color_error:
+            return _error(color_error)
 
         import re
         # Generate ID from name
@@ -224,6 +305,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                 config["tool_selection_mode"] = args["tool_selection_mode"]
             if args.get("app_config_tools"):
                 config["app_config_tools"] = True
+            config.update(settings)
 
             # System prompt
             if args.get("system_prompt_content"):
@@ -243,11 +325,13 @@ def _create_profile_tools(is_admin: bool) -> list:
                     "preset": "claude_code",
                 }
 
+            extra = {"avatar_color": args["avatar_color"].strip()} if args.get("avatar_color") else {}
             return None, database.create_profile(
                 profile_id=profile_id,
                 name=args["name"],
                 description=args.get("description"),
                 config=config,
+                **extra,
             )
 
         error, profile = await run_sync(_check_and_create)
@@ -273,7 +357,7 @@ def _create_profile_tools(is_admin: bool) -> list:
 
     @tool(
         "updateProfile",
-        "Update configuration of an existing profile.",
+        "Update a profile. Omitted fields stay unchanged; null clears an agent setting.",
         {
             "type": "object",
             "properties": {
@@ -284,32 +368,29 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "tools_preset": {"type": "string", "enum": ["claude_code"]},
                 "max_turns": {"type": "integer"},
                 "app_config_tools": {"type": "boolean"},
-                "system_prompt_content": {"type": "string", "description": "Custom system prompt content. Pass non-empty string to switch profile to custom system prompt; omit to leave unchanged."},
-                "system_prompt_append": {"type": "string", "description": "Text to append to the preset system prompt. Pass non-empty string to switch profile to preset+append; omit to leave unchanged."},
-                "tool_selection_mode": {
-                    **_TOOL_MODE_SCHEMA,
-                    "description": _TOOL_MODE_SCHEMA["description"] + " Omit to leave unchanged.",
+                "system_prompt_content": {"type": "string", "description": "Replace the whole prompt (custom)."},
+                "system_prompt_append": {"type": "string", "description": "Switch to the preset prompt plus this text."},
+                "reset_system_prompt": {"type": "boolean", "description": "Restore the bare preset prompt."},
+                "prompt_edits": {
+                    **PROMPT_EDITS_SCHEMA,
+                    "description": PROMPT_EDITS_SCHEMA["description"].replace(
+                        "the prompt", "the prompt (custom text, or text appended to the preset)", 1),
                 },
+                "tool_selection_mode": _TOOL_MODE_SCHEMA,
                 "allowed_tools": {
-                    "type": "array",
-                    "items": {"type": "string"},
+                    **_STRINGS,
                     "description": (
-                        "Tools the agent may use in 'allow' mode; replaces the "
-                        "stored list. Omit to leave unchanged. Ignored in other "
-                        "modes. An empty list is refused while the mode is "
-                        "'allow' (it would remove every tool): to lift the "
-                        "restriction pass tool_selection_mode 'all' instead."
+                        "Tools allowed in 'allow' mode; replaces the list. An "
+                        "empty list is refused in 'allow' mode (no tools left): "
+                        "pass tool_selection_mode 'all' instead."
                     ),
                 },
                 "disallowed_tools": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Tools the agent may not use in 'disallow' mode; replaces "
-                        "the stored list. Pass [] to block nothing; omit to leave "
-                        "unchanged. Ignored in other modes."
-                    ),
+                    **_STRINGS,
+                    "description": "Tools blocked in 'disallow' mode; replaces the list ([] blocks nothing).",
                 },
+                **_AGENT_SETTINGS_SCHEMA,
+                **list_ops_schema(_PROFILE_LIST_FIELDS),
             },
             "required": ["profile_id"],
         },
@@ -320,9 +401,20 @@ def _create_profile_tools(is_admin: bool) -> list:
         from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
         if args.get("profile_id") == ASSISTANT_AGENT_ID:
             return _error("The assistant's built-in agent cannot be changed or deleted.")
-        mode_error = _tool_mode_error(args)
+        mode_error = _tool_mode_error(args) or unknown_op_fields(
+            args, (*_PROFILE_LIST_FIELDS, "provider_models"))
         if mode_error:
             return _error(mode_error)
+        prompt_ways = [key for key in ("system_prompt_content", "system_prompt_append",
+                                       "reset_system_prompt") if args.get(key)]
+        if args.get("prompt_edits") is not None:
+            prompt_ways.append("prompt_edits")
+        if len(prompt_ways) > 1 and {"reset_system_prompt", "prompt_edits"} & set(prompt_ways):
+            return _error(_PROMPT_ONLY_ONE)
+        if "avatar_color" in args:
+            color_error = _avatar_color_error(args["avatar_color"])
+            if color_error:
+                return _error(color_error)
 
         def _read_merge_write():
             """READ-MODIFY-WRITE — must stay in ONE hop.
@@ -333,23 +425,30 @@ def _create_profile_tools(is_admin: bool) -> list:
             onto the config they read before the other wrote, and whichever
             wrote last would silently erase the other's change — the classic
             lost update, and the most damaging one in this file because config
-            is a single JSON column rather than per-field columns.
+            is a single JSON column rather than per-field columns. Prompt
+            patches and list add/remove read the stored value, so they must
+            run here too.
 
-            Returns ``(error_message, updated_row, updated_fields)``.
+            Returns ``(error_message, updated_row, updated_fields, details)``.
             """
             profile = database.get_profile(args["profile_id"])
             if not profile:
-                return f"Profile not found: {args['profile_id']}", None, None
+                return f"Profile not found: {args['profile_id']}", None, None, None
 
             # Merge updates into existing config
             config = dict(profile.get("config", {}))
             updated_fields = []
+            details: Dict[str, Any] = {}
+
+            def mark(field: str) -> None:
+                if field not in updated_fields:
+                    updated_fields.append(field)
 
             for field in ("thinking_mode", "tools_preset", "max_turns",
                           "app_config_tools"):
                 if field in args and args[field] is not None:
                     config[field] = args[field]
-                    updated_fields.append(field)
+                    mark(field)
 
             from app.core.tool_access import tool_selection_mode
 
@@ -357,10 +456,41 @@ def _create_profile_tools(is_admin: bool) -> list:
             for field in ("allowed_tools", "disallowed_tools"):
                 if field in args:
                     config[field] = args[field]
-                    updated_fields.append(field)
+                    mark(field)
             if args.get("tool_selection_mode") is not None:
                 config["tool_selection_mode"] = args["tool_selection_mode"]
-                updated_fields.append("tool_selection_mode")
+                mark("tool_selection_mode")
+
+            # Agent settings: null clears.
+            for field in _AGENT_SETTINGS:
+                if field not in args:
+                    continue
+                value = args[field]
+                if value is None:
+                    config.pop(field, None)
+                else:
+                    config[field] = (
+                        pruned_provider_models(value) if field == "provider_models" else value
+                    )
+                mark(field)
+
+            # add / remove: single entries without resending the list.
+            unmatched: Dict[str, Any] = {}
+            for field in (*_PROFILE_LIST_FIELDS, "provider_models"):
+                add, remove = list_ops_for(args, field)
+                if add is None and remove is None:
+                    continue
+                apply = apply_map_ops if field == "provider_models" else apply_list_ops
+                value, op_error, missing = apply(config.get(field), add, remove, field)
+                if op_error:
+                    return op_error, None, None, None
+                config[field] = value
+                details.setdefault("lists", {})[field] = value
+                if missing:
+                    unmatched[field] = missing
+                mark(field)
+            if unmatched:
+                details["not_found_for_remove"] = unmatched
 
             # The mode, not list emptiness, decides access
             # (app.core.tool_access): an empty allow list in "allow" mode
@@ -368,53 +498,96 @@ def _create_profile_tools(is_admin: bool) -> list:
             # instead of silently stripping the agent. Only calls that touch
             # the tool settings are checked, so renaming an agent that the
             # owner deliberately left with nothing ticked still works.
-            touches_tools = "allowed_tools" in args or "tool_selection_mode" in updated_fields
+            touches_allowed = "allowed_tools" in updated_fields
+            touches_tools = touches_allowed or "tool_selection_mode" in updated_fields
             if touches_tools and _allow_list_empty(config):
-                return _ALLOW_EMPTY_ERROR, None, None
+                return _ALLOW_EMPTY_ERROR, None, None, None
             # A profile saved without a mode infers one from its lists, and
             # there an empty allow list reads as "none". Don't let a "clear the
-            # list" call flip such a profile to no tools by inference.
+            # list" call (or removing its last entry) flip such a profile to no
+            # tools by inference.
             if (
-                "allowed_tools" in args
-                and not args.get("allowed_tools")
+                touches_allowed
+                and not config.get("allowed_tools")
                 and args.get("tool_selection_mode") is None
                 and mode_before != "none"
                 and tool_selection_mode(config) == "none"
             ):
                 return (
-                    "allowed_tools: [] would leave this agent with no tools at "
-                    "all: it has no saved tool_selection_mode, so an empty list "
+                    "An empty allowed_tools would leave this agent with no tools "
+                    "at all: it has no saved tool_selection_mode, so an empty list "
                     "reads as 'none'. Pass tool_selection_mode 'all' to lift the "
                     "restriction, or 'none' to remove every tool on purpose."
-                ), None, None
+                ), None, None, None
 
             # System prompt merge — mirrors createProfile semantics
+            existing_sp = config.get("system_prompt")
+            if isinstance(existing_sp, str):  # legacy plain-text prompt
+                existing_sp = {"type": "custom", "content": existing_sp}
+            elif not isinstance(existing_sp, dict):
+                # No prompt runs on the security text alone (query_options),
+                # i.e. an empty custom prompt; a dict without a type is a preset.
+                existing_sp = {"type": "custom", "content": ""}
             if args.get("system_prompt_content"):
                 config["system_prompt"] = {
                     "type": "custom",
                     "content": args["system_prompt_content"],
                 }
-                updated_fields.append("system_prompt")
+                mark("system_prompt")
             elif args.get("system_prompt_append"):
-                existing_sp = config.get("system_prompt") or {}
                 config["system_prompt"] = {
                     "type": "preset",
                     "preset": existing_sp.get("preset", "claude_code"),
                     "append": args["system_prompt_append"],
                 }
-                updated_fields.append("system_prompt")
+                mark("system_prompt")
+            elif args.get("reset_system_prompt"):
+                config["system_prompt"] = {
+                    "type": "preset",
+                    "preset": existing_sp.get("preset") or "claude_code",
+                }
+                mark("system_prompt")
+            elif args.get("prompt_edits") is not None:
+                # A custom prompt patches its content; a preset prompt patches
+                # the agent's own text appended to the preset.
+                custom = existing_sp.get("type") == "custom"
+                key = "content" if custom else "append"
+                text, edit_error, excerpts = apply_prompt_edits(
+                    existing_sp.get(key) or "", args["prompt_edits"])
+                if edit_error:
+                    return edit_error, None, None, None
+                patched = dict(existing_sp) if custom else {
+                    "preset": "claude_code", **existing_sp, "type": "preset"}
+                patched[key] = text
+                config["system_prompt"] = patched
+                details["prompt"] = {
+                    "edited": "custom prompt" if custom else "text appended to the preset",
+                    "length": len(text),
+                    "changes": excerpts,
+                }
+                mark("system_prompt")
             # If neither key provided (or both empty string), leave system_prompt untouched.
+
+            # Same ProfileConfig check as the Agents page, on the touched keys.
+            settings_error, _ = validate_profile_fields(config, updated_fields)
+            if settings_error:
+                return settings_error, None, None, None
 
             # Update profile-level fields
             name = args.get("name")
             description = args.get("description")
             if name:
-                updated_fields.append("name")
+                mark("name")
             if description is not None:
-                updated_fields.append("description")
+                mark("description")
+            extra = {}
+            if "avatar_color" in args:
+                color = args["avatar_color"]
+                extra["avatar_color"] = color.strip() if isinstance(color, str) else None
+                mark("avatar_color")
 
             if not updated_fields:
-                return "No fields provided to update.", None, None
+                return "No fields provided to update.", None, None, None
 
             # Built-in profiles remain editable via MCP (mirrors REST behavior).
             # Use the restore endpoint / UI to revert built-in profiles to defaults.
@@ -424,9 +597,10 @@ def _create_profile_tools(is_admin: bool) -> list:
                 description=description,
                 config=config,
                 allow_builtin=True,
-            ), updated_fields
+                **extra,
+            ), updated_fields, details
 
-        error, updated, updated_fields = await run_sync(_read_merge_write)
+        error, updated, updated_fields, details = await run_sync(_read_merge_write)
         if error:
             return _error(error)
 
@@ -437,6 +611,7 @@ def _create_profile_tools(is_admin: bool) -> list:
             "success": True,
             "profile_id": args["profile_id"],
             "updated_fields": updated_fields,
+            **details,
             "message": f"Profile '{updated.get('name')}' updated.",
         })
 
