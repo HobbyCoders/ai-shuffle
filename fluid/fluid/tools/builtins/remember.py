@@ -92,6 +92,17 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         )
     except (ValueError, OSError, TimeoutError) as exc:
         return ToolOutcome(text=f"Not saved: {exc}", is_error=True)
+    # Storage may return an archived or replaced match without reviving it
+    # (facts.py, the same-text archived-match branches). Nothing became
+    # current then, so the receipt must not say saved (#1514).
+    try:
+        stale = await asyncio.to_thread(_not_made_current, store, saved)
+    except Exception:  # noqa: BLE001 — a status read never fails a committed save
+        stale = ""
+    if stale:
+        # _close sees the same fact is not current and leaves the proposal open.
+        return ToolOutcome(text=f"Not saved as current: {stale}" + _receipt_notes(receipt)
+                           + await _close(store, proposal, saved, ctx), is_error=True)
     kind = "kept until the user changes it" if saved.protected else (
         "agent-saved; renewed when recalled" if saved.durable else "learned")
     if saved.always:
@@ -124,17 +135,52 @@ async def _close(store: Any, proposal: str, saved: Any, ctx: ToolCtx) -> str:
                 f"close it with Forget, proposal='{proposal}', confirm=true.")
 
 
+def _status(store: Any, saved: Any) -> tuple[str, str | None, Any]:
+    """``(state, successor, live successor)`` of the fact a save returned.
+    ``state`` is ``replaced``, ``archived``, ``conflicted`` or '' (current);
+    ``successor`` is the replacing fact's local ID when replaced, and the live
+    successor entry is set only while that fact is current."""
+    live = {m.id: m for m in store.memories()}
+    entry = live.get(saved.id) or saved
+    if entry.superseded_by and (entry.supersession_confirmed or not entry.protected):
+        from fluid.tools.builtins.recall import _local_ids
+        successor = _local_ids(store).get(entry.superseded_by, entry.superseded_by)
+        return "replaced", successor, live.get(successor)
+    if saved.id not in live:
+        return "archived", None, None
+    return ("conflicted" if entry.conflicted else ""), None, None
+
+
 def _not_current(store: Any, saved: Any) -> str:
     """Why the fact a save returned is not a current rule ('' when it is).
     Storage may return an archived or replaced match without reviving it."""
-    live = next((m for m in store.memories() if m.id == saved.id), None)
-    entry = live or saved
-    if entry.superseded_by and (entry.supersession_confirmed or not entry.protected):
-        from fluid.tools.builtins.recall import _local_ids
-        return f"[{saved.id}] was replaced by [{_local_ids(store).get(entry.superseded_by, entry.superseded_by)}]"
-    if live is None:
-        return f"[{saved.id}] is archived, not current"
-    return f"[{saved.id}] is conflicted" if live.conflicted else ""
+    state, successor, _ = _status(store, saved)
+    return {"replaced": f"[{saved.id}] was replaced by [{successor}]",
+            "archived": f"[{saved.id}] is archived, not current",
+            "conflicted": f"[{saved.id}] is conflicted"}.get(state, "")
+
+
+def _not_made_current(store: Any, saved: Any) -> str:
+    """The receipt for a save that returned an archived or replaced fact
+    without reviving it ('' otherwise): which fact stays in force, and the
+    call that would correct it."""
+    state, successor, current = _status(store, saved)
+    if state == "replaced" and current is not None:
+        rev = current.revision
+        return (f"this text matches [{saved.id}], which [{successor}] replaced, and storage "
+                f"does not bring a replaced fact back. [{successor} r{rev}] stays the current "
+                "fact; new sessions see it, not this text. To make this text current, correct "
+                f"[{successor}]: Remember with memory_id={successor} expected_revision={rev} "
+                "(user_requested=true only if the user asked for this change).")
+    if state == "replaced":
+        return (f"this text matches [{saved.id}], which [{successor}] replaced, and storage "
+                "does not bring a replaced fact back; new sessions do not see this text. "
+                f"Recall [{successor}] to find the current fact and correct that one with "
+                "memory_id and expected_revision.")
+    if state == "archived":
+        return (f"this text matches [{saved.id}], which is archived and was not brought back; "
+                f"new sessions do not see it. Recall [{saved.id}] to see why it was archived.")
+    return ""
 
 
 def _receipt_notes(receipt: dict[str, Any]) -> str:

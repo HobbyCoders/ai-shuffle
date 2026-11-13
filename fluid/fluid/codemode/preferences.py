@@ -192,7 +192,8 @@ class PreferenceProposals:
         ``duplicate`` (the same wording is already open), ``closed`` (a
         session already saved or dismissed this topic, scope and wording;
         see :meth:`close`), ``saved`` (a user-kept fact in scope already
-        says it word for word) or ``full`` (the queue holds
+        says it word for word, and no newer user-kept fact in scope on the
+        same topic says otherwise) or ``full`` (the queue holds
         MAX_OPEN_PREFERENCE_PROPOSALS other topics). Raises
         ValueError for a malformed topic, an empty or oversized text, a
         credential or an injection pattern."""
@@ -213,7 +214,14 @@ class PreferenceProposals:
             if not held:
                 raise ValueError("preference proposals are busy; the next pass retries")
             saved = self._saved_preferences(None)
-            if any(s in (scope, "global") and fp == fingerprint for _, s, _, fp, _ in saved):
+            in_scope = [row for row in saved if row[1] in (scope, "global")]
+            same_words = [at for _, _, at, fp, _ in in_scope if fp == fingerprint]
+            # A word-for-word memory answers the proposal only while it is the
+            # latest word on the topic: a newer live user-kept memory on the
+            # same topic that says something else leaves it open (#1508).
+            if same_words and not any(
+                    fp != fingerprint and at > max(same_words) and same_topic(name, body, k, terms)
+                    for k, _, at, fp, terms in in_scope):
                 return "saved"
             rows = self._read()
             records = [r for r in rows if self._is_open(r, saved, now)]
