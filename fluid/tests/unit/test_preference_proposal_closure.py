@@ -357,3 +357,47 @@ def test_a_repeated_rule_with_no_newer_contradiction_stays_suppressed(tmp_path):
     queue = _saved_at(store, 180.0, 110.0)
     assert queue.propose("python_indent", tabs, now=200.0) == "saved"
     assert queue._read() == []
+
+
+def test_memories_seen_when_a_proposal_is_queued_never_answer_it(tmp_path):
+    # Clock skew: replicated A (T110) and B (T180) are both ahead of this
+    # worker's clock (T100) when the owner goes back to A. The queued proposal
+    # is open: neither memory it already saw counts as a later answer.
+    store = SkillStore(tmp_path)
+    tabs = "Indent Python code in the fixture project with tabs."
+    store.save_memory(tabs, protected=True, when="When formatting Python code")
+    store.save_memory("Indent Python code in the fixture project with four spaces.",
+                      protected=True, when="When formatting Python code")
+    queue = _saved_at(store, 110.0, 180.0)
+    assert queue.propose("python_indent", tabs, now=100.0) == "proposed"
+    assert [r["text"] for r in queue.open(now=100.0)] == [tabs]
+    # A memory on the topic saved after both (the next local stamp) answers it.
+    rows = queue._saved_preferences(None)
+    key, scope, _at, fp, terms = rows[0]
+    queue._saved_preferences = lambda _entries: rows + [(key, scope, 180.5, fp, terms)]
+    assert queue.open(now=101.0) == []
+
+
+async def test_a_save_matching_a_replaced_fact_with_a_conflicted_successor(tmp_path):
+    # A was replaced by B; two synced workers then corrected B differently, so
+    # B is conflicted and new sessions do not see it. The receipt must not
+    # call B the current fact; it sends the agent to the owner's resolution.
+    text = "Release notes are written after the tag is pushed."
+    here, there = SkillStore(tmp_path / "here"), SkillStore(tmp_path / "there")
+    old = here.save_memory(RULE, protected=True, when=WHEN)
+    new = here.save_memory(text, protected=True, when=WHEN, replaces=[old.id])
+    there._facts.merge(here._facts.export())
+    copy = next(m for m in there.memories() if m.text == text)
+    here.save_memory("Release notes are written by the release bot after the tag is pushed.",
+                     memory_id=new.id, expected_revision=new.revision, protected=True, when=WHEN)
+    there.save_memory("Release notes are written by hand after the tag is pushed.",
+                      memory_id=copy.id, expected_revision=copy.revision, protected=True, when=WHEN)
+    here._facts.merge(there._facts.export())
+    [successor] = here.memories()
+    assert successor.id == new.id and successor.conflicted
+    out = await remember({"text": RULE, "when": WHEN, "user_requested": True,
+                          "proposal": "release_notes"}, ctx(here))
+    assert out.is_error and out.text.startswith("Not saved as current")
+    assert "stays the current fact" not in out.text and "new sessions see it" not in out.text
+    assert f"[{new.id}] is conflicted" in out.text and "Recall" in out.text
+    assert "owner" in out.text

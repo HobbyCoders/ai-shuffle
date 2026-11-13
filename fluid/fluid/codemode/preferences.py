@@ -25,7 +25,8 @@ raise the question, both bounded so they cannot nag:
   queue file is local to this worker; it does not replicate. A proposal
   also closes itself once a user-kept memory on the same topic is saved
   after it: one keyed by the topic name, or one sharing the proposal's
-  subject terms (:func:`same_topic`). The guidance queue
+  subject terms (:func:`same_topic`); a memory the proposal already saw
+  when it was queued never counts, whatever its timestamp. The guidance queue
   (``pending-proposals.jsonl``) is not reused: ``fluid evolve`` replays
   everything in it through the guidance gate.
 
@@ -169,8 +170,14 @@ class PreferenceProposals:
             return False
         scope = record.get("scope") or "global"
         # Answered: the owner's confirmation (or correction) of the topic was
-        # saved after the proposal was made.
+        # saved after the proposal was made. ``ts`` is this worker's clock;
+        # ``seen`` is the newest memory on the topic the proposal already saw,
+        # which never answers it even when replicated from a clock that runs
+        # ahead (rows from older versions carry no ``seen``).
+        seen = record.get("seen")
+        seen = float(seen) if isinstance(seen, (int, float)) and not isinstance(seen, bool) else None
         return not any((s == scope or s == "global") and at >= float(record["ts"])
+                       and (seen is None or at > seen)
                        and same_topic(record["topic"], record["text"], k, terms)
                        for k, s, at, _, terms in saved)
 
@@ -216,12 +223,12 @@ class PreferenceProposals:
             saved = self._saved_preferences(None)
             in_scope = [row for row in saved if row[1] in (scope, "global")]
             same_words = [at for _, _, at, fp, _ in in_scope if fp == fingerprint]
+            on_topic = [(at, fp) for k, _, at, fp, terms in in_scope if same_topic(name, body, k, terms)]
             # A word-for-word memory answers the proposal only while it is the
             # latest word on the topic: a newer live user-kept memory on the
             # same topic that says something else leaves it open (#1508).
-            if same_words and not any(
-                    fp != fingerprint and at > max(same_words) and same_topic(name, body, k, terms)
-                    for k, _, at, fp, terms in in_scope):
+            if same_words and not any(fp != fingerprint and at > max(same_words)
+                                      for at, fp in on_topic):
                 return "saved"
             rows = self._read()
             records = [r for r in rows if self._is_open(r, saved, now)]
@@ -236,8 +243,11 @@ class PreferenceProposals:
             records = [r for r in records if r not in same]
             if not same and len(records) >= MAX_OPEN_PREFERENCE_PROPOSALS:
                 return "full"
-            records.append({"ts": now, "topic": name, "text": body, "scope": scope,
-                            "sessions": [str(s) for s in sessions if s][:4]})
+            record = {"ts": now, "topic": name, "text": body, "scope": scope,
+                      "sessions": [str(s) for s in sessions if s][:4]}
+            if on_topic:
+                record["seen"] = max(at for at, _ in on_topic)
+            records.append(record)
             self._write(atomic_write_text, tombstones + records)
         return "proposed"
 

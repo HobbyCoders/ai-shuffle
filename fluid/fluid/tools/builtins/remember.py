@@ -165,6 +165,14 @@ def _not_made_current(store: Any, saved: Any) -> str:
     without reviving it ('' otherwise): which fact stays in force, and the
     call that would correct it."""
     state, successor, current = _status(store, saved)
+    if state == "replaced" and current is not None and current.conflicted:
+        # New sessions hold a conflicted fact back from the snapshot, so it is
+        # not the current fact either.
+        return (f"this text matches [{saved.id}], which [{successor}] replaced, and storage "
+                f"does not bring a replaced fact back. [{successor}] is conflicted: synced "
+                "workers saved different versions of it, so new sessions see neither this "
+                f"text nor [{successor}]. Recall [{successor}], ask the owner which version "
+                f"stands, then correct [{successor}] with memory_id and expected_revision.")
     if state == "replaced" and current is not None:
         rev = current.revision
         return (f"this text matches [{saved.id}], which [{successor}] replaced, and storage "
