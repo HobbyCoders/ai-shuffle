@@ -412,7 +412,7 @@ before the call (options ride in the tag: `[voice:relay reply_delay_ms=800]`):
 | `renew` | The provider ends its session as expired while the agent works; the app reconnects. |
 | `error` | The provider reports an error mid-call (once per chat line). |
 | `drop` | The provider connection is cut without a close. |
-| `long-work` | The agent works about 15 s (`[script:voice-long]`): its progress sentence is said once as a short line, the voice calls `check_work` (Grok only), then the short result is said. |
+| `long-work` | The agent works about 15 s (`[script:voice-long]`): its progress sentence is said once as a short line, the voice calls `check_work` while the work runs (Grok only), then the short result is said. |
 | `long-work-quiet` | As `long-work`, but the caller says "just tell me when it's done" after the handoff: no progress line, only the result. |
 
 Steps (one key each): `wait_audio_ms` (wait for that much speech-level
