@@ -72,8 +72,9 @@ def test_expand_offset_windows_large_content() -> None:
 
 
 def test_an_expansion_at_the_maximum_survives_native_intake() -> None:
-    """The whole result fits max_chars, so a 50k expansion is not stubbed by
-    the 50k tool-result intake and paging still reaches every character."""
+    """The whole result fits max_chars, so a maximum-size expansion is not
+    stubbed by the tool-result intake and paging still reaches every
+    character."""
     from fluid.context.recall import MAX_EXPAND_CHARS
 
     body = "".join(f"{i:07d}" for i in range(20_000))  # 140k distinct chars

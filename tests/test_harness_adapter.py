@@ -7303,19 +7303,20 @@ async def test_fast_mode_absent_matches_off_for_reconnect(monkeypatch):
 
 
 def test_codemode_kernel_keeps_fluids_default_stdout_cap():
-    """The per-cell stdout cap is fluid's 16,384 default, deliberately.
+    """The per-cell stdout cap is fluid's 8,000 default, deliberately.
 
     It was briefly raised to ``MAX_REPORT_CHARS * 2`` so a parent could print a
     whole subagent report from one cell; every OTHER cell inherited the
     licence and flooded ~120KB of grep/read output per call. Sync Task results
     now carry a bounded head plus a ``report_path``, so no legitimate cell
-    needs more than the default."""
+    needs more than the default; a cut cell's full stdout is spilled to a
+    file the agent can Read back."""
     import app.core.provider.harness_adapter as ha
 
     config = ha._codemode_kernel_config()
     default = ha.KernelConfig()
 
-    assert config.stdout_cap == default.stdout_cap == 16_384
+    assert config.stdout_cap == default.stdout_cap == 8_000
     assert config.ref_threshold == default.ref_threshold
     assert config.checkpoint == default.checkpoint
     assert config.allow_network == default.allow_network

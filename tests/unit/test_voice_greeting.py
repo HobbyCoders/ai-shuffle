@@ -63,5 +63,7 @@ def test_the_greeting_belongs_to_the_prompt_playbook():
     assert "Picking up: when a note says the caller just picked up, you speak first" in LIVE_INSTRUCTIONS
     assert "don't use a fixed opener and don't stack questions" in LIVE_INSTRUCTIONS
     assert "never guess a name" in LIVE_INSTRUCTIONS and "welcome them back in one sentence" in LIVE_INSTRUCTIONS
-    assert "carry on without greeting again" in LIVE_INSTRUCTIONS
+    # Greeting once per call is the renewal note's job, not the prompt's.
+    from app.core.voice_stream import RESUME_NOTE
+    assert "Do not greet the caller again" in RESUME_NOTE
     assert "Wrapping up:" in LIVE_INSTRUCTIONS
