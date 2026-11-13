@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tarfile
 import tempfile
 import time
@@ -60,10 +61,11 @@ GUARD_OVERRIDE_KEY = "AI_SHUFFLE_ANTIGRAVITY_ALLOW_UNATTENDED"
 #: Test and development hook: run this executable instead of the installed one.
 BINARY_ENV = "AI_SHUFFLE_ANTIGRAVITY_BIN"
 
-MANIFEST_URL = (
-    "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
-    "/manifests/linux_amd64.json"
-)
+#: Google's update manifests, one per ``<os>_<arch>`` key (``{version, url, sha512}``).
+MANIFEST_BASE = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/"
+#: ``sys.platform`` → Google's OS name, ``platform.machine()`` → its arch name.
+_MANIFEST_OS = {"linux": "linux", "win32": "windows", "darwin": "darwin"}
+_MANIFEST_ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 _ALLOWED_DOWNLOAD_HOSTS = ("storage.googleapis.com",)
 DASHBOARD_URL = "https://antigravity.google/docs/faq"
 TERMS_URL = "https://antigravity.google/terms"
@@ -161,18 +163,33 @@ def _current_record() -> Path:
     return _root() / "cli" / "current"
 
 
-def find_binary() -> Optional[str]:
-    """The executable to run: the override, the app's install, then PATH."""
-    override = os.environ.get(BINARY_ENV, "").strip()
-    if override:
-        return override if os.path.isfile(override) else None
+def _recorded_binary() -> Optional[str]:
+    """The app's own install (``<data>/antigravity/cli/<version>/agy[.exe]``)."""
     try:
         recorded = _current_record().read_text(encoding="utf-8").strip()
     except OSError:
-        recorded = ""
+        return None
     if recorded and os.path.isfile(recorded) and os.access(recorded, os.X_OK):
         return recorded
-    return shutil.which("agy")
+    return None
+
+
+def locate_binary() -> tuple[Optional[str], Optional[str]]:
+    """``(path, source)``: source is ``override``, ``app`` or ``path`` (None when absent)."""
+    override = os.environ.get(BINARY_ENV, "").strip()
+    if override:
+        return (override, "override") if os.path.isfile(override) else (None, None)
+    recorded = _recorded_binary()
+    if recorded:
+        return recorded, "app"
+    # PATHEXT makes this find agy.exe on Windows.
+    found = shutil.which("agy")
+    return (found, "path") if found else (None, None)
+
+
+def find_binary() -> Optional[str]:
+    """The executable to run: the override, the app's install, then PATH."""
+    return locate_binary()[0]
 
 
 async def binary_version(binary: str) -> Optional[str]:
@@ -202,72 +219,265 @@ async def binary_version(binary: str) -> Optional[str]:
 # Install (Google's own manifest; one background job per worker)
 # ---------------------------------------------------------------------------
 
+def _platform() -> tuple[str, str]:
+    """``(sys.platform, platform.machine())`` of this worker."""
+    import platform
+    return sys.platform, platform.machine()
+
+
+def manifest_key(system: Optional[str] = None, machine: Optional[str] = None) -> Optional[str]:
+    """Google's manifest key for this worker (``windows_amd64``…), or None when
+    Google publishes no build for it. Defaults to this worker's platform."""
+    if system is None or machine is None:
+        here = _platform()
+        system, machine = (here[0] if system is None else system), (here[1] if machine is None else machine)
+    os_name = next((v for k, v in _MANIFEST_OS.items() if (system or "").startswith(k)), None)
+    arch = _MANIFEST_ARCH.get((machine or "").strip().lower())
+    return f"{os_name}_{arch}" if os_name and arch else None
+
+
+def manifest_url(key: str) -> str:
+    return f"{MANIFEST_BASE}{key}.json"
+
+
+def unsupported_message() -> str:
+    system, machine = _platform()
+    return (f"Google publishes no Antigravity build for this worker ({system or 'unknown'} "
+            f"{machine or 'unknown'}). Antigravity runs on Windows, macOS and Linux, on x64 or arm64.")
+
+
 @dataclass
 class InstallJob:
-    state: str = "idle"  # idle | running | done | failed
+    kind: str = "install"  # install | update
+    state: str = "idle"  # idle | running | succeeded | failed
     version: Optional[str] = None
     error: Optional[str] = None
+    message: Optional[str] = None
     started_at: Optional[float] = None
+    finished_at: Optional[float] = None
 
 
 _install = InstallJob()
 _install_task: Optional[asyncio.Task] = None
+JOB_KINDS = ("install", "update")
+#: A worker checks for a newer Antigravity once per start; one restarting in a
+#: loop asks Google at most this often.
+STARTUP_CHECK_SECONDS = 600
+UP_TO_DATE = "Antigravity is up to date ({version})."
+
+
+def _version_key(text: Optional[str]) -> Optional[tuple]:
+    """``1.5.7`` → ``(1, 5, 7)``; None when the text is not a plain dotted version
+    (``1.5.7-rc1`` included: such versions compare by equality only)."""
+    match = re.fullmatch(r"\d+(?:\.\d+)*", (text or "").strip())
+    return tuple(int(part) for part in match.group(0).split(".")) if match else None
+
+
+def _is_current(installed: Optional[str], latest: str) -> bool:
+    """Whether ``installed`` is ``latest`` or newer: a job never downgrades."""
+    if not installed:
+        return False
+    if installed == latest:
+        return True
+    have, want = _version_key(installed), _version_key(latest)
+    return have is not None and want is not None and have >= want
 
 
 def install_state() -> Dict[str, Any]:
-    return {"state": _install.state, "version": _install.version, "error": _install.error}
+    return {"kind": _install.kind, "state": _install.state, "version": _install.version,
+            "error": _install.error, "message": _install.message}
 
 
-def start_install() -> Dict[str, Any]:
-    """Start (or join) the install of the latest Linux x64 release."""
+def start_install(kind: str = "install") -> Dict[str, Any]:
+    """Start (or join) the install or update check of Google's latest release.
+
+    One job per worker: a second start while one runs returns the running one.
+    """
     global _install_task, _install
+    if kind not in JOB_KINDS:
+        raise ValueError("Unknown Antigravity action.")
     if _install_task is not None and not _install_task.done():
         return install_state()
-    import platform
-    if os.name != "posix" or platform.machine().lower() not in ("x86_64", "amd64"):
-        _install = InstallJob(state="failed", error="The app installs Antigravity on Linux x64 only. "
-                              "Install Google's Antigravity CLI yourself so `agy` is on PATH.")
+    key = manifest_key()
+    if key is None:
+        message = unsupported_message() + " Install Google's Antigravity CLI yourself so agy is on PATH."
+        _install = InstallJob(kind=kind, state="failed", error=message, message=message,
+                              finished_at=time.time())
         return install_state()
-    _install = InstallJob(state="running", started_at=time.time())
-    _install_task = asyncio.get_running_loop().create_task(_run_install())
+    _install = InstallJob(kind=kind, state="running", started_at=time.time())
+    _install_task = asyncio.get_running_loop().create_task(_run_install(_install, key))
     return install_state()
 
 
-async def _run_install() -> None:
+def start_update() -> Dict[str, Any]:
+    """Check for update: the same job; it downloads only when Google has a newer release."""
+    return start_install("update")
+
+
+def _download_kind(url: str) -> tuple[str, str]:
+    """``(format, file name)`` from the download's own suffix."""
+    from urllib.parse import urlsplit
+    path = urlsplit(url).path.lower()
+    if path.endswith(".exe"):
+        return "exe", "agy.exe"
+    if path.endswith((".tar.gz", ".tgz")):
+        return "tar", "agy"
+    name = path.rsplit("/", 1)[-1] or url
+    raise RuntimeError(f"Google's update manifest named a download this app cannot install ({name}).")
+
+
+async def _run_install(job: InstallJob, key: str) -> None:
+    from urllib.parse import urlsplit
+
     import httpx
+    label = "Update check" if job.kind == "update" else "Install"
     try:
+        before_path, source = locate_binary()
+        before = await binary_version(before_path) if before_path else None
+        if not before and source == "app":
+            # Our own copy lives in cli/<version>/: a slow or failed --version
+            # still names it, so the check doesn't download it again.
+            before = _version_key(Path(before_path).parent.name) and Path(before_path).parent.name
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-            manifest = (await client.get(MANIFEST_URL)).raise_for_status().json()
+            manifest = (await client.get(manifest_url(key))).raise_for_status().json()
             version, url, digest = (str(manifest.get(k) or "") for k in ("version", "url", "sha512"))
-            from urllib.parse import urlsplit
-            if not (version and url and digest) or urlsplit(url).hostname not in _ALLOWED_DOWNLOAD_HOSTS:
+            if (not (version and url and digest) or not re.fullmatch(r"\d[\w.+-]{0,63}", version)
+                    or urlsplit(url).hostname not in _ALLOWED_DOWNLOAD_HOSTS):
                 raise RuntimeError("Google's update manifest did not name a download.")
-            _install.version = version
-            current = find_binary()
-            if current and await binary_version(current) == version:
-                # Already this version (a stale Install button, a second
-                # worker's screen): nothing is downloaded.
-                _install.state = "done"
+            job.version = version
+            if _is_current(before, version):
+                # Already this version or newer (a check with nothing new, a
+                # stale Install button, a second worker's screen, a release
+                # Google rolled back): nothing is downloaded.
+                job.state, job.message = "succeeded", UP_TO_DATE.format(version=before)
                 return
+            fmt, name = _download_kind(url)
             target = _root() / "cli" / re.sub(r"[^\w.-]", "_", version)
             target.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(dir=target.parent) as tmp:
-                archive = Path(tmp) / "cli.tar.gz"
-                sha = hashlib.sha512()
-                async with client.stream("GET", url) as response:
-                    response.raise_for_status()
-                    with archive.open("wb") as fh:
-                        async for chunk in response.aiter_bytes(1 << 20):
-                            sha.update(chunk)
-                            fh.write(chunk)
-                if sha.hexdigest().lower() != digest.lower():
-                    raise RuntimeError("The download did not match Google's checksum.")
-                await asyncio.to_thread(_extract_binary, archive, target / "agy")
-        _current_record().write_text(str(target / "agy"), encoding="utf-8")
-        _install.state = "done"
+            if fmt == "exe":
+                # Windows: the release is the executable itself.
+                partial = target / (name + ".part")
+                await _download(client, url, digest, partial)
+                partial.chmod(partial.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                os.replace(partial, target / name)
+            else:
+                with tempfile.TemporaryDirectory(dir=target.parent) as tmp:
+                    archive = Path(tmp) / "cli.tar.gz"
+                    await _download(client, url, digest, archive)
+                    await asyncio.to_thread(_extract_binary, archive, target / name)
+        _write_record(target / name)
+        # The copy just replaced stays until the next update: a chat that
+        # resolved it a moment ago may still be starting it. With the override
+        # set, the owner picks the binary, so nothing is pruned at all: the
+        # pinned file (or anything a link of theirs leads to) may live there.
+        if source != "override":
+            await asyncio.to_thread(prune_versions, target, [Path(before_path)] if before_path else [])
+        if before:
+            job.message = f"Antigravity updated from {before} to {version}."
+        else:
+            job.message = f"Antigravity {version} installed."
+        if source == "path":
+            job.message += " AI Shuffle's own copy now runs instead of the agy on PATH."
+        elif source == "override":
+            job.message += f" {BINARY_ENV} still selects the binary this worker runs."
+        job.state = "succeeded"
     except Exception as exc:  # noqa: BLE001 — reported to the owner as text
-        logger.warning("[antigravity] install failed", exc_info=True)
-        _install.state, _install.error = "failed", f"Install failed: {exc}"
+        logger.warning("[antigravity] %s failed", label.lower(), exc_info=True)
+        job.state, job.error = "failed", f"{label} failed: {exc}"
+        job.message = job.error
+    finally:
+        job.finished_at = time.time()
+        # The startup check has nobody watching Settings: the log is its result.
+        if job.state == "succeeded":
+            logger.info("[antigravity] %s: %s", job.kind, job.message)
+
+
+async def _download(client: Any, url: str, digest: str, dest: Path) -> None:
+    """Stream ``url`` to ``dest``, checking Google's sha512; nothing is left on a mismatch."""
+    sha = hashlib.sha512()
+    try:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            with dest.open("wb") as fh:
+                async for chunk in response.aiter_bytes(1 << 20):
+                    sha.update(chunk)
+                    fh.write(chunk)
+        if sha.hexdigest().lower() != digest.lower():
+            raise RuntimeError("The download did not match Google's checksum.")
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+
+
+def _write_record(binary: Path) -> None:
+    record = _current_record()
+    partial = record.with_name(record.name + ".part")
+    partial.write_text(str(binary), encoding="utf-8")
+    os.replace(partial, record)
+
+
+def prune_versions(keep: Path, spared: Optional[List[Path]] = None) -> List[str]:
+    """Best effort: remove app-installed versions other than ``keep`` and the
+    folders holding any ``spared`` executable.
+
+    A folder whose executable cannot be removed (an ``agy.exe`` still running
+    on Windows) is left whole for a later update; nothing is ever stopped.
+    """
+    removed: List[str] = []
+    cli = _root() / "cli"
+    kept = {keep.name}
+    for exe in spared or ():
+        try:
+            rel = Path(os.path.abspath(exe)).relative_to(os.path.abspath(cli))
+        except ValueError:
+            continue
+        if rel.parts:
+            kept.add(rel.parts[0])
+    try:
+        folders = [p for p in cli.iterdir() if p.is_dir() and p.name not in kept]
+    except OSError:
+        return removed
+    for folder in folders:
+        try:
+            for exe in ("agy.exe", "agy"):
+                (folder / exe).unlink(missing_ok=True)
+        except OSError:
+            logger.debug("[antigravity] kept %s: its executable is in use", folder, exc_info=True)
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
+        removed.append(folder.name)
+    return removed
+
+
+def _setting_key() -> str:
+    from app.core.config import settings
+    return "antigravity_cli_startup_check_at:" + settings.effective_instance_id
+
+
+def update_on_startup() -> bool:
+    """Check for a newer Antigravity when the worker starts. True when it started.
+
+    The same job as "Check for update". Only for the app's own install, never
+    one on PATH or behind the override, and never from the test suite or a
+    branch preview. Throttled so a worker restarting in a loop does not keep
+    asking Google; the job runs in the background and logs what it did.
+    """
+    if os.environ.get("TESTING") == "1" or os.environ.get("AI_SHUFFLE_PREVIEW") == "1":
+        return False
+    if locate_binary()[1] != "app" or manifest_key() is None:
+        return False
+    from app.db import database
+    key = _setting_key()
+    try:
+        last = float(database.get_system_setting(key) or 0)
+    except ValueError:
+        last = 0.0
+    now = time.time()
+    if 0 <= now - last < STARTUP_CHECK_SECONDS:
+        return False
+    database.set_system_setting(key, str(now))
+    start_update()
+    return True
 
 
 def _extract_binary(archive: Path, dest: Path) -> None:
@@ -1037,19 +1247,21 @@ def turn_row(provider_id: Optional[str], options: Any, turn_source: Optional[str
     return guard_refusal(row, options, turn_source=turn_source, person_entered=person_entered), row
 
 
-def spawn_binding(row: Mapping[str, Any]) -> str:
+def spawn_binding(row: Mapping[str, Any], *, binary: Optional[str] = None) -> str:
     """Digest of everything fixed into the agent process when it starts.
 
     The row (its private home), the key, the agent's extra environment and
     the installed binary go into
     its environment and argv at spawn; when any of them changes, the next
-    turn starts a fresh process (resuming the agent's saved session).
+    turn starts a fresh process (resuming the agent's saved session). Pass the
+    ``binary`` the spec was built with, so an update between the two cannot
+    make the binding name a different executable than the spec runs.
     """
     import json
 
     material = json.dumps({
         "id": row.get("id"), "auth_mode": row.get("auth_mode"), "key": row_api_key(row) or "",
-        "env": agent_extra_env(row), "binary": find_binary() or "",
+        "env": agent_extra_env(row), "binary": binary or find_binary() or "",
         # A sign-out or delete here: the next turn never reuses the process.
         "signin": signin_epoch(str(row.get("id") or "")),
     }, sort_keys=True)

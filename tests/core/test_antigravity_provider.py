@@ -1249,39 +1249,396 @@ def test_business_sign_in_has_no_headless_flow(client):
     assert body["state"] == "failed" and "browser" in body["message"]
 
 
-async def test_install_does_nothing_when_that_version_is_installed(mock_db, fake_agy, monkeypatch):
-    import platform
+# --- install and update ---------------------------------------------------------
+
+@pytest.mark.parametrize("system,machine,key", [
+    ("linux", "x86_64", "linux_amd64"),
+    ("linux", "aarch64", "linux_arm64"),
+    ("win32", "AMD64", "windows_amd64"),
+    ("win32", "ARM64", "windows_arm64"),
+    ("darwin", "x86_64", "darwin_amd64"),
+    ("darwin", "arm64", "darwin_arm64"),
+    ("linux", "riscv64", None),
+    ("win32", "x86", None),
+    ("freebsd14", "amd64", None),
+])
+def test_every_platform_google_publishes_has_its_manifest(system, machine, key):
+    assert ag.manifest_key(system, machine) == key
+    if key:
+        assert ag.manifest_url(key).endswith(f"/manifests/{key}.json")
+
+
+def test_a_platform_google_does_not_publish_is_refused_by_name(monkeypatch):
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "riscv64"))
+    monkeypatch.setattr(ag, "_install", ag.InstallJob())
+    monkeypatch.setattr(ag, "_install_task", None)
+    state = ag.start_install()
+    assert state["state"] == "failed" and state["kind"] == "install"
+    assert "(linux riscv64)" in state["message"] and state["error"] == state["message"]
+    assert "Linux x64 only" not in state["message"]
+
+
+@pytest.fixture
+def agy_root(tmp_path, monkeypatch):
+    """A private data dir with no override and no agy on PATH."""
+    root = tmp_path / "antigravity"
+    monkeypatch.delenv(ag.BINARY_ENV, raising=False)
+    monkeypatch.setattr(ag, "_root", lambda: root)
+    monkeypatch.setattr(ag.shutil, "which", lambda name: None)
+    monkeypatch.setattr(ag, "_install", ag.InstallJob())
+    monkeypatch.setattr(ag, "_install_task", None)
+    return root
+
+
+def _google(monkeypatch, *, version, url, payload=b"", digest=None):
+    """Answer Google's manifest and download; returns the URLs requested."""
+    import hashlib
 
     import httpx
 
-    if os.name != "posix" or platform.machine().lower() not in ("x86_64", "amd64"):
-        pytest.skip("the app installs Antigravity on Linux x64 only")
-    version = await ag.binary_version(str(fake_agy))
-    assert version
-    downloads = []
+    asked = []
 
-    class _Manifest:
+    class _Response:
+        def __init__(self, body=None):
+            self.body = body
+
         def raise_for_status(self):
             return self
 
         def json(self):
-            return {"version": version, "url": "https://storage.googleapis.com/fake/cli.tar.gz",
-                    "sha512": "00"}
+            return self.body
+
+        async def aiter_bytes(self, size):
+            for i in range(0, len(payload), 7):
+                yield payload[i:i + 7]
+
+    class _Stream:
+        async def __aenter__(self):
+            return _Response()
+
+        async def __aexit__(self, *exc):
+            return False
 
     async def get(self, url, **kw):
-        return _Manifest()
+        asked.append(url)
+        return _Response({"version": version, "url": url_,
+                          "sha512": digest or hashlib.sha512(payload).hexdigest()})
 
-    def stream(self, *args, **kw):
-        downloads.append(args)
-        raise AssertionError("a stale Install button must not download")
+    def stream(self, method, url, **kw):
+        asked.append(url)
+        return _Stream()
+    url_ = url
     monkeypatch.setattr(httpx.AsyncClient, "get", get)
     monkeypatch.setattr(httpx.AsyncClient, "stream", stream)
+    return asked
+
+
+def _versions(monkeypatch, table):
+    async def version(binary):
+        return table.get(str(binary))
+    monkeypatch.setattr(ag, "binary_version", version)
+
+
+def _tarball(name="antigravity", body=b"#!/bin/sh\necho agy\n"):
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(f"antigravity-cli/{name}")
+        info.size = len(body)
+        tar.addfile(info, io.BytesIO(body))
+    return buf.getvalue()
+
+
+async def _run_job(kind="install"):
+    state = ag.start_install(kind)
+    assert state["state"] == "running" and state["kind"] == kind
+    await ag._install_task
+    return ag.install_state()
+
+
+async def test_windows_installs_the_exe_itself(agy_root, monkeypatch):
+    monkeypatch.setattr(ag, "_platform", lambda: ("win32", "AMD64"))
+    exe = b"MZ fake windows agy"
+    url = "https://storage.googleapis.com/antigravity/windows-x64/cli_windows_x64.exe"
+    asked = _google(monkeypatch, version="1.5.7", url=url, payload=exe)
+    state = await _run_job()
+    assert state == {"kind": "install", "state": "succeeded", "version": "1.5.7", "error": None,
+                     "message": "Antigravity 1.5.7 installed."}
+    assert asked == [ag.manifest_url("windows_amd64"), url]
+    binary = agy_root / "cli" / "1.5.7" / "agy.exe"
+    assert binary.read_bytes() == exe and not (binary.parent / "agy.exe.part").exists()
+    assert (agy_root / "cli" / "current").read_text(encoding="utf-8") == str(binary)
+    assert ag.locate_binary() == (str(binary), "app")
+
+
+async def test_a_download_that_fails_its_checksum_leaves_nothing(agy_root, monkeypatch):
+    monkeypatch.setattr(ag, "_platform", lambda: ("win32", "ARM64"))
+    url = "https://storage.googleapis.com/antigravity/windows-arm/cli_windows_arm64.exe"
+    _google(monkeypatch, version="1.5.7", url=url, payload=b"tampered", digest="00")
+    state = await _run_job()
+    assert state["state"] == "failed" and "checksum" in state["message"]
+    assert list((agy_root / "cli" / "1.5.7").iterdir()) == []
+    assert not (agy_root / "cli" / "current").exists()
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://storage.googleapis.com/antigravity/cli.zip", "cannot install (cli.zip)"),
+    ("https://example.com/antigravity/cli.tar.gz", "did not name a download"),
+])
+async def test_an_unknown_or_foreign_download_is_refused(agy_root, monkeypatch, url, expected):
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
+    _google(monkeypatch, version="1.5.7", url=url, payload=b"x")
+    state = await _run_job()
+    assert state["state"] == "failed" and expected in state["message"]
+
+
+async def test_check_for_update_says_up_to_date_and_downloads_nothing(mock_db, fake_agy, monkeypatch):
+    version = await ag.binary_version(str(fake_agy))
+    assert version
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
     monkeypatch.setattr(ag, "_install", ag.InstallJob())
     monkeypatch.setattr(ag, "_install_task", None)
-    ag.start_install()
-    await ag._install_task
-    assert ag.install_state() == {"state": "done", "version": version, "error": None}
-    assert downloads == []
+    asked = _google(monkeypatch, version=version, url="https://storage.googleapis.com/fake/cli.tar.gz")
+    state = await _run_job("update")
+    assert state["state"] == "succeeded" and state["message"] == f"Antigravity is up to date ({version})."
+    assert asked == [ag.manifest_url("linux_amd64")]  # the manifest only, no download
+
+
+async def test_check_for_update_installs_the_newer_release_and_removes_the_old(agy_root, monkeypatch):
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "aarch64"))
+    older = agy_root / "cli" / "1.5.5" / "agy"
+    older.parent.mkdir(parents=True)
+    older.write_text("older")
+    old = agy_root / "cli" / "1.5.6" / "agy"
+    old.parent.mkdir(parents=True)
+    old.write_text("old")
+    old.chmod(0o755)
+    (agy_root / "cli" / "current").write_text(str(old), encoding="utf-8")
+    new = agy_root / "cli" / "1.5.7" / "agy"
+    _versions(monkeypatch, {str(old): "1.5.6"})
+    _google(monkeypatch, version="1.5.7", url="https://storage.googleapis.com/a/cli_linux_arm64.tar.gz",
+            payload=_tarball())
+    state = await _run_job("update")
+    assert state["state"] == "succeeded", state
+    assert state["message"] == "Antigravity updated from 1.5.6 to 1.5.7."
+    assert ag.locate_binary() == (str(new), "app")
+    assert new.read_bytes() == b"#!/bin/sh\necho agy\n" and os.access(new, os.X_OK)
+    assert not older.parent.exists()  # versions before the replaced one are gone
+    # The copy just replaced stays until the next update: a chat that resolved
+    # it a moment ago may still be starting it.
+    assert old.read_text() == "old"
+
+
+async def test_check_for_update_never_downgrades(agy_root, monkeypatch):
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
+    newer = agy_root / "cli" / "1.5.8" / "agy"
+    newer.parent.mkdir(parents=True)
+    newer.write_text("newer")
+    newer.chmod(0o755)
+    (agy_root / "cli" / "current").write_text(str(newer), encoding="utf-8")
+    _versions(monkeypatch, {str(newer): "1.5.8"})
+    asked = _google(monkeypatch, version="1.5.7", url="https://storage.googleapis.com/a/cli.tar.gz",
+                    payload=_tarball())
+    state = await _run_job("update")
+    assert state["state"] == "succeeded" and state["message"] == "Antigravity is up to date (1.5.8)."
+    assert asked == [ag.manifest_url("linux_amd64")]  # Google's older release is not downloaded
+    assert ag.locate_binary() == (str(newer), "app")
+
+
+async def test_with_the_override_set_an_update_prunes_nothing(agy_root, monkeypatch):
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
+    target = agy_root / "cli" / "1.5.4" / "agy"
+    target.parent.mkdir(parents=True)
+    target.write_text("pinned")
+    target.chmod(0o755)
+    pinned = agy_root / "cli" / "1.5.5" / "agy"
+    pinned.parent.mkdir(parents=True)
+    try:  # a link the owner made, possibly through several hops
+        pinned.symlink_to(target)
+    except OSError:
+        pinned.write_text("pinned")
+        pinned.chmod(0o755)
+    monkeypatch.setenv(ag.BINARY_ENV, str(pinned))
+    _versions(monkeypatch, {str(pinned): "1.5.5"})
+    _google(monkeypatch, version="1.5.7", url="https://storage.googleapis.com/a/cli.tar.gz",
+            payload=_tarball())
+    state = await _run_job("update")
+    assert state["state"] == "succeeded", state
+    assert pinned.read_text() == "pinned"  # never pruned from under the override
+    assert target.exists()
+    assert ag.locate_binary() == (str(pinned), "override")
+
+
+async def test_a_slow_version_check_still_knows_our_own_copy(agy_root, monkeypatch):
+    """--version timing out on the app's copy: the folder names the version, so
+    a check with nothing new downloads nothing."""
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
+    exe = agy_root / "cli" / "1.5.7" / "agy"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("x")
+    exe.chmod(0o755)
+    monkeypatch.setattr(ag, "locate_binary", lambda: (str(exe), "app"))
+
+    async def no_version(_binary):
+        return None
+    monkeypatch.setattr(ag, "binary_version", no_version)
+
+    class Resp:
+        def raise_for_status(self):
+            return self
+
+        def json(self):
+            return {"version": "1.5.7", "url": "https://storage.googleapis.com/x/agy.tar.gz", "sha512": "ab"}
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            return Resp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+
+    async def no_download(*a, **k):
+        raise AssertionError("downloaded again")
+    monkeypatch.setattr(ag, "_download", no_download)
+    job = ag.InstallJob(kind="update", state="running")
+    await ag._run_install(job, "linux_amd64")
+    assert (job.state, job.message) == ("succeeded", "Antigravity is up to date (1.5.7).")
+
+
+@pytest.mark.parametrize("installed,latest,current", [
+    ("1.5.7", "1.5.7", True), ("1.5.8", "1.5.7", True), ("1.10.0", "1.9.9", True),
+    ("1.5.6", "1.5.7", False), ("1.5.7-rc1", "1.5.7", False), (None, "1.5.7", False),
+])
+def test_a_job_installs_only_a_newer_release(installed, latest, current):
+    assert ag._is_current(installed, latest) is current
+
+
+def test_spawn_binding_names_the_binary_the_spec_was_built_with(agy_root, monkeypatch):
+    row = {"id": "row-1", "auth_mode": "gemini-api-key", "extra_env_json": {}}
+    monkeypatch.setattr(ag, "row_api_key", lambda _row: "k")
+    monkeypatch.setattr(ag, "find_binary", lambda: "/data/antigravity/cli/1.5.7/agy")
+    resolved = "/data/antigravity/cli/1.5.6/agy"
+    # An update between build_spec and spawn_binding must not split them.
+    assert ag.spawn_binding(row, binary=resolved) != ag.spawn_binding(row)
+    assert ag.spawn_binding(row, binary=resolved) == ag.spawn_binding(row, binary=resolved)
+
+
+async def test_an_update_over_agy_on_path_says_the_apps_copy_now_runs(agy_root, monkeypatch, tmp_path):
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
+    own = tmp_path / "bin" / "agy"
+    monkeypatch.setattr(ag.shutil, "which", lambda name: str(own) if name == "agy" else None)
+    own.parent.mkdir()
+    own.write_text("mine")
+    assert ag.locate_binary() == (str(own), "path")
+    _versions(monkeypatch, {str(own): "1.4.0"})
+    _google(monkeypatch, version="1.5.7", url="https://storage.googleapis.com/a/cli.tar.gz",
+            payload=_tarball("agy"))
+    state = await _run_job("update")
+    assert state["message"] == ("Antigravity updated from 1.4.0 to 1.5.7. "
+                                "AI Shuffle's own copy now runs instead of the agy on PATH.")
+    assert ag.locate_binary() == (str(agy_root / "cli" / "1.5.7" / "agy"), "app")
+    assert own.read_text() == "mine"  # the user's own binary is never touched
+
+
+def test_old_versions_in_use_are_kept_and_nothing_is_stopped(agy_root, monkeypatch):
+    from pathlib import Path
+
+    cli = agy_root / "cli"
+    for version, name in (("1.5.5", "agy.exe"), ("1.5.6", "agy.exe"), ("1.5.7", "agy.exe")):
+        (cli / version).mkdir(parents=True)
+        (cli / version / name).write_text(version)
+    (cli / "current").write_text(str(cli / "1.5.7" / "agy.exe"))
+    running = cli / "1.5.5" / "agy.exe"
+    real_unlink = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self == running:  # Windows: a running agy.exe cannot be deleted
+            raise PermissionError(13, "The process cannot access the file", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert ag.prune_versions(cli / "1.5.7") == ["1.5.6"]
+    assert running.read_text() == "1.5.5"  # left whole for a later update
+    assert (cli / "1.5.7" / "agy.exe").exists() and (cli / "current").exists()
+
+
+@pytest.fixture
+def startup_check(agy_root, monkeypatch):
+    """An app-installed agy, an empty settings store, and a recording start."""
+    from app.db import database
+
+    binary = agy_root / "cli" / "1.5.6" / "agy"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("agy")
+    binary.chmod(0o755)
+    (agy_root / "cli" / "current").write_text(str(binary), encoding="utf-8")
+    store, started = {}, []
+    monkeypatch.setattr(database, "get_system_setting", lambda key: store.get(key))
+    monkeypatch.setattr(database, "set_system_setting", lambda key, value: store.__setitem__(key, value))
+    monkeypatch.setattr(ag, "start_update", lambda: started.append(1))
+    monkeypatch.setattr(ag, "_platform", lambda: ("win32", "AMD64"))
+    monkeypatch.delenv("TESTING", raising=False)
+    monkeypatch.delenv("AI_SHUFFLE_PREVIEW", raising=False)
+    return store, started
+
+
+def test_startup_checks_the_apps_own_install_at_most_every_ten_minutes(startup_check):
+    store, started = startup_check
+    assert ag.update_on_startup() is True and started == [1]
+    assert ag.update_on_startup() is False and started == [1]  # throttled
+    store[ag._setting_key()] = str(float(store[ag._setting_key()]) - ag.STARTUP_CHECK_SECONDS - 1)
+    assert ag.update_on_startup() is True and started == [1, 1]
+
+
+@pytest.mark.parametrize("case", ["testing", "preview", "override", "path", "unsupported"])
+def test_startup_never_checks_tests_previews_or_a_binary_it_did_not_install(
+        startup_check, monkeypatch, tmp_path, case):
+    store, started = startup_check
+    if case == "testing":
+        monkeypatch.setenv("TESTING", "1")
+    elif case == "preview":
+        monkeypatch.setenv("AI_SHUFFLE_PREVIEW", "1")
+    elif case == "override":
+        override = tmp_path / "custom-agy"
+        override.write_text("agy")
+        monkeypatch.setenv(ag.BINARY_ENV, str(override))
+    elif case == "path":
+        (ag._root() / "cli" / "current").unlink()
+        monkeypatch.setattr(ag.shutil, "which", lambda name: str(tmp_path / "agy"))
+    else:
+        monkeypatch.setattr(ag, "_platform", lambda: ("linux", "riscv64"))
+    assert ag.update_on_startup() is False
+    assert started == [] and store == {}
+
+
+def test_check_for_update_through_the_api(client, monkeypatch):
+    import time
+
+    status = client.get(f"{BASE}/status").json()
+    assert status["source"] == "override" and isinstance(status["can_install"], bool)
+    monkeypatch.setattr(ag, "_platform", lambda: ("win32", "AMD64"))
+    monkeypatch.setattr(ag, "_install", ag.InstallJob())
+    monkeypatch.setattr(ag, "_install_task", None)
+    _google(monkeypatch, version=status["version"],
+            url="https://storage.googleapis.com/antigravity/windows-x64/cli_windows_x64.exe")
+    started = client.post(f"{BASE}/update").json()
+    assert started["kind"] == "update"
+    deadline = time.monotonic() + 15
+    while (job := client.get(f"{BASE}/status").json()["install"])["state"] == "running":
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    assert job == {"kind": "update", "state": "succeeded", "version": status["version"], "error": None,
+                   "message": f"Antigravity is up to date ({status['version']})."}
 
 
 def test_not_installed_is_reported(client, monkeypatch):

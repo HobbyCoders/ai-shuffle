@@ -88,12 +88,24 @@ async def meta(token: str = Depends(require_admin)):
 
 @router.get("/status")
 async def install_status(token: str = Depends(require_admin)):
-    """Whether this worker has the binary, its version, and peers lacking support."""
-    binary = await run_sync(antigravity.find_binary)
+    """Whether this worker has the binary, its version, and peers lacking support.
+
+    ``source``: ``app`` (installed here by AI Shuffle), ``path`` (an ``agy`` on
+    PATH), ``override`` (``AI_SHUFFLE_ANTIGRAVITY_BIN``) or null. ``can_install``:
+    Google publishes a build for this worker's platform; when it does not,
+    ``unsupported_message`` says so (else null). ``install``: the
+    install or update job (``kind``, ``state``, ``version``, ``message``, ``error``).
+    """
+    binary, source = await run_sync(antigravity.locate_binary)
     version = await antigravity.binary_version(binary) if binary else None
+    can_install = antigravity.manifest_key() is not None
     return {
         "installed": bool(binary and version),
         "version": version,
+        "source": source if binary and version else None,
+        "can_install": can_install,
+        # Why not, said up front: the Install button is disabled there.
+        "unsupported_message": None if can_install else antigravity.unsupported_message(),
         "install": antigravity.install_state(),
         "workers_requiring_update": await run_sync(antigravity.workers_requiring_update),
     }
@@ -101,8 +113,16 @@ async def install_status(token: str = Depends(require_admin)):
 
 @router.post("/install")
 async def install(token: str = Depends(require_admin)):
-    """Download Google's current Linux x64 release (sha512-checked) in the background."""
+    """Download Google's current release for this worker (Windows, macOS or
+    Linux, x64 or arm64; sha512-checked) in the background."""
     return antigravity.start_install()
+
+
+@router.post("/update")
+async def update(token: str = Depends(require_admin)):
+    """Check for update: the same background job. Says the agent is up to date,
+    or installs Google's newer release and switches to it; poll ``GET /status``."""
+    return antigravity.start_update()
 
 
 @router.get("/providers")
