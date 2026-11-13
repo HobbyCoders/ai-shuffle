@@ -239,7 +239,7 @@ from fluid.tools.builtins.tool_search import (
 from fluid.tools.images import condition_image
 from fluid.tools.mrtr import resolve_input_required
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
-from fluid.tools.view import settle_pointers, verbatim_tool_results
+from fluid.tools.view import commit_delivery, settle_pointers, verbatim_tool_results
 
 log = logging.getLogger(__name__)
 
@@ -6069,6 +6069,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # The request this call answers, for a repeat that may point back at
         # an earlier result (fluid.tools.view); None outside this window.
         self.ctx.view_results = self._request_views.get(sid)
+        # A call cancelled before its result was built (an interrupt during
+        # PostToolUse) leaves its offer here; it must never be committed.
+        self.ctx.staged_delivery = None
         self._tool_deliveries = []
         try:
             outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
@@ -6107,13 +6110,17 @@ class NativeLoop(BackgroundLifecycleMixin):
         nudge = self._reflection_nudge()
         if nudge:
             content.append(Text(nudge))
-        return ToolResultBlock(
+        block = ToolResultBlock(
             tool_use_id=tool_use_id,
             content=content,
             is_error=outcome.is_error,
             delivered_steers=self._tool_deliveries,
             delivery_metadata_version=1,
         )
+        # Only now is the result that will be stored known, so only now may
+        # the handler's offer become a target for a later repeat.
+        commit_delivery(self.ctx, block)
+        return block
 
     # ── end-of-turn reflection nudge ─────────────────────────────────────
     def _friction_source(self) -> Any | None:

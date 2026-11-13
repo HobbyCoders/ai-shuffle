@@ -12,6 +12,7 @@ sessions.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,16 @@ from fluid.tools.registry import ToolCtx
 
 
 def _native(ctx: ToolCtx, call_id: str, in_view: set[str] | frozenset[str]) -> ToolCtx:
-    """Put ``ctx`` in the state NativeLoop._dispatch_tool sets for one call."""
+    """Put ``ctx`` in the state NativeLoop._dispatch_tool sets for one call.
+
+    The previous call is finished first, as the engine finishes it: its
+    staged offer is committed against a successful result carrying its text.
+    """
+    staged = ctx.staged_delivery
+    if staged is not None:
+        view.commit_delivery(
+            ctx, ToolResultBlock(tool_use_id=staged[0], content=[Text(staged[3])]),
+        )
     ctx.extra["tool_use_id"] = call_id
     ctx.view_results = frozenset(in_view)
     return ctx
@@ -480,6 +490,82 @@ async def test_a_gone_pointer_keeps_the_steer_and_blocks_riding_on_it(source, mo
         if isinstance(b, ToolResultBlock) and b.tool_use_id == "t2"
     ]
     assert stored[0].content[0].text.startswith(view.POINTER_MARK)
+
+
+async def test_a_read_interrupted_during_its_hook_is_never_pointed_at(source):
+    """The Read handler returns before PostToolUse runs. An interrupt while an
+    awaited hook is still running stores only a cancellation error for that
+    call, so a repeat in the next turn must deliver the file, not a pointer
+    at content the model never received."""
+    import asyncio
+
+    from fluid.engine import native
+    from fluid.events import UserTurn
+    from fluid.events.ops import Interrupt
+    from fluid.hooks.bus import POST_TOOL_USE, HookBus
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.store.base import MemoryStore
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.registry import ToolRegistry
+
+    hook_running = asyncio.Event()
+
+    async def slow_hook(event, payload):
+        if payload.get("tool_use_id") == "t1":
+            hook_running.set()
+            await asyncio.Event().wait()  # held until the interrupt cancels it
+        return None
+
+    hooks = HookBus()
+    hooks.on(POST_TOOL_USE, slow_hook)
+    registry = ToolRegistry()
+    register_builtins(registry)
+    args = {"file_path": str(source)}
+    provider = _Scripted([_chunks("t1", args), _chunks("t2", args), _chunks(None)])
+    loop = native.NativeLoop(
+        provider=provider, store=MemoryStore(), model="m", registry=registry,
+        permissions=PermissionEngine("never_ask"), ctx=ToolCtx(cwd=str(source.parent)),
+        hooks=hooks,
+    )
+    await loop.submit(UserTurn(content="read it"))
+    await asyncio.wait_for(hook_running.wait(), 10)
+    await loop.submit(Interrupt())
+    await loop.wait_turn()
+    assert loop.ctx.deliveries == {}
+
+    await loop.submit(UserTurn(content="read it again"))
+    await loop.wait_turn()
+    final = provider.requests[-1]
+    assert _result_text(final, "t1").startswith("Tool execution cancelled")
+    second = _result_text(final, "t2")
+    assert not _is_pointer(second) and "line 40" in second
+
+
+def test_an_error_result_is_never_a_target():
+    """A failed, cancelled or timed-out call delivered no payload: its offer is
+    not committed, and its stored result never counts as in view."""
+    ctx = ToolCtx()
+    ctx.staged_delivery = ("toolu_a", "key", "v1", "the payload")
+    view.commit_delivery(ctx, ToolResultBlock(
+        tool_use_id="toolu_a", content=[Text("the payload")], is_error=True,
+    ))
+    assert ctx.deliveries == {} and ctx.staged_delivery is None
+    # A result that no longer starts with the offered payload is not one.
+    ctx.staged_delivery = ("toolu_b", "key", "v1", "the payload")
+    view.commit_delivery(ctx, ToolResultBlock(
+        tool_use_id="toolu_b", content=[Text("something else entirely")],
+    ))
+    assert ctx.deliveries == {}
+    # Appended hook context or a steer keeps the payload, so it still counts.
+    ctx.staged_delivery = ("toolu_c", "key", "v1", "the payload")
+    view.commit_delivery(ctx, ToolResultBlock(
+        tool_use_id="toolu_c", content=[Text("the payload\n\nhook context")],
+    ))
+    assert ctx.deliveries == {"key": ("toolu_c", "v1")}
+
+    use, res = _pair("toolu_e", "Read", "alpha body")
+    failed = Message(role="user", content=[replace(res.content[0], is_error=True)])
+    assert view.verbatim_tool_results(_nodes([use, failed]), [use, failed]) == frozenset()
 
 
 def test_settlement_rewrites_only_the_pointer_span():

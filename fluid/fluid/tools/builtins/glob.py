@@ -123,7 +123,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             f"the listing for {input['pattern']!r} under {root}",
             "your earlier identical Glob", target,
         ))
-    view.record_delivery(ctx, view_key, version)
+    view.record_delivery(ctx, view_key, version, outcome.text)
     return outcome
 
 

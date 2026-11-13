@@ -18,6 +18,10 @@ twice:
   is in the set (:func:`answer_from_view`). Everything that cannot answer —
   the delegated CLI, a code-mode cell, a host tool call outside the native
   loop — sees ``view_results`` as None, and every repeat is delivered in full.
+  The record is only staged by the handler; the engine commits it
+  (:func:`commit_delivery`) once the call's final result is built and is a
+  success that carries the payload, so a cancelled or failed call is never
+  pointed at.
 
 * **When the pointer is read.** The pointer reaches the model in the NEXT
   request, and a size-pressure trim or fold may run in between. The pointer
@@ -80,7 +84,8 @@ def verbatim_tool_results(
 
     A result a trim replaced, an image consumed out of it, steers re-rendered
     into it, or a fold or window that dropped it does not match its stored
-    block, so it is not counted. Only exact copies are.
+    block, so it is not counted. Only exact copies are, and never an error
+    result.
     """
     stored: dict[str, ToolResultBlock] = {}
     for node in nodes:
@@ -98,7 +103,10 @@ def verbatim_tool_results(
             if not isinstance(block, ToolResultBlock):
                 continue
             original = stored.get(block.tool_use_id)
-            if original is not None and (block is original or block == original):
+            if original is None or original.is_error:
+                # An error result never carries a payload to point at.
+                continue
+            if block is original or block == original:
                 found.add(block.tool_use_id)
     return frozenset(found)
 
@@ -117,13 +125,47 @@ def checks_view(ctx: "ToolCtx") -> bool:
     return _call_id(ctx) is not None
 
 
-def record_delivery(ctx: "ToolCtx", key: Hashable, version: Any) -> None:
-    """Remember that the current call delivered ``key`` at ``version`` in full."""
+def record_delivery(ctx: "ToolCtx", key: Hashable, version: Any, text: str) -> None:
+    """Offer the current call, which is returning ``text`` for ``key`` at
+    ``version``, as a later repeat's target.
+
+    The offer is only staged. A handler returns before PostToolUse, the
+    interrupt race and the engine's own additions have run, so it cannot know
+    what will be stored. :func:`commit_delivery` turns the offer into a record
+    once the engine has the final result, and only if that result is a
+    success that still carries ``text``.
+    """
     call_id = _call_id(ctx)
     if call_id is None or version is None:
         ctx.deliveries.pop(key, None)
         return
-    ctx.deliveries[key] = (call_id, version)
+    ctx.staged_delivery = (call_id, key, version, text)
+
+
+def commit_delivery(ctx: "ToolCtx", block: ToolResultBlock) -> None:
+    """Record the staged offer if ``block``, the result that will be stored for
+    the call, delivered the offered text.
+
+    An error result (a cancelled, failed or timed-out call) is never a target,
+    nor is one whose first text does not start with the offered text (a later
+    stage rewrote it). Text appended after it (hook context, a steer) and
+    blocks after it are fine: the payload is still there in full. The engine
+    calls this once per call, with nothing staged for a call the handler
+    never offered, so an offer from a call that was cancelled before reaching
+    this point is dropped by the next call's reset.
+    """
+    staged, ctx.staged_delivery = ctx.staged_delivery, None
+    if staged is None:
+        return
+    call_id, key, version, text = staged
+    first = block.content[0] if block.content else None
+    if (
+        call_id == block.tool_use_id
+        and not block.is_error
+        and isinstance(first, Text)
+        and first.text.startswith(text)
+    ):
+        ctx.deliveries[key] = (call_id, version)
 
 
 def answer_from_view(

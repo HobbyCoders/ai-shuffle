@@ -279,7 +279,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             f"{path} lines {offset}-{last}", "your earlier Read of those lines",
             target,
         ))
-    view.record_delivery(ctx, view_key, version)
+    view.record_delivery(ctx, view_key, version, numbered)
     if view.checks_view(ctx):
         repeat = False
 

@@ -283,5 +283,5 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             f"the {match.name} skill", "you loaded it earlier in this conversation",
             target,
         ))
-    view.record_delivery(ctx, view_key, version)
+    view.record_delivery(ctx, view_key, version, text)
     return ToolOutcome(text=text)

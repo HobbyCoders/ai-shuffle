@@ -186,7 +186,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 f"the result of searching {pattern!r} under {root}",
                 "your earlier identical Grep", target,
             ))
-        view.record_delivery(ctx, view_key, digest)
+        view.record_delivery(ctx, view_key, digest, outcome.text)
         ctx.grep_seen[key] = digest
         return outcome
     if ctx.grep_seen.get(key) == digest:
