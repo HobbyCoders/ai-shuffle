@@ -117,9 +117,15 @@
 		{ id: 'Policy', count: guard.status?.held.length || undefined }
 	]);
 
+	/** A failure throws, worded like the other sign-in errors, to the Danger zone by Sign out. */
 	async function signOut() {
-		await cli.signOut();
-		await providers.loadClaude(true);
+		try {
+			await cli.signOut({ rethrow: true });
+		} catch (e) {
+			throw new Error(accountErrorText(e, 'The CLI could not sign out.'));
+		} finally {
+			await providers.loadClaude(true);
+		}
 	}
 
 	function checkedLabel(at: number | null | undefined): string | null {

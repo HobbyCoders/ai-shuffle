@@ -16,9 +16,11 @@
 	/**
 	 * DangerZone: the last section of a detail. Each action is a row whose
 	 * button arms an InlineConfirm. Pass `items`, or `children` for custom rows.
-	 * An action that throws keeps the owner here and shows why under its row.
+	 * An action that throws keeps the owner here and shows why under its row,
+	 * until the next confirm opens or Settings is left (it stays mounted).
 	 */
-	import type { Snippet } from 'svelte';
+	import { getContext, type Snippet } from 'svelte';
+	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '../../layout/feature-panel-context';
 	import { getErrorMessage } from '$lib/api/client';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
@@ -35,6 +37,11 @@
 	/** The last failure per action, keyed like the rows. */
 	let errors = $state<Record<string, string>>({});
 	const keyOf = (item: DangerAction) => item.id ?? item.label;
+
+	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
+	$effect(() => {
+		if (feature && !feature.active) errors = {};
+	});
 
 	async function run(item: DangerAction) {
 		const key = keyOf(item);
@@ -55,6 +62,7 @@
 					label={item.button}
 					question={item.question}
 					onConfirm={() => run(item)}
+					onArm={() => (errors = {})}
 					disabled={item.disabled}
 				/>
 			</SettingRow>

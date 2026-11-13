@@ -110,8 +110,47 @@ describe('a failed action says so where it was taken (#1523)', () => {
 		});
 		await show();
 		settingsNav.go({ category: 'providers', item: FAL_KEY_ITEM });
-		expect((await failedRemove('Media key')).textContent).toContain('Remove failed');
+		expect((await failedRemove('Media key')).textContent).toBe('Database is busy');
 		expect(providers.current.falKeySet).toBe(true);
+	});
+
+	it('shows the server\'s reason, not only the status, when removing the Anthropic key fails', async () => {
+		worker = fakeWorker({ rows: [chatgptRow()] }, {
+			'DELETE /settings/integrations/anthropic': () => { throw { status: 403, detail: 'Agent previews cannot change ownership, credentials or settings.' }; }
+		});
+		vi.stubGlobal('fetch', worker.fetch);
+		await expect(providers.clearAnthropicKey()).rejects.toThrow('Agent previews cannot change ownership, credentials or settings.');
+	});
+
+	it('shows a failed Sign out beside Sign out, worded like the sign-in errors, not above the Danger zone', async () => {
+		worker = fakeWorker({
+			rows: [chatgptRow()],
+			claude: claudeSummary({ accounts: claudeAccounts({
+				default_in_use: false,
+				subscription: [subAccount({ id: 'work', kind: 'saved', label: 'Work', email: 'work@example.com', active: true })]
+			}) })
+		}, {
+			'POST /auth/claude/logout': () => { throw { status: 403, detail: 'Agent previews cannot change ownership, credentials or settings.' }; },
+			'DELETE /settings/claude-auth/accounts/subscription/:id': () => { throw { status: 409, detail: { code: 'login_running', message: 'A sign-in is still running.' } }; }
+		});
+		await show();
+		await fireEvent.click(group('Claude').getByRole('button', { name: /^Work,/ }));
+		await screen.findByRole('heading', { name: 'Work' });
+		// An earlier failed Remove must not still be the alert nearest Sign out.
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		expect((await screen.findByRole('alert')).textContent).toBe('A sign-in is still running.');
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+		expect(screen.queryByRole('alert')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+		await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1));
+		const alert = screen.getByRole('alert');
+		expect(alert.textContent).toBe('Agent previews cannot change ownership, credentials or settings.');
+		expect(alert.closest('.st-grp.danger')).toBeTruthy();
+		expect(alert.previousElementSibling?.textContent).toContain('Sign out of the Claude CLI');
+		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Sign out' })));
+		expect(screen.getByRole('heading', { name: 'Work' })).toBeTruthy();
 	});
 });
 

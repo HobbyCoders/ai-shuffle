@@ -143,4 +143,14 @@ describe('ClaudeCliLogin', () => {
 		expect(cli.loginError).toBe('not signed in');
 		expect(mocks.get).toHaveBeenCalledWith('/auth/claude/cli?refresh=true', { cache: 'no-store' });
 	});
+
+	it('throws a failed sign-out instead of setting loginError when asked, after reading the status again', async () => {
+		mocks.get.mockResolvedValue(status({ signed_in: true }));
+		mocks.post.mockResolvedValue({ success: false, error: 'not signed in' });
+		const cli = new ClaudeCliLogin();
+		await expect(cli.signOut({ rethrow: true })).rejects.toThrow('not signed in');
+		expect(cli.loginError).toBe('');
+		expect(cli.signingOut).toBe(false);
+		expect(mocks.get).toHaveBeenCalledWith('/auth/claude/cli?refresh=true', { cache: 'no-store' });
+	});
 });

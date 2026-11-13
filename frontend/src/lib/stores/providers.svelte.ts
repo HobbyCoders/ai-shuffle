@@ -167,6 +167,21 @@ async function boundedProviderRead<T>(read: Promise<T>, label: string): Promise<
 	}
 }
 
+/**
+ * The server's reason for a refused raw fetch (its `detail`, or the
+ * `detail.message` of saved-account routes), else "`action` (status)".
+ */
+async function refusal(res: Response, action: string): Promise<Error> {
+	const body = await res.json().catch(() => null);
+	const detail = body && typeof body === 'object' ? (body as { detail?: unknown }).detail : null;
+	const message =
+		typeof detail === 'string' ? detail
+		: detail && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string'
+			? (detail as { message: string }).message
+			: '';
+	return new Error(message.trim() || `${action} (${res.status})`);
+}
+
 // ============================================================================
 // Exported Store
 // ============================================================================
@@ -315,7 +330,7 @@ export const providers = {
 		} catch (e) {
 			throw new Error(e instanceof Error ? e.message : 'Network error');
 		}
-		if (!res.ok) throw new Error(`Remove failed (${res.status})`);
+		if (!res.ok) throw await refusal(res, 'Remove failed');
 		await providers.loadIntegrations();
 	},
 
@@ -349,7 +364,7 @@ export const providers = {
 		} catch (e) {
 			throw new Error(e instanceof Error ? e.message : 'Network error');
 		}
-		if (!res.ok) throw new Error(`Remove failed (${res.status})`);
+		if (!res.ok) throw await refusal(res, 'Remove failed');
 		await providers.loadIntegrations();
 	},
 
