@@ -6,7 +6,6 @@ Provides standalone functions that operate on a PluginService instance.
 
 import logging
 import re
-import shutil
 import subprocess
 import threading
 from contextlib import ExitStack
@@ -14,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from app.core.fs_utils import force_rmtree
 from app.core.plugin_models import MarketplaceInfo
 from app.core.plugin_locks import marketplace_lock, plugin_lock, state_lock, serialized_marketplace
 from app.core.process_tree import child_env
@@ -288,9 +288,9 @@ def remove_marketplace(svc, marketplace_id: str) -> bool:
             cache_dir = svc.CACHE_DIR / marketplace_id
             if (marketplace_id not in ("", ".", "..") and "/" not in marketplace_id
                     and "\\" not in marketplace_id and not cache_dir.is_symlink()):
-                shutil.rmtree(cache_dir, ignore_errors=True)
+                force_rmtree(cache_dir, ignore_errors=True)
             if install_location:
-                shutil.rmtree(install_location, ignore_errors=True)
+                force_rmtree(install_location, ignore_errors=True)
             if cache_dir.exists() or (install_location and Path(install_location).exists()):
                 # Keep the persistent gate closed after sharing violations or a
                 # crash. Retry Remove finishes it; Sync/Update cannot resurrect it.
@@ -341,7 +341,7 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
             if not install_path.exists():
                 raise RuntimeError(f"Marketplace directory not found: {install_location}")
             raise RuntimeError(f"Cannot re-clone marketplace: no source URL found for {marketplace_id}")
-        shutil.rmtree(install_path, ignore_errors=True)
+        force_rmtree(install_path, ignore_errors=True)
         try:
             subprocess.run(
                 ["git", "clone", "--depth", "1", "--", source_url, install_location],

@@ -253,13 +253,13 @@ def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> Optiona
 
         # Copy subdirectory to destination
         if dest.exists():
-            shutil.rmtree(dest)
+            _force_rmtree(dest)
         _copy_tree_resolving_symlinks(extracted, dest, root=tmp_dir)
         return _git_revision(tmp_dir)
 
     finally:
-        # Clean up the full clone
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        # Clean up the full clone (its .git holds read-only files on Windows)
+        _force_rmtree(tmp_dir, ignore_errors=True)
 
 
 def _resolve_plugin_source(svc, source, mp_path: Path, plugin_root: Optional[str] = None) -> Optional[Path]:
@@ -899,7 +899,7 @@ def uninstall_plugin(svc, plugin_id: str) -> bool:
             logger.warning("Not deleting plugin files outside the plugin cache: %s", install_path)
             continue
         if install_path.exists():
-            shutil.rmtree(install_path, ignore_errors=True)
+            _force_rmtree(install_path, ignore_errors=True)
 
     # Remove from installed_plugins.json
     del installed["plugins"][plugin_id]
@@ -975,7 +975,8 @@ def install_plugin_to_project(svc, plugin_id: str, scope: PluginScope = PluginSc
     local_dir = svc._resolve_plugin_source(source, mp_path, plugin_root)
 
     if target_path.exists():
-        shutil.rmtree(target_path)
+        # A Git-sourced copy keeps its .git, whose files are read-only on Windows.
+        _force_rmtree(target_path)
 
     if local_dir:
         _copy_tree_resolving_symlinks(local_dir, target_path, root=mp_path)
@@ -1070,8 +1071,8 @@ def uninstall_project_plugin(svc, plugin_id: str) -> bool:
     # read back, so a retry after fixing it still finds the plugin.
     svc._check_files_replaceable(svc._get_project_settings_file(scope))
 
-    # Remove plugin directory
-    shutil.rmtree(plugin_path)
+    # Remove plugin directory (a Git-sourced copy keeps its read-only .git)
+    _force_rmtree(plugin_path)
 
     # Remove from enabled plugins in the matching Fluid settings file
     settings = svc._read_project_settings(scope, for_update=True)

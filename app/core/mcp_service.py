@@ -22,6 +22,7 @@ from enum import Enum
 
 from fastapi import HTTPException
 
+from app.core.fs_utils import retry_sharing_violation
 from app.core.platform import is_docker_mode, get_claude_credentials_dir
 
 logger = logging.getLogger(__name__)
@@ -289,11 +290,17 @@ class McpService:
         file (~/.claude.json is the CLI's entire state file).
         """
         fallback = default if default is not None else {}
+
+        def load():
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
         try:
             if not path.exists():
                 return fallback
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            # A concurrent atomic replace briefly blocks opens on Windows;
+            # wait that out rather than calling the file unreadable.
+            data = retry_sharing_violation(load)
             # Every caller indexes the result as an object; a file holding
             # ``null`` or a list would otherwise raise AttributeError.
             if not isinstance(data, dict):
@@ -315,7 +322,8 @@ class McpService:
             temp_path = path.with_suffix('.tmp')
             with open(temp_path, 'w') as f:
                 json.dump(data, f, indent=2)
-            temp_path.replace(path)
+            # Windows refuses the rename while a reader has the file open.
+            retry_sharing_violation(lambda: temp_path.replace(path))
             return True
         except IOError as e:
             logger.error(f"Error writing {path}: {e}")
