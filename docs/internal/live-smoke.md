@@ -32,6 +32,11 @@ Every `browser` and `owner` row says why it is not automated with `needs`
 - `install`: a disposable candidate install or worker pair: restarts,
   upgrades, database faults, containers, a second worker.
 - `owner`: the owner's own data, history or decision.
+- `owner-login`: an owner sign-in in the browser. On a real worker an agent
+  drives the UI through a preview login, which the worker refuses for starting
+  or messaging a chat another worker runs and for terminals ("Agent previews
+  can't use terminals."). An agent can record such a row only on a session the
+  owner signed in; otherwise it is the owner's to check.
 - `dev-instance`: the row (or its main part) could be a UI journey on the dev
   instance and has not been written yet. These are the next journeys to write;
   when one lands, turn the row into a `journey` row naming it (or remove the
@@ -229,6 +234,11 @@ add it to the run's file:
 python -m scripts.live_smoke record <revision> --worker ServerWorker \
   --row two-worker-smoke.3 --status pass --evidence "snapshot /tmp/stop.png" --by owner
 ```
+
+A row whose `needs` include `owner-login` cannot be driven through an agent
+preview login: the worker refuses that login for creating or sending to a chat
+on another worker and for terminals. Check those rows in a browser the owner
+signed in to, and record them with `--by owner`.
 
 Script rows cannot be recorded; rerun them. Journey rows cannot be recorded
 either: their evidence is the journeys' CI pass. A worker whose file was written

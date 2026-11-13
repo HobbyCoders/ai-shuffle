@@ -4,7 +4,9 @@
  *
  * A result matches when every query word appears somewhere in its title,
  * "where" breadcrumb or keywords. Titles that start with the first word rank
- * first, then titles that contain it; duplicates (same title and where) drop.
+ * first, then results that have it as a whole word in their breadcrumb or
+ * keywords (so `pro` reaches the Pro plan ahead of every "Providers" row, #1461),
+ * then titles that contain it; duplicates (same title and where) drop.
  */
 import { desktop } from '$lib/services/desktop';
 import { CATEGORIES, categoryById, categoryGroupLabel } from './categories';
@@ -66,12 +68,14 @@ export function query(q: string, index: SearchItem[] = buildIndex()): SearchItem
 	const words = q.toLowerCase().trim().split(/\s+/).filter(Boolean);
 	if (!words.length) return [];
 	const first = words[0];
+	const wholeWord = new RegExp(`(^|[^\\p{L}\\p{N}])${first.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\p{L}\\p{N}])`, 'u');
 	const rank = (item: SearchItem) => {
 		const title = item.title.toLowerCase();
 		if (title.startsWith(first)) return 0;
 		if (title.split(/\s+/).some((w) => w.startsWith(first))) return 1;
-		if (title.includes(first)) return 2;
-		return 3;
+		if (wholeWord.test(`${item.where} ${item.keywords ?? ''}`.toLowerCase())) return 2;
+		if (title.includes(first)) return 3;
+		return 4;
 	};
 	const seen = new Set<string>();
 	return index
