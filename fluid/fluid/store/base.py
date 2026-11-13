@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
@@ -26,6 +27,7 @@ from fluid.events.model import (
     ToolArgsDelta,
 )
 from fluid.messages import Message
+from fluid.messages.content import HARNESS_NOTE_META_KEY
 
 log = logging.getLogger(__name__)
 
@@ -336,6 +338,19 @@ def clip_text(text: str, cap: int) -> str:
     return flat if len(flat) <= cap else flat[: cap - 1] + "…"
 
 
+# How recall and session views name a stored harness note (the plan reminder):
+# user-role on the wire, but nobody wrote it.
+HARNESS_NOTE_ROLE = "harness note"
+
+
+def recall_role(message: dict[str, Any]) -> str:
+    """The role a recall or view shows for one serialized ``Message`` dict."""
+    meta = message.get("provider_meta")
+    if isinstance(meta, Mapping) and meta.get(HARNESS_NOTE_META_KEY):
+        return HARNESS_NOTE_ROLE
+    return str(message.get("role", "?"))
+
+
 def recall_message(message: dict[str, Any], ts: float = 0.0) -> RecallMessage:
     """Normalize one serialized ``Message`` dict into a :class:`RecallMessage`.
 
@@ -370,7 +385,7 @@ def recall_message(message: dict[str, Any], ts: float = 0.0) -> RecallMessage:
             marker = "ERROR" if block.get("is_error") else "->"
             tools.append(clip_text(f"{marker} {inner or '(no text)'}", _TOOL_LINE_CAP))
     return RecallMessage(
-        role=str(message.get("role", "?")), text="\n".join(texts), tools=tools, ts=ts
+        role=recall_role(message), text="\n".join(texts), tools=tools, ts=ts
     )
 
 

@@ -11,6 +11,8 @@ slice at the count it returns, so its behavior is the regression guard for the
 These are pure functions over plain dicts — no filesystem, no DB.
 """
 
+import pytest
+
 from app.core.jsonl_rewind import (
     _next_real_user_index,
     compute_rewind_keep_count,
@@ -256,3 +258,12 @@ class TestTargetNotFound:
         )
         assert keep is None
         assert err is not None
+
+
+@pytest.mark.parametrize("meta", ["{broken", ["harness_note"], 7, None])
+def test_harness_note_check_ignores_metadata_that_is_not_a_mapping(meta):
+    from app.core.jsonl_rewind import is_harness_note
+
+    node = {"message": {"role": "user", "content": "hi", "provider_meta": meta}}
+    assert is_harness_note(node) is False
+    assert is_harness_note({"message": "{broken"}) is False

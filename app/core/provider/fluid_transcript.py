@@ -62,10 +62,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.core.jsonl_rewind import (
+    HARNESS_NOTE_ENTRY_FLAG,
     Checkpoint,
     RewindResult,
     checkpoints_from_entries,
     compute_rewind_keep_count,
+    is_harness_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -330,7 +332,7 @@ def _node_to_entry(node: Dict[str, Any], sdk_session_id: str) -> Dict[str, Any]:
     model = (message.get("provider_meta") or {}).get("model")
     if model:
         inner["model"] = model
-    return {
+    entry: Dict[str, Any] = {
         "uuid": node.get("node_id"),
         "parentUuid": node.get("parent_id"),
         "type": role,
@@ -338,6 +340,13 @@ def _node_to_entry(node: Dict[str, Any], sdk_session_id: str) -> Dict[str, Any]:
         "sessionId": sdk_session_id,
         "message": inner,
     }
+    if is_harness_note({"message": message}):
+        # Model context, not a prompt: ``isMeta`` keeps it out of the chat,
+        # checkpoints, search and backfill; the flag keeps rewind from taking
+        # it for the next request. Still one entry, so indexes stay aligned.
+        entry["isMeta"] = True
+        entry[HARNESS_NOTE_ENTRY_FLAG] = True
+    return entry
 
 
 # ─── Code-mode inner calls ───────────────────────────────────────────────────
@@ -1327,6 +1336,9 @@ def build_cli_transcript_entries(
             # The summary of an earlier CLI compaction, flagged the way the
             # CLI flags its own (see :func:`_after_compaction`).
             line["isCompactSummary"] = True
+        if role == "user" and is_harness_note(entry):
+            # The CLI still sends an isMeta line to the model; it never shows it.
+            line["isMeta"] = True
         if role == "user":
             line["message"] = {"role": "user", "content": content}
         else:
@@ -2681,9 +2693,10 @@ def fork_fluid_session(
 # ─── Compaction replay boundary ──────────────────────────────────────────────
 
 def _is_turn_start_node(node: Dict[str, Any]) -> bool:
-    """Whether *node* starts a real user turn (not a tool-result node)."""
+    """Whether *node* starts a real user turn (not a tool-result node or a
+    harness note), matching Fluid's ``is_turn_start``."""
     message = _as_dict(node.get("message"))
-    if message.get("role") != "user":
+    if message.get("role") != "user" or is_harness_note({"message": message}):
         return False
     for block in message.get("content") or []:
         if not isinstance(block, dict):

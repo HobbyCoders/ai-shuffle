@@ -692,7 +692,9 @@ async def update_profile_agent(
             name=request.name,
             description=request.description,
             prompt=request.prompt,
-            tools=request.tools,
+            # Omitted tools leave the agent's tool access alone; only an
+            # explicit value (list, [] or null) changes tool_selection_mode.
+            tools=request.tools if "tools" in request.model_fields_set else ...,
             model=request.model
         )
 

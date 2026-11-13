@@ -53,7 +53,14 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # remain deferred. Keep the pre-Plan baselines and allowance. The new deferred
 # Plan entry alone is accounted separately in the full-catalog guard and has
 # its own schema/help ceiling in test_agent_tool_prefix_budget.py.
-MEASURED_FULL = 133_634
+# Finer agent edits (Nov 2026, owner decision): updateProfile/updateSubagent gain
+# prompt_edits, add/remove and reset_system_prompt; createProfile/updateProfile
+# expose the agent settings an agent could not set (roster, provider_models,
+# plugins, add_dirs, avatar colour); subagents gain provider_models. All four
+# docs stay deferred and each new parameter is also listed in the signature
+# line: pre-Plan full 133,602 -> 136,469. Eager and both delegated budgets
+# unchanged.
+MEASURED_FULL = 136_469
 MEASURED_EAGER = 53_138
 MEASURED_DELEGATED_APPEND = 14_877
 MEASURED_DELEGATED_LOADED_TOOLS = 7_327

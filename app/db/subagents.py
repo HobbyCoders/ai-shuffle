@@ -75,7 +75,7 @@ def _agent_to_subagent(agent: Optional[dict]) -> Optional[SubagentRow]:
 
 
 def _subagent_config(
-    prompt: str,
+    prompt: Optional[str],
     tools: Optional[List[str]],
     model: Optional[str],
     skills: Optional[List[str]],
@@ -83,8 +83,10 @@ def _subagent_config(
     mcp_servers: Optional[List[Any]],
     base: Optional[dict] = None,
 ) -> dict:
+    """Config from subagent-shaped fields; ``prompt=...`` keeps ``base``'s prompt."""
     config = dict(base or {})
-    config["system_prompt"] = {"type": "custom", "content": prompt or ""}
+    if prompt is not ...:
+        config["system_prompt"] = {"type": "custom", "content": prompt or ""}
     if tools is not None:
         config["allowed_tools"] = tools
     else:
@@ -106,6 +108,23 @@ def _subagent_config(
     else:
         config.pop("mcp_servers", None)
     return config
+
+
+def _stamp_tool_mode(config: dict, tools: Optional[List[str]], mode_before: str) -> None:
+    """Make ``tool_selection_mode`` say what an explicit subagent ``tools`` value means.
+
+    ``app.core.tool_access`` reads the mode before the lists, so a tools edit
+    that left it alone could report success and change nothing (``none``), or
+    strip every tool (``allow`` with the list cleared). A non-empty list allows
+    only those tools, ``[]`` allows none, and null inherits every tool; null
+    keeps a ``disallow`` agent's block list, which this shape cannot show.
+    """
+    if tools:
+        config["tool_selection_mode"] = "allow"
+    elif tools is not None:
+        config["tool_selection_mode"] = "none"
+    else:
+        config["tool_selection_mode"] = "disallow" if mode_before == "disallow" else "all"
 
 
 def _code_defaults(subagent_id: str) -> Optional[Dict[str, Any]]:
@@ -145,6 +164,7 @@ def create_subagent(
     is_builtin: bool = False,
     store_defaults: bool = False,
     if_absent: bool = False,
+    provider_models: Optional[Dict[str, str]] = None,
 ) -> SubagentRow:
     """Create an agent row from subagent-shaped fields.
 
@@ -155,6 +175,8 @@ def create_subagent(
     ``if_absent`` keeps an existing row with this id (see ``create_profile``).
     """
     config = _subagent_config(prompt, tools, model, skills, memory, mcp_servers)
+    if provider_models:
+        config["provider_models"] = provider_models
     definition = _code_defaults(subagent_id) if store_defaults else None
     if definition:
         from app.core.builtin_subagents import DEFAULTS_RECORD_KEY, defaults_record
@@ -179,25 +201,48 @@ def update_subagent(
     memory: Optional[str] = ...,  # type: ignore[assignment]
     mcp_servers: Optional[List[Any]] = ...,  # type: ignore[assignment]
     defaults_record: Optional[Dict[str, Any]] = None,
+    provider_models: Optional[Dict[str, str]] = ...,  # type: ignore[assignment]
+    system_prompt: Optional[Dict[str, Any]] = ...,  # type: ignore[assignment]
 ) -> Optional[SubagentRow]:
     """Update the agent row behind a subagent-shaped view.
 
-    Uses Ellipsis (...) to distinguish "not provided" from "explicitly None".
+    Uses Ellipsis (...) to distinguish "not provided" from "explicitly None"
+    (an empty ``provider_models`` clears the map too).
     ``defaults_record`` replaces the built-in's shipped-defaults record.
+
+    The stored ``system_prompt`` object is kept unless ``prompt`` changes the
+    text this view shows (a preset prompt shows as ""), so editing anything
+    else never turns a preset into an empty custom prompt. ``system_prompt``
+    replaces the whole stored object instead (prompt patches keep its kind).
+    An explicit ``tools`` also sets ``tool_selection_mode`` (``_stamp_tool_mode``).
     """
     agent = _agents_db.get_profile(subagent_id)
     if not agent:
         return None
     current = _agent_to_subagent(agent)
+    base = agent.get("config") or {}
+    if prompt is not ... and (prompt or "") == current["prompt"]:
+        prompt = ...
     config = _subagent_config(
-        prompt=current["prompt"] if prompt is ... else (prompt or ""),
+        prompt=prompt if system_prompt is ... else ...,
         tools=current["tools"] if tools is ... else tools,
         model=current["model"] if model is ... else model,
         skills=current["skills"] if skills is ... else skills,
         memory=current["memory"] if memory is ... else memory,
         mcp_servers=current["mcp_servers"] if mcp_servers is ... else mcp_servers,
-        base=agent.get("config"),
+        base=base,
     )
+    if system_prompt is not ...:
+        config["system_prompt"] = system_prompt
+    if tools is not ...:
+        from app.core.tool_access import tool_selection_mode
+
+        _stamp_tool_mode(config, tools, tool_selection_mode(base))
+    if provider_models is not ...:
+        if provider_models:
+            config["provider_models"] = provider_models
+        else:
+            config.pop("provider_models", None)
     if defaults_record is not None:
         from app.core.builtin_subagents import DEFAULTS_RECORD_KEY
 

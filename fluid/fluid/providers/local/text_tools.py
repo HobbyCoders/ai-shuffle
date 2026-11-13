@@ -45,7 +45,7 @@ from fluid.messages import (
     ToolUseBlock,
     UnknownBlock,
 )
-from fluid.providers._chat_completions import system_message
+from fluid.providers._chat_completions import merge_user_runs, system_message
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 
 TOOL_OPEN = "<tool_call>"
@@ -353,7 +353,7 @@ def serialize_history(messages: list[Message]) -> list[Message]:
     ``ToolResultBlock`` → ``<tool_result name="…">…</tool_result>`` text (the
     name recovered from the matching call's id, since results only carry ids).
     Everything else passes through untouched; messages without tool blocks are
-    returned as-is.
+    returned as-is, except that consecutive user messages fold into one.
     """
     names = {
         block.id: block.name
@@ -379,7 +379,9 @@ def serialize_history(messages: list[Message]) -> list[Message]:
             else:
                 content.append(block)
         out.append(Message(role=msg.role, content=content, provider_meta=msg.provider_meta))
-    return out
+    # Tool results are user text now; a following user note would make two
+    # user turns in a row, which strict local chat templates reject.
+    return merge_user_runs(out)
 
 
 # ─── the decorating ProviderClient ───────────────────────────────────────────
