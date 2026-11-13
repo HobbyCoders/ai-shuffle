@@ -1458,8 +1458,10 @@
 	.ring-track {
 		stroke: var(--border-strong);
 	}
+	/* Healthy usage is neutral, not the theme's primary: a usage meter only
+	   changes colour when it means something (warning, then danger). */
 	.ring-progress {
-		stroke: var(--primary);
+		stroke: var(--muted-foreground);
 		transition: stroke-dashoffset 0.3s ease, stroke 0.2s ease;
 	}
 	.usage-ring.warning .ring-progress {
@@ -1608,7 +1610,7 @@
 	}
 	/* Collapsed state: one plain severity-coloured fill (same vars as the ring/pct). */
 	.ctx-seg.solid {
-		background: var(--primary);
+		background: var(--muted-foreground);
 	}
 	.ctx-seg.solid.warning {
 		background: var(--warning);
@@ -1739,7 +1741,7 @@
 	}
 	.row-fill {
 		height: 100%;
-		background: var(--primary);
+		background: var(--muted-foreground);
 		border-radius: 999px;
 		transition: width 0.3s ease;
 	}
