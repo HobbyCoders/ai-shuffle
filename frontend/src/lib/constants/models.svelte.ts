@@ -397,9 +397,10 @@ export function providerOfModel(value: string, providers: readonly ProviderEntry
  *   does not match `ready_providers` is trusted: the worker picked it from
  *   its own usable rows, and a classification mismatch must not override it.
  * - Otherwise the first ready provider with a usable model, in the same order as the
- *   worker's `credential_gate.default_provider_model`: provider rows in the
- *   worker's order (newest first), each row's default when it lists it (else
- *   its first model), subscription rows first; Claude's own default last.
+ *   worker's `credential_gate.default_provider_model`: provider rows oldest
+ *   first (a newly added key never takes the default over, #1522), each row's
+ *   default when it lists it (else its first model), subscription rows first;
+ *   Claude's own default last.
  */
 export function resolveDefaultModel(
 	serverDefault: string,
@@ -420,7 +421,9 @@ export function resolveDefaultModel(
 			if (preferred) return preferred.value;
 			continue;
 		}
-		const entries = providers
+		// `/api/models` lists rows newest first; the worker picks the oldest.
+		const entries = [...providers]
+			.reverse()
 			.filter((p) => p.usable !== false && brandOfEntry(p.id, p) === brand)
 			.sort((a, b) => Number(b.auth_kind === 'subscription') - Number(a.auth_kind === 'subscription'));
 		for (const entry of entries) {

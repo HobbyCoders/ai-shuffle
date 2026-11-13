@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { creditText } from './provider-credit';
+import { creditText, formatUsd } from './provider-credit';
 
 describe('remaining provider credits', () => {
  it('prefers account credit to key spending and limits', () => {
@@ -16,9 +16,21 @@ describe('remaining provider credits', () => {
  it.each([0, -1, NaN, Infinity, '12', true, null])('omits invalid/zero extra credits: %s', balance => {
   expect(creditText({ balance }, 'chatgpt')).toBeNull();
  });
- it('keeps an exhausted or overdrawn monetary account visible', () => {
-  expect(creditText({ balance_remaining: 0 }, 'fal')?.short).toBe('$0.00 left');
-  expect(creditText({ balance_remaining: -2 }, 'openrouter_account')?.short).toBe('$-2.00 left');
+ it('keeps an exhausted or overdrawn monetary account visible and flags it', () => {
+  expect(creditText({ balance_remaining: 0 }, 'fal')).toMatchObject({ short: '$0.00 left', exhausted: true });
+  expect(creditText({ balance_remaining: -2.5 }, 'openrouter_account')).toMatchObject({ short: '-$2.50 left', exhausted: true });
+  expect(creditText({ balance_remaining: -2.5 }, 'kimi')).toMatchObject({ detail: '-$2.50 left', exhausted: true });
+  expect(creditText({ balance_remaining: 0.01 }, 'fal')?.exhausted).toBe(false);
+  expect(creditText({ limit_remaining: 0 }, 'openrouter')).toMatchObject({ short: '$0.00 left on this key', exhausted: true });
+ });
+ it('groups thousands in large balances', () => {
+  expect(creditText({ balance_remaining: 12345678.91 }, 'openrouter_account')?.short).toBe('$12,345,678.91 left');
+  expect(creditText({ balance_remaining: -1234.5 }, 'fal')?.short).toBe('-$1,234.50 left');
+  expect(creditText({ limit_remaining: 1500 }, 'openrouter')?.short).toBe('$1,500.00 left on this key');
+ });
+ it('never shows a negative zero', () => {
+  expect(formatUsd(-0.001)).toBe('$0.00');
+  expect(formatUsd(-0)).toBe('$0.00');
  });
  it.each([
   { balance_remaining: 42 },

@@ -746,6 +746,10 @@
 	function creditsShort(credits: Record<string, unknown> | null, type: string | null): string | null {
 		return creditText(credits, type)?.short ?? null;
 	}
+	/** A shown balance at or below zero: the same red as a quota window at 0% left. */
+	function creditsExhausted(pb: ProviderUsageBucket): boolean {
+		return creditText(providerCredits(pb), pb.providerType)?.exhausted === true;
+	}
 
 	const target = $derived($usageTargetInstance);
 	const resolvedBucket = $derived(resolveBucket($rateLimit, target));
@@ -1194,12 +1198,12 @@
 		     it outranks the window pct (which an OpenRouter key-spend limit
 		     would otherwise produce). -->
 		{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
-			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
+			<span class="sec-summary sec-credits" class:danger={creditsExhausted(pb)} title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
 		{:else if pbSummary}
 			<span class="row-pct {pbSummary.severity} sec-summary">{pbSummary.pct}%{suffix}</span>
 		{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
 			<!-- ChatGPT extra credits live in the expanded rows only. -->
-			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
+			<span class="sec-summary sec-credits" class:danger={creditsExhausted(pb)} title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
 		{:else if reportedBalanceSource(pb) || keyReadBalance(pb)}
 			<span class="sec-summary sec-credits">{keyReadBalance(pb) && transientFailure(pb) ? 'Check failed' : 'Balance unavailable'}</span>
 		{:else}
@@ -1213,7 +1217,7 @@
 		{/each}
 		{@const credits = creditsLine(pb)}
 		{#if credits}
-			<div class="row-reset usage-credits">{credits}</div>
+			<div class="row-reset usage-credits" class:danger={creditsExhausted(pb)}>{credits}</div>
 		{/if}
 		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, pb.sourceInfo?.dashboard_label ?? 'Dashboard', pb.sourceInfo?.dashboard_label && pb.sourceInfo.dashboard_label !== 'Dashboard' ? `Open the ${pb.sourceInfo.dashboard_label}` : 'Compare on the provider dashboard')}
 	{/if}
@@ -1819,6 +1823,9 @@
 		.provider-header:hover .section-device { transform: none; }
 	}
 	.usage-credits { font-variant-numeric: tabular-nums; }
+	/* A balance at or below zero: the colour a quota window at 0% left uses. */
+	.sec-credits.danger,
+	.usage-credits.danger { color: var(--destructive); }
 	.provider-hide:hover, .provider-restore:hover {
 		background: var(--accent);
 		color: var(--foreground);
@@ -1915,7 +1922,7 @@
 	.sec-summary {
 		flex-shrink: 0;
 	}
-	/* Credits fallback summary — dollars carry no severity, so stay neutral. */
+	/* Credits fallback summary — a balance above zero stays neutral (see .danger). */
 	.sec-credits.sec-empty {
 		font-weight: 400;
 	}

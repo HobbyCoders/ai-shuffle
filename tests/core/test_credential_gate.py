@@ -342,6 +342,33 @@ def test_a_subscription_row_leads_an_api_row_of_the_same_provider(mock_db):
     assert credential_gate.default_provider_model() == ("sub", "gpt-5-codex")
 
 
+def test_a_second_key_does_not_move_either_default_without_usage_history(mock_db, tmp_path):
+    """#1522: with no most used model, adding a provider key keeps new chats
+    and Text tasks on the provider that was already the default."""
+    from app.core.generation_options import text_generation_config
+    from app.core.model_registry import registry_payload
+
+    claude_cli_status.get_status()  # the CLI is missing
+    _openai_with_default()
+    with database.get_db() as conn:  # the first key, set up long ago
+        conn.cursor().execute(
+            "UPDATE model_providers SET created_at = '2020-01-01T00:00:00+00:00' WHERE id = 'oa'")
+    assert credential_gate.default_run_selection() == "prov:oa:gpt-5"
+    _provider_row("goog", "google", auth_token="enc:key", checked=True,
+                  models=[{"id": "gemini-3.1-pro", "label": "Gemini"}], default_model="gemini-3.1-pro")
+    assert "goog" in [r["id"] for r in credential_gate.usable_provider_rows()]
+    # New chats: the registry default the composer preselects, and the run.
+    assert credential_gate.default_run_selection() == "prov:oa:gpt-5"
+    assert registry_payload()["default"] == "prov:oa:gpt-5"
+    assert (_build_turn(tmp_path, "second-key").aih_provider_id, _build_turn(tmp_path, "second-key").model) == ("oa", "gpt-5")
+    # Text tasks (titles, commit messages, agent generation).
+    config = text_generation_config()
+    assert (config["model"], config["provider"]) == ("gpt-5", "oa")
+    # The first provider gone, the newer key takes over.
+    database.update_model_provider("oa", enabled=False)
+    assert credential_gate.default_run_selection() == "prov:goog:gemini-3.1-pro"
+
+
 @pytest.mark.parametrize("token", ["sk-plain-test", None], ids=["keyed", "keyless"])
 def test_a_gateway_only_owner_runs_on_the_gateway_by_default(mock_db, tmp_path, token):
     """B-1: with only a custom gateway connected, a run that names no model
