@@ -530,7 +530,9 @@
 			sessionId: $activeSession.sessionId,
 			latestTurnKey: latestTurnKeyOf($activeSession.messages),
 			unsettled: latestTurnUnsettled,
-			parked: $activeSession.turnParked === true
+			parked: $activeSession.turnParked === true,
+			// The stopped turn keeps its steps while its "Not sent" rows wait below (#1147).
+			pinned: restingOnNotSentRows(notSentHold.messages)
 		});
 	});
 
