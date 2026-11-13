@@ -17,6 +17,7 @@ import {
 	FAL_KEY_ITEM,
 	filterProviders,
 	hasPlusMenu,
+	needsUpdateNote,
 	splitProviders,
 	type ProvidersInput
 } from './providers-model';
@@ -520,5 +521,20 @@ describe('saved Claude subscriptions', () => {
 			subscription: [subAccount({ active: true, kind: 'saved', id: 'a', label: 'A', signed_in: false, needs_sign_in: true })]
 		});
 		expect(claude.credentials[0]).toMatchObject({ statusText: 'Active for Claude', on: true, attention: false });
+	});
+});
+
+describe('needsUpdateNote (#1519)', () => {
+	it('names the workers that cannot run a gated row yet', () => {
+		expect(needsUpdateNote({ workers_requiring_update: ['GamingPC'] })).toBe('GamingPC needs an update to use this.');
+		expect(needsUpdateNote({ workers_requiring_update: ['A', 'B', 'C'] })).toBe(
+			'A, B and C need an update to use this.'
+		);
+	});
+
+	it('says nothing when every worker can run it or the field is absent (older server)', () => {
+		expect(needsUpdateNote({ workers_requiring_update: [] })).toBeNull();
+		expect(needsUpdateNote({})).toBeNull();
+		expect(needsUpdateNote(undefined)).toBeNull();
 	});
 });

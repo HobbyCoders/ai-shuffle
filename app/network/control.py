@@ -317,7 +317,18 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
     replays was so admitted). Always sent, so the owner can tell "no" from a
     worker too old to say (``turns.UNSTATED_ENTRY_KEY``). Never in ``payload``:
     the owner drops the key from any payload.
+
+    A turn that picks a capability-gated provider row is refused here, with
+    the reason, when the owner does not report that capability (#1519).
     """
+    from app.core import provider_capability
+
+    picked = (overrides or {}).get("provider") or provider_capability.provider_of_model(
+        (overrides or {}).get("model"))
+    if picked:
+        refusal = await run_sync(provider_capability.refusal, device_id, picked)
+        if refusal:
+            raise ControlRefused(refusal)
     body = {
         "session_id": session_id, "source": source, "prompt": prompt, "profile_id": profile_id,
         "project_id": project_id, "overrides": overrides, "payload": payload,

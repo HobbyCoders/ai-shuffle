@@ -124,6 +124,15 @@ def assign(table: str, row_id: str, device_id: Optional[str]) -> dict:
             raise KeyError("Owner must be an active device")
         if member.kind != engine.membership.KIND_WORKER:
             raise ValueError("Only a worker device can own a definition")
+        if table == "automations":
+            # Its runs use the automation's provider row there (#1519).
+            from app.core import provider_capability
+            from app.db import automations as automations_db
+
+            automation = automations_db.get_automation(row_id) or {}
+            refusal = provider_capability.refusal(device_id, automation.get("provider_id"))
+            if refusal:
+                raise ValueError(refusal)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(f"UPDATE {table} SET owner_device_id = %s, updated_at = NOW() WHERE id = %s", (device_id, row_id))

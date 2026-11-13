@@ -1,0 +1,220 @@
+"""Which network members can run a capability-gated ``model_providers`` row.
+
+One rule, used everywhere (#1519): ``model_providers`` rows sync to every
+member, so a row type an older build cannot run is gated by a capability the
+worker reports in its signed presence. A member counts as capable only when
+its presence reports that capability as ``1``. A member that reports nothing
+(an older build, or presence not seen yet) counts as NOT capable. Membership
+defines the set, not online state, because an offline member syncs the row
+later. Revoked members cannot sync and are ignored. This worker always
+counts as capable: it runs this build.
+
+Nothing here is cached as the answer. Every call reads current membership
+and presence, so a member admitted after a gated row exists, or one whose
+presence changes, is judged again the next time anyone asks:
+
+* creating or converting a gated row (``app/api/model_providers.py``,
+  ``app/api/antigravity.py``) refuses while any member is missing;
+* the provider list reports, per row, which workers need an update;
+* anything that picks a worker to run a session or turn on a gated row
+  (hand-off, remote StartSession, remote Task, a forwarded turn) refuses
+  that worker with :func:`refusal`, instead of failing later on it.
+
+:func:`recheck` is called when membership changes (admission, a synced
+membership record) and when presence arrives, and logs which gated rows a
+member gained or lost, so the change is visible in the worker's log too.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+from typing import Any, Dict, Iterable, List, Mapping, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def capability_for(provider_type: Optional[str]) -> Optional[str]:
+    """The presence capability a row of ``provider_type`` needs, or None (ungated)."""
+    from app.core import antigravity, gemini_provider, native_providers
+
+    ptype = (provider_type or "").strip().lower()
+    if ptype in native_providers.PROVIDERS:
+        return native_providers.CAPABILITY
+    if ptype == gemini_provider.PROVIDER:
+        return gemini_provider.CAPABILITY
+    if ptype == antigravity.PROVIDER_TYPE:
+        return antigravity.CAPABILITY
+    return None
+
+
+def _reports(presence: Optional[Mapping[str, Any]], capability: str) -> bool:
+    return ((presence or {}).get("capabilities") or {}).get(capability) == 1
+
+
+def _member_name(member: Mapping[str, Any]) -> str:
+    return member.get("name") or member["device_id"]
+
+
+def members_lacking(capability: str) -> List[Dict[str, str]]:
+    """Non-revoked members other than this worker that do not report ``capability``.
+
+    ``[{"device_id", "name"}]``; empty outside a network.
+    """
+    from app.db import network as store
+    from app.network import engine
+
+    ctx = engine.context()
+    if ctx is None:
+        return []
+    presence = engine.all_presence()
+    return [{"device_id": m["device_id"], "name": _member_name(m)}
+            for m in store.list_members(include_revoked=False)
+            if m["device_id"] != ctx.device_id
+            and not _reports(presence.get(m["device_id"]), capability)]
+
+
+def workers_requiring_update(capability: str) -> List[str]:
+    """Names of the members that cannot run a row gated by ``capability`` yet."""
+    return [m["name"] for m in members_lacking(capability)]
+
+
+def workers_requiring_update_for_rows(rows: Iterable[Mapping[str, Any]]) -> Dict[str, List[str]]:
+    """``{row id: [worker names]}`` for the gated rows some member cannot run.
+
+    Reads membership and presence once for the whole list.
+    """
+    by_capability: Dict[str, List[str]] = {}
+    out: Dict[str, List[str]] = {}
+    for row in rows:
+        capability = capability_for(row.get("provider_type"))
+        if capability is None:
+            continue
+        if capability not in by_capability:
+            by_capability[capability] = workers_requiring_update(capability)
+        if by_capability[capability]:
+            out[row["id"]] = by_capability[capability]
+    return out
+
+
+def needs_update_message(names: List[str], what: str = "this") -> str:
+    """'Worker X needs an update to use this.' (plural: 'X and Y need …')."""
+    if len(names) == 1:
+        return f"{names[0]} needs an update to use {what}."
+    return f"{', '.join(names[:-1])} and {names[-1]} need an update to use {what}."
+
+
+def refusal(device_id: Optional[str], provider_id: Optional[str] = None, *,
+            row: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    """Why ``device_id`` must not run ``provider_id`` (or ``row``), or None.
+
+    None when there is no target, the target is this worker, the row is
+    unknown or ungated, or the target reports the row's capability.
+    """
+    if not device_id or (row is None and not provider_id):
+        return None
+    from app.network import engine
+
+    ctx = engine.context()
+    if ctx is None or device_id == ctx.device_id:
+        return None
+    if row is None:
+        from app.db import model_providers as provider_db
+
+        row = provider_db.get_model_provider(provider_id)
+        if row is None:
+            return None
+    capability = capability_for(row.get("provider_type"))
+    if capability is None or _reports(engine.presence_of(device_id), capability):
+        return None
+    from app.db import network as store
+
+    member = store.get_member(device_id)
+    name = _member_name(member) if member else device_id
+    label = row.get("name") or row.get("provider_type") or "this provider"
+    return needs_update_message([name], label)
+
+
+def provider_of_model(value: Any) -> Optional[str]:
+    """The provider row id a ``prov:<id>:<model>`` model value names, or None."""
+    from app.core.query_options import decode_provider_model
+
+    decoded = decode_provider_model(value)
+    return decoded[0] if decoded else None
+
+
+# ---------------------------------------------------------------------------
+# Re-check on membership and presence changes
+# ---------------------------------------------------------------------------
+
+_last_gaps: Dict[str, frozenset] = {}
+_last_lock = threading.Lock()
+
+
+def recheck(device_ids: Optional[Iterable[str]] = None) -> Dict[str, List[str]]:
+    """Judge the gated rows again for ``device_ids`` (all members when None).
+
+    Returns ``{device_id: [row ids it cannot run]}`` for members with a gap
+    and logs each change since the last check. Never raises.
+    """
+    try:
+        return _recheck(device_ids)
+    except Exception:  # noqa: BLE001 — a log aid; readers judge live anyway
+        logger.debug("Provider capability re-check failed", exc_info=True)
+        return {}
+
+
+def _recheck(device_ids: Optional[Iterable[str]]) -> Dict[str, List[str]]:
+    from app.db import model_providers as provider_db
+    from app.db import network as store
+    from app.network import engine
+
+    ctx = engine.context()
+    if ctx is None:
+        return {}
+    rows = [r for r in provider_db.get_all_model_providers() if capability_for(r.get("provider_type"))]
+    members = {m["device_id"]: m for m in store.list_members(include_revoked=False)
+               if m["device_id"] != ctx.device_id}
+    wanted = set(members) if device_ids is None else {d for d in device_ids if d}
+    presence = engine.all_presence()
+    gaps: Dict[str, List[str]] = {}
+    changed = False
+    with _last_lock:
+        for device_id in wanted:
+            member = members.get(device_id)
+            missing = frozenset(
+                r["id"] for r in rows
+                if member is not None
+                and not _reports(presence.get(device_id), capability_for(r["provider_type"])))
+            before = _last_gaps.get(device_id, frozenset())
+            changed = changed or missing != before
+            if missing:
+                gaps[device_id] = sorted(missing)
+                _last_gaps[device_id] = missing
+            else:
+                _last_gaps.pop(device_id, None)
+            if missing - before:
+                names = [r.get("name") or r["id"] for r in rows if r["id"] in missing - before]
+                logger.warning("%s needs an update to use these providers: %s",
+                               _member_name(member), ", ".join(names))
+            if before and not missing and member is not None:
+                logger.info("%s can now use every provider on this network", _member_name(member))
+    if changed:
+        _refresh_open_pages()
+    return gaps
+
+
+def _refresh_open_pages() -> None:
+    """An open Providers page refetches, so its note appears or clears now.
+
+    Local only: every worker runs its own re-check when the change syncs to it.
+    """
+    try:
+        from app.core.global_events import global_events
+        global_events.resources_changed("settings", relay=False)
+    except Exception:  # noqa: BLE001 — the next page load shows it anyway
+        logger.debug("Could not tell open pages about a provider gap", exc_info=True)
+
+
+def _reset_for_tests() -> None:
+    with _last_lock:
+        _last_gaps.clear()

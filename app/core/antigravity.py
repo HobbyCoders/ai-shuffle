@@ -305,20 +305,11 @@ def _row_extra_env(row: Mapping[str, Any]) -> Dict[str, str]:
 def workers_requiring_update() -> List[str]:
     """Members that cannot run an Antigravity row yet (rows sync to every member).
 
-    Same rule as ``native_providers.workers_requiring_update``: membership,
-    not online presence, and support read from signed presence.
+    The rule lives in :mod:`app.core.provider_capability` (#1519).
     """
-    from app.db import network as store
-    from app.network import engine
+    from app.core import provider_capability
 
-    ctx = engine.context()
-    if ctx is None:
-        return []
-    presence = engine.all_presence()
-    return [member.get("name") or member["device_id"]
-            for member in store.list_members(include_revoked=False)
-            if member["device_id"] != ctx.device_id
-            and (presence.get(member["device_id"], {}).get("capabilities") or {}).get(CAPABILITY) != 1]
+    return provider_capability.workers_requiring_update(CAPABILITY)
 
 
 def guard_lifted(row: Mapping[str, Any]) -> bool:

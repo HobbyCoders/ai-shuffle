@@ -417,6 +417,12 @@ async def _dispatch_remote(
     if ctx is None:
         return {"ok": False, "error": (
             f"This worker is not part of a worker network; omit worker to run it here; {NOT_DISPATCHED}.")}
+    from app.core import provider_capability
+
+    # A capability-gated provider row cannot run on that worker (#1519).
+    gap = await asyncio.to_thread(provider_capability.refusal, worker["device_id"], provider_id)
+    if gap:
+        return {"ok": False, "error": f"{gap} Omit worker to run it here; {NOT_DISPATCHED}."}
     from app.core import spending_limits
 
     # The owner's daily spending limit, as for a local worker. Not a

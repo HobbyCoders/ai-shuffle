@@ -1961,6 +1961,14 @@ async def _start_remote(plan, sender_id, sender_generation):
     if task_registry.stop_invalidated(sender_id, sender_generation):
         await release()
         raise ValueError("The user stopped this session; nothing was started.")
+    if not plan.get("readback_only"):
+        # A capability-gated provider row cannot run there (#1519).
+        from app.core import provider_capability
+        refusal = await asyncio.to_thread(provider_capability.refusal, remote["device_id"],
+                                          plan["body"].get("provider_id"))
+        if refusal:
+            await release()
+            raise ValueError(f"{refusal} Nothing was started; pick another worker or provider.")
     try:
         action = REMOTE_READBACK_ACTION if plan.get("readback_only") else REMOTE_ACTION
         answer = await control.call(remote["device_id"], action, plan["body"], timeout=REMOTE_TIMEOUT)

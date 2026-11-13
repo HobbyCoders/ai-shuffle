@@ -33,6 +33,8 @@ Invites are meant for your home network or a VPN such as Tailscale. Workers sign
 
 **Kept on each worker:** folders and project checkouts, ports and addresses, logs, usage numbers, and the work currently running there.
 
+Some provider types need a worker new enough to run them: Kimi, MiniMax and OpenCode keys, Google Gemini keys and Google Antigravity. A worker tells the others which of these it supports. You can only add one while every worker supports it. A worker that joins later, or that runs an older version, gets the provider too but cannot use it: **Settings → Providers** shows "*Worker* needs an update to use this" on that provider, and the app refuses to move a chat, start a chat or subagent, hand off, send a message or assign an automation that uses that provider to that worker, with the same reason. A worker that has not said what it supports counts as not supporting it. The message clears once the worker is updated and back online.
+
 Saving or clearing a preference asks the network to publish the committed change, just like other shared settings. Permission rules, chat tag membership and new attachment metadata also wake their publishers. Periodic reconciliation still catches changes made outside these writers, and offline workers catch up when they reconnect.
 
 ## Use a chat on another worker
