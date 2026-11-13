@@ -168,15 +168,17 @@ def newest_utterance(entries) -> str:
     The one place a caller turn is read as a status question, for the handoff
     shortcut and Grok's check_work alike: turns the voice already answered
     (small talk, an earlier status question) are not part of the question.
-    Voice words after the caller's (spoken with the tool call) do not end it."""
-    words = []
+    Voice words after the caller's (spoken with the tool call) do not end it.
+    Entries are caption deltas that can split a word ("What", "'s running?"):
+    they are joined as they came, and noise is judged on the joined text."""
+    parts = []
     for e in reversed(entries):
-        if e["role"] != "user":
-            if words and e["text"].strip():
-                break
-        elif not is_noise(e["text"]):
-            words.append(e["text"].strip())
-    return " ".join(reversed(words)).strip()
+        if e["role"] == "user":
+            parts.append(e["text"])
+        elif e["text"].strip() and not is_noise("".join(reversed(parts))):
+            break
+    text = "".join(reversed(parts)).strip()
+    return "" if is_noise(text) else text
 
 
 def live_session_config(config: dict, history: list[dict]) -> dict:

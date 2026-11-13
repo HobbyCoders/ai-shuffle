@@ -94,6 +94,40 @@ async def test_live_delegation_is_correlated_and_uses_accumulated_user_context(m
 
 
 @pytest.mark.asyncio
+async def test_a_status_question_split_across_captions_is_still_a_status_question(monkeypatch):
+    # Review of PR #1541: captions can split a word; joining them with a space
+    # made "What 's running?", which started chat work.
+    delegate = AsyncMock(return_value="")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    call = stream()
+    call.flush = AsyncMock()
+    call.settle_speech = AsyncMock()
+    call.progress = SimpleNamespace(heard=lambda _text: None)
+    call.answer_status = AsyncMock()
+    call.upstream = Upstream([json.dumps(e) for e in [
+        {"type": "session.input_transcript.delta", "delta": "How's your day?", "end_ms": 400},
+        {"type": "session.output_transcript.delta", "delta": "Pretty good.", "end_ms": 900},
+        {"type": "session.input_transcript.delta", "delta": "What", "end_ms": 1000},
+        {"type": "session.input_transcript.delta", "delta": "'s running?", "end_ms": 1500},
+        {"type": "session.delegation.created", "delegation": {"id": "d1", "offset_ms": 1600}},
+    ]])
+    await call.receive_upstream()
+    await call.delegation_task
+    call.answer_status.assert_awaited_once()
+    delegate.assert_not_awaited()
+
+
+def test_newest_utterance_joins_captions_as_they_came():
+    said = lambda role, text: {"role": role, "text": text}  # noqa: E731
+    assert voice_stream.newest_utterance([said("user", "What"), said("user", "'s running?")]) == "What's running?"
+    assert voice_stream.newest_utterance(
+        [said("user", "Check the deploy."), said("assistant", "Sure."), said("user", " Um.")]) == "Check the deploy. Um."
+    assert voice_stream.newest_utterance([said("user", "Hmm.")]) == ""
+    assert voice_stream.newest_utterance(
+        [said("user", "Is it done yet?"), said("assistant", "Let me look.")]) == "Is it done yet?"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("selected,provider", [("prov:chosen-provider:chosen-model", "chosen-provider"), ("haiku", None)])
 async def test_handoff_reuses_same_session_and_composer_binding(monkeypatch, selected, provider):
     from app.core import provider_agent, turn_manager
