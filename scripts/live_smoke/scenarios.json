@@ -1487,6 +1487,15 @@
           "past_bug": "An uninstrumented shutdown-to-startup gap made database-copy time indistinguishable from application startup."
         },
         {
+          "id": "harness-basics.repeat-result-pointer",
+          "check": "A repeat Read or Skill load points at the earlier result only while it is still in view",
+          "kind": "owner",
+          "needs": ["provider", "install"],
+          "how": "On a disposable candidate worker started with FLUID_CODE_MODE=false (code-mode cells collapse repeats through their own refs and never get these pointers), open a disposable native agent chat on GPT 6.1 Sol through the subscription, never an API key. Ask it to Read one file over 1,000 characters twice, then load one skill twice. Then edit the file and Read it again, and finally repeat the same Read twice in a row after a pointer. Settle the explicitly hidden chat.",
+          "pass_when": "The second Read and the second Skill load each return an \"[already in view:\" note naming the earlier result instead of the content. The Read after the edit returns the full new content. The identical repeat right after a pointer returns the full content. The model answers questions about the file correctly after a pointer and does not re-read it in a loop.",
+          "past_bug": "#1539: skill instructions were reloaded mid-chat about 150 times a week (about 7.6k characters each) and identical Read, Grep and Glob calls re-sent content still above."
+        },
+        {
           "id": "harness-basics.rewind-file-restore-retired",
           "check": "Rewind never offers file restore and old agents lose the retired flag",
           "kind": "owner",
