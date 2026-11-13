@@ -29,6 +29,7 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 	return {
 		projects: writable([{ id: 'project', name: 'Project' }]),
 		clusterProjects: writable([]),
+		profiles: writable([]),
 		sessions,
 		appData: { loadSessions: vi.fn() }
 	};
@@ -546,6 +547,27 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Other worker' }));
 		expect(view.queryByRole('dialog')).toBeNull();
 		await waitFor(() => expect(moveSession).toHaveBeenCalledExactlyOnceWith('chat', 'peer'));
+	});
+
+	// The "No project" mark lives in this row on the desktop; the phone sheet
+	// leaves it to the phone top bar.
+	it('offers "No project" beside the worker in a saved no-project chat, and opens the attach sheet', async () => {
+		session.store.set({ ...base, sessionId: 'chat', project: null, projectV2Id: null, mode: 'chat' });
+		appSessions.store.set([{ id: 'chat', instance_id: 'local', is_remote: false, controllable: true }]);
+		const view = render(ContextPillBar, { sheetMode });
+		const chip = view.queryByRole('button', { name: /^No project\. Attach a project/ });
+		expect(chip !== null).toBe(!sheetMode);
+		if (!chip) return;
+		expect(chip.classList.contains('ctx-chip')).toBe(true);
+		expect(chip.textContent?.trim()).toBe('No project');
+		await fireEvent.click(chip);
+		expect(await view.findByRole('dialog', { name: 'Attach a project' })).toBeTruthy();
+	});
+
+	it('shows no "No project" chip in a chat that has a project', () => {
+		session.store.set(base);
+		const view = render(ContextPillBar, { sheetMode });
+		expect(view.queryByRole('button', { name: /^No project/ })).toBeNull();
 	});
 
 	it('gives a new no-project chat its worker and project rows, and no mode bar', () => {

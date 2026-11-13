@@ -15,7 +15,9 @@
 	 * agent chip stays a selector and the branch chip stays the checkout
 	 * selector where it was available before; the runner chip opens the
 	 * "Move this session" menu for both local and remote owners, where
-	 * session-move.ts allows a move (else it names the worker read-only). A degraded
+	 * session-move.ts allows a move (else it names the worker read-only). A chat
+	 * without a project shows "No project" after the runner, which opens the
+	 * attach sheet (NoProjectPill; the phone keeps it in its top bar). A degraded
 	 * session (queued work, no runner online) shows a read-only warning chip.
 	 *
 	 * `sheetMode` renders the same selectors as stacked rows inside the mobile
@@ -29,6 +31,7 @@
 	import BranchSelector from './BranchSelector.svelte';
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
+	import NoProjectPill from '$lib/components/layout/NoProjectPill.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { composerIsGitRepo, computeContextBadge, shouldShowBranchPill, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
@@ -728,6 +731,13 @@
 				{#if sheetMode}<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />{:else}<WorkerStatusDot online />{/if}
 				<span class="ctx-chip-label">{selfName}</span>
 			</span>
+		{/if}
+
+		<!-- A running chat with no project: "No project" opens the one-way attach
+		     sheet (#371 step 4), and hides itself where attaching cannot apply.
+		     The phone sheet leaves it to the phone top bar. -->
+		{#if !sheetMode}
+			<NoProjectPill />
 		{/if}
 
 		{#if $activeSession.mode !== 'chat'}

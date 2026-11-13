@@ -362,6 +362,24 @@ DELEGATED_LOADED_TOOLS: frozenset[str] = frozenset({
     "mcp__attachments__Read",
 })
 
+# The Google Antigravity (ACP) leg's always-loaded tier. ACP has no deferral of
+# its own, so the bundled bridge lists only these with their schemas, plus
+# fluid's LoadTools (every other tool announced by name, grouped by server, its
+# schema returned on demand) and CallTool (runs one by its real name, gated as
+# that tool). Without it the bridge listed ~98 app tools, ~26.5k tokens of
+# schemas on every request (Nov 2026), and the session's external MCP servers
+# went to the agent whole on top. The same core as the delegated leg, for the
+# same reasons: Task and Monitor carry the background-work routing the prompt
+# leads with, and the chat lane's attachment reader is its only reader. Each
+# other tool costs one LoadTools call the first time and a CallTool hop, never
+# a prompt rebuild, since the agent's tool list is fixed for the session. An
+# allowlist: a tool added later starts behind CallTool.
+ACP_LOADED_TOOLS: frozenset[str] = frozenset({
+    "mcp__builtins__Task",
+    "mcp__builtins__Monitor",
+    "mcp__attachments__Read",
+})
+
 # Kill switch: AI_SHUFFLE_PERF_BRIDGE_DEFER=0 (or false/off/no) puts every
 # bridged tool back on the always-loaded tier, and every native tool outside
 # the deferred servers back on the eager tier, for sessions started afterwards.
@@ -379,6 +397,18 @@ def delegated_bridge_deferred() -> Callable[[str], bool] | None:
     if flag in ("0", "false", "off", "no"):
         return None
     return lambda name: name not in DELEGATED_LOADED_TOOLS
+
+
+def acp_bridge_deferred() -> Callable[[str], bool] | None:
+    """The ACP bridge's call-through predicate, or None when switched off.
+
+    True for every registry name outside :data:`ACP_LOADED_TOOLS`. Shares the
+    :data:`BRIDGE_DEFER_ENV` kill switch, which restores the eager list (and
+    hands the external MCP servers to the agent again).
+    """
+    if delegated_bridge_deferred() is None:
+        return None
+    return lambda name: name not in ACP_LOADED_TOOLS
 
 
 def defer_native_tools(
