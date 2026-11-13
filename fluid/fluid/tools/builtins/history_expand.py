@@ -13,7 +13,12 @@ import asyncio
 
 from fluid.tools.time_context import history_zone
 
-from fluid.context.recall import DEFAULT_EXPAND_CHARS, expand_ref, recall_nodes
+from fluid.context.recall import (
+    DEFAULT_EXPAND_CHARS,
+    MAX_EXPAND_CHARS,
+    expand_ref,
+    recall_nodes,
+)
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 SPEC = ToolSpec(
@@ -43,7 +48,10 @@ SPEC = ToolSpec(
             },
             "max_chars": {
                 "type": "integer",
-                "description": f"Window size in chars (default {DEFAULT_EXPAND_CHARS}, max 50000).",
+                "description": (
+                    f"Window size in chars (default {DEFAULT_EXPAND_CHARS:,}, "
+                    f"max {MAX_EXPAND_CHARS:,})."
+                ),
             },
         },
         "required": ["ref"],

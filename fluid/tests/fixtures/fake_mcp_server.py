@@ -12,7 +12,8 @@ Behavior knobs:
   * ``FLUID_FAKE_TTL`` — advertise a ``tools/list`` freshness hint (``ttlMs``)
     so the client's TTL cache can be exercised.
   * the ``need_input`` tool — returns an MRTR ``input_required`` result
-    (an elicitation round-trip) to test that path.
+    (an elicitation round-trip) to test that path. Only a retry that carries
+    the answers (``inputResponses``) completes, with ``confirmed``.
   * ``FLUID_FAKE_HANG_HANDSHAKE`` — never answer the handshake (sleeps), so
     the client's connect timeout can be exercised.
   * ``FLUID_FAKE_CALL_SLEEP_S`` — sleep that many seconds before answering
@@ -83,6 +84,13 @@ def _call_tool_result(params: dict) -> dict:
             "resultType": "complete",
         }
     if name == "need_input":
+        responses = params.get("inputResponses")
+        if responses is not None:
+            return {
+                "content": [{"type": "text", "text": f"confirmed {json.dumps(responses)}"}],
+                "isError": False,
+                "resultType": "complete",
+            }
         return {
             "content": [],
             "isError": False,

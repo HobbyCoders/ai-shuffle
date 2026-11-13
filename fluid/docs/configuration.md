@@ -204,6 +204,49 @@ Claude plugin (and its enablement entry) straight into these paths.
 disallowed = ["Write", "mcp__chrome-devtools__*"]
 ```
 
+#### Spill files
+
+Long tool output is cut before it reaches the model, but the cut part stays
+recoverable. When Bash, Grep or Glob output passes 12,000 characters, a
+code-mode cell's stdout passes 8,000, or a SessionSearch or HistorySearch
+listing passes 8,000, the output is written to
+`<harness scratch>/tool-output/<tool>-<hash>.txt` (the per-session folder the
+"# Harness scratch" reminder names, cleared with it). The model sees the head,
+the tail and one marker line giving the cut line range, the character count
+and the file path, so it can Read a window or Grep the file instead of
+re-running the command. Bash keeps a third of the budget for the head and two
+thirds for the tail, where errors and exit summaries sit. If the file cannot
+be written, the output is cut to head and tail without a path.
+
+The file holds exactly the text the inline head and tail were cut from, and
+the marker never claims more. Bash keeps its first and last 512 KiB in memory
+while a command runs and writes the file once, after the ANSI stripping the
+inline text gets. It says "full output" only when nothing was dropped; past
+1 MiB the marker says "captured output" and how many bytes in the middle were
+not captured. A command that times out returns the timeout advice followed by
+its output up to the timeout, cut and spilled the same way. A cancelled turn
+writes no file. A cell's stdout reaches the host held to 2 MiB (head and
+tail), and over that the pointer line says how many chars in the middle were
+not kept. The marker is the same for the same output (the file is named by
+its content), so a repeated result does not disturb the prompt cache.
+
+Other caps page instead of spilling: WebFetch returns up to 16,000 characters
+per call (`offset` for the next page), HistoryExpand 8,000 by default (16,000
+at most), SessionView 8,000 (`text_offset` for the next page), and the bundled
+TaskList keeps its finished-task entries under 8,000 characters, naming the
+rest by id for TaskGet. Running tasks are always listed.
+
+Each session counts how often its output spilled and how often the agent
+came back for a spill file in `<harness state root>/spill-stats/<session>.json`
+(`spilled`, `read_back` by producing tool and `read_back_by` by reading tool,
+each a name-to-count map), and logs each read-back. Only a call's explicit
+path counts, after resolving it (`..` and symlinks followed): a Read, Grep or
+Glob whose path is a spill file of this session counts once for the tool named
+in the file name, and one aimed at the folder itself counts once as
+`unattributed`. Output text and shell commands are not scanned. Caps whose
+spills are read
+back often are cutting too much.
+
 ### `[context]`
 
 Knobs for tool-result trimming and the compaction ladder
@@ -839,17 +882,20 @@ Three things keep a cell's output honest:
   `_`, Python-REPL style. Both survive across cells. A kernel restart rebuilds
   the registry from the refs the checkpoint restored — a ref that was only ever
   reachable through `_refs` does not come back.
-- **Fair-share stdout.** A cell's stdout is capped at 16384 chars
+- **Fair-share stdout.** A cell's stdout is capped at 8000 chars
   (`KernelConfig.stdout_cap`). The budget is divided across the cell's prints
   rather than kept from the front, so the summary a model prints *last* still
-  arrives; the closing notice names the totals, the budget, the heaviest drops,
-  and the `_refs` handles still holding this cell's full tool results, so the
-  recovery is a slice rather than a re-run
-  (`…[stdout truncated: kept 16384 of 139201 chars across 13 prints — one
-  cell's stdout budget is 16,384 chars; heaviest drops: print 11 (-48200),
+  arrives, and a print cut to a share of 400 chars or more keeps its own tail
+  as well as its head. The closing notice names the totals, the budget, the
+  heaviest drops, and the `_refs` handles still holding this cell's full tool
+  results, so the recovery is a slice rather than a re-run
+  (`…[stdout truncated: kept 8000 of 139201 chars across 13 prints — one
+  cell's stdout budget is 8,000 chars; heaviest drops: print 11 (-48200),
   print 12 (-31005). This cell's full tool output is held in the kernel:
   _refs[4] (55,123 bytes) — slice it instead of re-running the tools or
-  re-printing.]`). The cap is stated in `run_python`'s own description.
+  re-printing.]`). A cut cell's whole stdout is also written to a spill file
+  (see "Spill files" below) and the result names it. The cap is stated in
+  `run_python`'s own description.
 - **Committed-call manifest.** A tool error aborts the whole cell, so a cell
   that edited three files before failing would otherwise show only a traceback.
   The result appends the calls that already ran, in order, with their targets
