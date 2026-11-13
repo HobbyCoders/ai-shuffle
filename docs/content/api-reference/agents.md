@@ -292,6 +292,8 @@ curl -X POST http://localhost:8000/api/v1/agents/agent_abc123/agents \
 
 Update a nested agent. `agent_name` may be the nested agent's id or name.
 
+The body is the same as for create. `tools` sets the agent's `tool_selection_mode`: a list means `allow` (only those tools), `[]` means `none`, and null or omitted means `all` (an agent in `disallow` mode keeps its block list). A `prompt` equal to the one this endpoint returns leaves the stored prompt as it is, so an agent on the preset prompt (shown as `""`) keeps it; other text replaces it with a custom prompt.
+
 **Auth:** Owner only
 
 ### DELETE /api/v1/agents/{agent_id}/agents/{agent_name}

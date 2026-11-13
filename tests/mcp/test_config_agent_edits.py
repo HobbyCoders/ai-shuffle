@@ -358,3 +358,167 @@ class TestSubagentEdits:
         body = await _call(subagent_tools, "updateSubagent",
                            {"subagent_id": AGENT_ID, "add": {"tools": ["Read"]}})
         assert body["success"] is False and "assistant" in body["error"].lower()
+
+
+# =============================================================================
+# The subagent view of any agent row: stored prompt and tool mode
+# =============================================================================
+
+_PRESET = {"type": "preset", "preset": "claude_code", "append": "Keep these rules."}
+
+
+def _agent(agent_id, config):
+    """An agent row saved in the profile (Agents page / REST) shape."""
+    from app.db import database
+    database.create_profile(agent_id, agent_id.title(), None, config)
+
+
+async def _rest_put(agent_id, **fields):
+    """PUT /agents/{profile}/agents/{name} against the real DB shim."""
+    from app.api.agents import ProfileSubagentRequest, update_profile_agent
+    from app.db import database
+    if not database.get_profile("caller"):
+        _agent("caller", {})
+    return await update_profile_agent("caller", agent_id, ProfileSubagentRequest(**fields), token="t")
+
+
+class TestSubagentKeepsStoredPrompt:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("args", [
+        {"provider_models": {"__native__": "haiku"}},
+        {"name": "Renamed"},
+        {"add": {"tools": ["Read"], "skills": ["lint"]}},
+        {"prompt": ""},  # the text this view shows for a preset: unchanged
+    ])
+    async def test_other_edits_keep_a_preset_prompt(self, mock_db, subagent_tools, args):
+        _agent("styled", {"system_prompt": dict(_PRESET)})
+        body = await _call(subagent_tools, "updateSubagent", {"subagent_id": "styled", **args})
+        assert body["success"] is True, body
+        assert _stored("styled")["system_prompt"] == _PRESET
+
+    @pytest.mark.asyncio
+    async def test_prompt_edits_patch_the_preset_append(self, mock_db, subagent_tools):
+        _agent("styled", {"system_prompt": dict(_PRESET)})
+        body = await _call(subagent_tools, "updateSubagent", {
+            "subagent_id": "styled", "prompt_edits": [{"old": "these", "new": "the house"}]})
+        assert body["success"] is True, body
+        assert body["updated_fields"] == ["prompt"]
+        assert body["prompt"]["edited"] == "text appended to the preset"
+        assert _stored("styled")["system_prompt"] == {**_PRESET, "append": "Keep the house rules."}
+
+    @pytest.mark.asyncio
+    async def test_full_prompt_replaces_with_custom(self, mock_db, subagent_tools):
+        _agent("styled", {"system_prompt": dict(_PRESET)})
+        await _call(subagent_tools, "updateSubagent", {"subagent_id": "styled", "prompt": "Own words."})
+        assert _stored("styled")["system_prompt"] == {"type": "custom", "content": "Own words."}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("config", [{"system_prompt": "Legacy text."}, {}],
+                             ids=["legacy-string", "no-prompt"])
+    async def test_legacy_and_missing_prompts_left_alone(self, mock_db, subagent_tools, config):
+        _agent("old", dict(config))
+        await _call(subagent_tools, "updateSubagent", {"subagent_id": "old", "name": "Older"})
+        assert _stored("old").get("system_prompt") == config.get("system_prompt")
+
+    @pytest.mark.asyncio
+    async def test_rest_put_round_trip_keeps_a_preset_prompt(self, mock_db):
+        _agent("styled", {"system_prompt": dict(_PRESET)})
+        updated = await _rest_put("styled", description="New", prompt="")
+        assert updated.description == "New"
+        assert _stored("styled")["system_prompt"] == _PRESET
+
+
+def _access(agent_id):
+    from app.core.tool_access import resolve_tool_access
+    access = resolve_tool_access(_stored(agent_id))
+    return access.allowed, access.disallowed
+
+
+class TestSubagentToolsSetTheMode:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("start, edit, mode, access", [
+        ({"tool_selection_mode": "none"}, {"add": {"tools": ["Read"]}}, "allow", (["Read"], None)),
+        ({"tool_selection_mode": "all"}, {"add": {"tools": ["Read"]}}, "allow", (["Read"], None)),
+        ({"tool_selection_mode": "allow", "allowed_tools": ["Read", "Grep"]}, {"tools": None},
+         "all", (None, None)),
+        ({"tool_selection_mode": "none"}, {"tools": None}, "all", (None, None)),
+        ({"tool_selection_mode": "disallow", "disallowed_tools": ["Bash"]}, {"tools": None},
+         "disallow", (None, ["Bash"])),
+        ({"tool_selection_mode": "disallow", "disallowed_tools": ["Bash"]}, {"tools": ["Read"]},
+         "allow", (["Read"], None)),
+        ({"tool_selection_mode": "allow", "allowed_tools": ["Read", "Grep"]},
+         {"remove": {"tools": ["Grep"]}}, "allow", (["Read"], None)),
+        ({}, {"tools": []}, "none", (None, ["*"])),
+    ], ids=["none+add", "all+add", "allow+null", "none+null", "disallow+null",
+            "disallow+list", "allow+remove", "unstamped+empty"])
+    async def test_explicit_tools_edit(self, mock_db, subagent_tools, start, edit, mode, access):
+        _agent("worker", dict(start))
+        body = await _call(subagent_tools, "updateSubagent", {"subagent_id": "worker", **edit})
+        assert body["success"] is True, body
+        assert _stored("worker")["tool_selection_mode"] == mode
+        assert _access("worker") == access
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("start", [
+        {}, {"allowed_tools": ["Read"]}, {"tool_selection_mode": "all", "allowed_tools": ["Read"]},
+        {"tool_selection_mode": "none"}, {"tool_selection_mode": "allow", "allowed_tools": ["Read"]},
+        {"tool_selection_mode": "disallow", "disallowed_tools": ["Bash"]},
+    ])
+    async def test_unrelated_edit_leaves_tools_untouched(self, mock_db, subagent_tools, start):
+        _agent("worker", {**start, "system_prompt": dict(_PRESET)})
+        before = _stored("worker")
+        body = await _call(subagent_tools, "updateSubagent", {"subagent_id": "worker", "name": "Renamed"})
+        assert body["success"] is True, body
+        assert _stored("worker") == before
+
+    @pytest.mark.asyncio
+    async def test_removing_the_last_tool_still_refused(self, mock_db, subagent_tools):
+        _agent("worker", {"tool_selection_mode": "allow", "allowed_tools": ["Read"]})
+        before = _stored("worker")
+        body = await _call(subagent_tools, "updateSubagent",
+                           {"subagent_id": "worker", "remove": {"tools": ["Read"]}})
+        assert body["success"] is False and "tools: null" in body["error"]
+        assert _stored("worker") == before
+
+    @pytest.mark.asyncio
+    async def test_rest_put_sets_the_mode_too(self, mock_db):
+        _agent("worker", {"tool_selection_mode": "allow", "allowed_tools": ["Read"]})
+        await _rest_put("worker", description="d", prompt="")  # tools omitted: inherit all
+        assert _stored("worker")["tool_selection_mode"] == "all"
+        assert _access("worker") == (None, None)
+        await _rest_put("worker", description="d", prompt="", tools=["Grep"])
+        assert _access("worker") == (["Grep"], None)
+
+
+class TestClearingWithNull:
+    _PROFILE_CLEARS = {"avatar_color": None, "agent_invoke_mode": None, "enabled_agents": None,
+                       "provider_models": None, "enabled_plugins": None, "add_dirs": None}
+    _SUBAGENT_CLEARS = {"tools": None, "model": None, "provider_models": None}
+
+    @pytest.mark.asyncio
+    async def test_profile_clears_are_schema_valid_and_applied(self, mock_db, profile_tools):
+        from jsonschema import validate
+        args = {"profile_id": "full", **self._PROFILE_CLEARS}
+        validate(args, get_tool(profile_tools, "updateProfile").input_schema)
+        await _call(profile_tools, "createProfile", {
+            "name": "Full", "avatar_color": "rose", "agent_invoke_mode": "custom",
+            "enabled_agents": ["helper"], "provider_models": {"__native__": "haiku"},
+            "enabled_plugins": ["plug@market"], "add_dirs": ["/srv"]})
+        body = await _call(profile_tools, "updateProfile", args)
+        assert body["success"] is True, body
+        got = await _call(profile_tools, "getProfile", {"profile_id": "full"})
+        assert got["avatar_color"] is None
+        assert not set(self._PROFILE_CLEARS) & set(got["config"])
+
+    @pytest.mark.asyncio
+    async def test_subagent_clears_are_schema_valid_and_applied(self, mock_db, subagent_tools):
+        from jsonschema import validate
+        created = await _call(subagent_tools, "createSubagent", {
+            "name": "Clearable", "description": "d", "prompt": "p", "tools": ["Read"],
+            "model": "haiku", "provider_models": {"__native__": "haiku"}})
+        args = {"subagent_id": created["subagent_id"], **self._SUBAGENT_CLEARS}
+        validate(args, get_tool(subagent_tools, "updateSubagent").input_schema)
+        body = await _call(subagent_tools, "updateSubagent", args)
+        assert body["success"] is True, body
+        got = await _call(subagent_tools, "getSubagent", {"subagent_id": created["subagent_id"]})
+        assert got["tools"] is None and got["model"] is None and not got["provider_models"]

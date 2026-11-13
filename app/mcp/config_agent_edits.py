@@ -97,6 +97,48 @@ def apply_prompt_edits(
     return text, None, excerpts
 
 
+def normalized_system_prompt(value: Any) -> dict[str, Any]:
+    """A stored ``system_prompt`` as a dict: legacy text is custom, and a
+    missing prompt runs on the security text alone, i.e. an empty custom
+    prompt; a dict without a type is a preset."""
+    if isinstance(value, str):
+        return {"type": "custom", "content": value}
+    if not isinstance(value, dict):
+        return {"type": "custom", "content": ""}
+    return value
+
+
+def patch_system_prompt(
+    stored: Any, edits: Any
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
+    """Apply ``prompt_edits`` to a stored ``system_prompt`` without changing its kind.
+
+    A custom prompt patches its content; a preset prompt patches the agent's
+    own text appended to the preset. Returns ``(new_prompt, error, details)``.
+    """
+    current = normalized_system_prompt(stored)
+    custom = current.get("type") == "custom"
+    key = "content" if custom else "append"
+    text, error, excerpts = apply_prompt_edits(current.get(key) or "", edits)
+    if error:
+        return None, error, {}
+    patched = dict(current) if custom else {"preset": "claude_code", **current, "type": "preset"}
+    patched[key] = text
+    return patched, None, {
+        "edited": "custom prompt" if custom else "text appended to the preset",
+        "length": len(text),
+        "changes": excerpts,
+    }
+
+
+def nullable(schema: dict[str, Any]) -> dict[str, Any]:
+    """``schema`` that also accepts null (the update tools' "clear" value)."""
+    result = {**schema, "type": [schema["type"], "null"]}
+    if "enum" in schema:
+        result["enum"] = [*schema["enum"], None]
+    return result
+
+
 def list_ops_schema(list_fields: Iterable[str], map_field: str = "provider_models") -> dict[str, Any]:
     """The ``add`` and ``remove`` properties for the given list fields plus one map."""
     list_fields = tuple(list_fields)

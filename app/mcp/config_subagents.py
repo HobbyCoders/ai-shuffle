@@ -13,9 +13,10 @@ from app.mcp.config_agent_edits import (
     PROMPT_EDITS_SCHEMA,
     apply_list_ops,
     apply_map_ops,
-    apply_prompt_edits,
     list_ops_for,
     list_ops_schema,
+    nullable,
+    patch_system_prompt,
     pruned_provider_models,
     unknown_op_fields,
     validate_profile_fields,
@@ -216,16 +217,16 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 "description": {"type": "string"},
                 "prompt": {"type": "string", "description": "Replaces the whole prompt."},
                 "prompt_edits": PROMPT_EDITS_SCHEMA,
-                "tools": {
+                "tools": nullable({
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "List of allowed tools. Pass null to clear (inherit all).",
-                },
-                "model": {
+                }),
+                "model": nullable({
                     "type": "string",
                     "enum": model_values(),
                     "description": "AI model override. Pass null to inherit from profile.",
-                },
+                }),
                 "skills": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -238,10 +239,10 @@ def _create_subagent_tools(is_admin: bool) -> list:
                     "type": "array",
                     "description": "MCP servers the subagent can access.",
                 },
-                "provider_models": {
+                "provider_models": nullable({
                     **_PROVIDER_MODELS_SCHEMA,
                     "description": _PROVIDER_MODELS_SCHEMA["description"] + " null clears it.",
-                },
+                }),
                 **list_ops_schema(_SUBAGENT_LIST_FIELDS),
             },
             "required": ["subagent_id"],
@@ -300,12 +301,14 @@ def _create_subagent_tools(is_admin: bool) -> list:
             details: dict[str, Any] = {}
 
             if args.get("prompt_edits") is not None:
-                text, edit_error, excerpts = apply_prompt_edits(
-                    existing.get("prompt") or "", args["prompt_edits"])
+                # Same as updateProfile: a preset prompt patches its appended
+                # text, so the preset survives.
+                stored = (database.get_profile(args["subagent_id"]) or {}).get("config") or {}
+                patched, edit_error, details["prompt"] = patch_system_prompt(
+                    stored.get("system_prompt"), args["prompt_edits"])
                 if edit_error:
                     return edit_error, None, None, None, None
-                update_kwargs["prompt"] = text
-                details["prompt"] = {"length": len(text), "changes": excerpts}
+                update_kwargs["system_prompt"] = patched
 
             unmatched: dict[str, Any] = {}
             for field in (*_SUBAGENT_LIST_FIELDS, "provider_models"):
@@ -338,6 +341,8 @@ def _create_subagent_tools(is_admin: bool) -> list:
                     return list_error, None, None, None, None
 
             fields = [k for k in (*updatable_fields, "provider_models") if k in update_kwargs]
+            if "system_prompt" in update_kwargs:
+                fields.insert(0, "prompt")
             if not fields:
                 return "No fields provided to update.", None, None, None, None
 

@@ -13,9 +13,11 @@ from app.mcp.config_agent_edits import (
     PROMPT_EDITS_SCHEMA,
     apply_list_ops,
     apply_map_ops,
-    apply_prompt_edits,
     list_ops_for,
     list_ops_schema,
+    normalized_system_prompt,
+    nullable,
+    patch_system_prompt,
     pruned_provider_models,
     unknown_op_fields,
     validate_profile_fields,
@@ -389,7 +391,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                     **_STRINGS,
                     "description": "Tools blocked in 'disallow' mode; replaces the list ([] blocks nothing).",
                 },
-                **_AGENT_SETTINGS_SCHEMA,
+                **{key: nullable(schema) for key, schema in _AGENT_SETTINGS_SCHEMA.items()},
                 **list_ops_schema(_PROFILE_LIST_FIELDS),
             },
             "required": ["profile_id"],
@@ -521,13 +523,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                 ), None, None, None
 
             # System prompt merge — mirrors createProfile semantics
-            existing_sp = config.get("system_prompt")
-            if isinstance(existing_sp, str):  # legacy plain-text prompt
-                existing_sp = {"type": "custom", "content": existing_sp}
-            elif not isinstance(existing_sp, dict):
-                # No prompt runs on the security text alone (query_options),
-                # i.e. an empty custom prompt; a dict without a type is a preset.
-                existing_sp = {"type": "custom", "content": ""}
+            existing_sp = normalized_system_prompt(config.get("system_prompt"))
             if args.get("system_prompt_content"):
                 config["system_prompt"] = {
                     "type": "custom",
@@ -548,23 +544,11 @@ def _create_profile_tools(is_admin: bool) -> list:
                 }
                 mark("system_prompt")
             elif args.get("prompt_edits") is not None:
-                # A custom prompt patches its content; a preset prompt patches
-                # the agent's own text appended to the preset.
-                custom = existing_sp.get("type") == "custom"
-                key = "content" if custom else "append"
-                text, edit_error, excerpts = apply_prompt_edits(
-                    existing_sp.get(key) or "", args["prompt_edits"])
+                patched, edit_error, details["prompt"] = patch_system_prompt(
+                    existing_sp, args["prompt_edits"])
                 if edit_error:
                     return edit_error, None, None, None
-                patched = dict(existing_sp) if custom else {
-                    "preset": "claude_code", **existing_sp, "type": "preset"}
-                patched[key] = text
                 config["system_prompt"] = patched
-                details["prompt"] = {
-                    "edited": "custom prompt" if custom else "text appended to the preset",
-                    "length": len(text),
-                    "changes": excerpts,
-                }
                 mark("system_prompt")
             # If neither key provided (or both empty string), leave system_prompt untouched.
 
