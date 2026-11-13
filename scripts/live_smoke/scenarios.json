@@ -1280,6 +1280,15 @@
           "past_bug": "#571: import-only WAL hid catch-up GIN record amplification and shared-load outliers; checkpoint or larger-batch throughput alone was not live-latency acceptance."
         },
         {
+          "id": "harness-basics.delegated-cli-context-limits",
+          "check": "Delegated Claude chats get the CLI context limits, no auto-memory and every skill in the compact list",
+          "kind": "owner",
+          "needs": ["provider"],
+          "how": "In a throwaway delegated chat on the cheapest Claude model on the subscription (never an API key), confirm the CLI child's env carries BASH_MAX_OUTPUT_LENGTH=12000, MAX_MCP_OUTPUT_TOKENS=8000 and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1. Plant a canary line in the project's ~/.claude/projects/<project>/memory/MEMORY.md and a codeword in its CLAUDE.md, and ask for both. Read the appended prompt's # More skills section. Change BASH_MAX_OUTPUT_LENGTH in the agent profile's env and send a message, then send one more with nothing changed. Then restart the disposable worker with BASH_MAX_OUTPUT_LENGTH=40000 in its own environment and no profile value, and check the child env again. Remove the canary and settle the explicitly hidden chat.",
+          "pass_when": "The child env has the three values. The model sees the CLAUDE.md codeword but not the canary. Every Fluid skill is listed, one short line each with shared folders named once, including skills Claude Code also lists. The profile change gives one fresh client with reason delegated_cli_limits, and the unchanged message reuses it. With the worker's own 40000 and no profile value, the child env keeps 40000.",
+          "past_bug": "#1540: PR #1536's limits, memory switch and compact skills list were checked only by unit tests and direct CLI probes."
+        },
+        {
           "id": "harness-basics.generation-conversation-preferences",
           "check": "Generation preferences can be read and edited in conversation without submission",
           "kind": "owner",
@@ -1496,6 +1505,15 @@
           "how": "Use a disposable candidate container with only synthetic data, never a live worker or database. Activate a staged source update and capture the supervisor log across old-app stop and replacement startup. Compare source_database_bytes and copied_database_bytes with read-only pg_database_size queries. Repeat with a candidate that fails after a schema/data migration and verify rollback restores the exact pre-update rows and schema. A dev-instance UI journey cannot activate this container-supervisor update path; the producing-path lab and unit tests cover it separately.",
           "pass_when": "Snapshot start and one terminal complete/failed record bracket copying, with total seconds, cumulative copy seconds, attempts and database-file bytes (not device-write or WAL bytes). Successful copy precedes child-spawn start and PID/elapsed logging. Failed copies never claim completed bytes. No arguments, environments or connection details appear in the new records. FILE_COPY, process deadlines and rollback protection remain unchanged, and failed-update rollback restores the synthetic data exactly. The next installed-container update remains unverified until these real producing-path receipts exist.",
           "past_bug": "An uninstrumented shutdown-to-startup gap made database-copy time indistinguishable from application startup."
+        },
+        {
+          "id": "harness-basics.repeat-result-pointer",
+          "check": "A repeat Read or Skill load points at the earlier result only while it is still in view",
+          "kind": "owner",
+          "needs": ["provider", "install"],
+          "how": "On a disposable candidate worker started with FLUID_CODE_MODE=false (code-mode cells collapse repeats through their own refs and never get these pointers), open a disposable native agent chat on GPT 6.1 Sol through the subscription, never an API key. Ask it to Read one file over 1,000 characters twice, then load one skill twice. Then edit the file and Read it again, and finally repeat the same Read twice in a row after a pointer. Settle the explicitly hidden chat.",
+          "pass_when": "The second Read and the second Skill load each return an \"[already in view:\" note naming the earlier result instead of the content. The Read after the edit returns the full new content. The identical repeat right after a pointer returns the full content. The model answers questions about the file correctly after a pointer and does not re-read it in a loop.",
+          "past_bug": "#1539: skill instructions were reloaded mid-chat about 150 times a week (about 7.6k characters each) and identical Read, Grep and Glob calls re-sent content still above."
         },
         {
           "id": "harness-basics.rewind-file-restore-retired",

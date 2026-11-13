@@ -150,7 +150,17 @@ def test_delegated_append_drops_guidance_for_tools_off_the_surface(tmp_path):
     text = ha._delegated_append_text("APPEND TEXT", options, _memory_registry())
     # Incoming peer work is independent of the receiver's outgoing tool surface.
     from fluid.context.peer import PROMPT_BLOCK
-    assert text == "APPEND TEXT\n\n" + PROMPT_BLOCK
+    # The batching rule names no tool, so it rides every surface.
+    batching = ha.DELEGATED_TOOL_USE_HEADER + ha.DELEGATED_BATCHING_RULE
+    assert text == "APPEND TEXT\n\n" + PROMPT_BLOCK + "\n\n" + batching
+
+
+def test_batching_rule_follows_the_file_tool_rule_on_a_code_session(tmp_path):
+    options = _preset_options(tmp_path)
+    blocks = ha._delegated_guidance_blocks(options, _memory_registry())
+    assert blocks[0] == f"{ha.DELEGATED_TOOL_USE_BLOCK}\n{ha.DELEGATED_BATCHING_RULE}"
+    # The file-tool rule already says to search with Glob and Grep.
+    assert "rather than find/grep through Bash" not in "\n".join(blocks)
 
 
 @pytest.mark.asyncio
@@ -705,6 +715,41 @@ def test_delegated_skills_block_marks_plugin_skills_opt_in():
     assert "- unslop:unslop: Humanize prose (/u/SKILL.md)" in mixed
 
     assert ha._delegated_skills_block([hidden]) is None
+
+
+def test_delegated_skills_block_is_one_short_line_per_skill():
+    """Descriptions are cut near 100 characters, and skills sharing a folder
+    are listed under one line naming it instead of repeating the path."""
+    from fluid.context.instructions import Skill
+
+    long = "word " * 60
+    a = Skill(name="alpha", description=long, path="/s/alpha/SKILL.md", scope="global")
+    b = Skill(name="beta", description="Short one", path="/s/beta/SKILL.md", scope="global")
+    lone = Skill(name="gamma", description="Elsewhere", path="/o/gamma/SKILL.md", scope="project")
+    text = ha._delegated_skills_block([a, b, lone])
+    lines = text.splitlines()
+    assert "- gamma: Elsewhere (/o/gamma/SKILL.md)" in lines
+    at = lines.index("In /s/<name>/SKILL.md:")
+    assert lines[at + 1].startswith("- alpha: word") and lines[at + 1].endswith("…")
+    assert len(lines[at + 1]) <= len("- alpha: ") + ha.DELEGATED_SKILL_SUMMARY_CHARS
+    assert lines[at + 2] == "- beta: Short one"
+    assert "/s/alpha/SKILL.md" not in text
+
+
+def test_delegated_append_lists_every_skill_the_same_way_each_turn(tmp_path, _isolated_home):
+    """Every fluid skill stays in "More skills", even one Claude Code also
+    lists from its own skills folder, and the appended text is byte-identical
+    across builds when nothing on disk changed, so the prompt cache holds."""
+    project = tmp_path / "proj"
+    for folder in (project / ".fluid" / "skills", _isolated_home / ".claude" / "skills"):
+        (folder / "deploy").mkdir(parents=True)
+        (folder / "deploy" / "SKILL.md").write_text(
+            "---\nname: deploy\ndescription: Ship a build\n---\nbody", encoding="utf-8",
+        )
+
+    first = ha._delegated_append_text("APPEND TEXT", _preset_options(project), ToolRegistry())
+    assert "- deploy: Ship a build (" in first
+    assert ha._delegated_append_text("APPEND TEXT", _preset_options(project), ToolRegistry()) == first
 
 
 # ─── Claude Code compactions become the chat's compaction card ──────────────

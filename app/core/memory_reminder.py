@@ -12,7 +12,9 @@ The rule now:
   Claude Code compaction (unless its SessionStart put-back already carried the
   current one), after a rewind or fork that left it off the active path, after
   a delegated slash command other than ``/compact``, after a model/provider
-  switch, and on a fresh adapter that cannot prove what the history holds.
+  switch that involves the CLI or an ACP leg (native to native renders the
+  same stored path, so the copy is still in the request), and on a fresh
+  adapter that cannot prove what the history holds.
   A CLI restarted without history (including a rejected --resume handle)
   gets the snapshot before its first frame. Retry-from-here restores missing
   or changed memory at the tail without rewriting the saved request.
