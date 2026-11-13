@@ -420,7 +420,8 @@ async def _dispatch_remote(
     from app.core import provider_capability
 
     # A capability-gated provider row cannot run on that worker (#1519).
-    gap = await asyncio.to_thread(provider_capability.refusal, worker["device_id"], provider_id)
+    gap = await asyncio.to_thread(provider_capability.picks_refusal, worker["device_id"],
+                                  [provider_id, model_id], profile_id=profile_id)
     if gap:
         return {"ok": False, "error": f"{gap} Omit worker to run it here; {NOT_DISPATCHED}."}
     from app.core import spending_limits
@@ -1359,11 +1360,22 @@ def _retry_at(attempts: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
 
 
+def _parent_refusal(worker_id: str, parent_device_id: str) -> Optional[str]:
+    """Why the parent worker cannot take ``worker_id``'s report yet: it lacks a
+    provider capability the caller's chat names (#1519). Blocking."""
+    from app.core import provider_capability
+
+    parent = remote_parent(worker_id)
+    return provider_capability.session_refusal(parent_device_id, (parent or {}).get("owner_session_id"))
+
+
 async def deliver_due() -> int:
     """Send every owed report that is due. Returns how many were acknowledged.
 
     A refusal (4xx) is final and kept as ``refused``; an unreachable parent,
-    or this worker being off the network, is retried with backoff.
+    or this worker being off the network, is retried with backoff; a parent
+    that lacks a provider capability the caller's chat names is re-checked on
+    every sweep and sent once it reports it (#1519).
     """
     from app.db import remote_tasks
     from app.network import control
@@ -1375,6 +1387,18 @@ async def deliver_due() -> int:
             # A newer report may replace this one while it is on the wire; only
             # the one sent is settled (#1812).
             sent = row.get("completion_id")
+            # The report wakes the caller there (#1519): a parent worker that
+            # cannot run its provider row gets it once updated. Kept owed and
+            # re-checked on every sweep (no backoff step), warned about once.
+            reason = await asyncio.to_thread(_parent_refusal, worker_id, row["parent_device_id"])
+            if reason:
+                if reason != row.get("last_error"):
+                    logger.warning("remote_task: report of %s kept until that worker is updated: %s",
+                                   worker_id, reason)
+                await asyncio.to_thread(remote_tasks.retry_report_later, worker_id,
+                                        next_attempt_at=remote_tasks.utc_now_iso(), error=reason,
+                                        attempt=False)
+                continue
             try:
                 answer = await control.call(row["parent_device_id"], TASK_REPORT_ACTION,
                                             row["report"], timeout=REPORT_TIMEOUT)

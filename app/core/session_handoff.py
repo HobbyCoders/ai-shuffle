@@ -188,7 +188,7 @@ def _refuse_incapable(session_id: str, target_id: str) -> None:
     """Raise ``ValueError`` when the chat's provider row cannot run on the target (#1519)."""
     from app.core import provider_capability
 
-    reason = provider_capability.turn_refusal(target_id, session_id)
+    reason = provider_capability.session_refusal(target_id, session_id)
     if reason:
         raise ValueError(f"{reason} Nothing was queued; pick another worker.")
 

@@ -176,10 +176,8 @@ def test_hand_off_and_automation_owner_refuse_an_incapable_worker(workers, monke
         with pytest.raises(ValueError, match="Old worker needs an update to use Gemini key"):
             session_handoff._refuse_incapable("s1", b.device_id)
         session_handoff._refuse_incapable("s1", a.device_id)  # this worker can
-        # A native Claude pick that the row does not curate runs natively:
-        # the same binding rule as a turn, so no false refusal.
-        db.create_session("s2", "default", provider_id="gem", model="sonnet",
-                          derive_provider_from_profile=False)
+        # A chat that names no gated row moves freely.
+        db.create_session("s2", "default", model="sonnet", derive_provider_from_profile=False)
         session_handoff._refuse_incapable("s2", b.device_id)
 
         db.create_automation(automation_id="auto1", name="Nightly", trigger_type="schedule",
@@ -209,6 +207,15 @@ def test_remote_task_on_a_gated_row_is_not_dispatched(workers, monkeypatch):
     assert result["ok"] is False
     assert "Old worker needs an update to use Gemini key" in result["error"]
     assert remote_task.NOT_DISPATCHED in result["error"]
+    # A bare model id the gated row lists, with no provider, is refused too.
+    with a.active():
+        result = asyncio.run(remote_task._dispatch_remote(
+            worker={"device_id": b.device_id, "device_name": "Old worker"}, caller_row={},
+            caller_session_id="s1", root_session_id="s1", depth=1, profile_id="default",
+            agent_name="Task", result_agent="Task", provider_id=None, model_id="gemini-2.5-pro",
+            effort=None, effort_explicit=False, prompt="do it", label="Task", roster_name=None,
+            mode=None, launch_tool_use_id=None, tool_allowlist=None, stop_generation=None))
+    assert result["ok"] is False and "needs an update" in result["error"]
 
 
 def test_provider_list_reports_workers_needing_an_update(workers):
@@ -299,15 +306,57 @@ def test_turns_without_overrides_follow_the_session_binding(workers, monkeypatch
             asyncio.run(voice_remote.submit(b.device_id, {"id": "s-gem", "profile_id": "default"},
                                             "hello", instructions="be brief"))
         assert sent == []
-        # A turn that rebinds to native Claude, or to an ungated row, may go.
-        db.create_model_provider("or", "OpenRouter", "openrouter", "https://openrouter.ai/api")
-        asyncio.run(control.submit_turn(b.device_id, "s-gem", prompt="hi", overrides={"model": "sonnet"}))
-        asyncio.run(control.submit_turn(b.device_id, "s-gem", prompt="hi",
-                                        overrides={"model": "prov:or:openai/gpt-5"}))
         # This worker, and a session on a native binding, are never judged.
-        db.create_session("s-native", "default", derive_provider_from_profile=False)
+        db.create_session("s-native", "default", model="sonnet", derive_provider_from_profile=False)
         asyncio.run(control.submit_turn(b.device_id, "s-native", prompt="hi"))
-        assert len(sent) == 2 + 1
+        asyncio.run(control.submit_turn(a.device_id, "s-gem", prompt="hi"))
+        assert len(sent) == 2
+
+
+def test_any_gated_pick_refuses_without_predicting_the_binding(workers, monkeypatch):
+    """Nothing predicts which row the older worker would bind: any session or
+    turn value naming a gated row refuses, and only those do."""
+    from app.core import credential_gate
+    from app.network import control
+
+    a, b = _network_with_old_worker(workers)
+    _no_send(monkeypatch)
+    refused = provider_capability.session_refusal
+    with a.active():
+        db.create_model_provider("or", "OpenRouter", "openrouter", "https://openrouter.ai/api")
+        _gemini_session(owner=b.device_id)
+        # The session's own row is gated: a turn picking another row or native
+        # Claude is refused too (the older worker may still bind Gemini).
+        for overrides in ({"provider": "or"}, {"model": "sonnet"}, {"model": "prov:or:openai/gpt-5"}):
+            assert "needs an update" in refused(b.device_id, "s-gem", overrides)
+        # A bare model id the gated row lists, with no provider.
+        db.create_session("s-bare", "default", model="gemini-2.5-pro", derive_provider_from_profile=False)
+        assert "needs an update" in refused(b.device_id, "s-bare")
+        # Only the launched model names it.
+        db.create_session("s-launch", "default", derive_provider_from_profile=False)
+        with db.get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET launched_model='prov:gem:gemini-2.5-pro' WHERE id='s-launch'")
+        assert "needs an update" in refused(b.device_id, "s-launch")
+        # A native or ungated session, and a turn picking the gated row on it.
+        db.create_session("s-or", "default", provider_id="or", model="openai/gpt-5",
+                          derive_provider_from_profile=False)
+        assert refused(b.device_id, "s-or") is None
+        assert refused(b.device_id, "s-or", {"model": "sonnet"}) is None
+        assert "needs an update" in refused(b.device_id, "s-or", {"model": "prov:gem:gemini-2.5-pro"})
+        assert "needs an update" in refused(b.device_id, "s-or", {"provider": "gem"})
+        with pytest.raises(control.ControlRefused, match="needs an update"):
+            asyncio.run(control.submit_turn(b.device_id, "s-or", prompt="hi", overrides={"provider": "gem"}))
+        # Bound to nothing: the default run model decides.
+        db.create_session("s-none", "default", derive_provider_from_profile=False)
+        monkeypatch.setattr(credential_gate, "default_run_model", lambda **kw: (None, "sonnet"))
+        assert refused(b.device_id, "s-none") is None
+        monkeypatch.setattr(credential_gate, "default_run_model", lambda **kw: ("gem", "gemini-2.5-pro"))
+        assert "needs an update" in refused(b.device_id, "s-none")
+        # This worker, and a worker that reports the capability, never.
+        assert refused(a.device_id, "s-gem") is None
+        _set_presence(b.device_id, {gemini_provider.CAPABILITY: 1})
+        assert refused(b.device_id, "s-gem") is None
+        assert refused(b.device_id, "s-none") is None
 
 
 def test_a_refused_held_message_is_kept_and_reported(workers, monkeypatch):
@@ -363,25 +412,86 @@ def _outbox(stop_reason):
                 for row in cursor.fetchall()]
 
 
-def test_started_chat_reports_to_an_incapable_worker_are_kept_refused(workers, monkeypatch):
+def test_started_chat_reports_wait_for_the_worker_update_then_arrive(workers, monkeypatch, caplog):
     from app.core import session_orchestration as orch
+    from app.network import control
 
     a, b = _network_with_old_worker(workers)
-    sent = _no_send(monkeypatch)
+    sent = []
+
+    async def call(device_id, action, body=None, **kwargs):
+        sent.append((device_id, action, (body or {}).get("session_id") or (body or {}).get("home")))
+        return {"delivered": True}
+
+    monkeypatch.setattr(control, "call", call)
     frame = {"task_id": "child", "agent_message_turn_id": "t9", "status": "completed", "summary": "done"}
+    caplog.set_level(logging.WARNING, logger=orch.log.name)
     with a.active():
         _gemini_session(owner=b.device_id)
-        # Forwarded from the outbox: refused for good, with the reason.
+        db.create_model_provider("or", "OpenRouter", "openrouter", "https://openrouter.ai/api")
+        db.create_session("s-or", "default", provider_id="or", model="openai/gpt-5",
+                          derive_provider_from_profile=False)
+        with db.get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET owner_device_id=%s WHERE id='s-or'", (b.device_id,))
+        # A report forwarded from the outbox, and the first report of a chat
+        # the assistant started from that worker.
         orch._owe_forward("s-gem", b.device_id, frame, 0)
-        asyncio.run(orch.deliver_forwarded_reports(force=True))
-        # The first report of a chat the assistant started from that worker.
+        orch._owe_forward("s-or", b.device_id, dict(frame, task_id="other"), 0)
         monkeypatch.setattr(orch, "build_started_report", lambda *args: (None, b.device_id, dict(frame, task_id="c2")))
         monkeypatch.setattr(orch, "_report_sender", lambda session_id: "s-gem")
         asyncio.run(orch.report_settled_start("c2", {"id": "t9"}, "completed"))
-        refused = _outbox(orch._FORWARD_REFUSED)
-    assert sent == []
-    assert sorted(r["report"]["task_id"] for r in refused) == ["c2", "child"]
-    assert all("Old worker needs an update to use Gemini key" in r["error"] for r in refused)
+        for _ in range(3):
+            asyncio.run(orch.deliver_forwarded_reports(force=True))
+        # Kept pending with the reason; the report for a chat it can run went.
+        kept = _outbox(orch._FORWARD_PENDING)
+        assert sorted(r["report"]["task_id"] for r in kept) == ["c2", "child"]
+        assert all("Old worker needs an update to use Gemini key" in r["deferred"] for r in kept)
+        assert _outbox(orch._FORWARD_REFUSED) == []
+        assert sent == [(b.device_id, orch.FORWARD_REPORT_ACTION, "s-or")]
+        # One warning per report, not one per pass.
+        assert caplog.text.count("kept until that worker is updated") == 2
+        # The worker updates: the next pass sends both, each its own way.
+        _set_presence(b.device_id, {gemini_provider.CAPABILITY: 1})
+        provider_capability.recheck([b.device_id])
+        assert asyncio.run(orch.deliver_forwarded_reports()) == 2
+        assert _outbox(orch._FORWARD_PENDING) == []
+    assert sorted(sent[1:]) == sorted([(b.device_id, orch.FORWARD_REPORT_ACTION, "s-gem"),
+                                       (b.device_id, orch.REPORT_ACTION, "c2")])
+
+
+def test_task_reports_wait_for_the_worker_update_then_arrive(workers, monkeypatch, caplog):
+    from app.core import remote_task
+    from app.db import remote_tasks
+    from app.network import control
+
+    a, b = _network_with_old_worker(workers)
+    sent = []
+
+    async def call(device_id, action, body=None, **kwargs):
+        sent.append((device_id, action))
+        return {"delivered": True}
+
+    monkeypatch.setattr(control, "call", call)
+    monkeypatch.setattr(remote_task, "remote_parent", lambda session_id: {
+        "device_id": b.device_id, "owner_session_id": "main", "parent_session_id": "main"})
+    caplog.set_level(logging.WARNING, logger=remote_task.logger.name)
+    with a.active():
+        _gemini_session("main", owner=b.device_id)
+        with db.get_db() as conn:
+            remote_tasks.record_child("child", b.device_id, conn=conn)
+        assert remote_tasks.owe_report("child", "c1", {"worker_session_id": "child"})
+        for _ in range(3):
+            assert asyncio.run(remote_task.deliver_due()) == 0
+        owed = remote_tasks.due_reports()
+        assert [r["worker_session_id"] for r in owed] == ["child"]
+        assert "Old worker needs an update to use Gemini key" in owed[0]["last_error"]
+        assert int(owed[0]["attempts"] or 0) == 0
+        assert caplog.text.count("kept until that worker is updated") == 1
+        assert sent == []
+        _set_presence(b.device_id, {gemini_provider.CAPABILITY: 1})
+        assert asyncio.run(remote_task.deliver_due()) == 1
+        assert remote_tasks.due_reports() == []
+    assert sent == [(b.device_id, remote_task.TASK_REPORT_ACTION)]
 
 
 def test_task_messages_to_an_incapable_worker_are_refused_with_the_reason(workers, monkeypatch):
@@ -423,6 +533,53 @@ def test_automation_steps_decide_the_owner_check(workers):
         assert automation_service.owner_refusal(existing, {"action_steps": [dict(step, model="sonnet")]}) is None
         with pytest.raises(ValueError, match="needs an update"):
             asyncio.run(automation_service.update_automation("auto3", action_steps=[step]))
+
+
+def _full_form(automation, **changes):
+    """What the edit form (AutomationsCard) sends on every save: every field."""
+    form = {"name": automation["name"], "description": None,
+            "triggers": [{"type": "cron", "config": {"cron": "0 0 * * *", "timezone": "UTC"}}],
+            "trigger_type": "cron", "trigger_config": {"cron": "0 0 * * *", "timezone": "UTC"},
+            "prompt": automation.get("prompt") or None, "profile_id": automation["profile_id"],
+            "project_id": None, "output_config": None, "action_steps": automation.get("action_steps") or None,
+            "max_turns": None, "timeout_seconds": None, "max_cost_per_run": None, "max_cost_per_day": None,
+            "max_cost_total": None, "max_runs_per_day": None, "requires_approval": False,
+            "model": automation.get("model") or None}
+    form.update(changes)
+    return form
+
+
+def test_a_full_form_edit_rechecks_only_what_it_adds(workers):
+    """The edit form resends every field: renaming a Gemini automation whose
+    owner lost the capability is not refused; adding Gemini to one it owns is."""
+    from fastapi import HTTPException
+
+    from app.api import automations as api
+    from app.core.models import AutomationUpdate
+
+    a, b = _network_with_old_worker(workers)
+    with a.active():
+        db.create_automation(automation_id="auto4", name="Nightly", trigger_type="schedule",
+                             trigger_config={"cron": "0 0 * * *"}, prompt="do", profile_id="default",
+                             model="prov:gem:gemini-2.5-pro")
+        db.create_automation(automation_id="auto5", name="Plain", trigger_type="schedule",
+                             trigger_config={"cron": "0 0 * * *"}, prompt="do", profile_id="default")
+        with db.get_db() as conn:
+            conn.cursor().execute("UPDATE automations SET owner_device_id=%s WHERE id IN ('auto4','auto5')",
+                                  (b.device_id,))
+
+        def patch(automation_id, **changes):
+            form = _full_form(db.get_automation(automation_id), **changes)
+            return asyncio.run(api.update_automation_endpoint(automation_id, AutomationUpdate(**form), token=None))
+
+        assert patch("auto4", name="Nightly (renamed)")["name"] == "Nightly (renamed)"
+        assert patch("auto4", prompt="do it better")["prompt"] == "do it better"
+        assert patch("auto5", name="Plain (renamed)")["name"] == "Plain (renamed)"
+        with pytest.raises(HTTPException) as refused:
+            patch("auto5", model="prov:gem:gemini-2.5-pro")
+        assert refused.value.status_code == 400
+        assert "Old worker needs an update to use Gemini key" in refused.value.detail
+        assert db.get_automation("auto5")["model"] in (None, "")
 
 
 def test_a_legacy_instance_id_names_the_same_worker(workers, monkeypatch):

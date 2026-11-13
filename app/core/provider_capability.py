@@ -157,60 +157,82 @@ def provider_of_model(value: Any) -> Optional[str]:
     return decoded[0] if decoded else None
 
 
-def turn_provider(session_id: Optional[str], overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
-    """The provider row a turn of ``session_id`` with ``overrides`` runs on, or None (native).
-
-    The binding rule of ``app/api/query.py`` ``_request_binding`` (which
-    mirrors ``query_options``): the model picked (this turn's, else the
-    session's) binds its row when it is a ``prov:`` value; otherwise the
-    turn's explicit provider, else the session's bound row, which a plain
-    Claude pick that row does not curate clears back to native.
-    """
-    overrides = overrides or {}
-    selected = overrides.get("model")
-    picked = provider_of_model(selected)
-    if picked:
-        return picked
+def session_refusal(device_id: Optional[str], session_id: Optional[str],
+                    overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    """Why ``device_id`` must not be sent work that can run a turn of
+    ``session_id`` (with ``overrides``), or None: :func:`picks_refusal` over
+    the session's provider, model and launched model and the turn's
+    ``provider`` and ``model``. Reads nothing for this worker or outside a
+    network. Blocking: call off the event loop."""
+    if _other_worker(device_id) is None:
+        return None
     session: Mapping[str, Any] = {}
     if session_id:
         from app.db import sessions
 
         session = sessions.get_session(session_id) or {}
-    selected = selected or session.get("model")
-    picked = provider_of_model(selected)
-    if picked:
-        return picked
-    if overrides.get("provider"):
-        return overrides["provider"]
-    bound = session.get("provider_id")
-    if bound and selected:
-        from app.core.query_options import is_native_claude_model
-
-        if is_native_claude_model(selected):
-            from app.core.provider_agent import curated_model_ids
-            from app.db import model_providers as provider_db
-
-            if selected not in curated_model_ids(provider_db.resolve_model_provider(bound)):
-                return None
-    return bound
+    overrides = overrides or {}
+    return picks_refusal(device_id, [session.get("provider_id"), session.get("model"),
+                                     session.get("launched_model"), overrides.get("provider"),
+                                     overrides.get("model")],
+                         profile_id=session.get("profile_id"))
 
 
-def turn_refusal(device_id: Optional[str], session_id: Optional[str],
-                 overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
-    """Why ``device_id`` must not run a turn of ``session_id`` (with
-    ``overrides``), or None. Reads nothing for this worker or outside a
-    network. Blocking: call off the event loop."""
+def picks_refusal(device_id: Optional[str], picks: Iterable[Any], *,
+                  profile_id: Optional[str] = None) -> Optional[str]:
+    """Why ``device_id`` must not run work that names ``picks`` (provider row
+    ids and model values), or None.
+
+    Conservative on purpose: the worker refused is an older build, whose own
+    binding rule differs (v1.2.1 guesses the provider from the model name),
+    so nothing here predicts which row a turn would bind. Refused when ANY
+    pick names a gated row that worker cannot run: the row id, a ``prov:``
+    value, or a bare model id the row lists. With no pick at all, the
+    agent's (``profile_id``) provider and model and the default run model
+    count instead. Refusing too much costs an update of that worker;
+    refusing too little runs gated work on it. Never refuses this worker,
+    outside a network, or with no gated row. Blocking.
+    """
     if _other_worker(device_id) is None:
         return None
-    return refusal(device_id, turn_provider(session_id, overrides))
+    from app.db import model_providers as provider_db
+
+    gated = [r for r in provider_db.get_all_model_providers() if capability_for(r.get("provider_type"))]
+    if not gated:
+        return None
+    picks = list(picks)
+    if not any(picks):
+        picks = _unbound_picks(profile_id)
+    values = {v for v in picks if isinstance(v, str) and v}
+    named = {provider_of_model(v) or v for v in values}
+    from app.core.provider_agent import curated_model_ids
+
+    for row in gated:
+        if row["id"] in named or values & set(curated_model_ids(row)):
+            reason = refusal(device_id, row=row)
+            if reason:
+                return reason
+    return None
 
 
-def automation_refusal(device_id: Optional[str], automation: Mapping[str, Any]) -> Optional[str]:
-    """Why ``device_id`` must not run ``automation``, or None: its prompt's
-    provider and each ``send_prompt`` step's, as a run resolves them
+def _unbound_picks(profile_id: Optional[str]) -> List[Optional[str]]:
+    """What work bound to nothing may still run on: its agent's provider and
+    model and the default run model (both ways it is picked)."""
+    from app.core.credential_gate import default_run_model
+    from app.db import database
+
+    profile = database.get_profile(profile_id) if profile_id else None
+    config = (profile or {}).get("config") or {}
+    picks: List[Optional[str]] = [config.get("provider"), config.get("model")]
+    for most_used in (True, False):
+        picks.extend(default_run_model(probe=False, prefer_most_used=most_used))
+    return picks
+
+
+def automation_providers(automation: Mapping[str, Any]) -> List[str]:
+    """The provider rows ``automation``'s runs use: its prompt's and each
+    ``send_prompt`` step's, as a run resolves them
     (``automation_service.resolve_automation_model``). Blocking."""
-    if _other_worker(device_id) is None:
-        return None
     from app.core.automation_service import resolve_automation_model
 
     picks = []
@@ -219,8 +241,18 @@ def automation_refusal(device_id: Optional[str], automation: Mapping[str, Any]) 
     for step in automation.get("action_steps") or []:
         if isinstance(step, dict) and step.get("type") == "send_prompt":
             picks.append(resolve_automation_model(dict(automation), step))
-    for pick in picks:
-        reason = refusal(device_id, pick.get("provider_id"))
+    return list(dict.fromkeys(p["provider_id"] for p in picks if p.get("provider_id")))
+
+
+def automation_refusal(device_id: Optional[str], automation: Mapping[str, Any], *,
+                       besides: Iterable[str] = ()) -> Optional[str]:
+    """Why ``device_id`` must not run ``automation``, or None. ``besides``:
+    rows not judged (an edit judges only the rows it adds). Blocking."""
+    if _other_worker(device_id) is None:
+        return None
+    skip = set(besides)
+    for provider_id in automation_providers(automation):
+        reason = None if provider_id in skip else refusal(device_id, provider_id)
         if reason:
             return reason
     return None

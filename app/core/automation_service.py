@@ -861,14 +861,17 @@ def owner_refusal(existing: Dict[str, Any], changes: Dict[str, Any]) -> Optional
     An owned automation runs on its owner device, so an edit that changes
     what it runs on must not pick a provider row the owner cannot run
     (#1519). Unowned ones are not judged: the worker that claims a run is
-    the one that runs it. Blocking.
+    the one that runs it. Only rows the edit adds are judged: the edit form
+    resends every field, so a rename or a new schedule changes nothing it
+    runs on and is never refused. Blocking.
     """
     owner = existing.get("owner_device_id")
     if not owner or not (_RUNS_ON_KEYS & changes.keys()):
         return None
     from app.core import provider_capability
 
-    return provider_capability.automation_refusal(owner, {**existing, **changes})
+    return provider_capability.automation_refusal(
+        owner, {**existing, **changes}, besides=provider_capability.automation_providers(existing))
 
 
 async def update_automation(automation_id: str, **kwargs) -> Optional[Dict]:

@@ -1966,8 +1966,10 @@ async def _start_remote(plan, sender_id, sender_generation):
     if not plan.get("readback_only"):
         # A capability-gated provider row cannot run there (#1519).
         from app.core import provider_capability
-        refusal = await asyncio.to_thread(provider_capability.refusal, remote["device_id"],
-                                          plan["body"].get("provider_id"))
+        refusal = await asyncio.to_thread(
+            provider_capability.picks_refusal, remote["device_id"],
+            [plan["body"].get("provider_id"), plan["body"].get("model")],
+            profile_id=plan["body"].get("profile_id"))
         if refusal:
             await release()
             raise ValueError(f"{refusal} Nothing was started; pick another worker or provider.")
@@ -2226,15 +2228,17 @@ async def report_settled_start(session_id, settled, outcome):
             # retries it, so it may steer into a live turn without a receipt.
             await deliver_started_report(home, frame, steer=True)
             return
+        from app.core import provider_capability
         from app.network import control
         sender = await asyncio.to_thread(_report_sender, session_id)
-        try:
-            # The report wakes the assistant's chat there, on its provider row (#1519).
-            await control.refuse_incapable(device, sender)
-        except control.ControlRefused as exc:
-            # Kept here, refused for good, with the reason: never dropped.
-            await asyncio.to_thread(_owe_forward, sender, device, frame, 0, refused=str(exc))
-            log.warning("Report of started chat %s not sent: %s", session_id, exc)
+        # The report wakes the assistant's chat there (#1519): a worker that
+        # cannot run its provider row gets it once updated, from the outbox.
+        reason = await asyncio.to_thread(provider_capability.session_refusal, device, sender)
+        if reason:
+            await asyncio.to_thread(_owe_forward, sender, device, frame, 0,
+                                    deferred=reason, report_of=session_id)
+            log.warning("Report of started chat %s kept until that worker is updated: %s",
+                        session_id, reason)
             return
         await control.call(device, REPORT_ACTION, {"session_id": session_id, "report": frame},
                            timeout=REMOTE_TIMEOUT)
@@ -2369,29 +2373,33 @@ def _report_sender(session_id):
     return ((start or {}).get("payload") or {}).get("orchestration_sender")
 
 
-def _owe_forward(home, device, frame, hops, refused=None):
+def _owe_forward(home, device, frame, hops, *, deferred=None, report_of=None):
     """Keep the report in the outbox. One pending row per report id; True when new.
 
-    ``refused``: kept already refused for good, with that reason."""
+    ``deferred``: why ``device`` cannot take it yet (it lacks a provider
+    capability, #1519); the outbox re-checks that on every pass.
+    ``report_of``: the started chat whose first report this is, sent later
+    to ``device`` as that chat's own report (``REPORT_ACTION``)."""
     from app.db import turns
     from app.db.base import transaction
     event_id = report_event_id(home, frame)
-    stop_reason = _FORWARD_REFUSED if refused else _FORWARD_PENDING
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s AND stop_reason=%s",
-                       (REPORT_OUTBOX, event_id, stop_reason))
+                       (REPORT_OUTBOX, event_id, _FORWARD_PENDING))
         if cursor.fetchone():
             return False
         payload = {"home": home, "device_id": device, "report": frame, "hops": hops,
                    "attempts": 0, "next_attempt_at": 0}
-        if refused:
-            payload["error"] = refused[:500]
+        if deferred:
+            payload["deferred"] = deferred[:500]
+        if report_of:
+            payload["report_of"] = report_of
         row = turns.enqueue_turn(REPORT_OUTBOX, "agent_message", command_id=event_id,
                                  payload=payload, _conn=conn)
         # Settled at birth, like the remote start receipts: never runnable.
         cursor.execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW(), "
-                       "stop_reason=%s WHERE id=%s", (stop_reason, row["id"]))
+                       "stop_reason=%s WHERE id=%s", (_FORWARD_PENDING, row["id"]))
     return True
 
 
@@ -2406,7 +2414,10 @@ def pending_forwarded_reports():
         return [turns._row(row) for row in cursor.fetchall()]
 
 
-def _settle_forward(row_id, *, delivered=False, refused=None, attempts=None, device=None):
+def _settle_forward(row_id, *, delivered=False, refused=None, attempts=None, device=None, deferred=None):
+    """Delete a delivered row, refuse it for good, defer it (``deferred``:
+    kept pending and re-checked on the next pass, no backoff), or retry it
+    with backoff."""
     import time
     from app.db.base import get_db
     with get_db() as conn:
@@ -2425,8 +2436,14 @@ def _settle_forward(row_id, *, delivered=False, refused=None, attempts=None, dev
             cursor.execute("UPDATE turns SET stop_reason=%s, payload=%s WHERE id=%s",
                            (_FORWARD_REFUSED, json.dumps(payload), row_id))
             return
-        payload["attempts"] = attempts
         payload["device_id"] = device or payload.get("device_id")
+        if deferred is not None:
+            payload["deferred"] = deferred[:500]
+            payload["next_attempt_at"] = 0
+            cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row_id))
+            return
+        payload.pop("deferred", None)
+        payload["attempts"] = attempts
         delay = _FORWARD_RETRY_SECONDS[min(max(attempts - 1, 0), len(_FORWARD_RETRY_SECONDS) - 1)]
         payload["next_attempt_at"] = time.time() + delay
         cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row_id))
@@ -2539,8 +2556,10 @@ async def deliver_forwarded_reports(*, force=False):
     """Send every due outbox report to the worker that runs its chat now.
 
     Run after each new report and from the remote report sweep (boot, then
-    every 30 s). An unreachable or older owner is retried with backoff; a
-    refusal is final and kept as ``report_forward_refused``. Returns how many
+    every 30 s). An unreachable or older owner is retried with backoff; one
+    that lacks a provider capability the chat names is re-checked on every
+    pass and sent once it reports it (#1519); a refusal by that worker is
+    final and kept as ``report_forward_refused``. Returns how many
     were delivered or passed on."""
     async with _report_lock("outbox"):
         return await _deliver_forwarded_locked(force)
@@ -2548,6 +2567,7 @@ async def deliver_forwarded_reports(*, force=False):
 
 async def _deliver_forwarded_locked(force):
     import time
+    from app.core import provider_capability
     from app.network import control
     delivered = 0
     for row in await asyncio.to_thread(pending_forwarded_reports):
@@ -2558,28 +2578,43 @@ async def _deliver_forwarded_locked(force):
         attempts = int(payload.get("attempts") or 0) + 1
         device = payload.get("device_id")
         try:
-            # Follow the chat if it moved again; back here, it wakes here.
-            owner = await asyncio.to_thread(_report_owner, home)
-            if owner is None:
-                outcome = await _admit_here(home, frame, row["command_id"], steer=False)
-                if outcome == "gone" and not int(payload.get("hops") or 0):
-                    outcome = await _absent_starter(home, frame)
-                if outcome in _DELIVERED:
-                    await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
-                    delivered += 1
-                elif outcome in _FINAL:
-                    await asyncio.to_thread(_settle_forward, row["id"], refused=outcome)
-                else:
-                    await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts)
+            if payload.get("report_of"):
+                # A started chat's first report, kept for the worker it reports
+                # to: sent as that chat's own report, which follows the
+                # assistant there if it moved (#1443).
+                action = REPORT_ACTION
+                body = {"session_id": payload["report_of"], "report": frame}
+            else:
+                # Follow the chat if it moved again; back here, it wakes here.
+                owner = await asyncio.to_thread(_report_owner, home)
+                if owner is None:
+                    outcome = await _admit_here(home, frame, row["command_id"], steer=False)
+                    if outcome == "gone" and not int(payload.get("hops") or 0):
+                        outcome = await _absent_starter(home, frame)
+                    if outcome in _DELIVERED:
+                        await asyncio.to_thread(_settle_forward, row["id"], delivered=True)
+                        delivered += 1
+                    elif outcome in _FINAL:
+                        await asyncio.to_thread(_settle_forward, row["id"], refused=outcome)
+                    else:
+                        await asyncio.to_thread(_settle_forward, row["id"], attempts=attempts)
+                    continue
+                device = owner
+                action = FORWARD_REPORT_ACTION
+                body = {"home": home, "event_id": row["command_id"], "report": frame,
+                        "hops": int(payload.get("hops") or 0) + 1}
+            # The report wakes home there (#1519): a worker that cannot run its
+            # provider row gets it once updated. Kept pending and re-checked
+            # here on every pass, warned about once.
+            reason = await asyncio.to_thread(provider_capability.session_refusal, device, home)
+            if reason:
+                if reason != payload.get("deferred"):
+                    log.warning("Report of started chat %s for %s kept until that worker is updated: %s",
+                                frame.get("task_id"), home, reason)
+                await asyncio.to_thread(_settle_forward, row["id"], device=device, deferred=reason)
                 continue
-            device = owner
-            body = {"home": home, "event_id": row["command_id"], "report": frame,
-                    "hops": int(payload.get("hops") or 0) + 1}
-            # The report wakes home there, on its provider row (#1519); a
-            # refusal is kept below as report_forward_refused.
-            await control.refuse_incapable(device, home)
             answer = await asyncio.wait_for(
-                control.call(device, FORWARD_REPORT_ACTION, body, timeout=REMOTE_TIMEOUT),
+                control.call(device, action, body, timeout=REMOTE_TIMEOUT),
                 timeout=REMOTE_TIMEOUT)
         except control.ControlRefused as exc:
             if "Unknown control action" in str(exc):
