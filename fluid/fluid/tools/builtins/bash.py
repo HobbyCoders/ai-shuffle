@@ -381,10 +381,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 partial, "Bash partial output (command timed out; output up to the timeout)")
         return ToolOutcome(text=text, is_error=True)
     except asyncio.CancelledError:
-        # The user interrupted the turn: this task is being torn down
-        # mid-await and nothing downstream will ever reap the process, so
-        # kill the tree here and let the cancellation keep propagating.
-        # Nothing is spilled: the file is written only for a finished result.
+        # Any cancellation (a user stop, a turn cancel, a host deadline): this
+        # task is being torn down mid-await and nothing downstream will ever
+        # reap the process, so kill the tree here and let the cancellation
+        # keep propagating. Nothing is spilled and nothing is claimed: the
+        # file is written only for a finished result.
         await kill_tree(proc)
         raise
     finally:

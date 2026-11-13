@@ -243,7 +243,8 @@ each a name-to-count map), and logs each read-back. Only a call's explicit
 path counts, after resolving it (`..` and symlinks followed): a Read, Grep or
 Glob whose path is a spill file of this session counts once for the tool named
 in the file name, and one aimed at the folder itself counts once as
-`unattributed`. Output text and shell commands are not scanned. Caps whose spills are read
+`unattributed`. Output text and shell commands are not scanned. Caps whose
+spills are read
 back often are cutting too much.
 
 ### `[context]`

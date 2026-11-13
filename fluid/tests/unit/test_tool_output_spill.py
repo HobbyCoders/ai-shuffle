@@ -27,10 +27,9 @@ import shutil
 from pathlib import Path
 
 import pytest
-
+from fluid.tools import spill
 from fluid.tools.builtins import register_builtins
 from fluid.tools.registry import ToolCtx, ToolRegistry
-from fluid.tools import spill
 
 
 def _ctx(tmp_path: Path, session: str = "sess-1") -> ToolCtx:
