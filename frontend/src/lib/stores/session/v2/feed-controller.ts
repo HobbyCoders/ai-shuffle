@@ -1548,7 +1548,9 @@ export const feedController: FeedController = {
 		if (currentSessionId === sessionId) reducerState = retract(reducerState);
 		const cached = sessionId ? transcriptCache.get(sessionId) : undefined;
 		if (cached) transcriptCache.set(sessionId!, { ...cached, state: sealState(retract(cached.state)) });
-		if (content != null) this.clearOptimisticSend(sessionId);
+		// Rows only. The flip is settled once the send leaves the run
+		// (settleRetiredSends), which keeps a turn the socket announced ahead
+		// of this feed (#1258).
 		return content;
 	},
 

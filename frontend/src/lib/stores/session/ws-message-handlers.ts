@@ -1137,21 +1137,24 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// A refused send will never run, so a Stop cannot be pressed on it.
 					const refusedId = data.client_message_id;
 					update(s => retireSends(s, refusedId));
-					// A send without a local row (a worktree chat's first send) raised
-					// the flip too: with nothing left behind it, withdraw it (#1499).
+					// The feed owns the flip of the chat it feeds: it withdraws it once
+					// nothing is left behind it, but never over a turn the socket
+					// announced ahead of the feed (#1258, #1499).
 					feedController.settleRetiredSends?.(sid);
 					if (sid !== getState().sessionId) break;
+					const fed = sid !== null && feedController.isFeeding(sid);
 					const restored = pendingQueue.takeWithdrawnRestore(sid);
 					// Idle sends echo on the transcript, not in the pending queue.
 					// Only recover an unconfirmed local row, never a durable receipt.
 					update(s => {
 						const recovered = restored ?? (refused?.content != null
 							? { prompt: refused.content, uploadPaths: [], uploadReferences: [] } : null);
-						const optimisticOnly = refused && s.optimisticStreaming && !s.liveTurnId;
+						// Unfed (a New Chat's first send): only the row raised the flip.
+						const optimisticOnly = !fed && refused && s.optimisticStreaming && !s.liveTurnId;
 						// The feed may already have withdrawn the flip: nothing runs, no clock.
 						const idle = optimisticOnly || (!s.isStreaming && !s.liveTurnId);
 						return { ...s,
-							...(refused ? { messages: s.messages.filter(m => m !== refused), optimisticStreaming: false } : {}),
+							...(refused ? { messages: s.messages.filter(m => m !== refused), ...(fed ? {} : { optimisticStreaming: false }) } : {}),
 							...(idle ? { isStreaming: false, streamStartTime: null } : {}),
 							queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
 							error: `Message not sent: ${data.message || 'Please try again.'}`,
