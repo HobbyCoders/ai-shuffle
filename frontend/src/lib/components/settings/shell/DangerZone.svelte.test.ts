@@ -8,11 +8,11 @@ afterEach(cleanup);
 
 const panel = $state({ active: true });
 
-function renderZone() {
+function renderZone(removeConfirm: () => Promise<void> = async () => { throw new Error('Database is busy'); }) {
 	panel.active = true;
 	const items = [
 		{ label: 'Sign out of the CLI', button: 'Sign out', question: 'Sign out?', onConfirm: vi.fn(async () => { throw new Error('The CLI is busy'); }) },
-		{ label: 'Remove this key', button: 'Remove', question: 'Remove it?', onConfirm: vi.fn(async () => { throw new Error('Database is busy'); }) }
+		{ label: 'Remove this key', button: 'Remove', question: 'Remove it?', onConfirm: vi.fn(removeConfirm) }
 	];
 	render(DangerZone, { props: { items }, context: new Map([[FEATURE_PANEL_CONTEXT, panel]]) });
 }
@@ -49,6 +49,20 @@ describe('DangerZone failures (#1523)', () => {
 		renderZone();
 		await fail('Remove');
 		panel.active = false;
+		flushSync();
+		expect(screen.queryByRole('alert')).toBeNull();
+	});
+
+	it('does not bring back a failure that lands after Settings was left', async () => {
+		let reject!: (e: Error) => void;
+		renderZone(() => new Promise<void>((_, r) => (reject = r)));
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		panel.active = false;
+		flushSync();
+		reject(new Error('Database is busy'));
+		await new Promise((r) => setTimeout(r, 0));
+		panel.active = true;
 		flushSync();
 		expect(screen.queryByRole('alert')).toBeNull();
 	});

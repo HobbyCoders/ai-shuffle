@@ -49,6 +49,8 @@
 		try {
 			await item.onConfirm();
 		} catch (e) {
+			// A failure that lands after Settings was left would reappear on return.
+			if (feature && !feature.active) return;
 			errors = { ...errors, [key]: getErrorMessage(e, `${item.button} failed`) };
 		}
 	}
