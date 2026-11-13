@@ -3,7 +3,7 @@
 // Docs adds no browser history entry of its own; and every search result opened
 // marks and shows its match, a whole word before letters inside another word.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp } from './lib/app.mjs';
+import { expect, gotoApp, settleServiceWorker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const workspace = (page) => page.getByRole('navigation', { name: 'Workspace', exact: true });
@@ -20,8 +20,8 @@ async function openDestination(page, label) {
 	}
 }
 
-async function waitTitle(page, title) {
-	await page.waitForFunction((want) => document.querySelector('.docs-content h1')?.textContent?.trim() === want, title, { timeout: 5000 });
+async function waitTitle(page, title, timeout = 5000) {
+	await page.waitForFunction((want) => document.querySelector('.docs-content h1')?.textContent?.trim() === want, title, { timeout });
 }
 
 /** The marked search hit as one string, and whether its first part is inside the visible pane. */
@@ -100,6 +100,8 @@ await runJourney({
 		viewports: ['desktop'],
 		async setup({ page, status }) {
 			await gotoApp(page, status);
+			// The case reloads on purpose: start from a settled service worker.
+			await settleServiceWorker(page, status);
 			await openDestination(page, 'Docs');
 			await waitTitle(page, 'AI Shuffle documentation');
 		},
@@ -113,9 +115,12 @@ await runJourney({
 			const after = await page.evaluate(() => history.length);
 			expect(after === length, `Docs adds no history entry (${length} before, ${after} after)`);
 			await mark('a reload reopens the open document');
+			// As settings-reload does: the new document's first paint ends this step,
+			// so the app shell coming back once it hydrates is the next step's change.
 			await page.reload({ waitUntil: 'domcontentloaded' });
 			await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
-			await waitTitle(page, 'Changelog');
+			await mark('the reloaded page reopens the Changelog');
+			await waitTitle(page, 'Changelog', 30_000);
 		}
 	}, {
 		name: 'desktop-repeated-search',
