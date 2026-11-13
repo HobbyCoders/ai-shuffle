@@ -236,20 +236,35 @@ def test_null_identity_is_no_answer() -> None:
         backend_probe._parse(b'{"rows": [[1, "active", null, null, null, 0]]}', [1])
 
 
+@pytest.mark.parametrize("slow_start", [False, True])
 @pytest.mark.parametrize("shutdown", [False, True])
 @pytest.mark.parametrize("unrelated_process", [False, True])
 def test_only_one_lifecycle_owner_can_signal_or_reap(
-    silent_server, monkeypatch, shutdown, unrelated_process,
+    silent_server, monkeypatch, shutdown, unrelated_process, slow_start,
 ) -> None:
     """Include close(): it requests shutdown, it must not signal alongside the reaper."""
     probe = backend_probe.BackendProbe()
     owners = set()
+    polling = threading.Event()
+    if slow_start:
+        # A loaded runner: the launch alone outlasts the 0.2 s probe budget, so
+        # the owner sees its deadline already passed the moment it holds the
+        # child, and kills and reaps it at once (#1480).
+        real_start = probe._start
+
+        def delayed(*args):
+            time.sleep(0.3)
+            return real_start(*args)
+
+        monkeypatch.setattr(probe, "_start", delayed)
     for name in ("poll", "wait", "kill"):
         original = getattr(subprocess.Popen, name)
 
-        def observed(self, *args, _original=original, **kwargs):
+        def observed(self, *args, _original=original, _name=name, **kwargs):
             if self is probe._child:
                 owners.add(threading.get_ident())
+                if _name == "poll":
+                    polling.set()  # the owner holds a live child in its loop
             return _original(self, *args, **kwargs)
 
         monkeypatch.setattr(subprocess.Popen, name, observed)
@@ -263,12 +278,14 @@ def test_only_one_lifecycle_owner_can_signal_or_reap(
         monitor.join(6)
         assert not monitor.is_alive()
     outcome = []
-    caller = threading.Thread(target=lambda: outcome.append(_read_within(probe, silent_server, 0.2, 5)))
+    # With shutdown, only close() may end the read: a 0.2 s budget measured from
+    # read() can expire during the launch, and then the child is set and reaped
+    # before this thread ever sees it, so close() would race nothing.
+    seconds = 30 if shutdown else 0.2
+    caller = threading.Thread(target=lambda: outcome.append(_read_within(probe, silent_server, seconds, 5)))
     caller.start()
     if shutdown:
-        deadline = time.monotonic() + 3
-        while probe._child is None and time.monotonic() < deadline:
-            time.sleep(0.001)
+        assert polling.wait(5), "the probe never polled its child"
         assert probe._child is not None
         probe.close()
     caller.join(6)

@@ -431,16 +431,33 @@ def test_recipient_revoked_during_tail_validation_is_refused(workers, monkeypatc
                 release.set()
 
 
+@pytest.mark.parametrize("slow_saved_read", [False, True])
 @pytest.mark.parametrize("stage", ["authentication", "manifest"])
-async def test_preparation_deadline_cancels_authentication_and_late_manifest(monkeypatch, stage):
+async def test_preparation_deadline_cancels_authentication_and_late_manifest(monkeypatch, stage, slow_saved_read):
     link = transport.PeerLink("peer-a", ["https://a.example.com"])
-    requests, verified = [], []
+    requests, verified, cancelled = [], [], []
+    if slow_saved_read:
+        # The pre-deadline thread hop as a loaded runner delays it (#1513).
+        saved_transfer = peer_snapshot.saved_transfer
+        def slow_saved_transfer(*args):
+            time.sleep(0.6)
+            return saved_transfer(*args)
+        monkeypatch.setattr(peer_snapshot, "saved_transfer", slow_saved_transfer)
+    async def stalled(where):
+        # Only the preparation deadline can end this stage. A stage that ended
+        # by itself would let the post-stage deadline checks pass the test
+        # without the deadline ever cancelling anything.
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(where)
+            raise
     async def authenticate(*args):
         if stage == "authentication":
-            await asyncio.sleep(0.1)
+            await stalled("authentication")
     async def manifest(*args, **kwargs):
         requests.append(kwargs["timeout"])
-        await asyncio.sleep(0.1)
+        await stalled("manifest")
         return {"pages": []}
     monkeypatch.setattr(link, "authenticate", authenticate)
     monkeypatch.setattr(link, "_request", manifest)
@@ -450,7 +467,11 @@ async def test_preparation_deadline_cancels_authentication_and_late_manifest(mon
     monkeypatch.setattr(peer_snapshot, "verify_manifest", verify)
     monkeypatch.setattr(transport, "STATE_PREPARE_SECONDS", 0.02)
     with pytest.raises(transport.PeerError, match="Timed out waiting"):
-        await asyncio.wait_for(link.receive_state(None, SimpleNamespace()), timeout=0.5)
+        # A hang guard, not a margin: the copy first reads the saved transfer
+        # in a worker thread, which a loaded CI runner can delay past 0.5 s
+        # before the 0.02 s preparation deadline even starts (#1513).
+        await asyncio.wait_for(link.receive_state(None, SimpleNamespace()), timeout=30)
+    assert cancelled == [stage]
     assert len(requests) == (1 if stage == "manifest" else 0)
     assert verified == []
 
