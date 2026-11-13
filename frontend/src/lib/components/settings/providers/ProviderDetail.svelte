@@ -8,8 +8,6 @@
 	import { getModels } from '$lib/constants/models.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
-	import { notify } from '$lib/stores/notifications';
-	import { getErrorMessage } from '$lib/api/client';
 	import type { ClaudeAuthMode } from '$lib/api/claude-auth';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import type { DangerAction } from '../shell/DangerZone.svelte';
@@ -73,15 +71,12 @@
 
 	const credsCount = $derived(provider.claude ? (mode === 'off' ? 'none active' : 'one active') : `${live.length} on`);
 
+	/** Throws on the first failure: the Danger zone shows it and the page stays. */
 	async function removeAll() {
-		try {
-			for (const c of provider.credentials) {
-				if (c.draft) continue;
-				if (c.flavor === 'fal') await providers.clearFalKey();
-				else if (c.row) await providers.deleteProvider(c.row.id);
-			}
-		} catch (e) {
-			notify(getErrorMessage(e, `Could not remove ${provider.name}`), { severity: 'error' });
+		for (const c of provider.credentials) {
+			if (c.draft) continue;
+			if (c.flavor === 'fal') await providers.clearFalKey();
+			else if (c.row) await providers.deleteProvider(c.row.id);
 		}
 		if (provider.gateway) settingsNav.clearSelection('providers');
 	}

@@ -551,14 +551,10 @@ export const providers = {
 		return row;
 	},
 
+	/** Delete one provider row. Throws on failure, so the caller stays put and says why. */
 	async deleteProvider(id: string) {
-		_update((s) => ({ ...s, providersError: '' }));
-		try {
-			await deleteModelProvider(id);
-			await providers.refreshProviders();
-		} catch (e) {
-			_update((s) => ({ ...s, providersError: getErrorMessage(e, 'Could not delete provider') }));
-		}
+		await deleteModelProvider(id);
+		await providers.refreshProviders();
 	},
 
 	/**

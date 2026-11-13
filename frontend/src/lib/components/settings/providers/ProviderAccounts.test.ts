@@ -43,6 +43,31 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+describe('a failed action says so where it was taken (#1523)', () => {
+	it('keeps the page open and shows why when Remove fails', async () => {
+		worker = fakeWorker({ rows: [row({ id: 'personal', name: 'Personal key' })] }, {
+			'DELETE /model-providers/:id': () => { throw { status: 500, detail: 'Database is busy' }; }
+		});
+		await show();
+		await fireEvent.click(group('OpenAI').getByRole('button', { name: /^Personal key/ }));
+		await screen.findByRole('heading', { name: 'Personal key' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		expect((await screen.findByRole('alert')).textContent).toContain('Database is busy');
+		expect(screen.getByRole('heading', { name: 'Personal key' })).toBeTruthy();
+		expect(providers.current.providers.map((r) => r.id)).toContain('personal');
+	});
+
+	it('shows a failed switch next to the switch', async () => {
+		worker = fakeWorker({ rows: [row({ id: 'personal', name: 'Personal key' })] }, {
+			'PATCH /model-providers/:id': () => { throw { status: 500, detail: 'Database is busy' }; }
+		});
+		await show();
+		await fireEvent.click(group('OpenAI').getByRole('switch', { name: 'Personal key on' }));
+		expect((await group('OpenAI').findByRole('alert')).textContent).toContain('Database is busy');
+	});
+});
+
 describe('saved account controls', () => {
 	it('switches a key with activate, refetches siblings, and leaves the subscription on', async () => {
 		await show();
