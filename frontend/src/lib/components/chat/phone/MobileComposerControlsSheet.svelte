@@ -1502,8 +1502,10 @@
 	.mcp-chip.run { color: var(--primary); background: color-mix(in oklab, var(--primary) 14%, transparent); font-weight: 600; }
 	.mcp-chip.run:active { background: color-mix(in oklab, var(--primary) 22%, transparent); }
 	.mcp-chip.run i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; animation: mcp-pulse 1.6s ease-in-out infinite; }
-	/* Effort's Auto toggle sits in the row head beside the value. */
-	.mcp-chip.mcp-auto { flex: none; min-height: 26px; padding: 3px 10px; }
+	/* Effort's Auto toggle sits in the row head beside the value. The negative
+	   block margin keeps it out of the head's height, so late effort metadata
+	   adding or removing it never moves the open groups. */
+	.mcp-chip.mcp-auto { flex: none; min-height: 26px; padding: 3px 10px; margin-block: -4px; }
 	.mcp-chip.mcp-auto[aria-pressed='true'] { color: var(--primary); background: color-mix(in oklab, var(--primary) 14%, transparent); font-weight: 600; cursor: default; }
 	.mcp-chip.run.quiet i { animation: none; opacity: 0.6; }
 	@keyframes mcp-pulse { 50% { opacity: 0.3; } }
