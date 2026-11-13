@@ -16,6 +16,7 @@ import { refreshProjectsOverviewIfUsed } from './projects-overview';
 import type { Project } from './types';
 import { createSubscribers } from './store-utils';
 import { activeSession } from './active-session';
+import { seedStreamingFromList } from './streaming-sessions';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -680,6 +681,7 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 		retireSupersededEdits(requestId);
 
 		_loadedSessionPages = Math.max(INITIAL_SESSION_PAGES, pagesFetched);
+		seedStreamingFromList(all);
 		sessionListCommits++;
 		sessionListCommitRequest = requestId;
 		commitSessions(rows, {
