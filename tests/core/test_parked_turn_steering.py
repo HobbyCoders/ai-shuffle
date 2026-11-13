@@ -275,8 +275,11 @@ def test_changed_provider_or_inherited_defaults_do_not_join(mock_db, change):
 async def test_rest_existing_completed_session_returns_new_parked_attempt(mock_db):
     from unittest.mock import AsyncMock
     from app.api.query import conversation
+    from app.core import claude_auth_mode
     from app.core.models import ConversationRequest
 
+    # An API key's Claude run on the owner's plan is refused before submit.
+    claude_auth_mode.set_mode("api_key")
     sid = "rest-completed-parked"
     database.create_api_user("rest-owner", "Test key", "test-hash")
     database.create_session(session_id=sid, profile_id="default", api_user_id="rest-owner")

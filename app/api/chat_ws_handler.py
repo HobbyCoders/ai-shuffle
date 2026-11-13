@@ -2819,19 +2819,26 @@ class ChatWebSocketHandler:
             return
         if not await self._authorize_mobile_session(session_id):
             return
-        # An omitted profile keeps the session's own agent; a named one must
-        # be among an API user's assigned agents. The session's own agent was
-        # checked by the gate above.
-        if profile_id:
-            allowed, profile_id = await self._restrict_profile(profile_id, profile_id)
-            if not allowed:
+        # An omitted profile keeps the session's own agent, written on the turn
+        # as handle_query does: a turn naming none is refused when it runs
+        # (#1531). Either way the agent passes the same restriction.
+        cloud_sess = await run_sync(database.get_session, session_id)
+        if not profile_id:
+            profile_id = (cloud_sess or {}).get("profile_id")
+            if not profile_id:
+                await self.send_json({
+                    "type": "error", "session_id": session_id,
+                    "message": "That agent no longer exists — pick another one.",
+                })
                 return
+        allowed, profile_id = await self._restrict_profile(profile_id, profile_id)
+        if not allowed:
+            return
 
         # V2 placement: the durable queued turn IS the hand-off (see
         # handle_query) — enqueue locally with no kick and wake the owner's
         # claim loop.
         placed_remote = False
-        cloud_sess = await run_sync(database.get_session, session_id)
         if cloud_sess:
             from app.core import placement as placement_mod
             decision = None

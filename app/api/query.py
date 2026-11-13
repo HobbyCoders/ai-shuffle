@@ -191,15 +191,20 @@ def _request_binding(
 
 async def _refuse_unready_leg(
     profile_id: str, overrides: dict | None, session_id: str | None = None,
+    api_user_id: str | None = None,
 ) -> None:
-    """503 with the setup message when the run's leg is not set up.
+    """Refuse up front a run the engine would refuse once it starts.
 
-    A run on the Claude Code CLI needs the active Claude Code mode's
+    400 with the gate's message when the run is for an API user
+    (``api_user_id``) and its model uses the owner's subscription, the status
+    ``/query`` answers when its engine refuses it (``credential_gate.
+    requester_refusal``). 503 with the setup message when the run's leg is not
+    set up: a run on the Claude Code CLI needs the active Claude Code mode's
     credential; a run on a provider row needs only the license (see
-    ``credential_gate.turn_refusal``). The error carries the gate's
-    ``agent_setup_required`` code in the ``X-Error-Code`` header. When the leg
-    cannot be worked out here, the request goes on: every engine runs the same
-    per-leg check on its built options before it starts a turn.
+    ``credential_gate.turn_refusal``). Each error carries the gate's code in
+    the ``X-Error-Code`` header. When the leg cannot be worked out here, the
+    request goes on: every engine runs the same checks on its built options
+    before it starts a turn.
     """
     from app.core import antigravity, credential_gate
     from app.core.provider.harness_adapter import provider_kind_for_sdk_options
@@ -224,7 +229,17 @@ async def _refuse_unready_leg(
         )
     from types import SimpleNamespace
 
-    leg = provider_kind_for_sdk_options(SimpleNamespace(model=model, aih_provider_id=provider_id))
+    binding_options = SimpleNamespace(model=model, aih_provider_id=provider_id)
+    # A background or queued turn is refused only after the route answered
+    # (#1530): its caller would never hear why.
+    refusal = await asyncio.to_thread(
+        credential_gate.requester_refusal, binding_options, api_user_id)
+    if refusal:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=refusal,
+            headers={"X-Error-Code": credential_gate.SUBSCRIPTION_OWNER_ONLY_CODE},
+        )
+    leg = provider_kind_for_sdk_options(binding_options)
     reason = await credential_gate.turn_refusal_async(leg)
     if reason:
         raise HTTPException(
@@ -256,7 +271,7 @@ async def one_shot_query(
             detail="No profile configured. Provide 'profile' in the request."
         )
     overrides = _request_overrides(request)
-    await _refuse_unready_leg(profile_id, overrides)
+    await _refuse_unready_leg(profile_id, overrides, api_user_id=api_user.get("id"))
 
     try:
         result = await _execute_query_with_failover(
@@ -309,7 +324,7 @@ async def stream_one_shot_query(
             detail="No profile configured. Provide 'profile' in the request."
         )
     overrides = _request_overrides(request)
-    await _refuse_unready_leg(profile_id, overrides)
+    await _refuse_unready_leg(profile_id, overrides, api_user_id=api_user.get("id"))
 
     async def event_generator():
         try:
@@ -437,7 +452,7 @@ async def conversation(
                 )
         # The queued turn is refused by the engine too, but only as a failed
         # outcome after the wait; refuse here, before a session row is made.
-        await _refuse_unready_leg(profile_id, overrides, session_id)
+        await _refuse_unready_leg(profile_id, overrides, session_id, api_user.get("id"))
         if not session_id:
             # The new row's agent foreign key would fail the insert with a
             # 500: refuse a deleted agent here, as /sessions does.
@@ -591,7 +606,7 @@ async def stream_conversation(
         )
     await _check_continued_session(api_user, request.session_id)
     overrides = _request_overrides(request)
-    await _refuse_unready_leg(profile_id, overrides, request.session_id)
+    await _refuse_unready_leg(profile_id, overrides, request.session_id, api_user_id)
 
     async def event_generator():
         try:
@@ -674,7 +689,7 @@ async def start_conversation(
     overrides = _request_overrides(request)
     # The background turn is refused by the engine too, but only after this
     # call has already answered "started"; refuse here so the caller sees it.
-    await _refuse_unready_leg(profile_id, overrides, request.session_id)
+    await _refuse_unready_leg(profile_id, overrides, request.session_id, api_user_id)
 
     try:
         result = await start_background_query(
