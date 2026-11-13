@@ -68,7 +68,7 @@
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
 	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
-	import { NO_ADJUSTABLE_EFFORT, UNKNOWN_EFFORT } from '$lib/constants/model-effort';
+	import { NO_ADJUSTABLE_EFFORT, UNKNOWN_EFFORT, autoEffortLabel } from '$lib/constants/model-effort';
 		import {
 		ACCESS_HELP, ACCESS_LABEL, ACCESS_SHORT, BYPASS, VelocityTracker, dragAxis, settlesClosed,
 		settlesOpen, stepValue, taskSummary
@@ -132,9 +132,11 @@
 	const effortLabel = $derived(
 		!effortKnown ? (effortValue ?? 'Unknown')
 			: !effortOptions.length ? 'Fixed'
-			: effortValue ? (effortOptions.find((o) => o.value === effortValue)?.label ?? 'Auto')
-			: 'Auto'
+			: (effortValue ? effortOptions.find((o) => o.value === effortValue)?.label : undefined)
+				?? autoEffortLabel(effortOptions, effortDefaultValue)
 	);
+	/** The level that runs: the pinned one, else the model's default (#1526). */
+	const effortChecked = $derived(effortOptions.some((o) => o.value === effortValue) ? effortValue : effortDefaultValue);
 	/**
 	 * Capability refreshes may arrive after the sheet opens. Keep one effort slot
 	 * in every state, with the truthful explanation replacing its controls. All
@@ -982,7 +984,7 @@
 										<div class="mcp-seg accent" role="radiogroup" aria-label="Reasoning effort" style:--n={effortOptions.length}>
 											<span id={effortDefaultNoteId} hidden>Model default</span>
 											{#each effortOptions as option (option.value)}
-												<button type="button" role="radio" aria-checked={option.value === effortValue}
+												<button type="button" role="radio" aria-checked={option.value === effortChecked}
 													class:auto={!effortValue && option.value === effortDefaultValue}
 													aria-describedby={!effortValue && option.value === effortDefaultValue ? effortDefaultNoteId : undefined}
 													title={option.description} onclick={() => pickPanelEffort(option.value)}>{option.label}</button>
@@ -1631,8 +1633,13 @@
 		background: color-mix(in oklab, var(--primary) 20%, var(--card));
 		box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 55%, transparent);
 	}
-	/* No pinned level: the model's default is marked, not selected. */
-	.mcp-seg button.auto { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 40%, transparent); color: var(--foreground); }
+	/* No pinned level: the model's default is the level that runs (checked), drawn
+	   outlined rather than filled so it reads as Auto, not pinned. */
+	.mcp-seg button.auto, .mcp-seg.accent button.auto[aria-checked='true'] {
+		background: transparent;
+		box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 40%, transparent);
+		color: var(--foreground);
+	}
 	.mcp-seg button.danger[aria-checked='true'] {
 		background: color-mix(in oklab, var(--destructive) 18%, var(--card));
 		color: var(--destructive);

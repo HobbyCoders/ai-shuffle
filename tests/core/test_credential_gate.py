@@ -1157,6 +1157,42 @@ async def test_the_rest_query_paths_refuse_an_api_user_on_a_subscription(mock_db
             await query_engine.execute_query("hello", "gate-profile", api_user_id=API_USER)
 
 
+@pytest.mark.parametrize("kind", ["claude_cli_subscription", "chatgpt_row"])
+async def test_conversation_start_refuses_an_api_user_on_a_subscription_before_answering(
+    mock_db, tmp_path, kind,
+):
+    """#1530: the background start answered 200 "started", then the engine
+    refused the turn where the caller could not see it. It now answers with
+    ``/query``'s status and reason before anything starts."""
+    from fastapi import HTTPException
+
+    from app.api.query import start_conversation
+    from app.core.models import ConversationRequest
+
+    _requesters()
+    model = SUBSCRIPTION_KINDS[kind]()
+    # An agent saved on a provider names it apart from its model.
+    config = {"provider": "p", "model": model.split(":")[-1]} if model.startswith("prov:") else {"model": model}
+    database.create_profile("gate-profile", "Gate", None, {"cwd": str(tmp_path), **config})
+    request = ConversationRequest(prompt="hello", profile="gate-profile")
+    with patch("app.api.query.start_background_query", new=AsyncMock()) as start, \
+         patch.object(credential_gate, "claude_credential_ready", return_value=(True, None)):
+        with pytest.raises(HTTPException) as exc:
+            await start_conversation(request, {"id": API_USER, "profile_ids": None})
+        assert exc.value.status_code == 400
+        assert exc.value.detail == credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE
+        assert exc.value.headers == {"X-Error-Code": credential_gate.SUBSCRIPTION_OWNER_ONLY_CODE}
+        start.assert_not_awaited()
+        # Not a refusal of every API run: one on a key provider still starts.
+        _provider_row("oa", "openai", auth_token="sk-test-plain",
+                      models=[{"id": "gpt-5", "label": "gpt-5"}], default_model="gpt-5")
+        database.create_profile("key-profile", "Key", None,
+                                {"cwd": str(tmp_path), "provider": "oa", "model": "gpt-5"})
+        start.return_value = {"session_id": "s", "status": "started"}
+        keyed = ConversationRequest(prompt="hello", profile="key-profile")
+        assert (await start_conversation(keyed, {"id": API_USER, "profile_ids": None}))["status"] == "started"
+
+
 # Existing setups: the settings warning and the save check.
 
 def test_subscription_warning_for_a_saved_setup(mock_db):

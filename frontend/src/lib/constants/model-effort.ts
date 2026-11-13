@@ -59,6 +59,15 @@ export function resolveModelEffort(value: string | null | undefined) {
 	};
 }
 
+/**
+ * What effort reads while no level is pinned: "Auto", naming the level the
+ * model runs at when it declares one, the level the controls mark (#1526).
+ */
+export function autoEffortLabel(options: readonly { value: string; label: string }[], defaultValue: string | null | undefined) {
+	const level = defaultValue ? options.find(option => option.value === defaultValue)?.label : undefined;
+	return level ? `Auto (${level})` : 'Auto';
+}
+
 /** Settings keep their existing inherit option outside this list. */
 export function modelEffortOptions(model: string | null, pinned: string | null) {
 	const capability = resolveModelEffort(model);

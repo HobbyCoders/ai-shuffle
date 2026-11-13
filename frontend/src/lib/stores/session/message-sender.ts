@@ -1452,6 +1452,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					return true;
 				}
 
+				// Open the new chat's feed before its first turn goes out, as the
+				// started path above does. The feed owns this send's optimistic flip,
+				// so a refusal of a send with no row of its own can withdraw it
+				// (#1499), and the reply renders even if the turn's WS `start`
+				// never reaches this device.
+				if (!feedController.isFeeding(response.session_id)) feedController.start(response.session_id);
 				const sent = await getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true, creation });
 				// Refused: the composer takes the text back, so drop its echo.
 				if (!sent) update(s => ({ ...s, messages: s.messages.filter(m => m.id !== userMsgId) }));

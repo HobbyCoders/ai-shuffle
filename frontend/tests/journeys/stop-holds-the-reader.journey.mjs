@@ -81,7 +81,8 @@ async function queueBehindABackgroundJob(page, mark, variant, queued) {
  * Stop everything with a background job running ends that job too, and its
  * running-task row leaves the transcript above the queued bubbles (#1147). In
  * the frame it leaves, nothing on screen may move: not the line being read, not
- * the bubbles, not the scroll position.
+ * the bubbles, not the scroll position. Nor once they are "Not sent" rows: the
+ * stopped turn keeps its finished steps unfolded while the rows wait below.
  */
 const stopWithARunningTask = {
 	async setup(ctx) {
@@ -104,10 +105,24 @@ const stopWithARunningTask = {
 		for (const text of texts) {
 			await page.locator('[data-not-sent="true"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
 		}
-		await page.waitForTimeout(500);
+		// The stopped turn settles and folds its finished steps after this (#1147):
+		// keep watching well past that.
+		await page.waitForTimeout(PAST_SETTLEMENT_MS);
 		const frames = await collect();
 		const geometry = frames.filter((f, i) => i === 0 || ['scrollTop', 'scrollHeight', 'taskRow', 'lineTop'].some((k) => f[k] !== frames[i - 1][k]) || f.messages.some((m, j) => m.top !== frames[i - 1].messages[j].top));
 		log(`[at, scrollTop, scrollHeight, task row, first line on screen, queued tops] ${JSON.stringify(geometry.map((f) => [f.at, f.scrollTop, f.scrollHeight, f.taskRow, f.lineTop, f.messages.map((m) => `${m.bubbles ? 'b' : 'r'}${m.top}`).join(' ')]))}`);
+		expect(frames.at(-1).at >= PAST_SETTLEMENT_MS, `watched past settlement (${frames.at(-1).at}ms)`);
+		// Once every queued message is its "Not sent" row, those rows hold still,
+		// through the fold of the stopped turn's finished steps above them.
+		const rowsFrom = frames.findIndex((f) => f.messages.every((m) => m.notSent === 1 && m.bubbles === 0));
+		expect(rowsFrom > 0, 'watched the queued messages become "Not sent" rows');
+		frames.slice(rowsFrom + 1).forEach((frame, i) => {
+			const previous = frames[rowsFrom + i];
+			frame.messages.forEach((message, m) => {
+				const moved = Math.abs(message.top - previous.messages[m].top);
+				expect(moved <= 1, `"Not sent" row ${m} held still after Stop: moved ${moved}px at ${frame.at}ms (scrollTop ${previous.scrollTop} -> ${frame.scrollTop}, scrollHeight ${previous.scrollHeight} -> ${frame.scrollHeight})`);
+			});
+		});
 		const gone = frames.findIndex((f, i) => i > 0 && f.taskRow === null && frames[i - 1].taskRow !== null);
 		expect(gone > 0, `watched the running-task row leave (${frames.length} frames)`);
 		const [was, now] = [frames[gone - 1], frames[gone]];
@@ -243,18 +258,10 @@ await runJourney({
 		{ name: 'stop-holds-the-reader-with-four-queued', ...stopReadingPosition({ scrolled: false, queued: 4, overflows: true, rounds: 2 }) },
 		{ name: 'stop-holds-the-reader-scrolled-up', ...stopReadingPosition({ scrolled: true }) },
 		{
-			// The frame the running-task row leaves is checked pixel by pixel in the case.
-			// Later, when the stopped turn settles, its finished steps fold and the rows
-			// under them move; on a phone that fold is large enough to count as a shift.
+			// The frame the running-task row leaves is checked pixel by pixel in the case,
+			// and so is every frame after the rows land, past the stopped turn settling.
 			name: 'stop-with-a-running-task-holds-the-bubbles',
-			...stopWithARunningTask,
-			allow: [
-				{
-					kind: 'layout_shift',
-					message: /moved: div\.msg-virtualized in MessageArea/,
-					reason: 'known bug #1147: a stopped turn folds its finished steps about 0.8 s after Stop and the Not sent rows move with it'
-				}
-			]
+			...stopWithARunningTask
 		},
 		{
 			// A reply arriving in large pieces, followed at the bottom. The follow has to

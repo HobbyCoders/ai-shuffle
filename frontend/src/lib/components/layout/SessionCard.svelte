@@ -599,6 +599,7 @@
 <div
 	bind:this={frameRef}
 	data-session-card={session.id}
+	data-status={status}
 	class="scard-frame"
 	class:phone={platform.isMobile}
 	class:compact

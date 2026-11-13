@@ -496,6 +496,18 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(chip.disabled).toBe(false);
 	});
 
+	// #1498: after a reload nothing else has loaded the worker list, and the
+	// chip must not fall back to "Local" for a worker that has a name.
+	it('names this worker on the runner chip of a local chat after a cold load', async () => {
+		session.store.set(base);
+		appSessions.store.set([{ id: base.sessionId, instance_id: 'local', is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'local', is_self: true, online: true, device_name: 'Tower' }] });
+		const view = render(ContextPillBar, { sheetMode });
+		expect(await view.findByRole('button', { name: 'Runner: Tower' })).toBeTruthy();
+		expect(view.queryByRole('button', { name: 'Runner: Local' })).toBeNull();
+		expect(listInstallsMock).toHaveBeenCalledTimes(1);
+	});
+
 	it('explains empty and failed local worker discovery and supports retry', async () => {
 		session.store.set(base);
 		appSessions.store.set([{ id: base.sessionId, is_remote: false }]);
@@ -919,10 +931,12 @@ describe('the read-only runner chip of a subagent’s chat', () => {
 		session.store.set({ ...base, projectV2Id: 'pv2-project' });
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'local',
 			is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'local', is_self: true, online: true, device_name: 'Tower' }] });
 		const view = render(ContextPillBar);
-		const el = chip(view.container);
-		expect(el?.textContent).toContain('Local');
-		expect(dotOf(el)).toBe('online');
-		expect(listInstallsMock).not.toHaveBeenCalled();
+		expect(dotOf(chip(view.container))).toBe('online');
+		// The list is loaded once so the chip names this worker (#1498).
+		await waitFor(() => expect(chip(view.container)?.textContent).toContain('Tower'));
+		expect(dotOf(chip(view.container))).toBe('online');
+		expect(listInstallsMock).toHaveBeenCalledTimes(1);
 	});
 });

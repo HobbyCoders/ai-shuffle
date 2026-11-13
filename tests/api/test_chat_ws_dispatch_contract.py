@@ -1138,6 +1138,75 @@ async def test_followup_reaches_runtime_with_explicit_or_session_agent(
 
 
 @pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("profile_id", ["default", "claude-code"])
+@pytest.mark.parametrize("selection", [{}, {"profile": None}, {"profile": "override-agent"}])
+async def test_queued_message_reaches_runtime_with_explicit_or_session_agent(
+    ws_env, monkeypatch, remote, profile_id, selection,
+):
+    """#1531 for queue_message: drive the socket producer, the durable queue
+    turn and the runtime consumer, as the query twin above does. An omitted
+    profile used to write the turn with no agent, refused as it started
+    ("Profile not found: None"); a remote hand-off also dropped a real agent
+    whose id is 'claude-code'."""
+    from app.core import placement as placement_mod, query_engine
+    from app.network import control
+    from tests.core.test_session_runtime import _runtime_env
+
+    if profile_id != "default":
+        database.create_profile(profile_id=profile_id, name="Agent", description=None, config={})
+    sid = _make_session("queued-followup", profile_id=profile_id)
+    expected_profile = selection.get("profile") or profile_id
+    if expected_profile != profile_id:
+        database.create_profile(
+            profile_id=expected_profile, name="Override", description=None, config={})
+    if remote:
+        from app.db.base import get_db
+
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE sessions SET instance_id = %s WHERE id = %s", ("peer", sid))
+        monkeypatch.setattr(
+            placement_mod, "resolve_placement",
+            lambda row: SimpleNamespace(kind="runner", runner_id="peer"),
+        )
+        monkeypatch.setattr(cwh.ChatWebSocketHandler, "_network_owner", AsyncMock(return_value="peer"))
+        monkeypatch.setattr(control, "_require_owned", lambda session_id: database.get_session(session_id))
+
+        async def deliver(device_id, operation, body):
+            assert (device_id, operation) == ("peer", "turns")
+            assert body["profile_id"] == expected_profile
+            return await control._submit_forwarded_turn(body, "sender", None)
+
+        monkeypatch.setattr(control, "call", deliver)
+
+    async with _connect(ws_env) as conn:
+        replies = await conn.roundtrip({
+            "type": "queue_message", "session_id": sid, "content": "later", **selection,
+        })
+        assert not [f for f in replies if f.get("type") == "error"]
+        [turn] = turns_db.get_queued_turns(sid)
+        assert (turn["source"], turn["profile_id"]) == ("queue", expected_profile)
+        seen = []
+
+        async def pump(**kwargs):
+            seen.append(kwargs["profile_id"])
+            assert query_engine.get_profile(kwargs["profile_id"])["id"] == expected_profile
+            yield {"type": "done"}
+
+        # This process stands in for the executing worker.
+        monkeypatch.setattr(
+            placement_mod, "resolve_placement",
+            lambda row: SimpleNamespace(
+                kind="runner", runner_id=settings.effective_instance_id, reason="test owner"),
+        )
+        monkeypatch.setattr("app.network.engine.context", lambda: None)
+        with _runtime_env(pump=pump):
+            result = await session_runtime.SessionRuntime(turn, user_id="admin").execute()
+        assert result == "completed"
+        assert seen == [expected_profile]
+
+
+@pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("profile", ["missing-agent", "claude-code", ""])
 async def test_invalid_explicit_followup_profile_errors_on_origin_socket(
     ws_env, monkeypatch, profile, remote,
