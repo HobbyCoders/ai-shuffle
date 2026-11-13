@@ -1447,12 +1447,19 @@ async def test_check_for_update_never_downgrades(agy_root, monkeypatch):
     assert ag.locate_binary() == (str(newer), "app")
 
 
-async def test_an_update_keeps_the_copy_the_override_names(agy_root, monkeypatch):
+async def test_with_the_override_set_an_update_prunes_nothing(agy_root, monkeypatch):
     monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
+    target = agy_root / "cli" / "1.5.4" / "agy"
+    target.parent.mkdir(parents=True)
+    target.write_text("pinned")
+    target.chmod(0o755)
     pinned = agy_root / "cli" / "1.5.5" / "agy"
     pinned.parent.mkdir(parents=True)
-    pinned.write_text("pinned")
-    pinned.chmod(0o755)
+    try:  # a link the owner made, possibly through several hops
+        pinned.symlink_to(target)
+    except OSError:
+        pinned.write_text("pinned")
+        pinned.chmod(0o755)
     monkeypatch.setenv(ag.BINARY_ENV, str(pinned))
     _versions(monkeypatch, {str(pinned): "1.5.5"})
     _google(monkeypatch, version="1.5.7", url="https://storage.googleapis.com/a/cli.tar.gz",
@@ -1460,22 +1467,8 @@ async def test_an_update_keeps_the_copy_the_override_names(agy_root, monkeypatch
     state = await _run_job("update")
     assert state["state"] == "succeeded", state
     assert pinned.read_text() == "pinned"  # never pruned from under the override
+    assert target.exists()
     assert ag.locate_binary() == (str(pinned), "override")
-
-
-def test_pruning_keeps_the_target_of_a_symlinked_override(agy_root):
-    cli = agy_root / "cli"
-    for version in ("1.5.5", "1.5.6", "1.5.7"):
-        (cli / version).mkdir(parents=True)
-        (cli / version / "agy").write_text(version)
-    (cli / "pinned").mkdir()
-    try:
-        (cli / "pinned" / "agy").symlink_to(cli / "1.5.5" / "agy")
-    except OSError:
-        pytest.skip("symlinks unavailable here")
-    removed = ag.prune_versions(cli / "1.5.7", [cli / "pinned" / "agy"])
-    assert removed == ["1.5.6"]
-    assert (cli / "pinned" / "agy").read_text() == "1.5.5"  # not left dangling
 
 
 @pytest.mark.parametrize("installed,latest,current", [

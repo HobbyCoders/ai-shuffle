@@ -363,10 +363,11 @@ async def _run_install(job: InstallJob, key: str) -> None:
                     await asyncio.to_thread(_extract_binary, archive, target / name)
         _write_record(target / name)
         # The copy just replaced stays until the next update: a chat that
-        # resolved it a moment ago may still be starting it. So does a copy
-        # the override names.
-        spared = [Path(p) for p in (before_path, os.environ.get(BINARY_ENV, "").strip()) if p]
-        await asyncio.to_thread(prune_versions, target, spared)
+        # resolved it a moment ago may still be starting it. With the override
+        # set, the owner picks the binary, so nothing is pruned at all: the
+        # pinned file (or anything a link of theirs leads to) may live there.
+        if source != "override":
+            await asyncio.to_thread(prune_versions, target, [Path(before_path)] if before_path else [])
         if before:
             job.message = f"Antigravity updated from {before} to {version}."
         else:
@@ -421,17 +422,13 @@ def prune_versions(keep: Path, spared: Optional[List[Path]] = None) -> List[str]
     removed: List[str] = []
     cli = _root() / "cli"
     kept = {keep.name}
-    roots = {os.path.abspath(cli), os.path.realpath(cli)}
     for exe in spared or ():
-        # The path as named and, behind a symlink, the file it points to.
-        for path in {os.path.abspath(exe), os.path.realpath(exe)}:
-            for root in roots:
-                try:
-                    rel = Path(path).relative_to(root)
-                except ValueError:
-                    continue
-                if rel.parts:
-                    kept.add(rel.parts[0])
+        try:
+            rel = Path(os.path.abspath(exe)).relative_to(os.path.abspath(cli))
+        except ValueError:
+            continue
+        if rel.parts:
+            kept.add(rel.parts[0])
     try:
         folders = [p for p in cli.iterdir() if p.is_dir() and p.name not in kept]
     except OSError:
