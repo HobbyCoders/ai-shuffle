@@ -1353,10 +1353,11 @@ def owe_if_finished(session_id: str) -> bool:
     return owed
 
 
-def _retry_at(attempts: int) -> str:
+def _retry_at(attempts: Optional[int]) -> str:
+    """When to try again after ``attempts`` failed sends; None: due now."""
     from datetime import datetime, timedelta, timezone
 
-    delay = RETRY_DELAYS[min(attempts, len(RETRY_DELAYS) - 1)]
+    delay = 0 if attempts is None else RETRY_DELAYS[min(attempts, len(RETRY_DELAYS) - 1)]
     return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
 
 
@@ -1396,7 +1397,7 @@ async def deliver_due() -> int:
                     logger.warning("remote_task: report of %s kept until that worker is updated: %s",
                                    worker_id, reason)
                 await asyncio.to_thread(remote_tasks.retry_report_later, worker_id,
-                                        next_attempt_at=remote_tasks.utc_now_iso(), error=reason,
+                                        next_attempt_at=_retry_at(None), error=reason,
                                         attempt=False)
                 continue
             try:
