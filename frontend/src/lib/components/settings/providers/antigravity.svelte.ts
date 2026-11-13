@@ -77,6 +77,7 @@ class AntigravityState {
 			this.schedule();
 		} catch (e) {
 			if (mine !== this.epoch) return;
+			this.epoch++; // a status read begun while the request was out must not clear this error
 			this.error = getErrorMessage(e, kind === 'update'
 				? 'Could not check for an Antigravity update' : 'Could not start the Antigravity install');
 			this.retry = () => this.install(kind);

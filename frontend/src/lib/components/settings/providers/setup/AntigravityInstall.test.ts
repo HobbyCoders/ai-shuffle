@@ -159,3 +159,19 @@ it('runs one polling chain when a poll in flight is overtaken by a refresh and a
 	await vi.advanceTimersByTimeAsync(2100);
 	expect(mocks.get).toHaveBeenCalledTimes(1); // only timer A polled
 });
+
+it('keeps a failed check\'s error when a refresh started during the request lands after it', async () => {
+	antigravity.meta = meta as never; antigravity.status = { ...installed };
+	const post = deferred<AntigravityInstallJob>();
+	const read = deferred<AntigravityInstallStatus>();
+	mocks.post.mockImplementation(() => post.promise);
+	mocks.get.mockImplementation((path: string) => path.endsWith('/status') ? read.promise : Promise.resolve(meta));
+	const action = antigravity.install('update');
+	const refresh = antigravity.load(true); // the tab came back while the POST was out
+	post.reject(new Error('Could not reach the worker'));
+	await action;
+	read.resolve({ ...installed });
+	await refresh;
+	expect(antigravity.error).toBe('Could not reach the worker');
+	expect(antigravity.retry).not.toBeNull();
+});
