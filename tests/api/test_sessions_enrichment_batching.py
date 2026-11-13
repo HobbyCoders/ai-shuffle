@@ -82,6 +82,19 @@ class TestBothListProducersCarryTheFailure:
         assert [row["last_turn_failed"] for row in result] == [True, False]
 
 
+class TestListRowsSayWhichChatsRun:
+    """A page that just loaded knows a running chat before the socket's snapshot (#1527)."""
+
+    def test_list_rows(self, install_settings, mock_db):
+        from app.db import database, turns
+
+        database.create_session(session_id="s0", profile_id="default")
+        turn = turns.enqueue_turn("s0", "user", prompt="go")
+        turns.start_turn(turn["id"])
+        result, *_ = _enrich(_sessions(2), install_settings)
+        assert [row["is_streaming"] for row in result] == [True, False]
+
+
 class TestEnrichmentOutputIsUnchanged:
     """Golden shape: every field the sessions board reads, byte for byte."""
 
@@ -118,6 +131,7 @@ class TestEnrichmentOutputIsUnchanged:
             "api_user_name": "Ada",
             "has_running_tasks": False,
             "last_turn_failed": False,
+            "is_streaming": False,
             "tags": [{"id": "t1", "name": "Bug"}],
             "has_forks": True,
             "is_remote": False,

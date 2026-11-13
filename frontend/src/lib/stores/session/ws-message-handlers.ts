@@ -97,7 +97,8 @@ export interface MessageHandlerDeps {
 
 	// External store access
 	streamingSessions: {
-		update: (fn: (m: Map<string, StreamingSessionInfo>) => Map<string, StreamingSessionInfo>) => void;
+		/** `sessionId` names the session a live change is about (#1527). */
+		update: (fn: (m: Map<string, StreamingSessionInfo>) => Map<string, StreamingSessionInfo>, sessionId?: string) => void;
 		set: (m: Map<string, StreamingSessionInfo>) => void;
 	};
 	backgroundPermissions: {
@@ -778,7 +779,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const next = new Map(map);
 				next.delete(sessionId);
 				return next;
-			});
+			}, sessionId);
 			scheduleSessionsReload();
 			if (getState().sessionId === sessionId) {
 				onNewChat();
@@ -846,7 +847,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					newMap.delete(ssId);
 				}
 				return newMap;
-			});
+			}, ssId);
 			return;
 		}
 

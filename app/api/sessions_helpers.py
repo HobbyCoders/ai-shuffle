@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 import threading
 import time
 
-from app.core import start_admission
+from app.core import start_admission, streaming_status
 from app.db import database
 from app.db.async_database import run_sync
 from app.db.api_users import get_api_users_by_ids
@@ -870,12 +870,16 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
     presence = get_running_task_presence(session_ids)
     failed = sessions_with_failed_latest_turn(session_ids)
     start_queued = start_admission.admission.queued_sessions()
+    busy = streaming_status.busy_session_ids(session_ids)
 
     for session in sessions:
         sid = session["id"]
         session["tags"] = tags_by_session.get(sid, [])
         session["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
         session["last_turn_failed"] = sid in failed
+        # A turn runs now: a page that just loaded reads it here until the
+        # socket's streaming snapshot arrives (#1527).
+        session["is_streaming"] = sid in busy
         if sid in start_queued:
             session["start_queued"] = True
         fork_info = fork_info_by_session.get(sid)
