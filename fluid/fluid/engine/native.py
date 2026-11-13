@@ -239,6 +239,7 @@ from fluid.tools.builtins.tool_search import (
 from fluid.tools.images import condition_image
 from fluid.tools.mrtr import resolve_input_required
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
+from fluid.tools.view import settle_pointers, verbatim_tool_results
 
 log = logging.getLogger(__name__)
 
@@ -1195,6 +1196,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # loop still bills what it spent.
         self._turn_usage: dict[str, Any] = {}
         self._tool_deliveries = []  # Includes nested code-mode tool completions.
+        # Per session: ids of the tool results its latest request carried
+        # verbatim (fluid.tools.view; set before each model call).
+        self._request_views: dict[str, frozenset[str]] = {}
         # Streaming deltas the store refused (see _emit / _note_dropped_event).
         # Cumulative for the engine, which hosts can read as a metric;
         # ``_dropped_events_turn`` rate-limits the log to once per turn.
@@ -4027,6 +4031,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                     usage=partial, cost_usd=partial_cost, num_model_calls=num_calls,
                 ))
                 return
+            # The tool results this request carries exactly as stored: the
+            # calls it leads to may answer a repeat with a pointer at one of
+            # them, and at nothing else (fluid.tools.view). Kept per session
+            # and published only while that session's own call runs. A pointer
+            # whose target this request no longer carries is shown as gone.
+            in_view = verbatim_tool_results(nodes, history)
+            self._request_views[sid] = in_view
+            history = settle_pointers(history, in_view)
             projected_prompt = self._estimate_request_input_tokens(history)
             drops_sticky = self._drops_sticky_on_empty()
             call_was_sticky = not self._sticky_poisoned and (
@@ -6054,11 +6066,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         # (the Task dispatcher) need it to correlate their cards with this
         # tool_use block.
         self.ctx.extra["tool_use_id"] = tool_use_id
+        # The request this call answers, for a repeat that may point back at
+        # an earlier result (fluid.tools.view); None outside this window.
+        self.ctx.view_results = self._request_views.get(sid)
         self._tool_deliveries = []
         try:
             outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
         finally:
             self.ctx.extra.pop("tool_use_id", None)
+            self.ctx.view_results = None
         if (
             outcome.background_task is not None
             and not outcome.background_task.serves

@@ -21,8 +21,10 @@ from fluid.tools.builtins._util import (
     WalkState,
     compile_glob,
     list_rel_files,
+    result_digest,
     truncate,
 )
+from fluid.tools import view
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 MAX_RESULTS = 200
@@ -106,7 +108,23 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if not root.is_absolute():
         root = (Path(ctx.cwd) / root).resolve()
     limit = _clamp_limit(input.get("limit"))
-    return await asyncio.to_thread(_glob, input["pattern"], root, limit, shutil.which("rg"))
+    outcome = await asyncio.to_thread(_glob, input["pattern"], root, limit, shutil.which("rg"))
+    if outcome.is_error:
+        return outcome
+    # The listing always runs. When it comes back exactly as the copy still
+    # in the model's request (same files, same order), a pointer stands in for
+    # it; any added, removed or re-dated file changes the text and it is
+    # delivered in full (fluid.tools.view).
+    view_key = ("Glob", input["pattern"], str(root), limit)
+    version = result_digest(outcome.text)
+    target = view.answer_from_view(ctx, view_key, version, len(outcome.text))
+    if target is not None:
+        return ToolOutcome(text=view.pointer(
+            f"the listing for {input['pattern']!r} under {root}",
+            "your earlier identical Glob", target,
+        ))
+    view.record_delivery(ctx, view_key, version)
+    return outcome
 
 
 def _glob(

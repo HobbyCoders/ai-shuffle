@@ -35,6 +35,7 @@ from fluid.tools.builtins._util import (
     truncate,
     walk_files,
 )
+from fluid.tools import view
 from fluid.tools.child_env import scrub_child_env
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
@@ -174,6 +175,20 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # Line order is ignored: ripgrep searches files in parallel, so the same
     # matches can come back in a different file order on an unchanged tree.
     digest = result_digest(outcome.text, unordered=True)
+    if view.checks_view(ctx):
+        # The native JSON surface can tell whether the earlier copy is still in
+        # the model's request, so it points at it only then (fluid.tools.view).
+        # After a trim or a fold the same rows are delivered again, in full.
+        view_key = ("Grep", *key)
+        target = view.answer_from_view(ctx, view_key, digest, len(outcome.text))
+        if target is not None:
+            return ToolOutcome(text=view.pointer(
+                f"the result of searching {pattern!r} under {root}",
+                "your earlier identical Grep", target,
+            ))
+        view.record_delivery(ctx, view_key, digest)
+        ctx.grep_seen[key] = digest
+        return outcome
     if ctx.grep_seen.get(key) == digest:
         # The header line names engine and root, so the earlier result is easy
         # to find; identity claims are dropped with the payload they described.

@@ -19,6 +19,8 @@ from typing import Any
 
 from fluid._filelock import file_lock
 from fluid.context.instructions import Skill, discover_skills, parse_frontmatter, skill_search_roots
+from fluid.tools import view
+from fluid.tools.builtins._util import result_digest
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 
@@ -269,6 +271,17 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if match.scope == "plugin":
         body = _expand_plugin_body(body, match.path, plugins, ctx.cwd, sources)
     await asyncio.to_thread(_note_usage, match.path)
-    return ToolOutcome(
-        text=f"# Skill: {match.name}\n# From: {match.path}\n\n{body.strip()}"
-    )
+    text = f"# Skill: {match.name}\n# From: {match.path}\n\n{body.strip()}"
+    # A reload of instructions the model can still see verbatim, from an
+    # unchanged file, gets a pointer. After a trim or a fold took the earlier
+    # copy out, or once the file changed, the full body goes out again.
+    view_key = ("Skill", str(match.path))
+    version = result_digest(text)
+    target = view.answer_from_view(ctx, view_key, version, len(text))
+    if target is not None:
+        return ToolOutcome(text=view.pointer(
+            f"the {match.name} skill", "you loaded it earlier in this conversation",
+            target,
+        ))
+    view.record_delivery(ctx, view_key, version)
+    return ToolOutcome(text=text)

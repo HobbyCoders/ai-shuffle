@@ -27,9 +27,10 @@ from fluid.tools.builtins._util import (
     is_binary,
     missing_path_note,
     resolve,
+    result_digest,
     unchanged_read_note,
 )
-from fluid.tools import read_window
+from fluid.tools import read_window, view
 from fluid.tools.fragments import READ_BEFORE_EDIT
 from fluid.tools.registry import (
     ContentWindow,
@@ -261,6 +262,26 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         return ToolOutcome(
             text=_no_lines_note(path, offset) + unchanged_read_note(repeat)
         )
+
+    # The native JSON surface goes further than the note: while the earlier
+    # result is still verbatim in the request the model is answering from, a
+    # pointer replaces the content (fluid.tools.view). The version is the
+    # delivered page's own hash next to the file's stamp, so a same-size
+    # rewrite inside one mtime tick still counts as a change. Where that
+    # check can be made, a repeat whose earlier copy is gone is a legitimate
+    # re-read and gets no "reuse what you learned" note either.
+    version = None if stamp is None else (stamp, result_digest(numbered))
+    view_key = ("Read", *key)
+    target = view.answer_from_view(ctx, view_key, version, len(numbered))
+    if target is not None:
+        last = offset + window_len - 1
+        return ToolOutcome(text=view.pointer(
+            f"{path} lines {offset}-{last}", "your earlier Read of those lines",
+            target,
+        ))
+    view.record_delivery(ctx, view_key, version)
+    if view.checks_view(ctx):
+        repeat = False
 
     # A read that starts at line 1 and runs out of file is the whole file,
     # whatever offset/limit was asked for, so it claims the window-independent
