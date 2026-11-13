@@ -15,9 +15,9 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 ### Agents and providers
 
 - Google is a built-in provider. Set it up with a Google AI Studio API key in Settings or first-run setup.
-- Google Antigravity runs Google's own Antigravity agent on the worker, connected with a Google AI Studio API key or a Google sign-in. Install the agent from **Settings > Providers > Google Antigravity**. Google's terms restrict using a personal Google sign-in through other software, and Google has suspended accounts for it: the app warns you before a personal sign-in starts, and a personal sign-in runs only in chats you type into unless you turn on **Allow unattended use** for that row.
-- Turns on a Kimi API key or an OpenCode Console key record their cost, and MiniMax turns no longer count cached input twice.
-- The usage popover shows the balance left on a Kimi API key and the 5-hour and weekly quota left on a MiniMax M Plan. Kimi Code, MiniMax API, OpenCode Go and OpenCode Console keys have no meter, so the popover links to the vendor's own dashboard for them.
+- Google Antigravity runs Google's own Antigravity agent on the worker, connected with a Google AI Studio API key or a Google sign-in. On Linux x64 workers, **Install Antigravity** in **Settings > Providers > Google Antigravity** installs the agent; on other workers, install Google's Antigravity CLI yourself so `agy` is on PATH. Google's terms restrict using a personal Google sign-in through other software, and Google has suspended accounts for it: the app warns you before a personal sign-in starts, and a personal sign-in runs only in chats you type into unless you turn on **Allow unattended use** for that row.
+- Turns on a Kimi API key or an OpenCode Console key record their cost, and MiniMax turns no longer overcount input tokens.
+- The usage popover shows the balance left on a Kimi API key and the 5-hour and weekly quota left on a MiniMax M Plan. Kimi Code, MiniMax API, OpenCode Go and OpenCode Console keys have no meter, so the popover links to the vendor's own dashboard for them. Meters and links apply to keys on the vendor's default endpoint.
 - An agent can send up to 8 requests at once to a service you granted it access to. Each request is still checked and approved on its own, as before.
 - Guidance agents get at the start of a chat is no longer cut off. On Claude Code the browser's instructions arrive in full, including the rules for sign-in pages and passwords, and the workspace notes no longer stop mid-sentence.
 
