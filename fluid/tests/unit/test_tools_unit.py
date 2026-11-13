@@ -204,6 +204,20 @@ async def test_grep_fallback_skips_binary_files(tmp_path, monkeypatch) -> None:
     assert "blob.bin" not in out.text
 
 
+def _spill_ctx(tmp_path) -> ToolCtx:
+    return ToolCtx(cwd=str(tmp_path), session_id="s1",
+                   extra={"harness_state_root": tmp_path / "state"})
+
+
+def _full_output(text: str) -> str:
+    """The spilled full output when the result was cut, else ``text``."""
+    import re
+    from pathlib import Path
+
+    match = re.search(r"saved to (.+?\.txt);", text)
+    return Path(match.group(1)).read_text(encoding="utf-8") if match else text
+
+
 async def test_grep_fallback_caps_matches_and_marks_truncation(tmp_path, monkeypatch) -> None:
     from fluid.tools.builtins import grep as grep_mod
 
@@ -215,9 +229,9 @@ async def test_grep_fallback_caps_matches_and_marks_truncation(tmp_path, monkeyp
 
     registry = ToolRegistry()
     register_builtins(registry)
-    out = await registry.dispatch("Grep", {"pattern": "needle"}, ToolCtx(cwd=str(tmp_path)))
+    out = await registry.dispatch("Grep", {"pattern": "needle"}, _spill_ctx(tmp_path))
 
-    hits = [ln for ln in out.text.splitlines() if ln.endswith(":needle")]
+    hits = [ln for ln in _full_output(out.text).splitlines() if ln.endswith(":needle")]
     assert len(hits) == grep_mod.MAX_MATCHES
     assert (
         f"[search truncated: match cap {grep_mod.MAX_MATCHES} reached — "
@@ -234,18 +248,18 @@ async def test_grep_fallback_honours_explicit_limit(tmp_path, monkeypatch) -> No
 
     registry = ToolRegistry()
     register_builtins(registry)
-    ctx = ToolCtx(cwd=str(tmp_path))
+    ctx = _spill_ctx(tmp_path)
 
     out = await registry.dispatch("Grep", {"pattern": "needle", "limit": 7}, ctx)
     hits = [ln for ln in out.text.splitlines() if ln.endswith(":needle")]
     assert len(hits) == 7
     assert "[search truncated: match cap 7 reached — " in out.text
 
-    # A limit above the default lifts the cap, not just lowers it. (Line count
-    # is compared loosely: the 30KB byte-truncation may drop some middle lines.)
+    # A limit above the default lifts the cap, not just lowers it. The inline
+    # result is byte-capped; the spilled file holds every line.
     out = await registry.dispatch("Grep", {"pattern": "needle", "limit": 300}, ctx)
-    hits = [ln for ln in out.text.splitlines() if ln.endswith(":needle")]
-    assert len(hits) > grep_mod.MAX_MATCHES
+    hits = [ln for ln in _full_output(out.text).splitlines() if ln.endswith(":needle")]
+    assert len(hits) == 300
     assert "[search truncated: match cap 200" not in out.text
 
 

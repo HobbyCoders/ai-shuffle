@@ -35,7 +35,7 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 _SNIPPET_RADIUS = 160
 _MAX_MATCHES_PER_SESSION = 3
-_OUTPUT_CAP = 16_000
+_OUTPUT_CAP = 8_000
 _DEFAULT_RECENT = 10
 
 # Rows the recent-listing asks the backend for when scoping to this project:

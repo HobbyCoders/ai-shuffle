@@ -116,10 +116,12 @@ def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
         f"{_RUN_PYTHON_DESC}\n"
         "\n"
         f"A cell's stdout is capped at {stdout_cap:,} characters, fair-shared "
-        "across its prints, and what is cut is named in a closing notice. Print "
-        "what you need to decide, not whole payloads: a tool result too large "
-        "to print is already in the kernel as a ResultRef, so slice it (or "
-        "recover it from `_refs[N]`) rather than re-running the tool."
+        "across its prints; a cut cell's full stdout is saved to a file the "
+        "closing notice names. Filter and summarize inside the cell (matching "
+        "lines, counts, the lines around an error) and print only that, never "
+        "whole files or big structures. A tool result too large to print is "
+        "already in the kernel as a ResultRef, so slice it (or recover it from "
+        "`_refs[N]`) rather than re-running the tool."
     )
 
 # ── the permission prompt for a cell ──
@@ -217,6 +219,25 @@ class _HumanWait:
         if self._since is None:
             return self._total
         return self._total + (self._now() - self._since)
+
+
+def _spill_cell_stdout(full: str, ctx: Any) -> str:
+    """Spill a cut cell's whole stdout; the one-line pointer, or "" without one.
+
+    The inline text is already the fair-shared cut (``…[-N chars]`` markers);
+    this only adds where the rest went. A failed write leaves the cut as is.
+    """
+    if not full or ctx is None:
+        return ""
+    from fluid.tools.spill import write_spill
+
+    path = write_spill(full, ctx=ctx, tool="run_python")
+    if path is None:
+        return ""
+    return (
+        f"[cell stdout cut to the cap; all {len(full):,} chars saved to {path} — "
+        "Read it with offset/limit or Grep it instead of re-running]"
+    )
 
 
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
@@ -663,6 +684,9 @@ class CodeModeSession:
         parts: list[str] = []
         if result.stdout.strip():
             parts.append(result.stdout.rstrip("\n"))
+        spill_note = _spill_cell_stdout(result.stdout_full, getattr(loop, "ctx", None))
+        if spill_note:
+            parts.append(spill_note)
         if result.value_repr:
             parts.append(f"=> {result.value_repr}")
         text = "\n".join(parts) if parts else "(no output)"

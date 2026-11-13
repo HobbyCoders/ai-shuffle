@@ -48,6 +48,49 @@ def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"content": [{"type": "text", "text": _json.dumps({"success": True, **payload}, default=_json_default)}]}
 
 
+# Chars of TaskList's task entries. Whole task dicts carry prompts and report
+# heads; thirty of them reached 38k chars in one call. Running tasks always
+# show; older finished ones past the budget are named by id only (TaskGet
+# reads any of them in full), so nothing is lost.
+TASK_LIST_CHAR_BUDGET = 8_000
+
+
+def _bound_task_list(tasks: List[Dict[str, Any]], budget: int = TASK_LIST_CHAR_BUDGET) -> Dict[str, Any]:
+    """``{"tasks": [...]}`` held to ``budget`` chars, plus what was left out.
+
+    ``tasks`` arrive newest-first. Every running task is kept whatever its
+    size; finished tasks are added newest-first while they fit, and the rest
+    come back as ``omitted_task_ids`` with a note saying how to read them.
+    """
+    import json as _json
+
+    def size(task: Dict[str, Any]) -> int:
+        return len(_json.dumps(task, default=_json_default)) + 2
+
+    kept: List[Dict[str, Any]] = []
+    omitted: List[str] = []
+    used = sum(size(t) for t in tasks if t.get("status") == "running")
+    for task in tasks:
+        if task.get("status") == "running":
+            kept.append(task)
+            continue
+        cost = size(task)
+        if used + cost <= budget:
+            kept.append(task)
+            used += cost
+        else:
+            omitted.append(str(task.get("id") or task.get("task_id") or "?"))
+    out: Dict[str, Any] = {"tasks": kept}
+    if omitted:
+        out["omitted_task_ids"] = omitted
+        out["omitted_note"] = (
+            f"{len(omitted)} older finished task(s) left out to keep this list "
+            f"under {budget:,} chars. TaskGet <task_id> reads one in full; "
+            "include_finished=false lists running tasks only."
+        )
+    return out
+
+
 def _park_doctrine() -> str:
     """Fluid's canonical park sentence, so the two legs cannot drift.
 
@@ -2527,7 +2570,7 @@ def create_builtin_tools_server(
         else:
             tasks = task_registry.get_active(session_id)
         running_count = sum(1 for t in tasks if t.get("status") == "running")
-        payload: Dict[str, Any] = {"tasks": tasks, "running_count": running_count}
+        payload: Dict[str, Any] = {**_bound_task_list(tasks), "running_count": running_count}
         if _all_still_running(tasks):
             # Nothing here that a wake had not already told the caller. Say so
             # at the top of the result so the answer to "should I call this

@@ -649,6 +649,12 @@ class ToolRegistry:
             )
         try:
             input = coerce_args(input, entry.spec.input_schema)
+            if entry.spec.source == "builtin":
+                # Guardrail telemetry: did the agent come back for output a
+                # cap spilled to a file? Cheap substring test before any IO.
+                from fluid.tools.spill import note_readback
+
+                note_readback(name, input, ctx)
             if entry.spec.source == "mcp":
                 _, server, tool = name.split("__", 2)
                 if entry.server is not None:

@@ -520,6 +520,7 @@ class SubprocessKernel:
                     error=frame.get("error"),
                     host_calls=host_calls,
                     notes=notes,
+                    stdout_full=frame.get("stdout_full") or "",
                 )
             else:  # unexpected EOF or malformed frame
                 note = await self._restart_and_restore()

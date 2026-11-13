@@ -53,6 +53,9 @@ import vfs
 # Boot-configured globals (populated by the boot frame).
 _REF_THRESHOLD = truncate.DEFAULT_LIMIT
 _STDOUT_CAP = truncate.DEFAULT_STDOUT_CAP
+# The last cell's untruncated stdout when it ran over the cap ("" otherwise);
+# sent once on the done frame for the host's spill file, then cleared.
+_FULL_STDOUT = [""]
 _CKPT_MAX_BYTES = 0  # 0: no budget (the host keeps its own cap)
 _SOURCES: dict = {}
 _SKILLS: dict = {}
@@ -1000,6 +1003,11 @@ def _finish_stdout(buf: "_SegmentedStdout") -> str:
         segments = [_UNREPRESENTABLE + "\n"]
     try:
         truncated = bool(segments) and sum(len(s) for s in segments) > _STDOUT_CAP
+        # The whole stdout rides to the host, which spills it to a file the
+        # model can Read or Grep; the inline cut stays the fair share below.
+        _FULL_STDOUT[0] = (
+            truncate.bounded_full_stdout("".join(segments)) if truncated else ""
+        )
         refs = _cell_refs(truncated)
         out = truncate.fair_share_stdout(segments, _STDOUT_CAP, refs=refs)
         if not truncated:
@@ -1376,8 +1384,13 @@ def _dispatch(kind, frame: dict) -> dict:
     """
     try:
         if kind == "exec":
+            _FULL_STDOUT[0] = ""
             out, value_repr, err = _run_cell(frame.get("code", ""))
-            return {"kind": "done", "stdout": out, "value_repr": value_repr, "error": err}
+            done = {"kind": "done", "stdout": out, "value_repr": value_repr, "error": err}
+            full, _FULL_STDOUT[0] = _FULL_STDOUT[0], ""
+            if full:
+                done["stdout_full"] = full
+            return done
         if kind == "set_vfs":
             _set_vfs(frame.get("sources") or {}, frame.get("skills") or {})
             return {"kind": "vfs_ok"}

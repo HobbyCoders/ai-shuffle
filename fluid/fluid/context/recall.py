@@ -26,11 +26,13 @@ from fluid.store.base import SessionNode, SessionStore, iter_events_of_class
 _REF_RE = re.compile(r"^(node_[0-9a-f]+)(?:\.\.(node_[0-9a-f]+))?$")
 _REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
-DEFAULT_EXPAND_CHARS = 20_000
-MAX_EXPAND_CHARS = 50_000
+# A window, not a cap: the header names the next offset, so a long original
+# is read in pages and only as far as the agent needs.
+DEFAULT_EXPAND_CHARS = 8_000
+MAX_EXPAND_CHARS = 16_000
 DEFAULT_SEARCH_RESULTS = 8
 _SNIPPET_RADIUS = 160
-_SEARCH_OUTPUT_CAP = 20_000
+_SEARCH_OUTPUT_CAP = 8_000
 
 
 @dataclass

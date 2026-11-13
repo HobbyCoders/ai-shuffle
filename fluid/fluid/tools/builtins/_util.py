@@ -20,7 +20,7 @@ from pathlib import Path
 from fluid.tools.child_env import scrub_child_env
 from fluid.tools.registry import ToolCtx
 
-_TRUNCATE_LIMIT = 30_000  # ~30KB; keep head + tail, drop the middle
+_TRUNCATE_LIMIT = 12_000  # chars; keep head + tail, drop (and spill) the middle
 
 # Terminal control sequences: CSI (colours, cursor moves), OSC (title/hyperlink
 # strings, terminated by BEL or ST) and the lone two-byte escapes. Test runners
@@ -73,14 +73,22 @@ def resolve(file_path: str, ctx: ToolCtx) -> Path:
     return p.resolve()
 
 
-def truncate(text: str, limit: int = _TRUNCATE_LIMIT) -> str:
-    """Head+tail truncation for large tool output (prevents context blowup)."""
-    if len(text) <= limit:
-        return text
-    half = limit // 2
-    head, tail = text[:half], text[-half:]
-    dropped = len(text) - 2 * half
-    return f"{head}\n... [{dropped} chars truncated] ...\n{tail}"
+def truncate(
+    text: str,
+    limit: int = _TRUNCATE_LIMIT,
+    *,
+    ctx: ToolCtx | None = None,
+    tool: str = "tool",
+    head_share: float = 0.5,
+) -> str:
+    """Head+tail truncation for large tool output (prevents context blowup).
+
+    With ``ctx`` the full text is first spilled to the session's scratch
+    folder and the marker names the file (see :mod:`fluid.tools.spill`).
+    """
+    from fluid.tools.spill import cut
+
+    return cut(text, limit, ctx=ctx, tool=tool, head_share=head_share)
 
 
 @dataclass

@@ -84,6 +84,9 @@ class KernelResult:
     error: str | None = None
     host_calls: int = 0
     notes: str = ""
+    # The cell's whole stdout when ``stdout`` was cut to the cap ("" when it
+    # fit); the host spills it to a file the model can Read or Grep.
+    stdout_full: str = ""
 
 
 # The host-call callback: (tool_name, kwargs) -> HostReply. Awaited by the

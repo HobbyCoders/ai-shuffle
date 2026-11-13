@@ -29,9 +29,13 @@ DEFAULT_TIMEOUT_S = 120.0
 MIN_TIMEOUT_S = 1.0
 MAX_TIMEOUT_S = 600.0
 # Bytes of a command's output kept in memory while it runs: the first half
-# and the last half, the middle dropped as it streams. Well above what the
-# model can see, so the cap only ever bites a runaway command.
-MAX_CAPTURE_BYTES = 8 * _TRUNCATE_LIMIT
+# and the last half, the middle dropped as it streams. Far above what the
+# model sees inline; what is captured is what the spill file can give back,
+# so the cap only ever bites a runaway command.
+MAX_CAPTURE_BYTES = 1024 * 1024
+# Share of the inline budget given to the head; the tail gets the rest, since
+# errors, tracebacks and exit summaries come last.
+_HEAD_SHARE = 1 / 3
 # The host this process runs on; describe() reads it at call time so a
 # measurement fixture can declare the platform it renders for.
 HOST_IS_WINDOWS = sys.platform == "win32"
@@ -77,9 +81,8 @@ def describe(tools: frozenset[str] | None = None, *, windows: bool | None = None
             else "\n"
         )
     )
-    read_windows = "Redirect to a file" + (
-        " and Read it in windows" if has("Read") else ""
-    )
+    readers = " or ".join(name for name in ("Read", "Grep") if has(name))
+    read_back = f" — {readers} that file" if readers else " — read that file"
     ps1_route = (
         "save the script to a .ps1 file with Write"
         if has("Write")
@@ -116,9 +119,9 @@ def describe(tools: frozenset[str] | None = None, *, windows: bool | None = None
         "- There is no stdin: commands that prompt for input will hang until "
         "the timeout. Pass non-interactive flags (e.g. --yes) where needed; "
         "interactive git flags (e.g. `git rebase -i`) are not supported.\n"
-        f"- Output is capped at ~{_TRUNCATE_LIMIT // 1000}KB (head and tail "
-        f"kept, middle dropped). {read_windows} when you expect more. "
-        "NEVER pipe a build or test command through tail/head/cat to shorten "
+        f"- Output over {_TRUNCATE_LIMIT:,} characters keeps its head and a "
+        "longer tail; the cut marker names a file with the full output"
+        f"{read_back} instead of re-running. NEVER pipe a build or test command through tail/head/cat to shorten "
         "output (e.g. `cargo build | tail -20`): the cap already handles "
         "size, and the pipe makes the exit code report the LAST pipeline "
         "command's status (tail's 0), masking real failures — run the "
@@ -352,7 +355,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # cancellation) must not orphan a live process either.
         if proc.returncode is None:
             await kill_tree(proc)
-    text = truncate(strip_ansi(stdout.decode(errors="replace")))
+    text = truncate(
+        strip_ansi(stdout.decode(errors="replace")),
+        ctx=ctx, tool="Bash", head_share=_HEAD_SHARE,
+    )
     code = proc.returncode or 0
     if not text.strip():
         # A bare "(no output)" is the one result that says nothing about what
