@@ -229,23 +229,24 @@ def _spill_cell_stdout(full: str, ctx: Any, total: int = 0) -> str:
     The inline text is already the fair-shared cut (``…[-N chars]`` markers);
     this only adds where the rest went. A failed write leaves the cut as is.
     Over ``FULL_STDOUT_MAX`` the kernel sent only head and tail, and the
-    pointer names the char range that was not kept.
+    pointer says the middle was not kept.
     """
     if not full or ctx is None:
         return ""
     path = spill.write_spill(full, ctx=ctx, tool="run_python")
     if path is None:
         return ""
-    hint = "Read it with offset/limit or Grep it instead of re-running"
     if total > FULL_STDOUT_MAX:
-        half = FULL_STDOUT_MAX // 2
+        lost = total - 2 * (FULL_STDOUT_MAX // 2)
         return (
-            f"[cell stdout cut to the cap; it was {total:,} chars, over the "
-            f"{FULL_STDOUT_MAX // (1024 * 1024)} MiB spill limit: chars 1-{half:,} and "
-            f"{total - half + 1:,}-{total:,} saved to {path} (session scratch), chars "
-            f"{half + 1:,}-{total - half:,} were not kept — {hint}]"
+            f"[cell stdout cut to the cap; its first and last {FULL_STDOUT_MAX // 2:,} chars "
+            f"saved to {path} (session scratch; the middle {lost:,} chars were not kept) "
+            f"— {spill.READ_HINT}]"
         )
-    return f"[cell stdout cut to the cap; all {len(full):,} chars saved to {path} (session scratch) — {hint}]"
+    return (
+        f"[cell stdout cut to the cap; all {len(full):,} chars saved to {path} "
+        f"(session scratch) — {spill.READ_HINT}]"
+    )
 
 
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.

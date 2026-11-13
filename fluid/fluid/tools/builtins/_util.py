@@ -81,13 +81,16 @@ def truncate(
     ctx: ToolCtx | None = None,
     tool: str = "tool",
     head_share: float = 0.5,
+    saved_as: str = "full output",
+    note: str = "",
 ) -> str:
     """Head+tail truncation for large tool output (prevents context blowup).
 
-    With ``ctx`` the full text is first spilled to the session's scratch
-    folder and the marker names the file (see :mod:`fluid.tools.spill`).
+    With ``ctx`` the text is first spilled to the session's scratch folder
+    and the marker names the file (see :func:`fluid.tools.spill.cut`).
     """
-    return spill.cut(text, limit, ctx=ctx, tool=tool, head_share=head_share)
+    return spill.cut(
+        text, limit, ctx=ctx, tool=tool, head_share=head_share, saved_as=saved_as, note=note)
 
 
 @dataclass

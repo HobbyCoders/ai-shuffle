@@ -695,17 +695,13 @@ class ToolRegistry:
             if name in {"Bash", "Monitor"} and not raw_shell_output:
                 text = fence_shell_output(text, f"{name} execution error")
             return ToolOutcome(text=text, is_error=True)
-        if entry.spec.source == "builtin":
+        if entry.spec.source == "builtin" and not outcome.is_error:
             # Guardrail telemetry: did the agent come back for output a cap
-            # spilled to a file? Counted from the files the call touched or
-            # returned; a cheap substring test runs before any IO.
+            # spilled to a file? Counted from the call's explicit path only.
             from fluid.tools.spill import note_access
 
-            returned = outcome.text or ""
-            if outcome.shell_result is not None:
-                returned = f"{returned}\n{outcome.shell_result[0]}"
             try:
-                note_access(name, input, returned, ctx)
+                note_access(name, input, ctx)
             except Exception:  # telemetry never fails a call
                 log.debug("spill read-back count failed", exc_info=True)
         # Code mode keeps raw shell text for parsing; its enclosing cell is

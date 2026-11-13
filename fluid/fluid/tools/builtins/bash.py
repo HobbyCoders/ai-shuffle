@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import signal
@@ -12,7 +13,7 @@ from typing import Any
 
 from fluid.context.settings_stack import layered_env
 from fluid.tools import agent_runner
-from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi
+from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
 from fluid.tools.child_env import scrub_child_env
@@ -25,20 +26,18 @@ from fluid.tools.priority import (
 )
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 from fluid.tools.shell import resolve_shell
-from fluid.tools.spill import SpillStream, cut_streamed
 
 DEFAULT_TIMEOUT_S = 120.0
 MIN_TIMEOUT_S = 1.0
 MAX_TIMEOUT_S = 600.0
 # Bytes of a command's output kept in memory while it runs: the first half
 # and the last half, the middle dropped as it streams. Far above what the
-# model sees inline; the spill file gets the whole output as it streams.
+# model sees inline, so the spill file holds the whole output of all but a
+# runaway command (and its marker says when it does not).
 MAX_CAPTURE_BYTES = 1024 * 1024
 # Share of the inline budget given to the head; the tail gets the rest, since
 # errors, tracebacks and exit summaries come last.
 _HEAD_SHARE = 1 / 3
-# After a timeout kill, how long to read what the command wrote just before it.
-_DRAIN_AFTER_KILL_S = 2.0
 # The host this process runs on; describe() reads it at call time so a
 # measurement fixture can declare the platform it renders for.
 HOST_IS_WINDOWS = sys.platform == "win32"
@@ -123,7 +122,7 @@ def describe(tools: frozenset[str] | None = None, *, windows: bool | None = None
         "the timeout. Pass non-interactive flags (e.g. --yes) where needed; "
         "interactive git flags (e.g. `git rebase -i`) are not supported.\n"
         f"- Output over {_TRUNCATE_LIMIT:,} characters keeps its head and a "
-        "longer tail; the cut marker names a file with the full output"
+        "longer tail; the cut marker names a file with the saved output"
         f"{read_back} instead of re-running. NEVER pipe a build or test command through tail/head/cat to shorten "
         "output (e.g. `cargo build | tail -20`): the cap already handles "
         "size, and the pipe makes the exit code report the LAST pipeline "
@@ -259,64 +258,67 @@ def clamp_timeout(value: Any) -> float:
 
 
 class _Capture:
-    """The first and last ``MAX_CAPTURE_BYTES // 2`` of a command's output.
+    """The first and last ``MAX_CAPTURE_BYTES // 2`` bytes of a command's output.
 
-    Shared with the reader rather than local to it, so what was read before
-    a timeout cancelled the reader is still there to show.
+    Owned by the caller and filled by :func:`_read_capped`, so what was read
+    before a timeout cancelled the reader is still there to show.
     """
 
     def __init__(self) -> None:
         self.head = bytearray()
         self.tail = bytearray()
-        self.dropped = 0
+        self.total = 0
 
     def add(self, chunk: bytes) -> None:
         half = MAX_CAPTURE_BYTES // 2
-        if len(self.head) < half:
-            take = min(len(chunk), half - len(self.head))
-            self.head += chunk[:take]
-            chunk = chunk[take:]
-            if not chunk:
-                return
-        self.tail += chunk
+        self.total += len(chunk)
+        take = max(0, min(len(chunk), half - len(self.head)))
+        self.head += chunk[:take]
+        self.tail += chunk[take:]
         if len(self.tail) > 2 * half:
-            self.dropped += len(self.tail) - half
             del self.tail[:-half]
+
+    @property
+    def dropped(self) -> int:
+        """Bytes between head and tail that were never kept."""
+        return self.total - len(self.head) - min(len(self.tail), MAX_CAPTURE_BYTES // 2)
 
     def value(self) -> bytes:
-        half = MAX_CAPTURE_BYTES // 2
-        if len(self.tail) > half:
-            self.dropped += len(self.tail) - half
-            del self.tail[:-half]
-        if not self.tail:
-            return bytes(self.head)
+        tail = bytes(self.tail[-(MAX_CAPTURE_BYTES // 2):])
         if self.dropped:
             marker = f"\n... [{self.dropped} bytes dropped while streaming] ...\n".encode()
-            return bytes(self.head) + marker + bytes(self.tail)
-        return bytes(self.head + self.tail)
+            return bytes(self.head) + marker + tail
+        return bytes(self.head) + tail
 
 
-async def _read_capped(
-    stream: asyncio.StreamReader,
-    sink: SpillStream | None = None,
-    capture: _Capture | None = None,
-) -> bytes:
+async def _read_capped(stream: asyncio.StreamReader, capture: _Capture | None = None) -> bytes:
     """Drain ``stream`` keeping the first and last ``MAX_CAPTURE_BYTES // 2``.
 
     ``communicate()`` buffers everything a command prints, so a runaway
     command (a build in a loop, a log tail) grows the host without bound.
-    Only head and tail can reach the model anyway, so the middle is dropped
-    from memory as it streams past; ``sink``, when given, writes every chunk
-    to the spill file so the middle stays recoverable. Each chunk reaches the
-    sink and the capture with no await in between, so a cancellation lands
-    between chunks, never inside one.
+    The middle is dropped from memory as it streams past, and the result says
+    so (see :func:`_render`).
     """
     capture = capture if capture is not None else _Capture()
     while chunk := await stream.read(65536):
-        if sink is not None:
-            sink.feed(chunk)
         capture.add(chunk)
     return capture.value()
+
+
+def _render(capture: _Capture, ctx: ToolCtx, *, timed_out: bool = False) -> str:
+    """The captured output, ANSI-stripped and cut to the inline cap.
+
+    Over the cap, the same cleaned text is spilled once and the marker names
+    it. It says "full output" only when nothing was dropped while capturing.
+    """
+    text = strip_ansi(capture.value().decode(errors="replace"))
+    saved_as = "output up to the timeout" if timed_out else "full output"
+    note = ""
+    if capture.dropped:
+        saved_as = "captured " + saved_as.removeprefix("full ")
+        note = f"the middle ~{capture.dropped:,} bytes were not captured"
+    return truncate(
+        text, ctx=ctx, tool="Bash", head_share=_HEAD_SHARE, saved_as=saved_as, note=note)
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
@@ -354,39 +356,18 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     raise_oom_score_adj(proc.pid)
     assert proc.stdout is not None
     capture = _Capture()
-    timed_out = False
-    # The spill file is the record of what ran: the stream writes the whole
-    # output as it arrives (nothing on disk until it outgrows the inline cap)
-    # and keeps the file on every outcome, a timeout or an exception included.
-    # Only a cancelled turn deletes it, as the block unwinds.
-    with SpillStream(ctx, "Bash", open_after=_TRUNCATE_LIMIT, transform=strip_ansi) as sink:
-        try:
-            await asyncio.wait_for(_read_capped(proc.stdout, sink, capture), timeout=timeout)
-            await asyncio.wait_for(proc.wait(), timeout=timeout)
-        except TimeoutError:
-            timed_out = True
-        finally:
-            # Every way out, a cancelled turn included, kills what still runs:
-            # nothing downstream would ever reap it.
-            if proc.returncode is None:
-                await kill_tree(proc)
-        if timed_out:
+    try:
+        await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=timeout)
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except TimeoutError:
+        await kill_tree(proc)
+        with contextlib.suppress(TimeoutError, OSError):
             # What the command wrote just before the kill is still in the pipe.
-            try:
-                await asyncio.wait_for(
-                    _read_capped(proc.stdout, sink, capture), timeout=_DRAIN_AFTER_KILL_S)
-            except (TimeoutError, OSError):
-                pass
-        text = cut_streamed(
-            strip_ansi(capture.value().decode(errors="replace")),
-            _TRUNCATE_LIMIT, sink, head_share=_HEAD_SHARE,
-            what="output up to the timeout" if timed_out else "full output",
-        )
-    if timed_out:
+            await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=2.0)
         # Say what the retry should change rather than leaving the model to
         # re-run the same command, and show what it printed before the kill:
         # the error that explains a hang is usually the last thing printed.
-        advice = (
+        text = (
             f"command timed out after {timeout:g}s and was killed. Raise "
             "the timeout parameter for a genuinely long command, narrow "
             "the command's scope, or use Monitor for a long-running job "
@@ -394,10 +375,24 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             "append & or poll for completion. Inspect any partial effects "
             "before retrying a command that may have changed state."
         )
-        if text.strip():
-            advice += "\n" + fence_shell_output(
-                text, "Bash partial output (command timed out; output up to the timeout)")
-        return ToolOutcome(text=advice, is_error=True)
+        partial = _render(capture, ctx, timed_out=True)
+        if partial.strip():
+            text += "\n" + fence_shell_output(
+                partial, "Bash partial output (command timed out; output up to the timeout)")
+        return ToolOutcome(text=text, is_error=True)
+    except asyncio.CancelledError:
+        # The user interrupted the turn: this task is being torn down
+        # mid-await and nothing downstream will ever reap the process, so
+        # kill the tree here and let the cancellation keep propagating.
+        # Nothing is spilled: the file is written only for a finished result.
+        await kill_tree(proc)
+        raise
+    finally:
+        # Any other abnormal exit (an exception out of the reader, a second
+        # cancellation) must not orphan a live process either.
+        if proc.returncode is None:
+            await kill_tree(proc)
+    text = _render(capture, ctx)
     code = proc.returncode or 0
     if not text.strip():
         # A bare "(no output)" is the one result that says nothing about what
