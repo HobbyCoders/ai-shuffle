@@ -150,8 +150,25 @@ def windowed_read_pointer(
 
 # ─── cell stdout budget ──────────────────────────────────────────────────────
 
-DEFAULT_STDOUT_CAP = 16384  # chars of cell stdout that reach the model
+DEFAULT_STDOUT_CAP = 8000  # chars of cell stdout that reach the model
 _DROP_MARKER = "…[-{n} chars]"
+# A truncated print keeps head AND tail (40/60) once its share is at least
+# this many chars; below it, head only, as a split would leave two stubs.
+_SPLIT_MIN = 400
+# Chars of a truncated cell's raw stdout the kernel hands the host for the
+# spill file (head and tail kept past this, a runaway print loop bounded).
+FULL_STDOUT_MAX = 2 * 1024 * 1024
+
+
+def bounded_full_stdout(text: str, limit: int = FULL_STDOUT_MAX) -> str:
+    """``text`` held to ``limit`` chars for the spill file, head and tail kept."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    dropped = len(text) - 2 * half
+    return f"{text[:half]}\n…[{dropped:,} chars of cell stdout not kept]…\n{text[-half:]}"
+
+
 _NAMED_DROPS = 2  # how many of the heaviest drops the notice names
 # How many kernel handles the notice names. Refs are created for every result
 # of a truncated cell (see ``SPILL_MIN``), so the list has to be able to name
@@ -288,11 +305,19 @@ def fair_share_stdout(
             if budget >= 2 or not parts or parts[-1] != "…\n":
                 parts.append("…\n")
             continue
-        head = segment[: budget - reserve]
-        marker = _drop_marker(len(segment) - len(head))
-        parts.append(head + marker + "\n")
-        kept_chars += len(head)
-        drops.append((index + 1, len(segment) - len(head)))
+        room = budget - reserve
+        # A share big enough to split keeps the print's tail too: a printed
+        # command result or log ends with its error or summary.
+        tail_n = (room * 3) // 5 if room >= _SPLIT_MIN else 0
+        head = segment[: room - tail_n]
+        tail = segment[len(segment) - tail_n:] if tail_n else ""
+        marker = _drop_marker(len(segment) - len(head) - len(tail))
+        if tail:
+            parts.append(head + marker + "\n" + tail)
+        else:
+            parts.append(head + marker + "\n")
+        kept_chars += len(head) + len(tail)
+        drops.append((index + 1, len(segment) - len(head) - len(tail)))
 
     heaviest = sorted(drops, key=lambda d: -d[1])[:_NAMED_DROPS]
     named = ", ".join(f"print {n} (-{d})" for n, d in heaviest)

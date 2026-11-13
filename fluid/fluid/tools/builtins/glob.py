@@ -108,7 +108,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if not root.is_absolute():
         root = (Path(ctx.cwd) / root).resolve()
     limit = _clamp_limit(input.get("limit"))
-    outcome = await asyncio.to_thread(_glob, input["pattern"], root, limit, shutil.which("rg"))
+    outcome = await asyncio.to_thread(_glob, input["pattern"], root, limit, shutil.which("rg"), ctx)
     if outcome.is_error:
         return outcome
     # The listing always runs. When it comes back exactly as the copy still
@@ -128,7 +128,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
 
 def _glob(
-    pattern: str, root: Path, limit: int = MAX_RESULTS, rg: str | None = None
+    pattern: str, root: Path, limit: int = MAX_RESULTS, rg: str | None = None,
+    ctx: ToolCtx | None = None,
 ) -> ToolOutcome:
     """Bounded glob listing. Runs on a thread — the listing can touch many paths.
 
@@ -197,5 +198,5 @@ def _glob(
         except ValueError:
             return str(path)
 
-    body = truncate("\n".join(_show(p) for _, p in hits)) or "(no matches)"
+    body = truncate("\n".join(_show(p) for _, p in hits), ctx=ctx, tool="Glob") or "(no matches)"
     return ToolOutcome(text="\n".join([head, body, *notes]))
