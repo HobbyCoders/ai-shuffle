@@ -1459,9 +1459,11 @@
 		stroke: var(--border-strong);
 	}
 	/* Healthy usage is neutral, not the theme's primary: a usage meter only
-	   changes colour when it means something (warning, then danger). */
+	   changes colour when it means something (warning, then danger). Mixed
+	   from --foreground, not --muted-foreground, because some theme presets
+	   tint muted text (purple, pink) and it can sit close to the track. */
 	.ring-progress {
-		stroke: var(--muted-foreground);
+		stroke: color-mix(in oklch, var(--foreground) 80%, transparent);
 		transition: stroke-dashoffset 0.3s ease, stroke 0.2s ease;
 	}
 	.usage-ring.warning .ring-progress {
@@ -1610,7 +1612,7 @@
 	}
 	/* Collapsed state: one plain severity-coloured fill (same vars as the ring/pct). */
 	.ctx-seg.solid {
-		background: var(--muted-foreground);
+		background: color-mix(in oklch, var(--foreground) 80%, transparent);
 	}
 	.ctx-seg.solid.warning {
 		background: var(--warning);
@@ -1741,7 +1743,7 @@
 	}
 	.row-fill {
 		height: 100%;
-		background: var(--muted-foreground);
+		background: color-mix(in oklch, var(--foreground) 80%, transparent);
 		border-radius: 999px;
 		transition: width 0.3s ease;
 	}
