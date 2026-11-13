@@ -518,7 +518,9 @@ def test_live_prompt_forbids_backchannels_and_waiting_filler():
     assert "Keep listening while the user pauses" in LIVE_INSTRUCTIONS
     assert "do not resume or repeat the sentence you were cut off in" in LIVE_INSTRUCTIONS
     assert "still on the call" in LIVE_INSTRUCTIONS and "gets nothing or one word" in LIVE_INSTRUCTIONS
-    assert "applies for the rest of the call; after it, speak up unprompted only for a result or a blocker" in LIVE_INSTRUCTIONS
+    assert "applies for the rest of the call." in LIVE_INSTRUCTIONS
+    # Only a request for fewer updates quiets unprompted updates, not any request about how the voice talks.
+    assert "If the user asked for fewer updates, speak up unprompted only for a result or a blocker." in LIVE_INSTRUCTIONS
 
 
 def test_live_prompt_is_one_first_person_voice_that_tells_results():
