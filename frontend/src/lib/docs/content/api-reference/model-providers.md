@@ -566,7 +566,7 @@ The agent keeps a Google sign-in in its own files on the worker. AI Shuffle star
 
 ### In Settings
 
-**Settings > Providers > Google Antigravity** (and the first-run setup) shows whether the agent is installed and its version. **Install Antigravity** downloads Google's release from its official manifest. Each row has an **Overview** tab (status, sign-in or key, sign-out), a **Models** tab (which Gemini models the picker offers) and a **Usage** tab. The model picker offers a thinking level (low, medium, high; Gemini 3.1 Pro offers low and high) as the effort control.
+**Settings > Providers > Google Antigravity** (and the first-run setup) shows whether the agent is installed and its version. **Install Antigravity** downloads Google's release for the worker from its official manifest (Windows, macOS and Linux, on x64 or arm64) and checks it against Google's checksum. Once installed, **Check for update** asks Google for a newer release: it says the agent is up to date, or installs the new version, switches to it and removes the older copies it can (one still running on Windows is left for next time). A worker also checks once when it starts, at most every 10 minutes, but only for the copy AI Shuffle installed. An `agy` you installed yourself is never changed: an update installs AI Shuffle's own copy, which then runs instead, and the message says so. Each row has an **Overview** tab (status, sign-in or key, sign-out), a **Models** tab (which Gemini models the picker offers) and a **Usage** tab. The model picker offers a thinking level (low, medium, high; Gemini 3.1 Pro offers low and high) as the effort control.
 
 **Terms warning.** Google's Antigravity [terms](https://antigravity.google/terms) (section 6) and [FAQ](https://antigravity.google/docs/faq) restrict using a personal Google sign-in (consumer plans) through third-party software, and Google has suspended accounts for it. AI Shuffle runs Google's own unmodified agent and never touches its sign-in, but the account is yours to risk. A Gemini API key or a business sign-in is the supported route. The warning is shown before a personal sign-in starts and on every personal sign-in row.
 
@@ -581,8 +581,9 @@ All of these are owner only, under `/api/v1/antigravity`.
 | Endpoint | What it does |
 | --- | --- |
 | `GET /meta` | `provider_type`, `auth_modes` (`id`, `label`, `headless`, `guarded`, `warning`), the `warning` text, `terms_url`, `dashboard_url`, `guard_default` and `default_models` |
-| `GET /status` | `installed`, `version`, `install` (`state`, `version`, `error`) and `workers_requiring_update` |
-| `POST /install` | Download and install Google's agent; poll `GET /status` |
+| `GET /status` | `installed`, `version`, `source` (`app` when AI Shuffle installed the agent, `path` for an `agy` on PATH, `override` for `AI_SHUFFLE_ANTIGRAVITY_BIN`, or `null`), `can_install` (Google publishes a build for this worker), `unsupported_message` (why not, when `can_install` is false; otherwise `null`), `install` (`kind`: `install` or `update`, `state`: `idle`, `running`, `succeeded` or `failed`, `version`, `message`, `error`) and `workers_requiring_update` |
+| `POST /install` | Download and install Google's agent for this worker's platform; poll `GET /status` |
+| `POST /update` | Check for update: the same background job. It finishes with `message` "Antigravity is up to date (X)." or "Antigravity updated from X to Y."; poll `GET /status` |
 | `GET /providers` | This leg's rows (no keys) with `guard_applies`, `allow_unattended` and `guarded`. They also appear in `GET /api/v1/model-providers` |
 | `POST /providers` | Create a row: `{"name", "auth_mode", "api_key"?, "models"?, "default_model"?, "enabled"}`. Returns the provider object plus `guard_applies`, `allow_unattended` and `guarded` |
 | `GET /providers/{id}/status` | `state` (`signed_in`, `signed_out`, `not_installed` or `error`), `message`, the guard fields, `auth_mode` and `login` (a sign-in waiting for its code, started on any device, or `null`) |

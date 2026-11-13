@@ -335,6 +335,14 @@ def check_prerequisites() -> None:
             logger.info("Claude Code CLI: checking for an update")
     except Exception:
         logger.warning("Could not check for a Claude Code update", exc_info=True)
+    # The same for the Antigravity agent AI Shuffle installed (never one on
+    # PATH): a background task on the loop, never awaited, never fatal.
+    try:
+        from app.core import antigravity
+        if antigravity.update_on_startup():
+            logger.info("Antigravity: checking for an update")
+    except Exception:
+        logger.warning("Could not check for an Antigravity update", exc_info=True)
     claude_relogin_notice.mark_if_needed()
 
     # Record the Claude Code auth mode once for an install that has none, so a

@@ -8,7 +8,8 @@ docs/internal/antigravity-acp-spike.md.
 * The binary is run unmodified. Its sign-in lives in its own state directory
   under ``HOME`` (``~/.gemini/antigravity-cli``) or the OS keyring. Fluid never
   opens, copies or refreshes any of it: each provider row gets its own
-  ``HOME`` so the agent keeps its own sign-in there, and only the agent reads it.
+  ``HOME`` (on Windows also ``APPDATA`` and ``LOCALAPPDATA`` inside it) so the
+  agent keeps its own sign-in there, and only the agent reads it.
 * ``gemini-api-key`` reads ``GEMINI_API_KEY`` from the agent's environment.
 * Instructions travel as ``_meta.antigravity.systemPrompt.append`` on
   ``session/new`` (the agent advertises ``_meta.antigravity.systemPrompt.append``;
@@ -20,6 +21,7 @@ docs/internal/antigravity-acp-spike.md.
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -51,12 +53,23 @@ _PASS_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP"
 
 def agent_env(home: str, *, api_key: str | None = None, extra: Mapping[str, str] | None = None,
               source: Mapping[str, str] | None = None) -> dict[str, str]:
-    """The agent's whole environment: a short pass-through list, its HOME, and
-    the row's key for ``gemini-api-key``."""
+    """The agent's whole environment: a short pass-through list, its HOME (and
+    on Windows its APPDATA/LOCALAPPDATA under it), and the row's key for
+    ``gemini-api-key``."""
     src = os.environ if source is None else source
     env = {k: src[k] for k in _PASS_ENV if k in src}
     env["HOME"] = home
     env["USERPROFILE"] = home
+    if sys.platform == "win32":
+        # Windows programs keep their state under %APPDATA% / %LOCALAPPDATA%,
+        # not HOME: point both into the row's own home too.
+        for name, parts in (("APPDATA", ("AppData", "Roaming")), ("LOCALAPPDATA", ("AppData", "Local"))):
+            path = os.path.join(home, *parts)
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError:
+                pass
+            env[name] = path
     env.setdefault("TERM", "dumb")
     env["NO_BROWSER"] = "1"
     if api_key:
