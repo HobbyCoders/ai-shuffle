@@ -106,6 +106,20 @@ it('can re-enable the fixed Kimi Code model after disabling it and reopening Man
 	expect(saved()).toEqual([model]);
 });
 
+it('re-ticks a preset model once every model is unticked (#1524)', async () => {
+	// A refreshable provider whose catalog is a built-in roster (MiniMax, Antigravity).
+	const models = [entry('m-1'), entry('m-2')];
+	mocks.post.mockResolvedValue({ source: 'preset', binding: 'mm-binding', models });
+	const minimax = row({ id: 'mm', provider_type: 'minimax', catalog_binding: 'mm-binding', models: [] });
+	render(ModelCuration, { row: minimax });
+	// Nothing is curated, so the pickers offer nothing: no box reads ticked.
+	const first = await screen.findByRole('checkbox', { name: 'm-1' });
+	expect((first as HTMLInputElement).checked).toBe(false);
+	expect((screen.getByRole('checkbox', { name: 'm-2' }) as HTMLInputElement).checked).toBe(false);
+	await toggle('m-1');
+	expect(saved()).toEqual([entry('m-1')]);
+});
+
 describe('shared catalog and concurrent curation', () => {
 	const catalog = { source: 'upstream', binding: 'fixture-binding-a', models: [entry('old'), entry('remote'), entry('new')] };
 
@@ -298,9 +312,28 @@ describe('Models tab', () => {
 	it('keeps the stored curation checked when the fetch fails', async () => {
 		mocks.post.mockRejectedValue(new Error('offline'));
 		render(ModelCuration, { row: router([entry('keep'), entry('toggle')]) });
+		const refresh = await screen.findByRole('button', { name: 'Refresh model list' });
+		await waitFor(() => expect((refresh as HTMLButtonElement).disabled).toBe(false));
+		await fireEvent.click(refresh);
 		expect((await screen.findByRole('alert')).textContent).toBe('offline');
 		await toggle('toggle');
 		expect(saved()).toEqual([entry('keep')]);
+	});
+
+	it('keeps a failed fetch on opening quiet; Refresh says why and a later success clears it (#1524)', async () => {
+		mocks.post.mockRejectedValue(new Error('offline'));
+		render(ModelCuration, { row: router([entry('keep')]) });
+		await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+		const refresh = await screen.findByRole('button', { name: 'Refresh model list' });
+		await waitFor(() => expect((refresh as HTMLButtonElement).disabled).toBe(false));
+		expect(screen.queryByRole('alert')).toBeNull();
+		expect((screen.getByRole('checkbox', { name: 'keep' }) as HTMLInputElement).checked).toBe(true);
+		await fireEvent.click(refresh);
+		expect((await screen.findByRole('alert')).textContent).toBe('offline');
+		mocks.post.mockResolvedValue({ source: 'upstream', binding: 'fixture-binding-a', models: [entry('keep')] });
+		await waitFor(() => expect((refresh as HTMLButtonElement).disabled).toBe(false));
+		await fireEvent.click(refresh);
+		await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
 	});
 
 	it('keeps each model’s context window and pricing', async () => {

@@ -1706,11 +1706,13 @@ def count_pending(cursor, origin: str, incarnation: int) -> int:
     return int(row["n"]) if row else 0
 
 
-def get_op(cursor, origin: str, incarnation: int, seq: int, *, at_or_after: bool = False) -> Optional[dict]:
-    """One stored envelope, optionally the first retained op at or after seq."""
+def get_op(cursor, origin: str, incarnation: int, seq: int, *, at_or_after: bool = False,
+           highest: bool = False) -> Optional[dict]:
+    """One stored envelope, optionally the first (or, with ``highest``, the last) retained op at or after seq."""
     comparison = ">=" if at_or_after else "="
+    order = "DESC" if at_or_after and highest else "ASC"
     cursor.execute("SELECT envelope FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s "
-                   f"AND seq {comparison} %s ORDER BY seq LIMIT 1", (origin, incarnation, seq))
+                   f"AND seq {comparison} %s ORDER BY seq {order} LIMIT 1", (origin, incarnation, seq))
     row = cursor.fetchone()
     return _load(row["envelope"], {}) if row else None
 

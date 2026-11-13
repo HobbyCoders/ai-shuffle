@@ -736,6 +736,16 @@ def test_validate_reads_journey_names_from_the_checkout(tmp_path):
     scenarios.validate(_data(row))  # the real journeys folder is the default
 
 
+def test_rows_an_agent_preview_cannot_drive_need_an_owner_login():
+    # The worker refuses an agent preview login for starting or messaging a chat
+    # another worker runs and for terminals (#1501).
+    by_id = {row["id"]: row for row in scenarios.rows(scenarios.load())}
+    for rid in ("two-worker-smoke.4", "two-worker-smoke.32", "harness-basics.chat-table-terminal-shortcuts"):
+        assert "owner-login" in by_id[rid]["needs"], rid
+    phone = by_id["harness-basics.new-session-add-project-phone"]
+    assert "No project" in phone["how"] and "'Add a project' button and its" not in phone["how"]
+
+
 def test_render_names_journeys_and_needs():
     text = scenarios.render_markdown(_data(
         {"id": "t.1", "check": "a", "kind": "journey", "journeys": ["send", "stop"], "how": "h"},

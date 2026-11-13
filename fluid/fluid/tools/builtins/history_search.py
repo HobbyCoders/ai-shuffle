@@ -81,4 +81,4 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         exclude=calling_node_ids(nodes, (ctx.extra or {}).get("tool_use_id")),
     )
     zone = await asyncio.to_thread(history_zone, ctx.extra)
-    return ToolOutcome(text=render_hits(hits, query, zone))
+    return ToolOutcome(text=render_hits(hits, query, zone, ctx=ctx))

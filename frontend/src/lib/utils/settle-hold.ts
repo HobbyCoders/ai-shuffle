@@ -113,6 +113,12 @@ export interface TurnHandoffInput {
 	unsettled: boolean;
 	/** The turn is parked on background work (reducer `parked`). */
 	parked: boolean;
+	/**
+	 * The chat rests on the "Not sent" rows Stop handed back. A hand-off that runs
+	 * out meanwhile waits for it to move on: the stopped turn folding its steps
+	 * right above those rows would move them under the reader (#1147).
+	 */
+	pinned?: boolean;
 }
 
 export interface TurnHandoffHold {
@@ -147,6 +153,9 @@ export function createTurnHandoffHold(
 	let previousUnsettled = false;
 	let previousParked = false;
 	const held = new Map<string, unknown>();
+	// Ran out while pinned; released by the first update that is not.
+	const waiting = new Set<string>();
+	let pinned = false;
 	let snapshot: ReadonlySet<string> = new Set();
 
 	function publish() {
@@ -156,11 +165,13 @@ export function createTurnHandoffHold(
 	function clearAll() {
 		for (const handle of held.values()) timers.clearTimeout(handle);
 		held.clear();
+		waiting.clear();
 		publish();
 	}
 
 	return {
-		update({ sessionId: id, latestTurnKey, unsettled, parked }) {
+		update({ sessionId: id, latestTurnKey, unsettled, parked, pinned: pin = false }) {
+			pinned = pin;
 			if (!started || id !== sessionId) {
 				started = true;
 				sessionId = id;
@@ -168,17 +179,28 @@ export function createTurnHandoffHold(
 			} else if (latestTurnKey !== previousKey && previousKey !== null && previousUnsettled) {
 				const key = previousKey;
 				if (held.has(key)) timers.clearTimeout(held.get(key));
+				waiting.delete(key);
 				held.set(key, timers.setTimeout(() => {
+					if (pinned) {
+						waiting.add(key);
+						return;
+					}
 					held.delete(key);
 					publish();
 					onExpire();
 				}, previousParked ? PARKED_SETTLE_HOLD_MS : SETTLE_HOLD_MS));
 				publish();
 			}
+			if (!pinned && waiting.size) {
+				for (const key of waiting) held.delete(key);
+				waiting.clear();
+				publish();
+			}
 			// The turn that is latest again (a rewind) is governed by the main hold.
 			if (latestTurnKey !== null && held.has(latestTurnKey)) {
 				timers.clearTimeout(held.get(latestTurnKey));
 				held.delete(latestTurnKey);
+				waiting.delete(latestTurnKey);
 				publish();
 			}
 			previousKey = latestTurnKey;

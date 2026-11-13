@@ -43,6 +43,9 @@ export interface Session {
 	last_turn_failed?: boolean | null;
 	/** A new turn was accepted but is waiting for the database to have room. */
 	start_queued?: boolean | null;
+	/** A turn runs now. Listed rows only; the streaming map is live after the
+	 *  socket's snapshot (#1527). */
+	is_streaming?: boolean | null;
 	/** Read-only state sampled on the owning worker, never local runner state. */
 	remote_runtime_state?: 'working' | 'parked' | 'permission' | 'question' | 'idle' | 'offline' | 'unknown' | null;
 	is_active: boolean;

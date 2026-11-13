@@ -198,11 +198,21 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   device's first operation.
 - **Restore from backup.** An envelope this device signed that it does not hold
   proves its sequence went backwards: a peer that claims to hold more of our
-  stream is asked for the first op past our outbox and only a verified one
-  counts. The device then bumps its incarnation and starts a fresh stream, and
-  re-imports its earlier incarnation's ops from peers. Until the first
+  stream is asked for the highest retained op past our outbox (an older peer
+  answers with the first one) and only a verified one counts. The restore also
+  put back an older Lamport clock, so the device first moves its clock past
+  that op's clock, then bumps its incarnation and starts a fresh stream: its
+  next write, a deletion included, outranks the versions it signed after the
+  backup that peers still hold (#1506). Peers never send a device its own ops,
+  so those later versions are not copied back to it (#1568). Until the first
   comparison with a peer after start, the outbox is held so a restored worker
   never reuses sequence numbers peers already hold.
+- **Snapshots carry only signed deletions.** A snapshot page lists a record as
+  deleted only when its sync record is a tombstone. A live record whose row
+  the sender no longer has (lost without a tombstone, or now local only) is
+  left out of the page, because nobody signed a deletion at that version. The
+  legacy offset-addressed snapshot route still sends such a record as deleted:
+  its readers advance by the item count.
 - **Apply semantics.** An op that cannot be applied *yet* (a key or
   certificate from another stream still on its way, credential storage
   locked) stays in place for a retry; one that can never apply (a record the
@@ -289,6 +299,7 @@ its own database, data directory and identity:
 | Device removed while offline, its writes rejected, new key unreadable | `test_engine.py::test_revoked_device_is_rejected_and_cannot_read_new_records` |
 | Recovery certificate with every worker off | `test_engine.py::test_recovery_certificate_admits_a_device_when_everyone_is_off` |
 | Restore from backup bumps incarnation | `test_transport.py::test_peer_link_exchanges_both_ways_and_detects_rollback` |
+| A restored worker's next write outranks its own lost versions; snapshots invent no deletions | `test_restored_worker_ordering.py` |
 | Join over HTTP with fingerprint check, then sync | `test_transport.py::test_enrollment_over_http_then_sync` |
 | Hub registration, founding the account network, device approve/reject | `test_hub.py` |
 | Session on A mirrored to B, driven from B, forked when offline | `test_control.py` |

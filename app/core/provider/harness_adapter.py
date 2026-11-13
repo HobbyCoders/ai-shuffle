@@ -656,8 +656,14 @@ class HarnessAdapter(ProviderAdapter):
         )
 
         # Antigravity, like the claude CLI, ships its own file and shell tools.
+        # Its bridge defers through fluid's call-through proxies, which serve
+        # the session's external MCP servers too, so those connect here.
+        self._acp_deferred = (
+            _acp_bridge_deferral(options) if kind == _ANTIGRAVITY_KIND else None
+        )
         self._registry = await self._build_registry(
-            options, native=not (self._is_delegated or kind == _ANTIGRAVITY_KIND)
+            options, native=not (self._is_delegated or kind == _ANTIGRAVITY_KIND),
+            host_mcp=self._acp_deferred is not None,
         )
 
         fluid_session_id = options.session_id or options.resume_session_id
@@ -2052,6 +2058,29 @@ class HarnessAdapter(ProviderAdapter):
         def bridge_filter(name: str) -> bool:
             return _bridged_tool_permitted(name, surface, blocked)
 
+        host_servers = getattr(self, "_host_mcp_servers", set())
+        if instructions and getattr(self, "_acp_deferred", None) is not None:
+            # The app's guidance names tools by their bridged name; most of
+            # them are reached through the call-through proxy on this leg.
+            instructions += (
+                "\n\nApp tools that are not in your tool list are listed by name in "
+                f"mcp__{_ACP_BRIDGE}__LoadTools; run them with mcp__{_ACP_BRIDGE}__CallTool."
+            )
+        if instructions and host_servers and self._registry is not None:
+            # The agent no longer connects these servers, so their own usage
+            # instructions (the browser's operating rules) ride the append.
+            permitted = frozenset(
+                spec.name for spec in self._registry.list_tools(loaded_only=False)
+                if bridge_filter(spec.name)
+            )
+            block = _mcp_instructions_block(self._registry, permitted)
+            if block:
+                instructions = f"{instructions}\n\n{block}"
+        external = (
+            {} if options.extra.get("assistant_proactive") is not None
+            else _external_mcp_servers(options.mcp_servers)
+        )
+
         self._engine = AcpLoop(
             store=store,
             spec=spec,
@@ -2065,11 +2094,14 @@ class HarnessAdapter(ProviderAdapter):
             session_id=fluid_session_id,
             cwd=options.cwd,
             add_dirs=list(options.add_dirs or ()),
-            mcp_servers=(
-                {} if options.extra.get("assistant_proactive") is not None
-                else _external_mcp_servers(options.mcp_servers)
-            ),
+            # Servers connected host-side reach the agent through the bridge's
+            # CallTool; one that could not connect there still goes to it.
+            mcp_servers={
+                name: config for name, config in external.items()
+                if name not in host_servers
+            },
             tool_filter=bridge_filter,
+            deferred=getattr(self, "_acp_deferred", None),
             # As on the claude leg: no permission engine on the bridge; the
             # agent asks before a tool runs and that ask reaches the owner.
             permissions=None,
@@ -3885,12 +3917,14 @@ class HarnessAdapter(ProviderAdapter):
 
         name = self._permission_tool_name(tool_name)
         extra = (self._options.extra or {}) if self._options is not None else {}
+        # Rules the Antigravity leg saved before it resolved bridged names are
+        # keyed on the bridge's spelling: still honour them, a Deny first.
+        names = [name] if name == tool_name else [name, tool_name]
 
         def _lookup() -> Optional[str]:
-            return saved_rule_decision(
-                self._resolve_app_session_id(), extra.get("profile_id"),
-                name, tool_input or {},
-            )
+            sid, profile = self._resolve_app_session_id(), extra.get("profile_id")
+            found = [saved_rule_decision(sid, profile, n, tool_input or {}) for n in names]
+            return "deny" if "deny" in found else next((d for d in found if d), None)
 
         return await run_sync(_lookup)
 
@@ -5831,8 +5865,14 @@ class HarnessAdapter(ProviderAdapter):
         )
 
     async def _build_registry(
-        self, options: SessionOptions, *, native: bool
+        self, options: SessionOptions, *, native: bool, host_mcp: bool = False
     ) -> Optional[ToolRegistry]:
+        """``host_mcp`` connects the external MCP servers on a non-native leg
+        (Antigravity with bridge deferral, whose bridge serves them through
+        its call-through proxies). The names connected land in
+        ``self._host_mcp_servers``; the rest still go to the agent itself.
+        """
+        self._host_mcp_servers: set = set()
         # Escape hatch: a caller may hand a fully-built registry — its contents
         # are then entirely the caller's responsibility (builtins included).
         prebuilt = _extra_opt(options, "registry")
@@ -5972,10 +6012,11 @@ class HarnessAdapter(ProviderAdapter):
             registry,
             options.mcp_servers,
             skip_tools={"builtins": skipped_builtins},
-            # Chat has neither ToolSearch nor code-mode read_tool_docs, so its
-            # permitted generation tools must be callable without discovery;
-            # elsewhere defer only what ToolSearch or code mode can still load.
-            defer_servers=(DEFERRED_SDK_SERVERS if native and _session_mode(options) != "chat" and (
+            # Defer only what ToolSearch or code mode can still load. The chat
+            # lane has no code mode but carries ToolSearch on its ceiling
+            # (session_modes), which loads only the tools that ceiling permits;
+            # a profile that drops ToolSearch defers nothing.
+            defer_servers=(DEFERRED_SDK_SERVERS if native and (
                 _expects_code_mode(options) or _tool_predicate(options) is None
                 or _tool_predicate(options)("ToolSearch")
             ) else None),
@@ -6034,7 +6075,9 @@ class HarnessAdapter(ProviderAdapter):
         # in-process connections (the bundled socket server only exposes
         # inproc/builtin specs, and permissions ride the CLI's stdio bridge).
         # Connecting here too would run every external server TWICE per session.
-        if native:
+        # Antigravity with bridge deferral (``host_mcp``) is the exception: its
+        # agent gets only the servers that did not connect here.
+        if native or host_mcp:
             from app.core.native_browser_proxy import register_native_browser_proxy
 
             for name, config in external_mcp.items():
@@ -6042,6 +6085,7 @@ class HarnessAdapter(ProviderAdapter):
                 # one Node/Playwright proxy per agent. Keep the original map for
                 # delegated legs and fall back to STDIO on source-only installs.
                 if name == "browser" and register_native_browser_proxy(registry, config):
+                    self._host_mcp_servers.add(name)
                     continue
                 # The app speaks the SDK's config dialect; fluid's MCP client
                 # speaks ``transport``. Normalize (never mutate — the delegated
@@ -6049,8 +6093,10 @@ class HarnessAdapter(ProviderAdapter):
                 normalized = _normalize_mcp_config_for_fluid(name, config)
                 if normalized is None:
                     continue  # unsupported transport; already warned about
+                normalized = _with_session_cwd(normalized, options.cwd)
                 try:
                     await registry.connect_mcp(name, normalized)
+                    self._host_mcp_servers.add(name)
                 except Exception as exc:  # best-effort; a bad MCP server must not fail connect
                     logger.warning("[HarnessAdapter] connect_mcp(%s) failed: %r", name, exc)
 
@@ -6304,6 +6350,23 @@ def _native_external_mcp_servers(options: SessionOptions) -> dict[str, Any]:
     merged.update(options.mcp_servers or {})
     external = _external_mcp_servers(merged)
     return {name: external[name] for name in sorted(external)}
+
+
+def _with_session_cwd(config: Any, cwd: Optional[str]) -> Any:
+    """A stdio server config that starts in the session's folder.
+
+    The claude CLI and the Antigravity agent spawn a stdio server in the
+    session cwd, so a relative path in its args (``--db-path ./x.sqlite``)
+    means the project's file. Connected host-side it would otherwise start in
+    the app's own directory. An explicit ``cwd`` wins; a remote server gets
+    none; a session folder that does not exist is left out. Returns a copy.
+    """
+    if (
+        not isinstance(config, dict) or not cwd or config.get("cwd")
+        or config.get("transport", "stdio") != "stdio" or not os.path.isdir(cwd)
+    ):
+        return config
+    return {**config, "cwd": os.path.abspath(cwd)}
 
 
 def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str, Any]]:
@@ -6939,9 +7002,16 @@ def _delegated_tool_policy(
         }:
             from app.core.coordinator_files import DENIAL
             return DENIAL
-        if blocked and matches_any(name, blocked):
+        # A bridged server tool (the ACP leg names it
+        # mcp__fluid_bundled__mcp__<server>__<tool>) matches either spelling,
+        # as the bridge filter does (_bridged_tool_permitted): a deny entry in
+        # either form withholds it. Not a bare name: "WebFetch" on these lists
+        # is the CLI's own tool, distinct from the bridged app copy.
+        served = name.removeprefix(_BUNDLED_CLI_PREFIX)
+        spellings = {name, served} if served != name and served.startswith("mcp__") else {name}
+        if blocked and any(matches_any(s, blocked) for s in spellings):
             return f"Tool '{name}' is disabled in this profile"
-        if surface and not tool_permitted(name, surface, None):
+        if surface and not any(tool_permitted(s, surface, None) for s in spellings):
             return f"Tool '{name}' is not enabled in this profile"
         rule = match_rule(rules, name, tool_input, cwd=session_cwd)
         if rule is not None and rule.decision == "deny":
@@ -6976,14 +7046,39 @@ def _delegated_bridge_deferral(options: SessionOptions):
     The chat lane bans the CLI's ToolSearch (``_delegated_disallowed``), so a
     deferred tool there is listed by name and can never be loaded: its
     permitted generation, memory and private-access tools all vanished. Chat
-    serves only its small surface, so nothing is deferred there, as on the
-    native leg's chat (``register_recorded_sdk_servers(defer_servers=None)``).
+    serves only its small surface, so nothing is deferred there. (The native
+    chat lane defers: fluid's ToolSearch is on its ceiling and reads only the
+    session's filtered view.)
     """
     from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
 
     if _session_mode(options) == "chat":
         return None
     return delegated_bridge_deferred()
+
+
+_ACP_BRIDGE = "fluid_bundled"
+
+
+def _acp_bridge_deferral(options: SessionOptions):
+    """Which bridged tools the Antigravity agent reaches through CallTool, or None.
+
+    ACP has no deferral of its own; fluid's bridge stands in with its
+    LoadTools/CallTool proxies (``fluid.tools.mcp.call_through``), the
+    leg's ToolSearch. So it follows the native leg's rule for ToolSearch: a
+    session whose surface or blocklist leaves ToolSearch out defers nothing,
+    since a deferred tool must never become unreachable. A background
+    proactive run and the ``AI_SHUFFLE_PERF_BRIDGE_DEFER`` kill switch defer
+    nothing either.
+    """
+    from app.core.provider.fluid_tool_bridge import acp_bridge_deferred
+
+    if options.extra.get("assistant_proactive") is not None:
+        return None
+    permit = _tool_predicate(options)
+    if permit is not None and not permit("ToolSearch"):
+        return None
+    return acp_bridge_deferred()
 
 
 def _session_mode(options: SessionOptions) -> str:

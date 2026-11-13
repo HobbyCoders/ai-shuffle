@@ -746,6 +746,10 @@
 	function creditsShort(credits: Record<string, unknown> | null, type: string | null): string | null {
 		return creditText(credits, type)?.short ?? null;
 	}
+	/** A shown balance at or below zero: the same red as a quota window at 0% left. */
+	function creditsExhausted(pb: ProviderUsageBucket): boolean {
+		return creditText(providerCredits(pb), pb.providerType)?.exhausted === true;
+	}
 
 	const target = $derived($usageTargetInstance);
 	const resolvedBucket = $derived(resolveBucket($rateLimit, target));
@@ -1194,12 +1198,12 @@
 		     it outranks the window pct (which an OpenRouter key-spend limit
 		     would otherwise produce). -->
 		{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
-			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
+			<span class="sec-summary sec-credits" class:danger={creditsExhausted(pb)} title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
 		{:else if pbSummary}
 			<span class="row-pct {pbSummary.severity} sec-summary">{pbSummary.pct}%{suffix}</span>
 		{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
 			<!-- ChatGPT extra credits live in the expanded rows only. -->
-			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
+			<span class="sec-summary sec-credits" class:danger={creditsExhausted(pb)} title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
 		{:else if reportedBalanceSource(pb) || keyReadBalance(pb)}
 			<span class="sec-summary sec-credits">{keyReadBalance(pb) && transientFailure(pb) ? 'Check failed' : 'Balance unavailable'}</span>
 		{:else}
@@ -1213,7 +1217,7 @@
 		{/each}
 		{@const credits = creditsLine(pb)}
 		{#if credits}
-			<div class="row-reset usage-credits">{credits}</div>
+			<div class="row-reset usage-credits" class:danger={creditsExhausted(pb)}>{credits}</div>
 		{/if}
 		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, pb.sourceInfo?.dashboard_label ?? 'Dashboard', pb.sourceInfo?.dashboard_label && pb.sourceInfo.dashboard_label !== 'Dashboard' ? `Open the ${pb.sourceInfo.dashboard_label}` : 'Compare on the provider dashboard')}
 	{/if}
@@ -1458,9 +1462,20 @@
 	.ring-track {
 		stroke: var(--border-strong);
 	}
+	/* Healthy usage is neutral, not the theme's primary: a usage meter only
+	   changes colour when it means something (warning, then danger). It is
+	   the text colour's lightness with no hue: --muted-foreground is tinted in
+	   some presets, and in others the text colour itself is the accent.
+	   Engines without relative colours keep the color-mix. The relative form
+	   must sit behind @supports: with var() inside, an unsupported engine only
+	   rejects it at computed-value time, too late to fall back to the line
+	   above, and the fill would vanish. */
 	.ring-progress {
-		stroke: var(--primary);
+		stroke: color-mix(in oklch, var(--foreground) 80%, transparent);
 		transition: stroke-dashoffset 0.3s ease, stroke 0.2s ease;
+	}
+	@supports (color: oklch(from red l 0 h / 0.8)) {
+		.ring-progress { stroke: oklch(from var(--foreground) l 0 h / 0.8); }
 	}
 	.usage-ring.warning .ring-progress {
 		stroke: var(--warning);
@@ -1608,7 +1623,10 @@
 	}
 	/* Collapsed state: one plain severity-coloured fill (same vars as the ring/pct). */
 	.ctx-seg.solid {
-		background: var(--primary);
+		background: color-mix(in oklch, var(--foreground) 80%, transparent);
+	}
+	@supports (color: oklch(from red l 0 h / 0.8)) {
+		.ctx-seg.solid { background: oklch(from var(--foreground) l 0 h / 0.8); }
 	}
 	.ctx-seg.solid.warning {
 		background: var(--warning);
@@ -1739,9 +1757,12 @@
 	}
 	.row-fill {
 		height: 100%;
-		background: var(--primary);
+		background: color-mix(in oklch, var(--foreground) 80%, transparent);
 		border-radius: 999px;
 		transition: width 0.3s ease;
+	}
+	@supports (color: oklch(from red l 0 h / 0.8)) {
+		.row-fill { background: oklch(from var(--foreground) l 0 h / 0.8); }
 	}
 	.row-fill.warning {
 		background: var(--warning);
@@ -1812,6 +1833,12 @@
 		}
 		.provider-header:hover .section-device { transform: translateX(2px); }
 	}
+	/* Wherever the button is not hover-revealed, a finger reaches it: the icon
+	   stays 13px and the button around it is 44px (#1528). */
+	@media (max-width: 768px), (hover: none), (pointer: coarse) {
+		.provider-hide { min-width: 44px; min-height: 44px; }
+		.provider-restore { min-height: 44px; }
+	}
 	@media (prefers-reduced-motion: reduce) {
 		.provider-header, .provider-hide, .provider-header .section-device, .row-fill {
 			transition: none;
@@ -1819,6 +1846,9 @@
 		.provider-header:hover .section-device { transform: none; }
 	}
 	.usage-credits { font-variant-numeric: tabular-nums; }
+	/* A balance at or below zero: the colour a quota window at 0% left uses. */
+	.sec-credits.danger,
+	.usage-credits.danger { color: var(--destructive); }
 	.provider-hide:hover, .provider-restore:hover {
 		background: var(--accent);
 		color: var(--foreground);
@@ -1915,7 +1945,7 @@
 	.sec-summary {
 		flex-shrink: 0;
 	}
-	/* Credits fallback summary — dollars carry no severity, so stay neutral. */
+	/* Credits fallback summary — a balance above zero stays neutral (see .danger). */
 	.sec-credits.sec-empty {
 		font-weight: 400;
 	}

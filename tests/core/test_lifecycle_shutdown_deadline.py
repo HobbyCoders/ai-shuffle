@@ -126,11 +126,13 @@ async def test_idle_pre_stop_still_acknowledges_a_clean_stop(monkeypatch):
     monkeypatch.setattr("app.core.task_persistence.flush", AsyncMock())
     # A default drain inside the stop deadline, so a capture without grace=0 would show.
     monkeypatch.setattr(query_shutdown, "configured_grace_seconds", lambda environ=None: 0.8)
-    started = asyncio.get_running_loop().time()
     assert await internal.desktop_stop_sessions(SimpleNamespace()) == {"stopped": True}
     # Pre-stop retires request reads at once (grace=0), not after the default
-    # finite-request drain.
-    assert query_shutdown._retire_at <= started + SLACK
+    # finite-request drain. Measured from the moment the stop captured its
+    # deadline (stop_deadline = now + BUDGET - 0.1), not from before the call:
+    # a scheduling or GC pause in a long CI worker must not read as a drain.
+    stop_began = query_shutdown._stop_deadline - BUDGET + 0.1
+    assert query_shutdown._retire_at == pytest.approx(stop_began, abs=1e-6)
 
 
 @pytest.mark.parametrize("step", ["turn", "flush"])

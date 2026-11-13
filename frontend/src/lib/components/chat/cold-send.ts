@@ -41,6 +41,11 @@ export function coldSendText(state: CacheState): string | null {
 	const cost = state.cost_comparison;
 	if (!cost) return intro + 'Sending now re-reads all of it. Cost comparison unavailable: model pricing is missing. Compact first to reduce context, or Send anyway.';
 	const usd = (value: number) => `$${value.toFixed(2)}`;
+	// Round the two parts to cents first and print their sum as the total, so
+	// the printed parts always add up to the printed total (#1500).
+	const cents = (value: number) => Math.round(value * 100);
+	const compactionCents = cents(cost.compaction_usd);
+	const continuedCents = cents(cost.continued_usd);
 	const summary = cost.summary_tokens
 		? ` and an assumed ${tokensInWords(cost.summary_tokens).replace(' tokens', '-token')} summary` : '';
 	const cacheWrite = state.leg === 'delegated' && state.cache_write_ttl
@@ -51,8 +56,8 @@ export function coldSendText(state: CacheState): string | null {
 		: 'Recommendation: Send anyway for this one call; compacting may save on later calls.';
 	return intro +
 		`Cold resume total: ~${usd(cost.cold_resume_usd)}. ` +
-		`Compact and continue total: ~${usd(cost.compact_continue_usd)} ` +
-		`(${usd(cost.compaction_usd)} compaction + ${usd(cost.continued_usd)} continuation). ` +
+		`Compact and continue total: ~${usd((compactionCents + continuedCents) / 100)} ` +
+		`(${usd(compactionCents / 100)} compaction + ${usd(continuedCents / 100)} continuation). ` +
 		`API-price estimates for ${cost.model}, assuming ~${tokensInWords(cost.compacted_context_tokens)} retained${summary} ` +
 		`and a ${tokensInWords(cost.reply_tokens).replace(' tokens', '-token')} reply. Later calls are extra.` + cacheWrite + ' ' + recommendation;
 }

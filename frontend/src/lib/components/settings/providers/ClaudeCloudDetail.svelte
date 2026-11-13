@@ -65,13 +65,10 @@
 	async function remove() {
 		// Read before the await: removing the row closes this detail, and its
 		// props cannot be read once it is gone.
+		// A failure throws through to the Danger zone, which shows it by Remove.
 		const back = provider.item;
-		try {
-			await providers.clearClaudeCloud();
-			settingsNav.selectItem(back, 'providers');
-		} catch (e) {
-			loadError = getErrorMessage(e, 'Remove failed');
-		}
+		await providers.clearClaudeCloud();
+		settingsNav.selectItem(back, 'providers');
 	}
 
 	const danger = $derived<DangerAction[]>(

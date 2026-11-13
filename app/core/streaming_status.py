@@ -181,6 +181,40 @@ def has_any_active_run() -> bool:
         return False
 
 
+# Reconnect and listing must use the same runs OR live-turn truth as
+# _has_active_run_db. In particular, draining turns remain busy after their
+# run lease is released. EXISTS also returns each session only once.
+_BUSY_SESSION_WHERE = (
+    "(EXISTS (SELECT 1 FROM runs r WHERE r.session_id=s.id "
+    "AND r.state='active' AND r.lease_expires_at >= NOW()) "
+    "OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.id "
+    "AND t.state IN ('running','interrupting','draining')))"
+)
+
+
+def busy_session_ids(session_ids: List[str]) -> set:
+    """Of ``session_ids``, those busy right now, by the snapshot's own truth.
+
+    The session list carries it so a freshly loaded page knows which chats run
+    before the socket's snapshot arrives (#1527). Fails open (empty set).
+    """
+    ids = list(dict.fromkeys(session_ids))
+    if not ids:
+        return set()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT s.id FROM sessions s WHERE s.id IN ("
+                + ", ".join(["%s"] * len(ids)) + f") AND {_BUSY_SESSION_WHERE}",
+                tuple(ids),
+            )
+            return {row["id"] for row in cursor.fetchall() or []}
+    except Exception:
+        logger.warning("[streaming_status] busy_session_ids read failed", exc_info=True)
+        return set()
+
+
 def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
     """Busy sessions owned by this user, matching the per-session busy read.
 
@@ -194,16 +228,9 @@ def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
     device paired to the owner (``"paired:<id>"``) sees the owner's sessions.
     Fails open (empty list) on any DB error.
     """
-    # Reconnect must use the same runs OR live-turn truth as
-    # _has_active_run_db. In particular, draining turns remain busy after their
-    # run lease is released. EXISTS also returns each session only once.
     base_sql = (
         "SELECT s.id AS session_id, s.project_id, s.worktree_id, "
-        "s.worktree_branch, s.branch FROM sessions s "
-        "WHERE (EXISTS (SELECT 1 FROM runs r WHERE r.session_id=s.id "
-        "AND r.state='active' AND r.lease_expires_at >= NOW()) "
-        "OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.id "
-        "AND t.state IN ('running','interrupting','draining')))"
+        f"s.worktree_branch, s.branch FROM sessions s WHERE {_BUSY_SESSION_WHERE}"
     )
     try:
         with get_db() as conn:

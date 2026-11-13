@@ -158,9 +158,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
     rg = shutil.which("rg")
     if rg:
-        outcome = await _ripgrep(rg, pattern, root, glob, no_ignore, limit)
+        outcome = await _ripgrep(rg, pattern, root, glob, no_ignore, limit, ctx)
     else:
-        outcome = await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit)
+        outcome = await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit, ctx)
 
     # One choke point for repeat-search handling, so neither engine has to know
     # about it. The search still ran; when its result has the same lines as the
@@ -290,7 +290,8 @@ async def _byte_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
 
 
 async def _ripgrep(
-    rg: str, pattern: str, root: Path, glob: str | None, no_ignore: bool, limit: int
+    rg: str, pattern: str, root: Path, glob: str | None, no_ignore: bool, limit: int,
+    ctx: ToolCtx | None = None,
 ) -> ToolOutcome:
     head = _header("rg", root)
     # ``--max-count`` is a PER-FILE bound, so it cannot enforce the global cap
@@ -385,7 +386,7 @@ async def _ripgrep(
             f"[search truncated: match cap {limit} reached — "
             "pass a higher limit or narrow the pattern]"
         )
-    text = truncate("\n".join(lines)).rstrip("\n")
+    text = truncate("\n".join(lines), ctx=ctx, tool="Grep").rstrip("\n")
     return ToolOutcome(text="\n".join([head, text or "(no matches)", *notes]))
 
 
@@ -395,7 +396,8 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
 
 
 def _pure_python_grep(
-    pattern: str, root: Path, glob: str | None, limit: int = MAX_MATCHES
+    pattern: str, root: Path, glob: str | None, limit: int = MAX_MATCHES,
+    ctx: ToolCtx | None = None,
 ) -> ToolOutcome:
     """Bounded fallback used when ripgrep is not installed. Runs on a thread."""
     head = _header("python-fallback", root) + " (ripgrep not found)"
@@ -440,7 +442,7 @@ def _pure_python_grep(
         notes.append(
             f"[search truncated: deadline reached after {state.files_seen} files]"
         )
-    body = truncate("\n".join(out)) or "(no matches)"
+    body = truncate("\n".join(out), ctx=ctx, tool="Grep") or "(no matches)"
     return ToolOutcome(text="\n".join([head, body, *notes]))
 
 

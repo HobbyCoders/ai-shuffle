@@ -483,7 +483,7 @@ async def test_grep_rg_reassembles_lines_split_across_reads(tmp_path, monkeypatc
     out = await grep_mod.handler({"pattern": "needle"}, ToolCtx(cwd=str(tmp_path)))
     assert f"{tmp_path}{os.sep}a.py:2:needle" in out.text
     assert "min.js:1:needle,needle" in out.text
-    assert "chars truncated" in out.text  # the 30KB output bound still applies
+    assert "chars truncated" in out.text  # the output bound still applies
 
 
 async def test_grep_rg_cancel_kills_the_process(tmp_path, monkeypatch) -> None:

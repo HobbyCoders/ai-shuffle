@@ -68,6 +68,22 @@ describe('GitProgressPopover outcomes', () => {
 		expect(resolve).toHaveBeenCalledTimes(1);
 	});
 
+	it('lets a refusal take the "Sending…" line rather than adding one (#1465)', async () => {
+		render(GitProgressPopover);
+		gitOperations.report('Pull', 'Pull stopped on conflicts.', {
+			actions: [{ id: 'resolve-agent', label: 'Resolve with agent', onClick: vi.fn(), disabledReason: 'Sending…' }]
+		});
+		const button = await screen.findByRole('button', { name: 'Resolve with agent' });
+		const drawnLines = () => [...document.querySelectorAll('.gp-note, .gp-why')].filter((line) => !line.classList.contains('gp-covered'));
+		expect(drawnLines().map((line) => line.textContent)).toEqual(['Resolve with agent: Sending…']);
+
+		gitOperations.setAction('resolve-agent', { disabledReason: 'Available when the current reply finishes.', note: "The message wasn't sent. Try again." });
+		await vi.waitFor(() => expect(drawnLines().map((line) => line.textContent)).toEqual(["Resolve with agent: The message wasn't sent. Try again."]));
+		// The reason is still what the disabled button is described by.
+		expect((button as HTMLButtonElement).disabled).toBe(true);
+		expect(document.getElementById(button.getAttribute('aria-describedby')!)?.textContent).toContain('Available when the current reply finishes.');
+	});
+
 	it('offers "Pull first" with a rejected push and dismisses cleanly', async () => {
 		const pull = vi.fn();
 		render(GitProgressPopover);

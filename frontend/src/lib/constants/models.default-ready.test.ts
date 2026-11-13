@@ -58,6 +58,12 @@ describe('resolveDefaultModel', () => {
 		expect(resolveDefaultModel('prov:agy-key:gemini-3.1-pro', ['antigravity'], [agyKey], claudeModels)).toBe('prov:agy-key:gemini-3.1-pro');
 	});
 
+	it('picks the oldest row of a brand, so a newly added key does not take over (#1522)', () => {
+		const newerKey = entry({ id: 'oa-new', provider_type: 'openai', models: [{ id: 'gpt-6', label: 'GPT-6' }] });
+		// Newest first, as `/api/models` lists them.
+		expect(resolveDefaultModel('prov:gone:x', ['openai'], [newerKey, openaiKey], claudeModels)).toBe('prov:oa-key:gpt-5.5');
+	});
+
 	it("uses a row's default only when it lists it", () => {
 		const stale = entry({ id: 'gw2', provider_type: 'custom', models: [{ id: 'a', label: 'A' }], default_model: 'gone' });
 		expect(resolveDefaultModel('sonnet', ['gw:gw2'], [stale], claudeModels)).toBe('prov:gw2:a');

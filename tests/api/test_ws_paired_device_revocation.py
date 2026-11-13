@@ -10,6 +10,7 @@ in the test database).
 """
 import asyncio
 import hashlib
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -116,7 +117,12 @@ async def _wait_for(predicate, what, timeout=3.0):
 async def _open_chat(token, device_id):
     wire = _RecordingWire()
     task = asyncio.create_task(ws_api.chat_websocket(wire.ws, token=token, device_id=device_id))
-    await _wait_for(lambda: wire.sent or task.done(), "no chat connect snapshot")
+    # The attention snapshot is the last connect frame: it follows a real
+    # worker-thread read, and only after it does the handler start its
+    # principal watchdog and serving loop. Returning on the first frame let a
+    # caller's close budget also pay for that thread hop on a loaded runner (#1471).
+    await _wait_for(lambda: any(f.get("type") == "session_attention_snapshot" for f in wire.sent)
+                    or task.done(), "no chat connect snapshot")
     assert not task.done(), f"chat socket closed at connect (code={wire.close_code})"
     return wire, task
 
@@ -197,9 +203,20 @@ async def test_unpair_route_closes_the_device_sockets_immediately(paired):
             await _hang_up(wire, task)
 
 
-async def test_a_replaced_session_token_closes_the_old_socket(paired):
+@pytest.mark.parametrize("slow_connect", [False, True])
+async def test_a_replaced_session_token_closes_the_old_socket(paired, slow_connect):
     paired.monkeypatch.setattr(ws_key_watch, "RECHECK_SECONDS", 3600.0)
     paired.monkeypatch.setattr(cwh, "PRINCIPAL_RECHECK_SECONDS", 3600.0)
+    if slow_connect:
+        # A loaded runner's connect-time thread read outlasts the close budget below.
+        import app.core.user_question_handler as attention
+        real_snapshot = attention.get_user_attention_snapshot
+
+        def slow_snapshot(user_id):
+            time.sleep(1.1)
+            return real_snapshot(user_id)
+
+        paired.monkeypatch.setattr(attention, "get_user_attention_snapshot", slow_snapshot)
     wire, task = await _open_chat(TOKEN_A, "dev-a-chat")
     try:
         with get_db() as conn:

@@ -227,14 +227,44 @@ class TestTimeoutKillsTheWholeHook:
     """
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("recorder", ["prompt", "slow"])
     @pytest.mark.parametrize("procfs_exit_race", [False, True])
-    async def test_timeout_returns_promptly_and_kills_the_child(self, tmp_path, monkeypatch, procfs_exit_race):
+    async def test_timeout_returns_promptly_and_kills_the_child(
+        self, tmp_path, monkeypatch, procfs_exit_race, recorder,
+    ):
         import time
 
         pid_file = tmp_path / "child.pid"
+        timeout_ms = 200
+        # "slow": the shell records its child after the timeout would have hit.
+        pause = "sleep 0.3; " if recorder == "slow" else ""
+
+        class TimeoutAfterChildRecorded:
+            """hook_executor's asyncio, but the hook timeout starts once the child pid is on disk.
+
+            A loaded runner can take longer than 0.2 s to start the shell, so
+            the kill used to land before the pid was written and the check
+            below read an empty file (#1462). The pid is written atomically.
+            """
+
+            def __getattr__(self, name):
+                return getattr(asyncio, name)
+
+            async def wait_for(self, fut, timeout):
+                if timeout == timeout_ms / 1000:
+                    deadline = time.monotonic() + 5
+                    while not pid_file.exists():
+                        if time.monotonic() > deadline:
+                            fut.close()
+                            raise AssertionError("the hook never recorded its child")
+                        await asyncio.sleep(0.01)
+                return await asyncio.wait_for(fut, timeout)
+
+        monkeypatch.setattr(hook_executor, "asyncio", TimeoutAfterChildRecorded())
         started = time.monotonic()
         result = await hook_executor.execute_bash_hook(
-            {"command": f"sleep 30 & echo $! > {pid_file}; wait", "timeout": 200},
+            {"command": f"sleep 30 & {pause}echo $! > {pid_file}.tmp && mv {pid_file}.tmp {pid_file}; wait",
+             "timeout": timeout_ms},
             {"event": "test", "data": {}},
         )
         elapsed = time.monotonic() - started

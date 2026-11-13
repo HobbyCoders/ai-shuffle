@@ -16,6 +16,7 @@ import ProvidersCollection from './ProvidersCollection.svelte';
 import { providerDrafts } from './drafts.svelte';
 import { chatgptRow, claudeAccounts, claudeSummary, row, subAccount } from './fixtures';
 import { fakeWorker } from './fake-worker';
+import { FAL_KEY_ITEM } from './providers-model';
 
 const accounts = (): ClaudeAccounts => ({
 	api_key: [
@@ -42,6 +43,116 @@ beforeEach(() => {
 	});
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe('a failed action says so where it was taken (#1523)', () => {
+	it('keeps the page open and shows why when Remove fails', async () => {
+		worker = fakeWorker({ rows: [row({ id: 'personal', name: 'Personal key' })] }, {
+			'DELETE /model-providers/:id': () => { throw { status: 500, detail: 'Database is busy' }; }
+		});
+		await show();
+		await fireEvent.click(group('OpenAI').getByRole('button', { name: /^Personal key/ }));
+		await screen.findByRole('heading', { name: 'Personal key' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		expect((await screen.findByRole('alert')).textContent).toContain('Database is busy');
+		expect(screen.getByRole('heading', { name: 'Personal key' })).toBeTruthy();
+		expect(providers.current.providers.map((r) => r.id)).toContain('personal');
+	});
+
+	it('shows a failed switch next to the switch', async () => {
+		worker = fakeWorker({ rows: [row({ id: 'personal', name: 'Personal key' })] }, {
+			'PATCH /model-providers/:id': () => { throw { status: 500, detail: 'Database is busy' }; }
+		});
+		await show();
+		await fireEvent.click(group('OpenAI').getByRole('switch', { name: 'Personal key on' }));
+		expect((await group('OpenAI').findByRole('alert')).textContent).toContain('Database is busy');
+	});
+
+	/** Confirms Remove and returns the alert, which must sit in the Danger zone beside it. */
+	async function failedRemove(heading: string) {
+		await screen.findByRole('heading', { name: heading });
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		const alert = await screen.findByRole('alert');
+		expect(alert.closest('.st-grp.danger')).toBeTruthy();
+		expect(screen.getAllByRole('alert')).toHaveLength(1);
+		expect(screen.getByRole('heading', { name: heading })).toBeTruthy();
+		return alert;
+	}
+
+	it('shows a failed Remove of a saved Anthropic key beside Remove', async () => {
+		worker = fakeWorker({ rows: [chatgptRow()], claude: claudeSummary({ accounts: accounts() }) }, {
+			'DELETE /settings/claude-auth/accounts/api_key/:id': () => { throw { status: 500, detail: 'Database is busy' }; }
+		});
+		await show();
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Selected for API key mode' }));
+		expect((await failedRemove('Work')).textContent).toContain('Database is busy');
+		expect(providers.current.claude?.accounts?.api_key.map((a) => a.id)).toContain('work');
+	});
+
+	it('shows a failed Remove of a saved Claude sign-in beside Remove', async () => {
+		worker = fakeWorker({
+			rows: [chatgptRow()],
+			claude: claudeSummary({ accounts: claudeAccounts({
+				subscription: [subAccount({ active: true }), subAccount({ id: 'work', kind: 'saved', label: 'Work', email: 'work@example.com', active: false })]
+			}) })
+		}, {
+			'DELETE /settings/claude-auth/accounts/subscription/:id': () => { throw { status: 500, detail: 'Database is busy' }; }
+		});
+		await show();
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Saved' }));
+		expect((await failedRemove('Work')).textContent).toContain('Database is busy');
+	});
+
+	it('shows a failed Remove of the fal.ai key beside Remove', async () => {
+		worker = fakeWorker({ rows: [chatgptRow()] }, {
+			'DELETE /settings/integrations/fal-ai': () => { throw { status: 500, detail: 'Database is busy' }; }
+		});
+		await show();
+		settingsNav.go({ category: 'providers', item: FAL_KEY_ITEM });
+		expect((await failedRemove('Media key')).textContent).toBe('Database is busy');
+		expect(providers.current.falKeySet).toBe(true);
+	});
+
+	it('shows the server\'s reason, not only the status, when removing the Anthropic key fails', async () => {
+		worker = fakeWorker({ rows: [chatgptRow()] }, {
+			'DELETE /settings/integrations/anthropic': () => { throw { status: 403, detail: 'Agent previews cannot change ownership, credentials or settings.' }; }
+		});
+		vi.stubGlobal('fetch', worker.fetch);
+		await expect(providers.clearAnthropicKey()).rejects.toThrow('Agent previews cannot change ownership, credentials or settings.');
+	});
+
+	it('shows a failed Sign out beside Sign out, worded like the sign-in errors, not above the Danger zone', async () => {
+		worker = fakeWorker({
+			rows: [chatgptRow()],
+			claude: claudeSummary({ accounts: claudeAccounts({
+				default_in_use: false,
+				subscription: [subAccount({ id: 'work', kind: 'saved', label: 'Work', email: 'work@example.com', active: true })]
+			}) })
+		}, {
+			'POST /auth/claude/logout': () => { throw { status: 403, detail: 'Agent previews cannot change ownership, credentials or settings.' }; },
+			'DELETE /settings/claude-auth/accounts/subscription/:id': () => { throw { status: 409, detail: { code: 'login_running', message: 'A sign-in is still running.' } }; }
+		});
+		await show();
+		await fireEvent.click(group('Claude').getByRole('button', { name: /^Work,/ }));
+		await screen.findByRole('heading', { name: 'Work' });
+		// An earlier failed Remove must not still be the alert nearest Sign out.
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+		expect((await screen.findByRole('alert')).textContent).toBe('A sign-in is still running.');
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+		expect(screen.queryByRole('alert')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+		await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1));
+		const alert = screen.getByRole('alert');
+		expect(alert.textContent).toBe('Agent previews cannot change ownership, credentials or settings.');
+		expect(alert.closest('.st-grp.danger')).toBeTruthy();
+		expect(alert.previousElementSibling?.textContent).toContain('Sign out of the Claude CLI');
+		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Sign out' })));
+		expect(screen.getByRole('heading', { name: 'Work' })).toBeTruthy();
+	});
+});
 
 describe('saved account controls', () => {
 	it('switches a key with activate, refetches siblings, and leaves the subscription on', async () => {

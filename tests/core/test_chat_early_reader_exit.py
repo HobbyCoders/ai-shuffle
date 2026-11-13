@@ -446,11 +446,13 @@ async def test_slow_real_away_receipt_settles_before_successor(mock_db, tmp_path
             await adapter.disconnect_transport()
 
 
+@pytest.mark.parametrize("pickup", ["prompt", "slow"])
 @pytest.mark.parametrize("reader", ["runtime", "direct"])
 async def test_permission_insert_during_engine_retirement_settles_before_successor(
-    mock_db, tmp_path, monkeypatch, reader,
+    mock_db, tmp_path, monkeypatch, reader, pickup,
 ):
     import threading
+    import time
 
     from app.core.permission_handler import PermissionHandler
     from app.core.session_pool import SessionPool
@@ -488,7 +490,12 @@ async def test_permission_insert_during_engine_retirement_settles_before_success
     database.create_session(SID, "default")
     real_insert = interactions.create_interaction
 
+    drain_deadline = 0.1
+
     def delayed_insert(*args, **kwargs):
+        if pickup == "slow":
+            # A loaded runner reaches the insert thread after the drain deadline.
+            time.sleep(drain_deadline * 3)
         insert_started.set()
         assert release_insert.wait(5), "test did not release the permission insert thread"
         try:
@@ -498,8 +505,25 @@ async def test_permission_insert_during_engine_retirement_settles_before_success
         finally:
             insert_done.set()
 
+    class DeadlineAfterInsert:
+        """session_admission's asyncio, but the abandoned-drain deadline starts once the insert is issued.
+
+        The engine reaches the permission insert only while the abandoned drain
+        pulls it, so that deadline used to race runner speed (#1468). Retiring
+        before the insert exists is not the case covered here.
+        """
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+        async def wait(self, fs, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+            if timeout == drain_deadline:
+                await asyncio.to_thread(insert_started.wait, 5)
+            return await asyncio.wait(fs, timeout=timeout, return_when=return_when)
+
     monkeypatch.setattr(interactions, "create_interaction", delayed_insert)
-    monkeypatch.setattr(admission, "_ABANDONED_DRAIN_SECONDS", 0.1)
+    monkeypatch.setattr(admission, "_ABANDONED_DRAIN_SECONDS", drain_deadline)
+    monkeypatch.setattr(admission, "asyncio", DeadlineAfterInsert())
     handler = PermissionHandler()
 
     async def can_use_tool(name, tool_input, context):
