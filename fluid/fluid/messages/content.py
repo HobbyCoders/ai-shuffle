@@ -11,6 +11,7 @@ next call targets a different provider. It is never synthesized or edited.
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 
@@ -165,7 +166,8 @@ HARNESS_NOTE_META_KEY = "harness_note"
 
 
 def is_harness_note(message: Message) -> bool:
-    return bool((message.provider_meta or {}).get(HARNESS_NOTE_META_KEY))
+    meta = message.provider_meta
+    return isinstance(meta, Mapping) and bool(meta.get(HARNESS_NOTE_META_KEY))
 
 
 @dataclass

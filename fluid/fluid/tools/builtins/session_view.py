@@ -167,11 +167,15 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 f"(offset {start})."
             )
         )
-    if text_offset is not None:
-        return _text_page(window, int(text_offset), title, stamp, zone)
     show = str(input.get("show") or "all").strip().lower()
     if show not in _SHOW_MODES:
         show = "all"
+    if text_offset is not None:
+        if show == "conversation" and window.messages[0].role == HARNESS_NOTE_ROLE:
+            return ToolOutcome(text=(
+                f"message {window.start} is a harness note (the session plan), not part "
+                "of the conversation; read it with show='all'."))
+        return _text_page(window, int(text_offset), title, stamp, zone)
     blocks = [
         (window.start + i, block)
         for i, msg in enumerate(window.messages)

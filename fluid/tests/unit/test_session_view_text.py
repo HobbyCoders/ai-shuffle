@@ -97,3 +97,47 @@ async def test_a_stored_plan_note_is_harness_context_not_a_user_message(tmp_path
     talk = await session_view.handler({"session_id": meta.session_id, "show": "conversation"}, ctx)
     assert "Session plan" not in talk.text
     assert "[0 user]" in talk.text and "[3 assistant]" in talk.text
+
+
+async def _plan_note_session(tmp_path, note_meta):
+    store = JsonlStore(tmp_path)
+    meta = await store.create_session()
+    rows = [("user", "do the work", {}), ("assistant", "on it", {}),
+            ("user", "# Session plan: do the work", note_meta), ("assistant", "done", {})]
+    for i, (role, text, flag) in enumerate(rows):
+        await store.append(meta.session_id, SessionNode(node_id=str(i),
+            parent_id=str(i - 1) if i else None,
+            message=Message(role=role, content=[Text(text=text)], provider_meta=flag)))
+    return meta.session_id, ToolCtx(extra={"session_view": store.session_slice})
+
+
+async def test_conversation_mode_also_hides_a_plan_note_from_character_paging(tmp_path):
+    from fluid.messages.content import HARNESS_NOTE_META_KEY
+
+    sid, ctx = await _plan_note_session(tmp_path, {HARNESS_NOTE_META_KEY: True})
+    paged = await session_view.handler({"session_id": sid, "show": "conversation",
+                                        "offset": 2, "count": 1, "text_offset": 0}, ctx)
+    assert not paged.is_error
+    assert "Session plan" not in paged.text and "message 2 is a harness note" in paged.text
+    # Numbering is unchanged: the next message keeps its stored offset.
+    after = await session_view.handler({"session_id": sid, "show": "conversation",
+                                        "offset": 3, "count": 1, "text_offset": 0}, ctx)
+    assert "[3 assistant] done" in after.text
+    # show='all' still pages the note itself.
+    full = await session_view.handler({"session_id": sid, "offset": 2, "text_offset": 0}, ctx)
+    assert "[2 harness note] # Session plan: do the work" in full.text
+
+
+@pytest.mark.parametrize("meta", ["{broken", ["harness_note"], 7])
+async def test_metadata_that_is_not_a_mapping_keeps_the_stored_role(tmp_path, meta):
+    from fluid.messages.content import is_harness_note
+    from fluid.store.base import recall_message, recall_role
+
+    message = {"role": "user", "content": [{"kind": "text", "text": "hi"}], "provider_meta": meta}
+    assert recall_role(message) == "user" and recall_message(message).role == "user"
+    assert not is_harness_note(Message(role="user", content=[Text(text="hi")], provider_meta=meta))
+    sid, ctx = await _plan_note_session(tmp_path, meta)
+    view = await session_view.handler({"session_id": sid}, ctx)
+    assert not view.is_error and "[2 user] [sent" in view.text
+    found = await JsonlStore(tmp_path).search(["session", "plan"])
+    assert found and all(role == "user" for role, _ in found[0].texts)

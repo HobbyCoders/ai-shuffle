@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
@@ -344,7 +345,8 @@ HARNESS_NOTE_ROLE = "harness note"
 
 def recall_role(message: dict[str, Any]) -> str:
     """The role a recall or view shows for one serialized ``Message`` dict."""
-    if (message.get("provider_meta") or {}).get(HARNESS_NOTE_META_KEY):
+    meta = message.get("provider_meta")
+    if isinstance(meta, Mapping) and meta.get(HARNESS_NOTE_META_KEY):
         return HARNESS_NOTE_ROLE
     return str(message.get("role", "?"))
 
