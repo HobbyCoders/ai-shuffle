@@ -526,6 +526,21 @@ async def test_handle_queue_message_submits_queue_turn_and_broadcasts(mock_db):
     p.sync.broadcast_queue_updated.assert_awaited()
 
 
+async def test_handle_queue_message_without_a_profile_runs_on_the_chats_agent(mock_db):
+    """#1531: an omitted profile was written on the turn as none, and the turn
+    was refused as it started ("Profile not found: None"). It now names the
+    chat's own agent, as a query does."""
+    database.create_profile("helper", "Helper", None, {"model": "sonnet"})
+    _make_session("sess-1", profile_id="helper")
+    with _Patches():
+        handler = _make_handler()
+        await handler.handle_queue_message({"session_id": "sess-1", "content": "later work"})
+
+    queued = turns_db.get_queued_turns("sess-1")
+    assert [(t["prompt"], t["profile_id"]) for t in queued] == [("later work", "helper")]
+    assert not [c for c in handler.send_json.call_args_list if c.args[0].get("type") == "error"]
+
+
 # ═══ handle_remove_queued_message / handle_clear_queued_messages ═════════════
 
 

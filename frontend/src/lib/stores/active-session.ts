@@ -78,26 +78,10 @@ import type {
 
 // ─── Module-Level Exports ────────────────────────────────────────────────────
 
-/** Cross-device streaming info for sidebar indicators */
-export interface StreamingSessionInfo {
-	projectId: string | null;
-	worktreeId: string | null;
-	/** Logical checkout branch. Another session on this SAME branch must
-	 *  share the Git safety lock, even with different/absent legacy IDs. */
-	worktreeBranch?: string | null;
-}
-
-// ─── streamingSessions ───────────────────────────────────────────────────────
-
-const _ssStore = createStore<Map<string, StreamingSessionInfo>>(new Map());
-
-/** Track which sessions are streaming across all user devices */
-export const streamingSessions = {
-	get current() { return _ssStore.current; },
-	subscribe: _ssStore.subscribe,
-	set: _ssStore.set,
-	update: _ssStore.update,
-};
+// The cross-device streaming map lives in its own module, so the session list
+// loader can seed it without importing this store (#1527).
+export { streamingSessions, type StreamingSessionInfo } from './streaming-sessions';
+import { streamingSessions } from './streaming-sessions';
 
 // ─── backgroundPermissions ────────────────────────────────────────────────────
 

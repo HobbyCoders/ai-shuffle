@@ -55,7 +55,10 @@ FAILED_LINE = "DEVLOOP_FAILED"
 #: Signals that stop ``up`` with a full teardown. SIGHUP: the terminal or the
 #: Monitor's pty went away. TaskStop SIGTERMs the group, then SIGKILLs every
 #: descendant about a second later; the guardian finishes what that cuts off.
-STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+#: Windows has no SIGHUP; leaving it out keeps this module importable there.
+STOP_SIGNALS = tuple(
+    sig for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)) if sig is not None
+)
 #: ``up --voice-engine``: the engine the seed sets for calls (both reach the fake voice provider).
 VOICE_ENGINES = ("gpt-live", "grok")
 

@@ -117,6 +117,16 @@ describe('EffortPopoverCard', () => {
 		expect(document.querySelector('.pop-note')).toBeNull();
 	});
 
+	// #1526: the thumb rests on the model's default, so the label names it.
+	it('names the model default the thumb rests on while no level is pinned', () => {
+		render(EffortPopoverCard, { props: { options, value: null, defaultValue: 'high', onSelect: vi.fn() } });
+
+		expect(slider().getAttribute('aria-valuetext')).toBe('Auto (High)');
+		expect(slider().value).toBe(String(options.findIndex((o) => o.value === 'high')));
+		expect(document.querySelector('[data-effort-value]')?.textContent).toBe('Auto (High)');
+		expect(document.querySelector('.slider.unpinned')).toBeTruthy();
+	});
+
 	it('pins a level from the unpinned resting position', async () => {
 		const onSelect = vi.fn();
 		render(EffortPopoverCard, { props: { options, value: null, onSelect } });

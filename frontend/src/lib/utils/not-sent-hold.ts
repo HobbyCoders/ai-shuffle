@@ -13,6 +13,7 @@
  * the same bubbles. Once the turn has ended a reload shows rows at once.
  */
 import type { ChatMessage, QueuedMessage } from '$lib/stores/types';
+import { agentDelivery } from './agent-delivery';
 
 export interface NotSentHold {
 	/** The transcript without held rows; the input array itself when nothing is held. */
@@ -151,6 +152,16 @@ export function stopRecoveryAppliesToTurn(
 /** The chat ends on words Stop refused: nothing below them is coming. */
 export function restingOnNotSentRows(messages: ChatMessage[]): boolean {
 	return messages.findLast(m => m.role === 'user')?.metadata?.not_sent === true;
+}
+
+/**
+ * The newest turn is the one the trailing "Not sent" rows opened. Unlike
+ * `restingOnNotSentRows` this also ends when an agent's wake (a system-role
+ * receipt) opens a turn below them, by the turn rule of `latestTurnKey`.
+ */
+export function restingOnNotSentTurn(messages: ChatMessage[]): boolean {
+	return messages.findLast(m => m.role === 'user' || (!!agentDelivery(m) && m.metadata?.agent_wake === true))
+		?.metadata?.not_sent === true;
 }
 
 /**

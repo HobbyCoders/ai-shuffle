@@ -278,6 +278,7 @@ curl http://localhost:8000/api/v1/streaming/active \
 ### Agent Selection
 - `profile` is required; a request without one is rejected with a 400
 - An API user with assigned agents (`profile_ids`) can only run those: any other `profile` is rejected with a 403. Omitting `profile` runs the assigned agent when there is exactly one, and is rejected with a 400 naming the allowed ids when there are several
+- A run whose model uses your personal subscription (the Claude CLI sign-in, ChatGPT/Codex or SuperGrok) can't run for an API key. Every route here refuses it before anything starts, with a 400, the reason in `detail` and `X-Error-Code: subscription_owner_only`; `/conversation/start` never answers `started` for it
 
 ### Project Context
 - If `project` is specified, the agent has access to that project's files

@@ -1444,6 +1444,7 @@ class ApplyResult:
     retry: int = 0     # transient: kept in place, the peer resends it
     lost: int = 0
     own_ahead: int = 0  # highest seq of our own current stream seen that we do not hold
+    own_ahead_clock: int = 0  # highest clock among those ops (#1506)
     reasons: List[str] = field(default_factory=list)
     blocked: List[dict] = field(default_factory=list)
     touched: List[Tuple[str, str, str]] = field(default_factory=list)
@@ -1547,6 +1548,7 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
                 # went backwards (restore from backup). ``apply_batch`` moves
                 # to a fresh incarnation once the batch is stored.
                 result.own_ahead = max(result.own_ahead, env.origin_seq)
+                result.own_ahead_clock = max(result.own_ahead_clock, env.clock)
             return "duplicate"  # our own op coming back
         # An op this device signed in an earlier incarnation: our own history
         # that a backup restore lost. Re-import it like any other stream.
@@ -2285,6 +2287,7 @@ def _merge_result(into: ApplyResult, part: ApplyResult) -> None:
     into.retry += part.retry
     into.lost += part.lost
     into.own_ahead = max(into.own_ahead, part.own_ahead)
+    into.own_ahead_clock = max(into.own_ahead_clock, part.own_ahead_clock)
     into.reasons.extend(part.reasons)
     into.blocked.extend(part.blocked[:max(0, 20 - len(into.blocked))])
     into.touched.extend(part.touched)
@@ -2871,7 +2874,8 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
         _batch_agent_deletions.ids = None
     if result.own_ahead:
         restored_from_backup(result.own_ahead, ctx.identity.incarnation,
-                             evidence_network_id=ctx.network_id, evidence_device_id=ctx.device_id)
+                             evidence_network_id=ctx.network_id, evidence_device_id=ctx.device_id,
+                             evidence_clock=result.own_ahead_clock)
     if result.touched:
         touched = list(result.touched)
         if any(c in ("membership", "member_names") for c, _, _ in touched):
@@ -2882,17 +2886,30 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
 
 
 def restored_from_backup(evidence_seq: int, evidence_incarnation: int, *,
-                         evidence_network_id: str, evidence_device_id: str) -> Optional[NetworkContext]:
+                         evidence_network_id: str, evidence_device_id: str,
+                         evidence_clock: int = 0) -> Optional[NetworkContext]:
     """Start a fresh stream: an op this device signed exists that it does not hold.
 
     Called with proof only (an envelope that verifies under our own signing
     key, at a sequence past our outbox), never on a peer's bare claim.
+
+    The restore also put back an older Lamport clock, while peers keep the
+    versions this device signed after the backup (they never send a device
+    its own ops). ``evidence_clock`` is the highest clock among those proofs:
+    the clock moves past it before anything is signed in the new stream, or
+    this device's next write, a tombstone included, would lose to its own
+    older version on every peer that holds it (#1506).
     """
     with _rollback_lock:
         ctx = load_context()
         if (ctx is None or ctx.network_id != evidence_network_id
                 or ctx.device_id != evidence_device_id):
             return ctx
+        if evidence_clock > 0:
+            # Also when another link already moved the stream on: its proof
+            # may have been an older op with a lower clock than this one.
+            with get_db() as conn:
+                store.observe_clock(conn.cursor(), int(evidence_clock))
         # Startup and background peer links can deliver the same proof. It
         # belongs to its signed stream, not a newer incarnation's outbox.
         if ctx.identity.incarnation != evidence_incarnation:
@@ -3036,6 +3053,15 @@ def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after
             nested_rekey = nested_secret_sync.enabled(cursor) and (
                 recipient is None or nested_secret_sync.enabled(cursor, recipient=recipient))
         items = [snapshot_item(cursor, coll, version, nested_rekey=nested_rekey) for version in versions]
+        if keyset:
+            # A live record without a readable row here (lost without a
+            # tombstone, or now local only) is not a deletion: nobody signed
+            # one at that version, and a recipient would adopt it as though
+            # its owner had (#1506). Leave the record out; its owner's ops
+            # still carry it. The legacy offset pages keep one item per
+            # record because their readers advance the offset by ``count``.
+            items = [item for item, version in zip(items, versions)
+                     if not item["deleted"] or bool(version["deleted"])]
     signed = seal_snapshot_chunk(collection, offset, items, more, ctx=ctx, encoding=encoding)
     return signed, versions[-1]["record_id"] if versions else after_record_id
 

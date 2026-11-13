@@ -52,7 +52,7 @@
 	import UserMessage from './UserMessage.svelte';
 	import { agentDelivery, agentSender, agentSenderNames } from '$lib/utils/agent-delivery';
 	import { createAgentMessageProjection } from '$lib/utils/agent-message-projection';
-	import { createNotSentHold, createNotSentRowsArrival, createStopBubbleHold, restingOnNotSentRows, stopPressedOn, stopRecoveryAppliesToTurn, withHeldBubbles } from '$lib/utils/not-sent-hold';
+	import { createNotSentHold, createNotSentRowsArrival, createStopBubbleHold, restingOnNotSentRows, restingOnNotSentTurn, stopPressedOn, stopRecoveryAppliesToTurn, withHeldBubbles } from '$lib/utils/not-sent-hold';
 	import AgentMessage from './AgentMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import TurnActivity from './TurnActivity.svelte';
@@ -530,7 +530,10 @@
 			sessionId: $activeSession.sessionId,
 			latestTurnKey: latestTurnKeyOf($activeSession.messages),
 			unsettled: latestTurnUnsettled,
-			parked: $activeSession.turnParked === true
+			parked: $activeSession.turnParked === true,
+			// The stopped turn keeps its steps while its "Not sent" rows wait below, until
+			// a newer turn opens under them, an agent's wake included (#1147).
+			pinned: restingOnNotSentTurn(notSentHold.messages)
 		});
 	});
 

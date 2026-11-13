@@ -303,6 +303,10 @@
 		if (!watchPresence) return;
 		return watchWorkerPresence();
 	});
+	// The runner chip names this worker: load the list once, or it reads "Local" (#1498).
+	$effect(() => {
+		if (!$workerInstalls) void refreshWorkerPresence().catch(() => {});
+	});
 
 	// A later successful refresh lifts a failed open's empty list.
 	$effect(() => {
