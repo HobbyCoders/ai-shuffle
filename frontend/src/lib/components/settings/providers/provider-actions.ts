@@ -14,19 +14,22 @@ import { CLAUDE_CLOUD_ITEM, type CredentialFlavor, type CredentialView, type Pro
 /**
  * A credential row's switch: PATCH `{enabled}` for model_providers rows, the
  * fal flag for fal.ai, activation for saved Claude keys and sign-ins.
+ * Resolves to the error message on failure, else null.
  */
-export async function setCredentialEnabled(c: CredentialView, enabled: boolean): Promise<boolean> {
+export async function setCredentialEnabled(c: CredentialView, enabled: boolean): Promise<string | null> {
 	try {
 		if (c.account && enabled) await providers.activateAnthropicAccount(c.account.id);
 		else if (c.subscription && enabled) await providers.activateClaudeSubscriptionAccount(c.subscription.id);
 		else if (c.flavor === 'fal') await providers.setFalEnabled(enabled);
 		else if (c.row) await providers.setProviderEnabled(c.row.id, enabled);
-		else return false;
+		else return null;
 		flashSaved();
-		return true;
+		return null;
 	} catch (e) {
-		notify(getErrorMessage(e, `Could not turn ${c.name} ${enabled ? 'on' : 'off'}`), { severity: 'error' });
-		return false;
+		// Returned too, so the control that was used can say it next to itself.
+		const message = getErrorMessage(e, `Could not turn ${c.name} ${enabled ? 'on' : 'off'}`);
+		notify(message, { severity: 'error' });
+		return message;
 	}
 }
 

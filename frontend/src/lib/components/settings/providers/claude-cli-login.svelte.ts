@@ -181,20 +181,27 @@ export class ClaudeCliLogin {
 		this.code = '';
 	}
 
-	/** `claude auth logout`, then ask again. */
-	async signOut(): Promise<void> {
+	/**
+	 * `claude auth logout`, then ask again. A failure lands in `loginError`, or
+	 * with `rethrow` is thrown instead so the control that was used can show it.
+	 */
+	async signOut({ rethrow = false }: { rethrow?: boolean } = {}): Promise<void> {
 		if (this.signingOut) return;
 		this.signingOut = true;
 		this.loginError = '';
+		let failure: unknown = null;
 		try {
 			const result = await logoutClaudeCli();
-			if (!result.success) this.loginError = result.error || 'The CLI could not sign out.';
+			if (!result.success) failure = new Error(result.error || 'The CLI could not sign out.');
 		} catch (e) {
-			this.loginError = getErrorMessage(e, 'The CLI could not sign out.');
+			failure = e;
 		} finally {
 			this.signingOut = false;
 			await this.load(true);
 		}
+		if (!failure) return;
+		if (rethrow) throw failure;
+		this.loginError = getErrorMessage(failure, 'The CLI could not sign out.');
 	}
 
 	dispose(): void {

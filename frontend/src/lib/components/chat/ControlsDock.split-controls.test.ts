@@ -406,7 +406,9 @@ describe('ControlsDock split controls', () => {
 		);
 	});
 
-	it('keeps the model picker open after selecting a model so context stays reachable', async () => {
+	// #1526: the phone sheet closes its picker on a choice; the desktop does the
+	// same, and the context-window controls are in the panel when it reopens.
+	it('closes the model picker after a model is chosen, as on the phone, with context on reopen', async () => {
 		const registryGet = vi.spyOn(api, 'get').mockResolvedValue({ models: getModels(), providers: [], claude: { auth_kind: 'subscription', plan_type: null } });
 		await hydrateModelRegistry();
 		registryGet.mockRestore();
@@ -417,11 +419,34 @@ describe('ControlsDock split controls', () => {
 
 		await fireEvent.click(screen.getByRole('option', { name: /opus/i }));
 		expect(get(activeSession).modelOverride).toBe('opus');
-		expect(screen.getByRole('dialog', { name: /choose model/i })).toBeTruthy();
-		expect(screen.getByRole('radiogroup', { name: /context window/i })).toBeTruthy();
-
-		await fireEvent.keyDown(window, { key: 'Escape' });
 		expect(screen.queryByRole('dialog', { name: /choose model/i })).toBeNull();
+		expect(document.activeElement).toBe(screen.getByRole('button', { name: /^model:/i }));
+
+		await fireEvent.click(screen.getByRole('button', { name: /^model:/i }));
+		expect(screen.getByRole('radiogroup', { name: /context window/i })).toBeTruthy();
+	});
+
+	// #1526: with no level pinned the slider rests on the model's default, so the
+	// chip and the card name that level instead of a bare "Auto".
+	it('names the model-default effort level the slider marks while nothing is pinned', async () => {
+		const registryGet = vi.spyOn(api, 'get').mockResolvedValue({ models: getModels(), providers: [], claude: { auth_kind: 'subscription', plan_type: null } });
+		await hydrateModelRegistry();
+		registryGet.mockRestore();
+		activeSession.setModelOverride('claude-sonnet-5-5');
+		activeSession.setEffortLevelOverride(null, false);
+		renderDock();
+		await tick();
+
+		const chip = screen.getByRole('button', { name: /^effort:/i });
+		expect(chip.textContent?.trim()).toBe('Auto (Medium)');
+		await fireEvent.click(chip);
+		expect(document.querySelector('[data-effort-value]')?.textContent).toBe('Auto (Medium)');
+		expect(screen.getByRole('slider', { name: /reasoning effort/i }).getAttribute('aria-valuetext')).toBe('Auto (Medium)');
+
+		// A pinned level reads as just that level.
+		activeSession.setEffortLevelOverride('high', false);
+		await tick();
+		expect(chip.textContent?.trim()).toBe('High');
 	});
 
 	it('closes the model picker when Tab moves focus out of it, leaving focus there (#1407)', async () => {

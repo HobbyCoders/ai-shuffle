@@ -386,12 +386,39 @@ def provider_id_for_row(row: Mapping[str, Any]) -> str:
     return f"gw:{row.get('id')}"
 
 
+def _created_order(row: Mapping[str, Any]) -> Tuple[float, str]:
+    """Sort key for :func:`usable_provider_rows`: oldest created first, then id.
+
+    ``created_at`` may be a datetime or an ISO string depending on the driver;
+    an unreadable one sorts first so the order stays total and stable.
+    """
+    from datetime import datetime, timezone
+
+    value = row.get("created_at")
+    stamp = 0.0
+    try:
+        if isinstance(value, str) and value:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            stamp = value.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        stamp = 0.0
+    return stamp, str(row.get("id") or "")
+
+
 def usable_provider_rows() -> List[dict]:
-    """Enabled provider rows that can run a model now; ``[]`` on any failure.
+    """Enabled provider rows that can run a model now, oldest created first;
+    ``[]`` on any failure.
 
     Agent providers only: the media provider (fal.ai) is not a model row.
     An Antigravity Google sign-in keeps no token in the row: it counts while
     Google's agent last said it is signed in on this worker.
+
+    Oldest first, so an implicit default (:func:`default_provider_model`)
+    stays on the provider the owner set up first: adding another key never
+    moves new chats or text tasks onto it (#1522).
     """
     try:
         from app.db import database
@@ -411,7 +438,7 @@ def usable_provider_rows() -> List[dict]:
         ]
     except Exception:  # noqa: BLE001 — the other rows still count
         logger.warning("Could not read the Antigravity sign-in rows", exc_info=True)
-    return rows
+    return sorted(rows, key=_created_order)
 
 
 def _claude_ok(cli=None) -> Tuple[bool, Optional[str]]:
@@ -470,7 +497,7 @@ def default_provider_model(*, servable_only: bool = False) -> Optional[Tuple[str
 
     The same pick as the composer's ``resolveDefaultModel``
     (frontend/src/lib/constants/models.svelte.ts), so the run, ``/api/models``
-    and the UI agree: providers in :func:`ready_providers` order (newest row
+    and the UI agree: providers in :func:`ready_providers` order (oldest row
     first), a subscription row before an API-key row of the same provider,
     and on each row its own default model when it is curated, else its first
     curated model. A usable row that lists no model is skipped.
@@ -505,7 +532,7 @@ def subscription_provider_model(
     For background work no session names a provider for (the memory learner
     behind a Claude Code session): only a subscription (ChatGPT, SuperGrok,
     or a native plan key) qualifies, never a cash API-key row, billed per
-    token. Newest row first, as :func:`usable_provider_rows` lists them; the
+    token. Oldest row first, as :func:`usable_provider_rows` lists them; the
     first row that curates ``prefer_model`` wins, else the first row's own
     default model (its first curated model when no default is set), the same
     per-row pick as :func:`default_provider_model`. Never raises.
@@ -686,7 +713,7 @@ def default_run_model(
 
     1. the owner's most used chat model (:func:`most_used_model`) while its
        provider can still run it;
-    2. the newest usable provider row's own default model
+    2. the oldest usable provider row's own default model
        (:func:`default_provider_model`); Claude is the remaining candidate,
        whose default is the registry default;
     3. the registry default, so a worker with nothing set up still gets the
@@ -695,7 +722,7 @@ def default_run_model(
     ``prefer_most_used=False`` is for internal text generation (titles,
     suggestions, commit text), where the chat model the owner uses most may
     be an expensive one: it skips step 1 and keeps the earlier order, the
-    registry default while Claude has its credential, else the newest usable
+    registry default while Claude has its credential, else the oldest usable
     provider's default model.
 
     Provider rows are every row :func:`ready_providers` counts, custom

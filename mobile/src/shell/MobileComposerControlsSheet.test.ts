@@ -605,6 +605,14 @@ describe('Chat controls panel', () => {
 		expect(within(effort).getByRole('radio', { name: 'Low' }).hasAttribute('aria-describedby')).toBe(false);
 	});
 
+	// #1526: the marked default is the level that runs: checked, and named by the row.
+	it('checks the model-default effort level and names it while nothing is pinned', () => {
+		render(MobileComposerControlsSheet, { props: props({ open: true, effortValue: null, effortDefaultValue: 'high' }) });
+		const effort = within(panel()).getByRole('radiogroup', { name: 'Reasoning effort' });
+		expect(within(effort).getAllByRole('radio', { checked: true }).map((r) => r.textContent?.trim())).toEqual(['High']);
+		expect(panel().querySelector('[data-row="effort"] .mcp-val')?.textContent).toBe('Auto (High)');
+	});
+
 	it('pops the page\'s own history entry when the on-screen Back leaves it (#705)', async () => {
 		page.state = { mobileControls: true };
 		render(MobileComposerControlsSheet, { props: props({ open: true }) });

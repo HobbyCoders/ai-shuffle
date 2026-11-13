@@ -130,6 +130,30 @@ describe('createTurnHandoffHold', () => {
 		expect(first.size).toBe(0);
 	});
 
+	it('keeps a hand-off that runs out while pinned until the pin lifts (#1147)', () => {
+		const onExpire = vi.fn();
+		const handoff = createTurnHandoffHold(onExpire);
+		handoff.update(at('t1', true));
+		// Stop: the "Not sent" rows open a newer turn and the chat rests on them.
+		expect([...handoff.update({ ...at('t2', true), pinned: true })]).toEqual(['t1']);
+		vi.advanceTimersByTime(PARKED_SETTLE_HOLD_MS);
+		expect(onExpire).not.toHaveBeenCalled();
+		expect([...handoff.update({ ...at('t2', true), pinned: true })]).toEqual(['t1']);
+		// The person moves on (a send): the stopped turn folds now, with no new wait.
+		expect([...handoff.update(at('t3', true))]).toEqual(['t2']);
+	});
+
+	it('lets a pinned hand-off that has not run out finish its ordinary window', () => {
+		const onExpire = vi.fn();
+		const handoff = createTurnHandoffHold(onExpire);
+		handoff.update(at('t1', true));
+		handoff.update({ ...at('t2', true), pinned: true });
+		expect([...handoff.update(at('t2', true))]).toEqual(['t1']);
+		vi.advanceTimersByTime(SETTLE_HOLD_MS);
+		expect(onExpire).toHaveBeenCalledTimes(1);
+		expect([...handoff.update(at('t2', true))]).toEqual([]);
+	});
+
 	it('drops hand-offs on a session switch', () => {
 		const onExpire = vi.fn();
 		const handoff = createTurnHandoffHold(onExpire);

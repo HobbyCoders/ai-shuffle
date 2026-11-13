@@ -104,12 +104,15 @@
 					Dismiss
 				</button>
 			</div>
+			<!-- One line per action: a note takes the reason's place on screen, so a
+			     refusal arriving after "Sending…" doesn't grow the phone's sheet and
+			     move its rows (#1465). The reason stays the button's description. -->
 			{#each actions as action (action.id)}
 				{#if action.note}
 					<p class="gp-note">{action.label}: {action.note}</p>
 				{/if}
 				{#if action.disabledReason}
-					<p class="gp-why" id="{uid}-{action.id}-why">{action.label}: {action.disabledReason}</p>
+					<p class="gp-why" class:gp-covered={!!action.note} id="{uid}-{action.id}-why">{action.label}: {action.disabledReason}</p>
 				{/if}
 			{/each}
 		{/if}
@@ -304,6 +307,17 @@
 		color: var(--destructive);
 		text-align: right;
 		word-break: break-word;
+	}
+
+	/* Read to assistive tech as the disabled button's reason, not drawn. */
+	.gp-why.gp-covered {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		margin: -1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
 	}
 
 	.gp-dismiss {

@@ -381,6 +381,10 @@
 	.notif-center.rail .notif-btn.open { background: var(--row-hover); }
 	.notif-center.rail .notif-btn:active { background: var(--row-hover); transform: scale(.95); }
 	.notif-center.rail .notif-badge { top: 0; right: -1px; box-shadow: 0 0 0 1.5px var(--sidebar); }
+	/* A finger apart on a narrow or touch rail, as SidebarRail's own (#1528). */
+	@media (max-width: 600px), (pointer: coarse) {
+		.notif-center.rail .notif-btn::after { content: ''; position: absolute; inset: -4px; }
+	}
 	.notif-center.rail .notif-panel {
 		position: fixed;
 		top: auto;

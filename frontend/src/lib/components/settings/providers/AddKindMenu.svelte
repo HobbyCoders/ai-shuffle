@@ -154,7 +154,11 @@
 		padding: 0 8px;
 		white-space: nowrap;
 	}
-	@media (pointer: coarse) {
+	/* The phone touch height, wherever the settings kit's own buttons get it. */
+	:global(.settings-shell[data-stacked]) .plus {
+		min-height: 44px;
+	}
+	@media (max-width: 600px), (pointer: coarse) {
 		.plus {
 			min-height: 44px;
 		}

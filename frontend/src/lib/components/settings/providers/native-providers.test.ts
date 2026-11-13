@@ -1,6 +1,6 @@
 /** Native key enrollment uses the worker contract, never a device sign-in or a billing meter. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 
 const mocks = vi.hoisted(() => ({ hydrate: vi.fn(), checkAuth: vi.fn() }));
 vi.mock('$lib/constants/models.svelte', async (original) => ({
@@ -170,11 +170,33 @@ it('metadata edits do not revalidate a native endpoint, and a rejected replaceme
 	expect(worker.sent('PATCH', `/model-providers/${saved.id}`)[0].body).toEqual({ name: 'Renamed', provider_type: 'kimi' });
 	await waitFor(() => expect((screen.getByRole('button', { name: 'Replace' }) as HTMLButtonElement).disabled).toBe(false));
 	await fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
-	await fireEvent.input(screen.getByLabelText('New auth token'), { target: { value: 'rejected-fake-key' } });
+	await fireEvent.input(screen.getByLabelText(`New ${nativeEnrollment[0].credential_label.toLowerCase()}`), { target: { value: 'rejected-fake-key' } });
 	await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 	expect((await screen.findByRole('alert')).textContent).toBe('Replacement rejected. Your saved key is unchanged.');
 	expect(worker.state.rows[0].auth_token_set).toBe(true);
 	expect(worker.state.rows[0].auth_token_masked).toBe('********');
+});
+
+it('shows a native key once, with Replace and Check key together, and the check result under it (#1523, #1525)', async () => {
+	const saved = nativeRow(nativeEnrollment[0]);
+	worker = fakeWorker({ rows: [saved] }, {
+		'POST /model-providers/:id/check-key': () => { throw { status: 400, detail: 'The provider rejected this key.' }; }
+	});
+	vi.stubGlobal('fetch', worker.fetch);
+	await providers.refreshAll();
+	settingsNav.go({ category: 'providers', item: `mp:${saved.id}` });
+	render(ProvidersCollection);
+	const replace = await screen.findByRole('button', { name: 'Replace' });
+	expect(screen.getAllByRole('button', { name: 'Replace' })).toHaveLength(1);
+	expect(screen.queryByText('Auth token')).toBeNull();
+	const row = replace.closest('.st-row') as HTMLElement;
+	expect(row.textContent).toContain(nativeEnrollment[0].credential_label);
+	await fireEvent.click(within(row).getByRole('button', { name: 'Check key' }));
+	const alert = await screen.findByRole('alert');
+	expect(alert.textContent).toBe('The provider rejected this key.');
+	// Right under the key row, above Context window and Max output.
+	expect(row.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	expect(alert.compareDocumentPosition(screen.getByRole('textbox', { name: 'Context window' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
 it('loads Kimi Code’s fixed preset without offering or attempting an upstream refresh', async () => {

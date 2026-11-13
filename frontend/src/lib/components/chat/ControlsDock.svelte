@@ -43,7 +43,7 @@
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { focusLeftRoots, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
-	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
+	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, autoEffortLabel } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
 	import { phoneLayout } from './phone/phone-layout.svelte';
 	import { Globe, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
@@ -510,7 +510,8 @@
 	// Effort only shows when there is something real to say: never "Unknown".
 	const showEffort = $derived(effortCapability.known ? effortLevels.length > 0 : !!effortValue);
 	const effortLabel = $derived(
-		!effortCapability.known ? (effortValue ?? 'Unknown') : !effortLevels.length ? 'Not adjustable' : effortValue ? (effortLevels.find((m) => m.value === effortValue)?.label ?? 'Auto') : 'Auto'
+		!effortCapability.known ? (effortValue ?? 'Unknown') : !effortLevels.length ? 'Not adjustable'
+			: (effortValue ? effortLevels.find((m) => m.value === effortValue)?.label : undefined) ?? autoEffortLabel(effortLevels, effortCapability.defaultValue)
 	);
 	const permissionLabel = $derived(
 		permissionPending ? 'Access' : permissionModes.find((m) => m.value === permissionValue)?.label ?? 'Ask first'
@@ -696,8 +697,10 @@
 						contextStandardTokens={contextStandardTokens}
 						onContextStandardChange={(tokens) => activeSession.setContextStandardCap(tokens)}
 						onSelect={(v) => {
-							// Stay open so context-window controls remain reachable.
+							// Choosing a model closes the picker, as on the phone; the
+							// context-window controls are in the same panel when reopened (#1526).
 							activeSession.setModelOverride(v);
+							dismissPopover();
 						}}
 						onRequestClose={dismissPopover}
 						focusSearchOnOpen
