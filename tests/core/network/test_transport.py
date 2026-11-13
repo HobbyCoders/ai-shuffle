@@ -499,11 +499,27 @@ async def test_session_freshness_tracks_clear_epoch_even_when_seq_drops(workers,
             assert status["epoch"] == status["owner_epoch"]
 
 
-async def test_session_freshness_waits_for_multibatch_epoch_replacement(workers, monkeypatch):
+@pytest.mark.parametrize("publish_budget", ["default", "expired"])
+async def test_session_freshness_waits_for_multibatch_epoch_replacement(workers, monkeypatch, publish_budget):
     from app.db import session_events
     from app.db.sessions import clear_session_conversation
     from app.network import catalog
     from tests.core.network.harness import join
+
+    if publish_budget == "expired":
+        # What a slow runner does: publish_owned stops after its first
+        # 400-event batch once EVENT_PASS_SECONDS has elapsed (#1510).
+        monkeypatch.setattr(catalog, "EVENT_PASS_SECONDS", 0)
+
+    def publish_all():
+        # The exchange carries only published ops. Drain the backlog like the
+        # scanner's next passes do, or the second batch can be still unpublished.
+        catalog.publish_owned()
+        for _ in range(10):
+            if not catalog.take_events_backlog():
+                return
+            catalog.publish_owned()
+        pytest.fail("owner transcript backlog did not drain")
 
     a, b = workers("replacement-owner"), workers("replacement-mirror")
     with a.active():
@@ -512,7 +528,7 @@ async def test_session_freshness_waits_for_multibatch_epoch_replacement(workers,
         session_events.append_events("replaced", [
             {"type": "message.user", "payload": {"content": f"old-{i}"}} for i in range(502)
         ])
-        catalog.publish_owned()
+        publish_all()
     join(a, b)
     served = ServedBy(a, "https://replacement-owner.example.com")
     monkeypatch.setattr(transport, "BATCH_LIMIT", 500)
@@ -528,7 +544,7 @@ async def test_session_freshness_waits_for_multibatch_epoch_replacement(workers,
             session_events.append_events("replaced", [
                 {"type": "message.user", "payload": {"content": f"new-{i}"}} for i in range(501)
             ])
-            catalog.publish_owned()
+            publish_all()
         with b.active():
             await link.sync_once(client, engine.context())
             rows = session_events.get_events("replaced", limit=1000)

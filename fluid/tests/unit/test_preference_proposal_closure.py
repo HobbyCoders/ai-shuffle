@@ -156,7 +156,8 @@ async def test_a_save_that_returns_a_replaced_fact_leaves_the_proposal_open(tmp_
     # Storage matches the archived rule and deliberately does not revive it.
     out = await remember({"text": RULE, "when": WHEN, "user_requested": True,
                           "proposal": "release_notes"}, ctx(store))
-    assert not out.is_error and [m.id for m in store.memories()] == [new.id]
+    assert out.is_error and [m.id for m in store.memories()] == [new.id]
+    assert out.text.startswith("Not saved as current") and "Saved [" not in out.text
     assert f"stays open: [{old.id}] was replaced by [{new.id}]" in out.text
     assert "Closed learner proposal" not in out.text and len(proposal_lines(store)) == 1
     # The call the receipt names (correct the current successor) closes it.
@@ -292,3 +293,111 @@ def test_rows_from_older_versions_still_work(tmp_path):
     [closed] = queue.close("release_notes", None, how="saved")
     assert closed["closed"] == "saved" and queue.open() == []
     assert queue.propose("release_notes", RULE) == "closed"
+
+
+@pytest.mark.parametrize("user_requested", [True, False])
+async def test_a_save_matching_a_replaced_fact_does_not_claim_saved(tmp_path, user_requested):
+    # #1514: storage returns the archived owner-kept rule without reviving it,
+    # for an owner save and for an agent save alike. The receipt must not say
+    # saved and available; it names the successor and the correcting call.
+    store = SkillStore(tmp_path)
+    old = store.save_memory(RULE, protected=True, when=WHEN)
+    new = store.save_memory("Release notes are written after the tag is pushed.", protected=True,
+                            when=WHEN, replaces=[old.id])
+    out = await remember({"text": RULE, "when": WHEN, "user_requested": user_requested},
+                         ctx(store))
+    assert out.is_error and [m.id for m in store.memories()] == [new.id]
+    assert "Saved [" not in out.text and "available to new sessions now" not in out.text
+    assert out.text.startswith(f"Not saved as current: this text matches [{old.id}], "
+                               f"which [{new.id}] replaced")
+    assert f"[{new.id} r{new.revision}] stays the current fact" in out.text
+    assert f"memory_id={new.id} expected_revision={new.revision}" in out.text
+    # Storage's no-revival rule is unchanged.
+    assert [m.id for m in store.archived_memories()] == [old.id]
+
+
+async def test_a_word_for_word_match_on_a_live_fact_still_says_saved(tmp_path):
+    store = SkillStore(tmp_path)
+    kept = store.save_memory(RULE, protected=True, when=WHEN)
+    out = await remember({"text": RULE, "when": WHEN, "user_requested": True}, ctx(store))
+    assert not out.is_error and out.text.startswith(f"Saved [{kept.id}]")
+
+
+def _saved_at(store, *times):
+    """The queue over ``store`` with its live facts stamped at ``times``."""
+    entries = [dict(vars(e), updated_at=t) for e, t in zip(store.memories(), times, strict=True)]
+    queue = PreferenceProposals(store)
+    rows = queue._saved_preferences(entries)
+    assert len(rows) == len(times)  # every fact is a live, user-kept rule
+    queue._saved_preferences = lambda _entries: rows
+    return queue
+
+
+def test_a_word_for_word_memory_suppresses_only_while_it_is_the_latest_word(tmp_path):
+    # #1508: A at T110, the opposite B at T180 (both live), the owner goes
+    # back to A at T200: the proposal is queued, not answered by the T110 copy.
+    store = SkillStore(tmp_path)
+    tabs = "Indent Python code in the fixture project with tabs."
+    spaces = "Indent Python code in the fixture project with four spaces."
+    store.save_memory(tabs, protected=True, when="When formatting Python code")
+    store.save_memory(spaces, protected=True, when="When formatting Python code")
+    queue = _saved_at(store, 110.0, 180.0)
+    assert queue.propose("python_indent", tabs, now=200.0) == "proposed"
+    assert [r["text"] for r in queue._read()] == [tabs]
+
+
+def test_a_repeated_rule_with_no_newer_contradiction_stays_suppressed(tmp_path):
+    store = SkillStore(tmp_path)
+    tabs = "Indent Python code in the fixture project with tabs."
+    store.save_memory(tabs, protected=True, when="When formatting Python code")
+    assert PreferenceProposals(store).propose("python_indent", tabs) == "saved"
+    # An older contradicting fact does not reopen it either.
+    store.save_memory("Indent Python code in the fixture project with four spaces.",
+                      protected=True, when="When formatting Python code")
+    queue = _saved_at(store, 180.0, 110.0)
+    assert queue.propose("python_indent", tabs, now=200.0) == "saved"
+    assert queue._read() == []
+
+
+def test_memories_seen_when_a_proposal_is_queued_never_answer_it(tmp_path):
+    # Clock skew: replicated A (T110) and B (T180) are both ahead of this
+    # worker's clock (T100) when the owner goes back to A. The queued proposal
+    # is open: neither memory it already saw counts as a later answer.
+    store = SkillStore(tmp_path)
+    tabs = "Indent Python code in the fixture project with tabs."
+    store.save_memory(tabs, protected=True, when="When formatting Python code")
+    store.save_memory("Indent Python code in the fixture project with four spaces.",
+                      protected=True, when="When formatting Python code")
+    queue = _saved_at(store, 110.0, 180.0)
+    assert queue.propose("python_indent", tabs, now=100.0) == "proposed"
+    assert [r["text"] for r in queue.open(now=100.0)] == [tabs]
+    # A memory on the topic saved after both (the next local stamp) answers it.
+    rows = queue._saved_preferences(None)
+    key, scope, _at, fp, terms = rows[0]
+    queue._saved_preferences = lambda _entries: rows + [(key, scope, 180.5, fp, terms)]
+    assert queue.open(now=101.0) == []
+
+
+async def test_a_save_matching_a_replaced_fact_with_a_conflicted_successor(tmp_path):
+    # A was replaced by B; two synced workers then corrected B differently, so
+    # B is conflicted and new sessions do not see it. The receipt must not
+    # call B the current fact; it sends the agent to the owner's resolution.
+    text = "Release notes are written after the tag is pushed."
+    here, there = SkillStore(tmp_path / "here"), SkillStore(tmp_path / "there")
+    old = here.save_memory(RULE, protected=True, when=WHEN)
+    new = here.save_memory(text, protected=True, when=WHEN, replaces=[old.id])
+    there._facts.merge(here._facts.export())
+    copy = next(m for m in there.memories() if m.text == text)
+    here.save_memory("Release notes are written by the release bot after the tag is pushed.",
+                     memory_id=new.id, expected_revision=new.revision, protected=True, when=WHEN)
+    there.save_memory("Release notes are written by hand after the tag is pushed.",
+                      memory_id=copy.id, expected_revision=copy.revision, protected=True, when=WHEN)
+    here._facts.merge(there._facts.export())
+    [successor] = here.memories()
+    assert successor.id == new.id and successor.conflicted
+    out = await remember({"text": RULE, "when": WHEN, "user_requested": True,
+                          "proposal": "release_notes"}, ctx(here))
+    assert out.is_error and out.text.startswith("Not saved as current")
+    assert "stays the current fact" not in out.text and "new sessions see it" not in out.text
+    assert f"[{new.id}] is conflicted" in out.text and "Recall" in out.text
+    assert "owner" in out.text
