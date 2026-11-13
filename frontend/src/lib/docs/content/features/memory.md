@@ -22,7 +22,7 @@ If the memory changed somewhere else while you were editing, your text stays on 
 
 ## Rules an agent suggests
 
-When you correct how agents work, for example which model handles which job, or how reviews, CI or deploys run, the background learner can suggest the whole rule as a memory. It never saves the rule itself: new chats see the suggestion and the agent asks you about it. Say yes and the agent saves it, and the suggestion goes away. Say no, or if a memory already says the same thing, the agent dismisses it, and the learner does not suggest the same wording again for 14 days. A differently worded rule on the same subject can still be suggested. A suggestion nobody answers expires after 14 days. Suggestions stay on the worker whose learner made them.
+When you correct how agents work, for example which model handles which job, or how reviews, CI or deploys run, the background learner can suggest the whole rule as a memory. It never saves the rule itself: new chats see the suggestion and the agent asks you about it. Say yes and the agent saves it, and the suggestion goes away. Say no, or if a memory already says the same thing, the agent dismisses it, and the learner does not suggest the same wording again for 14 days. A differently worded rule on the same subject can still be suggested. The learner does not suggest a rule a memory already says word for word, unless a newer memory on the same subject says something different. A suggestion nobody answers expires after 14 days. Suggestions stay on the worker whose learner made them.
 
 ## Deleting a memory
 

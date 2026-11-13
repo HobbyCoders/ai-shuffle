@@ -59,6 +59,19 @@ function reloadCase(name, { viaLink }) {
 		},
 		async act(ctx) {
 			const { page, mark, log, token } = ctx;
+			// Every status the chat's sidebar row shows from the new page's first
+			// frame until the reply ends: the turn runs all along, so it is never
+			// Done (#1527).
+			const id = await chatIdByToken(page, token);
+			await page.addInitScript(({ id, end }) => {
+				const seen = (window.__rowStatuses = []);
+				const tick = () => {
+					const status = document.querySelector(`[data-session-card="${CSS.escape(id)}"]`)?.getAttribute('data-status');
+					if (status && seen[seen.length - 1] !== status) seen.push(status);
+					if (!(document.body?.textContent || '').includes(end)) requestAnimationFrame(tick);
+				};
+				requestAnimationFrame(tick);
+			}, { id, end: SLOW_REPLY.end });
 			await mark('reload');
 			const t0 = Date.now();
 			await page.reload({ waitUntil: 'domcontentloaded' });
@@ -72,6 +85,9 @@ function reloadCase(name, { viaLink }) {
 			expect((await countUserRows(page, token)) === 1, 'the message is back, once');
 
 			await page.getByText(SLOW_REPLY.end, { exact: false }).first().waitFor({ timeout: 90_000 });
+			const statuses = await page.evaluate(() => window.__rowStatuses);
+			log(`sidebar row while the turn ran: ${statuses.join(' → ')}`);
+			expect(!statuses.includes('done'), `the running chat's row said Done after the reload: ${statuses.join(' → ')}`);
 			await waitTurnSettled(page, { messagesAtLeast: 2, timeout: 30_000 });
 			log(`reply settled ${Date.now() - t0}ms after reload`);
 			expect((await countUserRows(page, token)) === 1, 'the message shows once after the reply settled');

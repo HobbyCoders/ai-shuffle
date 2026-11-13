@@ -29,6 +29,7 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 	return {
 		projects: writable([{ id: 'project', name: 'Project' }]),
 		clusterProjects: writable([]),
+		profiles: writable([]),
 		sessions,
 		appData: { loadSessions: vi.fn() }
 	};
@@ -495,6 +496,18 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(chip.disabled).toBe(false);
 	});
 
+	// #1498: after a reload nothing else has loaded the worker list, and the
+	// chip must not fall back to "Local" for a worker that has a name.
+	it('names this worker on the runner chip of a local chat after a cold load', async () => {
+		session.store.set(base);
+		appSessions.store.set([{ id: base.sessionId, instance_id: 'local', is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'local', is_self: true, online: true, device_name: 'Tower' }] });
+		const view = render(ContextPillBar, { sheetMode });
+		expect(await view.findByRole('button', { name: 'Runner: Tower' })).toBeTruthy();
+		expect(view.queryByRole('button', { name: 'Runner: Local' })).toBeNull();
+		expect(listInstallsMock).toHaveBeenCalledTimes(1);
+	});
+
 	it('explains empty and failed local worker discovery and supports retry', async () => {
 		session.store.set(base);
 		appSessions.store.set([{ id: base.sessionId, is_remote: false }]);
@@ -534,6 +547,27 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Other worker' }));
 		expect(view.queryByRole('dialog')).toBeNull();
 		await waitFor(() => expect(moveSession).toHaveBeenCalledExactlyOnceWith('chat', 'peer'));
+	});
+
+	// The "No project" mark lives in this row on the desktop; the phone sheet
+	// leaves it to the phone top bar.
+	it('offers "No project" beside the worker in a saved no-project chat, and opens the attach sheet', async () => {
+		session.store.set({ ...base, sessionId: 'chat', project: null, projectV2Id: null, mode: 'chat' });
+		appSessions.store.set([{ id: 'chat', instance_id: 'local', is_remote: false, controllable: true }]);
+		const view = render(ContextPillBar, { sheetMode });
+		const chip = view.queryByRole('button', { name: /^No project\. Attach a project/ });
+		expect(chip !== null).toBe(!sheetMode);
+		if (!chip) return;
+		expect(chip.classList.contains('ctx-chip')).toBe(true);
+		expect(chip.textContent?.trim()).toBe('No project');
+		await fireEvent.click(chip);
+		expect(await view.findByRole('dialog', { name: 'Attach a project' })).toBeTruthy();
+	});
+
+	it('shows no "No project" chip in a chat that has a project', () => {
+		session.store.set(base);
+		const view = render(ContextPillBar, { sheetMode });
+		expect(view.queryByRole('button', { name: /^No project/ })).toBeNull();
 	});
 
 	it('gives a new no-project chat its worker and project rows, and no mode bar', () => {
@@ -897,10 +931,12 @@ describe('the read-only runner chip of a subagent’s chat', () => {
 		session.store.set({ ...base, projectV2Id: 'pv2-project' });
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'local',
 			is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'local', is_self: true, online: true, device_name: 'Tower' }] });
 		const view = render(ContextPillBar);
-		const el = chip(view.container);
-		expect(el?.textContent).toContain('Local');
-		expect(dotOf(el)).toBe('online');
-		expect(listInstallsMock).not.toHaveBeenCalled();
+		expect(dotOf(chip(view.container))).toBe('online');
+		// The list is loaded once so the chip names this worker (#1498).
+		await waitFor(() => expect(chip(view.container)?.textContent).toContain('Tower'));
+		expect(dotOf(chip(view.container))).toBe('online');
+		expect(listInstallsMock).toHaveBeenCalledTimes(1);
 	});
 });

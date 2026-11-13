@@ -437,6 +437,11 @@ def test_get_user_streaming_sessions_join(mock_db):
     # Unknown user -> nothing.
     assert streaming_status.get_user_streaming_sessions("nobody") == []
 
+    # The session list reads the same truth for the rows it lists (#1527).
+    listed = ["s-admin", "s-user", "s-admin-idle", "s-admin-expired", "s-missing"]
+    assert streaming_status.busy_session_ids(listed) == {"s-admin", "s-user"}
+    assert streaming_status.busy_session_ids([]) == set()
+
 
 @pytest.mark.parametrize("state", ["running", "interrupting", "draining"])
 @pytest.mark.parametrize("owner", [None, "u1"])
@@ -465,11 +470,21 @@ def test_reconnect_snapshot_matches_live_turn_truth(mock_db, state, owner):
     # the live turn has not settled. Reconnect must agree with busy guards.
     assert streaming_status._has_active_run_db("s-live") is True
     assert streaming_status.get_user_streaming_sessions(user_id) == snapshot
+    assert streaming_status.busy_session_ids(["s-live"]) == {"s-live"}
     other_user = "admin" if owner else "u1"
     assert streaming_status.get_user_streaming_sessions(other_user) == []
     assert streaming_status.get_user_streaming_sessions("nobody") == []
     assert turns.settle_turn(turn["id"], "completed")
     assert streaming_status.get_user_streaming_sessions(user_id) == []
+    assert streaming_status.busy_session_ids(["s-live"]) == set()
+
+
+def test_busy_session_ids_fails_open(monkeypatch):
+    def broken():
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(streaming_status, "get_db", broken)
+    assert streaming_status.busy_session_ids(["s1"]) == set()
 
 
 def test_get_user_streaming_sessions_reports_v2_branch(mock_db):

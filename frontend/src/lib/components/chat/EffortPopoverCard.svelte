@@ -16,7 +16,7 @@
 	 */
 	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
 	import { Zap } from 'lucide-svelte';
-	import { NO_ADJUSTABLE_EFFORT } from '$lib/constants/model-effort';
+	import { NO_ADJUSTABLE_EFFORT, autoEffortLabel } from '$lib/constants/model-effort';
 
 	interface ControlOption {
 		value: string;
@@ -60,7 +60,7 @@
 	const maxIndex = $derived(Math.max(options.length - 1, 0));
 	const index = $derived(pinned ? pinnedIndex : Math.max(0, options.findIndex(option => option.value === defaultValue)));
 	const current = $derived(options[index]);
-	const currentLabel = $derived(!known ? (value ?? 'Unknown') : !options.length ? 'Not adjustable' : pinned ? (current?.label ?? 'Effort') : 'Auto');
+	const currentLabel = $derived(!known ? (value ?? 'Unknown') : !options.length ? 'Not adjustable' : pinned ? (current?.label ?? 'Effort') : autoEffortLabel(options, defaultValue));
 	const progress = $derived(maxIndex > 0 ? (index / maxIndex) * 100 : 0);
 
 	function handleInput(event: Event) {

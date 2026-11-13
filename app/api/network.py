@@ -640,12 +640,15 @@ async def peer_ops(body: OpsRequest, device_id: str = Depends(tokens.require_dev
 
 @router.get("/peer/ops/{origin}/{incarnation}/{seq}")
 async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = False,
-                  device_id: str = Depends(tokens.require_device)) -> dict:
+                  device_id: str = Depends(tokens.require_device), highest: bool = False) -> dict:
     """One signed envelope, optionally the first retained op at or after seq.
 
     Rollback detection needs an op past the caller's watermark, not necessarily
     the advertised head: pruning can remove that head after another origin
-    replaces its record. A bare watermark is never rollback proof.
+    replaces its record. A bare watermark is never rollback proof. With
+    ``highest`` the last retained op at or after seq answers instead: within a
+    stream the clock grows with seq, so a restored worker learns the newest
+    clock it signed before the restore (#1506). Older workers ignore it.
     """
     with request_metrics.metrics.measure("tunnel", "GET /peer/ops/{param}/{param}/{param}"):
         transport.note_contact(device_id)
@@ -656,7 +659,7 @@ async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = F
             with store.get_db() as conn:
                 from app.network import nested_secret_sync
                 cursor = conn.cursor()
-                op = store.get_op(cursor, origin, incarnation, seq, at_or_after=at_or_after)
+                op = store.get_op(cursor, origin, incarnation, seq, at_or_after=at_or_after, highest=highest)
                 return op if op and nested_secret_sync.ops_compatible([op], device_id, cursor) else None
 
         op = await run_sync(_work)
@@ -905,7 +908,8 @@ _LAN_ROUTES = (
     ("POST", re.compile(r"/exchange"), lambda m, q, b, d: peer_exchange(ExchangeRequest.model_validate(b or {}), d)),
     ("POST", re.compile(r"/ops"), lambda m, q, b, d: peer_ops(OpsRequest.model_validate(b or {}), d)),
     ("GET", re.compile(r"/ops/([^/]{1,64})/(\d{1,18})/(\d{1,18})"),
-     lambda m, q, b, d: peer_op(m[1], int(m[2]), int(m[3]), _flag(q.get("at_or_after", False)), d)),
+     lambda m, q, b, d: peer_op(m[1], int(m[2]), int(m[3]), at_or_after=_flag(q.get("at_or_after", False)),
+                                highest=_flag(q.get("highest", False)), device_id=d)),
     ("POST", re.compile(r"/state"), lambda m, q, b, d: peer_state(_flag(q.get("prepare", False)),
                                                                   _int(q.get("format", 1)), d)),
     ("POST", re.compile(r"/transcripts"), lambda m, q, b, d: _peer_transcripts(b, d)),

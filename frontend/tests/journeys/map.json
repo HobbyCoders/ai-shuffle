@@ -205,6 +205,20 @@
 			"globs": ["frontend/src/lib/components/layout/Sidebar.svelte", "frontend/src/lib/components/layout/sidebar/SidebarRail.svelte", "frontend/src/lib/components/layout/sidebar/SidebarSheet.svelte"]
 		},
 		{
+			"why": "the drawer rail, Settings > Providers' Add account and Replace, and the Context and usage hide button answer a finger's 44px on a phone and keep their desktop size (#1528)",
+			"journeys": ["touch-targets"],
+			"globs": [
+				"frontend/tests/journeys/touch-targets.journey.mjs",
+				"frontend/src/lib/components/layout/sidebar/SidebarRail.svelte",
+				"frontend/src/lib/components/layout/sidebar/DesktopUpdateButton.svelte",
+				"frontend/src/lib/components/NotificationCenter.svelte",
+				"frontend/src/lib/components/settings/providers/AddKindMenu.svelte",
+				"frontend/src/lib/components/settings/providers/SavedSecretRow.svelte",
+				"frontend/src/lib/components/settings/shell/settings.css",
+				"frontend/src/lib/components/chat/ContextUsageBar.svelte"
+			]
+		},
+		{
 			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
 			"journeys": ["update-runtime"],
 			"globs": [

@@ -741,6 +741,10 @@
 	.rail .update-button:hover { color: var(--foreground); background: var(--row-hover); }
 	.rail .update-button:active { transform: scale(.95); }
 	.rail .update-button:focus-visible { outline-offset: -2px; }
+	/* A finger apart on a narrow or touch rail, as SidebarRail's own (#1528). */
+	@media (max-width: 600px), (pointer: coarse) {
+		.rail .update-button::before { content: ''; position: absolute; inset: -4px; }
+	}
 	.update-button :global(.update-spinner), .completion-ring { animation: update-spin 1s linear infinite; }
 	.completion-ring, .completion-check { position: absolute; }
 	.completion-check { opacity: 0; stroke-dasharray: 25; stroke-dashoffset: 25; }

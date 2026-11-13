@@ -1,10 +1,14 @@
 <script lang="ts">
 	/**
-	 * NoProjectPill — the header's mark for a running session without a
-	 * project (#371 step 4). A quiet dashed pill; pressing it opens the attach
-	 * sheet, which says what attaching adds and that it is one-way.
+	 * NoProjectPill — the mark for a running session without a project
+	 * (#371 step 4). Pressing it opens the attach sheet, which says what
+	 * attaching adds and that it is one-way.
+	 *
+	 * On the desktop it is a chip in the row under the composer, beside the
+	 * agent and worker (ContextPillBar). The phone composer has no such row, so
+	 * the phone top bar keeps an icon-sized button (`compact`).
 	 */
-	import { FolderPlus } from 'lucide-svelte';
+	import { ChevronDown, FolderClosed, FolderPlus } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles, sessions } from '$lib/stores/app-data.svelte';
 	import { archivedChats } from '$lib/stores/archived-chats';
@@ -13,11 +17,11 @@
 	import AttachProjectSheet from './AttachProjectSheet.svelte';
 
 	interface Props {
-		/** Phone top bar: icon-sized pill. */
-		compact?: boolean;
+		/** `chip`: the composer's context row. `compact`: the phone top bar's icon. */
+		variant?: 'chip' | 'compact';
 	}
 
-	let { compact = false }: Props = $props();
+	let { variant = 'chip' }: Props = $props();
 
 	let open = $state(false);
 
@@ -40,19 +44,36 @@
 </script>
 
 {#if visible && sessionId}
-	<button
-		type="button"
-		class="np-pill"
-		class:compact
-		aria-haspopup="dialog"
-		aria-expanded={open}
-		aria-label="No project. Attach a project to this session"
-		title="No project — attach one to get a checkout and git"
-		onclick={() => (open = true)}
-	>
-		<FolderPlus size={compact ? 18 : 14} strokeWidth={1.8} class="np-icon" aria-hidden="true" />
-		{#if !compact}<span>No project</span>{/if}
-	</button>
+	{#if variant === 'compact'}
+		<button
+			type="button"
+			class="np-pill"
+			aria-haspopup="dialog"
+			aria-expanded={open}
+			aria-label="No project. Attach a project to this session"
+			title="No project — attach one to get a checkout and git"
+			onclick={() => (open = true)}
+		>
+			<FolderPlus size={18} strokeWidth={1.8} aria-hidden="true" />
+		</button>
+	{:else}
+		<!-- The look is `.ctx-chip` (app.css), like the agent and worker beside it,
+		     and the same folder and word as the new-chat row's "No project". -->
+		<button
+			type="button"
+			class="ctx-chip np-chip"
+			class:open
+			aria-haspopup="dialog"
+			aria-expanded={open}
+			aria-label="No project. Attach a project to this session"
+			title="No project — attach one to get a checkout and git"
+			onclick={() => (open = true)}
+		>
+			<FolderClosed size={14} strokeWidth={1.75} aria-hidden="true" />
+			<span class="ctx-chip-label">No project</span>
+			<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />
+		</button>
+	{/if}
 	<AttachProjectSheet {open} {sessionId} {agentName} {blockedReason} onClose={() => (open = false)} />
 {/if}
 
@@ -60,31 +81,27 @@
 	.np-pill {
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
-		height: 28px;
-		padding: 0 11px 0 9px;
-		border: 1px dashed var(--border-strong);
-		border-radius: 999px;
+		justify-content: center;
+		width: 44px;
+		height: 44px;
+		padding: 0;
+		border: none;
+		border-radius: 12px;
 		background: transparent;
 		color: var(--muted-foreground);
-		font: inherit;
-		font-size: 12.5px;
-		font-weight: 500;
-		white-space: nowrap;
 		cursor: pointer;
-		transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+		transition: color 150ms ease, background 150ms ease;
 	}
-	.np-pill :global(.np-icon) { color: var(--subtle-foreground); transition: color 150ms ease; }
+	.np-pill :global(svg) { color: var(--subtle-foreground); transition: color 150ms ease; }
 	.np-pill:hover, .np-pill[aria-expanded='true'] {
-		border-style: solid;
-		border-color: color-mix(in oklab, var(--primary) 55%, var(--border));
 		color: var(--foreground);
 		background: color-mix(in oklch, var(--primary) 8%, transparent);
 	}
-	.np-pill:hover :global(.np-icon), .np-pill[aria-expanded='true'] :global(.np-icon) { color: var(--primary); }
+	.np-pill:hover :global(svg), .np-pill[aria-expanded='true'] :global(svg) { color: var(--primary); }
 	.np-pill:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.np-pill.compact { width: 44px; height: 44px; padding: 0; justify-content: center; border: none; border-radius: 12px; }
+	/* The chip keeps its word whole: it is short, and the row's names shrink first. */
+	.np-chip { flex-shrink: 0; }
 	@media (prefers-reduced-motion: reduce) {
-		.np-pill, .np-pill :global(.np-icon) { transition: none; }
+		.np-pill, .np-pill :global(svg) { transition: none; }
 	}
 </style>

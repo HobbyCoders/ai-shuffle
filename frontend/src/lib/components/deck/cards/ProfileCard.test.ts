@@ -312,10 +312,47 @@ describe('autosave and identity', () => {
 		// Hidden legacy bindings are retired by the full-replace PUT, as before.
 		expect(payload.config).not.toHaveProperty('model');
 		expect(payload.config).not.toHaveProperty('permission_mode');
-		expect(payload.config).not.toHaveProperty('custom_future_key');
+		// A setting the page does not edit goes back as stored (#1546).
+		expect(payload.config.custom_future_key).toEqual({ keep: true });
 		// No colour field on this worker, so none is sent.
 		expect(payload).not.toHaveProperty('avatar_color');
 		expect(serverAvatar).toBe('orbit');
+	});
+
+	it('keeps settings the page does not edit when another field is saved (#1546)', async () => {
+		agents = agents.map((a) =>
+			a.id === 'agent'
+				? ({
+						...a,
+						config: {
+							...a.config,
+							enabled_plugins: ['plugins/reviewer'],
+							app_config_tools: true,
+							thinking_mode: 'adaptive',
+							tools_preset: 'claude_code',
+							cwd: '/old/dir'
+						}
+					} as Profile)
+				: a
+		);
+		await appData.loadProfiles();
+		render(ProfileCard, { initialSelectedId: 'agent' });
+		await heading('Researcher');
+		await fireEvent.input(screen.getByLabelText('Description'), { target: { value: 'Edited description' } });
+		await waitFor(() => expect(mocks.put).toHaveBeenCalled(), { timeout: 2000 });
+		const [path, payload] = mocks.put.mock.calls.at(-1)!;
+		expect(path).toBe('/agents/agent');
+		expect(payload.config).toMatchObject({
+			enabled_plugins: ['plugins/reviewer'],
+			app_config_tools: true,
+			thinking_mode: 'adaptive',
+			tools_preset: 'claude_code',
+			cwd: '/old/dir'
+		});
+		// What the page owns still comes from the form, and retired keys stay out.
+		expect(payload.config.system_prompt.content).toBe('Keep my original prompt');
+		expect(payload.config).not.toHaveProperty('model');
+		expect(payload.config).not.toHaveProperty('avatar_id');
 	});
 
 	it('hides the colour choice when the agent API has no avatar_color', async () => {

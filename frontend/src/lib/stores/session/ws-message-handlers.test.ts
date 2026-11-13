@@ -505,6 +505,13 @@ describe('ws-message-handlers', () => {
 				expect(streaming.size).toBe(0);
 			},
 		);
+
+		it('names the session each live change is about, so a slower list cannot undo it (#1527)', () => {
+			handlers.handleMessage({ type: 'user_streaming_changed', session_id: 'session-2', is_streaming: false });
+			handlers.handleMessage({ type: 'user_session_deleted', session_id: 'session-3' });
+			const ids = (deps.streamingSessions.update as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1]);
+			expect(ids).toEqual(['session-2', 'session-3']);
+		});
 	});
 
 	describe('done handler', () => {
