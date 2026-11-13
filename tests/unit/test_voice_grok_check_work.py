@@ -473,6 +473,39 @@ async def test_an_open_handoff_counts_as_work_in_flight(monkeypatch, delegate):
 
 
 @pytest.mark.asyncio
+async def test_a_conversion_mid_typed_send_carries_the_typed_attachment(monkeypatch, delegate):
+    """#1505 on Grok: check_work at idle can take a typed message's words while
+    the typed path awaits; its files go with them, and nothing is sent twice."""
+    from app.core import upload_transfer
+    from app.core.voice_prompts import ATTACHMENT_NOTE_OPENER
+    call = idle_call(monkeypatch)
+    call.settle_speech = AsyncMock()
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda session_id: {"id": session_id, "mode": "chat"})
+    monkeypatch.setattr(upload_transfer, "partition_upload_paths", lambda paths, session, references=None: (paths, []))
+    monkeypatch.setattr(upload_transfer, "resolve_upload_references", lambda payload, session: payload)
+    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", lambda payload, session: None)
+    send_json = call.websocket.send_json
+
+    async def gate(event):
+        if event.get("type") == "caption" and voice_stream.TYPED_MESSAGE_PREFIX in event.get("delta", ""):
+            await call.answer_check_work("look-1")  # The voice checks on work right now.
+        await send_json(event)
+    call.websocket.send_json = gate
+
+    await call.receive_text(json.dumps({"type": "input_text", "id": "a", "text": "Read this", "upload_paths": ["/up/a.pdf"]}))
+    await call.delegation_task
+
+    (handed,) = delegate
+    assert handed["command"] == command_id(call.call_key, "check-look-1")
+    assert handed["uploads"] == {"upload_paths": ["/up/a.pdf"]}
+    assert ATTACHMENT_NOTE_OPENER in handed["transcript"] and '"/up/a.pdf"' in handed["transcript"]
+    # The typed path found its words gone: no "no request" note for an empty request.
+    notes = [e["item"]["content"][0]["text"] for e in sent(call.upstream)
+             if e["type"] == "conversation.item.create" and e["item"]["type"] == "message"]
+    assert not any(voice_stream.NO_REQUEST_NOTE in note for note in notes)
+
+
+@pytest.mark.asyncio
 async def test_a_cross_worker_conversion_takes_the_normal_handoff_path(monkeypatch, delegate):
     call = idle_call(monkeypatch)
     call.remote_owner = "dev-owner"

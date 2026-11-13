@@ -1025,6 +1025,71 @@ async def test_typed_attachments_travel_as_files_to_the_worker_running_the_chat(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("remote", [False, True], ids=["local", "another-worker"])
+async def test_a_spoken_handoff_settling_mid_typed_send_carries_the_typed_attachment(monkeypatch, remote):
+    """#1505: the spoken dispatch can run while the typed path awaits between
+    appending its words and reading them. Whichever request takes the typed
+    words must carry its attachment; the typed path must not send an empty one."""
+    import asyncio
+
+    from app.core import turn_recorder, upload_transfer
+    from app.core.voice_prompts import ATTACHMENT_NOTE_OPENER
+    call = stream()
+    call.upstream = Upstream([])
+    if remote:
+        call.remote_owner = "worker-2"
+        monkeypatch.setattr(upload_transfer, "lift_send_uploads", lambda paths, project, session: ["blob-1"])
+    _upload_row(monkeypatch, {"id": "s1", "mode": "chat", "project_id": "p1"})
+    monkeypatch.setattr(upload_transfer, "partition_upload_paths", lambda paths, session, references=None: (paths, []))
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", AsyncMock())
+    spoken_sent = asyncio.Event()
+    requests = []
+
+    async def delegate(session, context, **kwargs):
+        requests.append((context, kwargs))
+        if not spoken_sent.is_set():
+            # The caller carries on speaking before the typed path reads its entries.
+            await call.caption("user", " Also the config.")
+        spoken_sent.set()
+        return "On it."
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    call.settle_speech = AsyncMock()
+
+    # The caller spoke and the provider opened a handoff that is settling.
+    await call.caption("user", "Can you check the logs?")
+    call.settling = ["d1"]
+    spoken = {}
+    emit = call.emit
+
+    async def gate(event):
+        # Typed words are in the transcript; the spoken handoff settles now.
+        if event.get("type") == "caption" and voice_stream.TYPED_MESSAGE_PREFIX in event.get("delta", "") and not spoken:
+            spoken["task"] = asyncio.create_task(call.dispatch_when_settled())
+            await asyncio.wait_for(spoken_sent.wait(), 2)
+        await emit(event)
+    call.emit = gate
+
+    await call.receive_text(json.dumps({"type": "input_text", "id": "a", "text": "Read this", "upload_paths": ["/up/a.pdf"]}))
+    await spoken["task"]
+    if call.delegation_task is not None:
+        await call.delegation_task
+
+    expected = {"upload_paths": ["/up/a.pdf"], **({"upload_blob_ids": ["blob-1"]} if remote else {})}
+    typed = [(context, kwargs) for context, kwargs in requests if "Read this" in context]
+    assert len(typed) == 1
+    context, kwargs = typed[0]
+    assert kwargs.get("uploads") == expected
+    if not remote:  # Unmentioned in the words: the chat agent is told where it is.
+        assert ATTACHMENT_NOTE_OPENER in context and '"/up/a.pdf"' in context
+    assert len(requests) == 1  # Nothing left for the typed path: no second, empty request.
+    # Words spoken since the spoken handoff wait for the next one.
+    assert [e["text"] for e in call.transcript if e["seq"] > call.delegated_seq] == [" Also the config."]
+    assert [json.loads(e)["type"] for e in call.upstream.sent] == ["session.commentary.append"]
+    events = [c.args[0] for c in call.websocket.send_json.await_args_list]
+    assert [e for e in events if e["type"].startswith("text.")] == [{"type": "text.accepted", "id": "a"}]
+
+
+@pytest.mark.asyncio
 async def test_a_typed_attachment_past_the_caption_limit_keeps_its_typed_record(monkeypatch):
     """The length flush inside ``caption`` stores this message, so it must carry the files."""
     from app.core import turn_recorder, upload_transfer

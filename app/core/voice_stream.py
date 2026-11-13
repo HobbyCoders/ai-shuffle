@@ -183,6 +183,22 @@ def newest_utterance(entries) -> str:
     return "" if is_noise(text) else text
 
 
+def typed_attachments(entries) -> tuple[str, dict | None]:
+    """The attachment note and turn fields of the typed messages in ``entries``.
+
+    They ride each typed message's transcript entry, so whichever handoff
+    takes the words (the typed path, a spoken handoff that settled meanwhile,
+    or Grok's check_work) sends its files with them (#1505).
+    """
+    notes, uploads = [], {}
+    for entry in entries:
+        typed = entry.get("typed") or {}
+        notes.append(typed.get("note") or "")
+        for key, values in (typed.get("uploads") or {}).items():
+            uploads.setdefault(key, []).extend(values)
+    return "".join(notes), uploads or None
+
+
 def live_session_config(config: dict, history: list[dict]) -> dict:
     from app.core.query_options import decode_provider_model
     model = config.get("model") if config.get("model") in LIVE_MODELS else LIVE_MODEL
@@ -887,12 +903,13 @@ class VoiceStream:
 
     async def caption(self, role: str, delta: str, offset: int = 0, *, start_ms: float | None = None,
                       response_id: str | None = None, item_id: str | None = None,
-                      typed_uploads: list[str] | None = None):
+                      typed_uploads: list[str] | None = None, typed: dict | None = None):
         """One transcript fragment. ``start_ms`` is where it starts on the
         provider session's timeline (GPT Live), None when unknown. Provider
         response/item ids distinguish new assistant utterances from word pieces.
         ``typed_uploads`` (even empty) marks ``delta`` as text typed into the
-        call, with the files it carries."""
+        call, with the files it carries. ``typed`` rides the transcript entry
+        (see :func:`typed_attachments`)."""
         if not delta:
             return
         if role == "assistant" and self.last_caption_role == "user" and self.approval_waiting():
@@ -945,7 +962,7 @@ class VoiceStream:
         self.last_caption_role = role
         self.transcript_seq += 1
         self.transcript.append({"role": role, "text": delta, "offset_ms": offset, "start_ms": start_ms,
-                                "seq": self.transcript_seq})
+                                "seq": self.transcript_seq, **({"typed": typed} if typed else {})})
         if role == "assistant":
             if start_ms is None:
                 self.reply_timed = False
@@ -972,15 +989,17 @@ class VoiceStream:
         if len(self.pending[role]) >= 2000:
             await self.flush()
 
-    async def run_delegation(self, delegation_id: str | None, entries=None, *, file_note: str = "",
-                             uploads: dict | None = None, request_key: str | None = None):
+    async def run_delegation(self, delegation_id: str | None, entries=None, *, request_key: str | None = None):
         """Hand the caller's words to the chat agent. ``request_key`` names the
-        request for the forwarded command id when it has no ``delegation_id``."""
+        request for the forwarded command id when it has no ``delegation_id``.
+        Typed messages among ``entries`` bring their attachments (#1505)."""
         try:
+            entries = list(self.transcript if entries is None else entries)
+            file_note, uploads = typed_attachments(entries)
             # Keep the read loop free. Group partial captions into readable
             # turns; the Live delegation event itself carries no task text.
             conversation = []
-            for entry in (self.transcript if entries is None else entries):
+            for entry in entries:
                 if conversation and conversation[-1]["role"] == entry["role"]:
                     conversation[-1]["text"] += entry["text"]
                 else:
@@ -1275,19 +1294,25 @@ class VoiceStream:
             # Typed requests reuse the existing same-session delegation
             # path, not a guessed provider text event or a second conversation.
             await self.flush()
-            await self.caption("user", "\n\n" + TYPED_MESSAGE_PREFIX + text, typed_uploads=recorded)
+            await self.caption("user", "\n\n" + TYPED_MESSAGE_PREFIX + text, typed_uploads=recorded,
+                               typed={"key": key, "note": file_note, "uploads": uploads})
             await self.flush()  # Durable admission before acknowledging/dispatching.
             entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
-            self.delegated_seq = self.transcript_seq
             # A resent draft is accepted once; typed ids stay out of the
             # provider session's handoff count.
             self.typed_ids[key] = None
             while len(self.typed_ids) > MAX_TYPED_IDS:
                 del self.typed_ids[next(iter(self.typed_ids))]
-            self.delegation_task = asyncio.create_task(
-                self.run_delegation(None, entries, file_note=file_note, uploads=uploads))
-            _workers.add(self.delegation_task)
-            self.delegation_task.add_done_callback(_workers.discard)
+            # While the awaits above ran, a spoken handoff can have taken these
+            # words, files included (#1505): then there is nothing to send, and
+            # words spoken since stay for the next handoff.
+            if any((e.get("typed") or {}).get("key") == key for e in entries):
+                self.delegated_seq = self.transcript_seq
+                # Its own command id: the owner of a chat on another worker
+                # dedupes by it, and a retry of this message keeps it (#1543).
+                self.delegation_task = asyncio.create_task(self.run_delegation(None, entries, request_key=key))
+                _workers.add(self.delegation_task)
+                self.delegation_task.add_done_callback(_workers.discard)
         await self.emit({"type": "text.accepted", "id": identity})
 
     async def receive_browser(self):
