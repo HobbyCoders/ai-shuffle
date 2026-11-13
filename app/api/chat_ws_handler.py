@@ -2874,11 +2874,10 @@ class ChatWebSocketHandler:
         # table. The enqueue writes run in ONE worker-thread hop
         # (``submit_async``) while the kick still fires on this loop, so it can
         # schedule.
-        # Remote-placed: no kick (the owner's claim loop starts it) and the
-        # install-local 'claude-code' sentinel never rides a foreign turn row.
+        # Remote-placed: no kick (the owner's claim loop starts it). The agent
+        # is concrete either way, so it rides the turn as in handle_query, even
+        # when its id is 'claude-code': a turn naming none fails as it starts.
         queue_profile_id = profile_id
-        if placed_remote and queue_profile_id == "claude-code":
-            queue_profile_id = None
         # Transport context, at parity with handle_query: without it a drained
         # queue turn runs with user_id/api_user_id None, so session_runtime skips
         # the attention bump and the AskUserQuestion fanout.

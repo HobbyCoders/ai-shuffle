@@ -21,8 +21,8 @@ Covers the coordinator-mandated seven cases:
    up by the observe pass, which drives the live runtime's interrupt exactly
    once — a second pass is a guarded no-op.
 6. Flag OFF: ``claim_once`` is inert (the claim loop never runs). Flag ON: a
-   remote-placed query enqueues durably with NO local kick, strips the
-   install-local 'claude-code' sentinel, fires the NOTIFY wake, and acks
+   remote-placed query enqueues durably with NO local kick, keeps the
+   chat's concrete agent on the turn, fires the NOTIFY wake, and acks
    ``query_queued``.
 7. O4 amendment: the interrupt idempotency guard is PER-TURN — interrupting
    turn 1, completing it, then interrupting turn 2 drives the runtime interrupt
@@ -107,9 +107,9 @@ def _stub_installs(monkeypatch, online_ids):
     monkeypatch.setattr(database, "get_installs_map", lambda: rows)
 
 
-def _seed_session(sid, *, placement_val=None, instance_id=None):
+def _seed_session(sid, *, placement_val=None, instance_id=None, profile_id="default"):
     """A real sessions row with an explicit placement/instance_id."""
-    database.create_session(session_id=sid, profile_id="default", title="t")
+    database.create_session(session_id=sid, profile_id=profile_id, title="t")
     from app.db.base import get_db
 
     with get_db() as conn:
@@ -643,7 +643,10 @@ async def test_flag_on_query_errors_honestly_when_no_capable_runner(
 async def test_flag_on_queue_message_remote_placed_no_kick(
     mock_db, monkeypatch, kicks
 ):
+    """An explicitly chosen agent rides the remote turn row, even one whose id
+    is 'claude-code': a turn written with no agent fails as it starts."""
     _stub_installs(monkeypatch, [OTHER])
+    database.create_profile("claude-code", "Claude Code", None, {"model": "sonnet"})
     _seed_session("s-qplace", placement_val={"where": f"runner:{OTHER}"})
 
     notifies = []
@@ -663,9 +666,43 @@ async def test_flag_on_queue_message_remote_placed_no_kick(
     assert [(t["source"], t["prompt"]) for t in queued] == [
         ("queue", "queued remotely")
     ]
-    assert queued[0]["profile_id"] is None
+    assert queued[0]["profile_id"] == "claude-code"
     assert kicks == []
     assert notifies == ["s-qplace"]
+
+
+async def test_queue_message_without_a_profile_keeps_a_real_claude_code_agent_remotely(
+    mock_db, monkeypatch, kicks
+):
+    """#1531 on a remote-owned chat: an omitted profile resolves the chat's own
+    agent. When that real agent's id is 'claude-code', the remote hand-off must
+    not read it as the no-agent sentinel and write the turn with none — the
+    owner would then refuse it as it starts ("Profile not found: None")."""
+    _stub_installs(monkeypatch, [OTHER])
+    database.create_profile("claude-code", "Claude Code", None, {"model": "sonnet"})
+    _seed_session(
+        "s-qreal", placement_val={"where": f"runner:{OTHER}"}, profile_id="claude-code"
+    )
+
+    notifies = []
+    monkeypatch.setattr(
+        "app.core.turn_claim.notify_turns_changed", lambda sid: notifies.append(sid)
+    )
+    with _handler_env():
+        handler = _make_handler()
+        await handler.handle_queue_message({
+            "content": "queued remotely",
+            "session_id": "s-qreal",
+            "project": None,
+        })
+
+    queued = turns_db.get_queued_turns("s-qreal")
+    assert [(t["source"], t["prompt"], t["profile_id"]) for t in queued] == [
+        ("queue", "queued remotely", "claude-code")
+    ]
+    assert kicks == []
+    assert notifies == ["s-qreal"]
+    assert sent_frames(handler, "error") == []
 
 
 # ---------------------------------------------------------------------------
