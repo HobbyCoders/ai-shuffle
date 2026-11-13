@@ -267,9 +267,10 @@ UP_TO_DATE = "Antigravity is up to date ({version})."
 
 
 def _version_key(text: Optional[str]) -> Optional[tuple]:
-    """``1.5.7`` → ``(1, 5, 7)``; None when the text is not a plain dotted version."""
-    match = re.match(r"(\d+(?:\.\d+)*)", text or "")
-    return tuple(int(part) for part in match.group(1).split(".")) if match else None
+    """``1.5.7`` → ``(1, 5, 7)``; None when the text is not a plain dotted version
+    (``1.5.7-rc1`` included: such versions compare by equality only)."""
+    match = re.fullmatch(r"\d+(?:\.\d+)*", (text or "").strip())
+    return tuple(int(part) for part in match.group(0).split(".")) if match else None
 
 
 def _is_current(installed: Optional[str], latest: str) -> bool:
@@ -420,13 +421,17 @@ def prune_versions(keep: Path, spared: Optional[List[Path]] = None) -> List[str]
     removed: List[str] = []
     cli = _root() / "cli"
     kept = {keep.name}
+    roots = {os.path.abspath(cli), os.path.realpath(cli)}
     for exe in spared or ():
-        try:
-            rel = Path(os.path.abspath(exe)).relative_to(os.path.abspath(cli))
-        except ValueError:
-            continue
-        if rel.parts:
-            kept.add(rel.parts[0])
+        # The path as named and, behind a symlink, the file it points to.
+        for path in {os.path.abspath(exe), os.path.realpath(exe)}:
+            for root in roots:
+                try:
+                    rel = Path(path).relative_to(root)
+                except ValueError:
+                    continue
+                if rel.parts:
+                    kept.add(rel.parts[0])
     try:
         folders = [p for p in cli.iterdir() if p.is_dir() and p.name not in kept]
     except OSError:

@@ -1463,6 +1463,29 @@ async def test_an_update_keeps_the_copy_the_override_names(agy_root, monkeypatch
     assert ag.locate_binary() == (str(pinned), "override")
 
 
+def test_pruning_keeps_the_target_of_a_symlinked_override(agy_root):
+    cli = agy_root / "cli"
+    for version in ("1.5.5", "1.5.6", "1.5.7"):
+        (cli / version).mkdir(parents=True)
+        (cli / version / "agy").write_text(version)
+    (cli / "pinned").mkdir()
+    try:
+        (cli / "pinned" / "agy").symlink_to(cli / "1.5.5" / "agy")
+    except OSError:
+        pytest.skip("symlinks unavailable here")
+    removed = ag.prune_versions(cli / "1.5.7", [cli / "pinned" / "agy"])
+    assert removed == ["1.5.6"]
+    assert (cli / "pinned" / "agy").read_text() == "1.5.5"  # not left dangling
+
+
+@pytest.mark.parametrize("installed,latest,current", [
+    ("1.5.7", "1.5.7", True), ("1.5.8", "1.5.7", True), ("1.10.0", "1.9.9", True),
+    ("1.5.6", "1.5.7", False), ("1.5.7-rc1", "1.5.7", False), (None, "1.5.7", False),
+])
+def test_a_job_installs_only_a_newer_release(installed, latest, current):
+    assert ag._is_current(installed, latest) is current
+
+
 def test_spawn_binding_names_the_binary_the_spec_was_built_with(agy_root, monkeypatch):
     row = {"id": "row-1", "auth_mode": "gemini-api-key", "extra_env_json": {}}
     monkeypatch.setattr(ag, "row_api_key", lambda _row: "k")
