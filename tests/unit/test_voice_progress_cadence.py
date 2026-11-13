@@ -195,9 +195,23 @@ def test_fewer_updates_phrases(text):
     "Cancel the system update and reboot the box.",
     "Skip the updates for the staging server.",
     "Pull the latest updates and rebuild.",
+    # Review round 2: a bare "the updates" beside a work request is about software.
+    "Skip the updates and reboot the server.",
+    "Stop the updates and revert the config changes.",
+    "Stop the updates. Keep going with the refactor.",
 ])
 def test_not_fewer_updates(text):
     assert not wants_fewer_updates(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Stop the updates.",
+    "That's fine, stop the updates.",
+    "Okay, no more updates, thanks.",
+    "Stop the progress updates and reboot the server.",
+])
+def test_a_bare_stop_the_updates_mutes_only_when_it_is_the_whole_request(text):
+    assert wants_fewer_updates(text)
 
 
 @pytest.mark.parametrize("text", [

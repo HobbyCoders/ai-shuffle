@@ -1058,13 +1058,15 @@ class VoiceStream:
         if self.progress is not None:
             from app.core.voice_status import is_status_question
             spoken = "".join(e["text"] for e in entries if e["role"] == "user")
+            if self.has_check_work and self.status_told_turn == turn and (
+                    is_status_question(spoken) or not spoken.strip()):
+                # check_work answered this caller turn's status question (and
+                # spent its words): close the handoff quietly.
+                await self.send({"type": "session.thinking.append", "delegation_id": ids[0],
+                                 "content": STATUS_TOLD_NOTE})
+                return
             if is_status_question(spoken):
                 # A quick status question reads the app's task state directly.
-                if self.has_check_work and self.status_told_turn == turn:
-                    # check_work answered this caller turn: close the handoff quietly.
-                    await self.send({"type": "session.thinking.append", "delegation_id": ids[0],
-                                     "content": STATUS_TOLD_NOTE})
-                    return
                 await self.answer_status(ids[0], turn)
                 return
         await self.run_delegation(ids[0], entries)

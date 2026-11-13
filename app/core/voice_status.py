@@ -230,20 +230,28 @@ def is_status_question(text: str) -> bool:
 # be the request whole. Whole clauses keep work requests out ("stop the update
 # to the software", "skip the updates in the installer") and a negation in
 # front ("do not stop the updates") fails the match. The last clause that
-# states a preference wins.
+# states a preference wins. A bare "stop the updates" names no kind of update,
+# so it counts only when nothing else in the sentence is a work request ("skip
+# the updates and reboot the server" is about software): missing a mute costs
+# one spoken line, a wrong mute costs silence through the next long job.
 _CLAUSE_SPLIT = re.compile(r"[.!?;:,\n]+|\s+-\s+|\b(?:and|but|then)\b")
 _TAIL = r"(?: please| thanks| thank you| okay| ok| for now)*"
 _UPDATES = r"(?:the |your |all the |these |those |any )?(?:progress |status )?(?:updates|play by play|narration)"
+_SPOKEN_UPDATES = r"(?:the |your |all the |these |those |any )?(?:(?:progress |status )updates|play by play|narration)"
 _FEWER_UPDATES_PATTERNS = tuple(re.compile(p + _TAIL + "$") for p in (
     (r"^(?:you can |please )?(?:only|just) (?:tell|let) me(?: know)? (?:when|once|if) (?:it's|it is|that's|that is|"
      r"you're|you are|you've|everything's|everything is|it has|it's all|the work is) "
      r"(?:done|finished|ready|complete|completed)"),
-    r"^(?:please )?(?:stop|no more|enough|quit|skip|hold|cut|drop)(?: with)? " + _UPDATES,
+    r"^(?:please )?(?:stop|no more|enough|quit|skip|hold|cut|drop)(?: with)? " + _SPOKEN_UPDATES,
     r"^(?:please )?(?:stop|quit) (?:updating me|narrating|giving me updates|telling me every step|telling me each step)",
     r"^(?:i want |i'd like |i would like )?fewer (?:progress |status )?updates",
     (r"^(?:you )?(?:don't|do not|no need to) (?:need to |have to )?(?:keep )?(?:updating me|update me|giving me updates|"
      r"give me updates|telling me every step|tell me every step|telling me each step|narrating)(?: as you go)?"),
 ))
+_BARE_FEWER = re.compile(r"^(?:please )?(?:stop|no more|enough|quit|skip|hold|cut|drop)(?: with)? "
+                         r"(?:the |your |all the |these |those |any )?updates" + _TAIL + "$")
+_ACKNOWLEDGEMENT = re.compile(r"^(?:that's fine|that is fine|fine|thanks|thank you|got it|sounds good|yeah|yes|yep|"
+                              r"sure|great|cool|perfect|please|no worries|no problem|all good|i'm good)$")
 _MORE_UPDATES_PATTERNS = tuple(re.compile(p + _TAIL + "$") for p in (
     r"^(?:please )?keep me (?:posted|updated|informed|in the loop)(?: as you go)?",
     r"^(?:please |you can )?(?:give|tell) me (?:the )?(?:progress )?updates (?:again|as you go)",
@@ -257,14 +265,21 @@ def progress_preference(text: str) -> str | None:
     """"fewer" when the caller asks for no spoken progress until the work is
     done, "more" when they ask to be kept posted again, else None."""
     found = None
+    bare = other = False
     for clause in _CLAUSE_SPLIT.split(str(text or "").lower().replace("’", "'")):
         normal = _normal(clause)
         if not normal:
             continue
         if any(pattern.match(normal) for pattern in _FEWER_UPDATES_PATTERNS):
-            found = "fewer"
+            found, bare = "fewer", False
         elif any(pattern.match(normal) for pattern in _MORE_UPDATES_PATTERNS):
-            found = "more"
+            found, bare = "more", False
+        elif _BARE_FEWER.match(normal):
+            found, bare = "fewer", True
+        elif not _ACKNOWLEDGEMENT.match(normal):
+            other = True
+    if bare and other:
+        return None  # "Stop the updates and revert the config": a work request.
     return found
 
 

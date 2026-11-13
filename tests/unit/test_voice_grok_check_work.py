@@ -387,6 +387,56 @@ async def test_a_status_question_at_idle_gets_the_plain_status(monkeypatch, dele
     assert delegate == [] and responses(call.upstream) == 1
 
 
+def check(call_id):
+    return {**CHECK, "call_id": call_id}
+
+
+@pytest.mark.asyncio
+async def test_two_idle_status_questions_in_a_row_start_no_chat_work(monkeypatch, delegate):
+    # Review round 2: the first answered question stayed in "words since the
+    # handoff", so the second was judged as "Is it done yet? Is it done yet?".
+    call = idle_call(monkeypatch)
+    status_question(call, "Is it done yet?")
+    await receive(call, [COMMIT, check("look-1")])
+    status_question(call, "Is it done yet?")
+    await receive(call, [{"type": "response.done"}, COMMIT, check("look-2")])  # The first answer was spoken.
+    assert outputs(call.upstream) == [("look-1", STATUS_NOTE + "Nothing is running."),
+                                      ("look-2", STATUS_NOTE + "Nothing is running.")]
+    assert delegate == [] and responses(call.upstream) == 2
+
+
+@pytest.mark.asyncio
+async def test_small_talk_the_voice_answered_is_not_part_of_a_status_question(monkeypatch, delegate):
+    call = idle_call(monkeypatch)
+    status_question(call, "How's your day going?")
+    call.transcript_seq += 1
+    call.transcript.append({"role": "assistant", "text": "Pretty good, thanks.", "seq": call.transcript_seq})
+    status_question(call, "Is it done yet?")
+    await receive(call, [COMMIT, CHECK])
+    assert outputs(call.upstream) == [("look-1", STATUS_NOTE + "Nothing is running.")]
+    assert delegate == []
+
+
+@pytest.mark.asyncio
+async def test_a_new_request_after_an_answered_status_question_is_handed_off(monkeypatch, delegate):
+    call = idle_call(monkeypatch)
+    status_question(call, "Is it done yet?")
+    await receive(call, [COMMIT, check("look-1")])
+    status_question(call, "Check whether the deploy finished.")
+    await receive(call, [COMMIT, check("look-2")])
+    assert outputs(call.upstream)[-1] == ("look-2", CHECK_WORK_HANDED_OFF)
+    assert len(delegate) == 1 and "Is it done yet?" not in str(delegate[0])
+
+
+@pytest.mark.asyncio
+async def test_a_handoff_for_a_status_question_check_work_answered_starts_no_turn(monkeypatch, delegate):
+    call = idle_call(monkeypatch)
+    status_question(call, "Is it done yet?")
+    await receive(call, [COMMIT, check("look-1")])
+    await shortcut(call, "tool-1")  # The voice then also hands the same turn off.
+    assert delegate == [] and responses(call.upstream) == 1
+
+
 @pytest.mark.asyncio
 async def test_check_work_while_work_runs_stays_a_status_read(monkeypatch, delegate):
     call = idle_call(monkeypatch, WORKING)

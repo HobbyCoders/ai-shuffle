@@ -168,12 +168,27 @@ class GrokVoiceStream(VoiceStream):
                         if e.get("seq", 0) > self.delegated_seq and e["role"] == "user"
                         and e.get("seq") not in self.approval_consumed and not is_noise(e["text"])).strip()
 
+    def words_this_turn(self) -> str:
+        """The caller's newest utterance alone: their words back to the voice's
+        last spoken words. Earlier turns the voice already answered (a status
+        question, small talk) are not part of the question check_work answers."""
+        words = []
+        for e in reversed(self.transcript):
+            if e.get("seq", 0) <= self.delegated_seq:
+                break
+            if e["role"] != "user":
+                if words and e["text"].strip():
+                    break
+            elif e.get("seq") not in self.approval_consumed and not is_noise(e["text"]):
+                words.append(e["text"].strip())
+        return " ".join(reversed(words)).strip()
+
     async def awaited_words(self) -> str:
-        """The caller's words since the last handoff, once they have settled."""
+        """The caller's newest utterance, once their words have settled."""
         await self.settle_speech()
         deadline = time.monotonic() + CHECK_WORK_WORDS_WAIT_S
         while True:
-            words = self.words_since_handoff()
+            words = self.words_this_turn()
             if words or self.settling is not None or time.monotonic() >= deadline:
                 return words
             await asyncio.sleep(0.05)
@@ -216,6 +231,10 @@ class GrokVoiceStream(VoiceStream):
                 self.status_told_turn = told_before  # Not a status answer.
                 await self.convert_check_work(call_id, upstream)
                 return
+            if voice_status.is_status_question(words) and self.settling is None and self.upstream is upstream:
+                # A status question answered here is spent, like one the app's
+                # shortcut answers: it is not part of the caller's next request.
+                self.delegated_seq = self.transcript_seq
         # A handoff for this caller turn (both tools in one response) is
         # settling or has just started: the voice must not hand it off again.
         just_handed_off = self.settling is not None or (
