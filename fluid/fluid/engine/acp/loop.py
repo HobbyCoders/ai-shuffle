@@ -240,7 +240,14 @@ class AcpLoop:
         bus: EventBus | None = None,
         system_append: str | None = None,
         connection_factory: Callable[..., AcpConnection] = AcpConnection,
+        deferred: Callable[[str], bool] | None = None,
     ) -> None:
+        """``deferred`` names the registry tools the agent reaches only through
+        the bridge's ``LoadTools``/``CallTool`` proxies (ACP has no deferral of
+        its own; see ``fluid.tools.mcp.call_through``). With it the bridge also
+        serves the registry's deferred tier and host-connected MCP servers.
+        None lists every served tool with its schema, the old behaviour.
+        """
         self.store = store
         self.spec = spec
         self.provider = spec.provider
@@ -253,6 +260,7 @@ class AcpLoop:
         self.add_dirs = [os.path.abspath(d) for d in add_dirs or ()]
         self.mcp_servers = dict(mcp_servers or {})
         self.tool_filter = tool_filter
+        self.deferred = deferred
         self.permissions = permissions
         self.hooks = hooks
         self.tool_policy = tool_policy
@@ -492,9 +500,7 @@ class AcpLoop:
             return None
         from fluid.tools.mcp.bundled_server import bundled_server_config, serve_registry_socket
 
-        specs = [s for s in self.registry.list_tools(loaded_only=True)
-                 if s.source in ("inproc", "builtin") and self._bridge_permitted(s.name)]
-        if not specs:
+        if not self._served_names():
             return None
         if self._socket_server is None:
             self._tmpdir = tempfile.TemporaryDirectory(prefix="fluid-acp-")
@@ -504,6 +510,7 @@ class AcpLoop:
             self._socket_server = await serve_registry_socket(
                 self.registry, self._socket_path, self.ctx, token=self._bridge_token,
                 tool_filter=self._bridge_permitted, permissions=self.permissions, hooks=self.hooks,
+                call_through=self.deferred,
             )
             if not use_unix:
                 port = self._socket_server.sockets[0].getsockname()[1]
@@ -514,11 +521,61 @@ class AcpLoop:
     def _bridge_permitted(self, name: str) -> bool:
         return self.tool_filter is None or bool(self.tool_filter(name))
 
-    def bridged_tools(self) -> list[str]:
+    def _served_names(self) -> list[str]:
+        """Every registry tool the bridge serves, listed or behind the proxies."""
         if self.registry is None:
             return []
-        return [s.name for s in self.registry.list_tools(loaded_only=True)
-                if s.source in ("inproc", "builtin") and self._bridge_permitted(s.name)]
+        from fluid.tools.mcp.bundled_server import served_specs
+        from fluid.tools.registry import ToolCtx
+
+        return [s.name for s in served_specs(
+            self.registry, self.ctx or ToolCtx(), self._bridge_permitted,
+            call_through=self.deferred is not None,
+        )]
+
+    def bridged_tools(self) -> list[str]:
+        """The names on the bridge's tool list, as the agent sees them."""
+        from fluid.tools.mcp.call_through import CALL_TOOL, LOAD_TOOL
+
+        served = self._served_names()
+        if self.deferred is None:
+            return served
+        listed = [name for name in served if not self.deferred(name)]
+        if len(listed) < len(served):
+            listed += [LOAD_TOOL, CALL_TOOL]
+        return listed
+
+    def deferred_tools(self) -> list[str]:
+        """The served tools the agent reaches only through ``CallTool``."""
+        if self.deferred is None:
+            return []
+        return [name for name in self._served_names() if self.deferred(name)]
+
+    def _is_load_proxy(self, name: str) -> bool:
+        from fluid.tools.mcp.call_through import LOAD_TOOL
+
+        return self.deferred is not None and name == f"mcp__{BUNDLED_SERVER_NAME}__{LOAD_TOOL}"
+
+    def _is_call_proxy(self, call: Mapping[str, Any]) -> bool:
+        from fluid.tools.mcp.call_through import CALL_TOOL
+
+        return self.deferred is not None and self._bridged_name(call) == f"mcp__{BUNDLED_SERVER_NAME}__{CALL_TOOL}"
+
+    def _unwrap_bridged(self, name: str, data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """A ``CallTool`` call as the real tool it runs, for cards and policy.
+
+        The owner's permission card, saved rules and the transcript then name
+        the real tool and its input. A name the bridge does not serve stays
+        the proxy: the bridge refuses that call.
+        """
+        from fluid.tools.mcp.call_through import CALL_TOOL, unwrap_call
+
+        if self.deferred is None or name != f"mcp__{BUNDLED_SERVER_NAME}__{CALL_TOOL}":
+            return name, data
+        real, args = unwrap_call(data)
+        if real not in self._served_names():
+            return name, data
+        return f"mcp__{BUNDLED_SERVER_NAME}__{real}", args
 
     def _bridged_name(self, call: Mapping[str, Any]) -> str | None:
         title = str(call.get("title") or "")
@@ -793,7 +850,8 @@ class AcpLoop:
     async def _drive(self, sid: str, turn_id: str, user_node: SessionNode, content: list[Any]) -> None:
         conn = self._conn
         assert conn is not None and self._acp_session is not None
-        mapper = TurnMapper(session_id=sid, turn_id=turn_id, bridged_name=self._bridged_name)
+        mapper = TurnMapper(session_id=sid, turn_id=turn_id, bridged_name=self._bridged_name,
+                            unwrap_bridged=self._unwrap_bridged)
         self._mapper = mapper
         self._steering_open = True
         failure: AcpError | None = None
@@ -1000,9 +1058,22 @@ class AcpLoop:
             for event in mapper.map_update({"sessionUpdate": "tool_call", **call}):
                 await self._emit(event)
         else:
-            name, data = TurnMapper(session_id="", turn_id="").tool_name_and_input(call)
+            name, data = TurnMapper(session_id="", turn_id="", bridged_name=self._bridged_name,
+                                    unwrap_bridged=self._unwrap_bridged).tool_name_and_input(call)
+        # A CallTool call is only ever allowed once, even when the owner chose
+        # "always": the agent would remember CallTool itself and stop asking
+        # for every tool behind it. The host's saved rule keys on the real tool.
+        proxied = self._is_call_proxy(call)
+
+        def allow() -> dict[str, Any]:
+            return chose("allow_once") if proxied else chose("allow_once", "allow_always")
+
         if self._interrupted.is_set():
             return cancelled
+        if self._is_load_proxy(name):
+            # Reads schemas of tools this session is served, nothing else:
+            # the counterpart of ToolSearch, which no leg asks the owner about.
+            return chose("allow_once", "allow_always")
         denial = await self._policy_denial(name, data)
         if denial:
             logger.info("ACP permission for %s refused by policy: %s", name, denial)
@@ -1017,7 +1088,7 @@ class AcpLoop:
                     await self._emit(event)
             return chose("reject_once", "reject_always")
         if self.permission_mode == "bypassPermissions":
-            return chose("allow_once", "allow_always")
+            return allow()
         if self.permission_mode == "plan":
             return chose("reject_once", "reject_always")
         request_id = new_id("perm")
@@ -1039,10 +1110,10 @@ class AcpLoop:
                 return cancelled if self._interrupted.is_set() else chose("reject_once", "reject_always")
         finally:
             self._pending_permissions.pop(request_id, None)
-        if response.decision == "allow_always":
+        if response.decision == "allow_always" and not proxied:
             return chose("allow_always", "allow_once")
-        if response.decision == "allow":
-            return chose("allow_once", "allow_always")
+        if response.decision in ("allow", "allow_always"):
+            return allow()
         return chose("reject_once", "reject_always")
 
     async def _elicit(self, params: dict[str, Any]) -> dict[str, Any]:

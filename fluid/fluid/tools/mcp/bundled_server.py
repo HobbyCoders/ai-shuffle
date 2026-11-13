@@ -170,6 +170,7 @@ async def serve_registry_socket(
     http_routes: dict[str, HttpRoute | JsonHttpRoute] | None = None,
     deferred: Callable[[str], bool] | None = None,
     agent_id_for_tool: Callable[[str | None], str | None] | None = None,
+    call_through: Callable[[str], bool] | None = None,
 ) -> asyncio.AbstractServer:
     """Serve ``list``/``call`` requests against ``registry`` over a socket.
 
@@ -189,6 +190,11 @@ async def serve_registry_socket(
     ``deferred`` names the tools the CLI should keep behind its ToolSearch:
     each is still listed and callable, with ``_meta`` ``anthropic/alwaysLoad``
     false so only its name reaches the prompt until the model loads it.
+
+    ``call_through`` is for a client with no deferral of its own (an ACP
+    agent): the tools it names are left off the list, announced by
+    ``LoadTools`` and run through ``CallTool`` (see ``_answer`` and
+    ``fluid.tools.mcp.call_through``).
 
     ``http_routes`` (with ``http_token``, required for them) maps a path to
     the handler of a JSON ``POST`` there; see ``_serve_http``.
@@ -233,7 +239,7 @@ async def serve_registry_socket(
                 resp = await _answer(
                     registry, call_ctx, req,
                     tool_filter=tool_filter, permissions=permissions, hooks=hooks,
-                    on_stop=on_stop, deferred=deferred,
+                    on_stop=on_stop, deferred=deferred, call_through=call_through,
                 )
                 writer.write((json.dumps(resp) + "\n").encode())
                 await writer.drain()
@@ -538,6 +544,32 @@ async def _gate_call(
     return outcome
 
 
+def served_specs(
+    registry: ToolRegistry, ctx: ToolCtx,
+    tool_filter: Callable[[str], bool] | None = None,
+    *,
+    call_through: bool = False,
+) -> list[Any]:
+    """The registry tools this bridge serves to its client.
+
+    Without ``call_through``: the loaded in-proc and builtin tools. With it,
+    also the deferred tier and the host-connected MCP servers' tools, which
+    the client reaches through the call-through proxy (``call_through``).
+    """
+    sources = ("inproc", "builtin", "mcp") if call_through else ("inproc", "builtin")
+    return [
+        s for s in registry.list_tools(loaded_only=not call_through)
+        if s.source in sources
+        # Same rule as the native request schemas: a tool whose host
+        # capability is not wired on this ctx is invisible, not
+        # advertised-and-erroring.
+        and all(key in ctx.extra for key in (s.requires_extra or ()))
+        # The session tool restriction: a filtered tool is not listed,
+        # not merely refused when called.
+        and _permitted(tool_filter, s.name)
+    ]
+
+
 async def _answer(
     registry: ToolRegistry, ctx: ToolCtx, req: dict[str, Any],
     *,
@@ -546,36 +578,57 @@ async def _answer(
     hooks: HookBus | None = None,
     on_stop: OnStop | None = None,
     deferred: Callable[[str], bool] | None = None,
+    call_through: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
+    """One socket request.
+
+    ``call_through`` (for a client with no deferral of its own, see
+    ``fluid.tools.mcp.call_through``) names the served tools to keep off the
+    tool list: they are announced by ``LoadTools`` and run through
+    ``CallTool``, which is unwrapped here so the filter, hooks and
+    permissions below see the real tool.
+    """
+    from fluid.tools.mcp import call_through as proxy
+
     op = req.get("op")
     if op == "list":
-        specs = [
-            s for s in registry.list_tools(loaded_only=True)
-            if s.source in ("inproc", "builtin")
-            # Same rule as the native request schemas: a tool whose host
-            # capability is not wired on this ctx is invisible, not
-            # advertised-and-erroring.
-            and all(key in ctx.extra for key in (s.requires_extra or ()))
-            # The session tool restriction: a filtered tool is not listed,
-            # not merely refused when called.
-            and _permitted(tool_filter, s.name)
-        ]
+        specs = served_specs(registry, ctx, tool_filter, call_through=call_through is not None)
         tools: list[dict[str, Any]] = []
+        hidden: list[str] = []
         for s in specs:
+            if call_through is not None and call_through(s.name):
+                hidden.append(s.name)
+                continue
             entry: dict[str, Any] = {
                 "name": s.name, "description": s.description, "input_schema": s.input_schema,
             }
             if deferred is not None and deferred(s.name):
                 entry["meta"] = {ALWAYS_LOAD_META_KEY: False}
             tools.append(entry)
+        if hidden:
+            tools.extend(proxy.proxy_tools(hidden))
         return {"tools": tools}
     if op == "call":
         name = req.get("name", "")
+        args = req.get("arguments") or {}
+        if call_through is not None and name in proxy.PROXY_TOOLS:
+            served = {
+                s.name: s for s in served_specs(registry, ctx, tool_filter, call_through=True)
+            }
+            if name == proxy.LOAD_TOOL:
+                return _load_answer(registry, served, args)
+            name, args = proxy.unwrap_call(args)
+            if name not in served:
+                return {
+                    "text": f"tool not available in this session: {name or '(no name)'}. "
+                            f"{proxy.LOAD_TOOL} lists the tools you can run.",
+                    "is_error": True,
+                }
         if not _permitted(tool_filter, name):
             return {"text": f"tool not available in this session: {name}", "is_error": True}
         tool_use_id = req.get("tool_use_id")
         outcome = await _gate_call(
-            registry, ctx, name, req.get("arguments") or {},
+            registry, ctx, name, args,
             permissions=permissions, hooks=hooks, on_stop=on_stop,
             tool_use_id=tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None,
         )
@@ -597,6 +650,38 @@ async def _answer(
         return _call_answer(outcome)
     return {"error": f"unknown op: {op!r}"}
 
+
+def _load_answer(registry: ToolRegistry, served: dict[str, Any], args: Any) -> dict[str, Any]:
+    """``LoadTools``: the schemas of named or matching served tools, as text.
+
+    Only tools this session is served (filtered and wired) are found; any
+    other name reads as one that does not exist.
+    """
+    from fluid.tools.mcp import call_through as proxy
+
+    args = args if isinstance(args, dict) else {}
+    raw = args.get("names")
+    names = [raw] if isinstance(raw, str) else [n for n in raw or () if isinstance(n, str)]
+    found: list[Any] = []
+    missing: list[str] = []
+    for asked in names:
+        name = proxy.real_name(asked)
+        spec = served.get(name)
+        if spec is None:
+            # A bare tool name without its server, when exactly one matches.
+            tails = [s for n, s in served.items() if n.rsplit("__", 1)[-1] == name]
+            spec = tails[0] if len(tails) == 1 else None
+        if spec is None:
+            missing.append(asked)
+        elif spec not in found:
+            found.append(spec)
+    query = args.get("query")
+    if isinstance(query, str) and query.strip():
+        matches = [s for s in registry.search_tools(query) if s.name in served]
+        found.extend(s for s in matches[:5] if s not in found)
+    if not names and not (isinstance(query, str) and query.strip()):
+        return {"text": "Pass `names` or `query`.", "is_error": True}
+    return {"text": proxy.load_text(found, missing), "is_error": not found}
 
 def _call_answer(outcome: ToolOutcome) -> dict[str, Any]:
     """The socket reply for one call: text, error flag and any images.

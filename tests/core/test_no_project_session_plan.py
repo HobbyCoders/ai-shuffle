@@ -47,9 +47,13 @@ async def test_no_project_chat_plan_keeps_file_and_kernel_fences(active_plan, mo
         registry = await adapter._build_registry(options, native=native)
     permit = ha._tool_predicate(options)
     if native:
-        # Chat has no ToolSearch/kernel loader: permitted tools must remain
-        # directly callable through its existing JSON-schema path.
-        offered = {s.name for s in registry.list_tools(loaded_only=True) if permit is None or permit(s.name)}
+        # Chat has no kernel loader: a permitted tool is either sent with its
+        # JSON schema or deferred behind chat's ToolSearch, which only exists
+        # (and only loads tools) when the ceiling permits it.
+        allowed = (lambda name: True) if permit is None else permit
+        offered = {s.name for s in registry.list_tools(loaded_only=True) if allowed(s.name)}
+        if allowed("ToolSearch"):
+            offered |= {s.name for s in registry.deferred_tools() if allowed(s.name)}
         assert ("Plan" in offered) is expected
     else:
         from app.core import cli_tool_surface
