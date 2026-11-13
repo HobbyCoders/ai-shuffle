@@ -2544,6 +2544,13 @@ class HarnessAdapter(ProviderAdapter):
         provider = getattr(engine, "provider", "")
         return (getattr(engine, "model", ""), getattr(provider, "name", provider))
 
+    def _memory_native(self) -> bool:
+        """Whether the current engine renders every request from the stored
+        path. A model or provider change there keeps the # Memory block it
+        already sent in the request, so it is no reason to send it again.
+        The CLI and ACP legs keep their own transcripts and still re-send."""
+        return isinstance(self._engine, NativeLoop)
+
     async def _memory_held(self) -> Optional[Any]:
         """What the model holds of the # Memory snapshot, read back from the
         active path (:func:`app.core.memory_reminder.held_from_path`), or None
@@ -2577,8 +2584,13 @@ class HarnessAdapter(ProviderAdapter):
                 nodes, _end = await store.load_window(sid)
             else:
                 nodes = await store.load_path(sid)
-            identity = self._memory_engine_identity()
-            if self._memory_identity is not None and identity != self._memory_identity:
+            identity = (self._memory_native(), *self._memory_engine_identity())
+            if (
+                self._memory_identity is not None
+                and identity != self._memory_identity
+                # Native to native: the same stored path renders both requests.
+                and not (identity[0] and self._memory_identity[0])
+            ):
                 self._memory_trusted_node = None
                 self._memory_put_back = None
             self._memory_identity = identity
@@ -2649,7 +2661,12 @@ class HarnessAdapter(ProviderAdapter):
                 # A new adapter may use a different model/provider (including
                 # switching between native and CLI). Its own history, not the
                 # old leg's stored path, is what matters. Unknown = re-send.
-                if (row.get("model"), row.get("provider")) != self._memory_engine_identity():
+                # Native on both sides renders the same stored path, so the
+                # snapshot is still in the request.
+                if (
+                    (row.get("model"), row.get("provider")) != self._memory_engine_identity()
+                    and not (self._memory_native() and _native_provider(row.get("provider")))
+                ):
                     return True
             elif started and row.get("_cls") == "ContextCompaction":
                 if compaction_may_fold_snapshot(row.get("reason")):
@@ -4252,7 +4269,10 @@ class HarnessAdapter(ProviderAdapter):
             self._engine.model = model
         # The id as the caller sent it (before canonicalization), since that
         # is what its next turn compares against.
-        self._memory_trusted_node = None
+        if not self._memory_native():
+            # A native hot swap keeps rendering the same stored path, so the
+            # # Memory block already sent stays in the request.
+            self._memory_trusted_node = None
         self._memory_put_back = None
         self._memory_rehydrated = True
         self._native_scratch_stale = True
@@ -6707,6 +6727,16 @@ _BUNDLED_CLI_PREFIX = "mcp__fluid_bundled__"
 
 #: Leg kind of a Google Antigravity row (fluid.engine.acp, app/core/antigravity.py).
 _ANTIGRAVITY_KIND = "antigravity"
+
+
+def _native_provider(name: Any) -> bool:
+    """Whether a stored TurnStarted ``provider`` came from a NativeLoop.
+
+    The CLI leg records ``DelegatedLoop.provider``, ACP legs record ``acp``
+    (``fluid.engine.acp.loop``'s default) or ``antigravity``. A missing name
+    is unknown and counts as not native, so memory is sent again.
+    """
+    return bool(name) and name not in {DelegatedLoop.provider, "acp", _ANTIGRAVITY_KIND}
 
 
 def _delegated_disallowed(options: SessionOptions, registry: Any = None) -> list:

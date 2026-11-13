@@ -36,6 +36,7 @@ from typing import Any
 
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.skills import SkillStore
+from fluid.tools.view import POINTER_MARK
 
 _EVENT_CAP = 1_500
 _INPUT_CAP = 600
@@ -104,6 +105,20 @@ _REPEAT_MARKERS = (
 # Result bodies that mean "this call found nothing" without being an error.
 _EMPTY_MARKERS = ("(no matches)",)
 
+# The argument that names what a pointer-capable tool fetched. A follow-up
+# call naming the same target, with any window or options, is a re-request.
+_POINTER_SUBJECT = {
+    "Read": "file_path", "Grep": "pattern", "Glob": "pattern", "Skill": "name",
+}
+
+
+def _pointer_subject(name: str, input: Any) -> str | None:
+    field_name = _POINTER_SUBJECT.get(name)
+    if field_name is None or not isinstance(input, dict):
+        return None
+    value = input.get(field_name)
+    return str(value).strip() if value else None
+
 
 def _clip(text: str, cap: int) -> str:
     text = " ".join((text or "").split())
@@ -152,6 +167,11 @@ class FrictionDetector:
     ``repeat_after_empty``
         A call that found nothing, immediately followed by a call to the same
         tool with near-identical arguments.
+    ``reread_after_pointer``
+        A repeat answered with an "already in view" pointer
+        (:mod:`fluid.tools.view`), immediately followed by a call to the same
+        tool for the same file, pattern or skill: the pointer did not land.
+        Pointer hits themselves count as ``repeat_work``.
 
     Everything is best-effort: :meth:`observe` swallows its own errors, because
     a detector bug must never take down a turn. Nothing here interprets — the
@@ -170,6 +190,7 @@ class FrictionDetector:
         self._recorded = 0
         self._fails: dict[str, int] = {}
         self._empty: dict[str, str] = {}
+        self._pointed: dict[str, str] = {}
         self.begin_turn()
 
     def begin_turn(self) -> None:
@@ -177,6 +198,7 @@ class FrictionDetector:
         self._recorded = 0
         self._fails = {}
         self._empty = {}
+        self._pointed = {}
 
     @property
     def count(self) -> int:
@@ -216,8 +238,24 @@ class FrictionDetector:
         else:
             self._empty.pop(name, None)
 
+        # 5. The model asked for the same thing again right after a pointer
+        #    said it was still above: the pointer did not land. Evaluated
+        #    before this call updates the slot, like signal 4.
+        subject = _pointer_subject(name, input)
+        if subject is not None and self._pointed.get(name) == subject:
+            found.append(self._entry(
+                name, "reread_after_pointer",
+                f"{name} answered with a pointer to an earlier result, then "
+                f"was called again for the same target: {args}",
+            ))
+        pointed = text.startswith(POINTER_MARK)
+        if pointed and subject is not None:
+            self._pointed[name] = subject
+        else:
+            self._pointed.pop(name, None)
+
         # 3. The harness's own repeat-work notes (hooked, not re-derived).
-        if any(marker in text for marker in _REPEAT_MARKERS):
+        if pointed or any(marker in text for marker in _REPEAT_MARKERS):
             found.append(self._entry(
                 name, "repeat_work",
                 f"{name}({args}) returned content already delivered this "
