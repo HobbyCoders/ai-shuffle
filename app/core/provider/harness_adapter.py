@@ -764,12 +764,15 @@ class HarnessAdapter(ProviderAdapter):
 
             # Never put Claude cloud credentials in SessionOptions.env, which
             # also feeds tools and MCPs. This private copy is for claude only.
-            from app.core.environment import inject_claude_code_auth
+            from app.core.environment import (
+                apply_delegated_cli_limits,
+                inject_claude_code_auth,
+            )
 
-            cli_env = await run_sync(
+            cli_env = apply_delegated_cli_limits(await run_sync(
                 inject_claude_code_auth, dict(options.env or {}),
                 options.extra.get("provider_id"),
-            )
+            ))
             # The learning journal, as on the native JSON-mode leg (#687).
             delegated_journal, delegated_bus = await self._delegated_journal(
                 options, fluid_session_id
@@ -8254,12 +8257,18 @@ _DELEGATED_STAND_INS = (
 # Bash calls as file reads, searches and edits (sed -n, cat, grep, sed -i,
 # python write_text) against 7 dedicated-tool calls. Static text: it must stay
 # byte-identical across turns so the CLI's prompt cache keeps hitting.
+# Claude chats averaged about one tool call per step against about 2.5 in
+# native code-mode chats (Nov 2026), and every step re-sends the whole context.
+DELEGATED_TOOL_USE_HEADER = "# Tool use on this session\n"
+DELEGATED_BATCHING_RULE = (
+    "Batch independent tool calls (reads, searches, checks) into one step; "
+    "go one at a time only when a call needs an earlier result."
+)
 DELEGATED_TOOL_USE_BLOCK = (
     "# Tool use on this session\n"
-    "Use Claude Code's dedicated tools for file work: Read to read files "
-    "(offset and limit for large ones), Grep and Glob to search, Edit and Write "
-    "to change files, NotebookEdit for notebooks. Keep Bash for git, gh, "
-    "builds, tests, package managers and running scripts. Do not read, search "
+    "Use Claude Code's dedicated tools for file work: Read (offset and limit "
+    "for large files), Grep, Glob, Edit, Write and NotebookEdit. Keep Bash for git, gh, "
+    "builds, tests, package managers and scripts. Do not read, search "
     "or edit files with cat, head, tail, sed, awk, grep, find, echo "
     "redirection, heredocs or inline scripts. This holds even if another "
     "instruction (for example one beginning \"While bypass permissions mode is "
@@ -8271,10 +8280,9 @@ DELEGATED_TOOL_USE_BLOCK = (
 # the only permitted way to search, so the block leaves searching to Bash.
 DELEGATED_TOOL_USE_BLOCK_NO_SEARCH = (
     "# Tool use on this session\n"
-    "Use Claude Code's dedicated tools for file work: Read to read files "
-    "(offset and limit for large ones), Edit and Write to change files, "
-    "NotebookEdit for notebooks. Keep Bash for searching, git, gh, builds, "
-    "tests, package managers and running scripts. Do not read or edit files "
+    "Use Claude Code's dedicated tools for file work: Read (offset and limit "
+    "for large files), Edit, Write and NotebookEdit. Keep Bash for searching, git, gh, builds, "
+    "tests, package managers and scripts. Do not read or edit files "
     "with cat, head, tail, sed, awk, echo redirection, heredocs or inline "
     "scripts. This holds even if another instruction (for example one "
     "beginning \"While bypass permissions mode is active\" or \"While auto "
@@ -8343,16 +8351,23 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     blocks: List[str] = []
     # Both Read and Edit: the block forbids file work through Bash, so a
     # session without either would be left with no permitted way to do it.
+    # The full block forbids grep/find through Bash, so it needs a permitted
+    # Grep or Glob to search with.
+    file_rule = None
     if _session_mode(options) != "chat" and (
         permitted("Bash") or permitted("PowerShell")
     ) and permitted("Read") and permitted("Edit"):
-        # The full block forbids grep/find through Bash, so it needs a
-        # permitted Grep or Glob to search with.
-        blocks.append(
+        file_rule = (
             DELEGATED_TOOL_USE_BLOCK
             if permitted("Grep") or permitted("Glob")
             else DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
         )
+    # The batching rule rides every session, with the file-tool rule when
+    # there is one.
+    blocks.append(
+        f"{file_rule}\n{DELEGATED_BATCHING_RULE}" if file_rule
+        else DELEGATED_TOOL_USE_HEADER + DELEGATED_BATCHING_RULE
+    )
     notes: List[str] = []
     # The bundled Glob/Grep are only registered where the CLI may lack its own
     # (_registers_bundled_search), so the note exists only there.
@@ -8360,9 +8375,13 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     if search:
         own = _joined(search)
         verb = "are" if len(search) > 1 else "is"
+        # The full file-tool rule already says to search with Glob and Grep.
+        prefer = (
+            "" if file_rule == DELEGATED_TOOL_USE_BLOCK
+            else f"Search files with {own} rather than find/grep through Bash. "
+        )
         notes.append(
-            f"Search files with {own} rather than find/grep through Bash. If "
-            f"Claude Code's own {own} {verb} not in your tool list, use "
+            f"{prefer}If Claude Code's own {own} {verb} not in your tool list, use "
             + _joined([f"{_BUNDLED_CLI_PREFIX}{tool}" for tool in search]) + "."
         )
     if recall or memory:
@@ -8407,16 +8426,16 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
 
 DELEGATED_INSTRUCTIONS_HEADER = (
     "# AGENTS.md instructions\n"
-    "Claude Code loads CLAUDE.md files itself. These are the AGENTS.md-family "
-    "files the workspace also carries (fluid's instruction stack); follow them "
-    "the same way."
+    "The workspace's AGENTS.md files, which Claude Code does not load: follow "
+    "them as you follow CLAUDE.md."
 )
 DELEGATED_SKILLS_HEADER = (
     "# More skills\n"
-    "These skills live outside .claude/skills, so the Skill tool cannot load "
-    "them. Read a skill's SKILL.md at the path shown before doing a task it "
-    "covers."
+    "The Skill tool cannot load these. Before a task one covers, Read its "
+    "SKILL.md at the path shown."
 )
+# One short line per skill: the description cut near this many characters.
+DELEGATED_SKILL_SUMMARY_CHARS = 100
 
 
 def _delegated_fluid_context(options: SessionOptions) -> List[str]:
@@ -8462,17 +8481,47 @@ def _delegated_skills_block(skills: Any) -> Optional[str]:
     Same rules as fluid's ``skills_index``: a ``disable-model-invocation``
     skill is left out, and fluid's plugin opt-in note follows the header when
     a plugin skill is listed (#2003). None when nothing is left to list.
+
+    One short line per skill. Two or more skills kept as
+    ``<folder>/<name>/SKILL.md`` under the same folder are listed under one
+    line naming that folder, so the long path is not repeated on each line.
     """
     from fluid.context.compiler import skill_summary, skills_header
 
     shown = [skill for skill in skills if getattr(skill, "model_invocable", True)]
     if not shown:
         return None
-    lines = "\n".join(
-        f"- {skill.name}: {skill_summary(skill.description)} ({skill.path})"
-        for skill in shown
-    )
-    return f"{skills_header(DELEGATED_SKILLS_HEADER, shown)}\n{lines}"
+
+    def summary(skill: Any) -> str:
+        return skill_summary(skill.description, DELEGATED_SKILL_SUMMARY_CHARS)
+
+    def folder(skill: Any) -> Optional[str]:
+        path = str(skill.path)
+        sep = "\\" if "\\" in path else "/"
+        parts = path.rsplit(sep, 2)
+        if len(parts) == 3 and parts[1] == skill.name and parts[2] == "SKILL.md" and parts[0]:
+            return parts[0]
+        return None
+
+    counts: Dict[str, int] = {}
+    for skill in shown:
+        key = folder(skill)
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    single: List[str] = []
+    grouped: Dict[str, List[str]] = {}
+    for skill in shown:
+        key = folder(skill)
+        if key and counts[key] > 1:
+            grouped.setdefault(key, []).append(f"- {skill.name}: {summary(skill)}")
+        else:
+            single.append(f"- {skill.name}: {summary(skill)} ({skill.path})")
+    lines = list(single)
+    for key, entries in grouped.items():
+        sep = "\\" if "\\" in key else "/"
+        lines.append(f"In {key}{sep}<name>{sep}SKILL.md:")
+        lines.extend(entries)
+    return f"{skills_header(DELEGATED_SKILLS_HEADER, shown)}\n" + "\n".join(lines)
 
 
 def _delegated_skills_index(options: SessionOptions) -> Optional[str]:
