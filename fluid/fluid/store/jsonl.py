@@ -69,6 +69,7 @@ from fluid.store.base import (
     new_id,
     project_root_for,
     recall_message,
+    recall_role,
     walk_path,
 )
 
@@ -755,7 +756,7 @@ class JsonlStore:
                         if not n_hit:
                             continue
                         hit.score += n_hit
-                        role = message.get("role", "?")
+                        role = recall_role(message)
                         if len(hit.texts) < _MAX_MATCHES_PER_SESSION:
                             hit.texts.append((role, text))
                             hit.text_times.append(sent_ts)

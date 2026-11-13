@@ -17,7 +17,7 @@ from fluid.context.time_awareness import absolute_time
 from fluid.tools.time_context import history_zone
 from typing import Any
 
-from fluid.store.base import clip_text
+from fluid.store.base import HARNESS_NOTE_ROLE, clip_text
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 _DEFAULT_COUNT = 10
@@ -248,7 +248,10 @@ def _render(index: int, msg: Any, show: str, zone: str | None = "UTC") -> list[s
     if text and len(msg.text) > _TEXT_CAP and show != "tools":
         text += f" [text preview clipped — read with offset={index}, count=1, text_offset=0]"
     if show == "conversation":
-        return [f"[{index} {msg.role}] [sent {sent}] {text}"] if text else []
+        # A stored plan note is harness context, not part of the conversation.
+        if not text or msg.role == HARNESS_NOTE_ROLE:
+            return []
+        return [f"[{index} {msg.role}] [sent {sent}] {text}"]
     if show == "tools":
         if not msg.tools:
             return []

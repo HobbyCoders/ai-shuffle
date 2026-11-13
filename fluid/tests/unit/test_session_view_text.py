@@ -77,3 +77,23 @@ async def test_text_page_selects_one_message_and_validates_ranges(tmp_path):
                    {"text_offset": 0, "count": 2}, {"text_offset": 0, "show": "tools"}]:
         result = await session_view.handler({"session_id": meta.session_id, **fields}, ctx)
         assert result.is_error
+
+
+async def test_a_stored_plan_note_is_harness_context_not_a_user_message(tmp_path):
+    from fluid.messages.content import HARNESS_NOTE_META_KEY
+
+    store = JsonlStore(tmp_path)
+    meta = await store.create_session()
+    rows = [("user", "do the work", None), ("assistant", "on it", None),
+            ("user", "# Session plan: do the work", {HARNESS_NOTE_META_KEY: True}),
+            ("assistant", "done", None)]
+    for i, (role, text, flag) in enumerate(rows):
+        await store.append(meta.session_id, SessionNode(node_id=str(i),
+            parent_id=str(i - 1) if i else None,
+            message=Message(role=role, content=[Text(text=text)], provider_meta=flag)))
+    ctx = ToolCtx(extra={"session_view": store.session_slice})
+    full = await session_view.handler({"session_id": meta.session_id}, ctx)
+    assert "[2 harness note]" in full.text and "[2 user]" not in full.text
+    talk = await session_view.handler({"session_id": meta.session_id, "show": "conversation"}, ctx)
+    assert "Session plan" not in talk.text
+    assert "[0 user]" in talk.text and "[3 assistant]" in talk.text
