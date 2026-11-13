@@ -962,7 +962,7 @@ export function supportsNativeImages(row: ModelProvider | undefined): boolean {
 }
 
 /**
- * "GamingPC needs an update to use this." for a row some network workers
+ * "Office PC needs an update to use this." for a row some network workers
  * cannot run yet (they do not report support for its provider), else null.
  * The same rule refuses those workers when a chat on this row would move or
  * start there.

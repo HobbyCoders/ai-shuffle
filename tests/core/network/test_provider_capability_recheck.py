@@ -135,7 +135,7 @@ def test_every_gated_type_uses_one_rule():
 
 
 def test_needs_update_message_wording():
-    assert provider_capability.needs_update_message(["GamingPC"]) == "GamingPC needs an update to use this."
+    assert provider_capability.needs_update_message(["Office PC"]) == "Office PC needs an update to use this."
     assert (provider_capability.needs_update_message(["A", "B", "C"], "Gemini key")
             == "A, B and C need an update to use Gemini key.")
 

@@ -526,7 +526,7 @@ describe('saved Claude subscriptions', () => {
 
 describe('needsUpdateNote (#1519)', () => {
 	it('names the workers that cannot run a gated row yet', () => {
-		expect(needsUpdateNote({ workers_requiring_update: ['GamingPC'] })).toBe('GamingPC needs an update to use this.');
+		expect(needsUpdateNote({ workers_requiring_update: ['Office PC'] })).toBe('Office PC needs an update to use this.');
 		expect(needsUpdateNote({ workers_requiring_update: ['A', 'B', 'C'] })).toBe(
 			'A, B and C need an update to use this.'
 		);

@@ -100,13 +100,13 @@ it('checks the saved key and offers no usage tab', async () => {
 });
 
 it('names the workers that need an update to use the row, and drops the note once none do (#1519)', async () => {
-	const row = nativeRow(googleEnrollment, { workers_requiring_update: ['GamingPC'] });
+	const row = nativeRow(googleEnrollment, { workers_requiring_update: ['Office PC'] });
 	worker = fakeWorker({ rows: [row] });
 	vi.stubGlobal('fetch', worker.fetch);
 	await providers.refreshAll();
 	settingsNav.go({ category: 'providers', item: `mp:${row.id}` });
 	render(ProvidersCollection);
-	expect((await screen.findByText('GamingPC needs an update to use this.')).getAttribute('role')).toBe('status');
+	expect((await screen.findByText('Office PC needs an update to use this.')).getAttribute('role')).toBe('status');
 
 	worker = fakeWorker({ rows: [{ ...row, workers_requiring_update: [] }] });
 	vi.stubGlobal('fetch', worker.fetch);
