@@ -9,16 +9,26 @@ against the scripted agent in tests/fixtures/fake_acp_agent.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
 
-from fluid.events.model import PermissionRequest, ToolUse, TurnComplete
-from fluid.events.ops import RespondPermission, UserTurn
+from fluid.engine.acp import loop as acp_loop
+from fluid.events.model import PermissionRequest, QuestionRequest, ToolUse, TurnComplete
+from fluid.events.ops import Interrupt, RespondPermission, RespondQuestion, UserTurn
 from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
 from fluid.tools.inproc import create_inproc_server, tool
+from fluid.tools.mcp.bundled_server import _answer, _socket_rpc, serve_registry_socket
 from fluid.tools.mcp.call_through import CALL_TOOL, LOAD_TOOL, catalog_rows, unwrap_call
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
+from fluid.tools.mrtr import INTERRUPTED_TEXT, unresolved_notice
+from fluid.tools.registry import (
+    InputRequired,
+    ToolCtx,
+    ToolOutcome,
+    ToolRegistry,
+    ToolSpec,
+)
 
 from tests.unit.test_acp_engine import TERMINAL, _driver
 
@@ -192,3 +202,135 @@ def test_unwrap_and_catalog_helpers() -> None:
     assert catalog_rows(["mcp__b__y", "Zed", "mcp__b__x", "mcp__a__q"]) == [
         "core (<tool>): Zed", "a (mcp__a__<tool>): q", "b (mcp__b__<tool>): x, y",
     ]
+
+
+# ─── input_required through CallTool ─────────────────────────────────────────
+
+
+def _asking_registry(ran: list) -> ToolRegistry:
+    """``Ask`` pauses once on input_required, then finishes with the answer;
+    ``Nag`` never stops asking."""
+    registry = ToolRegistry()
+
+    def asking(name: str, forever: bool):
+        async def run(args: dict, ctx: ToolCtx) -> ToolOutcome:
+            ran.append((name, args))
+            answers = args.get("__input_responses__")
+            if answers is not None and not forever:
+                return ToolOutcome(text=f"{name} got {answers['colour']}")
+            return ToolOutcome(text="", input_required=InputRequired(
+                server="", tool=name, request_state="s1",
+                requests={"colour": {"method": "elicitation/create", "message": "Which colour?",
+                                     "schema": {"type": "string"}}},
+            ))
+        return run
+
+    registry.register_builtin(ToolSpec(name="Core", description="core", input_schema=SCHEMA),
+                              asking("Core", False))
+    for name, forever in (("Ask", False), ("Nag", True)):
+        registry.register_builtin(ToolSpec(name=name, description=name, input_schema=SCHEMA),
+                                  asking(name, forever))
+    return registry
+
+
+async def _asking_driver(tmp_path: Path, ran: list):
+    return await _driver(tmp_path, registry=_asking_registry(ran), ctx=ToolCtx(cwd=str(tmp_path)),
+                         deferred=lambda name: name != "Core")
+
+
+async def test_a_bridged_tool_that_asks_finishes_with_the_owners_answer(tmp_path: Path) -> None:
+    ran: list = []
+    d = await _asking_driver(tmp_path, ran)
+    try:
+        await d.loop.submit(UserTurn(content='mcp CallTool {"name": "Ask", "input": {"text": "x"}}'))
+        question = await d.until(QuestionRequest)
+        assert question.message == "Which colour?" and question.name == "mcp__fluid_bundled__Ask"
+        assert question.schema == {"type": "string"}
+        await d.loop.submit(RespondQuestion(request_id=question.request_id, answer="blue"))
+        end = await d.until(TERMINAL, timeout=60)
+        assert isinstance(end, TurnComplete), end
+        assert "mcp said: Ask got blue" in d.text()
+        # The same call re-run with the answers, as the native loop does.
+        assert ran == [("Ask", {"text": "x"}), ("Ask", {"text": "x", "__input_responses__": {"colour": "blue"}})]
+        assert d.loop._pending_questions == {}
+    finally:
+        await d.close()
+
+
+async def test_interrupt_while_a_bridged_tool_asks_ends_the_round_trip(tmp_path: Path) -> None:
+    ran: list = []
+    d = await _asking_driver(tmp_path, ran)
+    try:
+        await d.loop.submit(UserTurn(content='mcp CallTool {"name": "Ask", "input": {}}'))
+        await d.until(QuestionRequest)
+        await d.loop.submit(Interrupt())
+        await d.until(TERMINAL, timeout=60)
+        assert len(ran) == 1  # never re-run without an answer
+        assert d.loop._pending_questions == {}
+    finally:
+        await d.close()
+
+
+async def test_an_unanswered_question_times_out_as_an_interrupted_round_trip(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(acp_loop, "QUESTION_TIMEOUT", 0.2)
+    ran: list = []
+    d = await _asking_driver(tmp_path, ran)
+    try:
+        end = await d.turn('mcp CallTool {"name": "Ask", "input": {}}', timeout=60)
+        assert isinstance(end, TurnComplete), end
+        assert f"mcp said: {INTERRUPTED_TEXT}" in d.text()
+        assert len(ran) == 1 and d.loop._pending_questions == {}
+    finally:
+        await d.close()
+
+
+async def test_a_tool_that_never_stops_asking_is_cut_off(tmp_path: Path) -> None:
+    ran: list = []
+    d = await _asking_driver(tmp_path, ran)
+    try:
+        await d.loop.submit(UserTurn(content='mcp CallTool {"name": "Nag", "input": {}}'))
+        while True:
+            event = await d.until((QuestionRequest, *TERMINAL), timeout=60)
+            if not isinstance(event, QuestionRequest):
+                break
+            await d.loop.submit(RespondQuestion(request_id=event.request_id, answer="red"))
+        assert "still input_required after 3 round-trips" in d.text()
+        assert len(ran) == 4
+    finally:
+        await d.close()
+
+
+async def test_without_a_user_the_bridge_keeps_the_old_notice() -> None:
+    """The delegated CLI's bridge (no ``on_input_required``): unchanged."""
+    reply = await _answer(_asking_registry([]), ToolCtx(), {"op": "call", "name": "Ask", "arguments": {}})
+    assert reply == {"text": unresolved_notice(
+        "Ask", "Ask the user directly in your reply and wait for them, or "
+               "proceed without the answer and say what you assumed."), "is_error": True}
+
+
+async def test_two_calls_can_ask_at_once() -> None:
+    """Each bridge request has its own connection: one parked question does
+    not hold up another call's."""
+    ran: list = []
+    pending: dict[str, asyncio.Future] = {}
+
+    async def collect(name: str, marker: InputRequired) -> dict | None:
+        pending[name] = asyncio.get_running_loop().create_future()
+        return {"colour": await pending[name]}
+
+    server = await serve_registry_socket(_asking_registry(ran), "tcp:127.0.0.1:0", ToolCtx(),
+                                         on_input_required=collect)
+    address = f"tcp:127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    try:
+        calls = [asyncio.create_task(_socket_rpc(address, {"op": "call", "name": n, "arguments": {}}))
+                 for n in ("Ask", "Core")]
+        while len(pending) < 2:
+            await asyncio.sleep(0.01)
+        pending["Core"].set_result("green")
+        assert (await asyncio.wait_for(calls[1], 10))["text"] == "Core got green"
+        assert not calls[0].done()
+        pending["Ask"].set_result("blue")
+        assert (await asyncio.wait_for(calls[0], 10))["text"] == "Ask got blue"
+    finally:
+        server.close()
+        await server.wait_closed()

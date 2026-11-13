@@ -95,9 +95,16 @@ def test_no_deferral_when_toolsearch_is_off_the_surface_or_switched_off(tmp_path
     assert ha._acp_bridge_deferral(_options(tmp_path)) is None
 
 
-async def _run_turn(engine, text, timeout=60):
-    from fluid.events.model import ErrorEvent, Interrupted, TextDelta, TurnComplete
-    from fluid.events.ops import UserTurn
+async def _run_turn(engine, text, timeout=60, answer=None):
+    """One turn; ``answer`` replies to every question card the turn raises."""
+    from fluid.events.model import (
+        ErrorEvent,
+        Interrupted,
+        QuestionRequest,
+        TextDelta,
+        TurnComplete,
+    )
+    from fluid.events.ops import RespondQuestion, UserTurn
 
     events = []
     await engine._ensure_session()
@@ -105,6 +112,8 @@ async def _run_turn(engine, text, timeout=60):
     async def pump():
         async for event in engine.events():
             events.append(event)
+            if isinstance(event, QuestionRequest) and answer is not None:
+                await engine.submit(RespondQuestion(request_id=event.request_id, answer=answer))
             if isinstance(event, (TurnComplete, ErrorEvent, Interrupted)):
                 return
 
@@ -115,7 +124,7 @@ async def _run_turn(engine, text, timeout=60):
     return "".join(e.text for e in events if isinstance(e, TextDelta)), events
 
 
-async def _connected(tmp_path, client, monkeypatch, *, defer=True):  # noqa: F811
+async def _connected(tmp_path, client, monkeypatch, *, defer=True, **restrictions):  # noqa: F811
     from fluid.store.base import MemoryStore
 
     if not defer:
@@ -125,7 +134,8 @@ async def _connected(tmp_path, client, monkeypatch, *, defer=True):  # noqa: F81
     servers["weather"] = {"type": "stdio", "command": sys.executable, "args": ["-I", FAKE_MCP],
                           "env": {"FLUID_FAKE_INSTRUCTIONS": "Weather server rules: cite the city."}}
     options = SessionOptions(model="gemini-3.1-pro", cwd=str(tmp_path), permission_mode="bypassPermissions",
-                             mcp_servers=servers, extra={"provider_id": row["id"], "app_session_id": "s-acp"})
+                             mcp_servers=servers, extra={"provider_id": row["id"], "app_session_id": "s-acp"},
+                             **restrictions)
     adapter = ha.HarnessAdapter()
     adapter._options = options
     # connect()'s Antigravity steps, in order.
@@ -175,3 +185,104 @@ async def test_kill_switch_restores_the_eager_bridge_and_agent_side_servers(
     finally:
         await engine.aclose()
         await adapter._registry.aclose()
+
+
+def _call(tool, ask=False, **args):
+    """The fake agent's CallTool turn; ``ask`` sends the permission request
+    a real agent sends before an MCP call."""
+    return ("mcpask" if ask else "mcp") + " CallTool " + json.dumps({"name": tool, "input": args})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restrictions, refused", [
+    # The tool is on the profile's list in the spelling the owner ticks.
+    ({"tool_allowlist": ["ToolSearch", "mcp__weather__get_weather"]}, None),
+    ({"tool_allowlist": ["ToolSearch", "mcp__builtins__Task"]}, "not enabled"),
+    ({"disallowed_tools": ["mcp__weather__*"]}, "disabled"),
+    ({"disallowed_tools": ["mcp__fluid_bundled__mcp__weather__get_weather"]}, "disabled"),
+], ids=["allowlisted", "not-allowlisted", "blocked", "blocked-bundled-spelling"])
+async def test_the_session_policy_judges_call_tool_by_the_real_tool(
+        tmp_path, client, monkeypatch, restrictions, refused):  # noqa: F811
+    """The real app policy (``_delegated_tool_policy`` with saved rules) on
+    the AcpLoop permission path, in bypass mode where nothing else asks."""
+    adapter = await _connected(tmp_path, client, monkeypatch, **restrictions)
+    engine = adapter._engine
+    try:
+        policy = await engine._policy_denial("mcp__fluid_bundled__mcp__weather__get_weather", {"city": "Oslo"})
+        text, _events = await _run_turn(engine, _call("mcp__weather__get_weather", ask=True, city="Oslo"))
+        if refused is None:
+            assert policy is None and "Oslo: sunny" in text, text
+        else:
+            assert refused in (policy or ""), policy
+            # Withheld by the bridge filter too: the card stays on the proxy
+            # and the call is refused by the policy or the bridge, never run.
+            assert "Oslo: sunny" not in text, text
+            assert "mcp denied" in text or "tool not available in this session" in text, text
+    finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_external_tool_that_asks_the_owner_finishes_through_call_tool(
+        tmp_path, client, monkeypatch):  # noqa: F811
+    adapter = await _connected(tmp_path, client, monkeypatch)
+    engine = adapter._engine
+    try:
+        from fluid.events.model import QuestionAnswered, QuestionRequest
+
+        text, events = await _run_turn(engine, _call("mcp__weather__need_input"), answer={"ok": True})
+        [question] = [e for e in events if isinstance(e, QuestionRequest)]
+        assert question.message == "Confirm before continuing?"
+        assert question.name == "mcp__fluid_bundled__mcp__weather__need_input"
+        assert [e.answer for e in events if isinstance(e, QuestionAnswered)] == [{"ok": True}]
+        assert "confirmed" in text and "NOT asked" not in text, text
+    finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [True, False], ids=["native", "antigravity"])
+async def test_host_connected_stdio_servers_start_in_the_session_folder(tmp_path, native):
+    """A relative path in a server's args means the session's file, as when
+    the agent or the claude CLI spawns it: here the server's script itself."""
+    fixtures = Path(FAKE_MCP).parent
+    servers = _servers(str(tmp_path))
+    relative = {"command": sys.executable, "args": ["-I", Path(FAKE_MCP).name]}
+    servers["rel"] = relative
+    options = SessionOptions(model="m", cwd=str(fixtures), permission_mode="default", mcp_servers=servers)
+    adapter = ha.HarnessAdapter()
+    registry = await adapter._build_registry(options, native=native, host_mcp=not native)
+    try:
+        assert "rel" in adapter._host_mcp_servers
+        from fluid.tools.registry import ToolCtx
+        out = await registry.dispatch("mcp__rel__get_weather", {"city": "Rome"}, ToolCtx())
+        assert "Rome: sunny" in out.text
+        # The delegated leg serializes the original map: it is untouched.
+        assert "cwd" not in relative
+    finally:
+        await registry.aclose()
+
+
+def test_session_cwd_defaults_only_a_stdio_server_without_one(tmp_path):
+    stdio = {"command": "srv"}
+    assert ha._with_session_cwd(stdio, str(tmp_path)) == {"command": "srv", "cwd": str(tmp_path)}
+    assert stdio == {"command": "srv"}
+    explicit = {"command": "srv", "cwd": "/elsewhere"}
+    assert ha._with_session_cwd(explicit, str(tmp_path)) is explicit
+    remote = {"transport": "streamable_http", "url": "https://example.test/mcp"}
+    assert ha._with_session_cwd(remote, str(tmp_path)) is remote
+    assert ha._with_session_cwd(stdio, None) is stdio
+    assert ha._with_session_cwd(stdio, str(tmp_path / "missing")) is stdio
+
+
+def test_the_policy_reads_a_bridged_server_tool_in_either_spelling(tmp_path):
+    bundled = "mcp__fluid_bundled__mcp__weather__get_weather"
+    for blocked in (["mcp__weather__*"], ["mcp__weather__get_weather"], [bundled]):
+        assert "disabled" in ha._delegated_tool_policy(_options(tmp_path), None, blocked)(bundled, {})
+    allow = ha._delegated_tool_policy(_options(tmp_path, tool_allowlist=["mcp__weather__get_weather"]), None, [])
+    assert allow(bundled, {}) is None
+    assert "not enabled" in allow("mcp__fluid_bundled__mcp__weather__write_note", {})
+    # A bare name on the list is the CLI's own tool, not the bridged app copy.
+    assert ha._delegated_tool_policy(_options(tmp_path), None, ["WebFetch"])("mcp__fluid_bundled__WebFetch", {}) is None

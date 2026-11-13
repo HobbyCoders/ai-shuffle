@@ -6086,6 +6086,7 @@ class HarnessAdapter(ProviderAdapter):
                 normalized = _normalize_mcp_config_for_fluid(name, config)
                 if normalized is None:
                     continue  # unsupported transport; already warned about
+                normalized = _with_session_cwd(normalized, options.cwd)
                 try:
                     await registry.connect_mcp(name, normalized)
                     self._host_mcp_servers.add(name)
@@ -6342,6 +6343,23 @@ def _native_external_mcp_servers(options: SessionOptions) -> dict[str, Any]:
     merged.update(options.mcp_servers or {})
     external = _external_mcp_servers(merged)
     return {name: external[name] for name in sorted(external)}
+
+
+def _with_session_cwd(config: Any, cwd: Optional[str]) -> Any:
+    """A stdio server config that starts in the session's folder.
+
+    The claude CLI and the Antigravity agent spawn a stdio server in the
+    session cwd, so a relative path in its args (``--db-path ./x.sqlite``)
+    means the project's file. Connected host-side it would otherwise start in
+    the app's own directory. An explicit ``cwd`` wins; a remote server gets
+    none; a session folder that does not exist is left out. Returns a copy.
+    """
+    if (
+        not isinstance(config, dict) or not cwd or config.get("cwd")
+        or config.get("transport", "stdio") != "stdio" or not os.path.isdir(cwd)
+    ):
+        return config
+    return {**config, "cwd": os.path.abspath(cwd)}
 
 
 def _normalize_mcp_config_for_fluid(name: str, config: Any) -> Optional[Dict[str, Any]]:
@@ -6977,9 +6995,16 @@ def _delegated_tool_policy(
         }:
             from app.core.coordinator_files import DENIAL
             return DENIAL
-        if blocked and matches_any(name, blocked):
+        # A bridged server tool (the ACP leg names it
+        # mcp__fluid_bundled__mcp__<server>__<tool>) matches either spelling,
+        # as the bridge filter does (_bridged_tool_permitted): a deny entry in
+        # either form withholds it. Not a bare name: "WebFetch" on these lists
+        # is the CLI's own tool, distinct from the bridged app copy.
+        served = name.removeprefix(_BUNDLED_CLI_PREFIX)
+        spellings = {name, served} if served != name and served.startswith("mcp__") else {name}
+        if blocked and any(matches_any(s, blocked) for s in spellings):
             return f"Tool '{name}' is disabled in this profile"
-        if surface and not tool_permitted(name, surface, None):
+        if surface and not any(tool_permitted(s, surface, None) for s in spellings):
             return f"Tool '{name}' is not enabled in this profile"
         rule = match_rule(rules, name, tool_input, cwd=session_cwd)
         if rule is not None and rule.decision == "deny":

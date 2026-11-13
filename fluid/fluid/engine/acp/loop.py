@@ -510,7 +510,7 @@ class AcpLoop:
             self._socket_server = await serve_registry_socket(
                 self.registry, self._socket_path, self.ctx, token=self._bridge_token,
                 tool_filter=self._bridge_permitted, permissions=self.permissions, hooks=self.hooks,
-                call_through=self.deferred,
+                call_through=self.deferred, on_input_required=self._bridge_input,
             )
             if not use_unix:
                 port = self._socket_server.sockets[0].getsockname()[1]
@@ -1144,6 +1144,49 @@ class AcpLoop:
                                           request_id=request_id, answer=answer.answer,
                                           user_answered=answer.user_answered))
         return {"action": "accept", "content": _elicitation_content(answer.answer, schema)}
+
+
+    async def _bridge_input(self, name: str, marker: Any) -> dict[str, Any] | None:
+        """Ask the owner a bridged tool's input_required questions, one card each.
+
+        The bridge re-runs the tool with these answers (fluid.tools.mrtr), as
+        the native loop does. None, which the bridge reports as an interrupted
+        round-trip, when the turn is interrupted or no answer comes in time.
+        """
+        mapper = self._mapper
+        if self._session is None or mapper is None:
+            return None
+        answers: dict[str, Any] = {}
+        user_answered = False
+        for server_req_id, descriptor in (marker.requests or {}).items():
+            desc = descriptor if isinstance(descriptor, Mapping) else {}
+            request_id = new_id("question")
+            fut: asyncio.Future[RespondQuestion] = asyncio.get_running_loop().create_future()
+            self._pending_questions[request_id] = fut
+            try:
+                if self._interrupted.is_set():
+                    return None
+                await self._emit(QuestionRequest(
+                    session_id=self.session_id, turn_id=mapper.turn_id, request_id=request_id,
+                    tool_use_id=request_id, name=f"mcp__{BUNDLED_SERVER_NAME}__{name}",
+                    message=str(desc.get("message") or f"{marker.server} needs input for {name}"),
+                    schema=dict(desc["schema"]) if isinstance(desc.get("schema"), Mapping) else None,
+                ))
+                # Interrupt cancels the future; wait() never raises for that.
+                await asyncio.wait({fut}, timeout=QUESTION_TIMEOUT)
+                if not fut.done() or fut.cancelled():
+                    return None
+                answer = fut.result()
+            finally:
+                self._pending_questions.pop(request_id, None)
+            await self._emit(QuestionAnswered(session_id=self.session_id, turn_id=mapper.turn_id,
+                                              request_id=request_id, answer=answer.answer,
+                                              user_answered=answer.user_answered))
+            answers[server_req_id] = answer.answer
+            user_answered = user_answered or bool(answer.user_answered)
+        if user_answered:
+            answers["__user_answered__"] = True
+        return answers
 
 
 def _elicitation_content(answer: Any, schema: Mapping[str, Any] | None) -> dict[str, Any]:
