@@ -81,6 +81,63 @@ PROVIDER_OVERLAY_ENV_KEYS = (
 )
 
 
+def _delegated_cli_limit_values(env: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """What the delegated CLI will make of its context limits for this env.
+
+    Same precedence as the spawn (environment.apply_delegated_cli_limits): a
+    profile or provider value, then the worker's own environment, then
+    DELEGATED_CLI_ENV_DEFAULTS. So an absent key, an explicit default and an
+    inherited value the profile leaves alone each compare as the CLI sees them.
+    Values are read the way Claude Code reads them: the two sizes as integers,
+    the auto-memory switch as off / forced on / unset.
+    """
+    from fluid.tools.child_env import UNSET_ENV
+
+    from app.core.environment import DELEGATED_CLI_ENV_DEFAULTS, apply_delegated_cli_limits
+
+    env = env or {}
+    overlay = {key: env[key] for key in (*DELEGATED_CLI_ENV_DEFAULTS, UNSET_ENV) if key in env}
+    # An inherited value the CLI keeps is what it reads; one the overlay
+    # unsets was replaced by the default above.
+    sources = {**os.environ, **apply_delegated_cli_limits(overlay)}
+    values: Dict[str, Any] = {}
+    for key in DELEGATED_CLI_ENV_DEFAULTS:
+        raw = sources.get(key, "")
+        text = str(raw).strip().lower()
+        if key == "CLAUDE_CODE_DISABLE_AUTO_MEMORY":
+            values[key] = (
+                "off" if text in ("1", "true", "yes", "on")
+                else "forced_on" if text in ("0", "false", "no", "off")
+                else "unset"
+            )
+        else:
+            try:
+                values[key] = int(text)
+            except ValueError:
+                values[key] = text
+    return values
+
+
+def delegated_cli_limits_require_reconnect(
+    old_env: Optional[Dict[str, str]], new_env: Optional[Dict[str, str]]
+) -> bool:
+    """True when the delegated CLI's context limits differ between two envs.
+
+    Compared on every delegated session, subscription and gateway alike: the
+    CLI reads them only at spawn, so a profile edit needs a fresh subprocess.
+    Kept out of PROVIDER_OVERLAY_ENV_KEYS, which only gateway sessions compare.
+    """
+    old_values = _delegated_cli_limit_values(old_env)
+    new_values = _delegated_cli_limit_values(new_env)
+    for key, value in old_values.items():
+        if new_values.get(key) != value:
+            logger.debug(
+                f"[SessionPool] requires_reconnect: delegated CLI limit differs: {key}"
+            )
+            return True
+    return False
+
+
 def _claude_cloud_identity_keys() -> tuple:
     """The Claude cloud methods' variables: a change (switching the auth mode,
     the method, a region or a key) is a different account, so a respawn."""
@@ -1939,6 +1996,10 @@ def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> li
     # switch stays a hot-swap (see provider_env_requires_reconnect).
     if provider_env_requires_reconnect(old.env, new_options.env):
         changed.append("provider_env")
+    if adapter_lane(getattr(state, "adapter", None)) == DELEGATED_LANE and delegated_cli_limits_require_reconnect(
+        old.env, new_options.env
+    ):
+        changed.append("delegated_cli_limits")
     if getattr(old, "aih_claude_auth_fingerprint", None) != getattr(
         new_options, "aih_claude_auth_fingerprint", None
     ):

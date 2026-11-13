@@ -9,7 +9,10 @@ from tests.core.test_memory_reminder import (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["model", "provider", "hot_model"])
-async def test_model_or_provider_switch_resends_snapshot(monkeypatch, change):
+async def test_native_model_or_provider_switch_keeps_snapshot(monkeypatch, change):
+    """NativeLoop renders every request from the stored path, so the block
+    sent before a model or provider switch is still in the next request.
+    Sending it again would put two identical copies in view."""
     memory = {"section": _section(*FACTS)}
     adapter, loop = await _adapter(monkeypatch, memory)
     await _turn(adapter)
@@ -23,11 +26,37 @@ async def test_model_or_provider_switch_resends_snapshot(monkeypatch, change):
             loop.provider.name = "other"
         else:
             setattr(loop, change, "other")
-        # A reconnect must not credit the previous model's snapshot either.
+        # A reconnect reads the snapshot back from the same stored path.
         adapter, _ = await _adapter(monkeypatch, memory, loop=loop)
     await _turn(adapter)
     await _turn(adapter)
-    assert await _memory_kinds(loop) == ["full", "full", None]
+    assert await _memory_kinds(loop) == ["full", None, None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider, folded", [
+    ("anthropic", False),     # native to native: same stored path
+    ("claude", True),         # the CLI leg kept its own transcript
+    ("acp", True),
+    ("antigravity", True),
+    (None, True),             # unknown: send again
+])
+async def test_reconnect_trusts_only_a_snapshot_a_native_turn_sent(monkeypatch, provider, folded):
+    from app.core.provider import fluid_transcript
+    from app.core.provider.fluid_pg_store import PgFluidStore
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from fluid.engine.native import NativeLoop
+    from fluid.store.base import MemoryStore
+    from tests.core.test_memory_reminder import _REPLY
+    from tests.test_harness_adapter import FakeProvider
+
+    rows = [{"seq": 1, "event": {"_cls": "TurnStarted", "node_id": "n1",
+                                 "model": "earlier", "provider": provider}}]
+    monkeypatch.setattr(fluid_transcript, "_event_rows_of_class", lambda sid, classes: list(rows))
+    adapter = HarnessAdapter()
+    adapter._engine = NativeLoop(provider=FakeProvider(_REPLY), store=MemoryStore(), model="fake")
+    store = object.__new__(PgFluidStore)
+    assert await adapter._memory_folded_since(store, "ses_x", "n1") is folded
 
 
 @pytest.mark.asyncio
