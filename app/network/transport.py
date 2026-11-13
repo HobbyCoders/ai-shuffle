@@ -108,7 +108,25 @@ _peer_watermark_binding: Dict[str, dict] = {}
 # generation and incarnation as well, so only this says the responder's frontier
 # may release ops early; without it they keep the 30-day age.
 RETENTION_ACK = 1
+# Advertised in ``capabilities``: this worker re-imports its own ops from an
+# earlier incarnation (``engine.apply_envelope``), so a peer may send it its own
+# older streams after it was restored from a backup (#1568). Without it a peer
+# sends none of its streams, as before.
+OWN_HISTORY_CAPABILITY = "own-history-reimport"
 _snapshot_peers: set[str] = set()
+
+
+def own_history_before(capabilities, incarnation) -> int | None:
+    """The incarnation below which a peer's own streams may be sent back to it.
+
+    ``None`` (send none of its streams) unless it advertises
+    :data:`OWN_HISTORY_CAPABILITY` and reports an incarnation past the first.
+    """
+    if not isinstance(capabilities, dict) or capabilities.get(OWN_HISTORY_CAPABILITY) != 1:
+        return None
+    if type(incarnation) is not int or incarnation < 2:
+        return None
+    return incarnation
 _peer_catalog_backlog: Dict[str, bool] = {}
 # Only viewed chats request transcript heads. Bound memory and exchange work;
 # a poll renews interest, while closed tabs expire without a separate unsubscribe.
@@ -819,10 +837,18 @@ class PeerLink:
             # When the peer's tunnel appeared, the plain-http token is dropped
             # and the push below authenticates over the tunnel (``call``).
             self.update_endpoints(their_endpoints)
-        # Push what the peer lacks, in bounded batches.
+        # Push what the peer lacks, in bounded batches. A restored peer also
+        # gets what it signed in earlier incarnations (#1568).
+        own_history = own_history_before(capabilities, exchange.get("incarnation"))
         while True:
             outbound, _, snapshot = await asyncio.to_thread(
-                store.exchange_batch, theirs, limit=BATCH_LIMIT, exclude_origin=self.device_id)
+                store.exchange_batch, theirs, limit=BATCH_LIMIT, exclude_origin=self.device_id,
+                own_history_before=own_history)
+            if snapshot and own_history:
+                # A hole in its old stream needs a state copy, which only its
+                # own pull asks for. Keep pushing everything else meanwhile.
+                own_history = None
+                continue
             if snapshot:
                 # The other worker's next pull requests our state. Do not send
                 # an incomplete log prefix and pretend it was acknowledged.
@@ -1138,7 +1164,7 @@ def _capabilities() -> dict:
         capabilities = detect_capabilities()
     except Exception:  # noqa: BLE001
         capabilities = {}
-    return {**capabilities, CAPABILITY: 1, memory_records.CAPABILITY: 1}
+    return {**capabilities, CAPABILITY: 1, memory_records.CAPABILITY: 1, OWN_HISTORY_CAPABILITY: 1}
 
 
 

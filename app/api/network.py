@@ -613,8 +613,9 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
             elif released:
                 catalog.publish_owned()
             tokens.remember_binding_support(device_id, body.token_binding_proof)
-            ops, heads, snapshot = store.exchange_batch(body.watermarks, limit=body.limit, lane=body.lane,
-                                                       exclude_origin=device_id)
+            ops, heads, snapshot = store.exchange_batch(
+                body.watermarks, limit=body.limit, lane=body.lane, exclude_origin=device_id,
+                own_history_before=transport.own_history_before(body.capabilities, body.incarnation))
             return {"ops": ops, "watermarks": heads, "generation": ctx.generation,
                     "key_version": ctx.key_version, "incarnation": ctx.identity.incarnation,
                     "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),

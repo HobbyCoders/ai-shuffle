@@ -1555,6 +1555,11 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
         member = ctx.member(ctx.device_id)
         if member is None:
             return "duplicate"
+        # The restored outbox still holds that stream up to its last op, and
+        # peers resume it from there (#1568): count that prefix as received.
+        held = store.own_watermark(cursor, ctx.device_id, env.origin_incarnation)
+        if held > store.get_watermark(cursor, ctx.device_id, env.origin_incarnation):
+            store.set_watermark(cursor, ctx.device_id, env.origin_incarnation, held)
     else:
         refused: Optional[str] = None
         try:
@@ -1579,9 +1584,11 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     if env.key_version not in ctx.keyring:
         raise TransientApplyError("unknown key version %d" % env.key_version)
 
-    # Stream ordering per (origin, incarnation).
+    # Stream ordering per (origin, incarnation). Every older stream of our own
+    # is closed history, re-imported in any order after repeated restores.
+    own = env.origin_device_id == ctx.device_id
     highest = store.highest_incarnation(cursor, env.origin_device_id)
-    if env.origin_incarnation < highest:
+    if env.origin_incarnation < highest and not own:
         raise ApplyError("stale incarnation")
     watermark = store.get_watermark(cursor, env.origin_device_id, env.origin_incarnation)
     if env.origin_seq <= watermark:
@@ -1599,7 +1606,7 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     outcome = _apply_next(cursor, ctx, env, member, result)
     store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
     store.drop_pending_upto(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
-    if env.origin_incarnation > highest and highest:
+    if env.origin_incarnation > highest and highest and not own:
         store.clear_pending_stream(cursor, env.origin_device_id, highest)
     # Continue only after this transaction commits, not recursively under its
     # state lock. A legacy pending buffer can contain thousands of successors.
@@ -2894,8 +2901,9 @@ def restored_from_backup(evidence_seq: int, evidence_incarnation: int, *,
     key, at a sequence past our outbox), never on a peer's bare claim.
 
     The restore also put back an older Lamport clock, while peers keep the
-    versions this device signed after the backup (they never send a device
-    its own ops). ``evidence_clock`` is the highest clock among those proofs:
+    versions this device signed after the backup (they send them back only
+    once this device is on the new incarnation, #1568). ``evidence_clock`` is
+    the highest clock among those proofs:
     the clock moves past it before anything is signed in the new stream, or
     this device's next write, a tombstone included, would lose to its own
     older version on every peer that holds it (#1506).
@@ -3355,14 +3363,18 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
 
 
 def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: NetworkContext | None = None, _conn=None) -> None:
-    """After a snapshot, start tailing from the sender's view of every stream."""
+    """After a snapshot, start tailing from the sender's view of every stream.
+
+    That includes our own streams from earlier incarnations, whose versions the
+    copy carries (#1568); never the outbox we are writing now.
+    """
     ctx = ctx or require_context()
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
         for origin, streams in (watermarks or {}).items():
-            if origin == ctx.device_id:
-                continue
             for incarnation, last_seq in (streams or {}).items():
+                if origin == ctx.device_id and int(incarnation) >= ctx.identity.incarnation:
+                    continue
                 current = store.get_watermark(cursor, origin, int(incarnation))
                 if int(last_seq) > current:
                     store.set_watermark(cursor, origin, int(incarnation), int(last_seq))

@@ -773,8 +773,21 @@ def _log_heads(cursor) -> list[dict]:
     return rows
 
 
+def _excluded(origin: str, incarnation, exclude_origin: str | None, own_history_before: int | None) -> bool:
+    """Whether a stream stays out of what ``exclude_origin`` (the requester) is sent.
+
+    The requester never gets its own streams back, except, with
+    ``own_history_before``, those of incarnations older than the one it is on:
+    after a restore from backup, peers hold what it signed after the backup and
+    it re-imports them (#1568). Its current incarnation stays excluded.
+    """
+    if origin != exclude_origin:
+        return False
+    return not own_history_before or int(incarnation) >= int(own_history_before)
+
+
 def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: Optional[str] = None,
-              exclude_origin: Optional[str] = None, _conn=None,
+              exclude_origin: Optional[str] = None, own_history_before: int | None = None, _conn=None,
               _heads: Optional[Dict[str, Dict[str, int]]] = None) -> List[dict]:
     """Ops the caller lacks: per origin/incarnation, everything past its watermark.
 
@@ -812,7 +825,7 @@ def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: 
                              for origin, incarnations in _heads.items() for inc, head in incarnations.items())
         lagging = []
         for origin, incarnation, head in streams:
-            if origin == exclude_origin:
+            if _excluded(origin, incarnation, exclude_origin, own_history_before):
                 continue
             last = int((watermarks.get(origin) or {}).get(str(incarnation), (watermarks.get(origin) or {}).get(incarnation, 0)) or 0)
             if last < head:
@@ -2166,13 +2179,19 @@ def finish_backfill(generation: int, _conn=None) -> bool:
 
 
 def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = None,
-                   exclude_origin: str | None = None) -> tuple[List[dict], dict, bool]:
-    """Read one frontier for a bounded batch and its snapshot-gap check."""
+                   exclude_origin: str | None = None,
+                   own_history_before: int | None = None) -> tuple[List[dict], dict, bool]:
+    """Read one frontier for a bounded batch and its snapshot-gap check.
+
+    ``own_history_before`` is the requester's current incarnation when it can
+    re-import its own older streams (see ``_excluded``).
+    """
     with get_db() as conn:
         heads = local_watermarks(conn)
-        snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
+        snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin,
+                                     own_history_before=own_history_before, _conn=conn, _heads=heads)
         ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
-                        _conn=conn, _heads=heads)
+                        own_history_before=own_history_before, _conn=conn, _heads=heads)
         from app.network import nested_secret_sync
         if not nested_secret_sync.ops_compatible(ops, exclude_origin, conn.cursor()):
             # Signed history cannot be rewritten or filtered without stream
@@ -2195,6 +2214,7 @@ def preserved_builtin_ids(_conn=None) -> List[str]:
 
 
 def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
+                      own_history_before: int | None = None,
                       check_tail_compatibility: bool = False, _conn=None,
                       _heads: Optional[Dict[str, Dict[str, int]]] = None) -> bool:
     """Detect log gaps; only cached snapshots need whole-tail compatibility.
@@ -2213,9 +2233,9 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
         legacy_recipient = None
         protected = ()
         for origin, streams in heads.items():
-            if origin == exclude_origin:
-                continue
             for incarnation, head in streams.items():
+                if _excluded(origin, incarnation, exclude_origin, own_history_before):
+                    continue
                 last = int((watermarks.get(origin) or {}).get(str(incarnation), 0))
                 if last >= head:
                     continue
