@@ -5,9 +5,10 @@ Reads markdown files from docs/content/, parses metadata headers,
 and builds an in-memory index for the documentation API.
 """
 
+import html
 import re
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 DOCS_DIR = Path(__file__).parent.parent.parent / "docs" / "content"
 
@@ -37,6 +38,8 @@ class DocEntry:
     category: str
     order: int
     content: str  # raw markdown (without frontmatter)
+    text: str = field(default="", repr=False)  # readable text of ``content``
+    words: str = field(default="", repr=False)  # title, description and text as ``_words``
 
     @property
     def full_slug(self) -> str:
@@ -76,6 +79,108 @@ def _extract_headings(content: str) -> list[DocSection]:
         slug = re.sub(r"[\s]+", "-", slug).strip("-")
         sections.append(DocSection(id=slug, title=title, level=level))
     return sections
+
+
+# Readable text for search, as the Docs panel's ``markdownToPlainText`` reads
+# it (#1554): no table pipes, link targets, anchors, emphasis marks or HTML.
+_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_LINK_DEF_RE = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*\S")
+_RULE_RE = re.compile(r"^\s{0,3}(?:([-*_])(?:\s*\1){2,}|=+)\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}(?:\s+(.*?))?(?:\s+#+)?\s*$")
+_QUOTE_RE = re.compile(r"^\s*(?:>\s?)+")
+_LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?")
+_CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
+_CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1")
+_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((?:[^()]|\([^)]*\))*\)")
+_LINK_RE = re.compile(r"\[([^\]]+)\](?:\((?:[^()]|\([^)]*\))*\)|\[[^\]]*\])")
+_AUTOLINK_RE = re.compile(r"<((?:https?://|mailto:)[^>\s]+)>")
+_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_TAG_RE = re.compile(r"</?[A-Za-z][^>]*>")
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_EMPHASIS_RES = (
+    re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"),
+    re.compile(r"(~~)(?=\S)(.+?)(?<=\S)\1"),
+    re.compile(r"(?<![\w*])(\*)(?=\S)(.+?)(?<=\S)\1(?![\w*])"),
+    re.compile(r"(?<![\w_])(_)(?=\S)(.+?)(?<=\S)\1(?![\w_])"),
+)
+_ESCAPE_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!|>~])")
+_PLACEHOLDER_RE = re.compile("\x00(\\d+)\x00")
+
+
+def _inline_text(line: str) -> str:
+    """Readable text of one line: link text without its target, code without backticks, no HTML."""
+    code: list[str] = []
+
+    def keep(match: re.Match) -> str:
+        code.append(match.group(2).strip())
+        return f"\x00{len(code) - 1}\x00"
+
+    line = _CODE_SPAN_RE.sub(keep, line)
+    line = _IMAGE_RE.sub(r"\1", line)
+    line = _LINK_RE.sub(r"\1", line)
+    line = _AUTOLINK_RE.sub(r"\1", line)
+    line = _BREAK_RE.sub(" ", line)
+    line = _TAG_RE.sub("", line)
+    for pattern in _EMPHASIS_RES:
+        line = pattern.sub(r"\2", line)
+    line = html.unescape(_ESCAPE_RE.sub(r"\1", line))
+    return _PLACEHOLDER_RE.sub(lambda m: code[int(m.group(1))], line)
+
+
+def _markdown_to_plain_text(markdown: str) -> str:
+    """A document as the reader sees it, for search scores and snippets (#1554)."""
+    lines = _COMMENT_RE.sub("", markdown.replace("\r\n", "\n")).split("\n")
+    parts: list[str] = []
+    fence = ""
+    in_table = False
+    for i, line in enumerate(lines):
+        opener = _FENCE_RE.match(line)
+        if fence:
+            if opener and opener.group(1)[0] == fence[0] and len(opener.group(1)) >= len(fence):
+                fence = ""
+            else:
+                parts.append(line)
+            continue
+        if opener:
+            fence = opener.group(1)
+            continue
+        if not line.strip() or "|" not in line:
+            in_table = False
+        if not line.strip() or _LINK_DEF_RE.match(line) or _RULE_RE.match(line):
+            continue
+        following = lines[i + 1] if i + 1 < len(lines) else ""
+        if "|" in line and not in_table and "|" in following and _TABLE_SEP_RE.match(following):
+            in_table = True  # this line is a table's header row
+        if in_table:
+            if _TABLE_SEP_RE.match(line):
+                continue
+            cells = _CELL_SPLIT_RE.split(line.strip().strip("|"))
+            parts.append(" ".join(_inline_text(cell.strip()) for cell in cells))
+            continue
+        heading = _HEADING_RE.match(line)
+        if heading:
+            line = heading.group(1) or ""
+        else:
+            line = _LIST_RE.sub("", _QUOTE_RE.sub("", line))
+        parts.append(_inline_text(line))
+    return " ".join(" ".join(part.split()) for part in parts if part.strip())
+
+
+def _words(text: str) -> str:
+    """Text as a run of lower-case words, so punctuation and markup between them don't matter."""
+    return " ".join(re.sub(r"[\W]+", " ", text.lower()).split())
+
+
+def _snippet(text: str, at: int, length: int) -> str:
+    start = max(0, at - 60)
+    end = min(len(text), at + length + 60)
+    snippet = text[start:end].strip()
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(text):
+        snippet = snippet + "..."
+    return snippet
 
 
 class DocsIndex:
@@ -128,7 +233,9 @@ class DocsIndex:
                 category=category,
                 order=order,
                 content=content,
+                text=_markdown_to_plain_text(content),
             )
+            entry.words = _words(f"{title} {description} {entry.text}")
             self.docs[entry.full_slug] = entry
 
     def reload(self) -> None:
@@ -198,20 +305,27 @@ class DocsIndex:
         ]
 
     def search(self, query: str, limit: int = 20) -> list[dict]:
-        """Simple full-text search across all docs."""
+        """Simple full-text search across all docs, over their readable text."""
         self._ensure_loaded()
         if not query or not query.strip():
             return []
 
-        query_lower = query.lower().strip()
+        query_lower = " ".join(query.lower().split())
         terms = query_lower.split()
-        results: list[tuple[float, DocEntry, list[str]]] = []
+        # Several words together, as typed (the last may still be being typed).
+        phrase = _words(query) if len(terms) > 1 else ""
+        results: list[tuple[bool, float, DocEntry, list[str]]] = []
 
         for entry in self.docs.values():
             score = 0.0
             snippets: list[str] = []
             title_lower = entry.title.lower()
-            content_lower = entry.content.lower()
+            text_lower = entry.text.lower()
+            has_phrase = bool(phrase) and f" {phrase}" in f" {entry.words}"
+
+            # The snippet shows the query as typed first, where the text has it.
+            if len(terms) > 1 and query_lower in text_lower:
+                snippets.append(_snippet(entry.text, text_lower.index(query_lower), len(query_lower)))
 
             for term in terms:
                 # Title matches score higher
@@ -221,25 +335,19 @@ class DocsIndex:
                 if term in entry.description.lower():
                     score += 5.0
                 # Content matches
-                count = content_lower.count(term)
+                count = text_lower.count(term)
                 if count > 0:
                     score += min(count, 10)  # cap at 10 occurrences
-
-                    # Extract snippet around first match
-                    idx = content_lower.index(term)
-                    start = max(0, idx - 60)
-                    end = min(len(entry.content), idx + len(term) + 60)
-                    snippet = entry.content[start:end].strip()
-                    if start > 0:
-                        snippet = "..." + snippet
-                    if end < len(entry.content):
-                        snippet = snippet + "..."
-                    snippets.append(snippet)
+                    snippet = _snippet(entry.text, text_lower.index(term), len(term))
+                    if snippet not in snippets:
+                        snippets.append(snippet)
 
             if score > 0:
-                results.append((score, entry, snippets[:3]))
+                results.append((has_phrase, score, entry, snippets[:3]))
 
-        results.sort(key=lambda x: -x[0])
+        # A document holding the words together ranks above any that only has
+        # them apart (#1581); the scores order each group.
+        results.sort(key=lambda x: (not x[0], -x[1]))
         return [
             {
                 "slug": entry.slug,
@@ -249,7 +357,7 @@ class DocsIndex:
                 "score": score,
                 "snippets": snippets,
             }
-            for score, entry, snippets in results[:limit]
+            for _, score, entry, snippets in results[:limit]
         ]
 
 

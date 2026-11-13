@@ -1849,4 +1849,4 @@ Get a specific documentation page with full markdown content.
 
 ### GET /api/v1/documentation/search?q={query}
 
-Search across all documentation.
+Search across all documentation. Pages that hold the query's words together, in order, rank above pages that only have them apart. Each result's `snippets` are readable text around the match, without Markdown such as table pipes, link targets or emphasis marks.

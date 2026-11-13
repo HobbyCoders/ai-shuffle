@@ -117,3 +117,67 @@ def test_frontmatter_parser_edges():
     # Not at the very top -> not frontmatter.
     raw = "\n<!--\ntitle: x\n-->\nrest"
     assert dc._parse_frontmatter(raw) == ({}, raw)
+
+
+def test_search_snippets_are_readable_text_not_markdown(tmp_path, monkeypatch):
+    """Spotlight shows the first snippet as the row description (#1554)."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "getting-started/cloud.md", "\n".join([
+        "<!--\ntitle: AI Shuffle Cloud\n-->",
+        "## Paid plans", "",
+        "| Plan | Workers |", "| --- | :---: |", "| **Ultimate** | 30 |", "",
+        "See [the plans](/docs/getting-started/cloud#paid-plans), `code` and <span>this</span>.",
+        "- [x] ~~old~~ _new_ ![logo](/img/logo.png)", "",
+        "> quoted", "", "```sh", "echo hi", "```", "",
+        "[ref]: https://example.com/target",
+    ]))
+    index = DocsIndex()
+    [hit] = index.search("Ultimate")
+    assert index.docs["getting-started/cloud"].text == (
+        "Paid plans Plan Workers Ultimate 30 See the plans, code and this. "
+        "old new logo quoted echo hi"
+    )
+    assert hit["snippets"] == [
+        "Paid plans Plan Workers Ultimate 30 See the plans, code and this. old new logo quoted echo h..."
+    ]
+    # Link targets are not readable text, so they don't match either.
+    assert DocsIndex().search("example") == []
+    assert DocsIndex().search("paid-plans") == []
+
+
+def test_plain_text_keeps_words_that_only_look_like_markup():
+    assert dc._markdown_to_plain_text("set snake_case_name to 2*3*4 then # not a heading") == (
+        "set snake_case_name to 2*3*4 then # not a heading"
+    )
+    assert dc._markdown_to_plain_text("Line one\nline two\n\n***\n\n# Title #\nbody") == (
+        "Line one line two Title body"
+    )
+
+
+def test_search_ranks_the_exact_phrase_first(tmp_path, monkeypatch):
+    """A pasted sentence finds the page it came from above loose word matches (#1581)."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "features/loose.md",
+         "<!--\ntitle: Prompt tools\n-->\nWrite a prompt. Choose tools. Its tools write prompts. "
+         "Instructions for tools and prompts, its tools, its prompt.\n")
+    _doc(root, "getting-started/quick-start.md",
+         "<!--\ntitle: Quick Start\n-->\n"
+         + "Intro words. " * 10
+         + "3. Give it a **name**, write its **prompt** (its instructions), and choose its **tools**.\n")
+    query = "write its prompt (its instructions), and choose its tools"
+    results = DocsIndex().search(query)
+    assert [r["slug"] for r in results] == ["quick-start", "loose"]
+    # The snippet shows the phrase, not the first place one of its words occurs.
+    assert query in results[0]["snippets"][0].lower()
+    # A phrase whose last word is still being typed counts too.
+    assert DocsIndex().search("choose its too")[0]["slug"] == "quick-start"
+
+
+def test_real_docs_find_a_pasted_sentence_first():
+    index = DocsIndex()
+    [first, *_] = index.search("write its prompt (its instructions), and choose its tools")
+    assert first["slug"] == "quick-start"
+    [cloud] = [r for r in index.search("Ultimate") if r["slug"] == "cloud"]
+    assert not any(ch in cloud["snippets"][0] for ch in "|*`") and "](" not in cloud["snippets"][0]

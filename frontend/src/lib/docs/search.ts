@@ -31,6 +31,20 @@ export function matchTerms(query: string): string[] {
 
 const WORD = /[\p{L}\p{N}_]/u;
 
+/** Text as a run of lower-case words, so punctuation and markup between them don't matter. */
+function words(text: string): string {
+	return text.toLowerCase().replace(/[^\p{L}\p{N}_]+/gu, ' ').trim();
+}
+
+/**
+ * Whether `haystack` (already `words()`) holds a query of several words
+ * together, in order. The last word may be a prefix, as it is while being
+ * typed. A single word is left to the word scores.
+ */
+function holdsPhrase(haystack: string, phrase: string): boolean {
+	return phrase.includes(' ') && ` ${haystack}`.includes(` ${phrase}`);
+}
+
 /** Where `term` best occurs in `text`: 2 a whole word, 1 the start of a word, 0 inside one. */
 function bestOccurrence(text: string, term: string): [rank: number, at: number] | null {
 	let best: [number, number] | null = null;
@@ -67,6 +81,7 @@ export class DocsSearchEngine {
 	private index = new Map<string, Set<string>>(); // token -> full slugs
 	private docs = new Map<string, DocEntry>(); // full slug -> entry
 	private plain = new Map<string, string>(); // full slug -> readable text
+	private wordRuns = new Map<string, string>(); // full slug -> title, description and text as `words()`
 	private built = false;
 
 	constructor(private entries: DocEntry[]) {}
@@ -76,7 +91,9 @@ export class DocsSearchEngine {
 		for (const entry of this.entries) {
 			const key = `${entry.category}/${entry.slug}`;
 			this.docs.set(key, entry);
-			this.plain.set(key, markdownToPlainText(entry.content));
+			const plain = markdownToPlainText(entry.content);
+			this.plain.set(key, plain);
+			this.wordRuns.set(key, words(`${entry.title} ${entry.description} ${plain}`));
 			this.indexDoc(key, entry);
 		}
 		this.built = true;
@@ -124,19 +141,21 @@ export class DocsSearchEngine {
 			}
 		}
 
-		// Boost title matches
+		// Boost title matches: each query word found in the title counts.
+		const phrase = words(query);
+		const hasPhrase = new Set<string>();
 		for (const [key, score] of scores) {
 			const entry = this.docs.get(key)!;
 			const titleLower = entry.title.toLowerCase();
-			for (const token of queryTokens) {
-				if (titleLower.includes(token)) {
-					scores.set(key, score + 5);
-				}
-			}
+			const titleHits = queryTokens.filter((token) => titleLower.includes(token)).length;
+			scores.set(key, score + 5 * titleHits);
+			if (holdsPhrase(this.wordRuns.get(key) ?? '', phrase)) hasPhrase.add(key);
 		}
 
+		// A document holding the words together, as typed, ranks above any that
+		// only has them apart (#1581); the scores order each group.
 		return [...scores.entries()]
-			.sort((a, b) => b[1] - a[1])
+			.sort((a, b) => Number(hasPhrase.has(b[0])) - Number(hasPhrase.has(a[0])) || b[1] - a[1])
 			.slice(0, limit)
 			.map(([key, score]) => {
 				const entry = this.docs.get(key)!;
