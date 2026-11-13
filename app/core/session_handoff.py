@@ -187,10 +187,8 @@ def resolve_worker(worker: str) -> Dict[str, Any]:
 def _refuse_incapable(session_id: str, target_id: str) -> None:
     """Raise ``ValueError`` when the chat's provider row cannot run on the target (#1519)."""
     from app.core import provider_capability
-    from app.db import database
 
-    row = database.get_session(session_id) or {}
-    reason = provider_capability.refusal(target_id, row.get("provider_id"))
+    reason = provider_capability.turn_refusal(target_id, session_id)
     if reason:
         raise ValueError(f"{reason} Nothing was queued; pick another worker.")
 

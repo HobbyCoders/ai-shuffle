@@ -172,10 +172,15 @@ def test_hand_off_and_automation_owner_refuse_an_incapable_worker(workers, monke
         _gemini_row()
     _admit(a, b)
     with a.active():
-        monkeypatch.setattr(db, "get_session", lambda session_id: {"id": session_id, "provider_id": "gem"})
+        _gemini_session("s1")
         with pytest.raises(ValueError, match="Old worker needs an update to use Gemini key"):
             session_handoff._refuse_incapable("s1", b.device_id)
         session_handoff._refuse_incapable("s1", a.device_id)  # this worker can
+        # A native Claude pick that the row does not curate runs natively:
+        # the same binding rule as a turn, so no false refusal.
+        db.create_session("s2", "default", provider_id="gem", model="sonnet",
+                          derive_provider_from_profile=False)
+        session_handoff._refuse_incapable("s2", b.device_id)
 
         db.create_automation(automation_id="auto1", name="Nightly", trigger_type="schedule",
                              trigger_config={"cron": "0 0 * * *"}, prompt="do", profile_id="default",

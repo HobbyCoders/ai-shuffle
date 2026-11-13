@@ -410,7 +410,7 @@ async def move_session_to(session_id: str, session: dict, target_instance_id: st
     # does not report the capability (#1519): refuse now, not on its next turn.
     from app.core import provider_capability
 
-    refusal = await run_sync(provider_capability.refusal, target, session.get("provider_id"))
+    refusal = await run_sync(provider_capability.turn_refusal, target, session_id)
     if refusal:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
 
