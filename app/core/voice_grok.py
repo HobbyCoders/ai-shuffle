@@ -61,9 +61,13 @@ APP_NOTE_LEAD = "[Note from the app, not said by the caller] "
 CHECK_WORK_HANDED_OFF = ("Nothing was running, so this is a new request and it is now handed off to be worked on; "
                          "do not call delegate_to_chat_agent for it. Tell the caller in a few words that you're on it. "
                          "The reply arrives later as its own note.")
-# Appended to a check_work answer while work is in flight.
-CHECK_WORK_NEW_REQUEST = ("If the caller asked for something new rather than about this work, hand it off with "
-                          "delegate_to_chat_agent.")
+# Appended to a check_work answer while work is in flight. Probed on real Grok:
+# a softer "if the caller asked for something new, hand it off" lost a new
+# "check whether the deploy finished" every time ("I don't see a deploy in the
+# mix"); this wording handed it off 6/6 and kept 6/6 status questions as status.
+CHECK_WORK_NEW_REQUEST = ("This lookup only covers work you already handed off. If what the caller just asked is "
+                          "about anything else, it is a new request this lookup cannot answer: call "
+                          "delegate_to_chat_agent now and say only that you're checking.")
 # Appended while the caller's latest words are being handed off already.
 CHECK_WORK_JUST_HANDED_OFF = ("The caller's latest request was just handed off and is starting; do not call "
                               "delegate_to_chat_agent for it again.")
