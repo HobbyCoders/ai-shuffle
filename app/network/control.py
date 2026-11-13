@@ -291,6 +291,18 @@ def _unreachable_message(peer: str, me: str, failures: List[BaseException], rout
     return f"Couldn't reach {peer} from {me} ({' / '.join(reasons) or 'unreachable'} {where})."
 
 
+async def refuse_incapable(device_id: str, session_id: Optional[str],
+                           overrides: Optional[Dict[str, Any]] = None) -> None:
+    """Raise ``ControlRefused`` when ``device_id`` cannot run a turn of
+    ``session_id`` on its provider row (#1519). Every control action that
+    wakes a session on another worker checks this before sending."""
+    from app.core import provider_capability
+
+    reason = await run_sync(provider_capability.turn_refusal, device_id, session_id, overrides)
+    if reason:
+        raise ControlRefused(reason)
+
+
 async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: str = "user",
                       profile_id: Optional[str] = None, project_id: Optional[str] = None,
                       overrides: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None,
@@ -318,17 +330,11 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
     worker too old to say (``turns.UNSTATED_ENTRY_KEY``). Never in ``payload``:
     the owner drops the key from any payload.
 
-    A turn that picks a capability-gated provider row is refused here, with
-    the reason, when the owner does not report that capability (#1519).
+    A turn that runs on a capability-gated provider row (the session's
+    binding, or the one ``overrides`` picks) is refused here, with the reason,
+    when the owner does not report that capability (#1519).
     """
-    from app.core import provider_capability
-
-    picked = (overrides or {}).get("provider") or provider_capability.provider_of_model(
-        (overrides or {}).get("model"))
-    if picked:
-        refusal = await run_sync(provider_capability.refusal, device_id, picked)
-        if refusal:
-            raise ControlRefused(refusal)
+    await refuse_incapable(device_id, session_id, overrides)
     body = {
         "session_id": session_id, "source": source, "prompt": prompt, "profile_id": profile_id,
         "project_id": project_id, "overrides": overrides, "payload": payload,

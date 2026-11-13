@@ -125,12 +125,13 @@ def assign(table: str, row_id: str, device_id: Optional[str]) -> dict:
         if member.kind != engine.membership.KIND_WORKER:
             raise ValueError("Only a worker device can own a definition")
         if table == "automations":
-            # Its runs use the automation's provider row there (#1519).
+            # Its runs use the automation's provider rows there: the prompt's
+            # and each send_prompt step's (#1519).
             from app.core import provider_capability
             from app.db import automations as automations_db
 
             automation = automations_db.get_automation(row_id) or {}
-            refusal = provider_capability.refusal(device_id, automation.get("provider_id"))
+            refusal = provider_capability.automation_refusal(device_id, automation)
             if refusal:
                 raise ValueError(refusal)
     with get_db() as conn:

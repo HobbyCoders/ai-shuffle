@@ -103,20 +103,35 @@ def needs_update_message(names: List[str], what: str = "this") -> str:
     return f"{', '.join(names[:-1])} and {names[-1]} need an update to use {what}."
 
 
+def _other_worker(device_id: Optional[str]) -> Optional[str]:
+    """``device_id`` as a member device id (a legacy instance id is resolved),
+    or None outside a network, for no target and for this worker."""
+    if not device_id:
+        return None
+    from app.network import engine, runners
+
+    ctx = engine.context()
+    if ctx is None:
+        return None
+    device_id = runners.resolve_runner_id(device_id) or device_id
+    return None if device_id == ctx.device_id else device_id
+
+
 def refusal(device_id: Optional[str], provider_id: Optional[str] = None, *,
             row: Optional[Mapping[str, Any]] = None) -> Optional[str]:
     """Why ``device_id`` must not run ``provider_id`` (or ``row``), or None.
 
     None when there is no target, the target is this worker, the row is
     unknown or ungated, or the target reports the row's capability.
+    ``device_id`` may be a device id or a legacy instance id.
     """
-    if not device_id or (row is None and not provider_id):
+    if row is None and not provider_id:
+        return None
+    device_id = _other_worker(device_id)
+    if device_id is None:
         return None
     from app.network import engine
 
-    ctx = engine.context()
-    if ctx is None or device_id == ctx.device_id:
-        return None
     if row is None:
         from app.db import model_providers as provider_db
 
@@ -140,6 +155,75 @@ def provider_of_model(value: Any) -> Optional[str]:
 
     decoded = decode_provider_model(value)
     return decoded[0] if decoded else None
+
+
+def turn_provider(session_id: Optional[str], overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    """The provider row a turn of ``session_id`` with ``overrides`` runs on, or None (native).
+
+    The binding rule of ``app/api/query.py`` ``_request_binding`` (which
+    mirrors ``query_options``): the model picked (this turn's, else the
+    session's) binds its row when it is a ``prov:`` value; otherwise the
+    turn's explicit provider, else the session's bound row, which a plain
+    Claude pick that row does not curate clears back to native.
+    """
+    overrides = overrides or {}
+    selected = overrides.get("model")
+    picked = provider_of_model(selected)
+    if picked:
+        return picked
+    session: Mapping[str, Any] = {}
+    if session_id:
+        from app.db import sessions
+
+        session = sessions.get_session(session_id) or {}
+    selected = selected or session.get("model")
+    picked = provider_of_model(selected)
+    if picked:
+        return picked
+    if overrides.get("provider"):
+        return overrides["provider"]
+    bound = session.get("provider_id")
+    if bound and selected:
+        from app.core.query_options import is_native_claude_model
+
+        if is_native_claude_model(selected):
+            from app.core.provider_agent import curated_model_ids
+            from app.db import model_providers as provider_db
+
+            if selected not in curated_model_ids(provider_db.resolve_model_provider(bound)):
+                return None
+    return bound
+
+
+def turn_refusal(device_id: Optional[str], session_id: Optional[str],
+                 overrides: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    """Why ``device_id`` must not run a turn of ``session_id`` (with
+    ``overrides``), or None. Reads nothing for this worker or outside a
+    network. Blocking: call off the event loop."""
+    if _other_worker(device_id) is None:
+        return None
+    return refusal(device_id, turn_provider(session_id, overrides))
+
+
+def automation_refusal(device_id: Optional[str], automation: Mapping[str, Any]) -> Optional[str]:
+    """Why ``device_id`` must not run ``automation``, or None: its prompt's
+    provider and each ``send_prompt`` step's, as a run resolves them
+    (``automation_service.resolve_automation_model``). Blocking."""
+    if _other_worker(device_id) is None:
+        return None
+    from app.core.automation_service import resolve_automation_model
+
+    picks = []
+    if (automation.get("prompt") or "").strip():
+        picks.append(resolve_automation_model(dict(automation)))
+    for step in automation.get("action_steps") or []:
+        if isinstance(step, dict) and step.get("type") == "send_prompt":
+            picks.append(resolve_automation_model(dict(automation), step))
+    for pick in picks:
+        reason = refusal(device_id, pick.get("provider_id"))
+        if reason:
+            return reason
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -174,11 +258,14 @@ def _recheck(device_ids: Optional[Iterable[str]]) -> Dict[str, List[str]]:
     rows = [r for r in provider_db.get_all_model_providers() if capability_for(r.get("provider_type"))]
     members = {m["device_id"]: m for m in store.list_members(include_revoked=False)
                if m["device_id"] != ctx.device_id}
-    wanted = set(members) if device_ids is None else {d for d in device_ids if d}
     presence = engine.all_presence()
     gaps: Dict[str, List[str]] = {}
     changed = False
     with _last_lock:
+        # A full re-check also visits the gaps already recorded, so a member
+        # that was revoked or left loses its gap (and open pages refresh).
+        wanted = (set(members) | set(_last_gaps) if device_ids is None
+                  else {d for d in device_ids if d})
         for device_id in wanted:
             member = members.get(device_id)
             missing = frozenset(

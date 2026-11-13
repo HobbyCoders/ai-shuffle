@@ -2738,11 +2738,13 @@ async def _send_to_child(sender_session_id: str, row: Mapping[str, Any], text: s
         "message_id": str(uuid.uuid4()), "sender_session_id": sender_session_id,
         "text": text, "urgent": bool(urgent), "known_completion_id": known,
     }, kind)
+    from app.network import control
+
     try:
+        # A message wakes or resumes the child there, on its provider row (#1519).
+        await control.refuse_incapable(dispatch["target_device_id"], worker_id)
         answer = await _send_message(dispatch["target_device_id"], body)
     except Exception as exc:  # noqa: BLE001 — refused or unreachable: say which
-        from app.network import control
-
         if (dispatch.get("offline_notice_at") and isinstance(exc, control.RunnerUnreachable)
                 and MAY_HAVE_APPLIED not in str(exc)):
             return {"text": _offline_message_refusal(who, where, dispatch), "is_error": True}
@@ -2786,7 +2788,11 @@ async def send_to_parent(sender_session_id: str, row: Mapping[str, Any], text: s
         "message_id": str(uuid.uuid4()), "sender_session_id": sender_session_id,
         "text": text, "urgent": bool(urgent), "known_completion_id": None,
     }, kind)
+    from app.network import control
+
     try:
+        # The message wakes main there, on its provider row (#1519).
+        await control.refuse_incapable(parent["device_id"], parent["owner_session_id"])
         answer = await _send_message(parent["device_id"], body)
     except Exception as exc:  # noqa: BLE001 — refused or unreachable: say which
         return {"text": _message_refusal(exc, who=who, where=where), "is_error": True}

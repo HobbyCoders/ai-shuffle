@@ -518,6 +518,12 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 if not profile:
                     return f"Profile '{kwargs['profile_id']}' not found.", None, None
 
+            from app.core.automation_service import owner_refusal
+
+            refusal = owner_refusal(existing, kwargs)
+            if refusal:
+                return refusal, None, None
+
             updated = database.update_automation(auto_id, **kwargs)
             # The model report reads the agent and provider: same hop.
             if updated:

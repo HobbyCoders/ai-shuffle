@@ -851,6 +851,26 @@ async def create_automation(
     return automation
 
 
+#: Fields of an automation that decide which provider rows its runs use.
+_RUNS_ON_KEYS = frozenset({"model", "provider_id", "action_steps", "profile_id", "prompt"})
+
+
+def owner_refusal(existing: Dict[str, Any], changes: Dict[str, Any]) -> Optional[str]:
+    """Why ``changes`` to an owned automation must be refused, or None.
+
+    An owned automation runs on its owner device, so an edit that changes
+    what it runs on must not pick a provider row the owner cannot run
+    (#1519). Unowned ones are not judged: the worker that claims a run is
+    the one that runs it. Blocking.
+    """
+    owner = existing.get("owner_device_id")
+    if not owner or not (_RUNS_ON_KEYS & changes.keys()):
+        return None
+    from app.core import provider_capability
+
+    return provider_capability.automation_refusal(owner, {**existing, **changes})
+
+
 async def update_automation(automation_id: str, **kwargs) -> Optional[Dict]:
     """Update an existing automation.
 
@@ -914,6 +934,10 @@ async def update_automation(automation_id: str, **kwargs) -> Optional[Dict]:
             mode = normalize_permission_mode_choice(kwargs.pop("permission_mode"))
             if mode is not None:
                 kwargs["permission_mode"] = mode
+
+        refusal = owner_refusal(existing, kwargs)
+        if refusal:
+            raise ValueError(refusal)
 
         # Handle triggers array — validate and encrypt webhook secrets
         trigger_changed = False

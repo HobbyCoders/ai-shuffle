@@ -1375,6 +1375,8 @@ async def _message_remote(plan, sender_id, sender_generation):
         await release()
         raise ValueError("The user stopped this session; nothing was sent.")
     try:
+        # The message wakes the chat there, on its provider row (#1519).
+        await control.refuse_incapable(peer["device_id"], session_id)
         answer = await asyncio.wait_for(
             control.call(peer["device_id"], MESSAGE_ACTION, plan["body"], timeout=REMOTE_TIMEOUT),
             timeout=REMOTE_TIMEOUT)
@@ -2225,6 +2227,15 @@ async def report_settled_start(session_id, settled, outcome):
             await deliver_started_report(home, frame, steer=True)
             return
         from app.network import control
+        sender = await asyncio.to_thread(_report_sender, session_id)
+        try:
+            # The report wakes the assistant's chat there, on its provider row (#1519).
+            await control.refuse_incapable(device, sender)
+        except control.ControlRefused as exc:
+            # Kept here, refused for good, with the reason: never dropped.
+            await asyncio.to_thread(_owe_forward, sender, device, frame, 0, refused=str(exc))
+            log.warning("Report of started chat %s not sent: %s", session_id, exc)
+            return
         await control.call(device, REPORT_ACTION, {"session_id": session_id, "report": frame},
                            timeout=REMOTE_TIMEOUT)
     except Exception:  # noqa: BLE001 — a report never breaks settlement
@@ -2352,23 +2363,35 @@ def _report_owner(home):
     return control.owner_of(row) if row else None
 
 
-def _owe_forward(home, device, frame, hops):
-    """Keep the report in the outbox. One pending row per report id; True when new."""
+def _report_sender(session_id):
+    """The assistant chat that started ``session_id`` (on whichever worker), or None."""
+    start = _start_turn(session_id)
+    return ((start or {}).get("payload") or {}).get("orchestration_sender")
+
+
+def _owe_forward(home, device, frame, hops, refused=None):
+    """Keep the report in the outbox. One pending row per report id; True when new.
+
+    ``refused``: kept already refused for good, with that reason."""
     from app.db import turns
     from app.db.base import transaction
     event_id = report_event_id(home, frame)
+    stop_reason = _FORWARD_REFUSED if refused else _FORWARD_PENDING
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s AND stop_reason=%s",
-                       (REPORT_OUTBOX, event_id, _FORWARD_PENDING))
+                       (REPORT_OUTBOX, event_id, stop_reason))
         if cursor.fetchone():
             return False
-        row = turns.enqueue_turn(REPORT_OUTBOX, "agent_message", command_id=event_id, payload={
-            "home": home, "device_id": device, "report": frame, "hops": hops,
-            "attempts": 0, "next_attempt_at": 0}, _conn=conn)
+        payload = {"home": home, "device_id": device, "report": frame, "hops": hops,
+                   "attempts": 0, "next_attempt_at": 0}
+        if refused:
+            payload["error"] = refused[:500]
+        row = turns.enqueue_turn(REPORT_OUTBOX, "agent_message", command_id=event_id,
+                                 payload=payload, _conn=conn)
         # Settled at birth, like the remote start receipts: never runnable.
         cursor.execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW(), "
-                       "stop_reason=%s WHERE id=%s", (_FORWARD_PENDING, row["id"]))
+                       "stop_reason=%s WHERE id=%s", (stop_reason, row["id"]))
     return True
 
 
@@ -2552,6 +2575,9 @@ async def _deliver_forwarded_locked(force):
             device = owner
             body = {"home": home, "event_id": row["command_id"], "report": frame,
                     "hops": int(payload.get("hops") or 0) + 1}
+            # The report wakes home there, on its provider row (#1519); a
+            # refusal is kept below as report_forward_refused.
+            await control.refuse_incapable(device, home)
             answer = await asyncio.wait_for(
                 control.call(device, FORWARD_REPORT_ACTION, body, timeout=REMOTE_TIMEOUT),
                 timeout=REMOTE_TIMEOUT)
