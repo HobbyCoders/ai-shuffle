@@ -107,6 +107,9 @@ def _run_setups():
         await git_ops_runner.claim_once()
         while project_setup._tasks:
             await asyncio.gather(*list(project_setup._tasks), return_exceptions=True)
+            # A gather of finished tasks returns without yielding (Python 3.12),
+            # so let their set-discard callbacks run or this loop spins (#1458).
+            await asyncio.sleep(0)
     asyncio.run(go())
 
 

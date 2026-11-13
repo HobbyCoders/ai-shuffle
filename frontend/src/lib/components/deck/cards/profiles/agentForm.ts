@@ -93,3 +93,32 @@ export type AgentTab = (typeof AGENT_TABS)[number]['id'];
 export function isAgentTab(value: unknown): value is AgentTab {
 	return AGENT_TABS.some((t) => t.id === value);
 }
+
+/**
+ * Config keys the Agents page owns on save: the fields it edits (a cleared
+ * one is left out, which the full-replace `PUT /agents/{id}` turns into a
+ * clear), the legacy bindings it retires (model, provider, permission mode,
+ * effort), and the avatar, which belongs to the identity PATCH.
+ */
+const EDITOR_CONFIG_KEYS = new Set([
+	'include_partial_messages', 'provider_models', 'max_turns', 'setting_sources',
+	'tool_selection_mode', 'allowed_tools', 'disallowed_tools', 'enabled_agents',
+	'agent_invoke_mode', 'cwd', 'add_dirs', 'env', 'system_prompt',
+	'model', 'provider', 'permission_mode', 'effort',
+	'avatar_id'
+]);
+
+/**
+ * The stored settings the Agents page does not edit (`enabled_plugins`,
+ * `app_config_tools`, `thinking_mode`, `tools_preset`, agent memory, ...), to
+ * send back unchanged. `PUT /agents/{id}` replaces the whole config, so a save
+ * that left them out would erase what an agent or API call set (#1546).
+ */
+export function untouchedConfig(stored: unknown): Record<string, unknown> {
+	if (!stored || typeof stored !== 'object') return {};
+	return Object.fromEntries(
+		Object.entries(stored as Record<string, unknown>).filter(
+			([key, value]) => !EDITOR_CONFIG_KEYS.has(key) && value !== null && value !== undefined
+		)
+	);
+}
