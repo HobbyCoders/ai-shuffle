@@ -92,16 +92,20 @@ async def install_status(token: str = Depends(require_admin)):
 
     ``source``: ``app`` (installed here by AI Shuffle), ``path`` (an ``agy`` on
     PATH), ``override`` (``AI_SHUFFLE_ANTIGRAVITY_BIN``) or null. ``can_install``:
-    Google publishes a build for this worker's platform. ``install``: the
+    Google publishes a build for this worker's platform; when it does not,
+    ``unsupported_message`` says so (else null). ``install``: the
     install or update job (``kind``, ``state``, ``version``, ``message``, ``error``).
     """
     binary, source = await run_sync(antigravity.locate_binary)
     version = await antigravity.binary_version(binary) if binary else None
+    can_install = antigravity.manifest_key() is not None
     return {
         "installed": bool(binary and version),
         "version": version,
         "source": source if binary and version else None,
-        "can_install": antigravity.manifest_key() is not None,
+        "can_install": can_install,
+        # Why not, said up front: the Install button is disabled there.
+        "unsupported_message": None if can_install else antigravity.unsupported_message(),
         "install": antigravity.install_state(),
         "workers_requiring_update": await run_sync(antigravity.workers_requiring_update),
     }

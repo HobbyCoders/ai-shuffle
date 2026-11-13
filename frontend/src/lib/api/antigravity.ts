@@ -52,6 +52,8 @@ export interface AntigravityInstallStatus {
 	source?: 'app' | 'path' | 'override' | null;
 	/** Google publishes a build for this worker's platform. */
 	can_install?: boolean;
+	/** Why Install is unavailable when `can_install` is false; otherwise null. */
+	unsupported_message?: string | null;
 	install: AntigravityInstallJob;
 	/** Peer workers that must update before a row can be added. */
 	workers_requiring_update: string[];

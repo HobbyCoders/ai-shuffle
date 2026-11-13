@@ -1408,6 +1408,9 @@ async def test_check_for_update_says_up_to_date_and_downloads_nothing(mock_db, f
 
 async def test_check_for_update_installs_the_newer_release_and_removes_the_old(agy_root, monkeypatch):
     monkeypatch.setattr(ag, "_platform", lambda: ("linux", "aarch64"))
+    older = agy_root / "cli" / "1.5.5" / "agy"
+    older.parent.mkdir(parents=True)
+    older.write_text("older")
     old = agy_root / "cli" / "1.5.6" / "agy"
     old.parent.mkdir(parents=True)
     old.write_text("old")
@@ -1422,7 +1425,52 @@ async def test_check_for_update_installs_the_newer_release_and_removes_the_old(a
     assert state["message"] == "Antigravity updated from 1.5.6 to 1.5.7."
     assert ag.locate_binary() == (str(new), "app")
     assert new.read_bytes() == b"#!/bin/sh\necho agy\n" and os.access(new, os.X_OK)
-    assert not old.parent.exists()  # the older version folder is gone
+    assert not older.parent.exists()  # versions before the replaced one are gone
+    # The copy just replaced stays until the next update: a chat that resolved
+    # it a moment ago may still be starting it.
+    assert old.read_text() == "old"
+
+
+async def test_check_for_update_never_downgrades(agy_root, monkeypatch):
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
+    newer = agy_root / "cli" / "1.5.8" / "agy"
+    newer.parent.mkdir(parents=True)
+    newer.write_text("newer")
+    newer.chmod(0o755)
+    (agy_root / "cli" / "current").write_text(str(newer), encoding="utf-8")
+    _versions(monkeypatch, {str(newer): "1.5.8"})
+    asked = _google(monkeypatch, version="1.5.7", url="https://storage.googleapis.com/a/cli.tar.gz",
+                    payload=_tarball())
+    state = await _run_job("update")
+    assert state["state"] == "succeeded" and state["message"] == "Antigravity is up to date (1.5.8)."
+    assert asked == [ag.manifest_url("linux_amd64")]  # Google's older release is not downloaded
+    assert ag.locate_binary() == (str(newer), "app")
+
+
+async def test_an_update_keeps_the_copy_the_override_names(agy_root, monkeypatch):
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
+    pinned = agy_root / "cli" / "1.5.5" / "agy"
+    pinned.parent.mkdir(parents=True)
+    pinned.write_text("pinned")
+    pinned.chmod(0o755)
+    monkeypatch.setenv(ag.BINARY_ENV, str(pinned))
+    _versions(monkeypatch, {str(pinned): "1.5.5"})
+    _google(monkeypatch, version="1.5.7", url="https://storage.googleapis.com/a/cli.tar.gz",
+            payload=_tarball())
+    state = await _run_job("update")
+    assert state["state"] == "succeeded", state
+    assert pinned.read_text() == "pinned"  # never pruned from under the override
+    assert ag.locate_binary() == (str(pinned), "override")
+
+
+def test_spawn_binding_names_the_binary_the_spec_was_built_with(agy_root, monkeypatch):
+    row = {"id": "row-1", "auth_mode": "gemini-api-key", "extra_env_json": {}}
+    monkeypatch.setattr(ag, "row_api_key", lambda _row: "k")
+    monkeypatch.setattr(ag, "find_binary", lambda: "/data/antigravity/cli/1.5.7/agy")
+    resolved = "/data/antigravity/cli/1.5.6/agy"
+    # An update between build_spec and spawn_binding must not split them.
+    assert ag.spawn_binding(row, binary=resolved) != ag.spawn_binding(row)
+    assert ag.spawn_binding(row, binary=resolved) == ag.spawn_binding(row, binary=resolved)
 
 
 async def test_an_update_over_agy_on_path_says_the_apps_copy_now_runs(agy_root, monkeypatch, tmp_path):

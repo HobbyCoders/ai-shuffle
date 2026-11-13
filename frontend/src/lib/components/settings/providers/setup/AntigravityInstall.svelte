@@ -50,6 +50,9 @@
 		</SettingRow>
 	{/if}
 </RowGroup>
+{#if status && !status.installed && status.can_install === false && status.unsupported_message}
+	<p class="pv-msg">{status.unsupported_message} Install Google's Antigravity CLI yourself so <code>agy</code> is on PATH.</p>
+{/if}
 {#if antigravity.installing}
 	<p class="pv-msg" role="status">{job?.kind === 'update' ? 'Checking Google for a newer Antigravity' : 'Installing Antigravity'}</p>
 {:else if job?.state === 'failed' && (job.message || job.error)}

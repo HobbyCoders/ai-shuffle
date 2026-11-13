@@ -578,7 +578,7 @@ All of these are owner only, under `/api/v1/antigravity`.
 | Endpoint | What it does |
 | --- | --- |
 | `GET /meta` | `provider_type`, `auth_modes` (`id`, `label`, `headless`, `guarded`, `warning`), the `warning` text, `terms_url`, `dashboard_url`, `guard_default` and `default_models` |
-| `GET /status` | `installed`, `version`, `source` (`app` when AI Shuffle installed the agent, `path` for an `agy` on PATH, `override` for `AI_SHUFFLE_ANTIGRAVITY_BIN`, or `null`), `can_install` (Google publishes a build for this worker), `install` (`kind`: `install` or `update`, `state`: `idle`, `running`, `succeeded` or `failed`, `version`, `message`, `error`) and `workers_requiring_update` |
+| `GET /status` | `installed`, `version`, `source` (`app` when AI Shuffle installed the agent, `path` for an `agy` on PATH, `override` for `AI_SHUFFLE_ANTIGRAVITY_BIN`, or `null`), `can_install` (Google publishes a build for this worker), `unsupported_message` (why not, when `can_install` is false; otherwise `null`), `install` (`kind`: `install` or `update`, `state`: `idle`, `running`, `succeeded` or `failed`, `version`, `message`, `error`) and `workers_requiring_update` |
 | `POST /install` | Download and install Google's agent for this worker's platform; poll `GET /status` |
 | `POST /update` | Check for update: the same background job. It finishes with `message` "Antigravity is up to date (X)." or "Antigravity updated from X to Y."; poll `GET /status` |
 | `GET /providers` | This leg's rows (no keys) with `guard_applies`, `allow_unattended` and `guarded`. They also appear in `GET /api/v1/model-providers` |

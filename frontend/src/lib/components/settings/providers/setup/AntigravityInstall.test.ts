@@ -61,3 +61,12 @@ it('names the platform when Google publishes no build for this worker', async ()
 	expect((await screen.findByRole('alert')).textContent).toBe(message);
 	await waitFor(() => expect((screen.getByRole('button', { name: 'Install Antigravity' }) as HTMLButtonElement).disabled).toBe(true));
 });
+
+it('says why up front on a worker Google publishes no build for', async () => {
+	const message = 'Google publishes no Antigravity build for this worker (linux riscv64).';
+	current = { ...installed, installed: false, version: null, source: null, can_install: false,
+		unsupported_message: message, install: { kind: 'install', state: 'idle', version: null, error: null, message: null } };
+	render(AntigravityInstall);
+	expect(await screen.findByText((text) => text.startsWith(message))).toBeTruthy();
+	expect((screen.getByRole('button', { name: 'Install Antigravity' }) as HTMLButtonElement).disabled).toBe(true);
+});

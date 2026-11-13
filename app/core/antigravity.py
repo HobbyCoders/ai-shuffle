@@ -266,6 +266,22 @@ STARTUP_CHECK_SECONDS = 600
 UP_TO_DATE = "Antigravity is up to date ({version})."
 
 
+def _version_key(text: Optional[str]) -> Optional[tuple]:
+    """``1.5.7`` → ``(1, 5, 7)``; None when the text is not a plain dotted version."""
+    match = re.match(r"(\d+(?:\.\d+)*)", text or "")
+    return tuple(int(part) for part in match.group(1).split(".")) if match else None
+
+
+def _is_current(installed: Optional[str], latest: str) -> bool:
+    """Whether ``installed`` is ``latest`` or newer: a job never downgrades."""
+    if not installed:
+        return False
+    if installed == latest:
+        return True
+    have, want = _version_key(installed), _version_key(latest)
+    return have is not None and want is not None and have >= want
+
+
 def install_state() -> Dict[str, Any]:
     return {"kind": _install.kind, "state": _install.state, "version": _install.version,
             "error": _install.error, "message": _install.message}
@@ -324,10 +340,11 @@ async def _run_install(job: InstallJob, key: str) -> None:
                     or urlsplit(url).hostname not in _ALLOWED_DOWNLOAD_HOSTS):
                 raise RuntimeError("Google's update manifest did not name a download.")
             job.version = version
-            if before == version:
-                # Already this version (a check with nothing new, a stale
-                # Install button, a second worker's screen): nothing is downloaded.
-                job.state, job.message = "succeeded", UP_TO_DATE.format(version=version)
+            if _is_current(before, version):
+                # Already this version or newer (a check with nothing new, a
+                # stale Install button, a second worker's screen, a release
+                # Google rolled back): nothing is downloaded.
+                job.state, job.message = "succeeded", UP_TO_DATE.format(version=before)
                 return
             fmt, name = _download_kind(url)
             target = _root() / "cli" / re.sub(r"[^\w.-]", "_", version)
@@ -344,7 +361,11 @@ async def _run_install(job: InstallJob, key: str) -> None:
                     await _download(client, url, digest, archive)
                     await asyncio.to_thread(_extract_binary, archive, target / name)
         _write_record(target / name)
-        await asyncio.to_thread(prune_versions, target)
+        # The copy just replaced stays until the next update: a chat that
+        # resolved it a moment ago may still be starting it. So does a copy
+        # the override names.
+        spared = [Path(p) for p in (before_path, os.environ.get(BINARY_ENV, "").strip()) if p]
+        await asyncio.to_thread(prune_versions, target, spared)
         if before:
             job.message = f"Antigravity updated from {before} to {version}."
         else:
@@ -389,15 +410,25 @@ def _write_record(binary: Path) -> None:
     os.replace(partial, record)
 
 
-def prune_versions(keep: Path) -> List[str]:
-    """Best effort: remove app-installed versions other than ``keep``.
+def prune_versions(keep: Path, spared: Optional[List[Path]] = None) -> List[str]:
+    """Best effort: remove app-installed versions other than ``keep`` and the
+    folders holding any ``spared`` executable.
 
     A folder whose executable cannot be removed (an ``agy.exe`` still running
     on Windows) is left whole for a later update; nothing is ever stopped.
     """
     removed: List[str] = []
+    cli = _root() / "cli"
+    kept = {keep.name}
+    for exe in spared or ():
+        try:
+            rel = Path(os.path.abspath(exe)).relative_to(os.path.abspath(cli))
+        except ValueError:
+            continue
+        if rel.parts:
+            kept.add(rel.parts[0])
     try:
-        folders = [p for p in (_root() / "cli").iterdir() if p.is_dir() and p.name != keep.name]
+        folders = [p for p in cli.iterdir() if p.is_dir() and p.name not in kept]
     except OSError:
         return removed
     for folder in folders:
@@ -1210,19 +1241,21 @@ def turn_row(provider_id: Optional[str], options: Any, turn_source: Optional[str
     return guard_refusal(row, options, turn_source=turn_source, person_entered=person_entered), row
 
 
-def spawn_binding(row: Mapping[str, Any]) -> str:
+def spawn_binding(row: Mapping[str, Any], *, binary: Optional[str] = None) -> str:
     """Digest of everything fixed into the agent process when it starts.
 
     The row (its private home), the key, the agent's extra environment and
     the installed binary go into
     its environment and argv at spawn; when any of them changes, the next
-    turn starts a fresh process (resuming the agent's saved session).
+    turn starts a fresh process (resuming the agent's saved session). Pass the
+    ``binary`` the spec was built with, so an update between the two cannot
+    make the binding name a different executable than the spec runs.
     """
     import json
 
     material = json.dumps({
         "id": row.get("id"), "auth_mode": row.get("auth_mode"), "key": row_api_key(row) or "",
-        "env": agent_extra_env(row), "binary": find_binary() or "",
+        "env": agent_extra_env(row), "binary": binary or find_binary() or "",
         # A sign-out or delete here: the next turn never reuses the process.
         "signin": signin_epoch(str(row.get("id") or "")),
     }, sort_keys=True)

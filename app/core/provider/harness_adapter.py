@@ -2026,11 +2026,14 @@ class HarnessAdapter(ProviderAdapter):
                                  turn_source=source, person_entered=entered)
         if refusal:
             raise ProviderTurnRefused(refusal)
+        # One binary for both, so an update in between cannot split them.
+        binary = await run_sync(antigravity.find_binary)
         try:
-            spec = await run_sync(antigravity.build_spec, row, add_dirs=list(options.add_dirs or ()))
+            spec = await run_sync(antigravity.build_spec, row, add_dirs=list(options.add_dirs or ()),
+                                  binary=binary)
         except FileNotFoundError as exc:
             raise ProviderConfigError(str(exc)) from exc
-        self._antigravity_binding = await run_sync(antigravity.spawn_binding, row)
+        self._antigravity_binding = await run_sync(antigravity.spawn_binding, row, binary=binary)
         self._workspace_card = None if one_shot else await run_sync(
             self._build_workspace_card, options
         )
@@ -2100,11 +2103,13 @@ class HarnessAdapter(ProviderAdapter):
         if refusal:
             raise ProviderTurnRefused(refusal)
         assert row is not None
-        binding = await run_sync(antigravity.spawn_binding, row)
+        binary = await run_sync(antigravity.find_binary)
+        binding = await run_sync(antigravity.spawn_binding, row, binary=binary)
         if binding != self._antigravity_binding and self._engine is not None:
             try:
                 spec = await run_sync(antigravity.build_spec, row,
-                                      add_dirs=list((options.add_dirs if options else None) or ()))
+                                      add_dirs=list((options.add_dirs if options else None) or ()),
+                                      binary=binary)
             except FileNotFoundError as exc:
                 raise ProviderConfigError(str(exc)) from exc
             await self._engine.replace_spec(spec)
