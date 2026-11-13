@@ -122,10 +122,24 @@ def recoverable(nodes, rows, needle):
         for ref in re.findall(r'HistoryExpand\("([^"]+)"', row['text']):
             start, end = parse_ref(ref)
             for node in nodes[index[start]:index[end] + 1]:
-                text, error = expand_ref(nodes, node.node_id, max_chars=10**6)
-                if not error and needle in text:
+                text = read_whole(nodes, node.node_id)
+                if text is not None and needle in text:
                     return True
     return False
+
+
+def read_whole(nodes, node_id):
+    """A node's full expansion, paging past HistoryExpand's window cap."""
+    seen, offset = "", 0
+    while True:
+        text, error = expand_ref(nodes, node_id, offset=offset, max_chars=10**6)
+        if error:
+            return None
+        header, _, window = text.partition("\n")
+        seen += window
+        if "continue with offset=" not in header:
+            return seen
+        offset = int(header.rsplit("offset=", 1)[1].rstrip("]"))
 
 
 def test_every_cycle_reclaims_and_the_retained_size_stays_bounded():
