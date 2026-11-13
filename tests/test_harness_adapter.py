@@ -5784,7 +5784,7 @@ def recording_adapter(monkeypatch):
     monkeypatch.setattr(ha, "DelegatedLoop", _Delegated)
     monkeypatch.setattr(HarnessAdapter, "_build_store", lambda self, o: MemoryStore())
 
-    async def _registry(self, options, native):
+    async def _registry(self, options, native, host_mcp=False):
         return ha.ToolRegistry()
 
     async def _client(kind, options):
