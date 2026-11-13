@@ -1486,3 +1486,128 @@ def test_fork_scrubs_postgres_illegal_code_points_from_copied_events(mock_db):
     assert "\\u0000" not in raw
     assert "\\ud800" not in raw
     assert "\\ufffd" in raw
+
+
+# ─── stored harness notes (the session plan reminder) ────────────────────────
+#
+# Fluid stores the plan reminder as a user-role node flagged
+# ``provider_meta["harness_note"]`` so history stays append-only for the
+# provider's prompt cache. Nobody typed it: every app reader must treat it as
+# context inside the current turn.
+
+_PLAN_NOTE = "# Session plan\n\n- [x] read the file\n- [ ] write the fix"
+
+
+def _plan_note():
+    message = _user(_PLAN_NOTE)
+    message["provider_meta"] = {"harness_note": True}
+    return message
+
+
+def _seed_plan_turn(session_id="ses_plannote"):
+    """request → Plan call → result → plan note → final answer → next request."""
+    _insert(session_id, [
+        ("p1", None, _user("first prompt")),
+        ("p2", "p1", fluid_message("assistant", [{
+            "kind": "tooluseblock", "id": "t1", "name": "Plan",
+            "input": {"action": "set"},
+        }])),
+        ("p3", "p2", fluid_message("user", [{
+            "kind": "toolresultblock", "tool_use_id": "t1",
+            "content": [{"kind": "text", "text": "plan saved"}],
+            "is_error": False,
+            "delivered_steers": [],
+            "delivery_metadata_version": 0,
+        }])),
+        ("p4", "p3", _plan_note()),
+        ("p5", "p4", _assistant("final answer")),
+        ("p6", "p5", _user("second prompt")),
+        ("p7", "p6", _assistant("second reply")),
+    ])
+    return session_id
+
+
+def test_harness_note_fixture_matches_real_fluid_serialization():
+    pytest.importorskip("fluid")
+    from fluid.messages.content import HARNESS_NOTE_META_KEY, Message, Text
+
+    from app.core.jsonl_rewind import HARNESS_NOTE_META_KEY as APP_KEY
+
+    assert APP_KEY == HARNESS_NOTE_META_KEY
+    assert Message(
+        role="user", content=[Text(text=_PLAN_NOTE)],
+        provider_meta={HARNESS_NOTE_META_KEY: True},
+    ).to_dict() == _plan_note()
+
+
+def test_harness_note_projects_as_one_hidden_entry(mock_db):
+    session_id = _seed_plan_turn()
+    entries = fluid_transcript_entries(session_id)
+
+    # Still one entry per node, so rewind and fork indexes map back to nodes.
+    assert [e["uuid"] for e in entries] == [f"p{i}" for i in range(1, 8)]
+    note = entries[3]
+    assert note["isMeta"] is True
+    assert note["fluidHarnessNote"] is True
+    assert not any(e.get("isMeta") for i, e in enumerate(entries) if i != 3)
+    # Not a rewind checkpoint either.
+    assert "p4" not in {cp.uuid for cp in get_fluid_checkpoints(session_id)}
+
+
+def test_rewind_keeping_response_keeps_the_answer_after_a_plan_note(mock_db):
+    session_id = _seed_plan_turn()
+    result = rewind_fluid_session(session_id, "p1", include_response=True)
+
+    # The plan note sits inside the first turn; the cut is at the next
+    # request, so the final answer survives.
+    assert result.success is True
+    assert _head(session_id) == "p5"
+    assert [n["node_id"] for n in load_fluid_path(session_id)] == [
+        "p1", "p2", "p3", "p4", "p5",
+    ]
+    assert result.remaining_user_turns == 1
+
+
+def test_plan_note_is_never_shown_as_a_user_message(mock_db):
+    session_id = _seed_plan_turn()
+    messages, _usage = fluid_live_messages(session_id, "/workspace")
+
+    assert [m["content"] for m in messages if m["role"] == "user"] == [
+        "first prompt", "second prompt",
+    ]
+    assert not any("Session plan" in str(m.get("content")) for m in messages)
+    assert ("assistant", "final answer") in [
+        (m["role"], m.get("content")) for m in messages
+    ]
+
+
+def test_backfill_never_turns_a_plan_note_into_a_user_event(mock_db):
+    from app.core import history_backfill as hb
+    from app.db import sessions as sessions_db
+
+    session_id = _seed_plan_turn("ses_plannotebf")
+    sessions_db.create_session("app-plan-note", "default")
+    sessions_db.update_session("app-plan-note", sdk_session_id=session_id)
+
+    events = hb.convert_messages_to_events(
+        "app-plan-note", hb._load_legacy_history("app-plan-note")
+    )
+
+    users = [e for e in events if e["type"] == "message.user"]
+    assert [e["payload"]["content"] for e in users] == ["first prompt", "second prompt"]
+    assert not any("Session plan" in json.dumps(e["payload"]) for e in events)
+
+
+def test_reseed_keeps_the_plan_note_as_hidden_model_context(mock_db):
+    from app.core.provider.fluid_transcript import build_cli_transcript_entries
+
+    session_id = _seed_plan_turn("ses_plannotecli")
+    lines = build_cli_transcript_entries(
+        fluid_transcript_entries(session_id), "cli-uuid", "/workspace"
+    )
+
+    notes = [line for line in lines if "Session plan" in json.dumps(line["message"])]
+    assert len(notes) == 1
+    assert notes[0]["type"] == "user"
+    assert notes[0]["isMeta"] is True
+    assert sum(1 for line in lines if line.get("isMeta")) == 1

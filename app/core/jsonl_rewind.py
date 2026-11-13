@@ -62,17 +62,44 @@ class RewindResult:
         return asdict(self)
 
 
+# Fluid stores context the model needs mid-turn (the session plan reminder) as
+# a user-role node flagged ``provider_meta["harness_note"]`` — the key is
+# ``fluid.messages.content.HARNESS_NOTE_META_KEY``, repeated here because these
+# readers must work when ``fluid`` is not importable. Its projected transcript
+# entry carries ``HARNESS_NOTE_ENTRY_FLAG`` plus ``isMeta``. Nobody typed it.
+HARNESS_NOTE_META_KEY = "harness_note"
+HARNESS_NOTE_ENTRY_FLAG = "fluidHarnessNote"
+
+
+def is_harness_note(record: Mapping[str, Any]) -> bool:
+    """Whether a Fluid node (with its ``message`` decoded) or its projected
+    transcript entry is a harness note.
+
+    The one test every app reader uses to keep the note from counting as a
+    person's request: it is never a turn start, a rewind target or a shown
+    user message.
+    """
+    if record.get(HARNESS_NOTE_ENTRY_FLAG):
+        return True
+    message = record.get("message")
+    meta = message.get("provider_meta") if isinstance(message, Mapping) else None
+    return isinstance(meta, Mapping) and bool(meta.get(HARNESS_NOTE_META_KEY))
+
+
 def _next_real_user_index(
     entries: Sequence[Mapping[str, Any]], start_index: int
 ) -> Optional[int]:
     """Index of the next genuine user prompt after ``start_index``.
 
     Skips ``user`` entries that only carry tool_result blocks (those are the
-    CLI echoing tool output, not a new human turn). Returns ``None`` when no
-    further user prompt exists.
+    CLI echoing tool output, not a new human turn) and Fluid harness notes,
+    which sit inside the current turn. Returns ``None`` when no further user
+    prompt exists.
     """
     for i in range(start_index + 1, len(entries)):
         entry = entries[i]
+        if is_harness_note(entry):
+            continue
         if entry.get('type') == 'user' and entry.get('message', {}).get('role') == 'user':
             content = entry.get('message', {}).get('content', '')
             if isinstance(content, list):

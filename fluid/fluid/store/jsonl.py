@@ -54,6 +54,7 @@ from pathlib import Path
 
 from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
+from fluid.messages.content import is_harness_note
 from fluid.store.base import (
     CorruptSession,
     RecallMessage,
@@ -701,7 +702,7 @@ class JsonlStore:
         except (OSError, CorruptSession):
             return None
         for node in path:
-            if node.message.role == "user" and node.message.text().strip():
+            if node.message.role == "user" and not is_harness_note(node.message) and node.message.text().strip():
                 return clip_text(node.message.text(), _TITLE_CAP)
         return None
 

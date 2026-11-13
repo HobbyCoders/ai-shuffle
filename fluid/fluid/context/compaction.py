@@ -1264,7 +1264,9 @@ def render_span_digest(
                         f"  ✓ result {size} chars ({node.node_id})"
                         + (f'; last line: "{last}"' if last else "")
                     )
-            user_text = _user_text(node)
+            # A plan note is not a request; the loop re-adds the live plan
+            # whenever a fold drops it, so a digest never needs the old one.
+            user_text = "" if is_harness_note(message) else _user_text(node)
             if user_text:
                 cap = config.user_text_cap
                 if steer_cfg is not None and not is_wake_text(user_text):

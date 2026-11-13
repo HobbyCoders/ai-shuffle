@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from fluid.context.trim import image_source_path
 from fluid.events.model import ContextArchived
 from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages.content import is_harness_note
 from fluid.store.base import SessionNode, SessionStore, iter_events_of_class
 
 # A ref is one node id or an inclusive range: "node_ab12" / "node_a..node_b".
@@ -198,7 +199,8 @@ def _render_node(node: SessionNode, *, reminders: bool = True) -> str:
     index keep them.
     """
     lines: list[str] = []
-    role = node.message.role
+    # The stored plan reminder is user-role on the wire but nobody wrote it.
+    role = "harness note" if is_harness_note(node.message) else node.message.role
     loose_images = 0
     for block in node.message.content:
         if isinstance(block, Text):

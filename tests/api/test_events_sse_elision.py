@@ -48,7 +48,8 @@ def _seed_fluid(sdk_session_id: str, nodes: list[tuple[str, str | None, dict]]) 
                     Json(message),
                 ),
             )
-            if message.get("role") == "user":
+            # A stored harness note (the plan reminder) opens no turn.
+            if message.get("role") == "user" and not message["provider_meta"].get("harness_note"):
                 cursor.execute(
                     "INSERT INTO fluid_session_events (session_id, seq, event) "
                     "VALUES (%s, %s, %s)",
@@ -304,6 +305,33 @@ def test_mid_turn_steer_is_not_mistaken_for_a_turn_start(mock_db):
     assert (first_kept, elided, tier) == (8, 7, 3)
     first_row = session_events_db.get_events(app_session, first_kept - 1, 1)[0]
     assert first_row["payload"]["content"] == "prompt 2"
+
+
+def test_digest_over_a_turn_with_a_plan_note_is_one_turn(mock_db):
+    """Fluid's splitter keeps a stored plan note inside its turn, so a digest
+    of that whole turn is valid and the replay still starts after it."""
+    sdk = "ses_compactplan1"
+    note = _message("user", "# Session plan\n\n- [ ] step")
+    note["provider_meta"] = {"harness_note": True}
+    _seed_fluid(sdk, [
+        ("n1", None, _message("user", "one")),
+        ("n2", "n1", _message("assistant", "planning")),
+        ("n3", "n2", note),
+        ("n4", "n3", _message("assistant", "reply one")),
+        ("n5", "n4", _message("user", "two")),
+        ("n6", "n5", _message("assistant", "reply two")),
+        ("n7", "n6", _message("user", "three")),
+        ("n8", "n7", _message("assistant", "reply three")),
+    ])
+    _append_compaction(sdk, 1, [["n1", "n4", "digest"]])
+
+    boundary = latest_compaction_boundary(sdk)
+
+    assert boundary is not None
+    assert boundary["node_id"] == "n4"
+    assert boundary["turns"] == 1
+    assert boundary["first_retained_node_id"] == "n5"
+    assert boundary["first_retained_turn_id"] == "turn-1"
 
 
 def test_rewound_event_log_fails_closed(mock_db):

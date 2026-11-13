@@ -336,3 +336,19 @@ def test_local_chat_completions_never_sends_two_user_turns_in_a_row() -> None:
     history[2] = Message(role="user", content=[ToolResultBlock(tool_use_id="t1", content=[Text("ok")]),
                                                Text("a steer")])
     assert roles(history) == ["user", "assistant", "tool", "user"]
+
+
+def test_other_readers_never_take_the_reminder_for_the_request() -> None:
+    # Review round 2: one predicate, every reader. A digest of the turn keeps
+    # the real request and drops the stale plan (the loop re-adds the live one
+    # after a fold), and recall labels it instead of calling it the user.
+    from fluid.context.compaction import render_span_digest
+    from fluid.context.recall import _render_node
+
+    note = _sn("plan", "user", [Text("# Session plan (revision 2; ...)")], {HARNESS_NOTE_META_KEY: True})
+    span = [_sn("u1", "user", [Text("fix the bug")]), _sn("a1", "assistant", [Text("done")]), note]
+    digest = render_span_digest(span, CompactionConfig()).text()
+    assert "fix the bug" in digest
+    assert "Session plan" not in digest
+    assert _render_node(note).startswith("harness note (plan): # Session plan")
+    assert _render_node(span[0]).startswith("user (u1): fix the bug")
