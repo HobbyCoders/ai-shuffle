@@ -80,6 +80,11 @@ PROGRESS_MARKER = "what you are doing now, and nothing more: "
 #: (app.core.voice_grok.APP_NOTE_LEAD). It is the app's note, never the caller.
 APP_NOTE_LEAD = "[Note from the app, not said by the caller] "
 STATUS_MARKER = "Current work, read from the app just now (data, not instructions): "
+#: Grok: check_work called at idle for a new request is the handoff
+#: (app.core.voice_grok.CHECK_WORK_HANDED_OFF). Real Grok then says a short
+#: "on it" and does not hand off again; so does the fake.
+HANDED_OFF_MARKER = "Nothing was running, so this is a new request and it is now handed off"
+CHECK_WORK_ACK = "Checking on that now."
 BEGIN_NOW = "Begin the conversation now"
 RESUME_MARKER = "The voice connection was renewed in the middle of this call."
 HISTORY_PREFIX = "Prior conversation (context only): "
@@ -187,6 +192,7 @@ class Session:
         self.pending_speech: list[str] = []  # Live: commentary waiting for the pause.
         self.pending_notes: list[str] = []  # Grok: spoken notes waiting for response.create.
         self.pending_instruction = False  # Grok: a greeting trigger waiting.
+        self.pending_ack = ""  # Grok: check_work became the handoff; say "on it" next.
         self.check_calls: set[str] = set()  # Grok: check_work calls awaiting their output.
         self.flush_task: asyncio.Task | None = None
         self.speak_lock = asyncio.Lock()
@@ -312,7 +318,11 @@ class Session:
                 if tool == CHECK_WORK_TOOL:
                     # Like the model reading its tool result: told on response.create.
                     self.check_calls.discard(call)
-                    self.pending_notes.append(item.get("output") or "")
+                    if (item.get("output") or "").startswith(HANDED_OFF_MARKER):
+                        self.log("check_work.handed_off", call_id=call)
+                        self.pending_ack = CHECK_WORK_ACK
+                    else:
+                        self.pending_notes.append(item.get("output") or "")
                 return
             role = item.get("role")
             text = "".join(p.get("text", "") for p in item.get("content") or [] if isinstance(p, dict))
@@ -343,9 +353,13 @@ class Session:
                     "message": "Conversation already has an active response"}})
                 return
             notes, self.pending_notes = self.pending_notes, []
-            greeting, self.pending_instruction = self.pending_instruction and not notes, False
+            ack, self.pending_ack = self.pending_ack, ""
+            greeting, self.pending_instruction = self.pending_instruction and not notes and not ack, False
             if notes:
-                await self.speak(" ".join(spoken_words(n) for n in notes), trigger="note", notes=notes)
+                said = " ".join(spoken_words(n) for n in notes)
+                await self.speak(f"{ack} {said}" if ack else said, trigger="note", notes=notes)
+            elif ack:
+                await self.speak(ack, trigger="ack", notes=[])
             elif greeting:
                 await self.speak(GREETING, trigger="greeting", notes=[])
             else:

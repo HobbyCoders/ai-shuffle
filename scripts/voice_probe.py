@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import builtins
 import json
 import os
 import sys
@@ -55,6 +56,19 @@ REPLY = ("Last night's build passed except for one flaky test, the upload retry 
 CONTEXT_FACT = "The nightly build on main finished: 3 tests failed, all in the upload module."
 CONTEXT_QUESTION = "How many tests failed last night, and where?"
 SIDE_QUESTION = "While that runs, what's two plus two?"
+REDACTED = "[redacted]"
+
+
+def redact(text) -> str:
+    """The text with the bearer cut out: a provider that echoes the
+    Authorization header in an error must not put it on the terminal."""
+    text = str(text)
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    return text.replace(token, REDACTED) if token else text
+
+
+def print(*values, sep=" ", end="\n", file=None, flush=False):  # Shadows the builtin: every printed line is redacted.
+    builtins.print(redact(sep.join(str(v) for v in values)), end=end, file=file, flush=flush)
 
 
 def _connect(url: str, token: str):
@@ -295,7 +309,7 @@ async def main_async(args) -> int:
             await run_shape(args, shape)
         except Exception as exc:  # noqa: BLE001 - one shape failing must not hide the rest
             failed += 1
-            print(f"  [{shape}] probe failed: {type(exc).__name__}: {str(exc)[:200]}")
+            print(f"  [{shape}] probe failed: {type(exc).__name__}: {redact(exc)[:200]}")
     return 1 if failed else 0
 
 

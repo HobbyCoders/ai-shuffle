@@ -22,6 +22,9 @@
 //               short line before the short result, never after it; on Grok the voice's check_work, called
 //               while the work runs, is answered with the running work and starts nothing
 //   long-work-quiet  as long-work, but the caller asked to hear only the result: no progress line
+//   check-idle  Grok only: with nothing running, the voice answers a new request ("Check whether the
+//               deploy finished.") with check_work instead of a handoff; the app takes it as the
+//               handoff: one request reaches the agent, a short "on it", the reply said once
 //   attachment-during-call (#1265) a file sent while a call is live goes as fields beside the words
 //               and shows as a chip on the message
 import { runJourney } from './runner.mjs';
@@ -273,6 +276,41 @@ function longWork(name, { quiet }) {
 	};
 }
 
+const checkIdle = {
+	name: 'check-idle',
+	throttles: ['fast'],
+	async setup(ctx) {
+		ctx.token = await chatWithScenario(ctx, 'check-idle');
+	},
+	async act({ page, mark, status, log }) {
+		const voice = fakeVoiceLog(status);
+		const seq = voice.mark();
+		await mark('start the call; the caller asks for a check and the voice calls check_work');
+		await startCall(page, { timeout: 45_000 });
+		const session = await callSession(voice, seq, 'check-idle');
+		const looked = await voice.waitFor(seq, (es) => es.find((e) => e.kind === 'check_work' || e.kind === 'check_work.unsupported'), 'the voice calling check_work');
+		if (looked.kind === 'check_work.unsupported') {
+			log('gpt-live: no check_work tool, nothing to check');
+			await mark('end the call');
+			await endCall(page);
+			return;
+		}
+		await voice.waitFor(seq, (es) => es.find((e) => e.kind === 'check_work.handed_off'), 'check_work taken as the handoff', { timeout: 30_000 });
+		await voice.waitFor(seq, (es) => spokenNotes(es, session).find((e) => e.text.includes('214 tests')), 'the chat reply said aloud', { timeout: 90_000 });
+		await page.getByText('All 214 tests pass', { exact: false }).first().waitFor({ timeout: 30_000 });
+		await page.waitForTimeout(3000); // a second handoff or reply would land now
+		const entries = voice.since(seq);
+		const said = entries.filter((e) => e.kind === 'speech');
+		expect(said.some((e) => e.trigger === 'ack' && e.text === 'Checking on that now.'), `the voice said it is on it:\n  ${speechReport(entries)}`);
+		expectSaidOnce(entries, VOICE_REPLY_SPOKEN, 'the chat reply');
+		expect(!entries.some((e) => e.kind === 'handoff'), 'the voice did not hand the request off a second time');
+		expect((await countUserRows(page, 'Check whether the deploy finished.')) === 1, "the caller's words reach the chat once");
+		expect(!entries.some((e) => e.kind === 'error.sent' || e.kind === 'overlap'), 'no provider error or overlapping response');
+		await mark('end the call');
+		await endCall(page);
+	}
+};
+
 const attachmentDuringCall = {
 	name: 'attachment-during-call',
 	// Slow copies only: the fast ones add no signal and cost hosted shard time.
@@ -318,6 +356,6 @@ const attachmentDuringCall = {
 await runJourney({
 	name: 'voice-call',
 	browser: voiceBrowser,
-	cases: [startEnd, relay, waitUpdate, busy, longWork('long-work', { quiet: false }), longWork('long-work-quiet', { quiet: true }), contextAdmissionTimeout, attachmentDuringCall],
+	cases: [startEnd, relay, waitUpdate, busy, longWork('long-work', { quiet: false }), longWork('long-work-quiet', { quiet: true }), checkIdle, contextAdmissionTimeout, attachmentDuringCall],
 	allow: [...DEV_INSTANCE_NOISE]
 });

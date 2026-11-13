@@ -1,0 +1,9 @@
+{
+  "description": "Grok only. The caller asks for something that sounds like a check (fake AI [script:voice-reply]) and, with nothing running, the voice calls check_work instead of handing it off, as real Grok did 3/3 for \"Check whether the deploy finished.\". The app must take that call as the handoff: one request reaches the chat agent, the voice says a short \"on it\", and the reply is said once, in full.",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Check whether the deploy finished. [script:voice-reply]"},
+    {"check_work": true},
+    {"wait_speech": 1}
+  ]
+}

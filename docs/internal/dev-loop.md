@@ -414,13 +414,15 @@ before the call (options ride in the tag: `[voice:relay reply_delay_ms=800]`):
 | `drop` | The provider connection is cut without a close. |
 | `long-work` | The agent works about 15 s (`[script:voice-long]`): its progress sentence is said once as a short line, the voice calls `check_work` while the work runs (Grok only), then the short result is said. |
 | `long-work-quiet` | As `long-work`, but the caller says "just tell me when it's done" after the handoff: no progress line, only the result. |
+| `check-idle` | Grok only. With nothing running, the voice answers a new request with `check_work` instead of a handoff; the app takes that call as the handoff, the fake says "Checking on that now." and the reply (`[script:voice-reply]`) is said once. |
 
 Steps (one key each): `wait_audio_ms` (wait for that much speech-level
 microphone audio, so a script never runs ahead of a real microphone),
 `wait_ms`, `wait_speech` (wait until N notes were said), `caller` (the
 caller's words, as the provider's transcript events), `handoff` (with `ack`,
 the voice's own words), `check_work` (Grok: the voice calls its read-only
-status tool; the app's output is said), `say`, `error`, `close` (a reason:
+status tool; the app's output is said, or, when the app took the call as the
+handoff, a short "Checking on that now."), `say`, `error`, `close` (a reason:
 `inactive`, `expired`), `drop`. Options: `word_ms`, `start_delay_ms`, `reply_delay_ms`
 (slow provider), `step_timeout_ms`. A session that resumes a call (its history
 carries the app's renewal note) plays `default`, so a reconnect never replays

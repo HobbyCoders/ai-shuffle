@@ -20,7 +20,11 @@ from app.core.voice_progress import (
     VoiceProgress,
     note_kind,
 )
-from app.core.voice_status import is_status_question, wants_fewer_updates
+from app.core.voice_status import (
+    is_status_question,
+    progress_preference,
+    wants_fewer_updates,
+)
 
 
 def event(kind, payload=None, turn="t"):
@@ -184,9 +188,79 @@ def test_fewer_updates_phrases(text):
     "Tell me when you've read the logs what they say.",
     "Update the docs when it's done.",
     "Can you stop the server?",
+    # Review of PR #1541: work requests that say "update", and a negation.
+    "Stop the update to the software and run the tests instead",
+    "Do not stop the updates; keep me informed",
+    "Stop the updates to the config file and revert them.",
+    "Cancel the system update and reboot the box.",
+    "Skip the updates for the staging server.",
+    "Pull the latest updates and rebuild.",
 ])
 def test_not_fewer_updates(text):
     assert not wants_fewer_updates(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Keep me posted.",
+    "keep me updated please",
+    "Give me updates again.",
+    "Tell me how it's going as you go.",
+    "Do not stop the updates; keep me informed",
+    "Actually, never mind, keep me in the loop.",
+])
+def test_more_updates_phrases(text):
+    assert progress_preference(text) == "more"
+
+
+@pytest.mark.parametrize("text", [
+    "Update the docs when it's done.",
+    "Pull the latest updates and rebuild.",
+    "Is it done yet?",
+    "Keep the updated config and post it to the channel.",
+])
+def test_no_progress_preference(text):
+    assert progress_preference(text) is None
+
+
+def test_the_last_stated_preference_wins():
+    assert progress_preference("Keep me posted. Actually, just tell me when it's done.") == "fewer"
+    assert progress_preference("Stop the updates. No wait, keep me posted.") == "more"
+
+
+@pytest.mark.asyncio
+async def test_a_work_request_saying_update_does_not_mute_progress(clock):
+    p, send, _ = await call(clock)
+    p.heard("Stop the update to the software and run the tests instead")
+    says(p, "I'm stopping the update.")
+    await at(clock, p, PROGRESS_FIRST_S + 1)
+    assert len(progress_lines(send)) == 1
+
+
+@pytest.mark.asyncio
+async def test_keep_me_posted_turns_progress_back_on(clock):
+    p, send, _ = await call(clock)
+    p.heard("Just tell me when it's done.")
+    says(p, "I'm reading the logs.")
+    await at(clock, p, PROGRESS_FIRST_S + 1)
+    assert progress_lines(send) == []
+    p.heard("Actually, keep me posted.")
+    await at(clock, p, PROGRESS_FIRST_S + 2)
+    assert len(progress_lines(send)) == 1
+    assert progress_lines(send)[0].endswith("I'm reading the logs.")
+
+
+@pytest.mark.asyncio
+async def test_a_growing_caption_is_judged_whole(clock):
+    """"Stop the updates" as a partial caption of "Stop the updates to the
+    config file" must not stick once the caption grows into a work request."""
+    p, send, _ = await call(clock)
+    p.heard("Stop the updates")
+    assert p.fewer_updates
+    p.heard("Stop the updates to the config file and revert them.")
+    assert not p.fewer_updates
+    says(p, "I'm reverting the config.")
+    await at(clock, p, PROGRESS_FIRST_S + 1)
+    assert len(progress_lines(send)) == 1
 
 
 def test_status_questions_are_not_fewer_update_requests():

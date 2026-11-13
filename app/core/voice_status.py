@@ -224,19 +224,50 @@ def is_status_question(text: str) -> bool:
     return any(pattern.match(normal) for pattern in _STATUS_PATTERNS)
 
 
-# The caller asks the voice to stop telling progress on long work. Unlike a
-# status question it can sit inside a longer sentence ("that's fine, just tell
-# me when it's done"), so these are searched for, not matched whole.
-_FEWER_UPDATES_PATTERNS = tuple(re.compile(p) for p in (
-    r"\b(?:only|just) (?:tell|let) me (?:know )?(?:when|once|if) (?:it's|it is|that's|that is|you're|you are|you've|everything's|it has|it's all) "
-    r"(?:done|finished|ready|complete|completed)\b",
-    r"\b(?:stop|no more|enough|quit|skip|hold) (?:with )?(?:the )?(?:progress )?(?:updates|update|status updates|play by play|narration|narrating)\b",
-    r"\bfewer (?:progress )?updates\b",
-    r"\b(?:don't|do not|no need to) (?:need to |have to )?(?:keep )?(?:give|giving|tell|telling|update|updating) (?:me )?(?:the )?(?:progress|updates|every step|each step|as you go)\b",
+# The caller asks the voice to stop, or to resume, telling progress on long
+# work. Such a request can sit inside a longer sentence ("that's fine, just tell
+# me when it's done"), so the words are split into clauses and each clause must
+# be the request whole. Whole clauses keep work requests out ("stop the update
+# to the software", "skip the updates in the installer") and a negation in
+# front ("do not stop the updates") fails the match. The last clause that
+# states a preference wins.
+_CLAUSE_SPLIT = re.compile(r"[.!?;:,\n]+|\s+-\s+|\b(?:and|but|then)\b")
+_TAIL = r"(?: please| thanks| thank you| okay| ok| for now)*"
+_UPDATES = r"(?:the |your |all the |these |those |any )?(?:progress |status )?(?:updates|play by play|narration)"
+_FEWER_UPDATES_PATTERNS = tuple(re.compile(p + _TAIL + "$") for p in (
+    (r"^(?:you can |please )?(?:only|just) (?:tell|let) me(?: know)? (?:when|once|if) (?:it's|it is|that's|that is|"
+     r"you're|you are|you've|everything's|everything is|it has|it's all|the work is) "
+     r"(?:done|finished|ready|complete|completed)"),
+    r"^(?:please )?(?:stop|no more|enough|quit|skip|hold|cut|drop)(?: with)? " + _UPDATES,
+    r"^(?:please )?(?:stop|quit) (?:updating me|narrating|giving me updates|telling me every step|telling me each step)",
+    r"^(?:i want |i'd like |i would like )?fewer (?:progress |status )?updates",
+    (r"^(?:you )?(?:don't|do not|no need to) (?:need to |have to )?(?:keep )?(?:updating me|update me|giving me updates|"
+     r"give me updates|telling me every step|tell me every step|telling me each step|narrating)(?: as you go)?"),
 ))
+_MORE_UPDATES_PATTERNS = tuple(re.compile(p + _TAIL + "$") for p in (
+    r"^(?:please )?keep me (?:posted|updated|informed|in the loop)(?: as you go)?",
+    r"^(?:please |you can )?(?:give|tell) me (?:the )?(?:progress )?updates (?:again|as you go)",
+    r"^(?:please |you can )?(?:start|resume|go back to) (?:giving me )?(?:the )?(?:progress )?updates(?: again)?",
+    r"^(?:please )?(?:tell|let) me (?:know )?how it'?s going as you go",
+    r"^(?:you can )?(?:don't|do not) stop " + _UPDATES,
+))
+
+
+def progress_preference(text: str) -> str | None:
+    """"fewer" when the caller asks for no spoken progress until the work is
+    done, "more" when they ask to be kept posted again, else None."""
+    found = None
+    for clause in _CLAUSE_SPLIT.split(str(text or "").lower().replace("’", "'")):
+        normal = _normal(clause)
+        if not normal:
+            continue
+        if any(pattern.match(normal) for pattern in _FEWER_UPDATES_PATTERNS):
+            found = "fewer"
+        elif any(pattern.match(normal) for pattern in _MORE_UPDATES_PATTERNS):
+            found = "more"
+    return found
 
 
 def wants_fewer_updates(text: str) -> bool:
     """True when the caller asks for no spoken progress until the work is done."""
-    normal = _normal(text)
-    return bool(normal) and any(pattern.search(normal) for pattern in _FEWER_UPDATES_PATTERNS)
+    return progress_preference(text) == "fewer"

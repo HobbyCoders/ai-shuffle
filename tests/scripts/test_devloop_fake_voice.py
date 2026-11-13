@@ -64,6 +64,7 @@ def test_markers_match_the_app() -> None:
     assert fake_voice.APP_NOTE_LEAD == voice_grok.APP_NOTE_LEAD
     assert fake_voice.CHECK_WORK_TOOL == voice_status.CHECK_WORK_TOOL["name"]
     assert voice_progress.SPOKEN_PROGRESS_NOTE.endswith(fake_voice.PROGRESS_MARKER)
+    assert voice_grok.CHECK_WORK_HANDED_OFF.startswith(fake_voice.HANDED_OFF_MARKER)
     # The commentary GPT Live gets after its greeting trigger is acknowledged.
     assert "Begin the conversation now" in Path(voice_stream.__file__).read_text()
 
@@ -71,7 +72,7 @@ def test_markers_match_the_app() -> None:
 def test_shipped_scenarios_all_load() -> None:
     assert set(Scenarios(SCENARIOS_DIR).load()) >= {
         "default", "relay", "wait-update", "busy", "inactivity", "renew", "error", "drop",
-        "long-work", "long-work-quiet"}
+        "long-work", "long-work-quiet", "check-idle"}
 
 
 @pytest.mark.parametrize("data", [{"steps": [{}]}, {"steps": [{"caller": "a", "handoff": True}]},
@@ -192,10 +193,10 @@ def test_grok_says_a_reply_note_once_not_as_the_handoff_output(fake: FakeVoice) 
 
 def test_grok_check_work_is_answered_from_the_app_and_spoken(tmp_path: Path) -> None:
     """The fake model calls check_work; the app answers with its output, then one response."""
-    from unittest.mock import patch
+    from unittest.mock import AsyncMock, patch
 
     from app.core.voice_grok import GrokVoiceStream
-    from app.core.voice_stream import STATUS_TOLD_S
+    from app.core.voice_models import SUPERGROK_MODEL
 
     (tmp_path / "default.json").write_text('{"steps": [{"check_work": true}, {"wait_speech": 1}]}')
 
@@ -204,11 +205,8 @@ def test_grok_check_work_is_answered_from_the_app_and_spoken(tmp_path: Path) -> 
 
     async def run(fake: FakeVoice):
         async with connect(fake.url + "/v1/realtime?model=grok-voice-latest") as ws:
-            stream = GrokVoiceStream.__new__(GrokVoiceStream)
-            stream.session_id, stream.trace, stream.trace_waiting = "s", None, []
-            stream.closed, stream.restoring, stream.upstream, stream.progress = False, False, ws, None
-            stream.status_told_at = -STATUS_TOLD_S
-            stream.response_active = stream.speech_active = stream.speech_pending = False
+            stream = GrokVoiceStream(AsyncMock(), {"id": "s"}, {"model": SUPERGROK_MODEL, "voice": "eve"}, "k", 5)
+            stream.upstream = ws
             await ws.send(json.dumps({"type": "session.update", "session": {"instructions": "x", "tools": []}}))
             async for raw in ws:
                 event = json.loads(raw)
@@ -218,7 +216,7 @@ def test_grok_check_work_is_answered_from_the_app_and_spoken(tmp_path: Path) -> 
                 elif event["type"] == "response.done" and "call" in locals():
                     break
             with patch("app.db.async_database.run_sync", same_thread), \
-                    patch("app.core.voice_status.work_status", lambda _sid: {}), \
+                    patch("app.core.voice_status.work_status", lambda _sid: {"chat": "idle"}), \
                     patch("app.core.voice_status.status_sentence", lambda _s: "Nothing is running right now."):
                 await stream.answer_check_work(call)
             reader = asyncio.create_task(_drain(ws))
@@ -234,3 +232,52 @@ def test_grok_check_work_is_answered_from_the_app_and_spoken(tmp_path: Path) -> 
     assert speech["text"].endswith("Nothing is running right now.")
     assert sum(e["kind"] == "response.create" for e in log) == 1
     assert not [e for e in log if e["kind"] == "handoff"]  # Looking never starts work.
+
+
+def test_grok_check_work_at_idle_hands_off_once_and_says_on_it(tmp_path: Path, monkeypatch) -> None:
+    """R1: real Grok called check_work for "Check whether the deploy finished."
+    with nothing running. The app's real stream reads the fake's frames, takes
+    the call as the handoff, and the fake (like real Grok) says a short ack."""
+    from unittest.mock import AsyncMock
+
+    from app.core import voice_status, voice_stream
+    from app.core.voice_grok import CHECK_WORK_HANDED_OFF, GrokVoiceStream
+    from app.core.voice_models import SUPERGROK_MODEL
+    from app.db import async_database
+
+    (tmp_path / "default.json").write_text(
+        '{"steps": [{"caller": "Check whether the deploy finished."}, {"check_work": true}]}')
+    handed = []
+
+    async def same_thread(fn, *args):
+        return fn(*args)
+
+    async def delegate(session_id, transcript, on_submitted=None, **kwargs):
+        handed.append(kwargs.get("spoken"))
+        await asyncio.sleep(60)  # The work runs; its reply is not under test.
+        return ""
+
+    monkeypatch.setattr(async_database, "run_sync", same_thread)
+    monkeypatch.setattr(voice_status, "work_status", lambda _sid: {"chat": "idle"})
+    monkeypatch.setattr(voice_status, "status_sentence", lambda _s: "Nothing is running right now.")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+
+    async def run(fake: FakeVoice):
+        async with connect(fake.url + "/v1/realtime?model=grok-voice-latest") as ws:
+            stream = GrokVoiceStream(AsyncMock(), {"id": "s"}, {"model": SUPERGROK_MODEL, "voice": "eve"}, "k", 5)
+            stream.upstream, stream.flush = ws, AsyncMock()
+            await ws.send(json.dumps({"type": "session.update", "session": {"instructions": "x", "tools": []}}))
+            reader = asyncio.create_task(stream.receive_upstream())
+            await _wait_for(fake, "speech", trigger="ack", timeout=10)
+            await asyncio.sleep(0.2)
+            reader.cancel()
+
+    with FakeVoice(tmp_path, log_path=tmp_path / "voice.jsonl") as fake:
+        asyncio.run(run(fake))
+        log = fake.since(0)
+    (output,) = [e for e in log if e["kind"] == "tool_output"]
+    assert output["tool"] == "check_work" and output["text"] == CHECK_WORK_HANDED_OFF
+    assert [e["kind"] for e in log if e["kind"].startswith("check_work")] == ["check_work", "check_work.handed_off"]
+    assert [e["text"] for e in log if e["kind"] == "speech"] == [fake_voice.CHECK_WORK_ACK]
+    assert handed == ["Check whether the deploy finished."]
+    assert not [e for e in log if e["kind"] in ("handoff", "overlap")]

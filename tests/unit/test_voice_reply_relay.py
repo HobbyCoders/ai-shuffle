@@ -16,6 +16,7 @@ import pytest
 from app.core import voice_progress
 from app.core.voice_grok import (
     APP_NOTE_LEAD,
+    CHECK_WORK_NEW_REQUEST,
     HANDOFF_RECEIPT,
     HANDOFF_TOOL,
     GrokVoiceStream,
@@ -283,7 +284,10 @@ async def test_check_work_answers_with_its_output_then_a_response_and_starts_no_
     assert [e.get("item", {}).get("type") or e["type"] for e in sent] == ["function_call_output", "response.create"]
     output = sent[0]["item"]
     assert output["call_id"] == "look-1"
-    assert output["output"] == voice_progress.STATUS_NOTE + "You are working on: check the build."
+    # Work is in flight, so it stays a status read, with the reminder that
+    # something new still goes to delegate_to_chat_agent.
+    assert output["output"] == (voice_progress.STATUS_NOTE + "You are working on: check the build. "
+                                + CHECK_WORK_NEW_REQUEST)
     call.dispatch_when_settled.assert_not_called()
     assert call.delegation_task is None and call.pending_tools == set()
 
@@ -308,11 +312,10 @@ async def test_a_status_handoff_right_after_check_work_is_closed_quietly(monkeyp
 
 @pytest.mark.asyncio
 async def test_check_work_after_the_shortcut_closes_the_call_without_speaking(monkeypatch):
-    import time
     from app.core.voice_stream import STATUS_TOLD_NOTE
     call = GrokVoiceStream(AsyncMock(), {"id": "s"}, {"model": SUPERGROK_MODEL, "voice": "eve"}, "secret", 5)
     call.upstream = Upstream([])
-    call.status_told_at = time.monotonic()
+    call.status_told_turn = call.caller_turn  # The shortcut answered this caller turn.
     await call.answer_check_work("look-2")
     assert items(call) == [{"type": "conversation.item.create", "item": {
         "type": "function_call_output", "call_id": "look-2", "output": STATUS_TOLD_NOTE}}]

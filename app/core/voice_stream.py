@@ -28,7 +28,7 @@ from app.core.voice_prompts import (
     LIVE_CONTEXT_OPENER, LIVE_INSTRUCTIONS, DELEGATION_INSTRUCTIONS, PERSONAPLEX_INSTRUCTIONS, TYPED_MESSAGE_PREFIX,
     VOICE_INSTRUCTIONS, attachment_note,
 )
-from app.core.voice_progress import MAX_NOTE_BYTES, STATUS_NOTE, STEERED, STEERED_NOTE, split_bytes
+from app.core.voice_progress import EPHEMERAL, MAX_NOTE_BYTES, STATUS_NOTE, STEERED, STEERED_NOTE, split_bytes
 
 logger = logging.getLogger(__name__)
 MAX_FRAME_BYTES = 48_000
@@ -77,11 +77,15 @@ APPROVAL_SETTLE_S = 1.5
 # longer when the caller spoke last and the voice has not answered yet.
 PAUSE_QUIET_S = 1.5
 PAUSE_AFTER_CALLER_S = 3.0
-# One status question gets one answer: the app's shortcut (a handoff whose
-# words are a status question) and the voice's own check_work tool each skip
-# a question the other answered this recently.
-STATUS_TOLD_S = 10.0
+# One status question gets one answer: on Grok the app's shortcut (a handoff
+# whose words are a status question) and the voice's own check_work tool each
+# skip a caller turn (``caller_turn``) the other already answered. A new
+# question is a new turn and is always answered, however soon it follows.
 STATUS_TOLD_NOTE = "You just told the caller the current work status; do not repeat it."
+# A handoff for caller words the app already handed off (Grok: check_work at
+# idle was taken as the request): closed quietly, never a second chat turn.
+ALREADY_HANDED_OFF_NOTE = ("These words were already handed off as a request and are being worked on; "
+                           "its reply arrives later as its own note. Say nothing new about it now.")
 MERGED_REQUEST_NOTE = ("This handoff was combined with the request already handed off "
                        "while the user was still speaking; its result will follow.")
 # Call health (#1824). The browser is told how long ago the last microphone
@@ -569,7 +573,13 @@ class VoiceStream:
         self.last_caption_role = None
         self.last_assistant_caption_ids: tuple[str | None, str | None] = (None, None)
         self.progress = None
-        self.status_told_at = -STATUS_TOLD_S
+        # Caller turns heard so far (see caller_turns_from_captions); the turn
+        # a status answer last covered; the turn the settling handoff began
+        # in; and delegated_seq as a check_work conversion left it.
+        self.caller_turn = 0
+        self.status_told_turn = -1
+        self.settling_turn = 0
+        self.converted_seq: int | None = None
         self.transcript_seq = 0
         self.delegated_seq = 0
         self.last_user_caption_at = 0.0
@@ -619,6 +629,13 @@ class VoiceStream:
 
     # How the provider is named in the reconnect log lines.
     provider_label = "GPT Live"
+    # A new run of caller captions is a new caller turn. Grok counts its
+    # committed input instead: its captions can arrive after the tool calls
+    # of the response to them.
+    caller_turns_from_captions = True
+    # The voice has its own status tool (Grok's check_work), so the status
+    # shortcut must not answer a turn that tool already answered.
+    has_check_work = False
     # Sent to a provider session that is being replaced on purpose.
     close_event: dict | None = {"type": "session.close"}
 
@@ -636,7 +653,7 @@ class VoiceStream:
             # replaced, so its result goes to the new session as plain commentary.
             event = {**event, "delegation_id": None}
         try:
-            await self.upstream.send(json.dumps(event))
+            await self.upstream.send(json.dumps({k: v for k, v in event.items() if k != EPHEMERAL}))
         except ConnectionClosed:
             if not self.is_live:
                 raise
@@ -644,8 +661,16 @@ class VoiceStream:
             self.hold(event)
 
     def hold(self, event: dict):
-        """Keep a non-audio event for the next provider session."""
+        """Keep a non-audio event for the next provider session.
+
+        An ephemeral event (a spoken progress line) is dropped: replayed after
+        the reconnect it would say "still working" after the work finished, and
+        ahead of the result that is held with it.
+        """
         if event.get("type") in ("session.input_audio.append", "session.start"):
+            return
+        if event.get(EPHEMERAL):
+            logger.info("Voice %s dropped a progress note that could not be sent", self.session_id)
             return
         if len(self.held) >= MAX_HELD_EVENTS:
             self.held.popleft()
@@ -826,14 +851,15 @@ class VoiceStream:
             return entry["start_ms"] >= first["start_ms"]
         return entry.get("seq", 0) > first.get("seq", 0)
 
-    async def answer_status(self, delegation_id: str | None) -> None:
+    async def answer_status(self, delegation_id: str | None, turn: int | None = None) -> None:
         """Answer "what are you working on" from the app's task state; no chat turn."""
         from app.core import voice_status
+        if turn is not None:
+            self.status_told_turn = turn
         status = await run_sync(voice_status.work_status, self.session_id)
         sentence = voice_status.status_sentence(status)
         if self.progress is not None:
             sentence = self.progress.with_last_reply(sentence, status)
-        self.status_told_at = time.monotonic()
         for content in commentary_chunks(STATUS_NOTE + sentence, self.append_bytes):
             await self.send({"type": "session.commentary.append", "delegation_id": delegation_id, "content": content})
 
@@ -892,6 +918,8 @@ class VoiceStream:
             self.last_heard_at = time.monotonic()
             self.heard_this_session = True
             self.unheard_voiced_s = 0.0
+            if self.caller_turns_from_captions and self.last_caption_role != "user":
+                self.caller_turn += 1
         self.last_caption_role = role
         self.transcript_seq += 1
         self.transcript.append({"role": role, "text": delta, "offset_ms": offset, "start_ms": start_ms,
@@ -922,7 +950,10 @@ class VoiceStream:
         if len(self.pending[role]) >= 2000:
             await self.flush()
 
-    async def run_delegation(self, delegation_id: str, entries=None, *, file_note: str = "", uploads: dict | None = None):
+    async def run_delegation(self, delegation_id: str | None, entries=None, *, file_note: str = "",
+                             uploads: dict | None = None, request_key: str | None = None):
+        """Hand the caller's words to the chat agent. ``request_key`` names the
+        request for the forwarded command id when it has no ``delegation_id``."""
         try:
             # Keep the read loop free. Group partial captions into readable
             # turns; the Live delegation event itself carries no task text.
@@ -948,7 +979,7 @@ class VoiceStream:
             spoken = " ".join(e["text"].strip() for e in conversation
                               if e["role"] == "user" and not is_noise(e["text"])).strip().removeprefix(TYPED_MESSAGE_PREFIX)
             from app.core.voice_remote import command_id
-            command = command_id(self.call_key, delegation_id)
+            command = command_id(self.call_key, request_key or delegation_id)
             if self.progress is not None:
                 followed = []
 
@@ -997,9 +1028,11 @@ class VoiceStream:
             await self.settle_speech()
         finally:
             ids, self.settling = self.settling or [], None
+        turn = self.settling_turn
         # Capture only speech since the previous handoff. The chat already
         # owns the earlier history.
-        entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
+        before = self.delegated_seq
+        entries = [e for e in self.transcript if e.get("seq", 0) > before]
         self.delegated_seq = self.transcript_seq
         for extra in ids[1:]:
             try:
@@ -1016,17 +1049,23 @@ class VoiceStream:
                 await self.send({"type": "session.thinking.append", "delegation_id": ids[0],
                                  "content": APPROVAL_ANSWER_NOTE})
                 return
+        if self.converted_seq is not None and self.converted_seq == before and not any(
+                e["role"] == "user" and not is_noise(e["text"]) for e in entries):
+            # check_work already handed these words off (Grok): one request, one turn.
+            await self.send({"type": "session.thinking.append", "delegation_id": ids[0],
+                             "content": ALREADY_HANDED_OFF_NOTE})
+            return
         if self.progress is not None:
             from app.core.voice_status import is_status_question
             spoken = "".join(e["text"] for e in entries if e["role"] == "user")
             if is_status_question(spoken):
                 # A quick status question reads the app's task state directly.
-                if time.monotonic() - self.status_told_at < STATUS_TOLD_S:
-                    # check_work just answered this question: close the handoff quietly.
+                if self.has_check_work and self.status_told_turn == turn:
+                    # check_work answered this caller turn: close the handoff quietly.
                     await self.send({"type": "session.thinking.append", "delegation_id": ids[0],
                                      "content": STATUS_TOLD_NOTE})
                     return
-                await self.answer_status(ids[0])
+                await self.answer_status(ids[0], turn)
                 return
         await self.run_delegation(ids[0], entries)
 
@@ -1102,7 +1141,7 @@ class VoiceStream:
                         await self.send({"type": "session.commentary.append", "delegation_id": did,
                                          "content": "Too much work is already running to take this request. Ask the user to repeat it once the current work finishes."})
                     else:
-                        self.settling = [did]
+                        self.settling, self.settling_turn = [did], self.caller_turn
                         self.delegation_task = asyncio.create_task(self.dispatch_when_settled())
                         _workers.add(self.delegation_task)
                         self.delegation_task.add_done_callback(_workers.discard)

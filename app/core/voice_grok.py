@@ -19,7 +19,7 @@ from app.core.voice_progress import NOTE_PREFIX, SPOKEN_NOTE_PREFIX, STATUS_NOTE
 from app.core.voice_prompts import LIVE_INSTRUCTIONS
 from app.core.voice_status import CHECK_WORK_TOOL
 from app.core.voice_stream import (
-    RECONNECT_ATTEMPT_S, STATUS_TOLD_NOTE, STATUS_TOLD_S, VoiceStream, connect, renew_subscription_login,
+    RECONNECT_ATTEMPT_S, STATUS_TOLD_NOTE, VoiceStream, _workers, connect, is_noise, renew_subscription_login,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,22 @@ HANDOFF_RECEIPT = "Received. The answer comes as a separate note from the app; t
 # with response.create; a system role is not documented), so its lead says it
 # is the app's note and not the caller's words.
 APP_NOTE_LEAD = "[Note from the app, not said by the caller] "
+# check_work at idle with new caller words that are not a status question: the
+# voice reached for the status tool for a fresh request ("check whether the
+# deploy finished"), so the app hands those words off itself and answers the
+# call with this (owner's tests on real Grok: a short "on it", no second handoff).
+CHECK_WORK_HANDED_OFF = ("Nothing was running, so this is a new request and it is now handed off to be worked on; "
+                         "do not call delegate_to_chat_agent for it. Tell the caller in a few words that you're on it. "
+                         "The reply arrives later as its own note.")
+# Appended to a check_work answer while work is in flight.
+CHECK_WORK_NEW_REQUEST = ("If the caller asked for something new rather than about this work, hand it off with "
+                          "delegate_to_chat_agent.")
+# Appended while the caller's latest words are being handed off already.
+CHECK_WORK_JUST_HANDED_OFF = ("The caller's latest request was just handed off and is starting; do not call "
+                              "delegate_to_chat_agent for it again.")
+# How long check_work at idle waits for the caller's words to be transcribed
+# when none have arrived: xAI can send the transcript after the tool call.
+CHECK_WORK_WORDS_WAIT_S = 1.0
 # PCM16 mono at 24 kHz: bytes of output audio per millisecond, for the trace.
 AUDIO_BYTES_PER_MS = 48
 
@@ -84,6 +100,8 @@ class GrokVoiceStream(VoiceStream):
     # piece started a reply from part of the text and a second response told
     # it all again (#732). The bound on one note is NOTE_MAX_TOTAL_BYTES.
     append_bytes = None
+    caller_turns_from_captions = False  # Counted on input_audio_buffer.committed.
+    has_check_work = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -132,19 +150,51 @@ class GrokVoiceStream(VoiceStream):
                         trace["interrupted"])
             self.trace = None
 
-    async def answer_check_work(self, call_id: str) -> None:
-        """Answer the voice's read-only check_work call; it never starts work."""
+    def work_in_flight(self, status: dict) -> bool:
+        """Something runs or waits for this call: a status read, not a new request."""
+        from app.core import voice_status
+        task = self.delegation_task
+        return bool(voice_status.has_news(status) or self.pending_tools or self.settling is not None
+                    or (task is not None and not task.done())
+                    or (self.progress is not None and self.progress.has_open_handoff()))
+
+    def words_since_handoff(self) -> str:
+        """The caller's words not yet handed off (approval answers excluded)."""
+        return " ".join(e["text"].strip() for e in self.transcript
+                        if e.get("seq", 0) > self.delegated_seq and e["role"] == "user"
+                        and e.get("seq") not in self.approval_consumed and not is_noise(e["text"])).strip()
+
+    async def awaited_words(self) -> str:
+        """The caller's words since the last handoff, once they have settled."""
+        await self.settle_speech()
+        deadline = time.monotonic() + CHECK_WORK_WORDS_WAIT_S
+        while True:
+            words = self.words_since_handoff()
+            if words or self.settling is not None or time.monotonic() >= deadline:
+                return words
+            await asyncio.sleep(0.05)
+
+    async def answer_check_work(self, call_id: str, turn: int | None = None, upstream=None) -> None:
+        """Answer the voice's check_work call.
+
+        A status read, except at idle when the caller's newest words are a new
+        request rather than a status question: then the call is the handoff
+        (CHECK_WORK_HANDED_OFF). ``turn`` is the caller turn the call answers
+        and ``upstream`` the provider socket it came on; it writes to no other.
+        """
         from app.core import voice_status
         from app.db.async_database import run_sync
-        if time.monotonic() - self.status_told_at < STATUS_TOLD_S:
-            # The app's status shortcut just answered: close the call, say nothing new.
+        turn = self.caller_turn if turn is None else turn
+        upstream = self.upstream if upstream is None else upstream
+        if self.status_told_turn == turn:
+            # The app's status shortcut answered this caller turn: close the call quietly.
             try:
-                await self.wire({"type": "conversation.item.create", "item": {
-                    "type": "function_call_output", "call_id": call_id, "output": STATUS_TOLD_NOTE}})
+                await self.wire(self.call_output(call_id, STATUS_TOLD_NOTE), upstream)
             except (ConnectionClosed, UpstreamGone):
                 pass
             return
-        self.status_told_at = time.monotonic()
+        told_before, self.status_told_turn = self.status_told_turn, turn
+        status = None
         try:
             status = await run_sync(voice_status.work_status, self.session_id)
             sentence = voice_status.status_sentence(status)
@@ -154,13 +204,56 @@ class GrokVoiceStream(VoiceStream):
         except Exception:  # noqa: BLE001 - a failed read must not end the call
             logger.warning("Voice %s: check_work could not read the work status", self.session_id, exc_info=True)
             output = "The work status could not be read just now. Say what was last confirmed."
+        if status is not None and not self.work_in_flight(status) and not self.approval_waiting() \
+                and len(_workers) < 8:
+            words = await self.awaited_words()
+            if words and not voice_status.is_status_question(words) and not self.work_in_flight(status) \
+                    and self.upstream is upstream:
+                self.status_told_turn = told_before  # Not a status answer.
+                await self.convert_check_work(call_id, upstream)
+                return
+        # A handoff for this caller turn (both tools in one response) is
+        # settling or has just started: the voice must not hand it off again.
+        just_handed_off = self.settling is not None or (
+            self.delegation_task is not None and self.settling_turn == turn)
+        if status is not None and just_handed_off:
+            if not voice_status.is_status_question(self.words_since_handoff()):
+                output += " " + CHECK_WORK_JUST_HANDED_OFF
+        elif status is not None and self.work_in_flight(status):
+            output += " " + CHECK_WORK_NEW_REQUEST
         try:
-            await self.wire({"type": "conversation.item.create", "item": {
-                "type": "function_call_output", "call_id": call_id, "output": output}})
+            await self.wire(self.call_output(call_id, output), upstream)
             logger.info("Voice trace %s: check_work answered bytes=%d", self.session_id, len(output.encode("utf-8")))
-            await self.request_speech()
+            await self.request_speech(upstream)
         except (ConnectionClosed, UpstreamGone):
             pass  # The session is being replaced; its call ids went with it.
+
+    async def convert_check_work(self, call_id: str, upstream) -> None:
+        """Hand off the caller's words for a check_work call made at idle.
+
+        The same delegation the handoff tool starts, on this call's path
+        (a chat another worker owns included). Its notes arrive with no call
+        id: the check_work call is answered here, so nothing waits on it.
+        """
+        entries = [e for e in self.transcript
+                   if e.get("seq", 0) > self.delegated_seq and e.get("seq") not in self.approval_consumed]
+        self.delegated_seq = self.converted_seq = self.transcript_seq
+        logger.info("Voice trace %s: check_work at idle taken as a new request", self.session_id)
+        try:
+            await self.wire(self.call_output(call_id, CHECK_WORK_HANDED_OFF), upstream)
+            await self.request_speech(upstream)
+        except (ConnectionClosed, UpstreamGone):
+            pass  # The request still goes; its reply is held for the next session.
+        finally:
+            self.delegation_task = asyncio.create_task(
+                self.run_delegation(None, entries, request_key="check-" + call_id))
+            _workers.add(self.delegation_task)
+            self.delegation_task.add_done_callback(_workers.discard)
+
+    @staticmethod
+    def call_output(call_id: str, output: str) -> dict:
+        return {"type": "conversation.item.create", "item": {
+            "type": "function_call_output", "call_id": call_id, "output": output}}
 
     async def cancel_speech_resume(self):
         if self.speech_resume_task is not None:
@@ -192,12 +285,16 @@ class GrokVoiceStream(VoiceStream):
         return (not self.speech_active and not self.response_active and not self.speech_pending
                 and super().quiet_for_renewal())
 
-    async def request_speech(self):
+    async def request_speech(self, upstream=None):
+        """Ask for one response. ``upstream``: only on that provider socket; a
+        task begun on a replaced session must not touch the new one's state."""
+        if upstream is not None and self.upstream is not upstream:
+            raise UpstreamGone()
         self.speech_pending = True
         if not self.response_active and not self.speech_active:
             self.speech_pending = False
             self.response_active = True
-            await self.wire({"type": "response.create"})
+            await self.wire({"type": "response.create"}, upstream)
 
     # This is the shared conversational/delegating lifecycle, not the fal path.
     @property
@@ -222,11 +319,13 @@ class GrokVoiceStream(VoiceStream):
             return "expired" if aged else "closed"
         return reason
 
-    async def wire(self, event):
+    async def wire(self, event, bound=None):
+        """Write one event to the provider. ``bound``: the socket the caller
+        started on; when the session was replaced since, nothing is written."""
         if self.closed:
             return
         upstream = self.upstream
-        if upstream is None:
+        if upstream is None or (bound is not None and upstream is not bound):
             raise UpstreamGone()  # send() holds the event for the next session.
         await upstream.send(json.dumps(event))
 
@@ -266,11 +365,13 @@ class GrokVoiceStream(VoiceStream):
             # A note to speak: every open handoff gets its receipt first (the
             # documented order is output, then response.create), then the note
             # as a user message with the app's lead, then one response.
+            # A snapshot: a handoff the reader opens during these awaits keeps
+            # its place and gets its receipt with a later note.
             closed = sorted(self.pending_tools, key=lambda call: call != did)
             for call in closed:
                 await self.wire({"type": "conversation.item.create", "item": {
                     "type": "function_call_output", "call_id": call, "output": HANDOFF_RECEIPT}})
-            self.pending_tools.clear()
+                self.pending_tools.discard(call)
             note = APP_NOTE_LEAD + content
             await self.wire({"type": "conversation.item.create", "item": {
                 "type": "message", "role": "user",
@@ -410,6 +511,7 @@ class GrokVoiceStream(VoiceStream):
             elif kind == "input_audio_buffer.speech_stopped":
                 self.speech_active = False
             elif kind == "input_audio_buffer.committed":
+                self.caller_turn += 1  # One caller turn: the response and tool calls to it follow.
                 if self.speech_pending and not self.response_active and not self.speech_active:
                     await self.cancel_speech_resume()
                     self.speech_resume_task = asyncio.create_task(self.resume_pending_speech())
@@ -422,7 +524,8 @@ class GrokVoiceStream(VoiceStream):
                 # Read-only: answered from the app's own state, never a chat turn.
                 call_id = event.get("call_id")
                 if isinstance(call_id, str) and call_id:
-                    task = asyncio.create_task(self.answer_check_work(call_id))
+                    # Bound to this caller turn and this socket (see answer_check_work).
+                    task = asyncio.create_task(self.answer_check_work(call_id, self.caller_turn, self.upstream))
                     self.check_tasks.add(task)
                     task.add_done_callback(self.check_tasks.discard)
             elif kind == "error":
