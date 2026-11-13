@@ -175,8 +175,10 @@ def newest_utterance(entries) -> str:
     for e in reversed(entries):
         if e["role"] == "user":
             parts.append(e["text"])
-        elif e["text"].strip() and not is_noise("".join(reversed(parts))):
-            break
+        elif e["text"].strip():
+            if not is_noise("".join(reversed(parts))):
+                break
+            parts = []  # Only an "um" since the voice spoke: not part of the words before it.
     text = "".join(reversed(parts)).strip()
     return "" if is_noise(text) else text
 

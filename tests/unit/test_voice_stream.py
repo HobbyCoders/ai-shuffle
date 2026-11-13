@@ -121,7 +121,10 @@ def test_newest_utterance_joins_captions_as_they_came():
     said = lambda role, text: {"role": role, "text": text}  # noqa: E731
     assert voice_stream.newest_utterance([said("user", "What"), said("user", "'s running?")]) == "What's running?"
     assert voice_stream.newest_utterance(
-        [said("user", "Check the deploy."), said("assistant", "Sure."), said("user", " Um.")]) == "Check the deploy. Um."
+        [said("user", "Check the deploy."), said("assistant", "Sure."), said("user", " Um.")]) == "Check the deploy."
+    # Review round 5: a trailing "um" must not turn a status question into work.
+    assert voice_stream.newest_utterance(
+        [said("user", "Is it done yet?"), said("assistant", "Let me look."), said("user", " Um.")]) == "Is it done yet?"
     assert voice_stream.newest_utterance([said("user", "Hmm.")]) == ""
     assert voice_stream.newest_utterance(
         [said("user", "Is it done yet?"), said("assistant", "Let me look.")]) == "Is it done yet?"
