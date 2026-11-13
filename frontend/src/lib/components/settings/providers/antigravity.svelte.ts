@@ -25,6 +25,10 @@ class AntigravityState {
 	/** What "Try again" repeats after `error`: the failed action, else a status read. */
 	retry: (() => Promise<void>) | null = null;
 	private poll: ReturnType<typeof setTimeout> | null = null;
+	/** Bumped by every action and every poll scheduled: a status read that
+	 * started before the latest one is stale when it lands and is dropped, so
+	 * it can neither undo a newer error nor start a second polling chain. */
+	private epoch = 0;
 
 	/** Install job running on the worker. */
 	get installing(): boolean {
@@ -42,13 +46,16 @@ class AntigravityState {
 	async load(force = false): Promise<void> {
 		if (this.loading || (!force && this.meta && this.status)) return;
 		this.loading = true;
+		const seen = this.epoch;
 		try {
 			const [meta, status] = await Promise.all([this.meta ?? getAntigravityMeta(), getAntigravityStatus()]);
 			this.meta = meta;
+			if (seen !== this.epoch) return; // an action or poll since owns the status
 			this.status = status;
 			this.error = null;
 			if (status.install?.state === 'running' && !this.poll) this.schedule();
 		} catch (e) {
+			if (seen !== this.epoch) return;
 			this.error = getErrorMessage(e, 'Could not read the Antigravity status');
 			this.retry = () => this.load(true);
 		} finally {
@@ -61,11 +68,15 @@ class AntigravityState {
 		if (this.busy) return;
 		this.starting = true;
 		this.error = null;
+		this.cancelPoll();
+		const mine = ++this.epoch;
 		try {
 			const install = await (kind === 'update' ? updateAntigravity() : installAntigravity());
+			if (mine !== this.epoch) return;
 			if (this.status) this.status = { ...this.status, install };
 			this.schedule();
 		} catch (e) {
+			if (mine !== this.epoch) return;
 			this.error = getErrorMessage(e, kind === 'update'
 				? 'Could not check for an Antigravity update' : 'Could not start the Antigravity install');
 			this.retry = () => this.install(kind);
@@ -74,21 +85,29 @@ class AntigravityState {
 		}
 	}
 
-	private schedule(): void {
+	private cancelPoll(): void {
 		if (this.poll) clearTimeout(this.poll);
+		this.poll = null;
+	}
+
+	private schedule(): void {
+		this.cancelPoll();
+		const mine = ++this.epoch;
 		this.poll = setTimeout(async () => {
 			try {
 				let status = await getAntigravityStatus();
-				if (status.install?.state !== 'running') {
+				if (mine === this.epoch && status.install?.state !== 'running') {
 					// That read may have timed the old binary's --version just
 					// before the job switched copies: read once more so Version
 					// matches the result message.
 					status = await getAntigravityStatus();
 				}
+				if (mine !== this.epoch) return; // superseded: a newer chain or action owns it
 				this.status = status;
 				this.poll = null;
 				if (status.install?.state === 'running') this.schedule();
 			} catch (e) {
+				if (mine !== this.epoch) return;
 				this.poll = null;
 				this.error = getErrorMessage(e, 'Could not read the Antigravity status');
 				this.retry = () => this.load(true);

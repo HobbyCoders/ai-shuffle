@@ -16,7 +16,9 @@ let current: AntigravityInstallStatus;
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	(antigravity as unknown as { cancelPoll(): void }).cancelPoll();
 	antigravity.status = null; antigravity.meta = null; antigravity.error = null; antigravity.retry = null;
+	antigravity.starting = false; antigravity.loading = false;
 	current = { ...installed };
 	mocks.get.mockImplementation(async (path: string) => path.endsWith('/status') ? current : meta);
 });
@@ -115,4 +117,45 @@ it('sends one request for a double click, and Try again repeats a failed check',
 	await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
 	expect(mocks.post).toHaveBeenLastCalledWith('/antigravity/update');
 	await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+});
+
+function deferred<T>() {
+	let resolve!: (v: T) => void, reject!: (e: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
+}
+
+it('keeps a failed check\'s error when an older status read lands after it', async () => {
+	antigravity.meta = meta as never; antigravity.status = { ...installed };
+	const slow = deferred<AntigravityInstallStatus>();
+	mocks.get.mockImplementation((path: string) => path.endsWith('/status') ? slow.promise : Promise.resolve(meta));
+	mocks.post.mockRejectedValue(new Error('Could not reach the worker'));
+	render(AntigravityInstall); // its forced re-read stays pending
+	await fireEvent.click(await screen.findByRole('button', { name: 'Check for update' }));
+	expect((await screen.findByRole('alert')).textContent).toBe('Could not reach the worker');
+	slow.resolve({ ...installed });
+	await new Promise((r) => setTimeout(r, 0));
+	expect(screen.getByRole('alert').textContent).toBe('Could not reach the worker');
+	expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+});
+
+it('runs one polling chain when a poll in flight is overtaken by a refresh and a new check', async () => {
+	vi.useFakeTimers();
+	antigravity.meta = meta as never; antigravity.status = { ...installed };
+	const running: AntigravityInstallJob = { kind: 'update', state: 'running', version: null, error: null, message: null };
+	const done = { ...installed, install: { ...running, state: 'succeeded', message: 'Antigravity is up to date (1.5.6).' } };
+	mocks.post.mockResolvedValue(running);
+	const inFlight = deferred<AntigravityInstallStatus>();
+	mocks.get.mockImplementationOnce(() => inFlight.promise);
+	await antigravity.install('update');
+	await vi.advanceTimersByTimeAsync(2000); // the poll's read is now in flight
+	mocks.get.mockImplementation(async (path: string) => path.endsWith('/status') ? done : meta);
+	await antigravity.load(true); // sees the job finished: Check is enabled again
+	await antigravity.install('update'); // timer A
+	inFlight.resolve({ ...installed, install: running }); // the old poll lands
+	await vi.advanceTimersByTimeAsync(0);
+	mocks.get.mockClear();
+	mocks.get.mockImplementation(async (path: string) => path.endsWith('/status') ? { ...installed, install: running } : meta);
+	await vi.advanceTimersByTimeAsync(2100);
+	expect(mocks.get).toHaveBeenCalledTimes(1); // only timer A polled
 });
