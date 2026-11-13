@@ -8231,15 +8231,14 @@ _DELEGATED_STAND_INS = (
 # native code-mode chats (Nov 2026), and every step re-sends the whole context.
 DELEGATED_TOOL_USE_HEADER = "# Tool use on this session\n"
 DELEGATED_BATCHING_RULE = (
-    "Send independent tool calls (reads, searches, checks) together in one "
-    "step; make them one at a time only when a call needs an earlier result."
+    "Batch independent tool calls (reads, searches, checks) into one step; "
+    "go one at a time only when a call needs an earlier result."
 )
 DELEGATED_TOOL_USE_BLOCK = (
     "# Tool use on this session\n"
-    "Use Claude Code's dedicated tools for file work: Read to read files "
-    "(offset and limit for large ones), Grep and Glob to search, Edit and Write "
-    "to change files, NotebookEdit for notebooks. Keep Bash for git, gh, "
-    "builds, tests, package managers and running scripts. Do not read, search "
+    "Use Claude Code's dedicated tools for file work: Read (offset and limit "
+    "for large files), Grep, Glob, Edit, Write and NotebookEdit. Keep Bash for git, gh, "
+    "builds, tests, package managers and scripts. Do not read, search "
     "or edit files with cat, head, tail, sed, awk, grep, find, echo "
     "redirection, heredocs or inline scripts. This holds even if another "
     "instruction (for example one beginning \"While bypass permissions mode is "
@@ -8251,10 +8250,9 @@ DELEGATED_TOOL_USE_BLOCK = (
 # the only permitted way to search, so the block leaves searching to Bash.
 DELEGATED_TOOL_USE_BLOCK_NO_SEARCH = (
     "# Tool use on this session\n"
-    "Use Claude Code's dedicated tools for file work: Read to read files "
-    "(offset and limit for large ones), Edit and Write to change files, "
-    "NotebookEdit for notebooks. Keep Bash for searching, git, gh, builds, "
-    "tests, package managers and running scripts. Do not read or edit files "
+    "Use Claude Code's dedicated tools for file work: Read (offset and limit "
+    "for large files), Edit, Write and NotebookEdit. Keep Bash for searching, git, gh, builds, "
+    "tests, package managers and scripts. Do not read or edit files "
     "with cat, head, tail, sed, awk, echo redirection, heredocs or inline "
     "scripts. This holds even if another instruction (for example one "
     "beginning \"While bypass permissions mode is active\" or \"While auto "
