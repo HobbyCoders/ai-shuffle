@@ -441,10 +441,11 @@ def _tool_names(request) -> set[str]:
 
 
 @pytest.mark.asyncio
-async def test_chat_lane_keeps_every_permitted_tool_loaded(monkeypatch, tmp_path):
-    """The chat lane runs JSON tool calls and its ceiling leaves ToolSearch
-    out, so a deferred tool there could never be loaded: nothing beyond the
-    deferred servers may be deferred (review of the core-only eager tier)."""
+async def test_chat_lane_defers_only_what_its_toolsearch_can_load(monkeypatch, tmp_path):
+    """The chat lane runs JSON tool calls (never code mode). ToolSearch is on
+    its ceiling, so the large servers defer there, but every deferred tool the
+    ceiling permits must stay loadable through that ToolSearch, and nothing
+    outside the ceiling may be revealed (review of the core-only eager tier)."""
     from app.core.session_modes import CHAT_MODE_DENIED_TOOLS, CHAT_MODE_TOOL_SURFACE
 
     engine, request, _reported = await _first_request(
@@ -452,14 +453,20 @@ async def test_chat_lane_keeps_every_permitted_tool_loaded(monkeypatch, tmp_path
         tool_allowlist=list(CHAT_MODE_TOOL_SURFACE),
         disallowed_tools=list(CHAT_MODE_DENIED_TOOLS),
     )
-    assert not engine._tool_permitted("ToolSearch")
+    assert engine._tool_permitted("ToolSearch")
+    assert not engine._tool_permitted("run_python")
     sent = _tool_names(request)
-    for name in ("Read", "WebSearch", "WebFetch", "Remember", "Recall", "Forget",
-                 "mcp__chat-access__RequestChatAccess", "mcp__chat-access__ChatResources"):
+    assert "ToolSearch" in sent and "run_python" not in sent
+    for name in ("Read", "WebSearch", "WebFetch", "Remember", "Recall"):
         assert name in sent, (name, sorted(sent))
-    unreachable = {s.name for s in engine.registry.deferred_tools()
-                   if engine._tool_wired(s.name)}
-    assert not unreachable, sorted(unreachable)
+    assert not [n for n in sent if n.startswith(("mcp__app-config__", "mcp__ai-tools__"))]
+    reachable = {s.name for s in engine.registry.deferred_tools() if engine._tool_wired(s.name)}
+    assert "mcp__chat-access__RequestChatAccess" in reachable | sent
+    for name in sorted(reachable):
+        out = await engine.registry.dispatch("ToolSearch", {"query": f"select:{name}"}, engine.ctx)
+        assert not out.is_error, (name, out.text)
+        assert name in {t["name"] for t in engine._tools_api()}, name
+    assert "run_python" not in {t["name"] for t in engine._tools_api()}
 
 
 @pytest.mark.asyncio
