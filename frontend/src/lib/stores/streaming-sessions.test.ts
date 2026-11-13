@@ -36,6 +36,26 @@ describe('seedStreamingFromList (#1527)', () => {
 		expect([...mod.streamingSessions.current.keys()]).toEqual(['b']);
 	});
 
+	it('never lets a slower list undo a live change that arrived before the snapshot', () => {
+		// The socket broadcasts to a connection before it sends its snapshot, so a
+		// live change can land while an older list request is still in flight.
+		const live = (id: string, running: boolean) =>
+			mod.streamingSessions.update((m) => {
+				const next = new Map(m);
+				if (running) next.set(id, { projectId: 'p1', worktreeId: null });
+				else next.delete(id);
+				return next;
+			}, id);
+		live('a', false); // a finished
+		live('b', true); // b started
+		mod.seedStreamingFromList([row('a', true), row('b', false), row('c', true)]);
+		expect([...mod.streamingSessions.current.keys()].sort()).toEqual(['b', 'c']);
+
+		// The snapshot is the whole truth again.
+		mod.streamingSessions.set(new Map([['a', { projectId: null, worktreeId: null }]]));
+		expect([...mod.streamingSessions.current.keys()]).toEqual(['a']);
+	});
+
 	it('does not notify when the list agrees with the map', () => {
 		mod.seedStreamingFromList([row('a', true)]);
 		const seen: unknown[] = [];
