@@ -20,9 +20,20 @@
 	const peers = $derived(status?.workers_requiring_update ?? []);
 	const sourceHint = $derived(status?.source === 'path' ? "Google's agent, found on this worker's PATH"
 		: status?.source === 'override' ? "Google's agent, chosen by AI_SHUFFLE_ANTIGRAVITY_BIN"
-		: "Google's agent on this worker");
+		: "Google's agent, installed by AI Shuffle");
+	const unsupported = $derived(status?.can_install === false);
 
-	onMount(() => { if (isAdmin) void antigravity.load(); });
+	// Always re-read on open and when the tab comes back: a job may have run
+	// from another tab, device or the startup check in the meantime.
+	function refresh() {
+		if (isAdmin && document.visibilityState === 'visible') void antigravity.load(true);
+	}
+
+	onMount(() => {
+		refresh();
+		document.addEventListener('visibilitychange', refresh);
+		return () => document.removeEventListener('visibilitychange', refresh);
+	});
 </script>
 
 <RowGroup title="Antigravity agent" id="providers-antigravity-agent">
@@ -34,36 +45,40 @@
 		<SettingRow label="Version" hint={sourceHint}>
 			<ValueText mono status="ok" value={status.version ?? 'Installed'} />
 		</SettingRow>
-		<SettingRow label="Updates" hint="Asks Google for a newer release and installs it">
-			<button type="button" class="st-btn" disabled={antigravity.installing || status.can_install === false}
-				aria-busy={antigravity.installing && job?.kind === 'update'}
-				onclick={() => antigravity.install('update')}>{antigravity.installing ? 'Checking' : 'Check for update'}</button>
+		<SettingRow label="Updates" hint={unsupported ? 'No Google build for this platform; update this agy yourself'
+			: 'Asks Google for a newer release and installs it'}>
+			<button type="button" class="st-btn" disabled={antigravity.busy || unsupported}
+				aria-describedby={unsupported ? 'antigravity-unsupported' : undefined}
+				aria-busy={antigravity.busy}
+				onclick={() => antigravity.install('update')}>{antigravity.busy ? 'Checking' : 'Check for update'}</button>
 		</SettingRow>
-	{:else if antigravity.installing}
+	{:else if antigravity.busy}
 		<SettingRow label="Version" hint="Downloading Google's release">
 			<button type="button" class="st-btn" disabled aria-busy="true">Installing</button>
 		</SettingRow>
 	{:else}
-		<SettingRow label="Not installed" hint="Downloads Google's agent; nothing is bundled">
-			<button type="button" class="st-btn primary" disabled={status.can_install === false}
+		<SettingRow label="Not installed" hint={unsupported ? 'No Google build for this platform'
+			: "Downloads Google's agent; nothing is bundled"}>
+			<button type="button" class="st-btn primary" disabled={unsupported}
+				aria-describedby={unsupported ? 'antigravity-unsupported' : undefined}
 				onclick={() => antigravity.install()}>Install Antigravity</button>
 		</SettingRow>
 	{/if}
 </RowGroup>
-{#if status && !status.installed && status.can_install === false && status.unsupported_message}
-	<p class="pv-msg">{status.unsupported_message} Install Google's Antigravity CLI yourself so <code>agy</code> is on PATH.</p>
+{#if status && unsupported && status.unsupported_message}
+	<p class="pv-msg" id="antigravity-unsupported">{status.unsupported_message}{#if !status.installed}
+		Install Google's Antigravity CLI yourself so <code>agy</code> is on PATH.{/if}</p>
 {/if}
-{#if antigravity.installing}
+{#if antigravity.error}
+	<p class="pv-msg err" role="alert">{antigravity.error}</p>
+	<button type="button" class="st-btn" onclick={() => antigravity.retry?.()}>Try again</button>
+{:else if antigravity.installing}
 	<p class="pv-msg" role="status">{job?.kind === 'update' ? 'Checking Google for a newer Antigravity' : 'Installing Antigravity'}</p>
-{:else if job?.state === 'failed' && (job.message || job.error)}
+{:else if job?.state === 'failed' && (job.message || job.error) && !(unsupported && status?.unsupported_message)}
 	<p class="pv-msg err" role="alert">{job.message || job.error}</p>
 {:else if job?.state === 'succeeded' && job.message && status?.installed}
 	<p class="pv-msg" role="status">{job.message}</p>
 {/if}
 {#if peers.length}
 	<p class="pv-msg err" role="alert">Update these workers before adding an Antigravity provider: {peers.join(', ')}.</p>
-{/if}
-{#if antigravity.error}
-	<p class="pv-msg err" role="alert">{antigravity.error}</p>
-	<button type="button" class="st-btn" onclick={() => antigravity.load(true)}>Check again</button>
 {/if}

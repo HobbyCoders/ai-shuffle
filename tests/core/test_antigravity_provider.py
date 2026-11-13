@@ -1471,6 +1471,51 @@ async def test_with_the_override_set_an_update_prunes_nothing(agy_root, monkeypa
     assert ag.locate_binary() == (str(pinned), "override")
 
 
+async def test_a_slow_version_check_still_knows_our_own_copy(agy_root, monkeypatch):
+    """--version timing out on the app's copy: the folder names the version, so
+    a check with nothing new downloads nothing."""
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "x86_64"))
+    exe = agy_root / "cli" / "1.5.7" / "agy"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("x")
+    exe.chmod(0o755)
+    monkeypatch.setattr(ag, "locate_binary", lambda: (str(exe), "app"))
+
+    async def no_version(_binary):
+        return None
+    monkeypatch.setattr(ag, "binary_version", no_version)
+
+    class Resp:
+        def raise_for_status(self):
+            return self
+
+        def json(self):
+            return {"version": "1.5.7", "url": "https://storage.googleapis.com/x/agy.tar.gz", "sha512": "ab"}
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            return Resp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+
+    async def no_download(*a, **k):
+        raise AssertionError("downloaded again")
+    monkeypatch.setattr(ag, "_download", no_download)
+    job = ag.InstallJob(kind="update", state="running")
+    await ag._run_install(job, "linux_amd64")
+    assert (job.state, job.message) == ("succeeded", "Antigravity is up to date (1.5.7).")
+
+
 @pytest.mark.parametrize("installed,latest,current", [
     ("1.5.7", "1.5.7", True), ("1.5.8", "1.5.7", True), ("1.10.0", "1.9.9", True),
     ("1.5.6", "1.5.7", False), ("1.5.7-rc1", "1.5.7", False), (None, "1.5.7", False),

@@ -16,7 +16,7 @@ let current: AntigravityInstallStatus;
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	antigravity.status = null; antigravity.meta = null; antigravity.error = null;
+	antigravity.status = null; antigravity.meta = null; antigravity.error = null; antigravity.retry = null;
 	current = { ...installed };
 	mocks.get.mockImplementation(async (path: string) => path.endsWith('/status') ? current : meta);
 });
@@ -69,4 +69,50 @@ it('says why up front on a worker Google publishes no build for', async () => {
 	render(AntigravityInstall);
 	expect(await screen.findByText((text) => text.startsWith(message))).toBeTruthy();
 	expect((screen.getByRole('button', { name: 'Install Antigravity' }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it('says it once when an install failed on a worker Google publishes no build for', async () => {
+	const message = 'Google publishes no Antigravity build for this worker (linux riscv64).';
+	current = { ...installed, installed: false, version: null, source: null, can_install: false,
+		unsupported_message: message,
+		install: { kind: 'install', state: 'failed', version: null, error: message, message } };
+	render(AntigravityInstall);
+	expect(await screen.findAllByText((text) => text.startsWith(message))).toHaveLength(1);
+	expect(screen.queryByRole('alert')).toBeNull();
+	const install = screen.getByRole('button', { name: 'Install Antigravity' });
+	expect(install.getAttribute('aria-describedby')).toBe('antigravity-unsupported');
+});
+
+it('re-reads the status on open, so a job run elsewhere is not shown stale', async () => {
+	render(AntigravityInstall);
+	expect(await screen.findByText('1.5.6')).toBeTruthy();
+	cleanup();
+	current = { ...installed, version: '1.5.8', install: { kind: 'update', state: 'running', version: null, error: null, message: null } };
+	render(AntigravityInstall);
+	expect(await screen.findByText('Checking Google for a newer Antigravity')).toBeTruthy();
+	expect((screen.getByRole('button', { name: 'Checking' }) as HTMLButtonElement).disabled).toBe(true);
+	current = { ...current, install: { kind: 'update', state: 'succeeded', version: '1.5.8', error: null,
+		message: 'Antigravity updated from 1.5.6 to 1.5.8.' } };
+	expect(await screen.findByText('Antigravity updated from 1.5.6 to 1.5.8.', {}, { timeout: 4000 })).toBeTruthy();
+	expect(screen.getByText('1.5.8')).toBeTruthy();
+});
+
+it('sends one request for a double click, and Try again repeats a failed check', async () => {
+	render(AntigravityInstall);
+	const check = await screen.findByRole('button', { name: 'Check for update' });
+	let fail = true;
+	mocks.post.mockImplementation(async () => {
+		await new Promise((r) => setTimeout(r, 20));
+		if (fail) throw new Error('Could not reach the worker');
+		return { kind: 'update', state: 'running', version: null, error: null, message: null };
+	});
+	await fireEvent.click(check);
+	await fireEvent.click(check);
+	expect((await screen.findByRole('alert')).textContent).toBe('Could not reach the worker');
+	expect(mocks.post).toHaveBeenCalledTimes(1);
+	fail = false;
+	await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+	await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
+	expect(mocks.post).toHaveBeenLastCalledWith('/antigravity/update');
+	await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
 });

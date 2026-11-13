@@ -300,7 +300,7 @@ def start_install(kind: str = "install") -> Dict[str, Any]:
         return install_state()
     key = manifest_key()
     if key is None:
-        message = unsupported_message() + " Install Google's Antigravity CLI yourself so `agy` is on PATH."
+        message = unsupported_message() + " Install Google's Antigravity CLI yourself so agy is on PATH."
         _install = InstallJob(kind=kind, state="failed", error=message, message=message,
                               finished_at=time.time())
         return install_state()
@@ -334,6 +334,10 @@ async def _run_install(job: InstallJob, key: str) -> None:
     try:
         before_path, source = locate_binary()
         before = await binary_version(before_path) if before_path else None
+        if not before and source == "app":
+            # Our own copy lives in cli/<version>/: a slow or failed --version
+            # still names it, so the check doesn't download it again.
+            before = _version_key(Path(before_path).parent.name) and Path(before_path).parent.name
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             manifest = (await client.get(manifest_url(key))).raise_for_status().json()
             version, url, digest = (str(manifest.get(k) or "") for k in ("version", "url", "sha512"))
