@@ -1059,7 +1059,11 @@ class PeerLink:
         discard our unsynced writes). Ask for a retained op past our watermark:
         pruning may have removed both the first missing op and the head. An
         envelope that verifies under our own signing key proves that we were
-        restored from a backup. Returns True after a bump.
+        restored from a backup. The highest retained one is asked for: its
+        clock is the newest this device signed in the lost history that the
+        peer holds, and the new stream must sign past it (#1506). An older
+        peer answers with the lowest one, still a proof. Returns True after a
+        bump.
         """
         mine = theirs.get(ctx.device_id) or {}
         remote = int(mine.get(str(ctx.identity.incarnation), 0) or 0)
@@ -1076,7 +1080,7 @@ class PeerLink:
         try:
             answer = await self.call(client, ctx, "GET",
                                      f"/api/v1/network/peer/ops/{ctx.device_id}/{ctx.identity.incarnation}/{local + 1}",
-                                     params={"at_or_after": "true"})
+                                     params={"at_or_after": "true", "highest": "true"})
             env = Envelope.from_dict(answer["op"])
         except (PeerError, httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             logger.warning("Peer %s claims %d ops of our stream (we hold %d) but produced no proof: %s",
@@ -1090,6 +1094,7 @@ class PeerLink:
         recovered = await asyncio.to_thread(
             engine.restored_from_backup, env.origin_seq, env.origin_incarnation,
             evidence_network_id=env.network_id, evidence_device_id=env.origin_device_id,
+            evidence_clock=env.clock,
         )
         if (recovered is None or recovered.network_id != env.network_id
                 or recovered.device_id != env.origin_device_id

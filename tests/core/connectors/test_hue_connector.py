@@ -78,6 +78,9 @@ class Bridge:
 async def settle_replies(conn):
     while conn._reply_tasks:
         await asyncio.gather(*tuple(conn._reply_tasks))
+        # A gather of finished tasks returns without yielding (Python 3.12),
+        # so let their set-discard callbacks run or this loop spins (#1458).
+        await asyncio.sleep(0)
 
 
 def deliver_queued_replies(conn):
