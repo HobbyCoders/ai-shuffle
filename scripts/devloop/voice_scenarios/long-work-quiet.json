@@ -1,0 +1,10 @@
+{
+  "description": "As long-work, but the caller asks to hear only the result: no progress line may be said, only the answer.",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Can you look through the test logs? [script:voice-long]"},
+    {"handoff": true, "ack": "Sure, on it."},
+    {"caller": "Thanks, just tell me when it's done."},
+    {"wait_speech": 1}
+  ]
+}

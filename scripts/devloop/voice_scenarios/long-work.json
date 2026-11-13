@@ -1,0 +1,11 @@
+{
+  "description": "The caller asks for something that takes a while (fake AI [script:voice-long]: a progress sentence, a 14-second command, a short answer). The progress sentence must be said once during the wait, and the answer after it. Then the voice checks the work with check_work (Grok only).",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Can you look through the test logs? [script:voice-long]"},
+    {"handoff": true, "ack": "Sure, on it."},
+    {"wait_speech": 2},
+    {"check_work": true},
+    {"wait_speech": 3}
+  ]
+}

@@ -53,7 +53,7 @@ async def _wait_for(fake: FakeVoice, kind: str, count: int = 1, timeout: float =
 
 
 def test_markers_match_the_app() -> None:
-    from app.core import voice_grok, voice_progress, voice_stream
+    from app.core import voice_grok, voice_progress, voice_status, voice_stream
 
     assert fake_voice.SPOKEN_NOTE_PREFIX == voice_progress.SPOKEN_NOTE_PREFIX
     assert fake_voice.NOTE_PREFIX == voice_progress.NOTE_PREFIX
@@ -61,13 +61,17 @@ def test_markers_match_the_app() -> None:
     assert voice_progress.MILESTONE_NOTE.endswith(fake_voice.REPLY_MARKERS[0])
     assert voice_stream.RESUME_NOTE.startswith(fake_voice.RESUME_MARKER)
     assert fake_voice.HANDOFF_TOOL == voice_grok.HANDOFF_TOOL["name"]
+    assert fake_voice.APP_NOTE_LEAD == voice_grok.APP_NOTE_LEAD
+    assert fake_voice.CHECK_WORK_TOOL == voice_status.CHECK_WORK_TOOL["name"]
+    assert voice_progress.SPOKEN_PROGRESS_NOTE.endswith(fake_voice.PROGRESS_MARKER)
     # The commentary GPT Live gets after its greeting trigger is acknowledged.
     assert "Begin the conversation now" in Path(voice_stream.__file__).read_text()
 
 
 def test_shipped_scenarios_all_load() -> None:
     assert set(Scenarios(SCENARIOS_DIR).load()) >= {
-        "default", "relay", "wait-update", "busy", "inactivity", "renew", "error", "drop"}
+        "default", "relay", "wait-update", "busy", "inactivity", "renew", "error", "drop",
+        "long-work", "long-work-quiet"}
 
 
 @pytest.mark.parametrize("data", [{"steps": [{}]}, {"steps": [{"caller": "a", "handoff": True}]},
@@ -166,6 +170,7 @@ def test_grok_says_a_reply_note_once_not_as_the_handoff_output(fake: FakeVoice) 
         async with connect(fake.url + "/v1/realtime?model=grok-voice-latest") as ws:
             reader = asyncio.create_task(_drain(ws))
             stream = GrokVoiceStream.__new__(GrokVoiceStream)
+            stream.session_id, stream.trace, stream.trace_waiting = "s", None, []
             stream.closed, stream.restoring, stream.upstream = False, False, ws
             stream.pending_tools = {"call_1"}
             stream.response_active = stream.speech_active = stream.speech_pending = False
@@ -179,3 +184,53 @@ def test_grok_says_a_reply_note_once_not_as_the_handoff_output(fake: FakeVoice) 
     assert [e["text"] for e in log if e["kind"] == "tool_output"] == [HANDOFF_RECEIPT]
     assert [e["text"] for e in log if e["kind"] == "speech"] == [reply.strip()]
     assert sum(e["kind"] == "response.create" for e in log) == 1
+    # The reply arrived as the app's user-role note, never as the caller's words.
+    (note,) = [e for e in log if e["kind"] == "note"]
+    assert note["role"] == "user" and note["app_note"] is True and note["channel"] == "speak"
+    assert not [e for e in log if e["kind"] in ("caller", "unlabelled_user_item")]
+
+
+def test_grok_check_work_is_answered_from_the_app_and_spoken(tmp_path: Path) -> None:
+    """The fake model calls check_work; the app answers with its output, then one response."""
+    from unittest.mock import patch
+
+    from app.core.voice_grok import GrokVoiceStream
+    from app.core.voice_stream import STATUS_TOLD_S
+
+    (tmp_path / "default.json").write_text('{"steps": [{"check_work": true}, {"wait_speech": 1}]}')
+
+    async def same_thread(fn, *args):
+        return fn(*args)
+
+    async def run(fake: FakeVoice):
+        async with connect(fake.url + "/v1/realtime?model=grok-voice-latest") as ws:
+            stream = GrokVoiceStream.__new__(GrokVoiceStream)
+            stream.session_id, stream.trace, stream.trace_waiting = "s", None, []
+            stream.closed, stream.restoring, stream.upstream, stream.progress = False, False, ws, None
+            stream.status_told_at = -STATUS_TOLD_S
+            stream.response_active = stream.speech_active = stream.speech_pending = False
+            await ws.send(json.dumps({"type": "session.update", "session": {"instructions": "x", "tools": []}}))
+            async for raw in ws:
+                event = json.loads(raw)
+                if event["type"] == "response.function_call_arguments.done":
+                    assert event["name"] == "check_work"
+                    call = event["call_id"]
+                elif event["type"] == "response.done" and "call" in locals():
+                    break
+            with patch("app.db.async_database.run_sync", same_thread), \
+                    patch("app.core.voice_status.work_status", lambda _sid: {}), \
+                    patch("app.core.voice_status.status_sentence", lambda _s: "Nothing is running right now."):
+                await stream.answer_check_work(call)
+            reader = asyncio.create_task(_drain(ws))
+            await _wait_for(fake, "speech", trigger="note")
+            reader.cancel()
+
+    with FakeVoice(tmp_path, log_path=tmp_path / "voice.jsonl") as fake:
+        asyncio.run(run(fake))
+        log = fake.since(0)
+    (output,) = [e for e in log if e["kind"] == "tool_output"]
+    assert output["tool"] == "check_work" and output["text"].endswith("Nothing is running right now.")
+    (speech,) = [e for e in log if e["kind"] == "speech"]
+    assert speech["text"].endswith("Nothing is running right now.")
+    assert sum(e["kind"] == "response.create" for e in log) == 1
+    assert not [e for e in log if e["kind"] == "handoff"]  # Looking never starts work.
