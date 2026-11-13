@@ -17,6 +17,7 @@ from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
 from fluid.tools.child_env import scrub_child_env
 from fluid.tools.fragments import CWD_PARAM, FRESH_PROCESS
+from fluid.tools.hardening import fence_shell_output
 from fluid.tools.priority import (
     lower_process_group_priority,
     priority_creationflags,
@@ -31,12 +32,13 @@ MIN_TIMEOUT_S = 1.0
 MAX_TIMEOUT_S = 600.0
 # Bytes of a command's output kept in memory while it runs: the first half
 # and the last half, the middle dropped as it streams. Far above what the
-# model sees inline; what is captured is what the spill file can give back,
-# so the cap only ever bites a runaway command.
+# model sees inline; the spill file gets the whole output as it streams.
 MAX_CAPTURE_BYTES = 1024 * 1024
 # Share of the inline budget given to the head; the tail gets the rest, since
 # errors, tracebacks and exit summaries come last.
 _HEAD_SHARE = 1 / 3
+# After a timeout kill, how long to read what the command wrote just before it.
+_DRAIN_AFTER_KILL_S = 2.0
 # The host this process runs on; describe() reads it at call time so a
 # measurement fixture can declare the platform it renders for.
 HOST_IS_WINDOWS = sys.platform == "win32"
@@ -256,44 +258,65 @@ def clamp_timeout(value: Any) -> float:
     return min(max(timeout, MIN_TIMEOUT_S), MAX_TIMEOUT_S)
 
 
-async def _read_capped(stream: asyncio.StreamReader, sink: SpillStream | None = None) -> bytes:
+class _Capture:
+    """The first and last ``MAX_CAPTURE_BYTES // 2`` of a command's output.
+
+    Shared with the reader rather than local to it, so what was read before
+    a timeout cancelled the reader is still there to show.
+    """
+
+    def __init__(self) -> None:
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.dropped = 0
+
+    def add(self, chunk: bytes) -> None:
+        half = MAX_CAPTURE_BYTES // 2
+        if len(self.head) < half:
+            take = min(len(chunk), half - len(self.head))
+            self.head += chunk[:take]
+            chunk = chunk[take:]
+            if not chunk:
+                return
+        self.tail += chunk
+        if len(self.tail) > 2 * half:
+            self.dropped += len(self.tail) - half
+            del self.tail[:-half]
+
+    def value(self) -> bytes:
+        half = MAX_CAPTURE_BYTES // 2
+        if len(self.tail) > half:
+            self.dropped += len(self.tail) - half
+            del self.tail[:-half]
+        if not self.tail:
+            return bytes(self.head)
+        if self.dropped:
+            marker = f"\n... [{self.dropped} bytes dropped while streaming] ...\n".encode()
+            return bytes(self.head) + marker + bytes(self.tail)
+        return bytes(self.head + self.tail)
+
+
+async def _read_capped(
+    stream: asyncio.StreamReader,
+    sink: SpillStream | None = None,
+    capture: _Capture | None = None,
+) -> bytes:
     """Drain ``stream`` keeping the first and last ``MAX_CAPTURE_BYTES // 2``.
 
     ``communicate()`` buffers everything a command prints, so a runaway
     command (a build in a loop, a log tail) grows the host without bound.
-    Only head and tail can reach the model anyway (see ``truncate``), so the
-    middle is dropped from memory as it streams past; ``sink``, when given,
-    writes every chunk to the spill file so the middle stays recoverable.
+    Only head and tail can reach the model anyway, so the middle is dropped
+    from memory as it streams past; ``sink``, when given, writes every chunk
+    to the spill file so the middle stays recoverable. Each chunk reaches the
+    sink and the capture with no await in between, so a cancellation lands
+    between chunks, never inside one.
     """
-    half = MAX_CAPTURE_BYTES // 2
-    head = bytearray()
-    tail = bytearray()
-    dropped = 0
-    while True:
-        chunk = await stream.read(65536)
-        if not chunk:
-            break
+    capture = capture if capture is not None else _Capture()
+    while chunk := await stream.read(65536):
         if sink is not None:
             sink.feed(chunk)
-        if len(head) < half:
-            take = min(len(chunk), half - len(head))
-            head += chunk[:take]
-            chunk = chunk[take:]
-            if not chunk:
-                continue
-        tail += chunk
-        if len(tail) > 2 * half:
-            dropped += len(tail) - half
-            del tail[:-half]
-    if len(tail) > half:
-        dropped += len(tail) - half
-        del tail[:-half]
-    if not tail:
-        return bytes(head)
-    if dropped:
-        marker = f"\n... [{dropped} bytes dropped while streaming] ...\n".encode()
-        return bytes(head) + marker + bytes(tail)
-    return bytes(head + tail)
+        capture.add(chunk)
+    return capture.value()
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
@@ -330,46 +353,51 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # And the first thing the kernel kills when the host runs out of memory.
     raise_oom_score_adj(proc.pid)
     assert proc.stdout is not None
-    # Writes the whole output to the spill file as it streams (nothing on disk
-    # until it outgrows the inline cap); discarded on every early exit below.
-    sink = SpillStream(ctx, "Bash", open_after=_TRUNCATE_LIMIT, transform=strip_ansi)
-    finished = False
-    try:
-        stdout = await asyncio.wait_for(_read_capped(proc.stdout, sink), timeout=timeout)
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-        finished = True
-    except TimeoutError:
-        await kill_tree(proc)
-        # Killed, so nothing partial survives — say what the retry should
-        # change rather than leaving the model to re-run the same command.
-        return ToolOutcome(
-            text=(
-                f"command timed out after {timeout:g}s and was killed. Raise "
-                "the timeout parameter for a genuinely long command, narrow "
-                "the command's scope, or use Monitor for a long-running job "
-                "(serves=true only for a service meant to stay up). Do not "
-                "append & or poll for completion. Inspect any partial effects "
-                "before retrying a command that may have changed state."
-            ),
-            is_error=True,
+    capture = _Capture()
+    timed_out = False
+    # The spill file is the record of what ran: the stream writes the whole
+    # output as it arrives (nothing on disk until it outgrows the inline cap)
+    # and keeps the file on every outcome, a timeout or an exception included.
+    # Only a cancelled turn deletes it, as the block unwinds.
+    with SpillStream(ctx, "Bash", open_after=_TRUNCATE_LIMIT, transform=strip_ansi) as sink:
+        try:
+            await asyncio.wait_for(_read_capped(proc.stdout, sink, capture), timeout=timeout)
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except TimeoutError:
+            timed_out = True
+        finally:
+            # Every way out, a cancelled turn included, kills what still runs:
+            # nothing downstream would ever reap it.
+            if proc.returncode is None:
+                await kill_tree(proc)
+        if timed_out:
+            # What the command wrote just before the kill is still in the pipe.
+            try:
+                await asyncio.wait_for(
+                    _read_capped(proc.stdout, sink, capture), timeout=_DRAIN_AFTER_KILL_S)
+            except (TimeoutError, OSError):
+                pass
+        text = cut_streamed(
+            strip_ansi(capture.value().decode(errors="replace")),
+            _TRUNCATE_LIMIT, sink, head_share=_HEAD_SHARE,
+            what="output up to the timeout" if timed_out else "full output",
         )
-    except asyncio.CancelledError:
-        # The user interrupted the turn: this task is being torn down
-        # mid-await and nothing downstream will ever reap the process, so
-        # kill the tree here and let the cancellation keep propagating.
-        await kill_tree(proc)
-        raise
-    finally:
-        # Any other abnormal exit (an exception out of communicate, a second
-        # cancellation) must not orphan a live process either.
-        if not finished:
-            sink.discard()
-        if proc.returncode is None:
-            await kill_tree(proc)
-    text = cut_streamed(
-        strip_ansi(stdout.decode(errors="replace")),
-        _TRUNCATE_LIMIT, sink, head_share=_HEAD_SHARE,
-    )
+    if timed_out:
+        # Say what the retry should change rather than leaving the model to
+        # re-run the same command, and show what it printed before the kill:
+        # the error that explains a hang is usually the last thing printed.
+        advice = (
+            f"command timed out after {timeout:g}s and was killed. Raise "
+            "the timeout parameter for a genuinely long command, narrow "
+            "the command's scope, or use Monitor for a long-running job "
+            "(serves=true only for a service meant to stay up). Do not "
+            "append & or poll for completion. Inspect any partial effects "
+            "before retrying a command that may have changed state."
+        )
+        if text.strip():
+            advice += "\n" + fence_shell_output(
+                text, "Bash partial output (command timed out; output up to the timeout)")
+        return ToolOutcome(text=advice, is_error=True)
     code = proc.returncode or 0
     if not text.strip():
         # A bare "(no output)" is the one result that says nothing about what

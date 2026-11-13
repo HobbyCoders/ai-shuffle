@@ -649,12 +649,6 @@ class ToolRegistry:
             )
         try:
             input = coerce_args(input, entry.spec.input_schema)
-            if entry.spec.source == "builtin":
-                # Guardrail telemetry: did the agent come back for output a
-                # cap spilled to a file? Cheap substring test before any IO.
-                from fluid.tools.spill import note_readback
-
-                note_readback(name, input, ctx)
             if entry.spec.source == "mcp":
                 _, server, tool = name.split("__", 2)
                 if entry.server is not None:
@@ -689,6 +683,19 @@ class ToolRegistry:
             if name in {"Bash", "Monitor"} and not raw_shell_output:
                 text = fence_shell_output(text, f"{name} execution error")
             return ToolOutcome(text=text, is_error=True)
+        if entry.spec.source == "builtin":
+            # Guardrail telemetry: did the agent come back for output a cap
+            # spilled to a file? Counted from the files the call touched or
+            # returned; a cheap substring test runs before any IO.
+            from fluid.tools.spill import note_access
+
+            returned = outcome.text or ""
+            if outcome.shell_result is not None:
+                returned = f"{returned}\n{outcome.shell_result[0]}"
+            try:
+                note_access(name, input, returned, ctx)
+            except Exception:  # telemetry never fails a call
+                log.debug("spill read-back count failed", exc_info=True)
         # Code mode keeps raw shell text for parsing; its enclosing cell is
         # fenced after truncation, including output from later persistent cells.
         if (

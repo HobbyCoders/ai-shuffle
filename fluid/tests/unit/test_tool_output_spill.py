@@ -9,11 +9,14 @@ Pinned here:
 - a failed write falls back to plain head + tail truncation;
 - command output keeps the larger share for its tail, so a trailing error
   survives, and a big single print in a cell keeps its tail too;
-- a later Read/Grep/Bash of a spill file is counted per session and per
-  producing tool, a search over the whole folder once per producer it covers;
+- a later Read/Grep/Glob/Bash of a spill file is counted per session and per
+  producing tool, from the files the call touched or returned (each producer
+  once per call); a folder search that returns none counts as unattributed;
 - the file never holds less than the marker claims: Bash streams the whole
-  output to disk (to a ceiling the marker names), a cell over the 2 MiB
-  hand-off names the range it lost, and search listings spill too.
+  output to disk (to a byte ceiling the marker names), never splitting an
+  escape sequence or a character; a timeout keeps the output up to it and an
+  exception keeps the file, only a cancellation deletes it; a cell over the
+  2 MiB hand-off names the range it lost, and search listings spill too.
 """
 
 from __future__ import annotations
@@ -234,6 +237,9 @@ async def test_reading_a_spill_file_back_is_counted(tmp_path) -> None:
 
     read = await registry.dispatch("Read", {"file_path": str(path), "limit": 5}, ctx)
     assert not read.is_error
+    # A Grep that returns the file's lines counts for the tool that wrote it.
+    await registry.dispatch("Grep", {"pattern": "z", "path": str(path.parent), "limit": 3}, ctx)
+    # A search of the folder that returns no file counts, but for nobody.
     await registry.dispatch("Grep", {"pattern": "no-such-text", "path": str(path.parent)}, ctx)
     # An unrelated read is not counted.
     other = tmp_path / "other.txt"
@@ -241,9 +247,8 @@ async def test_reading_a_spill_file_back_is_counted(tmp_path) -> None:
     await registry.dispatch("Read", {"file_path": str(other)}, ctx)
 
     stats = spill.session_stats(ctx)
-    # The folder Grep counts for the tool whose spill files it covered.
-    assert stats["read_back"] == {"Bash": 2}
-    assert stats["read_back_by"] == {"Read": 1, "Grep": 1}
+    assert stats["read_back"] == {"Bash": 2, "unattributed": 1}
+    assert stats["read_back_by"] == {"Read": 1, "Grep": 2}
     assert stats["spilled"] == {"Bash": 1}
     # Per session: another session's ledger is untouched.
     assert spill.session_stats(_ctx(tmp_path, "sess-2")) == {}
@@ -254,22 +259,62 @@ def test_bash_naming_a_spill_file_counts_with_any_slash_or_case(tmp_path) -> Non
     path = spill.write_spill("data", ctx=ctx, tool="run_python")
     assert path is not None
     windowsy = str(path.parent).replace("/", "\\").upper() + "\\" + path.name
-    spill.note_readback("Bash", {"command": f"sed -n 1,40p '{windowsy}'"}, ctx)
+    spill.note_access("Bash", {"command": f"sed -n 1,40p '{windowsy}'"}, "data", ctx)
     assert spill.session_stats(ctx)["read_back"] == {"run_python": 1}
 
 
-def test_a_folder_search_counts_once_per_producer_it_covers(tmp_path) -> None:
+def _three_spills(ctx: ToolCtx) -> dict[str, Path]:
+    paths = {}
+    for tool in ("Bash", "run_python", "Grep"):
+        path = spill.write_spill(f"{tool} output\n" * 9, ctx=ctx, tool=tool)
+        assert path is not None
+        paths[tool] = path
+    return paths
+
+
+def test_a_search_counts_each_producer_it_returned_once(tmp_path) -> None:
     ctx = _ctx(tmp_path)
-    for tool in ("Bash", "Bash", "run_python", "Grep"):
-        spill.write_spill(f"{tool} {len(spill.session_stats(ctx).get('spilled', {}))} " * 9, ctx=ctx, tool=tool)
-    directory = spill.spill_dir(ctx)
-    assert directory is not None
-    spill.note_readback("Grep", {"pattern": "x", "path": str(directory)}, ctx)
-    assert spill.session_stats(ctx)["read_back"] == {"Bash": 1, "Grep": 1, "run_python": 1}
-    # A glob filter narrows the attribution to the files it names.
-    spill.note_readback("Grep", {"pattern": "x", "path": str(directory), "glob": "run_python-*"}, ctx)
-    assert spill.session_stats(ctx)["read_back"] == {"Bash": 1, "Grep": 1, "run_python": 2}
-    assert "folder" not in spill.session_stats(ctx)["read_back"]
+    paths = _three_spills(ctx)
+    # Grep repeats a file on every matching line; still one count per producer.
+    listing = "".join(f"{paths['Bash']}:{n}:Bash output\n" for n in range(1, 10))
+    listing += f"{paths['run_python']}:1:run_python output\n"
+    spill.note_access("Grep", {"pattern": "output", "path": str(paths["Bash"].parent)}, listing, ctx)
+    stats = spill.session_stats(ctx)
+    assert stats["read_back"] == {"Bash": 1, "run_python": 1}
+    assert stats["read_back_by"] == {"Grep": 1}
+
+
+async def test_a_glob_of_the_folder_counts_the_files_it_listed(tmp_path) -> None:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = _ctx(tmp_path)
+    paths = _three_spills(ctx)
+    # Glob lists names relative to the folder; the query is never interpreted.
+    out = await registry.dispatch("Glob", {"pattern": "run_python-*", "path": str(paths["Bash"].parent)}, ctx)
+    assert paths["run_python"].name in out.text
+    assert spill.session_stats(ctx)["read_back"] == {"run_python": 1}
+
+
+def test_spill_like_names_elsewhere_are_not_counted(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+    paths = _three_spills(ctx)
+    real = paths["Bash"].name
+    noise = "\n".join([
+        "wrote Bash-0123456789ab.txt",  # spill-shaped, but no such file here
+        f"cache/{real}",  # a real name, but not in or aimed at the folder
+        f"old-{real}",  # the tail of a longer name
+        "/tmp/other/tool-output/Bash-0123456789ab.txt",  # another folder's file
+    ])
+    spill.note_access("Bash", {"command": "make all"}, noise, ctx)
+    spill.note_access("Grep", {"pattern": "x", "path": str(tmp_path / "src")}, noise, ctx)
+    assert "read_back" not in spill.session_stats(ctx)
+
+
+def test_a_call_naming_the_file_it_just_spilled_is_not_a_read(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+    out = spill.cut("q\n" * 20_000, 1_000, ctx=ctx, tool="Bash")
+    spill.note_access("Bash", {"command": "seq 1 20000"}, out, ctx)
+    assert "read_back" not in spill.session_stats(ctx)
 
 
 # ── the file holds what the marker says ─────────────────────────────────────
@@ -312,8 +357,9 @@ def test_a_streamed_spill_over_its_ceiling_names_what_was_not_kept(tmp_path) -> 
     out = spill.cut_streamed(text[:3_000] + text[-3_000:], 1_200, stream, head_share=1 / 3)
     path = _spill_path(out)
     assert path.read_text(encoding="utf-8") == text[:20_000]
-    assert "full output" not in out
-    assert "the first 20,000 chars saved" in out
+    assert "— full output saved" not in out
+    assert "the first 20,000 chars of the full output saved" in out
+    assert "20,000-byte cap" in out
     m = re.search(r"chars ([\d,]+)-([\d,]+) of ([\d,]+) were not kept", out)
     assert m, out
     lost_from, lost_to, total = (int(g.replace(",", "")) for g in m.groups())
@@ -384,3 +430,88 @@ def test_history_search_listing_over_the_cap_spills(tmp_path) -> None:
     assert len(out) < recall._SEARCH_OUTPUT_CAP + 400
     assert "needle number 399" in _spill_path(out).read_text(encoding="utf-8")
     assert spill.session_stats(ctx)["spilled"] == {"HistorySearch": 1}
+
+
+def test_a_forced_flush_never_splits_an_escape_sequence(tmp_path) -> None:
+    from fluid.tools.builtins._util import strip_ansi
+
+    ctx = _ctx(tmp_path)
+    # One unterminated line long enough to force a flush, with an escape
+    # sequence arriving across the boundary.
+    first = ("a" * (spill._FLUSH_CHARS - 1) + "\x1b").encode()
+    second = "[31mFATAL\x1b[0m\n".encode()
+    raw = (first + second).decode()
+    stream = spill.SpillStream(ctx, "Bash", transform=strip_ansi)
+    stream.feed(first)
+    stream.feed(second)
+    out = spill.cut_streamed(strip_ansi(raw), 1_000, stream)
+    on_disk = _spill_path(out).read_text(encoding="utf-8")
+    assert on_disk == strip_ansi(raw)
+    assert "\x1b" not in on_disk
+    assert stream.chars == len(strip_ansi(raw))
+
+
+def test_a_multibyte_character_split_across_reads_stays_whole(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+    data = ("é" * 9_000 + "\n").encode()
+    stream = spill.SpillStream(ctx, "Bash")
+    stream.feed(data[:7])  # ends mid-character
+    stream.feed(data[7:])
+    out = spill.cut_streamed(data.decode(), 1_000, stream)
+    assert _spill_path(out).read_text(encoding="utf-8") == data.decode()
+
+
+def test_the_disk_ceiling_counts_bytes_and_stops_at_a_character(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+    text = "\U0001F600" * 3_000 + "\n"  # four bytes each
+    stream = spill.SpillStream(ctx, "Bash", ceiling=1_001)
+    _feed(stream, text)
+    out = spill.cut_streamed(text[:300] + text[-300:], 400, stream)
+    path = _spill_path(out)
+    assert path.stat().st_size == 1_000  # 250 whole characters, never 1,001
+    assert path.read_text(encoding="utf-8") == "\U0001F600" * 250
+    assert "the first 250 chars of the full output saved" in out
+    assert "1,001-byte cap" in out
+    assert "chars 251-" in out
+
+
+def test_leaving_the_stream_by_an_exception_keeps_the_file(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+    with pytest.raises(ValueError), spill.SpillStream(ctx, "Bash", open_after=100) as stream:
+        _feed(stream, "row\n" * 1_000)
+        raise ValueError("tool failed")
+    assert stream.path is not None
+    assert stream.path.read_text(encoding="utf-8") == "row\n" * 1_000
+    assert spill.session_stats(ctx)["spilled"] == {"Bash": 1}
+
+
+def test_leaving_the_stream_by_cancellation_deletes_the_file(tmp_path) -> None:
+    import asyncio
+
+    ctx = _ctx(tmp_path)
+    with pytest.raises(asyncio.CancelledError), spill.SpillStream(ctx, "Bash", open_after=100) as stream:
+        _feed(stream, "row\n" * 1_000)
+        raise asyncio.CancelledError
+    directory = spill.spill_dir(ctx)
+    assert directory is not None
+    assert not any(directory.iterdir())
+    assert spill.session_stats(ctx) == {}
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+async def test_a_timed_out_command_keeps_its_output_up_to_the_timeout(tmp_path) -> None:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = _ctx(tmp_path)
+    command = (
+        "for i in $(seq 1 3000); do echo \"line $i of noise\"; done; "
+        "echo FATAL-BEFORE-HANG; sleep 30"
+    )
+    out = await registry.dispatch("Bash", {"command": command, "timeout": 2}, ctx)
+    assert out.is_error
+    assert "timed out after 2s" in out.text
+    assert "output up to the timeout" in out.text
+    assert "FATAL-BEFORE-HANG" in out.text
+    full = _spill_path(out.text).read_text(encoding="utf-8")
+    assert "line 1500 of noise" in full
+    assert full.rstrip().endswith("FATAL-BEFORE-HANG")

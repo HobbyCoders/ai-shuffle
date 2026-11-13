@@ -219,10 +219,14 @@ thirds for the tail, where errors and exit summaries sit. If the file cannot
 be written, the output is cut to head and tail without a path.
 
 The file never holds less than the marker says. Bash streams its output to the
-file as it runs, keeping only head and tail in memory, up to 64 MiB on disk;
+file as it runs, keeping only head and tail in memory, up to 64 MiB of file;
 past that the marker names the character range kept neither in the file nor
-inline. A cell's stdout reaches the host held to 2 MiB (head and tail), and
-over that the pointer line names the range that was not kept.
+inline. The file is kept whatever way the command ends (success, failure, a
+timeout, an error in the tool) and deleted only when the turn is cancelled. A
+command that times out returns the timeout advice followed by its output up
+to the timeout, cut and spilled the same way. A cell's stdout reaches the host
+held to 2 MiB (head and tail), and over that the pointer line names the range
+that was not kept.
 
 Other caps page instead of spilling: WebFetch returns up to 16,000 characters
 per call (`offset` for the next page), HistoryExpand 8,000 by default (16,000
@@ -231,11 +235,13 @@ TaskList keeps its finished-task entries under 8,000 characters, naming the
 rest by id for TaskGet. Running tasks are always listed.
 
 Each session counts how often its output spilled and how often the agent
-came back for a spill file (per producing tool and per reading tool; a Grep,
-Glob or Bash over the whole folder counts once for each tool whose files it
-covers) in
+came back for a spill file (per producing tool and per reading tool) in
 `<harness state root>/spill-stats/<session>.json`, and logs each read-back.
-Caps whose spills are read back often are cutting too much.
+The producer comes from the spill files the call actually opened or returned:
+the file a Read opened, the files a Grep or Glob listed, the files a Bash
+command or its output names. Each producer counts once per call. A search of
+the folder that returns no spill file counts as `unattributed`. Caps whose
+spills are read back often are cutting too much.
 
 ### `[context]`
 

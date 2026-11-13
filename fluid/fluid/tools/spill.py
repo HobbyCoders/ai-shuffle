@@ -8,7 +8,7 @@ gets the larger share by default: errors, tracebacks and exit summaries sit at
 the end of command output. When the file cannot be written, the result falls
 back to plain head + tail truncation.
 
-The guardrail half: :func:`note_readback` counts when the agent later reads or
+The guardrail half: :func:`note_access` counts when the agent later reads or
 greps a spill file, per session and per producing tool, in
 ``<project state root>/spill-stats/<session>.json`` (state, not scratch, so the
 counts outlive the sweep). A cap that is never read back is cutting only what
@@ -25,7 +25,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
 from fluid.state import project_state_root, safe_key, scratch_dir
 from fluid.tools.registry import ToolCtx
@@ -34,12 +35,10 @@ _log = logging.getLogger(__name__)
 
 SPILL_SUBDIR = "tool-output"
 STATS_DIR = "spill-stats"
-# Tools whose calls can read a spill file back. Bash counts when its command
-# names the spill folder (`grep … tool-output/…`, `sed -n …`).
+# Tools whose calls can read a spill file back.
 _READERS = ("Read", "Grep", "Glob", "Bash", "PowerShell")
 _PATH_KEYS = ("file_path", "path", "command")
 _SAFE_TOOL = re.compile(r"[^A-Za-z0-9_]+")
-_SPILL_NAME = re.compile(r"([A-Za-z0-9_]+)-[0-9a-f]{12}\.txt")
 _stats_lock = threading.Lock()
 
 
@@ -140,23 +139,59 @@ def cut(
 
 # ── streamed spills (command output too big to hold in memory) ───────────────
 
-# Chars a streamed spill file may hold. A command printing more than this keeps
-# its first DISK_CEILING chars on disk and its tail inline; the marker names the
-# range that was kept by neither.
+# Bytes a streamed spill file may hold. A command printing more keeps the
+# start of its output on disk (cut at a character boundary) and its tail
+# inline; the marker names the char range kept by neither.
 DISK_CEILING = 64 * 1024 * 1024
 _FLUSH_CHARS = 65536  # an unterminated line is flushed once this long
+# How far back a forced flush looks for an escape sequence still arriving.
+_ESC_WINDOW = 256
+# A complete escape sequence, as the ANSI stripper sees it. ``ESC ]`` alone is
+# left out: it starts an OSC string that is complete only at its terminator.
+_ESC_SEQ = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\^_])")
+
+
+def _flush_point(text: str) -> int:
+    """Where a forced flush may cut ``text`` without splitting an escape.
+
+    Stripping ``ESC[31m`` cut in two would leave both halves in the file
+    while the inline copy, stripped in one piece, drops it. An escape still
+    incomplete at the end of ``text`` waits for the next read.
+    """
+    pos = max(0, len(text) - _ESC_WINDOW)
+    while (esc := text.find("\x1b", pos)) >= 0:
+        match = _ESC_SEQ.match(text, esc)
+        if match is None:
+            return esc
+        pos = match.end()
+    return len(text)
+
+
+def _size(n: int) -> str:
+    mib = 1024 * 1024
+    return f"{n // mib} MiB" if n % mib == 0 else f"{n:,}-byte"
 
 
 class SpillStream:
     """A tool's output written to its spill file as it arrives.
 
-    The caller keeps only a bounded head and tail in memory; this keeps every
-    char (up to :data:`DISK_CEILING`) on disk, so the marker can promise the
-    file holds what it says. Nothing touches disk until the output passes
-    ``open_after`` chars: most results fit inline and never need a file.
-    Bytes are decoded incrementally and ``transform`` (ANSI stripping) runs on
-    whole lines, so the file matches the inline text. Counts (``chars``,
-    ``newlines``) cover the whole output even when writing failed or stopped.
+    The caller keeps only a bounded head and tail in memory; this keeps the
+    whole output (up to :data:`DISK_CEILING` bytes) on disk, so the marker can
+    promise the file holds what it says. Nothing touches disk until the output
+    passes ``open_after`` chars: most results fit inline and never need a file.
+
+    Bytes are decoded incrementally, so a multi-byte character split across
+    reads waits for its last byte, and ``transform`` (ANSI stripping) runs on
+    whole lines; a forced flush of a long unterminated line holds back an
+    escape sequence still arriving. The file text therefore matches the
+    inline text char for char. ``chars`` and ``newlines`` count the whole
+    output even when writing failed or stopped at the ceiling.
+
+    The spill file is the recovery record. Use the stream as a context manager
+    around everything that produces the output: leaving the block because the
+    user or turn cancelled deletes the partial file; leaving it any other way
+    (an exception included) keeps it. A normal result renders with
+    :func:`cut_streamed` inside the block, which settles the file first.
     """
 
     def __init__(
@@ -175,8 +210,10 @@ class SpillStream:
         self.transform = transform or (lambda text: text)
         self.chars = 0
         self.newlines = 0
-        self.written = 0
+        self.written = 0  # chars on disk, for the marker
+        self.written_bytes = 0  # what the ceiling counts
         self.ends_with_newline = False
+        self.path: Path | None = None
         self.failed = spill_dir(ctx) is None
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._carry = ""
@@ -185,6 +222,27 @@ class SpillStream:
         self._tmp: Path | None = None
         self._hash = hashlib.sha256()
         self._closed = False
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        import asyncio
+
+        if self._closed:
+            return
+        if exc_type is not None and issubclass(exc_type, (asyncio.CancelledError, KeyboardInterrupt)):
+            self.discard()
+            return
+        self.end()
+        path = self.finish()
+        if path is not None and exc_type is not None:
+            _log.info("%s raised %s; its output so far is kept at %s", self.tool, exc_type.__name__, path)
 
     @property
     def capped(self) -> bool:
@@ -199,8 +257,9 @@ class SpillStream:
             self._emit(self._carry[: nl + 1])
             self._carry = self._carry[nl + 1:]
         elif len(self._carry) >= _FLUSH_CHARS:
-            self._emit(self._carry)
-            self._carry = ""
+            at = _flush_point(self._carry)
+            self._emit(self._carry[:at])
+            self._carry = self._carry[at:]
 
     def _emit(self, raw: str) -> None:
         text = self.transform(raw)
@@ -228,7 +287,7 @@ class SpillStream:
             directory.mkdir(parents=True, exist_ok=True)
             name = f".{_SAFE_TOOL.sub('_', self.tool) or 'tool'}-{uuid.uuid4().hex[:12]}.part"
             self._tmp = directory / name
-            self._fh = self._tmp.open("w", encoding="utf-8", errors="replace", newline="")
+            self._fh = self._tmp.open("wb")
             return True
         except Exception:  # noqa: BLE001 — no file means plain truncation
             _log.debug("tool-output spill stream open failed", exc_info=True)
@@ -236,19 +295,24 @@ class SpillStream:
             return False
 
     def _write(self, text: str) -> None:
-        room = self.ceiling - self.written
+        room = self.ceiling - self.written_bytes
         if room <= 0:
             return
-        piece = text[:room]
+        data = text.encode("utf-8", "replace")
+        if len(data) > room:
+            # The ceiling counts bytes on disk; stop at a character boundary.
+            text = data[:room].decode("utf-8", "ignore")
+            data = text.encode("utf-8")
         try:
-            self._fh.write(piece)
+            self._fh.write(data)
         except Exception:  # noqa: BLE001
             _log.debug("tool-output spill stream write failed", exc_info=True)
             self.failed = True
             self.discard()
             return
-        self._hash.update(piece.encode("utf-8", "replace"))
-        self.written += len(piece)
+        self._hash.update(data)
+        self.written += len(text)
+        self.written_bytes += len(data)
 
     def end(self) -> None:
         """Flush the decoder and any unterminated last line."""
@@ -258,9 +322,14 @@ class SpillStream:
             self._carry = ""
 
     def finish(self) -> Path | None:
-        """Close and name the file by content; its path, or None without one."""
+        """Close the file and name it by content; its path, or None without one.
+
+        The handle is closed before the rename and nothing else ever opens it
+        for writing, so the file can be read the moment this returns, on
+        Windows too.
+        """
         if self._closed:
-            return None
+            return self.path
         if self._fh is None and not self.failed and self._pending:
             # Never passed open_after, but the caller wants a file anyway.
             pending, self._pending = "".join(self._pending), []
@@ -272,17 +341,20 @@ class SpillStream:
             return None
         try:
             self._fh.close()
+            self._fh = None
             path = self._tmp.with_name(
                 f"{_SAFE_TOOL.sub('_', self.tool) or 'tool'}-{self._hash.hexdigest()[:12]}.txt")
             if path.is_file():
                 self._tmp.unlink()
             else:
                 self._tmp.replace(path)
+            self._tmp = None
         except Exception:  # noqa: BLE001
             _log.debug("tool-output spill stream finish failed", exc_info=True)
             self.discard()
             return None
         _bump(self.ctx, "spilled", self.tool)
+        self.path = path
         return path
 
     def discard(self) -> None:
@@ -303,11 +375,19 @@ class SpillStream:
             pass
 
 
-def cut_streamed(text: str, limit: int, stream: SpillStream, *, head_share: float = 1 / 3) -> str:
+def cut_streamed(
+    text: str,
+    limit: int,
+    stream: SpillStream,
+    *,
+    head_share: float = 1 / 3,
+    what: str = "full output",
+) -> str:
     """Like :func:`cut`, for output whose full copy ``stream`` wrote to disk.
 
     ``text`` is what the caller kept in memory (head + tail, its middle maybe
     already dropped); counts come from ``stream``, which saw everything.
+    ``what`` names the record in the marker, e.g. "output up to the timeout".
     """
     stream.end()
     total = max(stream.chars, len(text))
@@ -321,16 +401,17 @@ def cut_streamed(text: str, limit: int, stream: SpillStream, *, head_share: floa
         return f"{head}\n... [{dropped} chars truncated] ...\n{tail}"
     total_lines = _line_count(stream.newlines, stream.ends_with_newline)
     lost_to = total - len(tail)
-    if stream.capped and lost_to > stream.written:
-        saved = (
-            f"the first {stream.written:,} chars saved to {path} (session scratch, "
-            f"{stream.ceiling // (1024 * 1024)} MiB cap); chars "
-            f"{stream.written + 1:,}-{lost_to:,} of {total:,} were not kept"
+    if stream.capped:
+        kept = (
+            f"the first {stream.written:,} chars of the {what} saved to {path} "
+            f"(session scratch; the file stops at its {_size(stream.ceiling)} cap)"
         )
-    elif stream.capped:
-        saved = f"the first {stream.written:,} chars saved to {path} (session scratch); the rest is below"
+        saved = (
+            f"{kept}; chars {stream.written + 1:,}-{lost_to:,} of {total:,} were not kept"
+            if lost_to > stream.written else f"{kept}; the rest is below"
+        )
     else:
-        saved = f"full output saved to {path} (session scratch)"
+        saved = f"{what} saved to {path} (session scratch)"
     return _marker(head, tail, dropped, total_lines, saved)
 
 
@@ -371,60 +452,63 @@ def _bump(ctx: ToolCtx | None, bucket: str, key: str) -> None:
         _log.debug("spill stats write failed", exc_info=True)
 
 
-def note_readback(name: str, input: Any, ctx: ToolCtx | None) -> None:
-    """Count a Read/Grep/Bash call that touches this session's spill folder."""
+# A spill file's name: the producing tool, a dash, 12 hex of its content hash.
+_SPILL_NAME = r"([A-Za-z0-9_]+)-[0-9a-fA-F]{12}\.txt(?!\.?[A-Za-z0-9_])"
+# A name standing alone (a Glob listing relative to the folder, ``ls``) or
+# right after the folder name; never the tail of a longer word or path part.
+_BARE_NAME = re.compile(r"(?:(?<=" + SPILL_SUBDIR + r"/)|(?<![A-Za-z0-9_./-]))" + _SPILL_NAME, re.IGNORECASE)
+# A tool's own cut marker names the file it just wrote; that is not a read.
+_OWN_MARKER = re.compile(r"saved to [^\n]*?\(session scratch")
+
+
+def note_access(name: str, input: Any, result: str | None, ctx: ToolCtx | None) -> None:
+    """Count a finished call that read a spill file back, by producing tool.
+
+    Nothing about the query is interpreted. What counts is the spill files
+    the call touched or returned: the path a Read opened, the files a Grep or
+    Glob listed, the files a Bash or PowerShell command or its output names.
+    The producing tool is the filename's prefix, and each producer counts
+    once per call however many lines repeat its files. A name counts only
+    when it is a file in this session's spill folder, written as a full path
+    or right after ``tool-output/``, or bare when the call was aimed at the
+    folder itself. A call aimed at the folder that names no spill file counts
+    once as "unattributed".
+    """
     if ctx is None or name not in _READERS or not isinstance(input, dict):
         return
-    values = [v for k in _PATH_KEYS if isinstance(v := input.get(k), str) and v]
-    if not any(SPILL_SUBDIR in v.lower() for v in values):
+    named = "\n".join(v for k in _PATH_KEYS if isinstance(v := input.get(k), str) and v)
+    named = named.replace("\\", "/")
+    output = "" if name == "Read" else _OWN_MARKER.sub("", result or "").replace("\\", "/")
+    if SPILL_SUBDIR not in named.lower() and SPILL_SUBDIR not in output.lower():
         return
     directory = spill_dir(ctx)
     if directory is None:
         return
-    root = str(directory).replace("\\", "/")
-    for value in values:
-        norm = value.replace("\\", "/")
-        # Case-insensitive find: Windows paths arrive in any casing.
-        at = norm.lower().find(root.lower())
-        if at < 0:
-            continue
-        match = _SPILL_NAME.match(norm[at + len(root):].lstrip("/"))
-        if match:
-            producers = [match.group(1)]
-        else:
-            # The whole folder (a Grep, Glob or ls over it): once for each
-            # tool whose spill files the call covers, so the counts still say
-            # which cap the agent came back for.
-            # Grep's file filter is ``glob`` (its ``pattern`` is the regex);
-            # Glob's is ``pattern``.
-            names = input.get("glob") if name == "Grep" else input.get("pattern") if name == "Glob" else None
-            producers = _folder_producers(directory, names)
-        if not producers:
+    root = str(directory).replace("\\", "/").rstrip("/")
+    aimed = root.lower() in named.lower()
+    candidates: set[str] = set()
+    for match in _BARE_NAME.finditer(f"{named}\n{output}"):
+        before = match.string[max(0, match.start() - len(SPILL_SUBDIR) - 1):match.start()]
+        if aimed or before.lower() == f"{SPILL_SUBDIR}/":
+            candidates.add(match.group(0).lower())
+    producers: set[str] = set()
+    if candidates:
+        try:
+            existing = {p.name.lower(): p.name for p in directory.iterdir()}
+        except OSError:
+            existing = {}
+        producers = {real.rsplit("-", 1)[0] for c in candidates if (real := existing.get(c))}
+    if not producers:
+        if not aimed:
             return
-        for producer in producers:
-            _bump(ctx, "read_back", producer)
-        _bump(ctx, "read_back_by", name)
-        _log.info(
-            "tool-output spill read back: session=%s producer=%s reader=%s",
-            ctx.session_id, ",".join(producers), name,
-        )
-        return
-
-
-def _folder_producers(directory: Path, glob: Any = None) -> list[str]:
-    """Producing tools of the spill files in ``directory`` (``glob``-filtered)."""
-    import fnmatch
-
-    pattern = glob.rsplit("/", 1)[-1] if isinstance(glob, str) and glob else None
-    found: set[str] = set()
-    try:
-        for entry in directory.iterdir():
-            match = _SPILL_NAME.fullmatch(entry.name)
-            if match and (pattern is None or fnmatch.fnmatch(entry.name, pattern)):
-                found.add(match.group(1))
-    except OSError:
-        return []
-    return sorted(found)
+        producers = {"unattributed"}
+    for producer in sorted(producers):
+        _bump(ctx, "read_back", producer)
+    _bump(ctx, "read_back_by", name)
+    _log.info(
+        "tool-output spill read back: session=%s producer=%s reader=%s",
+        ctx.session_id, ",".join(sorted(producers)), name,
+    )
 
 
 def session_stats(ctx: ToolCtx) -> dict[str, Any]:
