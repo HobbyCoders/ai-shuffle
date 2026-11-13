@@ -199,7 +199,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.messages.content import SteerDelivery
+from fluid.messages.content import HARNESS_NOTE_META_KEY, SteerDelivery, is_harness_note
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
@@ -2689,7 +2689,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             # A tool-result head uses its preceding input, never the result;
             # matching node ids (not text) survives reloads and duplicate inputs.
             anchor = next((n for n in reversed([*path, head])
-                           if n.message.role == "user" and not any(
+                           if n.message.role == "user" and not is_harness_note(n.message)
+                           and not any(
                                isinstance(b, ToolResultBlock) for b in n.message.content)), None)
             if anchor is not None:
                 self._resume_anchor = anchor.node_id
@@ -3986,9 +3987,15 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # changed or a fold removed it from the view, so history stays
                 # append-only. Serializers fold it into the tool-result turn
                 # where the dialect needs alternating roles.
+                # Marked as a harness note: it is context inside this turn,
+                # never a turn start, so compaction keeps treating the real
+                # request as the open turn's first message.
                 plan_node = SessionNode(
                     node_id=new_id("node"), parent_id=parent.node_id,
-                    message=Message(role="user", content=[Text(plan_note)]),
+                    message=Message(
+                        role="user", content=[Text(plan_note)],
+                        provider_meta={HARNESS_NOTE_META_KEY: True},
+                    ),
                 )
                 history.append(plan_node.message)
             if self._encrypted_reasoning_poisoned:

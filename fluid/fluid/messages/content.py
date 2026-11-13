@@ -158,6 +158,16 @@ def block_from_dict(d: dict[str, Any]) -> ContentBlock:
     return cls(**d)
 
 
+#: ``provider_meta`` flag on a user node the harness wrote between real turns
+#: (the stored session-plan reminder). It is context, not a request: it never
+#: opens a turn for compaction or turn counting. Serializers ignore it.
+HARNESS_NOTE_META_KEY = "harness_note"
+
+
+def is_harness_note(message: Message) -> bool:
+    return bool((message.provider_meta or {}).get(HARNESS_NOTE_META_KEY))
+
+
 @dataclass
 class Message:
     role: str  # "user" | "assistant" | "system"

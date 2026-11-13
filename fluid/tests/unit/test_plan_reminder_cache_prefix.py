@@ -15,16 +15,21 @@ import json
 from collections.abc import AsyncIterator
 from itertools import pairwise
 
+from fluid.context.compaction import CompactionConfig, Compactor, is_turn_start
+from fluid.context.trim import TrimConfig
 from fluid.engine.native import NativeLoop
 from fluid.events import UserTurn
-from fluid.messages import Message, Text
+from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages.content import HARNESS_NOTE_META_KEY, is_harness_note
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers.anthropic.serialize import build_request_body as anthropic_body
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
+from fluid.providers.local.serialize import build_request_body as local_body
+from fluid.providers.local.text_tools import serialize_history
 from fluid.providers.openai_responses.serialize import (
     build_request_body as responses_body,
 )
-from fluid.store.base import MemoryStore
+from fluid.store.base import MemoryStore, SessionNode
 from fluid.tools.builtins import plan, register_builtins
 from fluid.tools.inproc import create_inproc_server, tool
 from fluid.tools.registry import ToolRegistry
@@ -249,3 +254,85 @@ async def test_an_unchanged_plan_is_not_restated_by_the_next_turn_calls() -> Non
     assert note in provider.requests[0].messages[-1].text()
     stored = "".join(n.message.text() for n in await store.load_path(sid))
     assert stored.count(note) == 1
+
+
+async def test_the_stored_reminder_is_marked_and_never_opens_a_turn() -> None:
+    _, store, sid, _ = await _run([
+        _tool_call("t1", "Plan", _plan_update(0, "in_progress")),
+        _text("done"),
+    ])
+    path = await store.load_path(sid)
+    notes = [n for n in path if is_harness_note(n.message)]
+    assert len(notes) == 1 and "# Session plan (revision 1;" in notes[0].message.text()
+    assert not is_turn_start(notes[0])
+    # The marker is durable: a resumed session reads it back from storage.
+    assert is_harness_note(Message.from_dict(notes[0].message.to_dict()))
+    assert [n for n in path if is_turn_start(n)] == path[:1]
+
+
+def _sn(nid: str, role: str, blocks: list, meta: dict | None = None) -> SessionNode:
+    return SessionNode(node_id=nid, parent_id=None,
+                       message=Message(role=role, content=blocks, provider_meta=meta or {}))
+
+
+def test_a_mid_turn_plan_update_cannot_get_the_real_request_digested() -> None:
+    # Review finding S1: an unmarked reminder node counted as a new turn, so
+    # the open request became an "older turn" the compactor could digest
+    # whole. A long request lost its late constraint mid-turn.
+    request = "Refactor the module. " + "context " * 1500 + "LATE-CONSTRAINT: never touch prod.yml"
+    nodes = [_sn("u0", "user", [Text("first turn")]), _sn("f0", "assistant", [Text("ok")]),
+             _sn("u1", "user", [Text(request)])]
+    for i in range(6):
+        nodes += [
+            _sn(f"a{i}", "assistant", [ToolUseBlock(id=f"c{i}", name="Read", input={"p": "x" * 3000})]),
+            _sn(f"r{i}", "user", [ToolResultBlock(tool_use_id=f"c{i}", content=[Text("r" * 3000)],
+                                                  delivery_metadata_version=1)]),
+        ]
+        if i == 2:
+            nodes.append(_sn("plan", "user", [Text("# Session plan (revision 2; ...)")],
+                             {HARNESS_NOTE_META_KEY: True}))
+    compactor = Compactor(config=CompactionConfig(
+        trigger_tokens=2_000, target_ratio=0.3, keep_recent_turns=1, trim=TrimConfig(enabled=False),
+    ))
+    for end in range(len(nodes) - 4, len(nodes) + 1):
+        rendered, _ = compactor.apply(nodes[:end], turn_boundary=False, context_window=8_000)
+    assert any(m.text() == request for m in rendered)
+    assert not any(start == "u1" for start, _ in compactor._digested)
+
+
+def _text_tool_history() -> list[Message]:
+    return [
+        Message(role="user", content=[Text("go")]),
+        Message(role="assistant", content=[ToolUseBlock(id="t1", name="Plan", input={})]),
+        Message(role="user", content=[ToolResultBlock(tool_use_id="t1", content=[Text("ok")])]),
+        Message(role="user", content=[Text("# Session plan (revision 1)")],
+                provider_meta={HARNESS_NOTE_META_KEY: True}),
+    ]
+
+
+def test_text_tools_fold_the_reminder_into_the_tool_result_turn() -> None:
+    # Review finding S2: strict chat templates (Mistral-7B-Instruct) refuse
+    # two user turns in a row.
+    history = _text_tool_history()
+    sent = serialize_history(history)
+    assert [m.role for m in sent] == ["user", "assistant", "user"]
+    assert "<tool_result" in sent[-1].content[0].text
+    assert sent[-1].content[1].text == "# Session plan (revision 1)"
+
+    later = [*history,
+             Message(role="assistant", content=[ToolUseBlock(id="t2", name="Plan", input={})]),
+             Message(role="user", content=[ToolResultBlock(tool_use_id="t2", content=[Text("ok")])]),
+             Message(role="user", content=[Text("# Session plan (revision 2)")])]
+    nxt = serialize_history(later)
+    assert nxt[:len(sent)] == sent  # still a strict prefix of the next request
+
+
+def test_local_chat_completions_never_sends_two_user_turns_in_a_row() -> None:
+    def roles(messages: list[Message]) -> list[str]:
+        body = local_body(ProviderRequest(model="m", system="", messages=messages))
+        return [m["role"] for m in body["messages"] if m["role"] != "system"]
+
+    history = _text_tool_history()
+    history[2] = Message(role="user", content=[ToolResultBlock(tool_use_id="t1", content=[Text("ok")]),
+                                               Text("a steer")])
+    assert roles(history) == ["user", "assistant", "tool", "user"]
