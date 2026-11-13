@@ -2580,7 +2580,6 @@ async def _deliver_forwarded_locked(force):
         home, frame = payload.get("home"), payload.get("report") or {}
         attempts = int(payload.get("attempts") or 0) + 1
         device = payload.get("device_id")
-        on_wire = False
         try:
             if payload.get("report_of"):
                 if await asyncio.to_thread(_starter_deleted, home):
@@ -2627,10 +2626,13 @@ async def _deliver_forwarded_locked(force):
                                 frame.get("task_id"), home, reason)
                 await asyncio.to_thread(_settle_forward, row["id"], device=device, deferred=reason)
                 continue
-            on_wire = True
-            answer = await asyncio.wait_for(
-                control.call(device, action, body, timeout=REMOTE_TIMEOUT),
-                timeout=REMOTE_TIMEOUT)
+            sending = control.call(device, action, body, timeout=REMOTE_TIMEOUT)
+            # A first report is sent once (below), so it needs control's own
+            # split between never sent (RunnerUnreachable, its connect time is
+            # bounded) and maybe arrived (MaybeApplied). An outer deadline
+            # would expire during a connection attempt and cannot tell them apart.
+            answer = await (sending if payload.get("report_of")
+                            else asyncio.wait_for(sending, timeout=REMOTE_TIMEOUT))
         except control.ControlRefused as exc:
             if "Unknown control action" in str(exc):
                 # An older owner: kept until that worker is updated.
@@ -2641,8 +2643,7 @@ async def _deliver_forwarded_locked(force):
             await asyncio.to_thread(_settle_forward, row["id"], refused=str(exc))
             continue
         except Exception as exc:  # noqa: BLE001 — unreachable or a lost reply: retry later
-            if (payload.get("report_of") and on_wire and not (
-                    isinstance(exc, control.RunnerUnreachable) and not isinstance(exc, control.MaybeApplied))):
+            if payload.get("report_of") and isinstance(exc, control.MaybeApplied):
                 # A first report may steer into a live turn there, which keeps
                 # no receipt: like its direct send, one that may have arrived
                 # is never sent again, so nothing wakes twice.

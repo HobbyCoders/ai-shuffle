@@ -789,3 +789,41 @@ def test_a_deferred_first_report_that_may_have_arrived_is_not_sent_again(workers
         asyncio.run(orch.deliver_forwarded_reports(force=True))
     assert sent.count(orch.REPORT_ACTION) == 2
     assert sent.count(orch.FORWARD_REPORT_ACTION) == 3
+
+
+def test_a_deferred_first_report_whose_connection_hangs_stays_owed(workers, monkeypatch):
+    """Connecting to a blackholed address outlasts the report's own timeout
+    (two connect attempts and the pause between them) before anything is
+    sent: the first report stays owed and goes once the address answers."""
+    import httpx
+
+    from app.core import session_orchestration as orch
+    from app.network import control, transport
+
+    a, b = _network_with_old_worker(workers)
+    frame = {"task_id": "c2", "agent_message_turn_id": "t9", "status": "completed", "summary": "done"}
+    monkeypatch.setattr(orch, "REMOTE_TIMEOUT", 0.2)
+    monkeypatch.setattr(control, "CONNECT_TIMEOUT", 0.15)
+    monkeypatch.setattr(control, "CONNECT_RETRY_DELAY", 0.05)
+    monkeypatch.setitem(transport._links, b.device_id, transport.PeerLink(b.device_id, ["http://192.0.2.1:9"]))
+    blackholed, sent = [True], []
+
+    async def post(link, client, ctx, route, action, payload, timeout):
+        if blackholed[0]:
+            await asyncio.sleep(control.CONNECT_TIMEOUT)
+            raise control._RouteFailed(httpx.ConnectTimeout("timed out"))
+        sent.append(action)
+        return {"delivered": True}
+
+    with a.active():
+        _gemini_session(owner=b.device_id)
+        _deferred_first_report(orch, monkeypatch, b, frame)
+        _set_presence(b.device_id, {gemini_provider.CAPABILITY: 1})
+        monkeypatch.setattr(control, "_post", post)
+        asyncio.run(orch.deliver_forwarded_reports(force=True))
+        kept = _outbox(orch._FORWARD_PENDING)
+        assert [r["report_of"] for r in kept] == ["c2"] and kept[0]["attempts"] == 1
+        blackholed[0] = False
+        asyncio.run(orch.deliver_forwarded_reports(force=True))
+        assert _outbox(orch._FORWARD_PENDING) == []
+    assert sent == [orch.REPORT_ACTION]
