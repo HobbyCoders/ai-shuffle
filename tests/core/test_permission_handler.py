@@ -474,6 +474,32 @@ class TestPermissionHandler:
             result = handler._check_rules("session-1", "profile-1", "Bash", {"command": "ls"})
             assert result is None
 
+    def test_check_rules_honours_a_rule_saved_under_the_bridge_spelling(self, handler):
+        """An Allow saved from an older Antigravity card (bridge spelling)
+        still decides the registry-named call; a rule on the registry name
+        comes first, and an unrelated tool is not matched."""
+        legacy = PermissionRule(
+            id="legacy", session_id=None, profile_id="profile-1",
+            tool_name="mcp__fluid_bundled__mcp__builtins__Monitor",
+            tool_pattern=None, decision=PermissionDecision.ALLOW,
+        )
+        rows = [{
+            "id": legacy.id, "profile_id": legacy.profile_id, "tool_name": legacy.tool_name,
+            "tool_pattern": None, "decision": "allow",
+        }]
+        with patch("app.db.database.get_permission_rules", return_value=rows):
+            hit = handler._check_rules("session-1", "profile-1", "mcp__builtins__Monitor", {})
+            assert hit is not None and hit.id == "legacy"
+            assert handler._check_rules("session-1", "profile-1", "mcp__builtins__Task", {}) is None
+
+            handler._session_rules["session-1"] = [PermissionRule(
+                id="direct", session_id="session-1", profile_id=None,
+                tool_name="mcp__builtins__Monitor", tool_pattern=None,
+                decision=PermissionDecision.DENY,
+            )]
+            hit = handler._check_rules("session-1", "profile-1", "mcp__builtins__Monitor", {})
+            assert hit is not None and hit.id == "direct"
+
     def test_check_rules_profile_rule_match(self, handler):
         """Should return matching profile rule from database."""
         db_rule = {

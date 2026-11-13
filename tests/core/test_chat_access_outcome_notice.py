@@ -56,6 +56,10 @@ async def _settle(broker):
     async with asyncio.timeout(5):
         while broker._notifications:
             await asyncio.gather(*list(broker._notifications), return_exceptions=True)
+            # A gather of tasks that are all done returns without yielding, so
+            # a task that finished before its done-callback (the set discard)
+            # ran would spin this loop forever and starve the timeout too.
+            await asyncio.sleep(0)
 
 
 def _submission():
