@@ -72,7 +72,7 @@ class Upstream:
 async def test_a_spoken_request_goes_to_the_owner_and_nothing_is_written_here(mirror):
     call = streamed_call()
     call.upstream = Upstream()
-    call.progress = SimpleNamespace(submitted=AsyncMock())
+    call.progress = SimpleNamespace(submitted=AsyncMock(), heard=lambda _words: None)
     await call.caption("user", "Make the rail icons bigger.")
     await call.caption("assistant", "Sure, asking the agent now.")
 
@@ -105,7 +105,7 @@ async def test_an_unreachable_owner_is_said_aloud_and_nothing_is_queued_here(mir
     monkeypatch.setattr(control, "call", offline)
     call = streamed_call()
     call.upstream = Upstream()
-    call.progress = SimpleNamespace(submitted=AsyncMock())
+    call.progress = SimpleNamespace(submitted=AsyncMock(), heard=lambda _words: None)
     await call.caption("user", "Run the tests.")
 
     await call.run_delegation("delegation-1")
@@ -134,7 +134,7 @@ async def test_a_conversation_run_here_still_records_and_queues_locally(mock_db,
     socket = SimpleNamespace(send_json=AsyncMock(), send_bytes=AsyncMock(), close=AsyncMock())
     call = voice_stream.VoiceStream(socket, {"id": "local-chat"}, {"model": "gpt-live-1", "voice": "marin"}, "s", 5)
     call.upstream = Upstream()
-    call.progress = SimpleNamespace(submitted=AsyncMock())
+    call.progress = SimpleNamespace(submitted=AsyncMock(), heard=lambda _words: None)
     await call.caption("user", "Summarize the diff.")
 
     await call.run_delegation("d1")
@@ -221,7 +221,7 @@ def test_the_request_prompt_is_the_callers_words_when_there_are_any():
 async def test_a_forwarded_request_carries_a_stable_command_id(mirror):
     call = streamed_call()
     call.upstream = Upstream()
-    call.progress = SimpleNamespace(submitted=AsyncMock())
+    call.progress = SimpleNamespace(submitted=AsyncMock(), heard=lambda _words: None)
     await call.caption("user", "Make the rail icons bigger.")
 
     await call.run_delegation("delegation-1")
@@ -253,7 +253,7 @@ async def test_a_lost_answer_says_it_may_have_reached_the_chat(mirror, monkeypat
     monkeypatch.setattr(control, "call", lost)
     call = streamed_call()
     call.upstream = Upstream()
-    call.progress = SimpleNamespace(submitted=AsyncMock())
+    call.progress = SimpleNamespace(submitted=AsyncMock(), heard=lambda _words: None)
     await call.caption("user", "Run the tests.")
 
     await call.run_delegation("delegation-1")
@@ -491,7 +491,7 @@ async def test_a_streamed_forward_the_owner_took_without_a_turn_id_is_said_aloud
     monkeypatch.setattr(control, "call", no_turn)
     call = streamed_call()
     call.upstream = Upstream()
-    call.progress = SimpleNamespace(submitted=AsyncMock())
+    call.progress = SimpleNamespace(submitted=AsyncMock(), heard=lambda _words: None)
     await call.caption("user", "Run the tests.")
 
     await call.run_delegation("delegation-1")

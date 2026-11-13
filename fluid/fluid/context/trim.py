@@ -48,6 +48,7 @@ from fluid.context.steer_render import (
     render_steers,
 )
 from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.messages.content import is_harness_note
 from fluid.store.base import SessionNode
 
 
@@ -876,7 +877,7 @@ class ToolResultTrimmer:
                     if isinstance(b, ToolResultBlock) and not b.is_error
                     and has_traceback_tail(b)
                 )
-            if node.message.role == "user" and any(
+            if node.message.role == "user" and not is_harness_note(node.message) and any(
                 not isinstance(b, ToolResultBlock) for b in node.message.content
             ):
                 starts += 1

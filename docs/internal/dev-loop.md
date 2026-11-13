@@ -412,20 +412,27 @@ before the call (options ride in the tag: `[voice:relay reply_delay_ms=800]`):
 | `renew` | The provider ends its session as expired while the agent works; the app reconnects. |
 | `error` | The provider reports an error mid-call (once per chat line). |
 | `drop` | The provider connection is cut without a close. |
+| `long-work` | The agent works about 15 s (`[script:voice-long]`): its progress sentence is said once as a short line, the voice calls `check_work` while the work runs (Grok only), then the short result is said. |
+| `long-work-quiet` | As `long-work`, but the caller says "just tell me when it's done" after the handoff: no progress line, only the result. |
+| `check-idle` | Grok only. With nothing running, the voice answers a new request with `check_work` instead of a handoff; the app takes that call as the handoff, the fake says "Checking on that now." and the reply (`[script:voice-reply]`) is said once. |
 
 Steps (one key each): `wait_audio_ms` (wait for that much speech-level
 microphone audio, so a script never runs ahead of a real microphone),
 `wait_ms`, `wait_speech` (wait until N notes were said), `caller` (the
 caller's words, as the provider's transcript events), `handoff` (with `ack`,
-the voice's own words), `say`, `error`, `close` (a reason: `inactive`,
-`expired`), `drop`. Options: `word_ms`, `start_delay_ms`, `reply_delay_ms`
+the voice's own words), `check_work` (Grok: the voice calls its read-only
+status tool; the app's output is said, or, when the app took the call as the
+handoff, a short "Checking on that now."), `say`, `error`, `close` (a reason:
+`inactive`, `expired`), `drop`. Options: `word_ms`, `start_delay_ms`, `reply_delay_ms`
 (slow provider), `step_timeout_ms`. A session that resumes a call (its history
 carries the app's renewal note) plays `default`, so a reconnect never replays
 the script. New scenario files are picked up without a restart.
 
 Everything it saw and said is logged as JSON lines: the status file's
-`fake_voice.log` (`speech`, `note`, `handoff`, `caller`, `audio`, sessions),
-also `GET <fake_voice.control>log?since=N`. `GET …/scenarios` lists the
+`fake_voice.log` (`speech`, `note`, `handoff`, `check_work`, `tool_output`,
+`caller`, `audio`, sessions; a Grok note sent as a `user` item carries
+`role` and `app_note`, and a `user` item without the app's lead is logged as
+`unlabelled_user_item`, since a real model would take it for the caller), also `GET <fake_voice.control>log?since=N`. `GET …/scenarios` lists the
 scenarios; `GET …/arm?scenario=NAME` makes the next new session without a tag
 play NAME (for a client that cannot type a tag first). The fake also answers
 the GPT-Live-1.1 access check with 404. It runs alone too:
@@ -465,6 +472,25 @@ before a call on a fresh chat) and read what the voice was asked to say. The
 status file's `fake_voice.control` then names the browser-facing address. A
 plain-HTTP LAN page is not a secure context, so a browser there gets no
 microphone; the native app is not affected.
+
+### The real provider: `scripts/voice_probe.py`
+
+The fake says every note it gets, so it cannot show what a real voice model
+does with one. `python -m scripts.voice_probe` opens a real xAI realtime
+session in text-only mode (no microphone, `turn_detection` null) and plays a
+short scripted handoff in each delivery shape: the reply as a `system` item,
+as a `user` app note (what ships), as the handoff's function output, and as
+`response.instructions`, plus whether a quiet `system` item is seen on a later
+turn and whether the model answers while a function call is still open. It
+uses the shipped `LIVE_INSTRUCTIONS`, `HANDOFF_TOOL` and note texts, and
+prints for each shape any `error` event, the items the provider acknowledged,
+the response status, audio length and the spoken transcript. It is a paid
+call: the bearer comes only from `VOICE_PROBE_XAI_BEARER`, which it never
+prints. `--shapes old,user` picks shapes; `--fake` runs it against the fake
+provider for free. On a real call the app log's `Voice trace` lines (note
+kind, bytes, wire shape, then transcript characters, audio ms and
+interruption for the response, and provider error codes; never text) show
+how much of a reply was said.
 
 ## Claude Code chats: the fake `claude` CLI (`--claude-cli fake`, the default)
 

@@ -118,6 +118,26 @@ async def test_round_trip_and_head_advance(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_session_view_labels_a_stored_plan_note_as_harness_context(mock_db):
+    from fluid.messages.content import HARNESS_NOTE_META_KEY
+    from fluid.tools.builtins import session_view
+    from fluid.tools.registry import ToolCtx
+
+    store = PgFluidStore()
+    await store.create_session("ses_note")
+    await store.append("ses_note", _node("n1", None, "do the work"))
+    note = SessionNode(node_id="n2", parent_id="n1", message=Message(
+        role="user", content=[Text(text="# Session plan: do the work")],
+        provider_meta={HARNESS_NOTE_META_KEY: True}))
+    await store.append("ses_note", note)
+    ctx = ToolCtx(extra={"session_view": store.session_slice})
+    full = await session_view.handler({"session_id": "ses_note"}, ctx)
+    assert "[1 harness note]" in full.text and "[1 user]" not in full.text
+    talk = await session_view.handler({"session_id": "ses_note", "show": "conversation"}, ctx)
+    assert "Session plan" not in talk.text and "[0 user]" in talk.text
+
+
+@pytest.mark.asyncio
 async def test_persistence_across_store_instances(mock_db):
     store = PgFluidStore()
     await store.create_session("ses_pg2")

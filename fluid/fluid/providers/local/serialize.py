@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from fluid.providers._chat_completions import (
+    merge_user_runs,
     system_message,
     translate_message,
     translate_tools,
@@ -54,7 +55,7 @@ def build_request_body(
     system = system_message(request.system)
     if system is not None:
         messages.append(system)
-    for msg in request.messages:
+    for msg in merge_user_runs(request.messages):
         messages.extend(translate_message(msg))
 
     body: dict[str, Any] = {

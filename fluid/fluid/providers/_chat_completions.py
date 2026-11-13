@@ -125,6 +125,27 @@ def image_part(block: Image) -> dict[str, Any]:
     }
 
 
+def merge_user_runs(messages: list[Message]) -> list[Message]:
+    """Fold each run of consecutive user messages into one, blocks in order.
+
+    History can hold a tool-result node followed by a stored harness note
+    (the plan reminder). Strict chat templates (Mistral-7B-Instruct and
+    similar) refuse two user turns in a row. Only the newest message ever
+    gains blocks, so a request stays a prefix of the next one.
+    """
+    out: list[Message] = []
+    for msg in messages:
+        if out and msg.role == "user" and out[-1].role == "user":
+            prev = out[-1]
+            out[-1] = Message(
+                role="user", content=[*prev.content, *msg.content],
+                provider_meta=prev.provider_meta,
+            )
+        else:
+            out.append(msg)
+    return out
+
+
 def translate_message(msg: Message) -> list[dict[str, Any]]:
     """One fluid ``Message`` → one or more chat/completions messages.
 

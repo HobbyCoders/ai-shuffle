@@ -18,6 +18,13 @@
 //   relay       the caller asks, the chat agent answers ([script:voice-reply]); the reply is said once, in full
 //   wait-update the agent starts a background build and waits ([script:voice-wait]): its update is said before the wait, the result after
 //   busy        a call placed while the chat is still answering says that reply once it lands, then relays a new request
+//   long-work   the agent works ~15 s ([script:voice-long]): its progress sentence is said once as a
+//               short line before the short result, never after it; on Grok the voice's check_work, called
+//               while the work runs, is answered with the running work and starts nothing
+//   long-work-quiet  as long-work, but the caller asked to hear only the result: no progress line
+//   check-idle  Grok only: with nothing running, the voice answers a new request ("Check whether the
+//               deploy finished.") with check_work instead of a handoff; the app takes it as the
+//               handoff: one request reaches the agent, a short "on it", the reply said once
 //   attachment-during-call (#1265) a file sent while a call is live goes as fields beside the words
 //               and shows as a chip on the message
 import { runJourney } from './runner.mjs';
@@ -220,6 +227,90 @@ const busy = {
 	}
 };
 
+const LONG_WORK = {
+	progress: "I'm reading through the test logs now.",
+	result: 'One test is flaky, the upload retry test. Everything else passed. Should I mark it flaky?'
+};
+
+/** Long work: a short progress line while the agent works (unless asked not to), then the result. */
+function longWork(name, { quiet }) {
+	return {
+		name,
+		throttles: ['fast'],
+		async setup(ctx) {
+			ctx.token = await chatWithScenario(ctx, name);
+		},
+		async act({ page, mark, status, log }) {
+			const voice = fakeVoiceLog(status);
+			const seq = voice.mark();
+			await mark('start the call; the caller asks for something that takes a while');
+			await startCall(page, { timeout: 45_000 });
+			const session = await callSession(voice, seq, name);
+			await voice.waitFor(seq, (es) => spokenNotes(es, session).find((e) => e.text.includes(LONG_WORK.result)), 'the result said aloud', { timeout: 90_000 });
+			const grok = voice.since(seq).some((e) => e.session === session && e.dialect === 'grok');
+			if (grok && !quiet) await voice.waitFor(seq, (es) => es.find((e) => e.kind === 'tool_output' && e.tool === 'check_work'), 'check_work answered', { timeout: 30_000 });
+			await page.waitForTimeout(3000);
+			const entries = voice.since(seq);
+			const notes = spokenNotes(entries, session);
+			const progress = notes.filter((e) => e.text === LONG_WORK.progress);
+			const result = notes.findIndex((e) => e.text.includes(LONG_WORK.result));
+			expect(notes.filter((e) => e.text.includes(LONG_WORK.result)).length === 1, `the result is said once:\n  ${speechReport(entries)}`);
+			if (quiet) {
+				expect(progress.length === 0, `no progress line after "just tell me when it's done":\n  ${speechReport(entries)}`);
+			} else {
+				expect(progress.length === 1, `the progress line is said once:\n  ${speechReport(entries)}`);
+				expect(notes.indexOf(progress[0]) < result, 'the progress line comes before the result, never after it');
+			}
+			if (grok && !quiet) {
+				// Looked at while the work runs: the latest progress, never a made-up result.
+				const looked = notes.findIndex((e) => e.text.includes('unfinished and not a result'));
+				expect(looked > -1 && looked < result, `check_work told the running work before the result:\n  ${speechReport(entries)}`);
+				expect(!entries.some((e) => e.kind === 'handoff' && e.seq > notes[looked].seq), 'check_work started no work');
+			}
+			expect(!entries.some((e) => e.kind === 'unlabelled_user_item'), "no app note reads as the caller's words");
+			expect(!entries.some((e) => e.kind === 'error.sent' || e.kind === 'overlap'), 'no provider error or overlapping response');
+			log(`${grok ? 'grok' : 'gpt-live'}: ${notes.length} spoken note(s)`);
+			await mark('end the call');
+			await endCall(page);
+		}
+	};
+}
+
+const checkIdle = {
+	name: 'check-idle',
+	throttles: ['fast'],
+	async setup(ctx) {
+		ctx.token = await chatWithScenario(ctx, 'check-idle');
+	},
+	async act({ page, mark, status, log }) {
+		const voice = fakeVoiceLog(status);
+		const seq = voice.mark();
+		await mark('start the call; the caller asks for a check and the voice calls check_work');
+		await startCall(page, { timeout: 45_000 });
+		const session = await callSession(voice, seq, 'check-idle');
+		const looked = await voice.waitFor(seq, (es) => es.find((e) => e.kind === 'check_work' || e.kind === 'check_work.unsupported'), 'the voice calling check_work');
+		if (looked.kind === 'check_work.unsupported') {
+			log('gpt-live: no check_work tool, nothing to check');
+			await mark('end the call');
+			await endCall(page);
+			return;
+		}
+		await voice.waitFor(seq, (es) => es.find((e) => e.kind === 'check_work.handed_off'), 'check_work taken as the handoff', { timeout: 30_000 });
+		await voice.waitFor(seq, (es) => spokenNotes(es, session).find((e) => e.text.includes('214 tests')), 'the chat reply said aloud', { timeout: 90_000 });
+		await page.getByText('All 214 tests pass', { exact: false }).first().waitFor({ timeout: 30_000 });
+		await page.waitForTimeout(3000); // a second handoff or reply would land now
+		const entries = voice.since(seq);
+		const said = entries.filter((e) => e.kind === 'speech');
+		expect(said.some((e) => e.trigger === 'ack' && e.text === 'Checking on that now.'), `the voice said it is on it:\n  ${speechReport(entries)}`);
+		expectSaidOnce(entries, VOICE_REPLY_SPOKEN, 'the chat reply');
+		expect(!entries.some((e) => e.kind === 'handoff'), 'the voice did not hand the request off a second time');
+		expect((await countUserRows(page, 'Check whether the deploy finished.')) === 1, "the caller's words reach the chat once");
+		expect(!entries.some((e) => e.kind === 'error.sent' || e.kind === 'overlap'), 'no provider error or overlapping response');
+		await mark('end the call');
+		await endCall(page);
+	}
+};
+
 const attachmentDuringCall = {
 	name: 'attachment-during-call',
 	// Slow copies only: the fast ones add no signal and cost hosted shard time.
@@ -265,6 +356,6 @@ const attachmentDuringCall = {
 await runJourney({
 	name: 'voice-call',
 	browser: voiceBrowser,
-	cases: [startEnd, relay, waitUpdate, busy, contextAdmissionTimeout, attachmentDuringCall],
+	cases: [startEnd, relay, waitUpdate, busy, longWork('long-work', { quiet: false }), longWork('long-work-quiet', { quiet: true }), checkIdle, contextAdmissionTimeout, attachmentDuringCall],
 	allow: [...DEV_INSTANCE_NOISE]
 });

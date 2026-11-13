@@ -56,6 +56,7 @@ explicit later resume.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -199,7 +200,12 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.messages.content import SteerDelivery
+from fluid.messages.content import (
+    HARNESS_NOTE_META_KEY,
+    PLAN_REVISION_META_KEY,
+    SteerDelivery,
+    is_harness_note,
+)
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
@@ -807,6 +813,24 @@ LOST_TOOL_RESULT_TEXT = (
     "[interrupted: this tool call never completed (e.g. the server restarted "
     "mid-call); its result was lost]"
 )
+
+
+def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) -> bool:
+    """Whether the newest plan statement in the view is the current plan.
+
+    Newest first, the first stored plan note or message carrying the plan
+    decides. A note is matched on the revision it was stored with, never on
+    rendered text: a fold replaces it with a summary that has no flag, and a
+    plan that changes back to older text still needs restating after the
+    newer note. The plan a turn's own request carries (added at turn start)
+    is matched on its text.
+    """
+    for message in reversed(history):
+        if is_harness_note(message):
+            return message.provider_meta.get(PLAN_REVISION_META_KEY) == revision
+        if plan_note in message.text():
+            return True
+    return False
 
 
 def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
@@ -2693,7 +2717,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             # A tool-result head uses its preceding input, never the result;
             # matching node ids (not text) survives reloads and duplicate inputs.
             anchor = next((n for n in reversed([*path, head])
-                           if n.message.role == "user" and not any(
+                           if n.message.role == "user" and not is_harness_note(n.message)
+                           and not any(
                                isinstance(b, ToolResultBlock) for b in n.message.content)), None)
             if anchor is not None:
                 self._resume_anchor = anchor.node_id
@@ -3979,15 +4004,34 @@ class NativeLoop(BackgroundLifecycleMixin):
             history = self._with_resume_clock(nodes, rendered)
             # Compaction can retire the anchor. Account for only the clock
             # actually sent, including on later calls of this same Resume.
-            overhead_tokens = self._context_overhead_tokens() + (estimate_tokens_of_text(plan_note) if plan_note else 0)
+            # The plan note is history once written (below), not overhead.
+            overhead_tokens = self._context_overhead_tokens()
             history = sanitize_assistant_history(repair_dangling_tool_calls(history))
-            if plan_note and not any(plan_note in message.text() for message in history):
-                # Ephemeral tail, not a system-prefix change or a transcript write.
-                # Keep tool-result pairing by extending the final user message.
-                if history and history[-1].role == "user":
-                    history[-1] = replace(history[-1], content=[*history[-1].content, Text(plan_note)])
-                else:
-                    history.append(Message(role="user", content=[Text(plan_note)]))
+            plan_node: SessionNode | None = None
+            plan_revision = (
+                hashlib.sha256(plan_note.encode()).hexdigest()[:16] if plan_note else None
+            )
+            if plan_note and not _plan_in_view(history, plan_note, plan_revision):
+                # A transcript write, never an unstored tail on the newest
+                # message: the next call would move that tail and change bytes
+                # the provider already cached. Written only when the plan text
+                # changed or a fold removed it from the view, so history stays
+                # append-only. Serializers fold it into the tool-result turn
+                # where the dialect needs alternating roles.
+                # Marked as a harness note: it is context inside this turn,
+                # never a turn start, so compaction keeps treating the real
+                # request as the open turn's first message.
+                plan_node = SessionNode(
+                    node_id=new_id("node"), parent_id=parent.node_id,
+                    message=Message(
+                        role="user", content=[Text(plan_note)],
+                        provider_meta={
+                            HARNESS_NOTE_META_KEY: True,
+                            PLAN_REVISION_META_KEY: plan_revision,
+                        },
+                    ),
+                )
+                history.append(plan_node.message)
             if self._encrypted_reasoning_poisoned:
                 # A prior call proved the history holds reasoning blobs the
                 # current model+account cannot decrypt; render without them
@@ -4031,6 +4075,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     usage=partial, cost_usd=partial_cost, num_model_calls=num_calls,
                 ))
                 return
+            if plan_node is not None:
+                # Stored only for a call that is really made; a retry of this
+                # call re-renders it from the path instead of writing again.
+                await self._append_node(sid, plan_node)
+                parent = plan_node
             # The tool results this request carries exactly as stored: the
             # calls it leads to may answer a repeat with a pointer at one of
             # them, and at nothing else (fluid.tools.view). Kept per session

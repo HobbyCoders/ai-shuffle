@@ -211,10 +211,77 @@ _STATUS_PATTERNS = tuple(re.compile(p) for p in (
 ))
 
 
+def _normal(text: str) -> str:
+    normal = " ".join(re.sub(r"[^\w\s']", " ", str(text or "").lower().replace("’", "'")).split())
+    return _LEADING_FILLER.sub("", normal).strip()
+
+
 def is_status_question(text: str) -> bool:
     """True when ``text`` is only a question about current work."""
-    normal = " ".join(re.sub(r"[^\w\s']", " ", str(text or "").lower().replace("’", "'")).split())
-    normal = _LEADING_FILLER.sub("", normal).strip()
+    normal = _normal(text)
     if not normal or len(normal.split()) > 12:
         return False
     return any(pattern.match(normal) for pattern in _STATUS_PATTERNS)
+
+
+# The caller asks the voice to stop, or to resume, telling progress on long
+# work. Such a request can sit inside a longer sentence ("that's fine, just tell
+# me when it's done"), so the words are split into clauses and each clause must
+# be the request whole. Whole clauses keep work requests out ("stop the update
+# to the software", "skip the updates in the installer") and a negation in
+# front ("do not stop the updates") fails the match. The last clause that
+# states a preference wins. A bare "stop the updates" names no kind of update,
+# so it counts only when nothing else in the sentence is a work request ("skip
+# the updates and reboot the server" is about software): missing a mute costs
+# one spoken line, a wrong mute costs silence through the next long job.
+_CLAUSE_SPLIT = re.compile(r"[.!?;:,\n]+|\s+-\s+|\b(?:and|but|then)\b")
+_TAIL = r"(?: please| thanks| thank you| okay| ok| for now)*"
+_UPDATES = r"(?:the |your |all the |these |those |any )?(?:progress |status )?(?:updates|play by play|narration)"
+_SPOKEN_UPDATES = r"(?:the |your |all the |these |those |any )?(?:(?:progress |status )updates|play by play|narration)"
+_FEWER_UPDATES_PATTERNS = tuple(re.compile(p + _TAIL + "$") for p in (
+    (r"^(?:you can |please )?(?:only|just) (?:tell|let) me(?: know)? (?:when|once|if) (?:it's|it is|that's|that is|"
+     r"you're|you are|you've|everything's|everything is|it has|it's all|the work is) "
+     r"(?:done|finished|ready|complete|completed)"),
+    r"^(?:please )?(?:stop|no more|enough|quit|skip|hold|cut|drop)(?: with)? " + _SPOKEN_UPDATES,
+    r"^(?:please )?(?:stop|quit) (?:updating me|narrating|giving me updates|telling me every step|telling me each step)",
+    r"^(?:i want |i'd like |i would like )?fewer (?:progress |status )?updates",
+    (r"^(?:you )?(?:don't|do not|no need to) (?:need to |have to )?(?:keep )?(?:updating me|update me|giving me updates|"
+     r"give me updates|telling me every step|tell me every step|telling me each step|narrating)(?: as you go)?"),
+))
+_BARE_FEWER = re.compile(r"^(?:please )?(?:stop|no more|enough|quit|skip|hold|cut|drop)(?: with)? "
+                         r"(?:the |your |all the |these |those |any )?updates" + _TAIL + "$")
+_ACKNOWLEDGEMENT = re.compile(r"^(?:that's fine|that is fine|fine|thanks|thank you|got it|sounds good|yeah|yes|yep|"
+                              r"no|nah|okay|ok|alright|right|"
+                              r"sure|great|cool|perfect|please|no worries|no problem|all good|i'm good|"
+                              r"(?:just )?(?:keep going|keep working|keep at it|carry on|continue|go on))$")
+_MORE_UPDATES_PATTERNS = tuple(re.compile(p + _TAIL + "$") for p in (
+    r"^(?:please )?keep me (?:posted|updated|informed|in the loop)(?: as you go)?",
+    r"^(?:please |you can )?(?:give|tell) me (?:the )?(?:progress )?updates (?:again|as you go)",
+    r"^(?:please |you can )?(?:start|resume|go back to) (?:giving me )?(?:the )?(?:progress )?updates(?: again)?",
+    r"^(?:please )?(?:tell|let) me (?:know )?how it'?s going as you go",
+    r"^(?:you can )?(?:don't|do not) stop " + _UPDATES,
+))
+
+
+def progress_preference(text: str) -> str | None:
+    """"fewer" when the caller asks for no spoken progress until the work is
+    done, "more" when they ask to be kept posted again, else None."""
+    clauses = [c for c in map(_normal, _CLAUSE_SPLIT.split(str(text or "").lower().replace("’", "'"))) if c]
+    fewer = [any(pattern.match(c) for pattern in _FEWER_UPDATES_PATTERNS) for c in clauses]
+    more = [any(pattern.match(c) for pattern in _MORE_UPDATES_PATTERNS) for c in clauses]
+    bare = [bool(_BARE_FEWER.match(c)) for c in clauses]
+    # "Stop the updates and revert the config" is a work request: beside any
+    # other clause a bare "the updates" states no preference at all.
+    work = any(not (f or m or b or _ACKNOWLEDGEMENT.match(c)) for c, f, m, b in zip(clauses, fewer, more, bare))
+    found = None
+    for f, m, b in zip(fewer, more, bare):
+        if f or (b and not work):
+            found = "fewer"
+        elif m:
+            found = "more"
+    return found
+
+
+def wants_fewer_updates(text: str) -> bool:
+    """True when the caller asks for no spoken progress until the work is done."""
+    return progress_preference(text) == "fewer"
