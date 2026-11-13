@@ -28,7 +28,10 @@
  // paint and on every reopen of the same document (#1476).
  const headings = $derived(currentDoc ? extractHeadings(currentDoc.content) : []);
  // The tab remembers the open document, so a reload reopens it. Docs keeps no
- // browser history of its own: this is a plain read on mount.
+ // browser history of its own: this is a plain read on mount, and only where
+ // list and document show side by side. A phone opens on the list, as before,
+ // because opening the stacked detail on load would add ViewShell's Back entry
+ // on top of the one the reloaded page already stands on.
  const OPEN_KEY = 'docs.open';
  function remember(doc: string) {
   try { sessionStorage.setItem(OPEN_KEY, doc); } catch { /* Storage blocked: a reload starts over. */ }
@@ -41,13 +44,9 @@
   try { return known(sessionStorage.getItem(OPEN_KEY) ?? ''); } catch { return null; }
  }
  onMount(() => {
-  if (activeSlug || initialItemId) return;
-  const last = lastOpen();
-  if (last) selectDoc(...last);
-  else if (!mobile && !platform.isMobile && window.innerWidth > 600) {
-   const first = docsByCategory[activeCategory]?.[0];
-   if (first) selectDoc(activeCategory, first.slug);
-  }
+  if (activeSlug || initialItemId || mobile || platform.isMobile || window.innerWidth <= 600) return;
+  const [category, slug] = lastOpen() ?? [activeCategory, docsByCategory[activeCategory]?.[0]?.slug];
+  if (slug) selectDoc(category, slug);
  });
  function selectDoc(category: string, slug: string, query = '') {
   activeCategory = category;

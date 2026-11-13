@@ -75,7 +75,7 @@ describe('Docs headings, search marks and reload (#1476, #1478)', () => {
   await waitFor(() => expect(view.container.querySelector('[data-view-shell="Docs"]')?.getAttribute('data-pane')).toBe('panel'));
  });
 
- it('reopens the open document after a reload, and the list after Back to Docs', async () => {
+ it('reopens the open document after a reload on a wide screen; a phone opens on the list', async () => {
   Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
   const view = render(DocsCard, {});
   await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
@@ -89,12 +89,8 @@ describe('Docs headings, search marks and reload (#1476, #1478)', () => {
   cleanup();
   Object.defineProperty(window, 'innerWidth', { value: 390, configurable: true });
   const phone = render(DocsCard, { mobile: true });
-  await waitFor(() => expect(title(phone)).toBe('Frequently asked questions'));
-  await fireEvent.click(phone.getByRole('button', { name: 'Back to Docs' }));
-  cleanup();
-  const listed = render(DocsCard, { mobile: true });
-  expect(listed.container.querySelector('.docs-content h1')).toBeNull();
-  expect(listed.container.querySelector('[data-view-shell="Docs"]')?.getAttribute('data-pane')).toBe('panel');
+  await waitFor(() => expect(phone.container.querySelector('[data-view-shell="Docs"]')?.getAttribute('data-pane')).toBe('panel'));
+  expect(phone.container.querySelector('.docs-content h1')).toBeNull();
  });
 
  it('marks every search result it opens, also after a document chosen from the list', async () => {
