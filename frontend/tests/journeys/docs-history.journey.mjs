@@ -49,7 +49,7 @@ await runJourney({
 	name: 'docs-history',
 	allow: DEV_INSTANCE_NOISE,
 	cases: [{
-		name: 'phone-document-steps-retire-for-files',
+		name: 'phone-document-steps-retire-for-agents',
 		viewports: ['phone'],
 		async setup({ page, status }) {
 			await gotoApp(page, status);
@@ -67,21 +67,22 @@ await runJourney({
 			await waitTitle(page, 'AI Shuffle documentation');
 			await page.goForward();
 			await waitTitle(page, 'Install with Docker');
-			await mark('switch to Files: its detail gets its own Back step');
-			await openDestination(page, 'Files');
-			await page.getByRole('button', { name: 'Workspace', exact: true }).click();
-			await page.locator('[data-view-shell="Files"][data-pane="detail"]').waitFor();
+			// A narrow window shows only Back on a document; the shortcut changes destination with it still open.
+			await mark('the Agents shortcut leaves Docs: an agent detail gets its own Back step');
+			await page.keyboard.press('Control+Shift+P');
+			await page.locator('[data-view-shell="Agents"] [data-settings-item]').first().click();
+			await page.locator('[data-view-shell="Agents"][data-pane="detail"]').waitFor();
 			await page.waitForTimeout(300);
-			const inFiles = await detailMarker(page);
-			expect(inFiles.viewPanelDetail && !inFiles.docsDoc, `the Files detail is the current Back step, not a Docs one (${JSON.stringify(inFiles)})`);
-			await mark('Back closes the Files detail and leaves no hidden Docs step');
-			await page.locator('.topbar').getByRole('button', { name: 'Back to Files', exact: true }).click();
-			await page.locator('[data-view-shell="Files"][data-pane="panel"]').waitFor();
+			const inAgents = await detailMarker(page);
+			expect(inAgents.viewPanelDetail && !inAgents.docsDoc, `the agent detail is the current Back step, not a Docs one (${JSON.stringify(inAgents)})`);
+			await mark('Back closes the agent detail and leaves no hidden Docs step');
+			await page.locator('.topbar').getByRole('button', { name: 'Back to Agents', exact: true }).click();
+			await page.locator('[data-view-shell="Agents"][data-pane="panel"]').waitFor({ timeout: 5000 });
 			const after = await detailMarker(page);
-			expect(!after.viewPanelDetail && !after.docsDoc, `no hidden detail step remains after Files Back (${JSON.stringify(after)})`);
+			expect(!after.viewPanelDetail && !after.docsDoc, `no hidden detail step remains after Agents Back (${JSON.stringify(after)})`);
 		}
 	}, {
-		name: 'desktop-reselect-and-repeated-search',
+		name: 'desktop-reselect-keeps-back',
 		viewports: ['desktop'],
 		async setup({ page, status }) {
 			await gotoApp(page, status);
@@ -97,7 +98,16 @@ await runJourney({
 			await waitTitle(page, 'AI Shuffle documentation');
 			await page.goForward();
 			await waitTitle(page, 'Frequently asked questions');
-
+		}
+	}, {
+		name: 'desktop-repeated-search',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await openDestination(page, 'Docs');
+			await waitTitle(page, 'AI Shuffle documentation');
+		},
+		async act({ page, mark }) {
 			await mark('a search result marks its phrase');
 			await openResult(page, 'remote access');
 			await page.locator('mark.doc-find-hit').first().waitFor();
