@@ -381,6 +381,13 @@ async def test_a_saved_deny_on_the_real_tool_refuses_its_call_tool_call(
         assert await engine._policy_denial("mcp__fluid_bundled__mcp__weather__get_weather", {"city": "Oslo"}) is None
         text, _events = await _run_turn(engine, _call("mcp__weather__write_note", ask=True, text="x"))
         assert "mcp denied" in text and "note saved" not in text, text
+        # A Deny saved on the bridge's spelling (before names resolved) holds.
+        permission_handler._session_rules["s-acp"].append(PermissionRule(
+            id="rule-acp-old", session_id="s-acp", profile_id=None,
+            tool_name="mcp__fluid_bundled__mcp__weather__get_weather", tool_pattern=None,
+            decision=PermissionDecision("deny")))
+        assert await engine._policy_denial(
+            "mcp__fluid_bundled__mcp__weather__get_weather", {"city": "Oslo"}) == SAVED_RULE_DENIAL
     finally:
         permission_handler.clear_session_rules("s-acp")
         await engine.aclose()

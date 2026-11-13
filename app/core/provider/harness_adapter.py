@@ -3912,12 +3912,14 @@ class HarnessAdapter(ProviderAdapter):
 
         name = self._permission_tool_name(tool_name)
         extra = (self._options.extra or {}) if self._options is not None else {}
+        # Rules the Antigravity leg saved before it resolved bridged names are
+        # keyed on the bridge's spelling: still honour them, a Deny first.
+        names = [name] if name == tool_name else [name, tool_name]
 
         def _lookup() -> Optional[str]:
-            return saved_rule_decision(
-                self._resolve_app_session_id(), extra.get("profile_id"),
-                name, tool_input or {},
-            )
+            sid, profile = self._resolve_app_session_id(), extra.get("profile_id")
+            found = [saved_rule_decision(sid, profile, n, tool_input or {}) for n in names]
+            return "deny" if "deny" in found else next((d for d in found if d), None)
 
         return await run_sync(_lookup)
 
