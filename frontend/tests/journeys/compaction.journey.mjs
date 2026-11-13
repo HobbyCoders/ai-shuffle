@@ -14,7 +14,7 @@
 //   auto        two big reads, then [script:compact]: Claude Code compacts on
 //               its own mid-turn and Fluid answers (no "compacting" status)
 //   manual      two big reads, then a typed /compact
-//   after-tool  one big read, then [script:compact-after-tool]: the compaction
+//   after-tool  two big reads, then [script:compact-after-tool]: the compaction
 //               falls between a tool's result and the model call that reads it
 //   message-before-compact
 //               a message typed while a tool runs, then an automatic compaction
@@ -82,15 +82,14 @@ async function meterReading(page) {
 }
 
 /**
- * Wait until the meter reads below `before` (or, `atMost`, not above it: a
- * turn that adds as much as its compaction removes; `above`: higher, as after
- * a read). It updates from the session's polls, so it can lag a turn.
+ * Wait until the meter reads below `before` (`above`: higher, as after a
+ * read). It updates from the session's polls, so it can lag a turn.
  */
-async function waitMeter(page, before, { atMost = false, above = false, timeout = 30_000 } = {}) {
+async function waitMeter(page, before, { above = false, timeout = 30_000 } = {}) {
 	const end = Date.now() + timeout;
 	// No reading yet (a new chat shows no meter): anything counts as up.
 	const floor = Number.isNaN(before.value) ? -Infinity : before.value;
-	const ok = (value) => (above ? value > floor : value < floor || (atMost && value <= floor));
+	const ok = (value) => (above ? value > floor : value < floor);
 	let now = await meterReading(page);
 	while (Date.now() < end) {
 		if (ok(now.value)) return now;
@@ -185,7 +184,7 @@ async function expectNoReplayedHistory(page, prompts, reads) {
  * Build a compacted chat and judge it: the reads, the compaction, the follow-up.
  * With `mark` a no-op this is staging (a reload case's unrecorded setup).
  */
-async function compactAndFollow(page, { reads, compact, settledText, meterAtMost = false }, { mark, log }) {
+async function compactAndFollow(page, { reads, compact, settledText }, { mark, log }) {
 	const token = uniq();
 	const prompts = [];
 	let messages = 0;
@@ -207,7 +206,7 @@ async function compactAndFollow(page, { reads, compact, settledText, meterAtMost
 	const compactPrompt = compact(token);
 	await typeAndSend(page, compactPrompt);
 	await waitTurnSettled(page, { text: settledText, messagesAtLeast: messages });
-	const after = await waitMeter(page, before, { atMost: meterAtMost });
+	const after = await waitMeter(page, before);
 	log(`meter after: ${after.label}`);
 	const back = await flicker();
 	expect(back.length === 0, `rows left the page and came back while it compacted: ${JSON.stringify(back)}`);
@@ -382,11 +381,13 @@ await runJourney({
 		compactionCase('auto', AUTO),
 		compactionCase('manual', MANUAL),
 		compactionCase('after-tool', {
-			reads: 1,
+			// The turn reads another 45,000 characters before it compacts and keeps
+			// that result, so what is left is about one read. After a single read the
+			// meter could only stay level, and a few hundred tokens of summary decided
+			// a rounded percent either way (#1363); after two it has to drop.
+			reads: 2,
 			compact: (token) => `one more ${token} [script:compact-after-tool]`,
-			settledText: 'Compacted after reading it; the result is still here.',
-			// The turn reads another 45,000 characters before it compacts.
-			meterAtMost: true
+			settledText: 'Compacted after reading it; the result is still here.'
 		}),
 		messageBeforeCompact('message-before-compact', 'message-then-compact'),
 		messageBeforeCompact('message-before-summarizer', 'message-then-summarize'),

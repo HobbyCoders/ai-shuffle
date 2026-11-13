@@ -55,7 +55,8 @@
 		type AgentTemplate,
 		type GroupState,
 		type RosterAgent,
-		invokeModeOf
+		invokeModeOf,
+		untouchedConfig
 	} from './profiles/agentForm';
 	import {
 		FOLDER_NONE,
@@ -617,7 +618,13 @@
 		// how hidden legacy bindings (model, provider, permission mode, effort) are
 		// retired. The backend keeps keys outside the schema, including the avatar
 		// (owned by the identity PATCH), so neither is sent from this snapshot.
+		// Settings this page does not edit (plugins, config tools, thinking mode,
+		// ...) start from the stored agent and go back unchanged (#1546).
+		const stored = editingProfile
+			? (profiles.find((p) => p.id === editingProfile?.id) ?? editingProfile).config
+			: null;
 		const config: any = {
+			...untouchedConfig(stored),
 			include_partial_messages: profileForm.include_partial_messages
 		};
 		// Subagent runtime map — the ONE model binding an agent still owns, used
