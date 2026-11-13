@@ -118,13 +118,18 @@ class TurnMapper:
 
     ``bridged_name`` resolves a tool call to the registry name the bundled
     MCP bridge serves (None when it is one of the agent's own tools).
+    ``unwrap_bridged`` turns a bridged proxy call (``CallTool``) into the real
+    tool name and input it runs.
     """
 
     def __init__(self, *, session_id: str, turn_id: str,
-                 bridged_name: Callable[[Mapping[str, Any]], str | None] | None = None) -> None:
+                 bridged_name: Callable[[Mapping[str, Any]], str | None] | None = None,
+                 unwrap_bridged: Callable[[str, dict[str, Any]], tuple[str, dict[str, Any]]] | None = None,
+                 ) -> None:
         self.session_id = session_id
         self.turn_id = turn_id
         self.bridged_name = bridged_name
+        self.unwrap_bridged = unwrap_bridged
         self._next_index = 0
         self._open_index: int | None = None
         self._open_kind: str | None = None
@@ -183,6 +188,8 @@ class TurnMapper:
         )
         bridged = self.bridged_name(call) if self.bridged_name is not None else None
         if bridged:
+            if self.unwrap_bridged is not None:
+                return self.unwrap_bridged(bridged, data)
             return bridged, data
         kind = str(call.get("kind") or "other")
         name = KIND_TOOL_NAMES.get(kind) or str(call.get("title") or "Tool")

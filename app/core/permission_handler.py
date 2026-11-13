@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 # any install answers them relay-free. An unanswered prompt is denied when its
 # TTL lapses.
 PERMISSION_KIND = "permission"
+
+# The bundled bridge's prefix for the app tools it serves to an outside agent.
+_BRIDGE_PREFIX = "mcp__fluid_bundled__"
 PERMISSION_TTL_SECONDS = 300
 # The deny text a person's "deny" answer gives the call (card, voice or a typed
 # no in an owner chat).
@@ -1176,26 +1179,39 @@ class PermissionHandler:
         tool_name: str,
         tool_input: Dict[str, Any]
     ) -> Optional[PermissionRule]:
-        """Check if any saved rule matches this tool use"""
-        # Check session-level rules first (more specific)
-        if session_id in self._session_rules:
-            for rule in self._session_rules[session_id]:
-                if rule.matches(tool_name, tool_input):
+        """Check if any saved rule matches this tool use.
+
+        A rule saved under the bridge's spelling of the same tool
+        (``mcp__fluid_bundled__<name>``) applies when no rule names it
+        directly: Antigravity cards carried that spelling before they named
+        the registry tool, and those rules must keep deciding. A saved Deny
+        in either spelling is also enforced ahead of this approver
+        (``HarnessAdapter._saved_rule_decision``).
+        """
+        names = [tool_name]
+        if not tool_name.startswith(_BRIDGE_PREFIX):
+            names.append(_BRIDGE_PREFIX + tool_name)
+        db_rules = None
+        for name in names:
+            # Check session-level rules first (more specific)
+            for rule in self._session_rules.get(session_id, ()):
+                if rule.matches(name, tool_input):
                     return rule
 
-        # Check profile-level rules from database
-        db_rules = database.get_permission_rules(profile_id=profile_id)
-        for rule_data in db_rules:
-            rule = PermissionRule(
-                id=rule_data["id"],
-                session_id=None,
-                profile_id=rule_data["profile_id"],
-                tool_name=rule_data["tool_name"],
-                tool_pattern=rule_data.get("tool_pattern"),
-                decision=PermissionDecision(rule_data["decision"])
-            )
-            if rule.matches(tool_name, tool_input):
-                return rule
+            # Check profile-level rules from database
+            if db_rules is None:
+                db_rules = database.get_permission_rules(profile_id=profile_id)
+            for rule_data in db_rules:
+                rule = PermissionRule(
+                    id=rule_data["id"],
+                    session_id=None,
+                    profile_id=rule_data["profile_id"],
+                    tool_name=rule_data["tool_name"],
+                    tool_pattern=rule_data.get("tool_pattern"),
+                    decision=PermissionDecision(rule_data["decision"])
+                )
+                if rule.matches(name, tool_input):
+                    return rule
 
         return None
 

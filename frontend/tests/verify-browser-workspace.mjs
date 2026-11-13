@@ -143,14 +143,22 @@ try {
 		assert.equal(await page.evaluate(() => window.browserFixture.openSockets), 1);
 		await address.press('Escape');
 		// The observer still follows a genuinely changed body size exactly once.
+		// The command goes out after a ResizeObserver frame and the panel's 100ms
+		// debounce, which a loaded runner can stretch past a fixed sleep (#1470):
+		// wait for the command itself, then hold a quiet window that a duplicate
+		// would land in.
+		const expectViewportCommands = async (count, message) => {
+			await page.waitForFunction(n => window.browserFixture.messages.filter(m => m.op === 'viewport').length >= n, count, { timeout: 5000 }).catch(() => {});
+			await page.waitForTimeout(300);
+			const sent = await page.evaluate(() => window.browserFixture.messages.map(m => m.op || m.type));
+			assert.equal(sent.filter(op => op === 'viewport').length, count, `${message}; panel sent ${sent.join(', ')}`);
+		};
 		await page.setViewportSize({ width: viewport.width, height: viewport.height + 40 });
-		await page.waitForTimeout(400);
+		await expectViewportCommands(afterChurn + 1, 'a real fit resize sends one command');
 		const resized = await page.evaluate(() => window.browserFixture.messages.filter(m => m.op === 'viewport'));
-		assert.equal(resized.length, afterChurn + 1, 'a real fit resize sends one command');
 		assert.notDeepEqual(resized.at(-1).args, resized.at(-2).args);
 		await page.setViewportSize(viewport);
-		await page.waitForTimeout(400);
-		assert.equal(await page.evaluate(() => window.browserFixture.messages.filter(m => m.op === 'viewport').length), afterChurn + 2);
+		await expectViewportCommands(afterChurn + 2, 'resizing back sends one more command');
 		await page.screenshot({
 			path: join(tmpdir(), `browser-workspace-${viewport.width}.png`),
 		});

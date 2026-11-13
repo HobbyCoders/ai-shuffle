@@ -46,10 +46,12 @@ from fluid.codemode.kernel import HostReply
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+from fluid.codemode.truncate import FULL_STDOUT_MAX
 from fluid.codemode.verify import verify_sources, verify_store
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import new_id
+from fluid.tools import spill
 from fluid.tools.fragments import CODE_MODE_ERROR_RULE, DEPENDENCY_AWARE_BATCHING
 from fluid.tools.hardening import fence_shell_output
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
@@ -116,10 +118,12 @@ def _run_python_desc(stdout_cap: int = KernelConfig.stdout_cap) -> str:
         f"{_RUN_PYTHON_DESC}\n"
         "\n"
         f"A cell's stdout is capped at {stdout_cap:,} characters, fair-shared "
-        "across its prints, and what is cut is named in a closing notice. Print "
-        "what you need to decide, not whole payloads: a tool result too large "
-        "to print is already in the kernel as a ResultRef, so slice it (or "
-        "recover it from `_refs[N]`) rather than re-running the tool."
+        "across its prints; a cut cell's stdout is saved to a file the "
+        "closing notice names. Filter and summarize inside the cell (matching "
+        "lines, counts, the lines around an error) and print only that, never "
+        "whole files or big structures. A tool result too large to print is "
+        "already in the kernel as a ResultRef, so slice it (or recover it from "
+        "`_refs[N]`) rather than re-running the tool."
     )
 
 # ── the permission prompt for a cell ──
@@ -217,6 +221,32 @@ class _HumanWait:
         if self._since is None:
             return self._total
         return self._total + (self._now() - self._since)
+
+
+def _spill_cell_stdout(full: str, ctx: Any, total: int = 0) -> str:
+    """Spill a cut cell's stdout; the one-line pointer, or "" without one.
+
+    The inline text is already the fair-shared cut (``…[-N chars]`` markers);
+    this only adds where the rest went. A failed write leaves the cut as is.
+    Over ``FULL_STDOUT_MAX`` the kernel sent only head and tail, and the
+    pointer says the middle was not kept.
+    """
+    if not full or ctx is None:
+        return ""
+    path = spill.write_spill(full, ctx=ctx, tool="run_python")
+    if path is None:
+        return ""
+    if total > FULL_STDOUT_MAX:
+        lost = total - 2 * (FULL_STDOUT_MAX // 2)
+        return (
+            f"[cell stdout cut to the cap; its first and last {FULL_STDOUT_MAX // 2:,} chars "
+            f"saved to {path} (session scratch; the middle {lost:,} chars were not kept) "
+            f"— {spill.READ_HINT}]"
+        )
+    return (
+        f"[cell stdout cut to the cap; all {len(full):,} chars saved to {path} "
+        f"(session scratch) — {spill.READ_HINT}]"
+    )
 
 
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
@@ -663,6 +693,10 @@ class CodeModeSession:
         parts: list[str] = []
         if result.stdout.strip():
             parts.append(result.stdout.rstrip("\n"))
+        spill_note = _spill_cell_stdout(
+            result.stdout_full, getattr(loop, "ctx", None), result.stdout_total)
+        if spill_note:
+            parts.append(spill_note)
         if result.value_repr:
             parts.append(f"=> {result.value_repr}")
         text = "\n".join(parts) if parts else "(no output)"

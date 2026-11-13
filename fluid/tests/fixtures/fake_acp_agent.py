@@ -64,6 +64,11 @@ TERMINAL_LOGIN = {"id": "terminal-login", "name": "Log in from the terminal", "d
                   "type": "terminal", "args": ["--login"]}
 
 
+def _write_json(path: str, data: object) -> None:
+    with open(path, "w") as fh:
+        json.dump(data, fh)
+
+
 def mode_ids() -> list[str]:
     raw = os.environ.get("FAKE_ACP_MODES") or "default,accept-edits,plan"
     return [m.strip() for m in raw.split(",") if m.strip()]
@@ -237,8 +242,24 @@ class Agent:
                                                  "text": "edited" if allowed else "denied by user"}}]})
             await self.say(sid, f"outcome={outcome.get('outcome')}:{outcome.get('optionId')}")
             return {"stopReason": "end_turn"}
-        if word == "mcp":
+        if word in ("mcp", "mcpask"):
             _, name, args = text.split(" ", 2)
+            if word == "mcpask":
+                # As agy does for an MCP tool: ask the host before running it.
+                call = {"toolCallId": "mcp-1", "title": f"mcp__fluid_bundled__{name}", "kind": "other",
+                        "status": "pending", "rawInput": json.loads(args)}
+                await self.update(sid, {"sessionUpdate": "tool_call", **call})
+                reply = await self.call("session/request_permission", {"sessionId": sid, "toolCall": call, "options": [
+                    {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                    {"optionId": "always", "name": "Always allow", "kind": "allow_always"},
+                    {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]})
+                outcome = (reply.get("result") or {}).get("outcome") or {}
+                await self.say(sid, f"chose={outcome.get('optionId')} ")
+                if outcome.get("optionId") not in ("allow", "always"):
+                    await self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "mcp-1",
+                                            "status": "failed"})
+                    await self.say(sid, "mcp denied")
+                    return {"stopReason": "end_turn"}
             result = await self.call_mcp(sid, name, json.loads(args))
             await self.update(sid, {"sessionUpdate": "tool_call", "toolCallId": "mcp-1",
                                     "title": f"mcp__fluid_bundled__{name}", "kind": "other", "status": "completed",
@@ -309,7 +330,13 @@ class Agent:
                                         "clientInfo": {"name": "fake-acp", "version": "1"}})
             proc.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
             listed = await rpc(2, "tools/list", {})
-            names = [t["name"] for t in listed.get("result", {}).get("tools", [])]
+            tools = listed.get("result", {}).get("tools", [])
+            names = [t["name"] for t in tools]
+            if name == "__list__":
+                # The tool list exactly as this agent was served it.
+                state = os.path.join(os.environ.get("FAKE_ACP_STATE", "."), "tools_list.json")
+                await asyncio.to_thread(_write_json, state, tools)
+                return f"listed {len(tools)}"
             if name not in names:
                 return f"tool {name} not listed: {sorted(names)}"
             called = await rpc(3, "tools/call", {"name": name, "arguments": args})
