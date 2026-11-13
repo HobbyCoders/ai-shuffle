@@ -14,9 +14,9 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
-from fluid.tools.child_env import scrub_child_env
+from fluid.tools.child_env import UNSET_ENV, scrub_child_env
 
 from app.core import encryption
 from app.core.config import ENV_FILE_PATH, ENV_FILE_REF_VAR, settings
@@ -456,6 +456,41 @@ def inject_claude_code_auth(
         env.pop(name, None)
     existing = [n for n in (env.get(UNSET_ENV) or "").split(",") if n.strip()]
     env[UNSET_ENV] = ",".join(dict.fromkeys(existing + list(unset)))
+    return env
+
+
+# Context limits for the delegated Claude Code CLI (checked against 2.1.323).
+# Every tool result stays in the chat until compaction, and the CLI's defaults
+# (30,000 characters of Bash output inline, 25,000 tokens of MCP output) fill a
+# 200k window fast. Bash output past the cap is saved to a file and the model
+# gets a short preview and the path. Auto-memory is Claude Code's own
+# MEMORY.md under ~/.claude/projects, loaded on top of the app's "# Memory"
+# snapshot; turning it off leaves CLAUDE.md and AGENTS.md loading and leaves
+# the files on disk alone.
+DELEGATED_CLI_ENV_DEFAULTS: Dict[str, str] = {
+    "BASH_MAX_OUTPUT_LENGTH": "12000",
+    "MAX_MCP_OUTPUT_TOKENS": "8000",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+}
+
+
+def apply_delegated_cli_limits(
+    env: Dict[str, str], inherited: Optional[Mapping[str, str]] = None
+) -> Dict[str, str]:
+    """Add :data:`DELEGATED_CLI_ENV_DEFAULTS` to a delegated CLI's spawn env.
+
+    A default is added only when neither the overlay (a profile or provider
+    value) nor the worker's own environment (``inherited``, os.environ by
+    default) sets the variable, so an owner can still raise a cap for one
+    agent or for the whole worker. An inherited value the overlay drops via
+    ``FLUID_CHILD_ENV_UNSET`` never reaches the CLI, so it does not count.
+    """
+    source = os.environ if inherited is None else inherited
+    unset = {name.strip().upper() for name in str(env.get(UNSET_ENV) or "").split(",")}
+    for key, value in DELEGATED_CLI_ENV_DEFAULTS.items():
+        if key in env or (key in source and key not in unset):
+            continue
+        env[key] = value
     return env
 
 
