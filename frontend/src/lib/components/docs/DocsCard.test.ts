@@ -118,4 +118,64 @@ describe('Docs history and headings (#1476, #1477)', () => {
   const reloaded = render(DocsCard, {});
   await waitFor(() => expect(title(reloaded)).toBe('Frequently asked questions'));
  });
+
+ it('choosing the open document again keeps Back to the document before it', async () => {
+  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+  const view = render(DocsCard, {});
+  await waitFor(() => expect(view.container.querySelector('.docs-content h1')).not.toBeNull());
+  const first = title(view);
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await waitFor(() => expect(title(view)).toBe('Frequently asked questions'));
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  expect(nav.stack).toHaveLength(2);
+  go(-1);
+  await waitFor(() => expect(title(view)).toBe(first));
+ });
+
+ it('marks every search result it opens, also after a document chosen from the list', async () => {
+  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+  const view = render(DocsCard, {});
+  await waitFor(() => expect(view.container.querySelector('.docs-content h1')).not.toBeNull());
+  const search = view.getByRole('searchbox', { name: 'Search docs' });
+  async function openResult(query: string) {
+   await fireEvent.input(search, { target: { value: query } });
+   const results = view.container.querySelector('[aria-label="Doc search results"]') as HTMLElement;
+   await waitFor(() => expect(within(results).getAllByRole('button').length).toBeGreaterThan(0));
+   await fireEvent.click(within(results).getAllByRole('button')[0]);
+  }
+  const hit = () => [...view.container.querySelectorAll('mark.doc-find-hit')].map((m) => m.textContent).join('');
+  await openResult('remote access');
+  await waitFor(() => expect(hit().toLowerCase()).toBe('remote access'));
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await waitFor(() => expect(title(view)).toBe('Frequently asked questions'));
+  expect(hit()).toBe('');
+  await openResult('remote access');
+  await waitFor(() => expect(hit().toLowerCase()).toBe('remote access'));
+ });
+
+ it('on a phone retires every document step when another destination opens, so its detail gets a Back step', async () => {
+  const { platform } = await import('$lib/stores/platform.svelte');
+  const { default: RetainedDocs } = await import('./test-fixtures/RetainedDocs.svelte');
+  vi.spyOn(history, 'go').mockImplementation((step = 0) => go(step));
+  platform.set('mobile');
+  try {
+   const view = render(RetainedDocs, { docs: true });
+   await fireEvent.click(view.getByRole('button', { name: 'Changelog' }));
+   await waitFor(() => expect(nav.stack).toHaveLength(2));
+   await view.rerender({ docs: true, initialItemId: 'getting-started/updates' });
+   await waitFor(() => expect(title(view)).toBe('Updates'));
+   expect(nav.stack).toHaveLength(3);
+
+   // Switch to the other destination: Docs takes both of its steps off the stack.
+   await view.rerender({ docs: false, initialItemId: null });
+   await waitFor(() => expect(nav.at).toBe(0));
+   await fireEvent.click(view.getByRole('button', { name: 'Open detail' }));
+   await waitFor(() => expect(nav.at).toBe(1));
+   expect(page.state.viewPanelDetail).toBeTruthy();
+   expect(page.state.docsDoc).toBeUndefined();
+   expect(nav.stack).toHaveLength(2);
+  } finally {
+   platform.set('desktop');
+  }
+ });
 });

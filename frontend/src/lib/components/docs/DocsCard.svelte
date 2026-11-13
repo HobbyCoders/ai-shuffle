@@ -4,7 +4,7 @@
  import { pushState } from '$app/navigation';
  import { layout } from '$lib/stores/layout.svelte';
  import { platform } from '$lib/stores/platform.svelte';
- import { ViewShell, ViewPanel, DetailPane, ListItem, ListGroupLabel, EmptyDetail } from '$lib/components/layout/view';
+ import { ViewShell, ViewPanel, DetailPane, ListItem, ListGroupLabel, EmptyDetail, nestedDetailStep } from '$lib/components/layout/view';
  import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
  import { categories, docs, getDocsByCategory, getDocBySlug } from '$lib/docs/index';
  import { extractHeadings } from '$lib/docs/markdown';
@@ -21,6 +21,8 @@
  let stacked = $state(false);
  let tocOpen = $state(false);
  let find = $state<{ query: string; key: number } | null>(null);
+ // Never reused: DocsContent reveals each search once per key, across documents chosen in between.
+ let searches = 0;
  const tocId = $props.id();
  let articleEl = $state<HTMLElement>();
  const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
@@ -38,6 +40,8 @@
   * Back step, carrying `docsDoc`. On a phone the step into a document from the
   * list is ViewShell's, which carries `docsDoc` too. An entry without it (wide
   * screens) shows `baseDoc`, the document that was open when Docs added no step.
+  * On a phone the steps after the first carry their depth, so leaving Docs takes
+  * them all off the stack (see detail-history.ts).
   * The open document is kept per tab so a reload, or Forward back into the app,
   * reopens it.
   */
@@ -58,7 +62,7 @@
   activeSlug = slug;
   tocOpen = false;
   detailOpen = true;
-  find = query ? { query, key: (find?.key ?? 0) + 1 } : null;
+  find = query ? { query, key: ++searches } : null;
   remember(`${category}/${slug}`);
   const scroll = articleEl?.closest('.view-main-slot');
   if (scroll) scroll.scrollTop = 0;
@@ -66,11 +70,13 @@
  /** A document the reader chose: a list row, a search result or a link in a document. */
  function selectDoc(category: string, slug: string, query = '') {
   const target = `${category}/${slug}`;
-  const replacing = detailOpen && !!openSlug && openSlug !== target;
-  if (!replacing) baseDoc = target;
+  const open = detailOpen && !!openSlug;
+  const replacing = open && openSlug !== target;
+  // The open document chosen again (a search inside it) adds no step and keeps the base.
+  if (!open) baseDoc = target;
   show(category, slug, query);
   if (!replacing) return;
-  try { pushState('', { ...page.state, docsDoc: target } as App.PageState); } catch { /* Routerless tests. */ }
+  try { pushState('', { ...page.state, ...nestedDetailStep(page.state), docsDoc: target } as App.PageState); } catch { /* Routerless tests. */ }
  }
  onMount(() => {
   if (activeSlug || initialItemId) return;

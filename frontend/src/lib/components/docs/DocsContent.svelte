@@ -120,25 +120,75 @@
 		return nodes;
 	}
 
+	const BLOCKS = 'p,li,h1,h2,h3,h4,h5,h6,td,th,pre,blockquote,dt,dd,caption,figcaption,div';
+
+	/**
+	 * The readable text as one string, the way the search snippet reads it
+	 * (`markdownToPlainText`): lower case, each run of spaces one space, and a
+	 * space between blocks, so a phrase matches across inline markup such as a
+	 * bold label. `at[i]` is the text node and offset that character came from,
+	 * or null for the space between blocks.
+	 */
+	function readableText(nodes: Text[]) {
+		let text = '';
+		const at: ([Text, number] | null)[] = [];
+		let block: Element | null = null;
+		for (const node of nodes) {
+			const own = node.parentElement?.closest(BLOCKS) ?? null;
+			if (text && own !== block && !text.endsWith(' ')) { text += ' '; at.push(null); }
+			block = own;
+			const value = node.nodeValue ?? '';
+			for (let i = 0; i < value.length; i++) {
+				let ch = value[i];
+				if (/\s/.test(ch)) {
+					if (!text || text.endsWith(' ')) continue;
+					ch = ' ';
+				} else {
+					const lower = ch.toLowerCase();
+					if (lower.length === 1) ch = lower;
+				}
+				text += ch;
+				at.push([node, i]);
+			}
+		}
+		return { text, at };
+	}
+
+	/** Mark characters `from`..`to` of `readableText`: one mark per text node they cross. */
+	function markSpan(at: ([Text, number] | null)[], from: number, to: number): HTMLElement[] {
+		const spans = new Map<Text, [number, number]>();
+		for (let i = from; i < to; i++) {
+			if (!at[i]) continue;
+			const [node, offset] = at[i]!;
+			const span = spans.get(node);
+			spans.set(node, span ? [span[0], offset + 1] : [offset, offset + 1]);
+		}
+		const marks: HTMLElement[] = [];
+		for (const [node, [start, end]] of spans) {
+			// Spacing between rows or items is no text to mark, and a mark there would break the table or list.
+			if (!node.data.slice(start, end).trim()) continue;
+			const range = document.createRange();
+			range.setStart(node, start);
+			range.setEnd(node, end);
+			const mark = document.createElement('mark');
+			mark.className = 'doc-find-hit';
+			range.surroundContents(mark);
+			marks.push(mark);
+		}
+		return marks;
+	}
+
 	/** Scroll to and mark the first match of a search: the whole query, else its first word found (#1478). */
 	function revealMatch(query: string) {
 		if (!contentEl) return;
 		for (const old of contentEl.querySelectorAll('mark.doc-find-hit')) old.replaceWith(...old.childNodes);
 		contentEl.normalize();
-		const nodes = readableTextNodes(contentEl);
+		const { text, at } = readableText(readableTextNodes(contentEl));
 		for (const term of matchTerms(query)) {
-			for (const node of nodes) {
-				const at = (node.nodeValue ?? '').toLowerCase().indexOf(term);
-				if (at === -1) continue;
-				const range = document.createRange();
-				range.setStart(node, at);
-				range.setEnd(node, at + term.length);
-				const mark = document.createElement('mark');
-				mark.className = 'doc-find-hit';
-				range.surroundContents(mark);
-				mark.scrollIntoView?.({ block: 'center' });
-				return;
-			}
+			const from = text.indexOf(term);
+			if (from === -1) continue;
+			markSpan(at, from, from + term.length)[0]?.scrollIntoView?.({ block: 'center' });
+			return;
 		}
 	}
 

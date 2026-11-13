@@ -50,6 +50,34 @@ describe('DocsContent find (#1478)', () => {
 			Element.prototype.scrollIntoView = original;
 		}
 	});
+
+	it('finds the whole phrase across inline markup, as the search snippet does', async () => {
+		await preloadAllDocs();
+		const scrolled: Element[] = [];
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this); };
+		try {
+			const query = 'Away for all chats (the moon';
+			const { content } = getDocByFullSlug('getting-started/changelog')!;
+			const view = render(DocsContent, { content, framed: true, find: { query, key: 1 } });
+			await waitFor(() => expect(view.container.querySelectorAll('mark.doc-find-hit').length).toBeGreaterThan(1));
+			const marks = [...view.container.querySelectorAll('mark.doc-find-hit')];
+			expect(marks.map((m) => m.textContent).join('')).toBe(query);
+			expect(marks[0].closest('strong')?.textContent).toBe('Away for all chats');
+			expect(new Set(marks.map((m) => m.closest('li')))).toHaveLength(1);
+			expect(scrolled).toEqual([marks[0]]);
+
+			// Clearing the marks restores the item's text exactly.
+			const item = marks[0].closest('li')!;
+			const text = item.textContent;
+			await view.rerender({ content, framed: true, find: { query: 'qzxqzx', key: 2 } });
+			expect(item.querySelector('mark')).toBeNull();
+			expect(item.textContent).toBe(text);
+			expect(item.querySelector('strong')?.textContent).toBe('Away for all chats');
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+	});
 });
 
 describe('DocsContent code copy', () => {

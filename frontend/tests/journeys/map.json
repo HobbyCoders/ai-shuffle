@@ -195,6 +195,11 @@
 			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
 		},
 		{
+			"why": "Docs: each document is a Back step, leaving Docs retires all of them, and every search result opened marks its phrase",
+			"journeys": ["docs-history"],
+			"globs": ["frontend/src/lib/components/docs/DocsCard.svelte", "frontend/src/lib/components/docs/DocsContent.svelte", "frontend/src/lib/components/docs/DocsSearch.svelte", "frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/layout/view/detail-history.ts"]
+		},
+		{
 			"why": "the rail's notification history opens inside the Sidebar, and the empty-chat composer holds no empty Stop seat",
 			"journeys": ["rail-popover-composer-inset"],
 			"globs": ["frontend/src/lib/components/NotificationCenter.svelte", "frontend/src/lib/components/layout/Sidebar.svelte"]

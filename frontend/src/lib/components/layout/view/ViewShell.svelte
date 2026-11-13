@@ -40,6 +40,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	import { platform } from '$lib/stores/platform.svelte';
 	import { viewPanel } from '$lib/stores/view-panel.svelte';
 	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '../feature-panel-context';
+	import { leaveDetail } from './detail-history';
 	import PanelContext from './PanelContext.svelte';
 	import '../../settings/shell/settings.css';
 
@@ -106,14 +107,15 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		// Leaving a retained destination must remove its invisible Back stop.
 		if (!active && pushed) {
 			pushed = false;
-			if (untrack(() => (page.state as { viewPanelDetail?: string }).viewPanelDetail) === historyKey) {
+			const entry = untrack(() => page.state);
+			if ((entry as { viewPanelDetail?: string }).viewPanelDetail === historyKey) {
 				detailHistory.retiring = historyKey;
-				history.back();
+				leaveDetail(entry); // With any steps the destination added inside it.
 			}
 		}
 		if (active && stacked && !detailOpen && previousOpen && pushed) {
 			pushed = false;
-			history.back();
+			leaveDetail(untrack(() => page.state));
 		}
 		previousOpen = open;
 		if (open && !pushed && !retiring) {
