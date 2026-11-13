@@ -492,6 +492,9 @@ async def test_parking_drains_user_messages_before_background_completion(mock_db
             # Await scheduler-owned execution so the successor also releases its lease.
             while turn_scheduler._kick_tasks:
                 await asyncio.gather(*list(turn_scheduler._kick_tasks))
+                # A gather of finished tasks returns without yielding (Python 3.12),
+                # so let their set-discard callbacks run or this loop spins (#1458).
+                await asyncio.sleep(0)
         finally:
             turn_manager.register_kick(None)
     assert delivered == ["launch background work", "answer me now"]
@@ -2569,6 +2572,9 @@ async def test_stranded_wake_closes_earlier_park_when_other_monitor_finishes(moc
         assert await rt.execute() == "parked"
         while turn_scheduler._kick_tasks:
             await asyncio.gather(*list(turn_scheduler._kick_tasks))
+            # A gather of finished tasks returns without yielding (Python 3.12),
+            # so let their set-discard callbacks run or this loop spins (#1458).
+            await asyncio.sleep(0)
         # Calling finalize's hand-back again cannot enqueue a second delivery.
         await rt._strand_task_steers()
 

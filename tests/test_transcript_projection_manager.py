@@ -54,11 +54,20 @@ class Actor:
         return False
 
 
+async def _inline_database(call, *args, **kwargs):
+    return call(*args, **kwargs)
+
+
 def instance(monkeypatch, *, scan_seconds=10):
     monkeypatch.setattr(manager.store, 'initialize', lambda: None)
     monkeypatch.setattr(manager.work, 'source_sessions', lambda after: [])
     monkeypatch.setattr(manager.work, 'projection_sources', lambda after: [])
     monkeypatch.setattr(manager.work, 'collect_garbage', lambda: False)
+    # The stubs above touch no database, so run them on the loop. Through the
+    # real helper, startup and every scan pass are thread-pool round trips; on
+    # a CPU-starved runner those handoffs alone outlast the 1 s waits (#1469).
+    # The thread join itself is covered by the concurrent-stop test below.
+    monkeypatch.setattr(manager, 'database', _inline_database)
     bridge, gateway, actor = Bridge(), Gateway(), Actor()
     producer = manager.ProjectionProducer(bridge=bridge, gateway=gateway, actor=actor, scan_seconds=scan_seconds)
     return producer, bridge, gateway, actor
