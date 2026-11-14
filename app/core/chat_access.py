@@ -898,8 +898,8 @@ class Broker:
             self.requests[request.id] = request
         self._track_attention(request)
         self._notify(session_id, owner)
-        from app.core.session_snooze import wake_for_attention
-        await wake_for_attention(session_id)  # needs the owner: a snooze ends early
+        from app.core.session_snooze import wake_soon
+        wake_soon(session_id)  # needs the owner: a snooze ends early
         keep_pending = False
         try:
             await self._show_in_main(session_id, owner)
@@ -1521,8 +1521,8 @@ class Broker:
             self.actions[action.id] = action
         self._track_attention(action)
         self._notify(session_id, grant.owner)
-        from app.core.session_snooze import wake_for_attention
-        await wake_for_attention(session_id)  # needs the owner: a snooze ends early
+        from app.core.session_snooze import wake_soon
+        wake_soon(session_id)  # needs the owner: a snooze ends early
         try:
             await self._show_in_main(session_id, grant.owner)
             await self._defer_registered_away(action)

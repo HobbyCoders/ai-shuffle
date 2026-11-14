@@ -26,6 +26,17 @@ async def _patch(sid, active, snoozed_until=None):
     )
 
 
+async def _woke(sid):
+    """Wait for the scheduled early wake (prompt paths do not await it)."""
+    import asyncio
+    for _ in range(300):
+        row = database.get_session(sid)
+        if row["is_active"] in (True, 1):
+            return row
+        await asyncio.sleep(0.01)
+    return database.get_session(sid)
+
+
 def _soon(minutes=30):
     return datetime.now(timezone.utc) + timedelta(minutes=minutes)
 
@@ -134,7 +145,7 @@ async def test_permission_prompt_wakes_snoozed_chat(mock_db, broadcasts):
                 break
             await asyncio.sleep(0.01)
         assert sent.called
-        row = database.get_session(sid)
+        row = await _woke(sid)
         assert row["is_active"] in (True, 1) and row["snoozed_until"] is None
         await handler.cancel_request("req-1", sid)
         await task
@@ -152,7 +163,7 @@ async def test_question_prompt_wakes_snoozed_chat(mock_db, broadcasts, monkeypat
         request_id="q1", tool_use_id="tu", session_id=sid,
         questions=[{"question": "Ship it?"}], broadcast_func=AsyncMock())
     assert result["status"] == "posted"
-    row = database.get_session(sid)
+    row = await _woke(sid)
     assert row["is_active"] in (True, 1) and row["snoozed_until"] is None
 
 
@@ -178,3 +189,19 @@ def test_canonical_and_validate():
     with pytest.raises(ValueError):
         session_snooze.validate_future(now, now=now)
     assert session_snooze.validate_future(now + timedelta(seconds=5), now=now) == "2030-01-01T00:00:05+00:00"
+
+
+async def test_private_access_request_wakes_snoozed_chat(mock_db, broadcasts, monkeypatch):
+    import asyncio
+    from app.core import chat_access, chat_vault
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("local", "worker")))
+    monkeypatch.setattr(chat_vault, "catalog", lambda owner, **kwargs: [])
+    sid = _new()
+    await _patch(sid, False, _soon())
+    broker = chat_access.Broker()
+    task = asyncio.create_task(broker.request(sid, "machine", "Need server access"))
+    row = await _woke(sid)
+    assert row["is_active"] in (True, 1) and row["snoozed_until"] is None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert not broker.requests

@@ -150,6 +150,25 @@ async def wake_for_attention(session_id: Optional[str]) -> bool:
         return False
 
 
+_pending_wakes: set[asyncio.Task] = set()
+
+
+def wake_soon(session_id: Optional[str]) -> None:
+    """Schedule :func:`wake_for_attention` without adding an await to the caller.
+
+    Prompt paths call this, so a cancel or error can never land between a
+    prompt being registered and its own cleanup.
+    """
+    if not session_id:
+        return
+    try:
+        task = asyncio.get_running_loop().create_task(wake_for_attention(session_id))
+    except RuntimeError:
+        return
+    _pending_wakes.add(task)
+    task.add_done_callback(_pending_wakes.discard)
+
+
 async def wake_due_once(now: Optional[datetime] = None) -> int:
     """One pass of the wake loop. Returns how many chats woke."""
     from app.db.async_database import run_sync
