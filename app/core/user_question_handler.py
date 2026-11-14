@@ -265,6 +265,16 @@ def get_user_attention_snapshot(user_id: str) -> List[Dict[str, Any]]:
     return snapshot
 
 
+async def _wake_for_answer(session_id: str) -> None:
+    """End the snooze of the chat the owner just answered. Never raises.
+
+    Conditional under the row lock (``session_active.write_wake``): a chat that
+    is merely settled, or was settled or re-snoozed since, is left as it is.
+    """
+    from app.core import session_snooze
+    await session_snooze.wake_for_attention(session_id, reason="the owner answered")
+
+
 async def publish_session_attention(session_id: str) -> None:
     """Fan a session's durable pending-prompt count to its owner. Never raises."""
     try:
@@ -650,6 +660,10 @@ class UserQuestionHandler:
         if not accepted:
             return False
         interaction_wait.notify_changed(session_id)
+        if human_input:
+            # The owner's own answer is a message to the chat, so it ends a
+            # snooze set after the card appeared. An Away answer does not.
+            await _wake_for_answer(session_id)
         # Match an ordinary human send: release Stop and supersede stale wakes.
         try:
             from app.core import wakeup_service
@@ -718,6 +732,8 @@ class UserQuestionHandler:
                 f"User question answered: {request_id}"
                 + (" (dismissed)" if dismissed else "")
             )
+            if human_input and not dismissed:
+                await _wake_for_answer(session_id)
             # Durable lifecycle event: guarded answer won → emit exactly
             # one interaction.answered. AFTER notify_changed.
             from app.core import interaction_events

@@ -154,7 +154,7 @@ def write_wake(session_id: str, expected: Optional[str] = None) -> Optional[dict
             store.lock_state(cur)  # same lock order as write_shared and incoming replication
         cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
         row = cur.fetchone()
-        if row is None or row["is_active"]:
+        if row is None or row["is_active"] or row["status"] == "archived":
             return None
         current = session_snooze.parse(row["snoozed_until"])
         if current is None or (expected is not None and current != session_snooze.parse(expected)):

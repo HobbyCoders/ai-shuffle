@@ -46,7 +46,7 @@ async def test_legacy_request_uses_ordinary_settlement(archived, active, expecte
         session_active, "set_shared", new_callable=AsyncMock, return_value=row
     ) as shared, patch.object(session_active, "_apply_archive_change", new_callable=AsyncMock) as stop:
         assert await session_active.update_membership(row, active, archived) == row
-    shared.assert_awaited_once_with("legacy", expected)
+    shared.assert_awaited_once_with("legacy", expected, None)
     stop.assert_not_awaited()
 
 

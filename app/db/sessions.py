@@ -850,7 +850,9 @@ def update_session(
         updates.append(f"status = {_ph}")
         values.append("active" if status == "archived" else status)
         if status == "archived":
+            # The legacy archive form is a settle: it also ends a snooze.
             updates.append("is_active = FALSE")
+            updates.append("snoozed_until = NULL")
     # Truthiness (not `!= 0`) on purpose: a None increment passes `!= 0` and
     # emits `col = col + NULL`, which NULLs the column for good — that is what
     # broke GET /api/v1/sessions/cursor (pydantic float validation on
@@ -2206,6 +2208,9 @@ def get_sessions_by_ids(session_ids: List[str]) -> Dict[str, SessionRow]:
 def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[SessionRow]:
     """Settled (inactive) list-visible top-level rows, newest first.
 
+    A snoozed chat is left out: it is in the sidebar's Snoozed list, and a
+    sweep over "all settled" must not cancel the owner's wake time.
+
     A coarse prefilter for bulk sidebar management. ``api_user_id`` follows
     ``get_sessions``: an empty string selects admin rows (NULL). Callers still
     apply the per-row visibility, owner and project checks ListSessions uses.
@@ -2213,7 +2218,7 @@ def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[
     _ph = ph()
     inst_sql, params = _instance_filter(_ph, "")
     query = (f"SELECT * FROM sessions WHERE 1=1{inst_sql}"
-             " AND (is_active IS NULL OR is_active = FALSE)"
+             " AND (is_active IS NULL OR is_active = FALSE) AND snoozed_until IS NULL"
              " AND COALESCE(hidden, FALSE) = FALSE AND COALESCE(is_worker, FALSE) = FALSE"
              " AND parent_session_id IS NULL")
     params = list(params)

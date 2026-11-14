@@ -205,3 +205,99 @@ async def test_private_access_request_wakes_snoozed_chat(mock_db, broadcasts, mo
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     assert not broker.requests
+
+
+def test_voice_request_ends_a_snooze_but_keeps_a_settled_chat_settled(mock_db):
+    from app.core import turn_manager
+    voice = {turn_manager.VOICE_DELEGATION: True}
+    sid = _new()
+    database.set_session_active(sid, False, None, session_snooze.canonical(_soon()))
+    reactivated = {}
+    turn_manager._reactivate_for_send(sid, "user", voice, reactivated)
+    row = database.get_session(sid)
+    assert row["is_active"] in (True, 1) and row["snoozed_until"] is None
+    assert reactivated  # announced to sidebars
+    # A call on a plain settled chat leaves it settled, as before.
+    plain = _new()
+    database.set_session_active(plain, False)
+    reactivated = {}
+    turn_manager._reactivate_for_send(plain, "user", voice, reactivated)
+    assert database.get_session(plain)["is_active"] in (False, 0) and reactivated == {}
+    # Background work with the flag still does not wake it.
+    database.set_session_active(sid, False, None, session_snooze.canonical(_soon()))
+    turn_manager._reactivate_for_send(sid, "automation", voice, {})
+    assert database.get_session(sid)["snoozed_until"] is not None
+
+
+async def test_voice_submit_wakes_a_snoozed_chat(mock_db, monkeypatch):
+    """The real intake: a delegated spoken turn queues AND ends the snooze."""
+    from app.core import turn_manager
+    from app.db import turns
+    monkeypatch.setattr(turn_manager, "_kick", lambda sid: None)
+    announced = AsyncMock()
+    monkeypatch.setattr(turn_manager, "_announce_reactivated", announced)
+    sid = _new()
+    database.set_session_active(sid, False, None, session_snooze.canonical(_soon()))
+    turn_id = await turn_manager.submit_async(
+        sid, "user", prompt="Make the icons bigger.", profile_id="default",
+        payload={turn_manager.VOICE_DELEGATION: True})
+    assert turns.get_turn(turn_id)["state"] == "queued"
+    row = database.get_session(sid)
+    assert row["is_active"] in (True, 1) and row["snoozed_until"] is None
+    announced.assert_awaited_once()
+
+
+def _drain_wakes():
+    import asyncio
+    return asyncio.gather(*session_snooze._pending_wakes)
+
+
+@pytest.mark.parametrize("how", ["owner", "away", "dismissed"])
+async def test_owner_answer_to_a_retained_question_card_ends_a_later_snooze(mock_db, broadcasts, monkeypatch, how):
+    """The direct-enqueue answer path: only the owner's own answer wakes the chat."""
+    from app.core.user_question_handler import UserQuestionHandler
+    from app.db import turns
+    monkeypatch.setattr("app.core.interaction_wait.notify_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_claim.notify_turns_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_manager._kick", lambda sid: None)
+    monkeypatch.setattr("app.core.user_question_handler.UserQuestionHandler._retire_native_question", AsyncMock())
+    monkeypatch.setattr("app.core.session_runtime.try_steer_pending", AsyncMock())
+    monkeypatch.setattr("app.core.session_runtime._broadcast_queue_after_start", AsyncMock())
+    handler = UserQuestionHandler()
+    sid = _new()
+    await handler.post_question(request_id="q1", tool_use_id="tu", session_id=sid,
+                                questions=[{"question": "Ship it?"}], broadcast_func=AsyncMock())
+    await _drain_wakes()
+    # The card stays on screen; the owner snoozes the chat after it appeared.
+    await _patch(sid, False, _soon())
+    answered = await handler.respond("q1", sid, {"Ship it?": "Yes"},
+                                     dismissed=how == "dismissed", human_input=how != "away")
+    assert answered
+    row = database.get_session(sid)
+    if how == "owner":
+        assert row["is_active"] in (True, 1) and row["snoozed_until"] is None
+        assert "Ship it?\nYes" in turns.get_queued_turns(sid)[0]["prompt"]
+    else:
+        assert row["is_active"] in (False, 0) and row["snoozed_until"] is not None
+
+
+async def test_archived_rows_are_never_woken(mock_db, broadcasts):
+    from app.db.base import get_db
+    sid = _new()
+    await _patch(sid, False, _soon(1))
+    # A legacy archived status that still carries a wake time.
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET status='archived' WHERE id=%s", (sid,))
+    assert session_snooze.due_snoozes(_soon(10)) == []
+    assert await session_snooze.wake_due_once(now=_soon(10)) == 0
+    assert not await session_snooze.wake_for_attention(sid)
+    assert database.get_session(sid)["is_active"] in (False, 0)
+
+
+async def test_legacy_archive_form_ends_the_snooze(mock_db, broadcasts):
+    sid = _new()
+    await _patch(sid, False, _soon(1))
+    row = database.update_session(session_id=sid, status="archived")
+    assert row["status"] == "active" and row["is_active"] in (False, 0)
+    assert row["snoozed_until"] is None
+    assert session_snooze.due_snoozes(_soon(10)) == []

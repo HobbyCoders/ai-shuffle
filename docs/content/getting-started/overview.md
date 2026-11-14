@@ -16,7 +16,7 @@ New here? Start with [Requirements](/docs/getting-started/requirements) and [Fir
 
 - Watch replies and tool use stream in as the agent works.
 - Pick the model, reasoning effort and permission mode for each chat.
-- Search, tag and fork chats. Chats you are working in stay in **Active** until you settle them. Settling dismisses a pending prompt. **Snooze** (next to Settle) puts a chat away until a time you pick; it comes back to Active then, or sooner if it needs you or you send it a message.
+- Search, tag and fork chats. Chats you are working in stay in **Active** until you settle them. Settling dismisses a pending prompt. **Snooze** (next to Settle) puts a chat away until a time you pick; it comes back to Active then, or sooner if it needs you, or you message it, talk to it on a call or answer its question.
 - Share files, generate images and media, and work in separate git worktrees.
 
 ### Agents

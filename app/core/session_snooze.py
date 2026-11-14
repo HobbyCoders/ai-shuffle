@@ -14,6 +14,11 @@ write (:func:`app.network.session_active.write_wake`):
   :func:`wake_for_attention`;
 * the owner sending it a message, which already reactivates a settled chat
   (``turn_manager._reactivate_for_send``); activating always clears a snooze.
+  A spoken request (``voice_delegation``) keeps a plain settled chat settled
+  but ends a snooze, and so does the owner's own answer to a question card
+  (``user_question_handler``); an Away-mode answer or a dismissal does not.
+
+An archived row (a legacy status) is never woken.
 """
 from __future__ import annotations
 
@@ -105,7 +110,8 @@ def due_snoozes(now: Optional[datetime] = None) -> list[dict]:
         cur = conn.cursor()
         cur.execute(
             "SELECT * FROM sessions WHERE snoozed_until IS NOT NULL AND snoozed_until <= %s "
-            "AND COALESCE(is_active, FALSE) = FALSE ORDER BY snoozed_until LIMIT %s",
+            "AND COALESCE(is_active, FALSE) = FALSE AND COALESCE(status, '') <> 'archived' "
+            "ORDER BY snoozed_until LIMIT %s",
             (canonical(now), _BATCH))
         rows = [dict(r) for r in cur.fetchall()]
     due = []
@@ -135,8 +141,9 @@ async def wake(session_id: str, *, expected: Optional[str] = None, reason: str) 
     return True
 
 
-async def wake_for_attention(session_id: Optional[str]) -> bool:
-    """The chat now needs the owner: end its snooze early. Never raises."""
+async def wake_for_attention(session_id: Optional[str], *, reason: str = "needs the owner") -> bool:
+    """The chat now needs the owner (or the owner answered it): end its snooze
+    early. Never raises."""
     if not session_id:
         return False
     try:
@@ -144,7 +151,7 @@ async def wake_for_attention(session_id: Optional[str]) -> bool:
         chat = await run_sync(_snoozed_chat, session_id)
         if chat is None:
             return False
-        return await wake(chat, reason="needs the owner")
+        return await wake(chat, reason=reason)
     except Exception:  # noqa: BLE001 — a prompt must never fail on its sidebar side effect
         logger.warning("Could not wake snoozed session %s early", session_id, exc_info=True)
         return False

@@ -98,6 +98,26 @@ async def test_a_spoken_request_goes_to_the_owner_and_nothing_is_written_here(mi
 
 
 @pytest.mark.asyncio
+async def test_a_spoken_request_ends_the_mirrors_snooze_but_not_a_plain_settle(mirror, monkeypatch):
+    """Forwarding wakes a snoozed chat here, as a forwarded typed send does."""
+    from datetime import datetime, timedelta, timezone
+    from app.core import session_snooze, voice_remote
+    announced = AsyncMock()
+    monkeypatch.setattr(turn_manager, "_announce_reactivated", announced)
+    when = session_snooze.canonical(datetime.now(timezone.utc) + timedelta(hours=1))
+    database.set_session_active(SESSION, False, None, when)
+    await voice_remote.submit(PEER, database.get_session(SESSION), "Ship it.", instructions="note")
+    assert mirror.sent[-1][2]["payload"]["voice_delegation"] is True
+    row = database.get_session(SESSION)
+    assert row["is_active"] and row["snoozed_until"] is None
+    announced.assert_awaited_once()
+    # A call on a plain settled chat keeps it settled.
+    database.set_session_active(SESSION, False)
+    await voice_remote.submit(PEER, database.get_session(SESSION), "Ship it.", instructions="note")
+    assert len(mirror.sent) == 2 and not database.get_session(SESSION)["is_active"]
+
+
+@pytest.mark.asyncio
 async def test_an_unreachable_owner_is_said_aloud_and_nothing_is_queued_here(mirror, monkeypatch):
     async def offline(*_args, **_kwargs):
         raise control.RunnerUnreachable("Couldn't reach Office PC from Home Server.")
