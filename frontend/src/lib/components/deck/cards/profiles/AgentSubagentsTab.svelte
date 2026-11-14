@@ -5,13 +5,11 @@
 	 * takes Task and Swarm off this agent). Each caller's provider assignments
 	 * still narrow the roster at run time.
 	 */
-	import type { AvatarId } from '$lib/api/agent-identity';
 	import RowGroup from '$lib/components/settings/rows/RowGroup.svelte';
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
 	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	import InlineBanner from '$lib/components/settings/rows/InlineBanner.svelte';
-	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
 	import type { AgentInvokeMode, RosterAgent } from './agentForm';
 	import { pinnedProviders } from './agentList';
 
@@ -22,14 +20,12 @@
 		enabled: string[];
 		/** True when agents with no pinned model run on the subagent default. */
 		hasDefault: boolean;
-		avatarOf: (id: string) => AvatarId;
-		colorOf: (id: string) => string | null;
 		onMode: (mode: AgentInvokeMode) => void;
 		onToggle: (id: string) => void;
 		onSetEnabled: (ids: string[]) => void;
 	}
 
-	let { agents, mode, enabled, hasDefault, avatarOf, colorOf, onMode, onToggle, onSetEnabled }: Props = $props();
+	let { agents, mode, enabled, hasDefault, onMode, onToggle, onSetEnabled }: Props = $props();
 
 	const MODES: { value: AgentInvokeMode; label: string }[] = [
 		{ value: 'all', label: 'All agents' },
@@ -80,7 +76,6 @@
 		{#each agents as agent (agent.id)}
 			{@const on = all || enabled.includes(agent.id)}
 			<div class="ra" class:dim={all}>
-				<AgentAvatar avatar={avatarOf(agent.id)} size={28} color={colorOf(agent.id)} neutral={agent.is_builtin} />
 				<div class="tx">
 					<div class="nm">{agent.name}</div>
 					<div class="ds">{reach(agent)}{agent.description ? ` · ${agent.description}` : ''}</div>
@@ -94,7 +89,7 @@
 <style>
 	.ra {
 		display: grid;
-		grid-template-columns: auto minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr) auto;
 		gap: 12px;
 		align-items: center;
 		min-height: 54px;
