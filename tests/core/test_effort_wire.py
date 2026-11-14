@@ -193,6 +193,7 @@ async def test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
             argv = launches[0]
             assert argv[argv.index("--input-format") + 1] == "stream-json"
             assert argv[argv.index("--output-format") + 1] == "stream-json"
+            assert argv[argv.index("--model") + 1] == model  # the CLI runs exactly this id
             assert argv.count("--effort") == (0 if expected is None else 1)
             assert (argv[argv.index("--effort") + 1] if "--effort" in argv else None) == expected
             assert loop._setting_request("apply_flag_settings")["settings"]["effortLevel"] == expected
@@ -270,6 +271,25 @@ async def test_thinking_and_effort_to_wire(mock_db, monkeypatch, tmp_path, recor
     await test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
         "anthropic", model, None, pick, clamp_effort(model, pick), "session",
         thinking_mode=mode, expected_thinking=thinking)
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_default_version_starts_the_cli_with_that_version(
+        mock_db, monkeypatch, tmp_path, record_property):
+    """Review S5: a version saved as the subagent default on another worker
+    starts this subscription worker's CLI on that version, though this CLI
+    listed no models; a file agent's start resolves it with ``leg_model_id``."""
+    from app.core import claude_auth_mode, subagent_default
+    from app.core.agent_provider_models import leg_model_id
+    from app.db import database
+
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_SUBSCRIPTION)
+    database.set_system_setting(subagent_default.SETTING_KEY,
+                                json.dumps({"model": "opus", "version": "claude-opus-4-6"}))
+    model = leg_model_id(None, subagent_default.effective().model or "")
+    assert model == "claude-opus-4-6"
+    await test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
+                              "delegated", model, None, None, None, "session")
 
 
 @pytest.mark.asyncio

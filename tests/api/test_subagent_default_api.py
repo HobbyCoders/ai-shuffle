@@ -23,7 +23,11 @@ class TestSubagentDefaultApi:
     def test_unset_by_default(self, authenticated_client, mock_db):
         assert authenticated_client.get(ENDPOINT).json() == {"model": None}
 
-    def test_put_roundtrip_normalizes(self, authenticated_client, mock_db):
+    def test_put_roundtrip_normalizes(self, authenticated_client, mock_db, monkeypatch):
+        from app.core import claude_auth_mode
+
+        # API-key mode folds a full id (a subscription keeps it as itself).
+        monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_API_KEY)
         _provider()
         resp = authenticated_client.put(ENDPOINT, json={"model": "claude-haiku-5-5"})
         assert resp.status_code == 200, resp.text

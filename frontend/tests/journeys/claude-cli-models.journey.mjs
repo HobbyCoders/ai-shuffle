@@ -5,11 +5,12 @@
 // Cases:
 //   enable-in-settings  Settings > Providers > Claude > Models: a version is off
 //                       by default; checking it saves and the composer offers it
-//   pick-and-run        pick that version in a chat, run a turn: the chat ran
-//                       exactly that model, not the alias
+//   pick-and-run        pick that version in a chat, run a turn: the fake CLI
+//                       was started with exactly that model, not the alias
 //
 // The throwaway instance's preview cookie may turn a model on or off
 // (app/api/auth.py, _preview_may_change_dev_data); a real install's may not.
+import { readFileSync } from 'node:fs';
 import { runJourney } from './runner.mjs';
 import {
 	PROJECT,
@@ -34,6 +35,9 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const CLAUDE_AGENT = 'Dev (Claude Code)';
 const VERSION = 'claude-opus-4-6';
 const VERSION_LABEL = 'Opus 4.6';
+
+/** The fake CLI's log: one JSON line per event, `start` lines carry argv. */
+const cliLog = (status) => readFileSync(status.claude_cli.log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
 
 const setEnabled = (page, enabled) => api(page, 'PUT', '/models/claude/enabled', { model: VERSION, enabled });
 
@@ -124,8 +128,9 @@ await runJourney({
 				await setEnabled(page, true);
 				await openClaudeChat({ page, status });
 			},
-			async act({ page, mark, variant, log }) {
+			async act({ page, status, mark, variant, log }) {
 				try {
+					const logged = cliLog(status).length;
 					await mark(`pick ${VERSION_LABEL}`);
 					const models = page.getByRole('dialog', { name: 'Choose model' });
 					await openPopup(page.getByRole('button', { name: /^Model:/ }).first(), models);
@@ -143,7 +148,12 @@ await runJourney({
 					const id = await chatIdByToken(page, token);
 					const chat = await api(page, 'GET', `/sessions/${id}`);
 					log(`chat ${id} model: ${chat.model}`);
-					expect(chat.model === VERSION, `the turn ran ${VERSION}, not an alias (got ${chat.model})`);
+					expect(chat.model === VERSION, `the chat saved ${VERSION}, not an alias (got ${chat.model})`);
+					// What the CLI itself was started with: `--model` of the chat's process.
+					const started = cliLog(status).slice(logged).filter((e) => e.kind === 'start' && e.argv?.includes('--model'));
+					const ran = started.map((e) => e.argv[e.argv.indexOf('--model') + 1]);
+					log(`fake CLI started with --model ${ran.join(', ')}`);
+					expect(ran.length > 0 && ran.every((value) => value === VERSION), `the CLI ran ${VERSION} (got ${ran})`);
 					await page.getByRole('button', { name: new RegExp(`^Model: .*${VERSION_LABEL.replace('.', '\\.')}`) }).first().waitFor();
 				} finally {
 					await setEnabled(page, false).catch(() => {});

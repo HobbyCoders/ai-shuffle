@@ -182,7 +182,7 @@ async def test_stored_legacy_settings_and_profile_pins_still_start_without_an_ov
     db.set_system_setting(subagent_default.SETTING_KEY, json.dumps({"model": legacy}))
     assert subagent_default.effective().model == expected
     from app.core.agent_provider_models import leg_model_id
-    assert leg_model_id(None, legacy) == expected
+    assert leg_model_id(None, legacy) == (legacy if legacy.startswith("claude-") else expected)
     for key, config in (("top", {"model": legacy}),
                         ("map", {"provider_models": {"__native__": legacy}})):
         pid = "legacy-" + key
@@ -193,7 +193,8 @@ async def test_stored_legacy_settings_and_profile_pins_still_start_without_an_ov
         # resolve() is never called. The execution leg migrates them separately.
         stored = seen[-1]["model_id"]
         assert stored == legacy
-        assert leg_model_id(None, stored) == expected
+        # On a subscription a full id runs as itself; a short form folds.
+        assert leg_model_id(None, stored) == (legacy if legacy.startswith("claude-") else expected)
         from app.core.model_registry import resolve_api_model_id
         assert resolve_api_model_id(stored) == {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5"}[expected]
     assert prompts == []
@@ -1494,7 +1495,8 @@ async def test_startsession_inherits_stored_legacy_model_without_explicit_resolu
     child = sessions.get_session(json.loads(outcome.text)["session_id"])
     assert child["model"] == legacy and child["provider_id"] is None
     from app.core.agent_provider_models import leg_model_id
-    assert leg_model_id(None, child["model"]) == expected
+    # On a subscription a full id runs as itself; a short form folds.
+    assert leg_model_id(None, child["model"]) == (legacy if legacy.startswith("claude-") else expected)
     assert not chats[2]
 
 

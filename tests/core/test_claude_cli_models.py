@@ -90,8 +90,6 @@ def test_aliases_are_labelled_and_sized_as_the_cli_resolves_them(cli):
 def test_a_listed_version_means_itself_on_the_subscription_leg(cli):
     assert m.get_model("claude-opus-4-6").label == "Opus 4.6"
     assert m.get_model("claude-opus-4-6").family == "opus"
-    assert m.cli_offers("claude-opus-5")
-    assert not m.cli_offers("claude-opus-9")
     # The API leg and the host rules keep collapsing old ids (out of scope).
     assert m.normalize_model("claude-opus-4-6") == "opus"
     assert m.resolve_api_model_id("opus") == "claude-opus-5"
@@ -118,11 +116,8 @@ def test_payload_offers_aliases_and_lists_versions_off_by_default(cli):
     assert not any(e["enabled"] for e in versions.values())
     assert versions["claude-opus-4-6"]["effort_levels"] == ["low", "medium", "high", "max"]
     assert versions["claude-haiku-4-5-20251001"]["context_window"] == 200_000
-    # Listed ids are no longer folded onto aliases in the picker; unlisted ones still are.
-    assert "claude-opus-4-6" not in payload["legacy_map"]
-    assert "claude-opus-5" not in payload["legacy_map"]
-    assert payload["legacy_map"]["claude-opus-4-8"] == "opus"
-    assert payload["legacy_map"]["claude-opus-4-6[1m]"] == "opus"
+    # On a subscription the picker folds no full id onto an alias.
+    assert not [k for k in payload["legacy_map"] if k.startswith("claude-")]
 
 
 def test_turned_on_versions_join_the_picker(cli):
@@ -186,87 +181,93 @@ def test_toggling_one_model_keeps_ids_this_worker_does_not_list(monkeypatch):
         cm.set_model_enabled("opus", True)
 
 
-def test_a_picked_version_is_never_folded_when_stored_inherited_or_sent(cli, monkeypatch):
-    """Review S1: subagent default, inheritance and Task keep a listed version."""
-    from app.core import model_override, subagent_default
+@pytest.mark.parametrize("saved", ["listed", "no list", "list without it", "other account", "unknown account"])
+def test_a_full_id_is_never_folded_when_stored_inherited_or_sent(cli, monkeypatch, saved):
+    """Review S1/S5: on a subscription a full id means itself on every path,
+    whatever this worker's saved list says; API-key and cloud fold as before."""
+    from app.core import claude_cli_status, model_override, subagent_default
     from app.core.agent_provider_models import leg_model_id
     from app.core.task_dispatch import _native_task_model
     from app.db import database
 
-    saved = {}
-    monkeypatch.setattr(database, "set_system_setting", lambda k, v: saved.update({k: v}))
+    snap = cm.parse_initialize(REPLY)
+    if saved == "no list":
+        monkeypatch.setattr(cm, "_snapshot", None)
+    elif saved == "list without it":
+        monkeypatch.setattr(cm, "_snapshot", {**snap, "models": [e for e in snap["models"]
+                                                                if e["value"] != "claude-opus-4-6"]})
+    elif saved == "other account":
+        cli["status"] = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True, email="b@example.invalid")
+    elif saved == "unknown account":
+        cli["status"] = None
+    # Saved on another worker; read here.
+    stored = {subagent_default.SETTING_KEY: json.dumps({"model": "opus", "version": "claude-opus-4-6"})}
+    monkeypatch.setattr(database, "get_system_setting", lambda k: stored.get(k))
+    monkeypatch.setattr(database, "set_system_setting", lambda k, v: stored.update({k: v}))
     monkeypatch.setattr(subagent_default, "reset_asked", lambda: None)
-    assert subagent_default.write("claude-opus-4-6").model == "claude-opus-4-6"
-    assert json.loads(saved[subagent_default.SETTING_KEY])["model"] == "claude-opus-4-6"
-    assert subagent_default.usable("claude-haiku-4-5-20251001") == "claude-haiku-4-5-20251001"
-    assert leg_model_id(None, "claude-opus-4-6") == "claude-opus-4-6"
-    assert _native_task_model("claude-opus-4-6") == "claude-opus-4-6"
-    # A parent chat's model handed to StartSession on another worker.
-    assert model_override.app_id(None, "claude-opus-4-6") == "claude-opus-4-6"
-    assert model_override.resolve("claude-opus-4-6", runs_here=False).model == "claude-opus-4-6"
-    # A default saved before versions could be picked still means today's alias.
-    monkeypatch.setattr(database, "get_system_setting",
-                        lambda k: json.dumps({"model": "claude-opus-4-6"}))
-    assert subagent_default.read().model == "opus"
-    monkeypatch.setattr(database, "get_system_setting", lambda k: saved.get(k))
+    for value in ("claude-opus-4-6", "claude-opus-4-8", "claude-opus-9"):
+        assert m.native_choice(value) == value
+        assert leg_model_id(None, value) == value
+        assert _native_task_model(value) == value
+        assert model_override.app_id(None, value) == value
+    # Description only: a kept id with no entry of its own reads as its family.
+    assert m.get_model_family("claude-opus-5[1m]") == m.get_model_family("claude-opus-4-8") == "opus"
+    assert m.get_context_window("claude-opus-4-8") == m.get_context_window("opus")
     assert subagent_default.read().model == "claude-opus-4-6"
-    # A legacy id no CLI listed folds as before; aliases are unchanged.
-    assert model_override.app_id(None, "claude-opus-4-8") == "opus"
-    assert subagent_default.write("opus").model == "opus"
-    # After a switch to an account whose list is not known yet, a picked version
-    # is refused (the owner is asked), never rewritten to an alias.
-    cli["status"] = None
-    assert model_override.app_id(None, "claude-opus-4-6") == "claude-opus-4-6"
-    assert subagent_default.usable("claude-opus-4-6") is None
-    assert _native_task_model("claude-opus-4-6") is None
-    with pytest.raises(ValueError):
-        model_override.resolve("claude-opus-4-6", runs_here=False)
-    # API-key and cloud modes fold as before.
+    assert subagent_default.effective().model == "claude-opus-4-6"
+    # Written here: older releases read ``model`` and run the alias until they update.
+    assert subagent_default.write("claude-opus-4-6").model == "claude-opus-4-6"
+    assert json.loads(stored[subagent_default.SETTING_KEY]) == {"model": "opus", "version": "claude-opus-4-6"}
+    assert subagent_default.write("sonnet").model == "sonnet"
+    assert json.loads(stored[subagent_default.SETTING_KEY]) == {"model": "sonnet"}
+    # API-key and cloud modes fold exactly as on main.
     for mode in ("api", "cloud"):
         cli["mode"] = mode
         assert subagent_default.write("claude-opus-4-6").model == "opus"
-        assert model_override.app_id(None, "claude-opus-4-6") == "opus"
+        assert json.loads(stored[subagent_default.SETTING_KEY]) == {"model": "opus"}
+        stored[subagent_default.SETTING_KEY] = json.dumps({"model": "opus", "version": "claude-opus-4-6"})
+        assert subagent_default.effective().model == "opus"
+        assert leg_model_id(None, "claude-opus-4-6") == "opus"
         assert _native_task_model("claude-opus-4-6") == "opus"
+        assert model_override.app_id(None, "claude-opus-4-6") == "opus"
+        assert m.native_choice("claude-opus-9") is None
 
 
 def test_the_list_belongs_to_the_account_it_was_captured_under(cli, monkeypatch):
     """Review S3: another sign-in never sees, keeps or overwrites the list."""
     from app.core import claude_cli_status, claude_subscriptions
 
-    stored = []
-    monkeypatch.setattr(cm, "store", stored.append)
+    monkeypatch.setattr(cm, "_path", lambda: None)
+    monkeypatch.setattr(claude_cli_status, "announce_account_change", lambda: None)
     account_a = cli["status"]
     account_b = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True, email="b@example.invalid",
                                                   cli_version="2.1.325")
+    key_a = cm.account_key("a@example.invalid", None)
     assert cm.catalog() is not None
-    assert cm.peek()["account"] == cm.account_key("a@example.invalid", None)
+    assert cm.peek()["account"] == key_a
     assert "a@example" not in json.dumps(cm.peek())  # a hash, never the email
     # Switched to B (or restarted signed in as B): A's list is not served.
     cli["status"] = account_b
     assert cm.catalog() is None
-    assert m.cli_offers("claude-opus-4-6") is False
+    assert cm.entry("claude-opus-4-6") is None
     # A handshake or chat started under A that answers now is not stored.
+    monkeypatch.setattr(cm, "_snapshot", None)
     cm._record(REPLY)
-    assert stored == []
+    assert cm.peek() is None
     # Startup after the switch asks the CLI again, though its version is unchanged.
     refreshed = []
     monkeypatch.setattr(cm, "refresh", lambda: refreshed.append(1))
     cm.refresh_if_stale("2.1.325")
     assert refreshed == [1]
-    # Signed out, or the account not known yet: nothing is served.
-    cli["status"] = None
-    assert cm.catalog() is None
-    cli["status"] = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=False)
-    assert cm.catalog() is None
-    # Back on A: served again. A reply from a superseded CLI is not stored.
+    # Signed out, or the account not known yet: nothing is served or stored.
+    for status in (None, claude_cli_status.ClaudeCliStatus(installed=True, signed_in=False)):
+        cli["status"] = status
+        assert cm.store(cm.parse_initialize(REPLY)) is None
+    # Back on A: stored and served. A reply from a superseded CLI is not stored.
     cli["status"] = account_a
-    assert cm.catalog() is not None
-    cm.refresh_if_stale("2.1.325")
-    assert refreshed == [1]
-    cm._record({**REPLY, "claude_code_version": "2.1.300"})
-    assert stored == []
+    assert cm.store(cm.parse_initialize({**REPLY, "claude_code_version": "2.1.300"})) is None
     cm._record(REPLY)
-    assert len(stored) == 1
+    assert cm.peek()["account"] == key_a and cm.catalog() is not None
     # A list saved without an account (an earlier build) is never served.
     monkeypatch.setattr(cm, "_snapshot", {**cm.parse_initialize(REPLY), "account": None})
     assert cm.catalog() is None
@@ -277,9 +278,37 @@ def test_the_list_belongs_to_the_account_it_was_captured_under(cli, monkeypatch)
     asked = []
     monkeypatch.setattr(cm, "refresh_soon", lambda: asked.append(1))
     monkeypatch.setattr(claude_cli_status, "invalidate", lambda: None)
-    monkeypatch.setattr(claude_cli_status, "announce_account_change", lambda: None)
     claude_subscriptions._switched()
     assert asked == [1]
+
+
+def test_a_capture_from_the_previous_account_never_replaces_the_active_one(cli, monkeypatch):
+    """Review S6: A's capture is checked at the write, after B's list landed."""
+    from app.core import claude_cli_status
+
+    monkeypatch.setattr(cm, "_path", lambda: None)
+    monkeypatch.setattr(claude_cli_status, "announce_account_change", lambda: None)
+    monkeypatch.setattr(cm, "_snapshot", None)
+    account_a = cli["status"]
+    reply_b = {**REPLY, "account": {"email": "b@example.invalid"}, "models": REPLY["models"][:5]}
+
+    def switch_while_a_is_in_flight(*args, **kwargs):
+        # A's capture knows A is active; then the owner switches to B and
+        # B's refresh stores B's list before A's capture writes.
+        cli["status"] = claude_cli_status.ClaudeCliStatus(
+            installed=True, signed_in=True, email="b@example.invalid", cli_version="2.1.325")
+        assert cm.store(cm.parse_initialize(reply_b)) is True
+        return account_a
+
+    monkeypatch.setattr(claude_cli_status, "get_status", switch_while_a_is_in_flight)
+    cm._record(REPLY)
+    assert cm.peek()["account"] == cm.account_key("b@example.invalid", None)
+    assert len(cm.catalog()["models"]) == 4  # B's list (aliases only), not A's
+    # A handshake that ends before B's status is known is refused too.
+    cli["status"] = None
+    monkeypatch.setattr(claude_cli_status, "get_status", lambda *a, **k: account_a)
+    cm._record(REPLY)
+    assert cm.peek()["account"] == cm.account_key("b@example.invalid", None)
 
 
 def test_a_throwaway_preview_may_turn_models_on_and_off_and_a_real_install_may_not():

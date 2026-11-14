@@ -11,7 +11,8 @@ Every agent the lead dispatches runs on, in order (#1827, #1830):
    notified once. An unpinned agent never falls back to the session's model.
 
 Stored as ONE shared system setting (``subagent_default``, JSON
-``{"model": ...}``), like the text-generation model: the network's
+``{"model": ...}``, plus ``version`` for a picked full Claude id, see
+:func:`write`), like the text-generation model: the network's
 ``system_settings`` collection syncs it to every worker of the account, and
 the dispatch path reads it without an account-hub lookup. Settings written
 before #1830 also carry an ``allowed`` list; it is ignored.
@@ -62,14 +63,15 @@ def read() -> SubagentDefault:
         return SubagentDefault()
     if not isinstance(data, dict):
         return SubagentDefault()
-    model = data.get("model")
+    version, model = data.get("version"), data.get("model")
+    if isinstance(version, str) and version.strip():
+        return SubagentDefault(model=version.strip())
     model = model.strip() if isinstance(model, str) and model.strip() else None
-    if model and not data.get("exact"):
-        # Saved before a version could be picked: a legacy Claude id still
-        # means today's alias, as it always ran (never the version it names).
-        from app.core.model_registry import normalize_model as _alias
+    if model:
+        # ``model`` always meant an alias: a legacy id there runs today's alias.
+        from app.core.model_registry import LEGACY_MODEL_MAP
 
-        model = _alias(model) or model
+        model = LEGACY_MODEL_MAP.get(model, model)
     return SubagentDefault(model=model)
 
 
@@ -77,9 +79,9 @@ def normalize_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
     """``(app-format id, None)`` for a model this install can run, else ``(None, reason)``.
 
     A Claude id normalizes onto its registry alias (``claude-opus-4-6`` ->
-    ``opus``), except on a subscription, where a version this worker's CLI
-    lists is kept as itself. A composite must name an enabled provider whose curated list
-    holds the model, the same check an agent's pin passes at roster time.
+    ``opus``), except on a subscription, where a full id is kept as itself.
+    A composite must name an enabled provider whose curated list holds the
+    model, the same check an agent's pin passes at roster time.
     """
     if not isinstance(value, str) or not value.strip():
         return None, "A model id is required."
@@ -100,7 +102,6 @@ def normalize_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
     if is_native_claude_model(text):
         from app.core.model_registry import model_values, native_choice
 
-        # A version the subscription CLI lists is kept as picked, never folded.
         chosen = native_choice(text)
         if chosen:
             return chosen, None
@@ -108,9 +109,12 @@ def normalize_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
             f"'{text}' is not a Claude model this app offers. "
             f"Choose one of: {', '.join(model_values())}."
         )
+    from app.core.model_registry import model_values
+
     return None, (
-        f"'{text}' is not a Claude model. A provider's model is written "
-        "prov:<providerId>:<modelId>."
+        f"'{text}' is not a Claude model. Use {', '.join(model_values())}, a full "
+        "Claude id such as claude-opus-4-6 (Claude subscription), or "
+        "prov:<providerId>:<modelId> for a provider's model."
     )
 
 
@@ -123,8 +127,15 @@ def write(model: Optional[str]) -> SubagentDefault:
         clean_model, error = normalize_model(model)
         if error:
             raise ValueError(f"model: {error}")
-    # ``exact``: the id is what was picked (a version stays that version).
-    database.set_system_setting(SETTING_KEY, json.dumps({"model": clean_model, "exact": True}))
+    data: Dict[str, Any] = {"model": clean_model}
+    if clean_model and clean_model.startswith("claude-"):
+        # The picked version rides in ``version``; ``model`` keeps the alias
+        # because a worker on an older release reads only ``model`` and runs
+        # the alias until it updates.
+        from app.core.model_registry import normalize_model as _alias
+
+        data = {"model": _alias(clean_model), "version": clean_model}
+    database.set_system_setting(SETTING_KEY, json.dumps(data))
     if clean_model:
         # A later "no default" state (cleared again) may ask once more.
         reset_asked()

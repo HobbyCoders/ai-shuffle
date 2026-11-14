@@ -182,40 +182,35 @@ def _cli_model(value: str) -> Optional[ModelOption]:
     return ModelOption(value, found.get("label") or value, family, window)
 
 
-def cli_offers(value: Optional[str]) -> bool:
-    """Whether the subscription CLI lists ``value`` by name (it then means itself)."""
-    from app.core import claude_cli_models
-
-    return bool(value) and claude_cli_models.entry(value) is not None
-
-
 def keeps_own_id(value: Optional[str]) -> bool:
-    """Whether a full Claude id means itself instead of today's alias.
+    """Whether a full Claude id is passed on as itself, never folded onto an alias.
 
-    True on a subscription sign-in for an id the CLI listed by name (in the
-    saved list, whichever account it came from, so an account switch never
-    turns a picked version into an alias; whether the active account can run
-    it is :func:`cli_offers`, and the CLI fails a turn it cannot run).
-    API-key and cloud modes, and ids no CLI listed, fold as before.
+    On a subscription sign-in every ``claude-*`` id means itself wherever it
+    is stored, inherited, sent to another worker or handed to the CLI; a CLI
+    that does not know it fails the turn visibly. The saved CLI list decides
+    only what the pickers offer and how a model is described. API-key and
+    cloud modes fold as before.
     """
     from app.core import claude_cli_models
 
-    return bool(value) and claude_cli_models.listed(value)
+    if not isinstance(value, str) or not value.lower().startswith("claude-"):
+        return False
+    try:
+        return claude_cli_models.subscription_mode()
+    except Exception:  # noqa: BLE001 - an unknown mode keeps today's folding
+        return False
 
 
 def normalize_picked(value: Optional[str]) -> str:
-    """``normalize_model`` for a model someone picked, stored or inherited:
-    a legacy id keeps its own name where :func:`keeps_own_id` says so."""
+    """``normalize_model`` for a model someone picked, stored or inherited."""
     return value if value and keeps_own_id(value) else normalize_model(value)
 
 
 def native_choice(value: Optional[str]) -> Optional[str]:
-    """The native Claude model ``value`` names on this worker, or None.
-
-    An alias (legacy ids fold onto one outside a subscription), or a version
-    this worker's subscription CLI lists, which means itself."""
+    """The native Claude model ``value`` names, or None: an alias, or on a
+    subscription any full Claude id as itself (see :func:`keeps_own_id`)."""
     model = normalize_picked((value or "").strip())
-    return model if model in model_values() or cli_offers(model) else None
+    return model if model in model_values() or keeps_own_id(model) else None
 
 
 def get_model(value: Optional[str], *, delegated: bool = True) -> Optional[ModelOption]:
@@ -233,8 +228,9 @@ def get_model(value: Optional[str], *, delegated: bool = True) -> Optional[Model
     normalized = normalize_picked(value) if delegated else normalize_model(value)
     if delegated and normalized == "haiku" and delegated_model_aliases()["haiku"] != API_MODEL_IDS["haiku"]:
         return _BY_VALUE["claude-haiku-4-5"]
-    version = re.sub(r"-\d{8}$", "", normalized) if normalized.startswith("claude-") else normalized
-    return _BY_VALUE.get(normalized) or _BY_VALUE.get(version)
+    version = re.sub(r"-\d{8}$", "", normalized.removesuffix("[1m]")) if normalized.startswith("claude-") else normalized
+    # A kept id with no entry of its own is described as the alias it folds to.
+    return _BY_VALUE.get(normalized) or _BY_VALUE.get(version) or _BY_VALUE.get(normalize_model(value))
 
 
 def display_provider_model_label(
@@ -737,7 +733,7 @@ def registry_payload() -> Dict[str, object]:
     legacy_map = dict(LEGACY_MODEL_MAP)
     if aliases["haiku"] != API_MODEL_IDS["haiku"]:
         legacy_map.pop("claude-haiku-5-5", None)
-    # An id the subscription CLI lists means itself, not today's alias.
+    # On a subscription a full id means itself, not today's alias.
     legacy_map = {k: v for k, v in legacy_map.items() if not keeps_own_id(k)}
     snapshot = claude_cli_models.catalog()
     listed = {m["value"] for m in snapshot["models"]} if snapshot else set()
