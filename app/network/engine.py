@@ -372,6 +372,15 @@ def _notify(touched: List[Tuple[str, str, str]]) -> None:
             recover_revoked_transfers()
         except Exception:  # noqa: BLE001 — retry when status is read or at boot
             logger.warning("Could not recover revoked-source transfers", exc_info=True)
+    collections = {collection for collection, _, _ in touched}
+    if collections & {"membership", "presence", "model_providers"}:
+        # A member joined or left, its presence changed or a provider row
+        # arrived: judge the capability-gated provider rows again (#1519).
+        # Presence records are keyed by device id; anything else re-judges all.
+        from app.core import provider_capability
+        provider_capability.recheck(
+            {record_id for collection, record_id, _ in touched if collection == "presence"}
+            if not (collections & {"membership", "model_providers"}) else None)
     for listener in list(_listeners):
         try:
             listener(touched)
@@ -3434,6 +3443,9 @@ def admit_device(*, device_id: str, signing_public: bytes, encryption_public: by
             backfill_owner_device_ids(ctx.device_id, include_unscoped=False)
         except Exception:  # noqa: BLE001
             logger.debug("Legacy owner backfill failed", exc_info=True)
+    # Gated provider rows reach this member too: judge them for it now (#1519).
+    from app.core import provider_capability
+    provider_capability.recheck([device_id])
     kick()
     return join_response(device_id=device_id, encryption_public=encryption_public, certificate=certificate)
 
