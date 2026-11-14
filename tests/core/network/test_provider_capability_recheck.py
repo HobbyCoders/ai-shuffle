@@ -642,10 +642,30 @@ def test_a_model_id_a_gated_row_also_lists_does_not_move_bound_work(workers):
         assert "needs an update" in provider_capability.picks_refusal(b.device_id, [], ["gemini-2.5-pro"])
 
 
-def _first_report(orch, monkeypatch, b, frame):
+def _first_report(orch, monkeypatch, b, frame, sender="s-gem", outcome="completed"):
     monkeypatch.setattr(orch, "build_started_report", lambda *args: (None, b.device_id, frame))
-    monkeypatch.setattr(orch, "_report_sender", lambda session_id: "s-gem")
-    asyncio.run(orch.report_settled_start(frame["task_id"], {"id": frame["agent_message_turn_id"]}, "completed"))
+    monkeypatch.setattr(orch, "_report_sender", lambda session_id: sender)
+    asyncio.run(orch.report_settled_start(frame["task_id"], {"id": frame["agent_message_turn_id"]}, outcome))
+
+
+def _notifications(monkeypatch):
+    from app.services import notification_service
+
+    notes = []
+
+    async def emit(*args, **kwargs):
+        notes.append(kwargs)
+
+    monkeypatch.setattr(notification_service, "emit_notification", emit)
+    return notes
+
+
+def _working_record_items():
+    with db.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, kind, content, source_session_id, source_turn_id FROM owner_working_items "
+                       "ORDER BY kind, id")
+        return [dict(row) for row in cursor.fetchall()]
 
 
 def _kept_on_chat():
@@ -666,12 +686,21 @@ def test_a_first_report_for_an_incapable_worker_stays_on_the_started_chat(worker
 
     a, b = _network_with_old_worker(workers)
     sent = _no_send(monkeypatch)
-    frame = {"task_id": "c2", "agent_message_turn_id": "t9", "status": "completed", "summary": "done"}
+    notes = _notifications(monkeypatch)
+    # The test database has no account records: a chat is the install owner's.
+    monkeypatch.setattr(orch, "_principal", lambda session_id: None)
+    frame = {"task_id": "c2", "agent_message_turn_id": "t9", "status": "completed", "summary": "done",
+             "title": "Fix the build", "needs_owner": ["Pick a release date"]}
     caplog.set_level(logging.WARNING, logger=orch.log.name)
     with a.active():
         _gemini_session(owner=b.device_id)
         db.create_session("c2", "default", derive_provider_from_profile=False)
         _first_report(orch, monkeypatch, b, frame)
+        items = _working_record_items()
+        assert [(i["kind"], i["source_session_id"], i["source_turn_id"]) for i in items] == [
+            ("needs_owner", "c2", "t9"), ("report", "c2", "t9")]
+        assert "done" in items[1]["content"] and items[0]["content"] == "Pick a release date"
+        assert [(n["session_id"], n["category"]) for n in notes] == [("c2", "session_report:c2")]
         kept = _kept_on_chat()
         assert [session for session, _ in kept] == ["c2"]
         assert kept[0][1]["starter_session_id"] == "s-gem" and kept[0][1]["child_turn_id"] == "t9"
@@ -685,7 +714,42 @@ def test_a_first_report_for_an_incapable_worker_stays_on_the_started_chat(worker
         assert sent == []
         _first_report(orch, monkeypatch, b, dict(frame, agent_message_turn_id="t10"))
         assert len(_kept_on_chat()) == 1
+        # Recording it again (or by another path) keeps one item per report.
+        asyncio.run(orch.record_started_report("s-gem", frame, started_here=True))
+        assert len(_working_record_items()) == 2
     assert [(device, action) for device, action, _ in sent] == [(b.device_id, orch.REPORT_ACTION)]
+
+
+def test_a_kept_report_is_recorded_without_the_starter_row(workers, monkeypatch):
+    """An aborted chat whose starter's row never reached this worker (or was
+    deleted) still lands in the owner's working record, on the authority of
+    the start receipt this worker wrote, and the owner is notified. A starter
+    row that is here but not an owner chat records nothing."""
+    from app.core import credential_gate
+    from app.core import session_orchestration as orch
+
+    a, b = _network_with_old_worker(workers)
+    sent = _no_send(monkeypatch)
+    notes = _notifications(monkeypatch)
+    monkeypatch.setattr(orch, "_principal", lambda session_id: None)
+    # A missing starter falls back to the default run model: Gemini here.
+    monkeypatch.setattr(credential_gate, "default_run_model", lambda **kw: ("gem", "gemini-2.5-pro"))
+    frame = {"task_id": "c3", "agent_message_turn_id": "t1", "status": "aborted", "summary": "stopped",
+             "needs_owner": ["Restart it"]}
+    with a.active():
+        _gemini_session(owner=b.device_id)
+        db.create_session("c3", "default", derive_provider_from_profile=False)
+        _first_report(orch, monkeypatch, b, frame, sender="s-not-here", outcome="aborted")
+        items = _working_record_items()
+        assert [(i["kind"], i["source_session_id"], i["source_turn_id"]) for i in items] == [
+            ("needs_owner", "c3", "t1"), ("report", "c3", "t1")]
+        assert [(n["session_id"], n["category"]) for n in notes] == [("c3", "session_report:c3")]
+        assert [session for session, _ in _kept_on_chat()] == ["c3"]
+        # A starter row that is here and not an owner chat grants nothing.
+        db.create_session("w1", "default", derive_provider_from_profile=False, is_worker=True)
+        asyncio.run(orch.record_started_report("w1", dict(frame, task_id="c4"), started_here=True))
+        assert len(_working_record_items()) == 2
+    assert sent == []
 
 
 def test_reports_for_a_removed_worker_leave_the_capability_wait(workers, monkeypatch):

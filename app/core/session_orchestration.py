@@ -2149,10 +2149,12 @@ def build_started_report(session_id, settled, outcome):
     return home, (None if home else device), frame
 
 
-async def record_started_report(starter_id, frame):
-    """Retain report-backs independently of the disposable starter chat."""
+async def record_started_report(starter_id, frame, *, started_here=False):
+    """Retain report-backs independently of the disposable starter chat.
+    ``started_here``: see ``working_record.record_report``."""
+    import functools
     from app.core.working_record import record_report
-    await asyncio.to_thread(record_report, starter_id, frame)
+    await asyncio.to_thread(functools.partial(record_report, starter_id, frame, started_here=started_here))
 
 
 async def defer_started_report(starter_id, frame, admit=None, *, reason=None):
@@ -2245,7 +2247,10 @@ async def report_settled_start(session_id, settled, outcome):
         if reason:
             from app.core import turn_scheduler
             async with turn_scheduler._terminal_delivery_lock(sender or session_id):
-                await record_started_report(sender, frame)
+                # build_started_report returned the device only from the
+                # start receipt accept_remote_start wrote for that worker's
+                # StartSession, for an origin turn the same sender sent.
+                await record_started_report(sender, frame, started_here=True)
                 await defer_started_report(sender, frame, reason=reason)
             log.warning("Report of started chat %s kept on that chat, not sent: %s", session_id, reason)
             return
