@@ -609,7 +609,8 @@ def content_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
     if coll.name == "sessions":
         from app.db.session_archive_migration import canonical_session
         record = canonical_session(record)
-    subset = {name: record.get(name) for name in coll.hash_fields if name not in coll.local_fields}
+    subset = {name: record.get(name) for name in coll.hash_fields if name not in coll.local_fields
+              and not (name in coll.late_fields and record.get(name) is None)}
     if coll.name == "model_providers":
         # An explicit local disconnect is an update even when the previously
         # published row omitted an untrusted/restored billing credential.
@@ -1968,7 +1969,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
 
     if coll.name == "session_active":
         if env.op == OP_UPSERT and (
-                plaintext.get("session_id") != env.record_id or not isinstance(plaintext.get("is_active"), bool)):
+                plaintext.get("session_id") != env.record_id or not isinstance(plaintext.get("is_active"), bool)
+                or not _valid_snooze(plaintext.get("snoozed_until"))):
             raise ApplyError("malformed session membership")
         # A sidebar click committed while the outbox was held must survive
         # reconnect. Sign it after observing the incoming clock, before the
@@ -2086,6 +2088,18 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     return "applied"
 
 
+def _valid_snooze(value: Any) -> bool:
+    """A membership record's optional wake time: absent/None or ISO-8601 with a zone."""
+    if value is None:
+        return True
+    if not isinstance(value, str) or len(value) > 64:
+        return False
+    try:
+        return datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
+
+
 def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any], *,
                     origin_device_id: Optional[str] = None, ctx: Optional[NetworkContext] = None) -> Mapping[str, Any]:
     """Owner-ordered rows may reference local-only rows; drop what we cannot see.
@@ -2104,6 +2118,11 @@ def _after_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any])
     if coll.name == "session_active":
         from app.network import session_active
         session_active.project(cursor, plaintext)
+    elif coll.name == "sessions" and plaintext.get("id"):
+        # The snooze is not a catalog field. When membership arrived before
+        # the catalog row existed, carry its wake time onto the new row.
+        from app.network import session_active
+        session_active.project_snooze(cursor, plaintext["id"])
     elif coll.name == "session_events":
         from app.network import catalog
         catalog.after_event_mirrored(cursor, dict(plaintext))

@@ -20,7 +20,9 @@ async function expectClosedPhoneSheets(page) {
 		return { label: sheet.getAttribute('aria-label'), native: sheet.classList.contains('phone'), opacity: style.opacity, visibility: style.visibility, pointerEvents: style.pointerEvents,
 			inert: sheet.inert, focusBlocked: document.activeElement === active && !sheet.contains(document.activeElement), hitBlocked: !sheet.contains(hit) };
 	}));
-	expect(sheets.length === 2, 'both closed navigation sheets remain mounted');
+	// Filter, Snooze and More: every closed sidebar sheet must own its hiding.
+	const labels = sheets.map(sheet => sheet.label);
+	expect(sheets.length === 3 && labels.includes('Snooze chat'), `all three closed sidebar sheets remain mounted (got: ${labels.join(', ')})`);
 	for (const sheet of sheets) {
 		// Native sheets translate beyond their plane; desktop popovers fade in place.
 		expect(sheet.native ? sheet.visibility === 'hidden' : Number(sheet.opacity) === 0, `${sheet.label} cannot paint while closed`);

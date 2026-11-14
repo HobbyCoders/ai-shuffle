@@ -1711,7 +1711,7 @@ class TestArchiveSession:
         assert response.status_code == 200
         assert response.json()["session"]["status"] == "active"
         assert response.json()["session"]["is_active"] is False
-        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None)
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None, None)
 
     def test_archive_session_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""
@@ -1755,7 +1755,7 @@ class TestSetSessionActive:
 
         assert response.status_code == 200
         assert response.json()["is_active"] is False
-        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None)
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None, None)
 
     def test_set_active_true_success(self, client, mock_database, sample_session):
         """Should re-activate a session (is_active=True)."""
@@ -1770,7 +1770,7 @@ class TestSetSessionActive:
 
         assert response.status_code == 200
         assert response.json()["is_active"] is True
-        mock_database.set_session_active.assert_called_once_with("test-session-id", True, None)
+        mock_database.set_session_active.assert_called_once_with("test-session-id", True, None, None)
 
     @pytest.mark.parametrize("archived", [True, False])
     def test_set_active_normalizes_legacy_archive_state(self, client, mock_database, sample_session, archived):
@@ -1787,7 +1787,7 @@ class TestSetSessionActive:
         assert response.status_code == 200
         assert response.json()["status"] == "active"
         assert response.json()["is_active"] is False
-        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None)
+        mock_database.set_session_active.assert_called_once_with("test-session-id", False, None, None)
 
     def test_set_active_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""

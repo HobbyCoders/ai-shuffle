@@ -38,6 +38,18 @@ describe('computeFloatingPosition', () => {
 		expect(pos.maxHeight).toBe(900 - 8 - 338);
 	});
 
+	it('keeps a kept side above while the list shrinks to fit below (a filtered picker)', () => {
+		const shrunk = { width: 280, height: 120 };
+		expect(computeFloatingPosition(rect(700, 200), shrunk, view).placement).toBe('bottom');
+		const kept = computeFloatingPosition(rect(700, 200), shrunk, view, { placement: 'top' });
+		expect(kept).toMatchObject({ placement: 'top', top: 700 - 6 - 120 });
+	});
+
+	it('gives up a kept side that became too small (a short window)', () => {
+		const pos = computeFloatingPosition(rect(60, 200), { width: 280, height: 400 }, view, { placement: 'top' });
+		expect(pos.placement).toBe('bottom');
+	});
+
 	it('shifts inside the viewport on a narrow phone', () => {
 		const phone = { width: 390, height: 844 };
 		const right = computeFloatingPosition(rect(200, 300, 80), { width: 280, height: 200 }, phone);

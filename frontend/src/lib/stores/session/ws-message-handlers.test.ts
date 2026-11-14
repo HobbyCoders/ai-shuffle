@@ -2676,6 +2676,13 @@ describe('ws-message-handlers', () => {
 			expect(state.pendingQuestions).toHaveLength(1);
 		});
 
+		it('keeps the waits on a snooze, since a wait is what wakes it early', () => {
+			handlers.handleMessage(frame('session-1', { is_active: false, snoozed_until: '2030-01-01T09:00:00Z' }));
+			expect(attention.get('session-1')).toEqual({ count: 1, kind: 'permission' });
+			expect(state.pendingPermissions).toHaveLength(1);
+			expect(state.pendingQuestions).toHaveLength(1);
+		});
+
 		it('clears nothing on unsettle', () => {
 			handlers.handleMessage(frame('session-1', { is_active: true }));
 			expect(attention.get('session-1')).toEqual({ count: 1, kind: 'permission' });

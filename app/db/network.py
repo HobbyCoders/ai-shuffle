@@ -285,7 +285,10 @@ def create_schema(cursor) -> None:
             session_id TEXT PRIMARY KEY,
             is_active BOOLEAN NOT NULL,
             local_pending BOOLEAN NOT NULL DEFAULT FALSE,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            -- Canonical ISO-8601 UTC wake time of a snoozed (settled) chat, as
+            -- signed. TEXT so the signed spelling round-trips unchanged.
+            snoozed_until TEXT
         )
     """)
     # A chat this worker deleted as its owner (#1308): incoming sync never
@@ -390,6 +393,7 @@ def _ensure_columns(cursor) -> None:
                 ("network_presence", "source_revision", "TEXT"),
                 ("network_session_active", "local_revision", "BIGINT NOT NULL DEFAULT 0"),
                 ("network_session_active", "local_revision_epoch", "TEXT NOT NULL DEFAULT ''"),
+                ("network_session_active", "snoozed_until", "TEXT"),
                 ("network_transcript_backfill_state", "generation", "BIGINT NOT NULL DEFAULT 1"),
                 ("network_transcript_backfill_state", "stalled_since", "BIGINT"))
     if type(cursor).__module__.startswith("psycopg2"):

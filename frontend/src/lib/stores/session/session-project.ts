@@ -46,14 +46,3 @@ export function resolvePersistedProject(
 	}
 	return { project: project || defaultProject, projectV2Id };
 }
-
-/** New Chat: restore a v2-only compose from ephemeral; otherwise last local default. */
-export function resolveNewChatProject(
-	ephemeral: { project: string; projectV2Id: string | null } | null | undefined,
-	defaultProject: string
-): SessionProjectPick {
-	if (ephemeral?.projectV2Id && !ephemeral.project) {
-		return { project: '', projectV2Id: ephemeral.projectV2Id };
-	}
-	return { project: defaultProject, projectV2Id: null };
-}

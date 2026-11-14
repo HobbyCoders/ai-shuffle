@@ -54,7 +54,7 @@ OFFLINE_PEERS_TIMEOUT = 1
 _COMMAND_RE = re.compile(r"orchestration:start:[0-9a-f]{64}")
 _MESSAGE_COMMAND_RE = re.compile(r"orchestration:message:[0-9a-f]{64}")
 _LIST_FIELDS = ("id", "title", "status", "profile_id", "project_id", "project_v2_id",
-                "branch", "model", "updated_at", "is_active", "owner_device_id")
+                "branch", "model", "updated_at", "is_active", "snoozed_until", "owner_device_id")
 REPORT_STATUSES = ("completed", "failed", "stopped")
 MAX_NEEDS_OWNER = 10
 # Turn sources that begin work in a chat. Continuations (unpark, auto-continue,
@@ -118,9 +118,10 @@ def _as_owner_chat(owner, memo=None):
 
 def _list_entry(row):
     entry = {key: row.get(key) for key in _LIST_FIELDS}
-    stamp = entry.get("updated_at")
-    if hasattr(stamp, "isoformat"):
-        entry["updated_at"] = stamp.isoformat()
+    for key in ("updated_at", "snoozed_until"):
+        stamp = entry.get(key)
+        if hasattr(stamp, "isoformat"):
+            entry[key] = stamp.isoformat()
     return entry
 
 
@@ -167,8 +168,11 @@ def _caller(session_id, *, allow_settled=False):
     from app.db import sessions
     from app.core import mobile_tool_identity
     from app.core.task_registry import task_registry
+    from app.core.session_snooze import runs_work
     row = sessions.get_session(session_id) if session_id else None
-    if not _local_top_level(row, allow_settled=allow_settled):
+    # A snoozed chat's own running work (a watch turn, a limit resume) keeps its
+    # tools; as a receiver or in a listing it still counts as settled.
+    if not _local_top_level(row, allow_settled=allow_settled or runs_work(row)):
         raise ValueError("Top-level orchestration requires an active, local, visible top-level chat.")
     if task_registry.is_user_stopped(session_id):
         raise ValueError("The user stopped this session; only the user may continue it.")
@@ -253,7 +257,8 @@ def list_sessions(session_id, data):
             eligible = visible_session(row)
         if row["id"] == session_id or not eligible or _owner(row) != caller_owner:
             continue
-        if state == "settled" and row.get("is_active"):
+        # A snoozed chat is not settled: it wakes on its own (state='all' shows it).
+        if state == "settled" and (row.get("is_active") or row.get("snoozed_until")):
             continue
         if scope == "project" and (
             row.get("project_v2_id") or row.get("project_id")
@@ -2176,8 +2181,10 @@ async def defer_started_report(starter_id, frame, admit=None, *, reason=None):
     from contextlib import nullcontext
     from app.db import sessions, session_events
     from app.core.task_registry import user_stop_holds
+    from app.core.session_snooze import runs_work
     row = await asyncio.to_thread(sessions.get_session, starter_id)
-    if (reason is None and row and row.get("is_active") and row.get("status") != "archived"
+    # A snoozed starter still takes its report (without waking), like an active one.
+    if (reason is None and runs_work(row) and row.get("status") != "archived"
             and not await user_stop_holds(starter_id)):
         return False
     event_id = "deferred-report:" + hashlib.sha256(

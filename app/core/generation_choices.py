@@ -7,6 +7,11 @@ The same per-account preference store as ``composer.modelFast.<model>``:
   asking; unattended runs use it too.
 - ``generation.lastChoice.<kind>``: the latest pick from the choice card. It is
   only offered first ("Same as last time"), never run without asking.
+- ``generation.forgottenChoice.<kind>``: the remembered choice "Ask me next
+  time" dropped. Read as the last choice only while there is no real one, so a
+  choice saved in Settings stays first on the next card (#1603). It is never
+  written to ``lastChoice``: preferences replicate last-writer-wins, and a
+  fallback written there could overwrite a real pick made on another worker.
 - ``generation.choicesMigrated``: set once the saved Settings media defaults
   (``image_model``, ``video_model``, ``audio_model``, ``model3d_model`` and
   their stored options) were copied into remembered choices. From then on the
@@ -25,6 +30,7 @@ logger = logging.getLogger(__name__)
 KINDS = ("image", "video", "audio", "3d")
 CHOICE_PREFIX = "generation.choice."
 LAST_PREFIX = "generation.lastChoice."
+FORGOTTEN_PREFIX = "generation.forgottenChoice."
 MIGRATED_KEY = "generation.choicesMigrated"
 # The Settings media default each unified generation kind replaced.
 LEGACY_SETTING = {"image": "image_model", "video": "video_model", "audio": "audio_model", "3d": "model3d_model"}
@@ -45,6 +51,10 @@ def choice_key(kind: str) -> str:
 
 def last_key(kind: str) -> str:
     return LAST_PREFIX + kind
+
+
+def forgotten_key(kind: str) -> str:
+    return FORGOTTEN_PREFIX + kind
 
 
 def clean(value: Any) -> dict | None:
@@ -127,25 +137,31 @@ def migrate(identity: tuple[str, str]) -> None:
 
 
 def load(identity: tuple[str, str], *, run_migration: bool = True) -> dict:
-    """``{"remembered": {kind: choice}, "last": {kind: choice}, "migrated": bool}``."""
+    """``{"remembered": {kind: choice}, "last": {kind: choice}, "migrated": bool}``.
+
+    ``last`` is the real last pick, else the forgotten remembered choice.
+    """
     from app.db import database
 
     if run_migration:
         migrate(identity)
     remembered: dict[str, dict] = {}
     last: dict[str, dict] = {}
+    forgotten: dict[str, dict] = {}
     migrated = False
     for row in database.get_all_user_preferences(*identity):
         key = row.get("key") or ""
         if key == MIGRATED_KEY:
             migrated = row.get("value") is True
             continue
-        for prefix, target in ((CHOICE_PREFIX, remembered), (LAST_PREFIX, last)):
+        for prefix, target in ((CHOICE_PREFIX, remembered), (LAST_PREFIX, last), (FORGOTTEN_PREFIX, forgotten)):
             kind = key[len(prefix):] if key.startswith(prefix) else None
             if kind in KINDS:
                 choice = clean(row.get("value"))
                 if choice:
                     target[kind] = choice
+    for kind, choice in forgotten.items():
+        last.setdefault(kind, choice)
     return {"remembered": remembered, "last": last, "migrated": migrated}
 
 
@@ -167,12 +183,21 @@ def save(identity: tuple[str, str], kind: str, value: Any, *, remember: bool, or
 
 
 def forget(identity: tuple[str, str], kind: str) -> bool:
-    """Ask again next time: drop the remembered choice (the last one stays)."""
+    """Ask again next time: drop the remembered choice (the last one stays).
+
+    A choice remembered from Settings or the migration was never a card pick,
+    so there may be no last choice. It is kept under its own key, which
+    ``load`` offers as the last choice only while no real pick exists (#1603).
+    """
     from app.db import database
 
     if kind not in KINDS:
         raise ValueError("Unknown generation kind.")
     migrate(identity)
+    row = database.get_user_preference(*identity, choice_key(kind))
+    remembered = clean(row.get("value")) if row else None
+    if remembered:
+        database.set_user_preference(*identity, forgotten_key(kind), remembered)
     return database.delete_user_preference(*identity, choice_key(kind))
 
 

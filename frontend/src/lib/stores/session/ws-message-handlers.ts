@@ -170,6 +170,8 @@ export { SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'title',
 	'is_active',
+	// A snooze's wake time; null when it ends (wake, unsnooze, settle).
+	'snoozed_until',
 	'hidden',
 	'status',
 	'updated_at',
@@ -641,8 +643,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					}
 				}
 				// A settle dismisses the session's waits server-side (#2324);
-				// drop the local copies so the card and composer follow.
-				if (updates.is_active === false) {
+				// drop the local copies so the card and composer follow. A snooze
+				// keeps them: a wait is what wakes it early.
+				if (updates.is_active === false && !updates.snoozed_until) {
 					dismissSettledSessionPrompts(updatedSessionId, { backgroundPermissions, getState, update });
 				}
 				// Row-level metadata (title backfill, is_active flip, …) is merged
@@ -708,7 +711,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			// session's pending permission/question server-side (#2324): drop the
 			// local attention entry and the open session's prompt cards so the
 			// card status is derived fresh. Unsettle clears nothing.
-			if (updates.is_active === false) {
+			if (updates.is_active === false && !updates.snoozed_until) {
 				dismissSettledSessionPrompts(sessionId, { backgroundPermissions, getState, update });
 			}
 			// A project attached from another tab or device (#371). The attach

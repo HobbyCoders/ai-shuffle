@@ -39,7 +39,16 @@ export interface FloatingMenuOptions {
 	margin?: number;
 	/** `false` leaves the node where it is (an in-flow variant). Default true. */
 	enabled?: boolean;
+	/**
+	 * Keep the side (above or below) chosen when it opened while the menu
+	 * stays open, so a list that shrinks as you filter it does not jump to the
+	 * other side. It still moves when that side gets too small (a resize).
+	 */
+	keepPlacement?: boolean;
 }
+
+/** Below this many px a kept side gives way to the roomier one. */
+const KEPT_SIDE_MIN = 120;
 
 export interface FloatingPosition {
 	top: number;
@@ -66,12 +75,15 @@ export function computeFloatingPosition(
 	anchor: Rect,
 	size: { width: number; height: number },
 	view: { width: number; height: number },
-	{ align = 'start', gap = 6, margin = 8 }: Pick<FloatingMenuOptions, 'align' | 'gap' | 'margin'> = {}
+	{ align = 'start', gap = 6, margin = 8, placement: kept }: Pick<FloatingMenuOptions, 'align' | 'gap' | 'margin'> & { placement?: 'top' | 'bottom' } = {}
 ): FloatingPosition {
 	const below = Math.max(0, view.height - margin - (anchor.bottom + gap));
 	const above = Math.max(0, anchor.top - gap - margin);
+	// A kept side stays while it can still show a useful part of the list.
+	const keptSpace = kept === 'bottom' ? below : kept === 'top' ? above : 0;
+	const keepIt = !!kept && (keptSpace >= Math.min(size.height, KEPT_SIDE_MIN) || keptSpace >= (kept === 'bottom' ? above : below));
 	// Prefer below; flip only when it does not fit there and above is roomier.
-	const placement: 'top' | 'bottom' = size.height <= below || below >= above ? 'bottom' : 'top';
+	const placement: 'top' | 'bottom' = keepIt && kept ? kept : size.height <= below || below >= above ? 'bottom' : 'top';
 	const space = placement === 'bottom' ? below : above;
 	const height = Math.min(size.height, space);
 	const top = placement === 'bottom' ? anchor.bottom + gap : anchor.top - gap - height;
@@ -111,6 +123,7 @@ export function floatingMenu(node: HTMLElement, initial: FloatingMenuOptions) {
 	node.style.bottom = 'auto';
 
 	let frame = 0;
+	let kept: 'top' | 'bottom' | undefined;
 
 	function place() {
 		frame = 0;
@@ -129,8 +142,9 @@ export function floatingMenu(node: HTMLElement, initial: FloatingMenuOptions) {
 			anchor.getBoundingClientRect(),
 			{ width: node.offsetWidth, height: node.offsetHeight },
 			viewport(),
-			options
+			{ ...options, placement: options.keepPlacement ? kept : undefined }
 		);
+		if (options.keepPlacement) kept = pos.placement;
 		node.style.top = `${Math.round(pos.top)}px`;
 		node.style.left = `${Math.round(pos.left)}px`;
 		node.style.maxHeight = `${Math.floor(Number.isFinite(cssMax) ? Math.min(cssMax, pos.maxHeight) : pos.maxHeight)}px`;

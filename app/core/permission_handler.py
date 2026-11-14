@@ -505,6 +505,8 @@ class PermissionHandler:
             session_id, PERMISSION_KIND, payload, ttl_seconds,
         )
         interaction_id = row["id"]
+        from app.core.session_snooze import wake_soon
+        wake_soon(session_id)  # needs the owner: a snooze ends early
 
         # Live before anything can show the prompt: the owner can answer a chat
         # prompt while its delivery is still returning.
@@ -945,6 +947,8 @@ class PermissionHandler:
 
         if requeued_ids:
             interaction_wait.notify_changed(session_id)
+            from app.core.session_snooze import wake_soon
+            wake_soon(session_id)  # asks the owner again: a snooze ends early
 
         # Re-broadcast each requeued request. The caller (the chat socket's
         # requeue_deferred_permissions) confirms with the one

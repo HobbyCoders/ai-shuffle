@@ -65,7 +65,7 @@ def _session_rows(key):
 
     with get_db() as conn:
         cursor = conn.cursor()
-        query = ("SELECT s.id, s.sdk_session_id, s.is_active, "
+        query = ("SELECT s.id, s.sdk_session_id, s.is_active, s.snoozed_until, s.status, "
                  "EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.id AND t.ended_at IS NULL) AS open_turn "
                  "FROM sessions s")
         if not key.startswith("key~"):
@@ -77,8 +77,10 @@ def _session_rows(key):
 
 
 def _idle(key):
+    from app.core.session_snooze import runs_work
     rows = _session_rows(key)
-    if any(row["is_active"] not in (False, 0) or row["open_turn"] for row in rows):
+    # A snoozed chat comes back to its scratch: keep it like an active chat's.
+    if any(row["is_active"] not in (False, 0) or runs_work(row) or row["open_turn"] for row in rows):
         return None
     return QUIET_SECONDS if rows else ORPHAN_SECONDS
 

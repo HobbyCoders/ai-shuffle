@@ -22,8 +22,11 @@ deleting history. Project/device filters explicitly apply to **loaded chats
 only**, not the entire history. Search reaches all history, with **More chat
 results** to continue beyond the first 20 matches.
 
-`GET /api/v1/sessions/cursor` accepts `membership=active|settled` (membership is
-`is_active`, not `status`), plus `device_id` (the owning instance ID).
+`GET /api/v1/sessions/cursor` accepts `membership=active|settled|snoozed`
+(membership is `is_active`, not `status`), plus `device_id` (the owning
+instance ID). `snoozed` lists settled chats that carry a `snoozed_until` time;
+`settled` leaves them out. The panel shows them in their own **Snoozed** group
+under Active, soonest wake first.
 `GET /api/v1/sessions/count` returns `{ "total": n }` without row enrichment,
 using the same project/profile, device, tag, API-user/admin, instance, hidden
 and worker predicates. `exclude_archived` is accepted only for old clients and
@@ -351,6 +354,7 @@ curl http://localhost:8000/api/v1/sessions/sess_abc123 \
   "created_at": "2025-01-15T10:30:00Z",
   "updated_at": "2025-01-15T10:35:00Z",
   "is_active": false,
+  "snoozed_until": null,
   "tags": []
 }
 ```
@@ -655,6 +659,14 @@ curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \
   -H "Content-Type: application/json" \
   -d '{"is_active": false}'
 ```
+
+#### Snooze
+
+Send `{"is_active": false, "snoozed_until": "2026-11-16T14:00:00Z"}` to settle a chat until a time. `snoozed_until` is an ISO 8601 time with a timezone; it must be in the future. A past or naive time, or one sent with `"is_active": true` or `"archived"`, returns `422`. The chat moves to the **Snoozed** group (`membership=snoozed`) and its prompts stay open.
+
+At that time the server moves it back to Active by itself, with no browser open. It comes back earlier when it needs you: a permission or approval request, a question for you, or a private-access request. It also comes back when you send it a message, speak to it on a call, or answer one of its question cards yourself (an Away answer or a dismissal does not count). A call on a chat that is only settled still leaves it settled. Progress, a finished turn and background work do not wake it, and snoozing does not stop work that is already running, such as a watch turn (settling still does). Agents see snoozed chats in `ListSessions` with `state="all"`, with their `snoozed_until`; `state="settled"` leaves them out. Settling it by name (including `SettleSession` with `session_ids`) ends the snooze; a sweep over all settled chats (`all_settled`) leaves snoozed chats alone. Any later `PATCH .../active` replaces the snooze: `true` unsnoozes it, and a plain `false` settles it without a wake time.
+
+`snoozed_until` is part of the shared membership record, so a snooze set on any worker shows on the others and works while the execution owner is offline. The worker running the chat wakes it; other workers step in two minutes after it is due if it is still asleep. Workers that predate snooze accept the record and show the chat as Settled. A settle or unsnooze written by such a worker ends the snooze. A wake never undoes a newer snooze or settle.
 
 ### PUT /api/v1/sessions/{session_id}/workspace-folders
 
