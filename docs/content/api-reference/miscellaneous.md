@@ -15,8 +15,8 @@ These shared services use the owner-only `/api/v1/owner` prefix:
 - `GET /api/v1/owner/limits` reads the daily spending cap, job time limit and today's spend.
 - `PATCH` or `PUT /api/v1/owner/limits` changes only supplied limit fields. Disabling
   the daily cap requires `confirm_spend_limit_off: true`; it is not a model-facing tool.
-- `GET /api/v1/owner/agents` lists names and avatar presets for ordinary agents.
-- `PATCH /api/v1/owner/agents/{id}/identity` changes only the name/avatar, preserving
+- `GET /api/v1/owner/agents` lists the names of ordinary agents.
+- `PATCH /api/v1/owner/agents/{id}/identity` changes only the name, preserving
   the agent's prompts, tools, model and other configuration.
 
 Both reads and writes require owner authentication (API keys are refused), and writes
