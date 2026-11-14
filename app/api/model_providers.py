@@ -183,6 +183,9 @@ class FetchModelsResponse(BaseModel):
     fetched_at: Optional[str] = None
     fetched_by_device: Optional[str] = None
     fetched_by_name: Optional[str] = None
+    # ``source == "agent"`` only: the version of the provider's own agent that
+    # reported the list (``fetched_at`` is when it did).
+    agent_version: Optional[str] = None
 
 
 class CodexDeviceStartResponse(BaseModel):
@@ -1490,8 +1493,19 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
 
     from app.core import antigravity
     if row.get("provider_type") == antigravity.PROVIDER_TYPE:
-        # No HTTP catalog: Google's agent binary owns the model list. Curation
-        # picks from the models it offered (with their thinking levels).
+        # No HTTP catalog: Google's agent binary owns the model list, and says
+        # it at every session start (antigravity.record_offered_models). Refresh
+        # serves the last list it reported, with when; it starts no agent, as a
+        # probe would leave a session in the agent's own list. The seed stands
+        # in until a first chat has run on this credential.
+        seeded = {m["id"] for m in antigravity.DEFAULT_MODELS}
+        captured = await run_sync(model_catalogs.read, provider_id)
+        if captured and captured.get("source") == "agent" and captured.get("models"):
+            return FetchModelsResponse(
+                source="agent", models=captured["models"], binding=captured.get("binding"),
+                recommended=[m["id"] for m in captured["models"] if m["id"] in seeded],
+                **{field: captured.get(field) for field in (
+                    "fetched_at", "fetched_by_device", "fetched_by_name", "agent_version")})
         return FetchModelsResponse(source="preset", models=[dict(m) for m in antigravity.DEFAULT_MODELS],
                                    recommended=[m["id"] for m in antigravity.DEFAULT_MODELS],
                                    binding=checked_binding)

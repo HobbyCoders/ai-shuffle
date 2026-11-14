@@ -71,15 +71,19 @@ def _recording_loop(compaction=None, reply="ok", **kwargs) -> tuple[_Recording, 
 # ---------------------------------------------------------------------------
 
 def test_the_block_text_includes_lifetime_and_stays_within_its_allowance():
-    """The new temporary lifetime stays within the existing fixed prompt budget."""
+    """The lifetime and the chat-link limit stay within the fixed prompt budget.
+
+    Scratch is outside the folders the worker serves, so a chat link to a file
+    there is refused (403) and the phone reports a file it could not load.
+    """
     path = NOTE.split("Use ", 1)[1].split(" (absolute", 1)[0]
     assert NOTE == mr.wrap(
         "# Harness scratch\n"
-        f"Use {path} (absolute, per-session) for temporary briefs, "
-        "artifacts and review evidence; create it only when needed. Cleared once "
-        "settled and quiet. Never put "
+        f"Use {path} (absolute, per-session) for briefs, "
+        "artifacts and review evidence; create only when needed. Cleared once "
+        "settled and quiet; chat cannot link it. Never put "
         "harness state or scratch in the working folder's .fluid/. Project "
-        ".fluid is for loading skills, agents, commands, plugins and settings "
+        ".fluid holds skills, agents, commands, plugins and settings "
         "(and host-managed worktrees); explicit skill/plugin authoring is unchanged."
     )
     assert len(NOTE) <= 450

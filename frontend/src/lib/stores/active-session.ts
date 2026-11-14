@@ -17,7 +17,7 @@
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, Profile } from '$lib/api/client';
-import { api, recheckAuthOn401 } from '$lib/api/client';
+import { api, getErrorMessage, recheckAuthOn401 } from '$lib/api/client';
 import { acceptUserEvent } from '$lib/services/user-event-dedupe';
 import type { SessionAttention } from './session/ws-message-handlers';
 import { dismissSettledSessionPrompts, snapshotSessionPrompts, type SettlePromptSnapshot } from './session/settle-prompts';
@@ -916,7 +916,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			});
 		} catch (error) {
 			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
-				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${error instanceof Error ? error.message : String(error)}`,
+				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${getErrorMessage(error)}`,
 					{ session_id: sessionId, persist: false });
 			}
 			return;

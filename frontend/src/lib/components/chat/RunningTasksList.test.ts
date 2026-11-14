@@ -289,6 +289,28 @@ describe('RunningTasksList stopping', () => {
 		expect(row.querySelector('svg.lucide-square')).toBeNull();
 	});
 
+	it.each([
+		// 35% of a phone row, as before; a row as wide as a foldable's inner
+		// screen arms at 160px, not 35% of its 800px.
+		['a phone-width row', 360, 120, false],
+		['a phone-width row', 360, 130, true],
+		['a wide row', 800, 155, false],
+		['a wide row', 800, 165, true],
+	])('a left swipe on %s (%ipx) of %ipx stops the task: %s', async (_label, width, travel, stops) => {
+		setTasks([task('a', { subject: 'Fix login' })]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		const inner = rowOf('Fix login').querySelector('.row-inner') as HTMLElement;
+		Object.defineProperty(inner, 'offsetWidth', { configurable: true, value: width });
+		const at = (clientX: number) => ({ pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX, clientY: 20 });
+		await fireEvent.pointerDown(inner, at(700));
+		await fireEvent.pointerMove(inner, at(690));
+		await fireEvent.pointerMove(inner, at(700 - travel));
+		expect(rowOf('Fix login').classList.contains('armed')).toBe(stops);
+		await fireEvent.pointerUp(inner, at(700 - travel));
+		if (stops) expect(mocks.stopSessionTask).toHaveBeenCalledWith('s1', 'a');
+		else expect(mocks.stopSessionTask).not.toHaveBeenCalled();
+	});
+
 	it('stops one task and keeps it as Stopped with its worker', async () => {
 		setTasks([task('a', { subject: 'Remote job', worker: { name: 'ServerWorker' } }), task('b')]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });

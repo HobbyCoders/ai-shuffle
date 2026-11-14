@@ -1269,7 +1269,8 @@ describe('Sidebar multi-select (R15)', () => {
 			expect(selbar().getAttribute('aria-hidden')).toBe('true');
 
 			const card = await longPress('active');
-			await fireEvent.click(card);
+			// The click the finger leaves on release (detail 1) neither opens nor unpicks it.
+			await fireEvent.click(card, { detail: 1 });
 			expect(selbar().getAttribute('aria-hidden')).toBeNull();
 			expect(selbar().textContent).toContain('1 selected');
 			expect(onOpenSession).not.toHaveBeenCalled();

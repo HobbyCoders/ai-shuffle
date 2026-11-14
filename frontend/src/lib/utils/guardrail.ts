@@ -155,11 +155,16 @@ export function guardrailNoteView(
 			served && requested
 				? `${provider || 'The provider'} answered with ${served} instead of ${requested}${category ? ` (safety check: ${category})` : ''}.`
 				: content || 'The provider answered with a different model.';
+		// An agent that picks its own model (ACP) explains why in the tooltip;
+		// it names the models as the card does.
+		const notOffered = served && requested && text(d.reason) === 'not_offered'
+			? `${provider || 'The provider'} does not offer ${requested} here, so ${served} answered instead.`
+			: '';
 		return {
 			kind: 'rerouted',
 			title: text(d.reason) === 'refusal_fallback' || category ? 'Safety check' : 'Model rerouted',
 			text: sentence,
-			detail: content || sentence
+			detail: notOffered || content || sentence
 		};
 	}
 	if (subtype === GUARDRAIL_BLOCKED_SUBTYPE) {

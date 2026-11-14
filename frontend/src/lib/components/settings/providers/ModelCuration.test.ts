@@ -14,7 +14,8 @@ const mocks = vi.hoisted(() => ({
 	refresh: vi.fn(),
 	notify: vi.fn(),
 	addAnthropicAccount: vi.fn(),
-	loadClaude: vi.fn()
+	loadClaude: vi.fn(),
+	installs: [] as Array<Record<string, unknown>>
 }));
 vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.get, post: mocks.post, patch: mocks.patch },
@@ -35,6 +36,14 @@ vi.mock('$lib/stores/providers.svelte', async () => {
 	};
 });
 vi.mock('$lib/stores/notifications', () => ({ notify: mocks.notify }));
+vi.mock('$lib/stores/worker-presence', async () => {
+	const { writable } = await import('svelte/store');
+	const installs = writable<Array<Record<string, unknown>> | null>(null);
+	return {
+		workerInstalls: { subscribe: installs.subscribe },
+		refreshWorkerPresence: async () => { installs.set(mocks.installs); return mocks.installs; }
+	};
+});
 
 import { resourceSync } from '$lib/services/resource-sync';
 import ModelCuration from './ModelCuration.svelte';
@@ -118,6 +127,21 @@ it('re-ticks a preset model once every model is unticked (#1524)', async () => {
 	expect((screen.getByRole('checkbox', { name: 'm-2' }) as HTMLInputElement).checked).toBe(false);
 	await toggle('m-1');
 	expect(saved()).toEqual([entry('m-1')]);
+});
+
+it("names the worker that captured an agent's list as the app does elsewhere", async () => {
+	// A Docker worker's host name is its container ID; the app calls it "Local".
+	mocks.installs = [{ id: 'dev-self', device_name: '75c733a3514a', is_self: true }];
+	const models = [entry('gemini-4-argon')];
+	mocks.get.mockResolvedValue({
+		source: 'agent', binding: 'ag-binding', models, agent_version: '1.5.6',
+		fetched_at: '2026-11-14T18:13:08Z', fetched_by_device: 'dev-self', fetched_by_name: '75c733a3514a'
+	});
+	render(ModelCuration, { row: row({ id: 'ag', provider_type: 'antigravity', catalog_binding: 'ag-binding', models }) });
+	const line = await screen.findByTestId('curation-agent-list');
+	await waitFor(() => expect(line.textContent).toMatch(/ on Local\. Each new chat updates it\.$/));
+	expect(line.textContent).toMatch(/^Listed by the agent 1\.5\.6 when a chat started, /);
+	expect(line.textContent).not.toContain('75c733a3514a');
 });
 
 describe('shared catalog and concurrent curation', () => {

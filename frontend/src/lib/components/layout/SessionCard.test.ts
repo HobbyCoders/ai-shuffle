@@ -230,15 +230,31 @@ describe('SessionCard snooze', () => {
 		expect(screen.queryByTitle('Snooze session')).toBeNull();
 	});
 
-	it('shows the wake time on a snoozed row and offers Unsnooze and Settle', async () => {
-		renderCard({ is_active: false, snoozed_until: until }, { onSnooze: vi.fn(), status: 'idle', compact: true });
+	it('shows the wake time on a snoozed row and offers Unsnooze, Snooze and Settle', async () => {
+		const onSnooze = vi.fn();
+		renderCard({ is_active: false, snoozed_until: until }, { onSnooze, status: 'idle', compact: true });
 		const label = document.querySelector('.snooze-until')?.textContent ?? '';
 		expect(label).toMatch(/^until /);
 		expect(document.querySelector('.details')?.textContent).toContain(`Snoozed ${label}`);
+		const buttons = Array.from(document.querySelectorAll('.hover-acts button')).map((b) => b.getAttribute('title'));
+		expect(buttons).toEqual(['Unsnooze: move to Active', 'Snooze session', 'Settle session']);
+		// Snooze on a snoozed row picks a new wake time.
+		await fireEvent.click(screen.getByTitle('Snooze session'));
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
 		await fireEvent.click(screen.getByTitle('Unsnooze: move to Active'));
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
 		await fireEvent.click(screen.getByTitle('Settle session'));
 		expect(mocks.setSessionActive).toHaveBeenLastCalledWith('session-a', false);
+	});
+
+	it('offers Snooze beside Move to Active on a settled row', async () => {
+		const onSnooze = vi.fn();
+		renderCard({ is_active: false }, { onSnooze, compact: true });
+		const buttons = Array.from(document.querySelectorAll('.hover-acts button')).map((b) => b.getAttribute('title'));
+		expect(buttons).toEqual(['Move to Active', 'Snooze session']);
+		await fireEvent.click(screen.getByTitle('Snooze session'));
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
 	});
 
 	it('drops the label and offers the Active actions once the time has passed', () => {
@@ -585,7 +601,7 @@ describe('SessionCard swipe gestures', () => {
 		expect(lane?.textContent).toContain('Settle');
 		expect(lane?.classList.contains('toggle')).toBe(true);
 		await up(frame, { x: 120 });
-		await fireEvent.click(card);
+		await fireEvent.click(card, { detail: 1 });
 		clock.mockRestore();
 
 		expect(frame.classList.contains('sliding')).toBe(true);
@@ -598,7 +614,7 @@ describe('SessionCard swipe gestures', () => {
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
-	it.each([true, false])('right swipe has no lifecycle side effects (active=%s)', async (is_active) => {
+	it.each([true, false])('right swipe has no lifecycle side effects without a picker (active=%s)', async (is_active) => {
 		const clock = slowClock();
 		const { container } = renderCard({ is_active });
 		const { frame, card } = parts(container);
@@ -611,6 +627,92 @@ describe('SessionCard swipe gestures', () => {
 		expect(mocks.setSessionArchived).not.toHaveBeenCalled();
 		expect(mocks.setSessionActive).not.toHaveBeenCalled();
 		expect(mocks.banner).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		['an active row', { is_active: true }],
+		['a settled row', { is_active: false }],
+		['a snoozed row', { is_active: false, snoozed_until: '2026-08-20T15:00:00Z' }],
+	])('opens the snooze picker on a long right swipe of %s, and springs back', async (_label, row) => {
+		const clock = slowClock();
+		const onSnooze = vi.fn();
+		const { container, onOpen } = renderCard(row, { onSnooze, compact: !row.is_active });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 100 });
+		expect(frame.classList.contains('dragging')).toBe(true);
+		expect(frame.classList.contains('armed')).toBe(false);
+		await move(frame, { x: 200 });
+		expect(frame.classList.contains('armed')).toBe(true);
+		// The lane uncovered on the left is the snooze lane, not the settle one.
+		const lane = container.querySelector('.lane.l.on');
+		expect(lane?.textContent?.trim()).toBe('Snooze');
+		expect(lane?.classList.contains('snooze')).toBe(true);
+		expect(lane?.classList.contains('toggle')).toBe(false);
+		expect(container.querySelector('.lane.r.on')).toBeNull();
+		await up(frame, { x: 200 });
+		await fireEvent.click(card, { detail: 1 });
+		clock.mockRestore();
+
+		// The picker opens at once; the row neither slides off nor folds.
+		expect(onSnooze).toHaveBeenCalledTimes(1);
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		expect(frame.classList.contains('sliding')).toBe(false);
+		expect(frame.classList.contains('dragging')).toBe(false);
+		expect(card.style.transform).toBe('');
+		await vi.advanceTimersByTimeAsync(450);
+		expect(frame.classList.contains('folded')).toBe(false);
+		expect(container.querySelector('.lane')).toBeNull();
+		// Only a picked time changes the session; the drag's click opens nothing.
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		expect(onOpen).not.toHaveBeenCalled();
+	});
+
+	it('springs a short right drag back without opening the picker', async () => {
+		const clock = slowClock();
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 90 });
+		expect(container.querySelector('.lane.l.on')?.textContent?.trim()).toBe('Snooze');
+		await up(frame, { x: 90 });
+		clock.mockRestore();
+		await vi.advanceTimersByTimeAsync(450);
+		expect(onSnooze).not.toHaveBeenCalled();
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
+	it('opens the snooze picker on a fast right flick short of the arm point', async () => {
+		const ticks = [1000, 1020, 1040];
+		vi.spyOn(performance, 'now').mockImplementation(() => ticks.shift() ?? 1040);
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 60 });
+		await move(frame, { x: 110 });
+		expect(frame.classList.contains('armed')).toBe(false);
+		await up(frame, { x: 110 });
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
+	it('still settles on a left swipe when the row can snooze', async () => {
+		const clock = slowClock();
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await down(card, { x: 300 });
+		await move(frame, { x: 120 });
+		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Settle');
+		expect(container.querySelector('.lane.l.on')).toBeNull();
+		await up(frame, { x: 120 });
+		clock.mockRestore();
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		expect(onSnooze).not.toHaveBeenCalled();
 	});
 
 	it('moves a settled row back to Active on a left swipe', async () => {
@@ -648,7 +750,7 @@ describe('SessionCard swipe gestures', () => {
 		await move(frame, { x: 160 });
 		await up(frame, { x: 160 });
 		// The click the drag leaves behind does not open the session…
-		await fireEvent.click(card);
+		await fireEvent.click(card, { detail: 1 });
 		clock.mockRestore();
 		expect(frame.classList.contains('dragging')).toBe(false);
 		expect(frame.classList.contains('sliding')).toBe(false);
@@ -659,7 +761,7 @@ describe('SessionCard swipe gestures', () => {
 		// …but a real tap afterwards does.
 		await down(card, { x: 100, id: 2 });
 		await up(frame, { x: 100, id: 2 });
-		await fireEvent.click(card);
+		await fireEvent.click(card, { detail: 1 });
 		expect(onOpen).toHaveBeenCalledWith('session-a');
 	});
 
@@ -676,6 +778,94 @@ describe('SessionCard swipe gestures', () => {
 		await up(frame, { x: 210 });
 		await vi.advanceTimersByTimeAsync(450);
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+	});
+
+	describe('on a wide row', () => {
+		// A row as wide as a foldable's inner screen: 40% of it would be 320px.
+		// The arm point is capped at 160px, so the travel matches a phone's.
+		function widen(frame: HTMLElement, width: number) {
+			Object.defineProperty(frame, 'offsetWidth', { configurable: true, value: width });
+		}
+
+		it.each([
+			['commits just past the cap', 165, true],
+			['springs back just short of it', 155, false],
+		])('left swipe %s', async (_label, travel, commits) => {
+			const clock = slowClock();
+			const { container } = renderCard({ is_active: true });
+			const { frame, card } = parts(container);
+			widen(frame, 800);
+			await down(card, { x: 700 });
+			await move(frame, { x: 690 });
+			await move(frame, { x: 700 - travel });
+			expect(frame.classList.contains('armed')).toBe(commits);
+			// Short of the ease limit the row still follows the finger 1:1.
+			expect(card.style.transform).toBe(`translateX(-${travel}px)`);
+			await up(frame, { x: 700 - travel });
+			clock.mockRestore();
+			await vi.advanceTimersByTimeAsync(450);
+			if (commits) expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+			else expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		});
+
+		it.each([
+			['opens the picker just past the cap', 165, true],
+			['springs back just short of it', 155, false],
+		])('right swipe %s', async (_label, travel, commits) => {
+			const clock = slowClock();
+			const onSnooze = vi.fn();
+			const { container } = renderCard({ is_active: true }, { onSnooze });
+			const { frame, card } = parts(container);
+			widen(frame, 800);
+			await down(card, { x: 20 });
+			await move(frame, { x: 30 });
+			await move(frame, { x: 20 + travel });
+			expect(frame.classList.contains('armed')).toBe(commits);
+			expect(container.querySelector('.lane.l.on')?.textContent?.trim()).toBe('Snooze');
+			await up(frame, { x: 20 + travel });
+			clock.mockRestore();
+			await vi.advanceTimersByTimeAsync(450);
+			expect(onSnooze).toHaveBeenCalledTimes(commits ? 1 : 0);
+			expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		});
+
+		it('eases the drag past 1.55 times the arm point, not past 62% of the row', async () => {
+			const clock = slowClock();
+			const { container } = renderCard({ is_active: true });
+			const { frame, card } = parts(container);
+			widen(frame, 800);
+			await down(card, { x: 700 });
+			await move(frame, { x: 690 });
+			await move(frame, { x: 300 });
+			// 400px of finger: 248px 1:1, then the other 152px at 35%.
+			const moved = -Number(card.style.transform.match(/-?[\d.]+/)?.[0]);
+			expect(moved).toBeCloseTo(248 + 152 * 0.35, 1);
+			await up(frame, { x: 300 });
+			clock.mockRestore();
+			await vi.advanceTimersByTimeAsync(450);
+		});
+
+		it('keeps 40% of a phone-width row as the arm point', async () => {
+			const clock = slowClock();
+			const { container } = renderCard({ is_active: true });
+			const { frame, card } = parts(container);
+			widen(frame, 300);
+			await down(card, { x: 290 });
+			await move(frame, { x: 280 });
+			await move(frame, { x: 290 - 115 });
+			expect(frame.classList.contains('armed')).toBe(false);
+			await move(frame, { x: 290 - 125 });
+			expect(frame.classList.contains('armed')).toBe(true);
+			// 62% of the row is still where the drag starts to ease.
+			await move(frame, { x: 290 - 186 });
+			expect(card.style.transform).toBe('translateX(-186px)');
+			await move(frame, { x: 290 - 286 });
+			expect(Number(card.style.transform.match(/-?[\d.]+/)?.[0])).toBeCloseTo(-(186 + 100 * 0.35), 1);
+			await up(frame, { x: 4 });
+			clock.mockRestore();
+			await vi.advanceTimersByTimeAsync(450);
+			expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		});
 	});
 
 	it('leaves a vertical move to the list scroll', async () => {
@@ -703,8 +893,8 @@ describe('SessionCard swipe gestures', () => {
 		expect(screen.getByTitle('Settle session')).toBeTruthy();
 	});
 
-	it('does not swipe an archived row right, since it is archived already', async () => {
-		const { container } = renderCard({ is_active: false, status: 'archived' });
+	it('does not swipe an archived row right, even where the list can snooze', async () => {
+		const { container } = renderCard({ is_active: false, status: 'archived' }, { onSnooze: vi.fn() });
 		const { frame, card } = parts(container);
 		await down(card, { x: 20 });
 		await move(frame, { x: 220 });
@@ -720,7 +910,7 @@ describe('SessionCard swipe gestures', () => {
 		await vi.advanceTimersByTimeAsync(500);
 		expect(onLongPress).toHaveBeenCalledWith('session-a');
 		await up(frame, { x: 100 });
-		await fireEvent.click(card);
+		await fireEvent.click(card, { detail: 1 });
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
@@ -752,6 +942,54 @@ describe('SessionCard swipe gestures', () => {
 	it('opens the row from the keyboard', async () => {
 		const { container, onOpen } = renderCard();
 		await fireEvent.keyDown(parts(container).card, { key: 'Enter' });
+		expect(onOpen).toHaveBeenCalledWith('session-a');
+	});
+
+	it.each([
+		['the captured frame', true],
+		['nowhere', false],
+	])('opens on the first Enter after a right swipe whose click lands on %s', async (_where, frameClick) => {
+		const clock = slowClock();
+		const onSnooze = vi.fn();
+		const { container, onOpen } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 200 });
+		await up(frame, { x: 200 });
+		// Pointer capture retargets the gesture's click to the frame, past the card.
+		if (frameClick) await fireEvent.click(frame, { detail: 1 });
+		clock.mockRestore();
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		// The picker is dismissed and focus comes back to the row: no new pointerdown.
+		await fireEvent.keyDown(card, { key: 'Enter' });
+		expect(onOpen).toHaveBeenCalledTimes(1);
+		await fireEvent.keyDown(card, { key: ' ' });
+		expect(onOpen).toHaveBeenCalledTimes(2);
+	});
+
+	it('opens on the first Enter after a left swipe that springs back with no click', async () => {
+		const clock = slowClock();
+		const { container, onOpen } = renderCard();
+		const { frame, card } = parts(container);
+		await down(card, { x: 160 });
+		await move(frame, { x: 100 });
+		await up(frame, { x: 100 });
+		clock.mockRestore();
+		await vi.advanceTimersByTimeAsync(450);
+		await fireEvent.keyDown(card, { key: 'Enter' });
+		expect(onOpen).toHaveBeenCalledWith('session-a');
+	});
+
+	it('lets an assistive-tech click open the row after a gesture left no click', async () => {
+		const onLongPress = vi.fn();
+		const { container, onOpen } = renderCard({}, { onLongPress });
+		const { frame, card } = parts(container);
+		await down(card, { x: 100 });
+		await vi.advanceTimersByTimeAsync(500);
+		await up(frame, { x: 100 });
+		expect(onLongPress).toHaveBeenCalledWith('session-a');
+		// A screen reader's activation is a click with detail 0 and no pointerdown.
+		await fireEvent.click(card, { detail: 0 });
 		expect(onOpen).toHaveBeenCalledWith('session-a');
 	});
 });

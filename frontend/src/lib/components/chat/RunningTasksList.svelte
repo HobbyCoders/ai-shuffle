@@ -74,6 +74,7 @@
 	import { openSession } from '$lib/services/session-navigation';
 	import { buildShell } from '$lib/utils/platform';
 	import { isSwarmActive } from '$lib/utils/swarm';
+	import { swipeArmDistance } from '$lib/utils/swipe-arm';
 	import SwarmHistory from './SwarmHistory.svelte';
 	import WatchWorkerPicker from './WatchWorkerPicker.svelte';
 	import {
@@ -661,15 +662,16 @@
 	}
 
 	// ── Swipe left to stop (touch and pen only) ───────────────────────────────
+	/** Past this share of the row, capped at SWIPE_ARM_MAX_PX, release stops it. */
 	const SWIPE_ARM = 0.35;
 	let swipe = $state<{ key: string; dx: number; armed: boolean } | null>(null);
-	let swipeStart: { key: string; x: number; y: number; id: number; width: number; locked: boolean | null } | null = null;
+	let swipeStart: { key: string; x: number; y: number; id: number; arm: number; locked: boolean | null } | null = null;
 	let suppressClickUntil = 0;
 
 	function swipeDown(event: PointerEvent, row: RunRow) {
 		if (event.pointerType === 'mouse' || row.state !== 'running' || !event.isPrimary) return;
 		const target = event.currentTarget as HTMLElement;
-		swipeStart = { key: row.key, x: event.clientX, y: event.clientY, id: event.pointerId, width: target.offsetWidth || 360, locked: null };
+		swipeStart = { key: row.key, x: event.clientX, y: event.clientY, id: event.pointerId, arm: swipeArmDistance(target.offsetWidth || 360, SWIPE_ARM), locked: null };
 	}
 
 	function swipeMove(event: PointerEvent) {
@@ -688,7 +690,7 @@
 			(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
 		}
 		const clamped = Math.min(0, dx);
-		swipe = { key: s.key, dx: clamped, armed: -clamped >= s.width * SWIPE_ARM };
+		swipe = { key: s.key, dx: clamped, armed: -clamped >= s.arm };
 	}
 
 	function swipeEnd(event: PointerEvent, row: RunRow) {

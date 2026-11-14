@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
 	guardrailCategoryLabel,
+	guardrailModelLabel,
 	guardrailNoteView,
 	guardrailSummary,
 	guardrailView,
@@ -110,6 +111,22 @@ describe('guardrailNoteView', () => {
 		})!;
 		expect(note.title).toBe('Model rerouted');
 		expect(note.text).toBe('The provider answered with b instead of a.');
+	});
+
+	it('names the models in a not-offered tooltip as the card does', () => {
+		const note = guardrailNoteView('model_rerouted', {
+			content: 'The agent does not offer opus here, so sonnet answered instead.',
+			provider_label: 'The agent',
+			requested_model: 'opus',
+			served_model: 'sonnet',
+			reason: 'not_offered'
+		})!;
+		const served = guardrailModelLabel('sonnet');
+		const requested = guardrailModelLabel('opus');
+		expect([served, requested]).not.toContain('sonnet');
+		expect(requested).not.toBe('opus');
+		expect(note.text).toBe(`The agent answered with ${served} instead of ${requested}.`);
+		expect(note.detail).toBe(`The agent does not offer ${requested} here, so ${served} answered instead.`);
 	});
 
 	it('falls back to the persisted content when models are missing', () => {

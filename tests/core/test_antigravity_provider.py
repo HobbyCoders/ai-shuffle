@@ -5,6 +5,7 @@ launched through the binary override, exactly as the real ``agy`` would be.
 """
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -324,6 +325,7 @@ def _connected(row_id, session_id="s1"):
         extra={"provider_id": row_id, "app_session_id": session_id}, add_dirs=[], aih_turn_source=None)
     adapter._engine = _Engine()
     adapter._antigravity_binding = ag.spawn_binding(db.get_model_provider(row_id, include_token=True))
+    adapter._antigravity_capture = {"bound": ag.capture_binding(db.get_model_provider(row_id, include_token=True))}
     adapter._next_app_turn_source = None
     adapter._next_turn_person_entered = False
     return adapter
@@ -881,6 +883,8 @@ async def test_child_and_agent_started_chats_go_through_the_turn_check(client, s
 async def test_key_rows_are_never_guarded_and_restart_on_a_new_key(client, session_row):
     row = _create(client, "gemini-api-key", api_key="test-gemini-secret-value")
     adapter = _connected(row["id"])
+    holder = adapter._antigravity_capture  # what the engine's on_models reads
+    old_bound = dict(holder["bound"])
     await _turn(adapter, "automation")
     assert adapter._engine.specs == []
     from app.api.model_providers import _encrypt_token_or_400
@@ -890,6 +894,9 @@ async def test_key_rows_are_never_guarded_and_restart_on_a_new_key(client, sessi
     # process with the new one (and resumes the saved conversation).
     assert len(adapter._engine.specs) == 1
     assert adapter._engine.specs[0].env.get("GEMINI_API_KEY") == "test-gemini-other-value"
+    # Its model list is saved under the new key's binding, not the first one.
+    assert holder["bound"] == ag.capture_binding(db.get_model_provider(row["id"], include_token=True))
+    assert holder["bound"] != old_bound
     await _turn(adapter, "user")
     assert len(adapter._engine.specs) == 1
 
@@ -988,6 +995,17 @@ async def test_a_new_key_ends_the_rows_running_agents_and_other_edits_do_not(cli
     db.update_model_provider(row["id"], auth_token=_encrypt_token_or_400("test-gemini-other-value"))
     await ag.reconcile_agents([row["id"]])
     assert engine.stops == [ag.STOPPED_KEY_CHANGED]
+
+
+async def test_a_sign_in_row_whose_sign_in_began_again_is_not_told_its_key_changed(client, session_row):
+    row = _create(client)
+    ag._note_signin(row["id"], "signed_in")
+    engine = _running(row["id"])  # warm across the flap below
+    ag._note_signin(row["id"], "signed_out")
+    ag._note_signin(row["id"], "signed_in")
+    await ag.reconcile_agents([row["id"]])
+    assert engine.stops == [ag.STOPPED_SIGNIN_CHANGED]
+    assert "API key" not in ag.STOPPED_SIGNIN_CHANGED
 
 
 async def test_a_sign_in_row_counts_as_ready_only_while_signed_in_here(mock_db, fake_agy):
@@ -1144,6 +1162,178 @@ def test_rows_carry_gemini_models_with_thinking_levels(client):
     assert fetched.status_code == 200, fetched.text
     ids = [m["id"] for m in fetched.json()["models"]]
     assert ids == [m["id"] for m in ag.DEFAULT_MODELS] and all(i.startswith("gemini-") for i in ids)
+
+
+async def test_the_models_the_agent_reports_become_the_rows_catalog(client, monkeypatch):
+    """What AcpLoop reports at a session start (fake shapes from CLI 1.5.9's
+    combined ids; the real agent's Hydrogen levels were not observed)."""
+    from app.api import model_providers
+    from app.core import model_catalogs
+    from app.core.guardrail_prompt import model_rerouted_note
+
+    # An unpaired worker: its catalog snapshots are otherwise never stored.
+    monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-local-hmac-key", "local"))
+    row = _create(client)
+    curated = db.get_model_provider(row["id"])["models_json"]
+    reported = [
+        {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen", "levels": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-4-carbon", "label": "Gemini 4 Carbon", "levels": ["low", "extra"]},
+        # Named by id only: the seed's levels and name stand.
+        {"id": "gemini-3.1-pro", "label": "gemini-3.1-pro", "levels": None},
+        {"id": "gemini-9-new", "label": "gemini-9-new", "levels": None},  # levels unknown
+    ]
+    bound = ag.capture_binding(db.get_model_provider(row["id"], include_token=True))
+    ag.capture_offered_models(row["id"], lambda: bound)(reported, "1.5.9")
+    await asyncio.gather(*ag._capture_tasks)
+
+    catalog_app = FastAPI()
+    catalog_app.include_router(model_providers.router)
+    catalog_app.dependency_overrides[require_admin] = lambda: None
+    with TestClient(catalog_app) as catalog:
+        first = catalog.post(f"/api/v1/model-providers/{row['id']}/fetch-models").json()
+        again = catalog.post(f"/api/v1/model-providers/{row['id']}/fetch-models").json()
+    assert first["source"] == "agent" and first["agent_version"] == "1.5.9" and first["fetched_at"]
+    # Refresh serves the stored list without re-stamping it.
+    assert again["fetched_at"] == first["fetched_at"]
+    levels = {m["id"]: (m.get("reasoning_capabilities") or {}).get("effort_levels") for m in first["models"]}
+    assert levels == {"gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+                      "gemini-4-carbon": ["low", "xhigh"], "gemini-3.1-pro": ["low", "high"],
+                      "gemini-9-new": None}
+    assert [m["label"] for m in first["models"]] == [
+        "Gemini 4 Hydrogen", "Gemini 4 Carbon", "Gemini 3.1 Pro", "Gemini 9 New"]
+    assert first["recommended"] == ["gemini-3.1-pro"]
+    # Curation is the owner's: nothing new is ticked, nothing curated dropped.
+    assert db.get_model_provider(row["id"])["models_json"] == curated
+    # A turn on a model the agent does not offer leaves a card naming both.
+    note = model_rerouted_note({"requested_model": "gemini-4-argon", "served_model": "gemini-3.1-pro",
+                                "provider": "antigravity", "rerouted": True, "reason": "not_offered"}, row["id"])
+    assert "does not offer gemini-4-argon" in note["content"] and "gemini-3.1-pro answered" in note["content"]
+
+
+_REPORTED = [{"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen", "levels": ["low", "xhigh"]}]
+
+
+def _bound(row_id):
+    return ag.capture_binding(db.get_model_provider(row_id, include_token=True))
+
+
+async def test_a_list_is_saved_only_under_the_key_its_agent_ran_with(client, monkeypatch):
+    """The key is replaced while a capture waits: the old agent's list is not
+    stored under the new key. The replacement agent's own list is."""
+    from app.api.model_providers import _encrypt_token_or_400
+    from app.core import model_catalogs
+
+    monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-local-hmac-key", "local"))
+    row = _create(client, "gemini-api-key", api_key="test-gemini-secret-value")
+    running = {"bound": _bound(row["id"])}
+    capture = ag.capture_offered_models(row["id"], lambda: running["bound"])
+    capture(_REPORTED, "1.5.9")  # the old agent reports; the write has not run yet
+    db.update_model_provider(row["id"], auth_token=_encrypt_token_or_400("test-gemini-other-value"))
+    await asyncio.gather(*ag._capture_tasks)
+    assert db.get_system_setting(model_catalogs.key(row["id"])) is None
+    running["bound"] = _bound(row["id"])  # replace_spec: the new agent's binding
+    capture(_REPORTED, "1.5.9")
+    await asyncio.gather(*ag._capture_tasks)
+    assert model_catalogs.read(row["id"])["source"] == "agent"
+
+
+async def test_a_sign_in_rows_list_holds_only_for_that_sign_in_on_this_worker(client, monkeypatch):
+    from app.core import model_catalogs
+
+    monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-local-hmac-key", "local"))
+    row = _create(client)
+    capture = ag.capture_offered_models(row["id"], lambda bound=_bound(row["id"]): bound)
+    capture(_REPORTED, "1.5.9")
+    await asyncio.gather(*ag._capture_tasks)
+    assert model_catalogs.read(row["id"])["source"] == "agent"
+    stored = db.get_system_setting(model_catalogs.key(row["id"]))
+    # A restart keeps it: the tag is in a file, not in memory.
+    ag._signin_epochs.clear()
+    assert model_catalogs.read(row["id"]) is not None
+    # Another worker's copy (its own tag) synced over ours is not served here.
+    other = json.loads(stored)
+    other["signin"] = "0" * 32
+    db.set_system_setting(model_catalogs.key(row["id"]), json.dumps(other))
+    assert model_catalogs.read(row["id"]) is None
+    db.set_system_setting(model_catalogs.key(row["id"]), stored)
+    # A capture queued before a sign-out lands after it, and the old copy
+    # syncs back: neither is the next account's list.
+    capture(_REPORTED, "1.5.9")
+    await ag.sign_out(row)
+    await asyncio.gather(*ag._capture_tasks)
+    db.set_system_setting(model_catalogs.key(row["id"]), stored)
+    _bound(row["id"])  # the next agent start mints the next sign-in's tag
+    assert model_catalogs.read(row["id"]) is None
+    catalog_app = FastAPI()
+    from app.api import model_providers
+    catalog_app.include_router(model_providers.router)
+    catalog_app.dependency_overrides[require_admin] = lambda: None
+    with TestClient(catalog_app) as catalog:
+        fetched = catalog.post(f"/api/v1/model-providers/{row['id']}/fetch-models").json()
+    assert fetched["source"] == "preset" and not fetched.get("fetched_at")
+
+
+@pytest.mark.parametrize("content", ["", "  \n", "not-a-nonce", "\xff\xfe"], ids=["empty", "blank", "garbage", "binary"])
+def test_a_cut_short_or_bad_tag_file_is_replaced(client, content):
+    """A write cut short (or any bad content) is no tag, not a tag forever
+    missing: the next agent start replaces it, and engines connecting at
+    once for the row agree on the one tag."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    row = _create(client)
+    path = ag._signin_tag_path(row["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content.encode("latin-1"))
+    path.with_name("~" + path.name).write_text("left by a killed write")
+    assert ag.signin_tag(row["id"]) is None  # a reader alone never writes
+    with ThreadPoolExecutor(4) as pool:
+        bound = list(pool.map(lambda _: _bound(row["id"]), range(8)))
+    assert bound[0] and bound[0]["signin"] and all(b == bound[0] for b in bound)
+    assert ag.signin_tag(row["id"]) == bound[0]["signin"]
+
+
+async def test_a_sign_ins_list_lives_as_long_as_its_signed_in_marker(client, session_row, monkeypatch):
+    """One rule, in ``_note_signin``: a signed-out answer ends the sign-in's
+    list (even a transient one), and the first signed-in answer after it
+    replaces each warm agent of the row at its next turn, with a new capture
+    binding whose captures count. A sign-in through the app takes that path."""
+    from app.core import model_catalogs
+
+    monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-local-hmac-key", "local"))
+    row = _create(client)
+    ag._note_signin(row["id"], "signed_in")  # a status check found it signed in
+    adapter = _connected(row["id"])
+    holder = adapter._antigravity_capture
+    capture = ag.capture_offered_models(row["id"], lambda: holder["bound"])
+
+    async def captured():
+        capture(_REPORTED, "1.5.9")
+        await asyncio.gather(*ag._capture_tasks)
+        return model_catalogs.read(row["id"])
+
+    assert (await captured())["source"] == "agent"
+    first = dict(holder["bound"])
+    ag._note_signin(row["id"], "signed_out")  # a transient answer...
+    assert await captured() is None  # ...ends the list; the warm agent's report no longer counts
+    ag._note_signin(row["id"], "signed_in")  # signed in again
+    ag._note_signin(row["id"], "signed_in")  # a repeat answer begins nothing
+    assert model_catalogs.read(row["id"]) is None
+    await _turn(adapter, "user")
+    assert len(adapter._engine.specs) == 1  # the warm chat runs a replaced agent
+    assert holder["bound"]["signin"] and holder["bound"] != first
+    assert _bound(row["id"]) == holder["bound"]  # a new chat: the same new tag
+    assert (await captured())["source"] == "agent"
+    await _turn(adapter, "user")
+    assert len(adapter._engine.specs) == 1
+    second = dict(holder["bound"])
+    started = client.post(f"{BASE}/providers/{row['id']}/login").json()
+    done = client.post(f"{BASE}/providers/{row['id']}/login/{started['login_id']}/complete",
+                       json={"code": "good"}).json()
+    assert done["state"] == "signed_in", done
+    assert model_catalogs.read(row["id"]) is None  # the previous sign-in's list
+    await _turn(adapter, "user")
+    assert len(adapter._engine.specs) == 2 and holder["bound"] != second
+    assert (await captured())["source"] == "agent"
 
 
 @pytest.mark.parametrize("mode,billing", [

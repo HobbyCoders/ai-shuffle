@@ -1,8 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { marked } from 'marked';
 import type { ChatMessage } from '$lib/stores/types';
-import { galleryMediaForTurn, rewriteWithGallery } from './media-gallery';
+import { galleryHiddenEmbeds, galleryMediaForTurn, proseMediaSources } from './media-gallery';
+import { renderChatMarkdown } from './chat-markdown';
+import { sanitizeHtml } from './sanitize';
 import { buildDisplayItems } from './work-log';
+
+// A settled reply's render under a gallery: what the gallery shows is dropped.
+const renderWithGallery = (text: string, sources: ReadonlySet<string>, sessionId?: string | null) =>
+	renderChatMarkdown(text, false, { hide: new Set(galleryHiddenEmbeds(text, sources, sessionId)) });
 
 const image = '/api/generated-images/by-path?path=/images/a.png';
 const image2 = '/api/generated-images/by-path?path=/images/b.png';
@@ -40,7 +46,7 @@ describe('settled turn media gallery', () => {
 		for (const item of gallery) {
 			expect(new URL(item.src, 'https://viewer').searchParams.get('session_id')).toBe('remote-chat');
 		}
-		const html = rewriteWithGallery(answer.content, new Set(gallery.map(item => item.src)), 'remote-chat');
+		const html = renderWithGallery(answer.content, new Set(gallery.map(item => item.src)), 'remote-chat');
 		expect(html).toContain('My choices.');
 		expect(html).not.toContain('<img');
 	});
@@ -59,10 +65,10 @@ describe('settled turn media gallery', () => {
 		const text = `Choose this. ![Photo](${image}) [Clip](/demo.mp4) [Audio](/demo.mp3) [File](/notes.txt)`;
 		const gallery = galleryMediaForTurn([message('a', { content: text })]);
 		expect(gallery.map(item => item.kind)).toEqual(['image', 'video']);
-		const rendered = rewriteWithGallery(text, new Set(gallery.map(item => item.src)));
+		const rendered = renderWithGallery(text, new Set(gallery.map(item => item.src)));
 		expect(rendered).toContain('Choose this.');
 		expect(rendered).toContain('<audio');
-		expect(rendered).toContain('[File](/notes.txt)');
+		expect(rendered).toContain('<a href="/notes.txt">File</a>');
 		expect(rendered).not.toContain('<img');
 		expect(rendered).not.toContain('<video');
 	});
@@ -166,10 +172,10 @@ describe('generated media in the turn gallery (#784)', () => {
 	});
 
 	it('drops a reply image the gallery shows even by its extension-less artifact URL', () => {
-		const html = rewriteWithGallery(`Both:\n\n![A](${art('a')})\n\n![Other](${art('z')})`, new Set([art('a')]));
+		const html = renderWithGallery(`Both:\n\n![A](${art('a')})\n\n![Other](${art('z')})`, new Set([art('a')]));
 		expect(html).toContain('Both:');
-		expect(html).not.toContain(`![A](${art('a')})`);
-		expect(html).toContain(`![Other](${art('z')})`);
+		expect(html).not.toContain(art('a'));
+		expect(html).toContain(art('z'));
 	});
 
 	it.each([
@@ -178,7 +184,7 @@ describe('generated media in the turn gallery (#784)', () => {
 		['an angle-bracket URL', (u: string) => `![A](<${u}>)`],
 		['an angle-bracket URL and title', (u: string) => `![A]( <${u}> "The A" )`]
 	])('drops a gallery image embedded with %s (#792)', (_label, embed) => {
-		const html = rewriteWithGallery(`Pick:\n\n${embed(art('a'))}\n\n${embed(art('z'))}`, new Set([art('a')]));
+		const html = renderWithGallery(`Pick:\n\n${embed(art('a'))}\n\n${embed(art('z'))}`, new Set([art('a')]));
 		expect(html).toContain('Pick:');
 		expect(html).not.toContain(art('a'));
 		expect(html).toContain(art('z'));
@@ -187,10 +193,11 @@ describe('generated media in the turn gallery (#784)', () => {
 	it('never drops an image written inside code (#792)', () => {
 		const fenced = `\`\`\`md\n![A](${art('a')})\n\`\`\``;
 		const inline = `Use \`![A](${art('a')})\` to embed.`;
-		const html = rewriteWithGallery(`${fenced}\n\n${inline}\n\n![A](${art('a')})`, new Set([art('a')]));
+		const html = renderWithGallery(`${fenced}\n\n${inline}\n\n![A](${art('a')})`, new Set([art('a')]));
 		expect(html.split(art('a')).length - 1).toBe(2);
-		expect(html).toContain(fenced);
-		expect(html).toContain(inline);
+		expect(html).toContain(`<pre class="cb-pre"><code>![A](${art('a')})`);
+		expect(html).toContain(`![A](${art('a')})</code>`);
+		expect(html).not.toContain('<img');
 	});
 
 	it('skips the parse for a result that cannot name media (#792)', () => {
@@ -211,3 +218,119 @@ describe('generated media in the turn gallery (#784)', () => {
 		])).toEqual([]);
 	});
 });
+
+// Every input the reviews of #1604 and #1622 found: marked is the one parser,
+// so the reply's render and the gallery dedupe read the same tokens (#1619).
+describe('media markdown in code and in prose (#1619)', () => {
+	const urls = [
+		['an artifact URL', '/api/v1/artifacts/abc123?session_id=s1', '/api/v1/artifacts/def456'],
+		['a .png URL', '/api/generated-images/by-path?path=/w/a.png', '/w/other.png']
+	] as const;
+
+	const inCode: [string, (u: string) => string][] = [
+		['a fenced block', u => `\`\`\`md\n![A](${u})\n\`\`\``],
+		['inline code', u => `Use \`![A](${u})\` to embed.`],
+		['a double-backtick span holding a backtick', u => `\`\`before \` ![x](${u}) after\`\``],
+		['a multiline span', u => `\`start\n![x](${u})\nend\``],
+		['a fence in a blockquote', u => `> \`\`\`md\n> ![A](${u})\n> \`\`\``],
+		['a ~~~ fence', u => `~~~\n![A](${u})\n~~~`],
+		['a 4-backtick fence holding a 3-backtick one', u => `\`\`\`\`md\n\`\`\`\n![A](${u})\n\`\`\`\n\`\`\`\``],
+		['a fence in a list item', u => `- item\n\n  \`\`\`md\n  ![A](${u})\n  \`\`\``],
+		['an indented code block', u => `Example:\n\n    ![A](${u})`],
+		['inline code inside a link label', u => `[see \`![x](${u})\`](https://example.com)`]
+	];
+	const inProse: [string, (u: string, other: string) => string][] = [
+		['plain prose', u => `Here:\n\n![A](${u})`],
+		['a list item', u => `- ![A](${u})`],
+		['a blockquote', u => `> ![A](${u})`],
+		['alt text with backticks', u => `![The \`model\` result](${u})`],
+		['alt text with brackets', u => `![The [model] result](${u})`],
+		['a link nested in the alt text', (u, other) => `![See [thumbnail](${other})](${u})`]
+	];
+
+	const fragment = (html: string) => {
+		const root = document.createElement('div');
+		root.innerHTML = sanitizeHtml(html);
+		return root;
+	};
+	const players = (root: HTMLElement) =>
+		[...root.querySelectorAll('.generated-media-container img')].map(img => img.getAttribute('src'));
+
+	describe.each(urls)('with %s', (_label, url, other) => {
+		const sources = new Set([url]);
+		const reply = (content: string) => [{ id: 'r', role: 'assistant' as const, type: 'text' as const, content }];
+
+		it.each(inCode)('leaves media markdown in %s as written, in the render and the dedupe', (_case, write) => {
+			const text = `${write(url)}\n\nAlso: ![B](${other.replace('other', 'gallery')}) ![C](/w/third.png)`;
+			const root = fragment(renderChatMarkdown(text, false, {}));
+			expect(players(root)).not.toContain(url);
+			expect(root.querySelector('code')?.textContent).toContain(url);
+			expect(proseMediaSources(reply(text)).has(url)).toBe(false);
+			expect(galleryHiddenEmbeds(text, sources)).toEqual([]);
+			// A gallery never drops code either.
+			expect(renderWithGallery(text, sources)).toContain(url);
+		});
+
+		it.each(inProse)('gives media markdown in %s one player, and counts it as shown', (_case, write) => {
+			const text = write(url, other);
+			const root = fragment(renderChatMarkdown(text, false, {}));
+			expect(players(root)).toEqual([url]);
+			expect(root.textContent).not.toContain('](');
+			expect(proseMediaSources(reply(text)).has(url)).toBe(true);
+			expect(proseMediaSources(reply(text)).has(other)).toBe(false);
+			expect(galleryHiddenEmbeds(text, sources)).toEqual([url]);
+			expect(fragment(renderWithGallery(text, sources)).querySelector('img')).toBeNull();
+		});
+	});
+
+	it('gives the player the alt text with its backticks', () => {
+		const root = fragment(renderChatMarkdown('![The `model` result](/api/v1/artifacts/abc)', false, {}));
+		expect(root.querySelector('img')?.getAttribute('alt')).toBe('The `model` result');
+		expect(root.querySelector('a.media-download-btn')).toBeTruthy();
+		expect(root.querySelector('p')).toBeNull();
+	});
+
+	// The dedupe enters exactly the children the renderer draws: a media link's
+	// player replaces its whole label, while any other link, emphasis, heading,
+	// table cell or list item renders its children (#1622 review).
+	describe.each(urls)('the dedupe counts exactly what the render draws, with %s', (_label, url) => {
+		const drawn = (text: string) => {
+			const root = fragment(renderChatMarkdown(text, false, {}));
+			return new Set([...root.querySelectorAll('img, video, audio')].map(el => el.getAttribute('src')));
+		};
+		it.each([
+			['an image labelling an audio link', `[![thumb](${url})](/clip.mp3)`, ['/clip.mp3']],
+			['an image labelling a video link', `[![thumb](${url})](/clip.mp4)`, ['/clip.mp4']],
+			['an image in emphasis labelling an audio link', `[*see ![a](${url})*](/clip.mp3)`, ['/clip.mp3']],
+			['an image in strong inside an ordinary link', `[**![a](${url})**](https://example.com)`, [url]],
+			['a linked image inside strong', `**[![a](${url})](https://example.com)**`, [url]],
+			['an image in a heading', `# ![a](${url})`, [url]],
+			['an image in a table cell', `| A |\n| - |\n| ![a](${url}) |`, [url]],
+			['an image in struck-through text', `~~![a](${url})~~`, [url]],
+			['an image in a task item', `- [ ] ![a](${url})`, [url]]
+		])('%s', (_case, text, expected) => {
+			expect([...drawn(text)]).toEqual(expected);
+			const sources = proseMediaSources([{ id: 'r', role: 'assistant', type: 'text', content: text }]);
+			expect([...sources]).toEqual(expected);
+		});
+	});
+
+	it('leaves the tool row its picture when the reply only links it under an audio player', () => {
+		const art = '/api/v1/artifacts/abc123';
+		const made = message('g', {
+			type: 'tool_use', toolName: 'generateImage', toolStatus: 'complete',
+			toolResult: JSON.stringify({ status: 'completed', success: true, result: { success: true, image_url: art } })
+		});
+		const rowOf = (content: string) => {
+			const items = buildDisplayItems([user, made, message('r', { type: 'text', content })], { ...options, groupingEnabled: false });
+			return items.find(item => item.kind === 'message' && item.message.id === 'g');
+		};
+		const audioOnly = `[![thumb](${art})](/clip.mp3)`;
+		expect(rowOf(audioOnly)).toMatchObject({ kind: 'message' });
+		expect(rowOf(audioOnly)).not.toHaveProperty('hiddenMedia');
+		expect(galleryMediaForTurn([made, message('r', { type: 'text', content: audioOnly })])).toEqual([]);
+		// Control: the same image drawn in prose is the reply's copy.
+		expect(rowOf(`![thumb](${art})`)).toHaveProperty('hiddenMedia', new Set([art]));
+	});
+});
+
