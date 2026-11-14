@@ -15,9 +15,10 @@
 		clear() { finishedBodies.clear(); finishedBytes = 0; },
 		stats() { return { entries: finishedBodies.size, bytes: finishedBytes }; }
 	};
-	function finishedMarkdown(source: string, _epoch = 0): string {
+	// `hide`: the hrefs a turn's gallery already shows (galleryHiddenEmbeds).
+	function finishedMarkdown(source: string, _epoch = 0, hide: readonly string[] = []): string {
 		const enabled = import.meta.env.VITE_PERF_FINISHED_MARKDOWN_CACHE !== '0';
-		const key = `${finishedHighlightGeneration(source)}\0${source}`;
+		const key = `${finishedHighlightGeneration(source)}\0${hide.length ? JSON.stringify(hide) : ''}\0${source}`;
 		const hit = enabled ? finishedBodies.get(key) : undefined;
 		if (hit) {
 			// The renderer registers table sources and trusted terminal commands.
@@ -28,7 +29,7 @@
 			if (valid) { finishedBodies.delete(key); finishedBodies.set(key, hit); return hit.html; }
 			finishedBodies.delete(key); finishedBytes -= hit.bytes;
 		}
-		const html = sanitizeFinishedHtml(parseFinishedMarkdown(source, true));
+		const html = sanitizeFinishedHtml(parseFinishedMarkdown(source, true, { hide: new Set(hide) }));
 		const bytes = (key.length + html.length) * 2 + 64;
 		if (enabled && bytes <= FINISHED_CACHE_BYTES) {
 			finishedBodies.set(key, { html, bytes }); finishedBytes += bytes;
@@ -51,10 +52,10 @@
 	import TableCopyMenu from './TableCopyMenu.svelte';
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
-	import { rewriteMediaMarkdown, clampRevealToMediaBoundary, retryImages } from '$lib/utils/media';
-	import { renderChatMarkdown } from '$lib/utils/chat-markdown';
+	import { clampRevealToMediaBoundary, retryImages } from '$lib/utils/media';
+	import { lastOpenBlock, renderChatMarkdown, type OpenBlock } from '$lib/utils/chat-markdown';
 	import { routeChatFiles } from '$lib/utils/chat-files';
-	import { rewriteWithGallery } from '$lib/utils/media-gallery';
+	import { galleryHiddenEmbeds } from '$lib/utils/media-gallery';
 	import { highlightGenerationForSource, onHighlighterReady } from '$lib/utils/shiki';
 	import { Typewriter } from '$lib/utils/typewriter';
 	import MessageActions from './MessageActions.svelte';
@@ -187,6 +188,9 @@
 	// marked() work from O(full_content) to O(last_paragraph) per update.
 
 	// Streaming cursor HTML to inject inline with text
+	// A streaming reply renders media players and hides nothing: the gallery
+	// only takes a settled turn.
+	const STREAM_MEDIA = {};
 	const STREAMING_CURSOR = '<span class="streaming-cursor inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse align-middle"></span>';
 
 	// Use a plain object to avoid Svelte 5 compiling these as reactive signals.
@@ -202,6 +206,11 @@
 		wasStreaming: false,
 		stablePrefixContent: '',
 		stablePrefixHtml: '',
+		stablePrefixOpen: null as OpenBlock,
+		// The latest stable prefix that ends no open block: the split falls back
+		// to it while a blank line sits inside a fence or a list item.
+		goodPrefixContent: '',
+		goodPrefixHtml: '',
 		highlightGen: 0,
 		result: { prefix: '', tail: '' }
 	};
@@ -224,7 +233,7 @@
 	onDestroy(_stopHighlightWatch);
 
 	const unscopedRendered = $derived(gallerySources?.size && !streaming
-		? { prefix: finishedMarkdown(rewriteWithGallery(displayContent, gallerySources, sessionId), highlightEpoch), tail: '' }
+		? { prefix: finishedMarkdown(displayContent, highlightEpoch, galleryHiddenEmbeds(displayContent, gallerySources, sessionId)), tail: '' }
 		: renderMarkdownMemoized(displayContent, streaming, highlightEpoch));
 	const latestRendered = $derived({
 		prefix: routeChatFiles(unscopedRendered.prefix, sessionId),
@@ -489,6 +498,9 @@
 		// (carries the streaming cursor); otherwise it is one settled block.
 		_cache.stablePrefixContent = '';
 		_cache.stablePrefixHtml = '';
+		_cache.stablePrefixOpen = null;
+		_cache.goodPrefixContent = '';
+		_cache.goodPrefixHtml = '';
 		_cache.content = text;
 		_cache.wasStreaming = isStreaming;
 		_cache.result = isStreaming
@@ -510,37 +522,41 @@
 
 		if (lastBoundary <= 0) {
 			// No paragraph boundary yet — full parse (content is short)
-			const html = renderChatMarkdown(rewriteMediaMarkdown(text, undefined, { source: text, offset: 0 }), false);
+			const html = renderChatMarkdown(text, false, STREAM_MEDIA);
 			return { prefix: '', tail: sanitizeHtml(injectStreamingCursor(html)) };
 		}
 
 		const stableContent = text.substring(0, lastBoundary);
-		const tailContent = text.substring(lastBoundary);
 
-		// If the stable prefix hasn't changed, reuse its cached (sanitized) HTML
-		let prefixHtml: string;
-		if (stableContent === _cache.stablePrefixContent) {
-			prefixHtml = _cache.stablePrefixHtml;
-		} else {
-			// Stable prefix grew — re-parse, sanitize, and cache it once. Only this
-			// side gets syntax highlighting: its fences are closed, and Shiki's
-			// memo makes the repeat renders cheap.
-			// Both halves are read against the whole reply, so a fence or list
-			// that spans the split keeps its media markdown as code (#1619).
-			prefixHtml = sanitizeHtml(renderChatMarkdown(rewriteMediaMarkdown(stableContent, undefined, { source: text, offset: 0 }), true));
+		// When the stable prefix grows, re-parse, sanitize, and cache it once.
+		// Only this side gets syntax highlighting, and Shiki's memo makes the
+		// repeat renders cheap.
+		if (stableContent !== _cache.stablePrefixContent) {
+			_cache.stablePrefixHtml = sanitizeHtml(renderChatMarkdown(stableContent, true, STREAM_MEDIA));
 			_cache.stablePrefixContent = stableContent;
-			_cache.stablePrefixHtml = prefixHtml;
+			_cache.stablePrefixOpen = lastOpenBlock();
+			if (!_cache.stablePrefixOpen) {
+				_cache.goodPrefixContent = stableContent;
+				_cache.goodPrefixHtml = _cache.stablePrefixHtml;
+			}
 		}
+
+		// A blank line inside a fence, or before a list item's indented
+		// continuation, ends no block: parsed alone, the tail would read code as
+		// prose or prose as code. Split at the last boundary that ends a block.
+		const open = _cache.stablePrefixOpen === 'fence'
+			|| (_cache.stablePrefixOpen === 'list' && /^\n+[ \t]/.test(text.substring(lastBoundary)));
+		const prefixContent = open ? _cache.goodPrefixContent : stableContent;
 
 		// Always re-parse the tail (last incomplete paragraph + new content).
 		// This is the only DOMPurify pass that runs every delta — bounded to the
-		// last paragraph rather than the whole message. Highlighting is off here:
+		// last block rather than the whole message. Highlighting is off here:
 		// the fence may not be closed yet, and tokenising per delta would be the
 		// most expensive thing in the stream loop.
-		let tailHtml = renderChatMarkdown(rewriteMediaMarkdown(tailContent, undefined, { source: text, offset: lastBoundary }), false);
+		let tailHtml = renderChatMarkdown(text.substring(prefixContent.length), false, STREAM_MEDIA);
 		tailHtml = sanitizeHtml(injectStreamingCursor(tailHtml));
 
-		return { prefix: prefixHtml, tail: tailHtml };
+		return { prefix: open ? _cache.goodPrefixHtml : _cache.stablePrefixHtml, tail: tailHtml };
 	}
 
 	/**
@@ -566,16 +582,16 @@
 
 	/**
 	 * Full markdown render (non-streaming or first render). Media markdown
-	 * (images / video / audio) is rewritten into inline players with download +
+	 * (images / video / audio) renders as inline players with download +
 	 * expand controls in both cases, so generated media shows up immediately —
-	 * the only difference while streaming is the trailing cursor.
-	 * See $lib/utils/media for detection rules and produced markup.
+	 * the only difference while streaming is the trailing cursor. marked's own
+	 * image and link renderers draw them ($lib/utils/chat-markdown), so media
+	 * markdown written in code stays code; $lib/utils/media has the detection
+	 * rules and the markup.
 	 */
 	function renderMarkdownFull(text: string, isStreaming: boolean): string {
-		// A streaming reply is read through the one-delta memo, not the settled cache.
-		const source = rewriteMediaMarkdown(text, undefined, isStreaming ? { source: text, offset: 0 } : undefined);
-		if (!isStreaming) return finishedMarkdown(source);
-		return sanitizeHtml(injectStreamingCursor(renderChatMarkdown(source, false)));
+		if (!isStreaming) return finishedMarkdown(text);
+		return sanitizeHtml(injectStreamingCursor(renderChatMarkdown(text, false, STREAM_MEDIA)));
 	}
 
 	// ── Code-block copy ────────────────────────────────────────────────────

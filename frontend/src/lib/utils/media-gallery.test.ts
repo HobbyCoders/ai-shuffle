@@ -1,9 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { marked } from 'marked';
 import type { ChatMessage } from '$lib/stores/types';
-import { rewriteMediaMarkdown } from './media';
-import { galleryMediaForTurn, proseMediaSources, rewriteWithGallery } from './media-gallery';
+import { galleryHiddenEmbeds, galleryMediaForTurn, proseMediaSources } from './media-gallery';
+import { renderChatMarkdown } from './chat-markdown';
+import { sanitizeHtml } from './sanitize';
 import { buildDisplayItems } from './work-log';
+
+// A settled reply's render under a gallery: what the gallery shows is dropped.
+const renderWithGallery = (text: string, sources: ReadonlySet<string>, sessionId?: string | null) =>
+	renderChatMarkdown(text, false, { hide: new Set(galleryHiddenEmbeds(text, sources, sessionId)) });
 
 const image = '/api/generated-images/by-path?path=/images/a.png';
 const image2 = '/api/generated-images/by-path?path=/images/b.png';
@@ -41,7 +46,7 @@ describe('settled turn media gallery', () => {
 		for (const item of gallery) {
 			expect(new URL(item.src, 'https://viewer').searchParams.get('session_id')).toBe('remote-chat');
 		}
-		const html = rewriteWithGallery(answer.content, new Set(gallery.map(item => item.src)), 'remote-chat');
+		const html = renderWithGallery(answer.content, new Set(gallery.map(item => item.src)), 'remote-chat');
 		expect(html).toContain('My choices.');
 		expect(html).not.toContain('<img');
 	});
@@ -60,10 +65,10 @@ describe('settled turn media gallery', () => {
 		const text = `Choose this. ![Photo](${image}) [Clip](/demo.mp4) [Audio](/demo.mp3) [File](/notes.txt)`;
 		const gallery = galleryMediaForTurn([message('a', { content: text })]);
 		expect(gallery.map(item => item.kind)).toEqual(['image', 'video']);
-		const rendered = rewriteWithGallery(text, new Set(gallery.map(item => item.src)));
+		const rendered = renderWithGallery(text, new Set(gallery.map(item => item.src)));
 		expect(rendered).toContain('Choose this.');
 		expect(rendered).toContain('<audio');
-		expect(rendered).toContain('[File](/notes.txt)');
+		expect(rendered).toContain('<a href="/notes.txt">File</a>');
 		expect(rendered).not.toContain('<img');
 		expect(rendered).not.toContain('<video');
 	});
@@ -167,34 +172,10 @@ describe('generated media in the turn gallery (#784)', () => {
 	});
 
 	it('drops a reply image the gallery shows even by its extension-less artifact URL', () => {
-		const html = rewriteWithGallery(`Both:\n\n![A](${art('a')})\n\n![Other](${art('z')})`, new Set([art('a')]));
+		const html = renderWithGallery(`Both:\n\n![A](${art('a')})\n\n![Other](${art('z')})`, new Set([art('a')]));
 		expect(html).toContain('Both:');
 		expect(html).not.toContain(art('a'));
-		// One the gallery does not show keeps its own player and download (#1603).
-		expect(html).toContain(`src="${art('z')}"`);
-		expect(html).toContain('media-download-btn');
-	});
-
-	it.each([
-		['without a gallery', (md: string) => rewriteMediaMarkdown(md)],
-		['with a gallery that does not show it', (md: string) => rewriteWithGallery(md, new Set([art('other')]))]
-	])('leaves an artifact image written in code as written, %s (#1603)', (_label, render) => {
-		const fenced = `\`\`\`md\n![In a fence](${art('a')})\n\`\`\``;
-		const inline = `Use \`![Inline](${art('a')})\` to embed.`;
-		const out = render(`${fenced}\n\n${inline}\n\n![Prose](${art('a')})`);
-		expect(out).toContain(fenced);
-		expect(out).toContain(inline);
-		expect(out.match(/<img /g)).toHaveLength(1);
-		expect(out).toContain('alt="Prose"');
-		expect(out).toContain('media-download-btn');
-	});
-
-	it('counts a reply artifact image as a gallery image, once (#1603)', () => {
-		const gallery = galleryMediaForTurn([
-			made('g1', unified({ image_url: art('a') })),
-			message('reply', { type: 'text', content: `![A](${art('a')}) ![Z](${art('z')})` })
-		]);
-		expect(gallery.map((item) => [item.kind, item.src])).toEqual([['image', art('a')], ['image', art('z')]]);
+		expect(html).toContain(art('z'));
 	});
 
 	it.each([
@@ -203,7 +184,7 @@ describe('generated media in the turn gallery (#784)', () => {
 		['an angle-bracket URL', (u: string) => `![A](<${u}>)`],
 		['an angle-bracket URL and title', (u: string) => `![A]( <${u}> "The A" )`]
 	])('drops a gallery image embedded with %s (#792)', (_label, embed) => {
-		const html = rewriteWithGallery(`Pick:\n\n${embed(art('a'))}\n\n${embed(art('z'))}`, new Set([art('a')]));
+		const html = renderWithGallery(`Pick:\n\n${embed(art('a'))}\n\n${embed(art('z'))}`, new Set([art('a')]));
 		expect(html).toContain('Pick:');
 		expect(html).not.toContain(art('a'));
 		expect(html).toContain(art('z'));
@@ -212,10 +193,11 @@ describe('generated media in the turn gallery (#784)', () => {
 	it('never drops an image written inside code (#792)', () => {
 		const fenced = `\`\`\`md\n![A](${art('a')})\n\`\`\``;
 		const inline = `Use \`![A](${art('a')})\` to embed.`;
-		const html = rewriteWithGallery(`${fenced}\n\n${inline}\n\n![A](${art('a')})`, new Set([art('a')]));
+		const html = renderWithGallery(`${fenced}\n\n${inline}\n\n![A](${art('a')})`, new Set([art('a')]));
 		expect(html.split(art('a')).length - 1).toBe(2);
-		expect(html).toContain(fenced);
-		expect(html).toContain(inline);
+		expect(html).toContain(`<pre class="cb-pre"><code>![A](${art('a')})`);
+		expect(html).toContain(`![A](${art('a')})</code>`);
+		expect(html).not.toContain('<img');
 	});
 
 	it('skips the parse for a result that cannot name media (#792)', () => {
@@ -237,78 +219,75 @@ describe('generated media in the turn gallery (#784)', () => {
 	});
 });
 
-describe('media markdown in code stays as written (#1619)', () => {
-	const urls = [['an artifact URL', '/api/v1/artifacts/a?session_id=s'], ['a .png URL', '/api/generated-images/by-path?path=/w/a.png']];
-	const reply = (content: string) => message('reply', { type: 'text', content });
-	const BACKTICKS = '`'.repeat(3);
-	const codeCases: [string, (u: string) => string][] = [
-		['a double-backtick span holding a backtick', (u) => `before \`\` \` ![x](${u}) after\`\``],
-		['a single-backtick span over two lines', (u) => `a \`multi\n![x](${u})\` b`],
-		['a fence in a blockquote', (u) => `> ${BACKTICKS}md\n> ![A](${u})\n> ${BACKTICKS}`],
-		['a fence in a list item', (u) => `- item\n\n  ${BACKTICKS}\n  ![A](${u})\n  ${BACKTICKS}`],
-		['a ~~~ fence', (u) => `~~~\n![A](${u})\n~~~`],
-		['a 4-backtick fence holding a 3-backtick line', (u) => `${BACKTICKS}\`md\n${BACKTICKS}\n![A](${u})\n${BACKTICKS}\n${BACKTICKS}\``],
-		['a fence still streaming (unclosed)', (u) => `Here:\n\n${BACKTICKS}md\n![A](${u})`],
-		['an indented code block', (u) => `Text.\n\n    ![A](${u})`]
+// Every input the reviews of #1604 and #1622 found: marked is the one parser,
+// so the reply's render and the gallery dedupe read the same tokens (#1619).
+describe('media markdown in code and in prose (#1619)', () => {
+	const urls = [
+		['an artifact URL', '/api/v1/artifacts/abc123?session_id=s1', '/api/v1/artifacts/def456'],
+		['a .png URL', '/api/generated-images/by-path?path=/w/a.png', '/w/other.png']
+	] as const;
+
+	const inCode: [string, (u: string) => string][] = [
+		['a fenced block', u => `\`\`\`md\n![A](${u})\n\`\`\``],
+		['inline code', u => `Use \`![A](${u})\` to embed.`],
+		['a double-backtick span holding a backtick', u => `\`\`before \` ![x](${u}) after\`\``],
+		['a multiline span', u => `\`start\n![x](${u})\nend\``],
+		['a fence in a blockquote', u => `> \`\`\`md\n> ![A](${u})\n> \`\`\``],
+		['a ~~~ fence', u => `~~~\n![A](${u})\n~~~`],
+		['a 4-backtick fence holding a 3-backtick one', u => `\`\`\`\`md\n\`\`\`\n![A](${u})\n\`\`\`\n\`\`\`\``],
+		['a fence in a list item', u => `- item\n\n  \`\`\`md\n  ![A](${u})\n  \`\`\``],
+		['an indented code block', u => `Example:\n\n    ![A](${u})`],
+		['inline code inside a link label', u => `[see \`![x](${u})\`](https://example.com)`]
+	];
+	const inProse: [string, (u: string, other: string) => string][] = [
+		['plain prose', u => `Here:\n\n![A](${u})`],
+		['a list item', u => `- ![A](${u})`],
+		['a blockquote', u => `> ![A](${u})`],
+		['alt text with backticks', u => `![The \`model\` result](${u})`],
+		['alt text with brackets', u => `![The [model] result](${u})`],
+		['a link nested in the alt text', (u, other) => `![See [thumbnail](${other})](${u})`]
 	];
 
-	describe.each(urls)('%s', (_kind, url) => {
-		it.each(codeCases)('leaves it as written in %s, in both paths, and the dedupe agrees', (_label, make) => {
-			const md = make(url);
-			expect(rewriteMediaMarkdown(md)).toBe(md);
-			expect(rewriteWithGallery(md, new Set([url]))).toBe(md);
-			expect(proseMediaSources([reply(md)]).size).toBe(0);
+	const fragment = (html: string) => {
+		const root = document.createElement('div');
+		root.innerHTML = sanitizeHtml(html);
+		return root;
+	};
+	const players = (root: HTMLElement) =>
+		[...root.querySelectorAll('.generated-media-container img')].map(img => img.getAttribute('src'));
+
+	describe.each(urls)('with %s', (_label, url, other) => {
+		const sources = new Set([url]);
+		const reply = (content: string) => [{ id: 'r', role: 'assistant' as const, type: 'text' as const, content }];
+
+		it.each(inCode)('leaves media markdown in %s as written, in the render and the dedupe', (_case, write) => {
+			const text = `${write(url)}\n\nAlso: ![B](${other.replace('other', 'gallery')}) ![C](/w/third.png)`;
+			const root = fragment(renderChatMarkdown(text, false, {}));
+			expect(players(root)).not.toContain(url);
+			expect(root.querySelector('code')?.textContent).toContain(url);
+			expect(proseMediaSources(reply(text)).has(url)).toBe(false);
+			expect(galleryHiddenEmbeds(text, sources)).toEqual([]);
+			// A gallery never drops code either.
+			expect(renderWithGallery(text, sources)).toContain(url);
 		});
 
-		it.each([
-			['plain prose', (u: string) => `Here ![A](${u}) it is.`],
-			['a list item', (u: string) => `- one\n- ![A](${u})`],
-			['a blockquote', (u: string) => `> look\n> ![A](${u})`],
-			['alt text holding backticks', (u: string) => `![The \`a\` one](${u})`]
-		])('draws it in %s, counts it, and the gallery drops it', (_label, make) => {
-			const md = make(url);
-			expect(rewriteMediaMarkdown(md)).toContain('media-download-btn');
-			expect(proseMediaSources([reply(md)]).size).toBe(1);
-			expect(rewriteWithGallery(md, new Set([url]))).not.toContain(url);
+		it.each(inProse)('gives media markdown in %s one player, and counts it as shown', (_case, write) => {
+			const text = write(url, other);
+			const root = fragment(renderChatMarkdown(text, false, {}));
+			expect(players(root)).toEqual([url]);
+			expect(root.textContent).not.toContain('](');
+			expect(proseMediaSources(reply(text)).has(url)).toBe(true);
+			expect(proseMediaSources(reply(text)).has(other)).toBe(false);
+			expect(galleryHiddenEmbeds(text, sources)).toEqual([url]);
+			expect(fragment(renderWithGallery(text, sources)).querySelector('img')).toBeNull();
 		});
 	});
 
-	it('drops gallery images around a fence in a blockquote and keeps the fence as written', () => {
-		const art = (hash: string) => `/api/v1/artifacts/${hash}`;
-		const fence = `> ${BACKTICKS}md\n> ![A](${art('a')})\n> ${BACKTICKS}`;
-		const html = rewriteWithGallery(`![G1](${art('g1')})\n\n${fence}\n\n![G2](${image})`, new Set([art('g1'), art('a'), image]));
-		expect(html).toBe(`\n\n${fence}\n\n`);
-	});
-
-	it('drops a gallery image whose alt text holds backticks, and keeps one it does not show', () => {
-		const art = (hash: string) => `/api/v1/artifacts/${hash}`;
-		const html = rewriteWithGallery(`![The \`a\` one](${art('a')})\n\n![The \`z\` one](${art('z')})`, new Set([art('a')]));
-		expect(html).not.toContain(art('a'));
-		expect(html).toContain(`src="${art('z')}"`);
-	});
-
-	it('reads a streaming fragment against the whole reply', () => {
-		const url = '/api/v1/artifacts/a';
-		// The split falls inside a fence: the tail is still code.
-		const fenced = `${BACKTICKS}md\n![A](${url})\n\n![B](${url})\n${BACKTICKS}`;
-		const cut = fenced.lastIndexOf('\n\n');
-		const tail = fenced.slice(cut);
-		expect(rewriteMediaMarkdown(tail, undefined, { source: fenced, offset: cut })).toBe(tail);
-		// A list item's indented continuation is prose, though alone it reads as code.
-		const listed = `- item\n\n    ![A](${url})`;
-		const at = listed.lastIndexOf('\n\n');
-		expect(rewriteMediaMarkdown(listed.slice(at))).toBe(listed.slice(at));
-		expect(rewriteMediaMarkdown(listed.slice(at), undefined, { source: listed, offset: at })).toContain('media-download-btn');
-	});
-
-	it('lexes a settled reply once, and never lexes text without media', () => {
-		const content = `Once.\n\n![A](${image}) and \`code\`.`;
-		const lexer = vi.spyOn(marked, 'lexer');
-		rewriteMediaMarkdown(content);
-		rewriteMediaMarkdown(content);
-		rewriteMediaMarkdown('Plain [link](https://example.com/page) and `code`.');
-		const calls = lexer.mock.calls.length;
-		lexer.mockRestore();
-		expect(calls).toBe(1);
+	it('gives the player the alt text with its backticks', () => {
+		const root = fragment(renderChatMarkdown('![The `model` result](/api/v1/artifacts/abc)', false, {}));
+		expect(root.querySelector('img')?.getAttribute('alt')).toBe('The `model` result');
+		expect(root.querySelector('a.media-download-btn')).toBeTruthy();
+		expect(root.querySelector('p')).toBeNull();
 	});
 });
+

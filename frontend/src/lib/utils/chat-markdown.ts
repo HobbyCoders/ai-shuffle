@@ -11,12 +11,13 @@
  *  2. Highlighting itself is memoised in `$lib/utils/shiki` on code + language,
  *     so the settled PREFIX re-renders are cache hits.
  */
-import { Marked, Renderer, type Tokens } from 'marked';
+import { Marked, Renderer, type Token, type Tokens } from 'marked';
 import { highlightToInnerHtml, resolveShikiLang } from './shiki';
 import { escapeHtml } from './escape-html';
 import { renderInlineCode } from './inline-code';
 import { registerTable } from './table-export';
 import { commandBlock, registerCommandBlock } from '$lib/terminal/commands';
+import { collapseRawBase64, embedKind, mediaHtml } from './media';
 
 /** Parsed fence info string: ```ts title="src/a.ts" / ```ts:src/a.ts / ```ts src/a.ts */
 export interface FenceMeta {
@@ -117,10 +118,79 @@ export function renderCodeBlock(code: string, info: string | undefined, highligh
 // setter wraps — there is no await between the two, so no interleaving.
 let _highlightEnabled = true;
 
+/**
+ * Media options for one render. Media markdown becomes a player inside
+ * marked's own image and link renderers, so only what marked reads as an image
+ * or a link in prose gets one: never anything in code, with nested brackets,
+ * titles and container blocks resolved by the same parse (#1619). `hide` holds
+ * the hrefs a turn's gallery already shows (media-gallery `galleryHiddenEmbeds`).
+ */
+export interface ChatMedia {
+	hide?: ReadonlySet<string>;
+}
+let _media: ChatMedia | null = null;
+
+/** A token that renders as a player, or as nothing because the gallery shows it. */
+function isPlacedMedia(token: Token): boolean {
+	if (token.type !== 'image' && token.type !== 'link') return false;
+	return !!embedKind(token.type, token.href) || (token.type === 'image' && !!_media?.hide?.has(token.href));
+}
+
+/**
+ * The last block of the most recent parse when a later blank line can still
+ * continue it: a fence that has not closed, or a list. A streaming reply must
+ * not be split there (AssistantMessage's prefix/tail render).
+ */
+export type OpenBlock = 'fence' | 'list' | null;
+let _openBlock: OpenBlock = null;
+
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/;
+
+function openBlockOf(tokens: Token[]): OpenBlock {
+	let last: Token | undefined;
+	for (let i = tokens.length - 1; i >= 0 && !last; i--) if (tokens[i].type !== 'space') last = tokens[i];
+	if (last?.type === 'list') return 'list';
+	if (last?.type !== 'code' || last.codeBlockStyle === 'indented') return null;
+	const lines = last.raw.trimEnd().split('\n');
+	const open = lines[0].match(FENCE_LINE)?.[1];
+	const close = lines.length > 1 ? lines[lines.length - 1].match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/)?.[1] : undefined;
+	const closed = !!open && !!close && close[0] === open[0] && close.length >= open.length;
+	return closed ? null : 'fence';
+}
+
+export function lastOpenBlock(): OpenBlock {
+	return _openBlock;
+}
+
 const chatMarked = new Marked({
 	breaks: true,
 	gfm: true,
+	hooks: {
+		processAllTokens(tokens: Token[]): Token[] {
+			_openBlock = openBlockOf(tokens);
+			return tokens;
+		}
+	},
 	renderer: {
+		image(this: Renderer, token: Tokens.Image): string {
+			if (!_media) return Renderer.prototype.image.call(this, token);
+			if (_media.hide?.has(token.href)) return '';
+			const kind = embedKind('image', token.href);
+			return kind ? mediaHtml(kind, token.href, token.text) : Renderer.prototype.image.call(this, token);
+		},
+		link(this: Renderer, token: Tokens.Link): string {
+			const kind = _media && embedKind('link', token.href);
+			if (!kind) return Renderer.prototype.link.call(this, token);
+			return _media?.hide?.has(token.href) ? '' : mediaHtml(kind, token.href, token.text);
+		},
+		// A paragraph of players alone gets no <p>: a player is a block, and the
+		// browser would close the <p> before it and leave empty paragraphs.
+		paragraph(this: Renderer, token: Tokens.Paragraph): string {
+			const bare = _media && token.tokens.some(isPlacedMedia) && token.tokens.every(
+				(t) => isPlacedMedia(t) || t.type === 'br' || (t.type === 'text' && !t.raw.trim())
+			);
+			return bare ? this.parser.parseInline(token.tokens) + '\n' : Renderer.prototype.paragraph.call(this, token);
+		},
 		// Short inline code stays one chip on one line (see inline-code.ts).
 		codespan: renderInlineCode,
 		code(token: Tokens.Code): string {
@@ -149,12 +219,16 @@ const chatMarked = new Marked({
  * @param highlight - false for the still-streaming tail (a fence that has not
  *   closed yet must not be tokenised, and re-tokenising per token would be the
  *   single most expensive thing in the stream loop).
+ * @param media - render media markdown as players (the chat reply); omitted,
+ *   images and links render as plain markdown.
  */
-export function renderChatMarkdown(text: string, highlight: boolean): string {
+export function renderChatMarkdown(text: string, highlight: boolean, media?: ChatMedia): string {
 	_highlightEnabled = highlight;
+	_media = media ?? null;
 	try {
-		return chatMarked.parse(text, { async: false }) as string;
+		return chatMarked.parse(media ? collapseRawBase64(text) : text, { async: false }) as string;
 	} finally {
 		_highlightEnabled = true;
+		_media = null;
 	}
 }
