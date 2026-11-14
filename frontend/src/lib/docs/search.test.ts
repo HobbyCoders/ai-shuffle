@@ -49,6 +49,21 @@ describe('docs search ranking (#1581)', () => {
 		expect(slugs.at(-1)).toBe('features/hosts');
 	});
 
+	it('splits words as Spotlight’s backend does: every part counts, edge hyphens leave the word, short parts drop', () => {
+		const engine = new DocsSearchEngine([
+			doc('access', 'Access', 'remote access remote'),
+			doc('remote', 'Remote', 'remote access remote'),
+			doc('letters', 'Letters', 'Every letter here.'),
+			doc('mail', 'Mail', 'Send mail.')
+		]);
+		const slugs = (query: string) => engine.search(query).map((r) => r.slug);
+		// `remote` from the compound and `remote` typed again both count.
+		expect(slugs('remote-access remote')).toEqual(['features/remote', 'features/access']);
+		for (const query of ['remote-', '-remote']) expect(slugs(query)[0], query).toBe('features/remote');
+		// `e-mail` counts `mail`, not `e`, which would match inside nearly every word.
+		expect(slugs('e-mail')).toEqual(['features/mail']);
+	});
+
 	it('puts the snippet and the jump at the phrase, not an earlier lone word', () => {
 		const text = `Remote hosts are supported. ${'Padding unrelated context. '.repeat(12)}Enable remote-access here.`;
 		const lower = text.toLowerCase();
@@ -91,6 +106,10 @@ describe('docs search ranking (#1581)', () => {
 		// A hyphenated word finds the page about it first, as Spotlight's backend does.
 		for (const query of ['remote-access', 'remote, access!', 'remote access']) {
 			expect(engine.search(query)[0]?.slug, query).toBe('getting-started/remote-access');
+		}
+		// A hyphen at either edge leaves the word, so its page is still found.
+		for (const query of ['remote-', '-remote']) {
+			expect(engine.search(query, 10).map((r) => r.slug), query).toContain('getting-started/remote-access');
 		}
 	});
 });

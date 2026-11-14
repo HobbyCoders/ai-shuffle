@@ -220,6 +220,23 @@ def test_search_scores_a_hyphenated_word_by_its_separate_words(tmp_path, monkeyp
     assert slugs[-1] == "hosts", slugs
 
 
+def test_search_splits_words_as_the_docs_panel_does(tmp_path, monkeypatch):
+    """Parity with the Docs panel's tokens: every occurrence of a part counts,
+    a hyphen at either edge still leaves the word, and short parts don't count."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "features/access.md", "<!--\ntitle: Access\n-->\nremote access remote\n")
+    _doc(root, "features/remote.md", "<!--\ntitle: Remote\n-->\nremote access remote\n")
+    _doc(root, "features/letters.md", "<!--\ntitle: Letters\n-->\nEvery letter here.\n")
+    _doc(root, "features/mail.md", "<!--\ntitle: Mail\n-->\nSend mail.\n")
+    # `remote` from the compound and `remote` typed again both count.
+    assert [r["slug"] for r in DocsIndex().search("remote-access remote")] == ["remote", "access"]
+    for query in ("remote-", "-remote"):
+        assert [r["slug"] for r in DocsIndex().search(query)][:1] == ["remote"], query
+    # `e-mail` counts `mail`, not `e`, which would match inside nearly every word.
+    assert [r["slug"] for r in DocsIndex().search("e-mail")] == ["mail"]
+
+
 def test_real_docs_find_a_pasted_sentence_first():
     index = DocsIndex()
     [first, *_] = index.search("write its prompt (its instructions), and choose its tools")
@@ -229,5 +246,8 @@ def test_real_docs_find_a_pasted_sentence_first():
     # A hyphenated word finds the page about it first, as the Docs panel does.
     for query in ("remote-access", "remote, access!", "remote access"):
         assert index.search(query)[0]["slug"] == "remote-access", query
+    # A hyphen at either edge leaves the word, so its page is still found.
+    for query in ("remote-", "-remote"):
+        assert "remote-access" in [r["slug"] for r in index.search(query, limit=10)], query
     [cloud] = [r for r in index.search("Ultimate") if r["slug"] == "cloud"]
     assert not any(ch in cloud["snippets"][0] for ch in "|*`") and "](" not in cloud["snippets"][0]

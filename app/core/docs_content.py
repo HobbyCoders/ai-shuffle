@@ -331,15 +331,18 @@ class DocsIndex:
 
         query_lower = " ".join(query.lower().split())
         # Sentence punctuation around a word (`remote,` `(its`) isn't part of it.
-        terms = [term.strip(_SENTENCE_MARKS) or term for term in query_lower.split()]
         # A hyphenated or punctuated word also counts as its separate words
-        # (`remote-access` → `remote`, `access`), so a page that writes them
-        # apart, or names them in its title, scores for them too. Parts of two
+        # (`remote-access` → `remote`, `access`; `remote-` → `remote`), so a page
+        # that writes them apart, or names them in its title, scores for them
+        # too. Each occurrence counts, as in the Docs panel's search. Parts of two
         # letters or fewer would match inside nearly every word, so they don't count.
-        for term in list(terms):
+        terms: list[str] = []
+        for raw in query_lower.split():
+            term = raw.strip(_SENTENCE_MARKS) or raw
+            terms.append(term)
             parts = _words(term).split()
-            if len(parts) > 1:
-                terms.extend(p for p in parts if len(p) > 2 and p not in terms)
+            if parts != [term]:
+                terms.extend(p for p in parts if len(p) > 2)
         # Several words together, as typed (the last may still be being typed).
         phrase = _words(query)
         if " " not in phrase:
