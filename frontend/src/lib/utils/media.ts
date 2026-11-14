@@ -10,7 +10,6 @@
  * `.media-*` class names). Visibility/hover styling lives in app.css.
  */
 
-import { marked } from 'marked';
 import { apiUrl } from '$lib/api/runtime';
 import { chatFileUrl } from './chat-files';
 import { escapeHtml } from './escape-html';
@@ -53,9 +52,7 @@ function mediaTarget(url: string): { path: string; fromQuery: boolean } {
 
 /** Extract a lowercase file extension from a URL, handling `?path=` serve routes. */
 function extOf(url: string): string {
-	// The last path segment only: a dot in a host (`https://w.example/…/<hash>`)
-	// or a folder is not a file type.
-	const candidate = mediaTarget(url).path.split(/[/\\]/).pop() ?? '';
+	const candidate = mediaTarget(url).path;
 	const dot = candidate.lastIndexOf('.');
 	return dot >= 0 ? candidate.slice(dot + 1).toLowerCase() : '';
 }
@@ -78,46 +75,6 @@ export function classifyMediaUrl(url: string): MediaKind | null {
 	if (VIDEO_EXTS.has(ext)) return 'video';
 	if (AUDIO_EXTS.has(ext)) return 'audio';
 	return null;
-}
-
-// The artifact store's serve route (app/api/artifacts.py): relative, or on a
-// worker's origin. Its content-addressed path names no file type.
-const ARTIFACT_URL = /^(?:https?:\/\/[^/?#\s]+)?\/api\/v1\/artifacts\/[^/?#\s]+(?:[?#]|$)/i;
-
-/**
- * The media kind of a markdown image's URL. A generated image the reply embeds
- * by its artifact URL is a picture: it gets the same player, download button
- * and lightbox as the tool row it leaves the picture to (#1603).
- */
-function imageEmbedKind(url: string): MediaKind | null {
-	return classifyMediaUrl(url) ?? (ARTIFACT_URL.test(url) ? 'image' : null);
-}
-
-/**
- * The raw artifact-URL images marked's lexer renders as images in `text`, the
- * same reading `embedsOf` (media-gallery.ts) uses, so one written in code stays
- * as written (#1603). Other media URLs keep the plain regex reading. Lexed once
- * per text, and only for text naming the artifact route (#1282).
- */
-const proseArtifactCache = new Map<string, ReadonlySet<string>>();
-const PROSE_ARTIFACT_CACHE_MAX = 500;
-const NO_ARTIFACTS: ReadonlySet<string> = new Set();
-
-function proseArtifactImages(text: string): ReadonlySet<string> {
-	if (!text.includes('/api/v1/artifacts/')) return NO_ARTIFACTS;
-	const cached = proseArtifactCache.get(text);
-	if (cached) return cached;
-	const found = new Set<string>();
-	marked.walkTokens(marked.lexer(text), (token) => {
-		if (token.type === 'image' && ARTIFACT_URL.test(token.href ?? '')) found.add(token.raw);
-	});
-	if (proseArtifactCache.size >= PROSE_ARTIFACT_CACHE_MAX) {
-		const oldest = proseArtifactCache.keys().next().value;
-		if (oldest !== undefined) proseArtifactCache.delete(oldest);
-	}
-	const images = found.size ? found : NO_ARTIFACTS;
-	proseArtifactCache.set(text, images);
-	return images;
 }
 
 /**
@@ -521,11 +478,8 @@ export function rewriteMediaMarkdown(
 	text: string,
 	renderMedia: (kind: MediaKind, url: string, label: string) => string = mediaHtml
 ): string {
-	let artifacts: ReadonlySet<string> | undefined;
 	let out = text.replace(IMG_MD, (match, alt: string, url: string) => {
-		const kind =
-			classifyMediaUrl(url) ??
-			(ARTIFACT_URL.test(url) && (artifacts ??= proseArtifactImages(text)).has(match) ? 'image' : null);
+		const kind = classifyMediaUrl(url);
 		return kind ? renderMedia(kind, url, alt) : match;
 	});
 	out = out.replace(LINK_MD, (match, lead: string, label: string, url: string) => {
@@ -556,7 +510,7 @@ export function clampRevealToMediaBoundary(text: string, cut: number): number {
 		if (cut < end) {
 			// Cut straddles this token. Clamp only if it is embeddable media.
 			const urlMatch = m[0].match(/\(([^)\s]+)\)/);
-			if (urlMatch && (m[0].startsWith('!') ? imageEmbedKind : classifyMediaUrl)(urlMatch[1])) return start;
+			if (urlMatch && classifyMediaUrl(urlMatch[1])) return start;
 			break;
 		}
 	}

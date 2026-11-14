@@ -95,19 +95,6 @@ it('leaves external and inline media untouched', async () => {
 	expect(sources).toEqual(['https://cdn.example/a.png', 'data:image/png;base64,AAAA']);
 });
 
-it.each([false, true])('gives a reply image embedded by its artifact URL a download and lightbox (streaming=%s, #1603)', async (streaming) => {
-	const artifact = '/api/v1/artifacts/e0b8f9e9?session_id=remote-chat';
-	const view = render(AssistantMessage, { content: `Here it is.\n\n![Alley](${artifact})`, streaming, sessionId: 'remote-chat' });
-	await waitFor(() => expect(view.container.querySelector('img')).toBeTruthy());
-	const img = view.container.querySelector('img')!;
-	expect(img.getAttribute('src')).toBe(artifact);
-	expect(img.classList.contains('media-zoomable')).toBe(true);
-	expect(view.container.querySelector('button.media-expand-btn')).toBeTruthy();
-	const download = view.container.querySelector('a.media-download-btn')!;
-	expect(download.getAttribute('href')).toBe(artifact);
-	expect(download.getAttribute('download')).toBe('generated-image.png');
-});
-
 describe('a reply image that is not on this worker yet (#1850)', () => {
 	afterEach(() => vi.useRealTimers());
 

@@ -23,11 +23,10 @@ export function safeMediaSource(src: string): boolean {
 }
 
 /**
- * `kind` is null for a markdown image the media rewrite leaves alone (a URL
- * that names no media kind, or a titled or angle-bracketed embed): the markdown
- * renderer still draws it as a picture, so a tool row must count it as shown,
- * but it only joins the gallery through the tool row that made it. A plain
- * `![…](/api/v1/artifacts/<hash>)` embed is an image (#1603).
+ * `kind` is null for a markdown image whose URL names no media kind (an
+ * artifact URL, `/api/v1/artifacts/<hash>`): the markdown renderer still draws
+ * it as a picture, so a tool row must count it as shown, but it only joins the
+ * gallery through the tool row that made it.
  */
 type ProseEmbed = readonly [kind: MediaKind | null, src: string, label: string];
 
