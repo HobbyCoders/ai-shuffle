@@ -40,6 +40,7 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
   "codex_refresh_token_set": false,
   "account_email": null,
   "account_plan": null,
+  "workers_requiring_update": [],
   "created_at": "2026-09-01T10:00:00+00:00",
   "updated_at": "2026-09-01T10:00:00+00:00"
 }
@@ -329,6 +330,8 @@ curl http://localhost:8000/api/v1/model-providers \
 ```
 
 **Response:** `{"providers": [ ...provider objects... ]}`
+
+`workers_requiring_update` lists, per provider, the workers on your network that cannot run it yet: Kimi, MiniMax, OpenCode, Google Gemini and Antigravity rows need a worker that reports support for them, and a worker that reports nothing counts as not supporting them. It is `[]` for every other provider, and is filled in only by this list endpoint. Moving, starting or handing off a chat, sending a message or assigning an automation that uses such a provider to one of those workers is refused with `409` (or an error message) naming the worker.
 
 ### POST /api/v1/model-providers
 

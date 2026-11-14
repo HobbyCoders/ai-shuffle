@@ -27,20 +27,11 @@ MODELS_URL = API_ROOT + "/v1beta/models"
 def workers_requiring_update() -> list[str]:
     """Current members whose presence does not advertise :data:`CAPABILITY`.
 
-    Same rule as the native Messages vendors: membership, not online
-    presence, defines the set, since an offline peer syncs the row later.
+    The rule lives in :mod:`app.core.provider_capability` (#1519).
     """
-    from app.db import network as store
-    from app.network import engine
+    from app.core import provider_capability
 
-    ctx = engine.context()
-    if ctx is None:
-        return []
-    presence = engine.all_presence()
-    return [member.get("name") or member["device_id"]
-            for member in store.list_members(include_revoked=False)
-            if member["device_id"] != ctx.device_id
-            and (presence.get(member["device_id"], {}).get("capabilities") or {}).get(CAPABILITY) != 1]
+    return provider_capability.workers_requiring_update(CAPABILITY)
 
 
 def metadata() -> dict[str, Any]:
