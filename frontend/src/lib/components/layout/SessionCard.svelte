@@ -28,8 +28,10 @@
 	 * the button's description.
 	 *
 	 * Inbox gestures. A touch or pen swipe LEFT settles an active row (moves a
-	 * settled or snoozed one back to Active). Past 40% of the row the lane goes
-	 * solid and letting go commits; a fast flick commits too. The row then
+	 * settled or snoozed one back to Active). Past 40% of the row, and never
+	 * more than 160px in (so a row as wide as a foldable's inner screen asks no
+	 * longer a drag than a phone's), the lane goes solid and letting go
+	 * commits; a fast flick commits too. The row then
 	 * slides out and folds away. A swipe RIGHT snoozes: a snooze needs a time, so
 	 * it opens the sidebar's time picker for this row and springs back; the row
 	 * moves to Snoozed only once a time is picked. A press-and-hold starts
@@ -67,6 +69,7 @@
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
+	import { swipeArmDistance } from '$lib/utils/swipe-arm';
 	import {
 		GIT_STAGE_TONES,
 		GIT_STAGE_TIPS,
@@ -404,10 +407,12 @@
 	// ── Gestures ────────────────────────────────────────────────────────
 	/** Movement before a press picks an axis; less than this is still a tap. */
 	const AXIS_LOCK = 8;
-	/** Past this share of the row the lane arms and release commits. */
+	/** Past this share of the row, capped at SWIPE_ARM_MAX_PX, the lane arms
+	 *  and release commits. */
 	const ARM_RATIO = 0.4;
-	/** The row follows the finger 1:1 up to here, then with drag. */
-	const EASE_RATIO = 0.62;
+	/** The row follows the finger 1:1 to this multiple of the arm distance,
+	 *  then with drag (62% of a phone row). */
+	const EASE_PAST_ARM = 1.55;
 	/** A flick this fast (px/ms) over FLICK_MIN_DX commits short of the arm point. */
 	const FLICK_VELOCITY = 0.9;
 	const FLICK_MIN_DX = 60;
@@ -437,6 +442,7 @@
 	let startY = 0;
 	let axis: 'x' | null = null;
 	let rowWidth = FALLBACK_WIDTH;
+	let armDistance = swipeArmDistance(FALLBACK_WIDTH, ARM_RATIO);
 	let lastX = 0;
 	let lastT = 0;
 	let velocity = 0;
@@ -468,6 +474,7 @@
 		velocity = 0;
 		axis = null;
 		rowWidth = frameRef?.offsetWidth || FALLBACK_WIDTH;
+		armDistance = swipeArmDistance(rowWidth, ARM_RATIO);
 		if (pointerType !== 'mouse') pressing = true;
 		clearLongPress();
 		if (onLongPress) {
@@ -509,10 +516,10 @@
 		lastT = t;
 		// A row with no right-swipe action does not move that way.
 		if (swipe.right === null) dx = Math.min(0, dx);
-		const lim = rowWidth * EASE_RATIO;
+		const lim = armDistance * EASE_PAST_ARM;
 		dragX = Math.abs(dx) <= lim ? dx : Math.sign(dx) * (lim + (Math.abs(dx) - lim) * 0.35);
 		lane = dx > 0 ? 'l' : dx < 0 ? 'r' : null;
-		armed = Math.abs(dx) > rowWidth * ARM_RATIO;
+		armed = Math.abs(dx) > armDistance;
 	}
 
 	function springBack() {

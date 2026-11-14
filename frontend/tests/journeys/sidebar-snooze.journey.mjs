@@ -14,6 +14,12 @@
 // is not the snooze lane, the row slides away before a time is picked, or a
 // dismissed picker still snoozes it.
 //
+// A wide row asks the same finger travel as a phone's: on the Fold's inner
+// screen a slow 170px swipe opens the picker (right) and settles (left).
+// Guards: the arm point grows with the row again (40% of the phone app's
+// 856px list there is 342px). The responsive UI's sidebar is narrow at every
+// width, so only `--mobile-shell` showed the bug.
+//
 // The chat is the case's own (created through the API, deleted by the runner
 // afterwards), so no seeded chat is touched. A short wake (the server's loop
 // and the page's local re-group at the due time) is covered by unit tests and
@@ -73,8 +79,10 @@ async function rowAction(page, id, name) {
  * A finger dragging across the row, 60% of its width (past the 40% commit
  * point), paced like a real swipe and held before lifting so it commits on
  * distance, not as a flick. `beforeLift` looks at the row mid-drag.
+ * `travel` instead drags a fixed number of pixels, in 8px steps at most
+ * 0.3px/ms, far below the flick speed, so only distance can commit it.
  */
-async function swipeRow(page, id, direction, beforeLift) {
+async function swipeRow(page, id, direction, beforeLift, { travel: fixed } = {}) {
 	await showChats(page);
 	const row = page.locator(CARD(id));
 	await row.scrollIntoViewIfNeeded();
@@ -82,14 +90,15 @@ async function swipeRow(page, id, direction, beforeLift) {
 	const y = box.y + box.height / 2;
 	// Start clear of the screen edges, where the system takes back swipes.
 	const from = direction > 0 ? box.x + 40 : box.x + box.width - 40;
-	const travel = box.width * 0.6 * direction;
+	const travel = (fixed ?? box.width * 0.6) * direction;
+	const steps = fixed ? Math.ceil(fixed / 8) : 10;
 	const cdp = await page.context().newCDPSession(page);
 	const touch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
 	try {
 		await touch('touchStart', [{ x: from, y }]);
-		for (let step = 1; step <= 10; step++) {
-			await touch('touchMove', [{ x: from + (travel * step) / 10, y }]);
-			await page.waitForTimeout(16);
+		for (let step = 1; step <= steps; step++) {
+			await touch('touchMove', [{ x: from + (travel * step) / steps, y }]);
+			await page.waitForTimeout(fixed ? 30 : 16);
 		}
 		await page.waitForTimeout(150);
 		if (beforeLift) await beforeLift(row);
@@ -106,6 +115,15 @@ async function expectSnoozeLane(row) {
 		return { text: on?.textContent?.trim() ?? null, snooze: !!on?.classList.contains('snooze'), armed: frame.classList.contains('armed') };
 	});
 	expect(lane.snooze && lane.text === 'Snooze' && lane.armed, `a right swipe uncovers the armed Snooze lane, got ${JSON.stringify(lane)}`);
+}
+
+/** Mid-drag, the lane behind a left-swiped active row is the armed Settle lane. */
+async function expectSettleLane(row) {
+	const lane = await row.evaluate((frame) => {
+		const on = frame.querySelector('.lane.on');
+		return { text: on?.textContent?.trim() ?? null, toggle: !!on?.classList.contains('toggle'), armed: frame.classList.contains('armed'), width: frame.offsetWidth };
+	});
+	expect(lane.toggle && lane.text === 'Settle' && lane.armed, `a left swipe uncovers the armed Settle lane, got ${JSON.stringify(lane)}`);
 }
 
 /** After a right swipe the row is back in place, not sliding off or folded. */
@@ -274,6 +292,34 @@ await runJourney({
 				await waitLane(page, id, 'active', 1000);
 				const row = await api(page, 'GET', `/sessions/${id}`);
 				expect(row.is_active && !row.snoozed_until, `a dismissed picker changes nothing; the server holds ${JSON.stringify({ is_active: row.is_active, snoozed_until: row.snoozed_until })}`);
+			}
+		},
+		{
+			// A wide row (the Fold's inner screen, where the phone app's list is
+			// 856px wide) must commit on the same finger travel as a phone's: a
+			// slow 170px drag either way, past the 160px cap. 40% of the row
+			// would have asked for 342px.
+			name: `${mobileShell ? 'native' : 'responsive'}-swipe-fixed-travel`,
+			viewports: ['fold-inner', 'fold-cover'],
+			setup: (ctx) => swipeSetup(ctx),
+			async act({ page, mark, log }) {
+				const id = page.__snoozeChat;
+				await waitLane(page, id, 'active');
+				log(`row ${await page.locator(CARD(id)).evaluate((frame) => frame.offsetWidth)}px wide`);
+
+				await mark('slow 170px swipe right: the picker opens');
+				await swipeRow(page, id, 1, expectSnoozeLane, { travel: 170 });
+				const picker = snoozePicker(page);
+				await picker.waitFor({ timeout: 10_000 });
+				const sheet = await picker.boundingBox();
+				await page.touchscreen.tap(sheet.x + sheet.width / 2, Math.max(8, sheet.y / 2));
+				await picker.waitFor({ state: 'hidden', timeout: 10_000 });
+				await expectRowInPlace(page, id);
+
+				await mark('slow 170px swipe left: the row settles');
+				await swipeRow(page, id, -1, expectSettleLane, { travel: 170 });
+				await waitLane(page, id, 'settled');
+				await waitSaved(page, id, (row) => !row.is_active && !row.snoozed_until, 'the left swipe never settled the chat');
 			}
 		},
 		{

@@ -780,6 +780,94 @@ describe('SessionCard swipe gestures', () => {
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
 	});
 
+	describe('on a wide row', () => {
+		// A row as wide as a foldable's inner screen: 40% of it would be 320px.
+		// The arm point is capped at 160px, so the travel matches a phone's.
+		function widen(frame: HTMLElement, width: number) {
+			Object.defineProperty(frame, 'offsetWidth', { configurable: true, value: width });
+		}
+
+		it.each([
+			['commits just past the cap', 165, true],
+			['springs back just short of it', 155, false],
+		])('left swipe %s', async (_label, travel, commits) => {
+			const clock = slowClock();
+			const { container } = renderCard({ is_active: true });
+			const { frame, card } = parts(container);
+			widen(frame, 800);
+			await down(card, { x: 700 });
+			await move(frame, { x: 690 });
+			await move(frame, { x: 700 - travel });
+			expect(frame.classList.contains('armed')).toBe(commits);
+			// Short of the ease limit the row still follows the finger 1:1.
+			expect(card.style.transform).toBe(`translateX(-${travel}px)`);
+			await up(frame, { x: 700 - travel });
+			clock.mockRestore();
+			await vi.advanceTimersByTimeAsync(450);
+			if (commits) expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+			else expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		});
+
+		it.each([
+			['opens the picker just past the cap', 165, true],
+			['springs back just short of it', 155, false],
+		])('right swipe %s', async (_label, travel, commits) => {
+			const clock = slowClock();
+			const onSnooze = vi.fn();
+			const { container } = renderCard({ is_active: true }, { onSnooze });
+			const { frame, card } = parts(container);
+			widen(frame, 800);
+			await down(card, { x: 20 });
+			await move(frame, { x: 30 });
+			await move(frame, { x: 20 + travel });
+			expect(frame.classList.contains('armed')).toBe(commits);
+			expect(container.querySelector('.lane.l.on')?.textContent?.trim()).toBe('Snooze');
+			await up(frame, { x: 20 + travel });
+			clock.mockRestore();
+			await vi.advanceTimersByTimeAsync(450);
+			expect(onSnooze).toHaveBeenCalledTimes(commits ? 1 : 0);
+			expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		});
+
+		it('eases the drag past 1.55 times the arm point, not past 62% of the row', async () => {
+			const clock = slowClock();
+			const { container } = renderCard({ is_active: true });
+			const { frame, card } = parts(container);
+			widen(frame, 800);
+			await down(card, { x: 700 });
+			await move(frame, { x: 690 });
+			await move(frame, { x: 300 });
+			// 400px of finger: 248px 1:1, then the other 152px at 35%.
+			const moved = -Number(card.style.transform.match(/-?[\d.]+/)?.[0]);
+			expect(moved).toBeCloseTo(248 + 152 * 0.35, 1);
+			await up(frame, { x: 300 });
+			clock.mockRestore();
+			await vi.advanceTimersByTimeAsync(450);
+		});
+
+		it('keeps 40% of a phone-width row as the arm point', async () => {
+			const clock = slowClock();
+			const { container } = renderCard({ is_active: true });
+			const { frame, card } = parts(container);
+			widen(frame, 300);
+			await down(card, { x: 290 });
+			await move(frame, { x: 280 });
+			await move(frame, { x: 290 - 115 });
+			expect(frame.classList.contains('armed')).toBe(false);
+			await move(frame, { x: 290 - 125 });
+			expect(frame.classList.contains('armed')).toBe(true);
+			// 62% of the row is still where the drag starts to ease.
+			await move(frame, { x: 290 - 186 });
+			expect(card.style.transform).toBe('translateX(-186px)');
+			await move(frame, { x: 290 - 286 });
+			expect(Number(card.style.transform.match(/-?[\d.]+/)?.[0])).toBeCloseTo(-(186 + 100 * 0.35), 1);
+			await up(frame, { x: 4 });
+			clock.mockRestore();
+			await vi.advanceTimersByTimeAsync(450);
+			expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		});
+	});
+
 	it('leaves a vertical move to the list scroll', async () => {
 		const { container } = renderCard();
 		const { frame, card } = parts(container);
