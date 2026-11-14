@@ -223,7 +223,9 @@ def test_repeated_restores_reimport_every_earlier_incarnation_in_any_order(worke
         for incarnation in (2, 1):
             result = engine.apply_batch([op for op in mine if op["origin_incarnation"] == incarnation])
             assert not result.rejected and not result.retry and not result.pending
-    # The later incarnation is newer, for a shared setting and the chat it runs alike.
+    # Ordered by (clock, origin), not by incarnation: each restore moved B's
+    # clock past what A proved it signed, so the later incarnation's versions
+    # carry the higher clocks, for a shared setting and the chat it runs alike.
     assert (owner_pref(b, "theme"), owner_pref(b, "one"), owner_pref(b, "two"), _chat(b)[0]) == \
         ("lost-2", "incarnation-1", "incarnation-2", "lost-2")
     for incarnation in (1, 2):
