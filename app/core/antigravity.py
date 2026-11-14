@@ -215,8 +215,12 @@ def capture_binding(row: Mapping[str, Any]) -> Optional[Dict[str, Optional[str]]
 
 
 def catalog_in_scope(row: Mapping[str, Any], snapshot: Mapping[str, Any]) -> bool:
-    """A stored sign-in row's catalog counts only with this worker's current
-    sign-in tag; any other row's needs nothing more than its binding."""
+    """An Antigravity row's catalog counts only when its agent listed it (an
+    earlier version stored the built-in seed as ``upstream``), and a stored
+    sign-in row's only with this worker's current sign-in tag. Any other
+    row's needs nothing more than its binding."""
+    if row.get("provider_type") == PROVIDER_TYPE and snapshot.get("source") != "agent":
+        return False
     if not worker_scoped(row):
         return True
     tag = signin_tag(str(row.get("id") or ""))

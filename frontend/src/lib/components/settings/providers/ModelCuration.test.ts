@@ -144,6 +144,23 @@ it("names the worker that captured an agent's list as the app does elsewhere", a
 	expect(line.textContent).not.toContain('75c733a3514a');
 });
 
+it("asks the agent on opening when nothing it listed is stored (the old stored seed reads as nothing)", async () => {
+	const seeded = [entry('gemini-4-argon')];
+	mocks.post.mockResolvedValue({
+		source: 'agent', binding: 'ag-binding', models: [...seeded, entry('gemini-4-hydrogen'), entry('claude-opus-5-5')],
+		agent_version: '1.5.9', fetched_at: '2026-11-14T23:32:00Z', fetched_by_device: 'dev-self', fetched_by_name: 'Local'
+	});
+	render(ModelCuration, { row: row({ id: 'ag', provider_type: 'antigravity', catalog_binding: 'ag-binding', models: seeded }) });
+	expect(await screen.findByRole('checkbox', { name: 'gemini-4-hydrogen' })).toBeTruthy();
+	expect(mocks.get).toHaveBeenCalledWith('/model-providers/ag/model-catalog');
+	expect(mocks.post).toHaveBeenCalledTimes(1);
+	expect(mocks.post).toHaveBeenCalledWith('/model-providers/ag/fetch-models');
+	// Listed, not ticked: curation stays the owner's.
+	expect((screen.getByRole('checkbox', { name: 'claude-opus-5-5' }) as HTMLInputElement).checked).toBe(false);
+	expect((screen.getByRole('checkbox', { name: 'gemini-4-argon' }) as HTMLInputElement).checked).toBe(true);
+	expect(mocks.patch).not.toHaveBeenCalled();
+});
+
 describe('shared catalog and concurrent curation', () => {
 	const catalog = { source: 'upstream', binding: 'fixture-binding-a', models: [entry('old'), entry('remote'), entry('new')] };
 

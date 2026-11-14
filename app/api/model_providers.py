@@ -1503,10 +1503,11 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
         # No HTTP catalog: Google's agent binary owns the model list, stored
         # when it lists it (fetch_models above, antigravity.refresh_models)
         # and at every session start (antigravity.record_offered_models). The
-        # last list it gave on this credential answers, else the seed.
+        # last list it gave on this credential answers (read() holds only an
+        # agent-listed one for this provider), else the seed.
         seeded = {m["id"] for m in antigravity.DEFAULT_MODELS}
         captured = await run_sync(model_catalogs.read, provider_id)
-        if captured and captured.get("source") == "agent" and captured.get("models"):
+        if captured and captured.get("models"):
             return FetchModelsResponse(
                 source="agent", models=captured["models"], binding=captured.get("binding"),
                 recommended=[m["id"] for m in captured["models"] if m["id"] in seeded],

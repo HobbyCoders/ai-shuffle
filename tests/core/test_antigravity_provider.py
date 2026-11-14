@@ -1359,6 +1359,29 @@ def test_a_seed_reply_never_replaces_another_workers_list(client, monkeypatch):
     assert db.get_system_setting(model_catalogs.key(row["id"])) == theirs
 
 
+def test_the_old_versions_stored_seed_is_not_a_list(client, monkeypatch):
+    """An earlier version stored the seed as an ``upstream`` catalog under the
+    key's own binding (a key row needs no sign-in tag). It is not served, so
+    the Models tab finds nothing stored and asks the agent; another
+    provider's upstream catalog still counts."""
+    from app.core import model_catalogs
+
+    monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-network-hmac-key", "network"))
+    row = _create(client, "gemini-api-key", api_key="test-gemini-secret-value")
+    keyed = db.get_model_provider(row["id"], include_token=True)
+    legacy = json.dumps({"source": "upstream", "binding": model_catalogs.binding(keyed), "hidden": [],
+                         "models": [{"id": m["id"], "label": m["label"]} for m in ag.DEFAULT_MODELS],
+                         "recommended": [], "fetched_by_device": "other-worker"})
+    db.set_system_setting(model_catalogs.key(row["id"]), legacy)
+    other = {**keyed, "provider_type": "openai"}
+    assert model_catalogs._holds(other, {**json.loads(legacy), "binding": model_catalogs.binding(other)})
+    with _catalog_client() as catalog:
+        assert catalog.get(f"/api/v1/model-providers/{row['id']}/model-catalog").json() is None
+        fetched = catalog.post(f"/api/v1/model-providers/{row['id']}/fetch-models").json()
+        assert fetched["source"] == "agent" and [m["id"] for m in fetched["models"]] == _LISTED
+        assert catalog.get(f"/api/v1/model-providers/{row['id']}/model-catalog").json()["source"] == "agent"
+
+
 def test_a_failed_listing_keeps_the_last_list(client, monkeypatch, tmp_path):
     """Listed once; then the agent prints nothing usable: the last list stands."""
     row = _listing_row(client, monkeypatch)
