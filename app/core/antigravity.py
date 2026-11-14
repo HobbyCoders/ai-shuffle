@@ -1450,6 +1450,8 @@ STOPPED_DISABLED = ("This chat's Antigravity provider was turned off, so this tu
                     "Turn it back on or pick a different model.")
 STOPPED_KEY_CHANGED = ("This provider's Gemini API key was replaced, so this turn was stopped. "
                        "Send the message again to continue with the new key.")
+STOPPED_SIGNIN_CHANGED = ("This provider's sign-in or settings changed on this worker, so this turn "
+                          "was stopped. Send the message again to continue.")
 
 # Row id -> live ACP engines and the spawn binding each runs with. Weak: an
 # engine that is gone drops out by itself; nothing here keeps one alive.
@@ -1507,7 +1509,10 @@ async def reconcile_agents(row_ids: Any) -> None:
         elif not row.get("enabled"):
             await stop_agents(row_id, STOPPED_DISABLED)
         else:
-            await stop_agents(row_id, STOPPED_KEY_CHANGED, keep_binding=spawn_binding(row))
+            # Only a key row's binding moves with a key; any other row's with
+            # its sign-in here (``signin_epoch``) or its settings.
+            reason = STOPPED_KEY_CHANGED if row.get("auth_mode") == agy_spec.GEMINI_API_KEY else STOPPED_SIGNIN_CHANGED
+            await stop_agents(row_id, reason, keep_binding=spawn_binding(row))
 
 
 # ---------------------------------------------------------------------------

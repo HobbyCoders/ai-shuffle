@@ -997,6 +997,17 @@ async def test_a_new_key_ends_the_rows_running_agents_and_other_edits_do_not(cli
     assert engine.stops == [ag.STOPPED_KEY_CHANGED]
 
 
+async def test_a_sign_in_row_whose_sign_in_began_again_is_not_told_its_key_changed(client, session_row):
+    row = _create(client)
+    ag._note_signin(row["id"], "signed_in")
+    engine = _running(row["id"])  # warm across the flap below
+    ag._note_signin(row["id"], "signed_out")
+    ag._note_signin(row["id"], "signed_in")
+    await ag.reconcile_agents([row["id"]])
+    assert engine.stops == [ag.STOPPED_SIGNIN_CHANGED]
+    assert "API key" not in ag.STOPPED_SIGNIN_CHANGED
+
+
 async def test_a_sign_in_row_counts_as_ready_only_while_signed_in_here(mock_db, fake_agy):
     from app.api.model_providers import _public_provider, _row_with_token_flags
     from app.core import credential_gate
