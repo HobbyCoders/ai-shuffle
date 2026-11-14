@@ -99,6 +99,19 @@ describe('EffortPopoverCard', () => {
 		expect(onSelect).toHaveBeenCalledWith('max');
 	});
 
+	it('puts the thumb back on the level in force when the chat refuses a pick', async () => {
+		let answer!: () => void;
+		const onSelect = vi.fn(() => new Promise<void>(resolve => { answer = resolve; }));
+		render(EffortPopoverCard, { props: { options, value: 'high', onSelect } });
+
+		await fireEvent.input(slider(), { target: { value: '3' } });
+		expect(onSelect).toHaveBeenCalledWith('xhigh');
+		expect(slider().value).toBe('3');
+		answer();
+		await vi.waitFor(() => expect(slider().value).toBe('2'));
+		expect(document.querySelector('[data-effort-value]')?.textContent).toBe('High');
+	});
+
 	it('does not re-emit the level that is already pinned', async () => {
 		const onSelect = vi.fn();
 		render(EffortPopoverCard, { props: { options, value: 'high', onSelect } });

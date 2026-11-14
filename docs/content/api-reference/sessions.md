@@ -529,6 +529,8 @@ Change effort or Fast mode while a chat runs, or save a context-window choice se
 
 The chosen window must fall within the model's range: from its Standard window (the smaller entry in `context_window_choices`) up to its Extended window (the larger, the model's full context). A value in between raises the Standard cap, so the chat compacts later than the default. The response acknowledges the saved `context_window`. It takes effect on the next turn, including a wake or retry; an in-flight request is not interrupted. A saved pin stays a ceiling when the model changes. An older chat whose picker choice was only remembered in its browser needs that choice selected again to save it on the worker. Unpinned chats keep their model's default window.
 
+An effort change may name `for_model`, the model the composer has selected (`prov:<provider_id>:<model>` for a provider's model). A model picked in an open chat is switched with the next message. When the running model refuses the level but the selected model offers it in its provider's current list, the answer is `{"effort": ..., "fast": ..., "applies_with_next_message": true}`: the running chat and its saved settings are left alone, and the next message carries the level with the switch. `for_model` never changes the chat's model.
+
 In a Claude Code chat a Fast mode change reaches the running turn only with the next message. While that is so, the answer has `fast_applies_turn`, the id of the running turn, and `GET /api/v1/sessions/{session_id}/live` reports the same field until that turn ends. It is absent otherwise, including on lanes that switch at their next request.
 
 ### POST /api/v1/sessions/{session_id}/compact

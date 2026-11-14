@@ -33,6 +33,8 @@
 	import { hasModelRefresh, getModelCatalog, updateModelProvider, type ModelCatalogSnapshot, type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { notify } from '$lib/stores/notifications';
+	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
+	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
@@ -291,6 +293,17 @@
 		void load(false, true);
 	});
 
+	/** The worker that captured the list, named as the rest of the app names it. */
+	const listedOn = $derived.by(() => {
+		const device = catalog?.fetched_by_device;
+		const install = device ? $workerInstalls?.find((i) => i.id === device || i.device_id === device) : undefined;
+		return workerDisplayName(install?.device_name ?? catalog?.fetched_by_name ?? device, install?.is_self ? 'Local' : 'Worker');
+	});
+	// Load the worker list once, or this worker reads as its host name (#1498).
+	$effect(() => {
+		if (catalog?.fetched_at && !$workerInstalls) void refreshWorkerPresence().catch(() => {});
+	});
+
 	watchResources(['settings'], async () => {
 		if (mode === 'manage') await load(false);
 	});
@@ -324,9 +337,9 @@
 	{#if mode === 'setup' && !failure}<p class="pv-msg" aria-live="polite">{setupHint}</p>{/if}
 	{#if catalog?.fetched_at && catalog.source === 'agent'}
 		<!-- Refresh re-reads this list; only a chat start asks the agent again. -->
-		<p class="pv-msg" data-testid="curation-agent-list">Listed by the agent{catalog.agent_version ? ` ${catalog.agent_version}` : ''} when a chat started, <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {catalog.fetched_by_name ?? catalog.fetched_by_device}. Each new chat updates it.</p>
+		<p class="pv-msg listed" data-testid="curation-agent-list">Listed by the agent{catalog.agent_version ? ` ${catalog.agent_version}` : ''} when a chat started, <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {listedOn}. Each new chat updates it.</p>
 	{:else if catalog?.fetched_at}
-		<p class="pv-msg">Last refreshed <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {catalog.fetched_by_name ?? catalog.fetched_by_device}</p>
+		<p class="pv-msg listed">Last refreshed <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {listedOn}</p>
 	{/if}
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	{#if failure}
@@ -416,6 +429,10 @@
 <style>
 	.filter {
 		margin: 0 0 8px;
+	}
+	/* The same gap as the filter and typed row keep below themselves. */
+	.listed {
+		margin-bottom: 8px;
 	}
 	.typed {
 		display: flex;

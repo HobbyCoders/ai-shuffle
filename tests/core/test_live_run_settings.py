@@ -143,6 +143,54 @@ async def test_http_validation_and_remote_owner_routing(live, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_effort_pick_follows_a_model_picked_but_not_yet_sent(mock_db, monkeypatch):
+    """Hydrogen ticked mid-chat: xhigh is checked against Hydrogen's current levels.
+
+    The chat still runs Argon until the next message carries the switch, so
+    the running agent and the saved binding are left alone.
+    """
+    from app.core import antigravity as ag
+    from app.core.provider.harness_adapter import _decide_provider_kind
+
+    hydrogen = {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen",
+                "reasoning_capabilities": ag._thinking(["low", "medium", "high", "xhigh"])}
+    db.create_model_provider(provider_id="ag-row", name="Antigravity", provider_type=ag.PROVIDER_TYPE,
+                             base_url="", auth_mode="gemini-api-key", auth_token="k",
+                             models=[*ag.DEFAULT_MODELS, hydrogen], default_model=None, enabled=True)
+    make_profile("agent", {})
+    db.create_session("mid-switch", profile_id="agent", provider_id="ag-row",
+                      derive_provider_from_profile=False, model="gemini-4-argon", effort="high")
+    adapter = HarnessAdapter()
+    adapter._options = SessionOptions(model="gemini-4-argon", effort="high", extra={"provider_id": "ag-row"})
+    adapter._provider_kind = _decide_provider_kind(adapter._options)
+    adapter._engine = SimpleNamespace(effort="high", request_extra={}, ctx=SimpleNamespace(extra={}))
+    state = SessionState(adapter=adapter, is_connected=True,
+                         connect_options=SimpleNamespace(effort="high", aih_fast=False))
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda sid: state))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: None)
+    monkeypatch.setattr(api, "require_session", AsyncMock(side_effect=lambda request, sid: db.get_session(sid)))
+    monkeypatch.setattr(api.control, "owner_of", lambda row: None)
+
+    picked = await api.update_run_settings(None, "mid-switch", api.RunSettingsUpdate(
+        effort="xhigh", for_model="prov:ag-row:gemini-4-hydrogen"))
+    assert picked == {"effort": "xhigh", "fast": False, "applies_with_next_message": True}
+    assert adapter._options.effort == "high"
+    assert db.get_session("mid-switch")["effort"] == "high"
+    # A level the picked model does not offer, or xhigh for the model the chat
+    # runs, is still refused.
+    for body in ({"effort": "max", "for_model": "prov:ag-row:gemini-4-hydrogen"},
+                 {"effort": "xhigh", "for_model": "prov:ag-row:gemini-4-argon"},
+                 {"effort": "xhigh"}):
+        with pytest.raises(HTTPException) as refused:
+            await api.update_run_settings(None, "mid-switch", api.RunSettingsUpdate(**body))
+        assert refused.value.status_code == 409
+    # A level the running model accepts still reaches it at once.
+    assert (await api.update_run_settings(None, "mid-switch", api.RunSettingsUpdate(
+        effort="low", for_model="prov:ag-row:gemini-4-hydrogen")))["effort"] == "low"
+    assert adapter._options.effort == "low"
+
+
+@pytest.mark.asyncio
 async def test_idle_session_and_explicit_default_persist_without_spawning(mock_db, monkeypatch):
     make_profile("agent", {"effort": "max"})
     db.create_session("idle-knobs", profile_id="agent", model="opus", effort="high", fast=True)
