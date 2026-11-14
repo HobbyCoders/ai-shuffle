@@ -197,6 +197,19 @@ it('a saved gateway on standby says Standby once, and its page does not name a k
 	expect(screen.getByText(/Vertex AI key file/)).toBeTruthy();
 });
 
+it('an older worker without per-method warnings: a saved gateway, Bedrock and Foundry name no key file (#1583)', async () => {
+	const legacyWarning = `Agents on this worker can run shell commands and can read these credentials, including the Vertex AI key file on this worker's disk, with their own tools and in terminals. Use an account with the smallest permissions that work, and only on a worker you trust.`;
+	cloud = { ...savedGateway(), warning: legacyWarning, method_warnings: undefined };
+	worker.state.claude = claudeSummary({ cloud: cloud.status });
+	await show(CLAUDE_CLOUD_ITEM);
+	expect(document.body.textContent).not.toContain('key file');
+	for (const [method, keyFile] of [['bedrock', false], ['foundry', false], ['vertex', true], ['gateway', false]] as const) {
+		await fireEvent.change(screen.getByLabelText('Cloud method'), { target: { value: method } });
+		await flush();
+		expect(document.body.textContent?.includes('Vertex AI key file'), method).toBe(keyFile);
+	}
+});
+
 it('keeps the warning on the page while the method is on, and Remove deletes it', async () => {
 	cloud = savedGateway();
 	worker.state.claude = claudeSummary({

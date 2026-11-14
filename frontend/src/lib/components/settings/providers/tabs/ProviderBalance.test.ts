@@ -46,6 +46,19 @@ it('xAI provides management-key controls, cycle spend and limit, not OpenAI sign
  await waitFor(() => expect(mocks.remove).toHaveBeenCalledWith('x1'));
 });
 it.each([
+ [-2.5, '-$2.50', true],
+ [0, '$0.00', true],
+ [12.4, '$12.40', false]
+])('xAI remaining %s reads %s, in the warning colour: %s; spend and limit stay neutral (#1583)', async (raw, text, danger) => {
+ mocks.get.mockResolvedValue({ ...status, credits: { balance_remaining: raw, spend_month: -1, spending_limit: 200 } });
+ render(ProviderBalance, { providerId: 'x1' });
+ const remaining = await screen.findByText(text, { selector: '.st-val' });
+ expect(remaining.classList.contains('danger')).toBe(danger);
+ expect(screen.getByText('-$1.00').classList.contains('danger')).toBe(false);
+ for (const v of document.querySelectorAll('.st-val')) if (v !== remaining) expect(v.classList.contains('danger')).toBe(false);
+ expect(document.body.textContent).not.toContain('$-');
+});
+it.each([
  { last_error_kind: 'network_error' },
  { needs_reauth: true },
  { fresh_until: Date.now() - 1 },

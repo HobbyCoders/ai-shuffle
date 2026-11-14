@@ -4,6 +4,7 @@
  import { getProviderBalance, saveProviderBalance, removeProviderBalance, type ProviderBalance } from '$lib/api/provider-balances';
  import { getSettingsAccess } from '$lib/settings/access.svelte';
  import { formatUsd } from '$lib/components/chat/provider-credit';
+ import { balanceDisplay } from '../credential-display';
  import RowGroup from '../../rows/RowGroup.svelte';
  import SettingRow from '../../rows/SettingRow.svelte';
  import TextField from '../../rows/TextField.svelte';
@@ -17,6 +18,8 @@
  let busy = $state(false);
  let error = $state('');
  const reading = $derived(!error && !status?.last_error_kind && !status?.needs_reauth && status?.status === 'fresh' && status.fetched_at && now <= (status.fresh_until ?? status.fetched_at) ? status.credits : null);
+ // Sign first and in the warning colour at zero or below, as everywhere a balance shows.
+ const balance = $derived(reading ? balanceDisplay(reading.balance_remaining) : null);
  let disposed = false;
  let reread: ReturnType<typeof setTimeout> | undefined;
  async function refresh() {
@@ -50,7 +53,7 @@
 
 <RowGroup title="xAI Management API balance">
  <SettingRow label="Remaining" hint={status?.source ?? 'Provider-reported prepaid credit'}>
-  <ValueText value={reading ? formatUsd(reading.balance_remaining) : status?.configured ? 'Balance unavailable' : 'Not reported yet'} />
+  <ValueText tone={balance?.danger ? 'danger' : 'muted'} value={balance?.text ?? (status?.configured ? 'Balance unavailable' : 'Not reported yet')} />
  </SettingRow>
  {#if status?.fetched_at}<p class="balance-note">Last fetched: {new Date(status.fetched_at).toLocaleString()} · {status.status}</p>{/if}
  {#if status?.needs_reauth}<p role="status">Management access refused. Replace or re-save the management key.</p>

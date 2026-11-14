@@ -122,10 +122,13 @@ export const VERTEX_CLOUD_WARNING = `Agents on this worker can run shell command
 
 /**
  * The warning for one method, the worker's copy first. An older worker sends
- * one warning for every method, and that stays what it shows.
+ * no per-method warnings, only one `warning` that names the Vertex AI key file
+ * for every method, so its copy is not used: this page's own text for the
+ * method is.
  */
 export function cloudWarning(config: ClaudeCloudConfig | null, method: ClaudeCloudMethodId | null | undefined): string {
-	const own = method ? config?.method_warnings?.[method] : undefined;
-	return own ?? config?.warning ?? (method === 'vertex' ? VERTEX_CLOUD_WARNING : CLOUD_WARNING);
+	const perMethod = config?.method_warnings;
+	if (!method) return (perMethod ? config?.warning : undefined) ?? CLOUD_WARNING;
+	return perMethod?.[method] ?? (method === 'vertex' ? VERTEX_CLOUD_WARNING : CLOUD_WARNING);
 }
 export const GATEWAY_WARNING = 'All Claude traffic from this worker goes to the address you enter. The browser tool also receives this address and token.';

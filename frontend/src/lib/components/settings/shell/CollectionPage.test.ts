@@ -254,6 +254,56 @@ describe('CollectionPage scroll on a phone (#1582)', () => {
 		expect(settingsNav.selectedItem('hooks')).toBe('a');
 	});
 
+	it('reopens the same item with its own scrolled pane at the top, and Back still returns to the list', async () => {
+		settingsNav.stacked = true;
+		const { scroller, scrollTo, setTop } = inScroller();
+		const pane = scroller.querySelector<HTMLElement>('.st-dpane')!;
+		let paneTop = 0;
+		const paneScroll = vi.fn((o: ScrollToOptions) => (paneTop = o.top ?? paneTop));
+		pane.scrollTo = paneScroll as unknown as typeof pane.scrollTo;
+		setTop(300);
+		settingsNav.selectItem('a');
+		flushSync();
+		await tick();
+		paneTop = 500; // The reader scrolls down a long detail.
+		settingsNav.view = 'page';
+		flushSync();
+		await tick();
+		expect(scrollTo).toHaveBeenLastCalledWith({ top: 300 });
+
+		// The same item again: the selection never changed.
+		paneScroll.mockClear();
+		settingsNav.view = 'detail';
+		flushSync();
+		await tick();
+		expect(paneScroll).toHaveBeenCalledWith({ top: 0 });
+		expect(paneTop).toBe(0);
+		expect(scrollTo).toHaveBeenLastCalledWith({ top: 0 });
+
+		settingsNav.view = 'page';
+		flushSync();
+		await tick();
+		expect(scrollTo).toHaveBeenLastCalledWith({ top: 300 });
+	});
+
+	it('leaves a split pane alone when nothing new is picked', async () => {
+		const { scroller, scrollTo } = inScroller();
+		settingsNav.selectItem('a');
+		flushSync();
+		await tick();
+		const pane = scroller.querySelector<HTMLElement>('.st-dpane')!;
+		const paneScroll = vi.fn();
+		pane.scrollTo = paneScroll as unknown as typeof pane.scrollTo;
+		settingsNav.view = 'page';
+		flushSync();
+		await tick();
+		settingsNav.view = 'detail';
+		flushSync();
+		await tick();
+		expect(paneScroll).not.toHaveBeenCalled();
+		expect(scrollTo).not.toHaveBeenCalled();
+	});
+
 	it('leaves the scroll alone where the list and the detail sit side by side', async () => {
 		const { scrollTo, setTop } = inScroller();
 		setTop(300);

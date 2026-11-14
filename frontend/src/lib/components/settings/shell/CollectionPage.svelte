@@ -119,7 +119,11 @@
 	// its top, not at the list's offset, and Back returns to where the list was.
 	// Pre-effect: the list's offset is read before the detail replaces it.
 	// Stacked Back keeps the item selected and only steps back to the list, so
-	// the item on screen, not the selection, is what changes.
+	// the item on screen, not the selection, is what changes. Stacked, the
+	// detail pane can also scroll on its own (settings.css pins it), and
+	// reopening the same item does not change the selection, so the pane
+	// starts at its top here too. Beside the list (split panes) none of this
+	// runs: the pane reset above handles a newly picked item.
 	const shownItem = $derived(
 		settingsNav.stacked ? (settingsNav.view === 'detail' ? (openItem ?? null) : null) : (openItem ?? null)
 	);
@@ -132,10 +136,11 @@
 		if (previous === undefined || previous === current) return;
 		if (!untrack(() => replace || settingsNav.stacked)) return;
 		const scroller = el && scrollParent(el);
-		if (!scroller) return;
-		if (previous === null) listTop = scroller.scrollTop;
-		const top = current === null ? listTop : 0;
-		void tick().then(() => scroller.scrollTo?.({ top }));
+		if (previous === null && scroller) listTop = scroller.scrollTop;
+		void tick().then(() => {
+			scroller?.scrollTo?.({ top: current === null ? listTop : 0 });
+			if (current !== null) pane?.scrollTo?.({ top: 0 });
+		});
 	});
 	function scrollParent(node: HTMLElement): HTMLElement | null {
 		for (let p = node.parentElement; p; p = p.parentElement) {
