@@ -242,6 +242,8 @@ def _no_claude_cli_model_list(monkeypatch):
 
     monkeypatch.setattr(claude_cli_models, "_snapshot", None)
     monkeypatch.setattr(claude_cli_models, "_loaded", True)
+    # A saved-login switch would start a real handshake on a thread.
+    monkeypatch.setattr(claude_cli_models, "refresh_soon", lambda: None)
 
 
 @pytest.fixture(autouse=True)

@@ -1226,21 +1226,21 @@ def _caller_provider_id(
 
 
 def _native_task_model(requested: str) -> Optional[str]:
-    """The registry alias a Task ``model`` names for a native Claude target.
+    """The native Claude model a Task ``model`` names for a native target.
 
-    Accepts a registry alias (``haiku``/``sonnet``/``opus``/``fable``) or a
-    legacy full Claude id that normalizes onto one, and returns the alias.
-    Anything else (another provider's model, an unknown ``claude-*`` id) is
-    None: the Task contract offers only the aliases for native targets.
+    Accepts a registry alias (``haiku``/``sonnet``/``opus``/``fable``), a
+    legacy full Claude id that normalizes onto one outside a subscription, or
+    a version this worker's subscription CLI lists (kept as itself). Anything
+    else (another provider's model, an unknown ``claude-*`` id) is None.
     """
-    from app.core.model_registry import model_values, normalize_model
+    from app.core.model_registry import native_choice
     from app.core.query_options import is_native_claude_model
 
     value = (requested or "").strip()
     if not is_native_claude_model(value):
         return None
-    alias = normalize_model(value)
-    return alias if alias in model_values() else None
+    # On a subscription a version this worker's CLI lists means itself.
+    return native_choice(value)
 
 
 def _task_target_label(target: Any, definition: Any, ref: str) -> str:

@@ -67,6 +67,8 @@ if str(ROOT) not in sys.path:
 from scripts.devloop import fake_ai
 from scripts.devloop.fake_claude import COMPACTION_DIR, FAKE_EMAIL, SCENARIOS_DIR
 
+FAKE_ORG = "Dev loop fake Claude CLI (no account)"
+
 FIXTURE = ROOT / "fluid" / "tests" / "fixtures" / "fake_claude_script.py"
 VERSION = "2.1.312 (Claude Code)"
 MODEL = "claude-sonnet-4-5"
@@ -484,7 +486,10 @@ class DevClaude(script.Fake):
     # ── protocol ──
     def initialize_extra(self) -> dict:
         """The model list a subscription CLI reports at ``initialize``."""
+        # ``account`` matches ``claude auth status``: the list belongs to it.
         return {"claude_code_version": VERSION.split()[0],
+                "account": {"email": FAKE_EMAIL, "organization": FAKE_ORG,
+                            "subscriptionType": f"Claude {fake_plan().capitalize()}"},
                 "models": FAKE_CLI_MODELS, **super().initialize_extra()}
 
     def answer_control(self, msg: dict) -> None:
@@ -1246,14 +1251,14 @@ def auth_status() -> dict:
     plan = fake_plan()
     subscription = ("max" if plan == "ultra" else plan) or "fake"
     return {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
-            "email": FAKE_EMAIL, "orgName": "Dev loop fake Claude CLI (no account)",
+            "email": FAKE_EMAIL, "orgName": FAKE_ORG,
             "subscriptionType": subscription, "configDirectory": None}
 
 
 def auth_status_text() -> str:
     """``claude auth status --text`` when a plan is set: its tier line."""
     return (f"Login method: Claude {fake_plan().capitalize()} account\n"
-            f"Email: {FAKE_EMAIL}\nOrganization: Dev loop fake Claude CLI (no account)\n")
+            f"Email: {FAKE_EMAIL}\nOrganization: {FAKE_ORG}\n")
 
 
 def main(argv: list[str] | None = None) -> int:

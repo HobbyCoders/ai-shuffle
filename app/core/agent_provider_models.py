@@ -535,10 +535,9 @@ def leg_model_id(leg: str | None, value: str) -> str | None:
     if not leg:
         if not is_native_claude_model(text):
             return None
-        from app.core.model_registry import model_values, normalize_model
+        from app.core.model_registry import native_choice
 
-        alias = normalize_model(text)
-        return alias if alias in model_values() else None
+        return native_choice(text)
     return None if is_native_claude_model(text) else text
 
 

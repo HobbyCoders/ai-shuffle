@@ -788,7 +788,7 @@ curl http://localhost:8000/api/v1/models \
 
 On a Claude subscription, the model list comes from the worker's Claude Code CLI. Claude Code sends it when a chat starts, and AI Shuffle also asks for it at startup and on refresh, without sending a prompt. The four short ids (`haiku`, `sonnet`, `opus`, `fable`) are always offered, labelled with the version Claude Code currently runs for them, such as "Opus 5.5". Their effort levels follow what Claude Code reports. The versioned models Claude Code lists are off until you check them in **Settings → Providers → Claude → Models**. A checked version runs exactly that model, with its own effort levels and context window. Before Claude Code has listed its models, only the four short ids are offered.
 
-Each worker keeps its own list. A model id goes unchanged to the Claude Code that runs the chat. If that worker's Claude Code does not know the id, the turn fails with Claude Code's error; it never runs another model in its place. API-key and cloud sign-ins keep the built-in list.
+Each worker keeps its own list, for the Claude account it came from. After you switch Claude accounts, AI Shuffle asks Claude Code again; until it answers, only the four short ids are offered. A model id goes unchanged to the Claude Code that runs the chat. If that worker's Claude Code does not know the id, the turn fails with Claude Code's error; it never runs another model in its place. API-key and cloud sign-ins keep the built-in list.
 
 #### POST /api/v1/models/claude/refresh
 
@@ -800,7 +800,7 @@ Asks this worker's Claude Code for its model list again, then returns the same b
 
 #### PUT /api/v1/models/claude/enabled
 
-Sets which versioned Claude models appear in the model pickers. Send the whole list; short ids and repeats are dropped.
+Turns one versioned Claude model on or off in the model pickers. Other models stay as they are, including ones only another worker's Claude Code lists. `400` for a short id such as `opus`.
 
 **Auth:** Owner only
 
@@ -808,7 +808,7 @@ Sets which versioned Claude models appear in the model pickers. Send the whole l
 curl -X PUT http://localhost:8000/api/v1/models/claude/enabled \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"models": ["claude-opus-4-6"]}'
+  -d '{"model": "claude-opus-4-6", "enabled": true}'
 ```
 
-**Response:** `{ "models": ["claude-opus-4-6"] }`
+**Response:** every model now turned on, for example `{ "models": ["claude-opus-4-6"] }`

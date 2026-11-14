@@ -48,14 +48,22 @@ it('lists the aliases as the CLI names them and the versions with their saved st
 	expect(screen.getByText('Claude Code 2.1.325')).toBeTruthy();
 });
 
-it('saves the whole turned-on list when one is checked', async () => {
+it('saves only the id that was toggled, so ids this worker does not list survive', async () => {
 	render(ClaudeCliModels);
 	mocks.get.mockResolvedValue(payload(['claude-opus-4-6', 'claude-opus-5']));
 	const versions = screen.getByTestId('claude-versioned-models');
 	await fireEvent.click(within(versions).getAllByRole('checkbox')[0]);
 	await waitFor(() =>
 		expect(mocks.put).toHaveBeenCalledWith('/models/claude/enabled', {
-			models: ['claude-opus-4-6', 'claude-opus-5']
+			model: 'claude-opus-4-6',
+			enabled: true
+		})
+	);
+	await fireEvent.click(within(versions).getAllByRole('checkbox')[1]);
+	await waitFor(() =>
+		expect(mocks.put).toHaveBeenLastCalledWith('/models/claude/enabled', {
+			model: 'claude-opus-5',
+			enabled: false
 		})
 	);
 });

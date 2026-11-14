@@ -361,12 +361,14 @@ def _label(value: Any, default: str) -> str:
 def _switched() -> None:
     """A different folder is now active: new spawns and status reads follow it."""
     global _reap_due
-    from app.core import claude_cli_status
+    from app.core import claude_cli_models, claude_cli_status
 
     _reap_due = True
     invalidate_identity()
     claude_cli_status.invalidate()
     claude_cli_status.announce_account_change()
+    # The picker's model list belongs to the account: ask the CLI again.
+    claude_cli_models.refresh_soon()
 
 
 def save_current(label: str = "") -> str:

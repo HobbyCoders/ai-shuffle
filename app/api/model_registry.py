@@ -10,8 +10,6 @@ The underlying registry lives in ``app/core/model_registry.py``; this router
 is a thin read-only projection of it.
 """
 
-from typing import List
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -57,8 +55,9 @@ async def list_models(token: str = Depends(require_auth)) -> dict:
     return await run_sync(registry_payload)
 
 
-class ClaudeEnabledModelsRequest(BaseModel):
-    models: List[str] = Field(default_factory=list, max_length=200)
+class ClaudeEnabledModelRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=300)
+    enabled: bool
 
 
 @router.post("/claude/refresh")
@@ -77,9 +76,14 @@ async def refresh_claude_models(token: str = Depends(require_admin)) -> dict:
 
 
 @router.put("/claude/enabled")
-async def set_claude_enabled_models(
-    request: ClaudeEnabledModelsRequest, token: str = Depends(require_admin)
+async def set_claude_enabled_model(
+    request: ClaudeEnabledModelRequest, token: str = Depends(require_admin)
 ) -> dict:
-    """Which versioned Claude Code models the pickers offer (the aliases always are)."""
-    saved = await run_sync(claude_cli_models.set_enabled_models, request.models)
+    """Turn one versioned Claude Code model on or off in the pickers (the aliases
+    always are). Other enabled ids are kept, including ones this worker's CLI
+    does not list."""
+    try:
+        saved = await run_sync(claude_cli_models.set_model_enabled, request.model, request.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"models": saved}

@@ -49,14 +49,14 @@
 	});
 
 	async function toggle(value: string) {
-		const next = versions
-			.filter((m) => (m.value === value ? !checkedOf(m.value, m.enabled) : checkedOf(m.value, m.enabled)))
-			.map((m) => m.value);
-		pending = { ...pending, [value]: next.includes(value) };
+		const model = versions.find((m) => m.value === value);
+		const enabled = !checkedOf(value, model?.enabled ?? false);
+		pending = { ...pending, [value]: enabled };
 		busy = true;
 		error = '';
 		try {
-			await api.put('/models/claude/enabled', { models: next });
+			// One id on or off: ids this worker's CLI does not list stay enabled.
+			await api.put('/models/claude/enabled', { model: value, enabled });
 			await hydrateModelRegistry();
 			flashSaved();
 		} catch (e) {

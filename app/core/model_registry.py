@@ -189,6 +189,35 @@ def cli_offers(value: Optional[str]) -> bool:
     return bool(value) and claude_cli_models.entry(value) is not None
 
 
+def keeps_own_id(value: Optional[str]) -> bool:
+    """Whether a full Claude id means itself instead of today's alias.
+
+    True on a subscription sign-in for an id the CLI listed by name (in the
+    saved list, whichever account it came from, so an account switch never
+    turns a picked version into an alias; whether the active account can run
+    it is :func:`cli_offers`, and the CLI fails a turn it cannot run).
+    API-key and cloud modes, and ids no CLI listed, fold as before.
+    """
+    from app.core import claude_cli_models
+
+    return bool(value) and claude_cli_models.listed(value)
+
+
+def normalize_picked(value: Optional[str]) -> str:
+    """``normalize_model`` for a model someone picked, stored or inherited:
+    a legacy id keeps its own name where :func:`keeps_own_id` says so."""
+    return value if value and keeps_own_id(value) else normalize_model(value)
+
+
+def native_choice(value: Optional[str]) -> Optional[str]:
+    """The native Claude model ``value`` names on this worker, or None.
+
+    An alias (legacy ids fold onto one outside a subscription), or a version
+    this worker's subscription CLI lists, which means itself."""
+    model = normalize_picked((value or "").strip())
+    return model if model in model_values() or cli_offers(model) else None
+
+
 def get_model(value: Optional[str], *, delegated: bool = True) -> Optional[ModelOption]:
     """Look up a stored value; cloud CLI aliases apply only to delegated routes.
 
@@ -200,7 +229,8 @@ def get_model(value: Optional[str], *, delegated: bool = True) -> Optional[Model
         listed = _cli_model(value)
         if listed is not None:
             return listed
-    normalized = normalize_model(value)
+    # The delegated CLI runs a kept legacy id as itself: describe that version.
+    normalized = normalize_picked(value) if delegated else normalize_model(value)
     if delegated and normalized == "haiku" and delegated_model_aliases()["haiku"] != API_MODEL_IDS["haiku"]:
         return _BY_VALUE["claude-haiku-4-5"]
     version = re.sub(r"-\d{8}$", "", normalized) if normalized.startswith("claude-") else normalized
@@ -707,10 +737,10 @@ def registry_payload() -> Dict[str, object]:
     legacy_map = dict(LEGACY_MODEL_MAP)
     if aliases["haiku"] != API_MODEL_IDS["haiku"]:
         legacy_map.pop("claude-haiku-5-5", None)
+    # An id the subscription CLI lists means itself, not today's alias.
+    legacy_map = {k: v for k, v in legacy_map.items() if not keeps_own_id(k)}
     snapshot = claude_cli_models.catalog()
     listed = {m["value"] for m in snapshot["models"]} if snapshot else set()
-    # An id the subscription CLI lists means itself, not today's alias.
-    legacy_map = {k: v for k, v in legacy_map.items() if k not in listed}
 
     def entry(value: str, fallback: ModelOption) -> Dict[str, object]:
         # Labels follow the CLI only for what it lists; other modes keep today's.

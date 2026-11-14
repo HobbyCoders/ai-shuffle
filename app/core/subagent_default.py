@@ -64,6 +64,12 @@ def read() -> SubagentDefault:
         return SubagentDefault()
     model = data.get("model")
     model = model.strip() if isinstance(model, str) and model.strip() else None
+    if model and not data.get("exact"):
+        # Saved before a version could be picked: a legacy Claude id still
+        # means today's alias, as it always ran (never the version it names).
+        from app.core.model_registry import normalize_model as _alias
+
+        model = _alias(model) or model
     return SubagentDefault(model=model)
 
 
@@ -71,7 +77,8 @@ def normalize_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
     """``(app-format id, None)`` for a model this install can run, else ``(None, reason)``.
 
     A Claude id normalizes onto its registry alias (``claude-opus-4-6`` ->
-    ``opus``). A composite must name an enabled provider whose curated list
+    ``opus``), except on a subscription, where a version this worker's CLI
+    lists is kept as itself. A composite must name an enabled provider whose curated list
     holds the model, the same check an agent's pin passes at roster time.
     """
     if not isinstance(value, str) or not value.strip():
@@ -91,11 +98,12 @@ def normalize_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
     if text.startswith("prov:"):
         return None, f"'{text}' is not a valid prov:<providerId>:<modelId> id."
     if is_native_claude_model(text):
-        from app.core.model_registry import model_values, normalize_model as _alias
+        from app.core.model_registry import model_values, native_choice
 
-        alias = _alias(text)
-        if alias in model_values():
-            return alias, None
+        # A version the subscription CLI lists is kept as picked, never folded.
+        chosen = native_choice(text)
+        if chosen:
+            return chosen, None
         return None, (
             f"'{text}' is not a Claude model this app offers. "
             f"Choose one of: {', '.join(model_values())}."
@@ -115,7 +123,8 @@ def write(model: Optional[str]) -> SubagentDefault:
         clean_model, error = normalize_model(model)
         if error:
             raise ValueError(f"model: {error}")
-    database.set_system_setting(SETTING_KEY, json.dumps({"model": clean_model}))
+    # ``exact``: the id is what was picked (a version stays that version).
+    database.set_system_setting(SETTING_KEY, json.dumps({"model": clean_model, "exact": True}))
     if clean_model:
         # A later "no default" state (cleared again) may ask once more.
         reset_asked()

@@ -152,9 +152,10 @@ def app_id(provider_id: Optional[str], model_id: Optional[str]) -> Optional[str]
     if provider_id:
         return f"prov:{provider_id}:{text}"
     if is_native_claude_model(text):
-        from app.core.model_registry import normalize_model
+        from app.core.model_registry import normalize_picked
 
-        return normalize_model(text)
+        # On a subscription a version keeps its own id when inherited or sent on.
+        return normalize_picked(text)
     return text
 
 
@@ -221,9 +222,9 @@ def resolve(value: Any, leg: Optional[str] = None, *, runs_here: bool = True) ->
     wanted = canonical(text, leg)
     # Legacy normalization may intentionally migrate old stored versions onto
     # today's alias. An explicit override must instead match the actual route.
-    from app.core.model_registry import model_values
+    from app.core.model_registry import cli_offers, model_values
 
-    exact = explicit is not None or text in model_values()
+    exact = explicit is not None or text in model_values() or cli_offers(wanted)
     normalized, reason = checked(wanted) if exact else (None, None)
     if not runs_here and explicit and wanted not in catalog:
         # Known spoken composites can be normalized locally, but a canonical

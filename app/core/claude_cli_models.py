@@ -22,6 +22,15 @@ own "issue with the selected model" error (it never substitutes a model).
 Only a subscription sign-in uses the list (:func:`catalog` is None in any other
 mode), so API-key and cloud modes keep the static registry.
 
+The list also belongs to the account it was captured under, since plans list
+different models. The saved list records ``account``, a short hash of the
+email and organization in the same ``initialize`` reply (never the email
+itself). It is served only while the active sign-in that
+``claude_cli_status`` reports hashes the same, and a reply is stored only when
+it matches the active sign-in and CLI version, so a handshake or chat process
+started under the previous account cannot overwrite the new one. A saved-login
+switch asks the CLI again (:func:`refresh_soon`).
+
 Which versioned entries the pickers offer is the owner's choice
 (``ENABLED_SETTING``, a JSON list in ``system_settings``); the four aliases are
 always offered and versioned entries are off until turned on.
@@ -29,6 +38,7 @@ always offered and versioned entries are off until turned on.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -53,6 +63,7 @@ ALIASES = ("haiku", "sonnet", "opus", "fable")
 
 _lock = threading.Lock()
 _refresh_lock = threading.Lock()
+_enabled_lock = threading.Lock()
 _snapshot: Optional[Dict[str, Any]] = None
 _loaded = False
 
@@ -70,6 +81,14 @@ def _effort_levels(entry: Dict[str, Any]) -> Optional[List[str]]:
     if not isinstance(levels, list):
         return None
     return [level for level in levels if isinstance(level, str)]
+
+
+def account_key(email: Any, organization: Any) -> Optional[str]:
+    """A non-secret id for a Claude sign-in (a hash), None without an email."""
+    if not isinstance(email, str) or not email.strip():
+        return None
+    org = organization.strip() if isinstance(organization, str) else ""
+    return hashlib.sha256(f"{email.strip().lower()}\n{org}".encode("utf-8")).hexdigest()[:16]
 
 
 def parse_initialize(payload: Any) -> Optional[Dict[str, Any]]:
@@ -98,8 +117,10 @@ def parse_initialize(payload: Any) -> Optional[Dict[str, Any]]:
     if not models:
         return None
     version = payload.get("claude_code_version")
+    account = payload.get("account") if isinstance(payload.get("account"), dict) else {}
     return {
         "cli_version": version if isinstance(version, str) and version else None,
+        "account": account_key(account.get("email"), account.get("organization")),
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "models": models,
     }
@@ -141,7 +162,7 @@ def peek() -> Optional[Dict[str, Any]]:
 
 
 def _same(a: Optional[Dict[str, Any]], b: Dict[str, Any]) -> bool:
-    return bool(a) and a.get("cli_version") == b.get("cli_version") and a.get("models") == b.get("models")
+    return bool(a) and all(a.get(k) == b.get(k) for k in ("cli_version", "account", "models"))
 
 
 def store(snapshot: Dict[str, Any]) -> bool:
@@ -177,13 +198,27 @@ def _subscription_mode() -> bool:
     return claude_auth_mode.current_mode() == claude_auth_mode.MODE_SUBSCRIPTION
 
 
+def _account_of(status: Any) -> Optional[str]:
+    """The ``account_key`` of a ``claude_cli_status`` result, None unless signed in."""
+    if status is None or not status.signed_in:
+        return None
+    return account_key(status.email, status.org_name)
+
+
 def catalog() -> Optional[Dict[str, Any]]:
-    """The list the pickers use: only on a subscription sign-in, else None."""
+    """The list the pickers use, else None.
+
+    Only on a subscription sign-in, and only while the active sign-in is the
+    account the list was captured under (unknown counts as different)."""
     snap = peek()
-    if not snap:
+    if not snap or not snap.get("account"):
         return None
     try:
-        return snap if _subscription_mode() else None
+        from app.core import claude_cli_status
+
+        if not _subscription_mode() or snap["account"] != _account_of(claude_cli_status.peek()):
+            return None
+        return snap
     except Exception:  # noqa: BLE001 - the static registry is the fallback
         return None
 
@@ -194,6 +229,18 @@ def entry(value: Optional[str]) -> Optional[Dict[str, Any]]:
     if not snap:
         return None
     return next((m for m in snap["models"] if m.get("value") == value), None)
+
+
+def listed(value: str) -> bool:
+    """Whether the saved list names ``value``, on a subscription sign-in, for
+    any account (deciding only that the id is not folded onto an alias)."""
+    snap = peek()
+    if not snap or not any(m.get("value") == value for m in snap["models"]):
+        return False
+    try:
+        return _subscription_mode()
+    except Exception:  # noqa: BLE001 - unknown mode keeps today's folding
+        return False
 
 
 def alias_targets() -> Dict[str, str]:
@@ -229,15 +276,26 @@ def enabled_models() -> List[str]:
     return [v for v in values if isinstance(v, str)] if isinstance(values, list) else []
 
 
-def set_enabled_models(values: List[str]) -> List[str]:
-    """Save which versioned ids the pickers offer; returns the saved list."""
-    from app.db.settings import set_system_setting
+def set_model_enabled(value: str, enabled: bool) -> List[str]:
+    """Turn one versioned id on or off; returns the saved list.
 
-    clean: List[str] = []
-    for value in values:
-        if isinstance(value, str) and value.strip() and value not in ALIASES and value not in clean:
-            clean.append(value.strip())
-    set_system_setting(ENABLED_SETTING, json.dumps(clean))
+    Only ``value`` changes: ids this worker's CLI does not list (another
+    worker's, or hidden by a CLI update) stay enabled. Read fresh, not from
+    the cache, so a recent change from another worker is kept."""
+    from app.db.settings import get_system_setting, set_system_setting
+
+    value = (value or "").strip()
+    if not value or value in ALIASES:
+        raise ValueError("Only a versioned model can be turned on or off.")
+    with _enabled_lock:
+        try:
+            current = json.loads(get_system_setting(ENABLED_SETTING) or "[]")
+        except ValueError:
+            current = []
+        clean = [v for v in current if isinstance(v, str) and v != value] if isinstance(current, list) else []
+        if enabled:
+            clean.append(value)
+        set_system_setting(ENABLED_SETTING, json.dumps(clean))
     from app.core import claude_cli_status
 
     claude_cli_status.announce_account_change()
@@ -247,12 +305,29 @@ def set_enabled_models(values: List[str]) -> List[str]:
 # ─── Capture ────────────────────────────────────────────────────────────────
 
 
+def _current(snapshot: Dict[str, Any]) -> bool:
+    """Whether ``snapshot`` came from the active sign-in and CLI version.
+
+    Blocking (may probe the CLI); runs on a thread."""
+    from app.core import claude_cli_status
+
+    status = claude_cli_status.get_status()
+    if not snapshot.get("account") or snapshot["account"] != _account_of(status):
+        logger.info("Claude Code model list from another sign-in ignored")
+        return False
+    if status.cli_version and snapshot.get("cli_version") and status.cli_version != snapshot["cli_version"]:
+        logger.info("Claude Code model list from version %s ignored (running %s)",
+                    snapshot["cli_version"], status.cli_version)
+        return False
+    return True
+
+
 def _record(payload: Any) -> None:
     try:
         if not _subscription_mode():
             return
         snapshot = parse_initialize(payload)
-        if snapshot is not None:
+        if snapshot is not None and _current(snapshot):
             store(snapshot)
     except Exception:  # noqa: BLE001 - capture is best effort
         logger.warning("Could not record the Claude Code model list", exc_info=True)
@@ -351,18 +426,34 @@ def refresh() -> Dict[str, Any]:
         snapshot = parse_initialize(payload)
         if snapshot is None:
             raise RuntimeError("Claude Code did not list any models. Update it and try again.")
+        if not _current(snapshot):
+            raise RuntimeError("The Claude sign-in changed while Claude Code listed its models. Try again.")
         store(snapshot)
         return snapshot
 
 
 def refresh_if_stale(cli_version: Optional[str]) -> None:
-    """Startup: list the models when none are saved or the CLI version changed."""
+    """Startup: list the models when none are saved for the active sign-in or
+    the CLI version changed."""
     try:
         if not _subscription_mode():
             return
-        snap = peek()
+        snap = catalog()
         if snap and (not cli_version or snap.get("cli_version") == cli_version):
             return
         refresh()
     except Exception as exc:  # noqa: BLE001 - startup never fails on this
         logger.info("Claude Code model list not refreshed: %s", exc)
+
+
+def refresh_soon() -> None:
+    """A saved-login switch: ask the CLI for the new account's list (no prompt),
+    off the caller's thread. Never raises."""
+    def run() -> None:
+        try:
+            if _subscription_mode():
+                refresh()
+        except Exception as exc:  # noqa: BLE001 - the next chat or Refresh retries
+            logger.info("Claude Code model list not refreshed after the sign-in changed: %s", exc)
+
+    threading.Thread(target=run, name="claude-cli-models-switch", daemon=True).start()
