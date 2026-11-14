@@ -23,7 +23,7 @@ internal class ExternalRedirectException :
  * Cloudflare Access's HTML page) stays an authorization failure, like a 401.
  */
 internal fun Response.refusedByWorker(): Boolean =
-    code == 403 && header("Content-Type").orEmpty().startsWith("application/json", ignoreCase = true)
+    code == 403 && body?.contentType()?.let { it.type == "application" && it.subtype == "json" } == true
 
 /** Shared streaming transport for WebView assets and SAF downloads. Credentials never leave the paired HTTPS origin. */
 internal class WorkerDownloadClient(
