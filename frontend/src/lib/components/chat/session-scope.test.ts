@@ -8,6 +8,7 @@ import {
 	ATTACH_GAINS,
 	accessModes,
 	attachBlockedReason,
+	attachChoice,
 	attachWarning,
 	effectiveAccessMode,
 	noProjectPermission,
@@ -91,11 +92,53 @@ describe('Attach a project', () => {
 		expect(noProjectPillVisible({ ...idle, hidden: true })).toBe(false);
 	});
 
-	it('lets an idle local session attach, and says why otherwise', () => {
+	it('lets an idle session attach, and says why otherwise', () => {
 		expect(attachBlockedReason(idle)).toBeNull();
-		expect(attachBlockedReason({ ...idle, isRemote: true })).toBe('Attach the project from the worker that runs this session.');
 		expect(attachBlockedReason({ ...idle, busy: true })).toBe('Wait for this turn to finish, then attach.');
 		expect(attachBlockedReason({ ...idle, hasProject: true })).toBe('This session can’t take a project.');
+	});
+
+	it('lets a session another worker runs attach while that worker is online', () => {
+		const remote = { ...idle, isRemote: true, ownerName: 'Worker B' };
+		expect(attachBlockedReason(remote)).toBeNull();
+		expect(attachBlockedReason({ ...remote, ownerOffline: true })).toBe('Worker B is offline. It must be online to attach a project.');
+		expect(attachBlockedReason({ ...remote, ownerOffline: true, ownerName: null })).toMatch(/^The worker that runs this session is offline/);
+		// The other blocks still hold.
+		expect(attachBlockedReason({ ...remote, busy: true })).toBe('Wait for this turn to finish, then attach.');
+		expect(attachBlockedReason({ ...remote, subagent: true })).toBe('This session can’t take a project.');
+	});
+
+	describe('which projects the sheet can pick', () => {
+		const holder = (install_id: string, device_name: string, is_self = false) => ({ install_id, device_name, online: true, is_self });
+		const catalog = [
+			{ project_v2_id: 'v2-both', eligible: [holder('dev-a', 'Worker A', true), holder('dev-b', 'Worker B')] },
+			{ project_v2_id: 'v2-a', eligible: [holder('dev-a', 'Worker A', true)] },
+			{ project_v2_id: 'v2-b', eligible: [holder('dev-b', 'Worker B')] },
+			{ project_v2_id: 'v2-c', eligible: [holder('dev-c', 'Worker C')] },
+		];
+		const local = (v2: string | null) => ({ remoteOnly: false, projectV2Id: v2 });
+		const remote = (v2: string) => ({ remoteOnly: true, projectV2Id: v2 });
+		const ownerB = { id: 'dev-b', name: 'Worker B', online: true };
+
+		it('offers this worker’s projects for a session it runs', () => {
+			expect(attachChoice(local('v2-a'), catalog, null)).toEqual({ pickable: true, note: null });
+			expect(attachChoice(local(null), catalog, null)).toEqual({ pickable: true, note: null });
+			expect(attachChoice(remote('v2-c'), catalog, null)).toEqual({ pickable: false, note: 'on Worker C' });
+		});
+
+		it('offers the owning worker’s projects for a session another worker runs', () => {
+			expect(attachChoice(local('v2-both'), catalog, ownerB).pickable).toBe(true);
+			expect(attachChoice(remote('v2-b'), catalog, ownerB).pickable).toBe(true);
+			// This worker has it, the owner does not: greyed, saying where it is.
+			expect(attachChoice(local('v2-a'), catalog, ownerB)).toEqual({ pickable: false, note: 'on this worker' });
+			expect(attachChoice(remote('v2-c'), catalog, ownerB)).toEqual({ pickable: false, note: 'on Worker C' });
+			// Not in the catalog at all: say it is not on the owner.
+			expect(attachChoice(local(null), catalog, ownerB)).toEqual({ pickable: false, note: 'not on Worker B' });
+		});
+
+		it('offers nothing while the owning worker is offline', () => {
+			expect(attachChoice(remote('v2-b'), catalog, { ...ownerB, online: false })).toEqual({ pickable: false, note: null });
+		});
 	});
 
 	it('warns that attaching is one-way, naming the agent and the project', () => {

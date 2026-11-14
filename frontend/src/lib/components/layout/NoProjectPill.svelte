@@ -13,7 +13,7 @@
 	import { profiles, sessions } from '$lib/stores/app-data.svelte';
 	import { archivedChats } from '$lib/stores/archived-chats';
 	import { subagentChats } from '$lib/stores/subagent-chats';
-	import { attachBlockedReason, noProjectPillVisible, type AttachState } from '$lib/components/chat/session-scope';
+	import { attachBlockedReason, noProjectPillVisible, type AttachOwner, type AttachState } from '$lib/components/chat/session-scope';
 	import AttachProjectSheet from './AttachProjectSheet.svelte';
 
 	interface Props {
@@ -27,10 +27,24 @@
 
 	const sessionId = $derived($activeSession.sessionId);
 	const row = $derived($sessions.find((s) => s.id === sessionId) ?? null);
+	const isRemote = $derived(!!(row?.is_remote ?? $activeSession.isRemote));
+	// The worker that runs the chat: the attach is relayed to it, and the sheet
+	// offers its projects. instance_id only counts on a row with no owner.
+	const owner = $derived<AttachOwner | null>(
+		isRemote
+			? {
+					id: row?.owner_device_id || row?.instance_id || '',
+					name: row?.device_name ?? $activeSession.ownerDeviceName ?? null,
+					online: typeof row?.device_online === 'boolean' ? row.device_online : null
+				}
+			: null
+	);
 	const attachState = $derived<AttachState>({
 		sessionId,
 		hasProject: $activeSession.mode !== 'chat' || !!$activeSession.project || !!$activeSession.projectV2Id,
-		isRemote: !!(row?.is_remote ?? $activeSession.isRemote),
+		isRemote,
+		ownerOffline: owner?.online === false,
+		ownerName: owner?.name ?? null,
 		busy: !!($activeSession.isStreaming || $activeSession.optimisticStreaming),
 		// A turn parked on background work: the server refuses the attach then too.
 		backgroundWork: !!row?.parked_task_kind,
@@ -74,7 +88,7 @@
 			<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />
 		</button>
 	{/if}
-	<AttachProjectSheet {open} {sessionId} {agentName} {blockedReason} onClose={() => (open = false)} />
+	<AttachProjectSheet {open} {sessionId} {agentName} {blockedReason} {owner} onClose={() => (open = false)} />
 {/if}
 
 <style>

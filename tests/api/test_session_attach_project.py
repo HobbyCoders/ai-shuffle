@@ -2,7 +2,8 @@
 
 Issue #371 step 4. The attach turns the row into an ordinary project session
 (mode NULL, project columns set), is one-way, and refuses sessions it must not
-touch: one that already has a project, a busy one, one run by another worker.
+touch: one that already has a project or a busy one. A chat another worker runs
+is relayed to that worker, which applies the same rules to its own checkout.
 """
 
 from typing import Any
@@ -196,13 +197,191 @@ async def test_a_client_that_starts_streaming_after_the_write_is_not_cut_off(see
 
 
 @pytest.mark.asyncio
-async def test_a_session_run_by_another_worker_is_refused(seeded, quiet, monkeypatch):
+async def test_a_row_this_worker_no_longer_runs_is_never_written_here(seeded, quiet, monkeypatch):
+    """The relay resolves the owner from the row; if this worker still can't
+    claim it (it moved away mid-request), the shared write refuses."""
     monkeypatch.setattr(attach_api, "_owned_here", lambda session: False)
     with pytest.raises(HTTPException) as exc:
         await _attach("attach-chat")
     assert exc.value.status_code == 409
     assert exc.value.detail == attach_api.NOT_HERE
     assert db.get_session("attach-chat")["mode"] == "chat"
+
+
+# =============================================================================
+# A chat another worker runs: relayed to that worker
+# =============================================================================
+
+
+@pytest.fixture
+def remote_owner(monkeypatch):
+    """The chat is run by worker ``dev-b``; record what would be relayed."""
+    from app.network import control
+
+    monkeypatch.setattr(control, "owner_of", lambda session: "dev-b")
+    sent = AsyncMock(return_value={
+        "session_id": "attach-chat", "project_id": "b-local-id", "project_v2_id": "pv2-b",
+        "mode": "code", "permission_mode": "default",
+    })
+    monkeypatch.setattr(control, "call", sent)
+    monkeypatch.setattr(attach_api, "_worker_name", AsyncMock(return_value="Worker B"))
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_a_remote_chat_is_relayed_by_shared_identity(seeded, quiet, remote_owner):
+    from app.core import project_resolver
+
+    pv2 = project_resolver.resolve_project_v2({"project_id": "attach-proj"})
+    result = await _attach("attach-chat")
+    remote_owner.assert_awaited_once()
+    device, action, body = remote_owner.await_args.args
+    assert (device, action) == ("dev-b", "attach-project")
+    # Legacy ids are per worker: only the shared identity crosses.
+    assert body == {"session_id": "attach-chat", "project_v2_id": pv2["id"], "origin": pv2["origin"]}
+    assert result.project_id == "b-local-id" and result.permission_mode == "default"
+    # Nothing is written here: the owner's row syncs back as for any change.
+    assert db.get_session("attach-chat")["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_remote_only_project_is_relayed_by_its_v2_id(seeded, quiet, remote_owner):
+    from app.db import projects_v2
+
+    pv2 = projects_v2.upsert_project("git:example/remote-only", "Remote only")
+    session = db.get_session("attach-chat")
+    with patch.object(attach_api, "require_session", AsyncMock(return_value=session)):
+        await attach_project(_request(), "attach-chat", AttachProjectRequest(project_v2_id=pv2["id"]), "token")
+    body = remote_owner.await_args.args[2]
+    assert body == {"session_id": "attach-chat", "project_v2_id": pv2["id"], "origin": "git:example/remote-only"}
+
+
+@pytest.mark.parametrize("failure, status_code, words", [
+    ("unreachable", 503, "Worker B runs this chat and must be online"),
+    ("maybe", 503, "may still have been applied"),
+    ("refused", 409, "Web app isn't checked out on Worker B"),
+])
+@pytest.mark.asyncio
+async def test_relay_failures_read_clearly(seeded, quiet, remote_owner, failure, status_code, words):
+    from app.network import control
+
+    remote_owner.side_effect = {
+        "unreachable": control.RunnerUnreachable("Couldn't reach Worker B from Worker A."),
+        "maybe": control.MaybeApplied("Worker B did not answer in time."),
+        "refused": control.ControlRefused("Web app isn't checked out on Worker B, the worker that runs this chat."),
+    }[failure]
+    with pytest.raises(HTTPException) as exc:
+        await _attach("attach-chat")
+    assert exc.value.status_code == status_code
+    assert words in exc.value.detail
+    if failure == "maybe":
+        # Never reported as a clean failure that is safe to retry.
+        assert "must be online" not in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_row_refusals_are_checked_here_before_relaying(seeded, quiet, remote_owner):
+    with pytest.raises(HTTPException) as exc:
+        await _attach("attach-code")
+    assert exc.value.detail == attach_api.ALREADY_HAS_PROJECT
+    remote_owner.assert_not_awaited()
+
+
+def test_only_the_owner_reaches_the_relay(routed, remote_owner):
+    """``require_admin`` and the preview line hold on the viewing worker."""
+    from app.core import preview_access
+
+    app, owner_token = routed
+    assert _post(_client(app, bearer=MEMBER_PAIRED)).status_code == 403
+    preview = {preview_access.cookie_name(): preview_access.mint("agent-session")}
+    with patch.object(preview_access, "_session_exists", lambda session_id: True):
+        assert _post(_client(app, cookies=preview)).status_code == 403
+    remote_owner.assert_not_awaited()
+    assert _post(_client(app, bearer=OWNER_PAIRED)).status_code == 200
+    remote_owner.assert_awaited_once()
+
+
+# =============================================================================
+# The owner side of the relay: the ``attach-project`` control action
+# =============================================================================
+
+
+@pytest.fixture
+def checkout(seeded, tmp_path):
+    from app.core import project_resolver
+
+    folder = tmp_path / "web-app"
+    folder.mkdir()
+    db.create_project(project_id="owner-proj", name="Web app", description=None, path=str(folder))
+    return project_resolver.resolve_project_v2({"project_id": "owner-proj"})
+
+
+@pytest.mark.asyncio
+async def test_the_owner_attaches_its_own_checkout(checkout, quiet):
+    from app.network import control
+
+    result = await control.handle("attach-project", {
+        "session_id": "attach-chat", "project_v2_id": checkout["id"], "origin": checkout["origin"],
+        # A viewer's legacy id means nothing here and is ignored.
+        "project_id": "attach-proj",
+    }, from_device="dev-a")
+    assert result["project_id"] == "owner-proj"
+    assert result["project_v2_id"] == checkout["id"]
+    assert result["permission_mode"] == "default"
+    row = db.get_session("attach-chat")
+    assert row["project_id"] == "owner-proj" and row["mode"] is None
+    assert row["permission_mode"] == "default"
+    _, broadcast = quiet
+    broadcast.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_owner_refuses_a_project_it_has_no_checkout_of(seeded, quiet):
+    from app.db import projects_v2
+    from app.network import control
+
+    pv2 = projects_v2.upsert_project("git:example/elsewhere", "Elsewhere")
+    with pytest.raises(HTTPException) as exc:
+        await control.handle("attach-project", {"session_id": "attach-chat", "project_v2_id": pv2["id"]},
+                             from_device="dev-a")
+    assert exc.value.status_code == 404
+    assert exc.value.detail.startswith("Elsewhere isn't checked out on ")
+    assert db.get_session("attach-chat")["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_owner_refuses_a_checkout_whose_folder_is_gone(seeded, quiet):
+    from app.core import project_resolver
+    from app.network import control
+
+    pv2 = project_resolver.resolve_project_v2({"project_id": "attach-proj"})  # path does not exist
+    with pytest.raises(HTTPException) as exc:
+        await control.handle("attach-project", {"session_id": "attach-chat", "project_v2_id": pv2["id"]},
+                             from_device="dev-a")
+    assert exc.value.status_code == 404
+    assert db.get_session("attach-chat")["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_owner_rechecks_busy_under_its_own_state(checkout, quiet, monkeypatch):
+    from app.core import streaming_status
+    from app.network import control
+
+    monkeypatch.setattr(streaming_status, "_has_active_run_db", lambda sid: True)
+    with pytest.raises(HTTPException) as exc:
+        await control.handle("attach-project", {"session_id": "attach-chat", "project_v2_id": checkout["id"]},
+                             from_device="dev-a")
+    assert exc.value.detail == attach_api.BUSY
+    assert db.get_session("attach-chat")["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_owner_needs_a_project_identity(seeded, quiet):
+    from app.network import control
+
+    with pytest.raises(ValueError):
+        await control.handle("attach-project", {"session_id": "attach-chat", "project_id": "attach-proj"},
+                             from_device="dev-a")
 
 
 @pytest.mark.asyncio

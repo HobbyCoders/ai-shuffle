@@ -14,6 +14,15 @@ Owner only (``require_admin``): the attach widens what the session can reach,
 so API users, non-owner paired devices and agent previews are refused. The
 same write puts the session back on Ask (see ``attach_session_project``).
 
+The attach always runs on the worker that runs the session, because only it
+can read its own busy state, release its own pooled client and check its own
+checkout. Viewed from another of the owner's workers, the route checks the
+caller here first, then relays to the owner over the peer control channel
+(``attach-project``), naming the project by its shared identity (project V2
+id and origin): legacy project ids are local to each worker. The owner runs
+the same ``apply_attach_project`` as a local attach, resolving its OWN
+checkout of that project, and refuses when it has none.
+
 Busy sessions are refused, and the check is not a cached hint: this process's
 live runtime, its turn executions and the pooled client are read first, then
 the write itself re-checks queued and live turns under turn admission's
@@ -32,23 +41,29 @@ from app.api.common import require_origin_access
 from app.api.sessions_helpers import require_session
 from app.db import database
 from app.db.async_database import run_sync
+from app.network import control
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 ALREADY_HAS_PROJECT = "This session already has a project. Projects can't be changed or detached."
-NOT_HERE = "Attach the project from the worker that runs this session."
+NOT_HERE = "This chat now runs on another worker. Reopen it and try again."
 BUSY = "Wait for this session to finish its turn, then attach the project."
 BUSY_BACKGROUND = (
     "This session's background work is still running. "
     "Wait for its running or background work to finish, then attach the project."
 )
 NEEDS_LOCAL_CHECKOUT = "This project isn't checked out on this worker."
+SUBAGENT = "A subagent's chat can't be given a project."
+ARCHIVED = "This chat is archived. Restore it first."
 
 
 class AttachProjectRequest(BaseModel):
-    project_id: str
+    """Name the project by exactly one of a local legacy id or its V2 id."""
+
+    project_id: Optional[str] = None
+    project_v2_id: Optional[str] = None
 
 
 class AttachProjectResponse(BaseModel):
@@ -112,27 +127,13 @@ def _has_live_run(session_id: str) -> bool:
         return True
 
 
-@router.post("/{session_id}/attach-project", response_model=AttachProjectResponse)
-async def attach_project(
-    request: Request,
-    session_id: str,
-    body: AttachProjectRequest,
-    token: str = Depends(require_admin),
-):
-    """Give this no-project session a project. One-way, owner only.
-
-    Refusals, in order: anyone but the owner (403); an archived chat (409);
-    a session that is not a no-project top-level chat (409); one owned by another worker (409); one with a turn queued or
-    running, or whose state can't be read (409); a project the caller
-    cannot reach or that has no checkout on this worker (403/404 via origin
-    access). A lost race with another attach also answers 409.
-    """
+def _check_attachable(session: dict) -> None:
+    """The refusals that read only the row; both workers apply them."""
     from app.core import archive_guard
     from app.core.session_modes import session_mode_of
 
-    session = await require_session(request, session_id)
     if archive_guard.is_archived_row(session):
-        raise HTTPException(status.HTTP_409_CONFLICT, "This chat is archived. Restore it first.")
+        raise HTTPException(status.HTTP_409_CONFLICT, ARCHIVED)
     if (
         session_mode_of(session) != "chat"
         or session.get("project_id")
@@ -140,23 +141,78 @@ async def attach_project(
     ):
         raise HTTPException(status.HTTP_409_CONFLICT, ALREADY_HAS_PROJECT)
     if session.get("is_worker") or session.get("parent_session_id"):
+        raise HTTPException(status.HTTP_409_CONFLICT, SUBAGENT)
+
+
+def _own_checkout(project_v2_id: Optional[str], origin: Optional[str]) -> tuple[dict, Optional[str]]:
+    """This worker's project row and V2 id for a project named by shared identity.
+
+    A relayed attach cannot use the viewing worker's legacy id. The V2 row is
+    replicated, so its origin is read here when this worker has it; the sent
+    origin is only a fallback, and either way only a checkout this worker
+    registered itself, with its folder present, can match.
+    """
+    from app.core import project_resolver, project_setup
+
+    pv2 = project_resolver.resolve_catalog_project(project_v2_id) if project_v2_id else None
+    key = (pv2 or {}).get("origin") or origin
+    project = project_setup._registered_row(key) if key else None
+    if not project:
+        name = (pv2 or {}).get("name") or "This project"
         raise HTTPException(
-            status.HTTP_409_CONFLICT, "A subagent's chat can't be given a project."
+            status.HTTP_404_NOT_FOUND,
+            f"{name} isn't checked out on {_self_name()}, the worker that runs this chat. "
+            "Add it there first, or pick a project it has.",
         )
+    if not pv2:
+        pv2 = project_resolver.resolve_project_v2({"project_id": project["id"]})
+    return project, (pv2 or {}).get("id")
+
+
+def _self_name() -> str:
+    try:
+        from app.network import engine
+        ctx = engine.context()
+        if ctx is not None:
+            return control._names(ctx, ctx.device_id)[1]
+    except Exception:  # noqa: BLE001 — the message must not fail
+        pass
+    return "this worker"
+
+
+async def apply_attach_project(
+    session_id: str,
+    *,
+    project_id: Optional[str] = None,
+    project_v2_id: Optional[str] = None,
+    origin: Optional[str] = None,
+    api_user: Optional[dict] = None,
+) -> AttachProjectResponse:
+    """Attach on the worker that runs ``session_id``: the one set of rules.
+
+    ``project_id`` is this worker's legacy id (a local attach); otherwise the
+    project is named by ``project_v2_id``/``origin`` and resolved to this
+    worker's own checkout. Raises ``HTTPException`` with the refusal.
+    """
+    session = await run_sync(database.get_session, session_id)
+    if session is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    _check_attachable(session)
     if not _owned_here(session):
         raise HTTPException(status.HTTP_409_CONFLICT, NOT_HERE)
     if _live_here(session_id) or await run_sync(_has_live_run, session_id):
         raise HTTPException(status.HTTP_409_CONFLICT, BUSY)
 
-    access = await run_sync(
-        require_origin_access,
-        api_user=get_api_user_from_request(request),
-        project_id=body.project_id,
-    )
-    project = access.get("legacy")
-    if not project:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, NEEDS_LOCAL_CHECKOUT)
-    project_v2_id = (access.get("project_v2") or {}).get("id")
+    if project_id:
+        access = await run_sync(require_origin_access, api_user=api_user, project_id=project_id)
+        project = access.get("legacy")
+        if not project:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, NEEDS_LOCAL_CHECKOUT)
+        project_v2_id = (access.get("project_v2") or {}).get("id")
+    elif project_v2_id or origin:
+        project, project_v2_id = await run_sync(_own_checkout, project_v2_id, origin)
+    else:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Pick a project to attach.")
 
     try:
         row = await run_sync(
@@ -192,6 +248,8 @@ async def attach_project(
     except Exception:  # noqa: BLE001 — a stale client is refreshed on its next turn
         logger.warning("Could not release the live client for %s", session_id, exc_info=True)
 
+    # Relayed to the user's other workers too, so a page open on the worker
+    # that asked for a relayed attach updates without a reload.
     try:
         from app.core.sync_engine import sync_engine
         await sync_engine.broadcast_user_session_updated(
@@ -211,3 +269,90 @@ async def attach_project(
         mode="code",
         permission_mode=row.get("permission_mode") or "default",
     )
+
+
+async def handle(body: dict, from_device: str) -> dict:
+    """The ``attach-project`` control action, run on the session's owner.
+
+    The viewing worker already required the owner (``require_admin``) before
+    relaying; the project arrives by shared identity, never a legacy id.
+    """
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id is required")
+    project_v2_id = body.get("project_v2_id")
+    origin = body.get("origin")
+    if not isinstance(project_v2_id, str):
+        project_v2_id = None
+    if not isinstance(origin, str):
+        origin = None
+    if not project_v2_id and not origin:
+        raise ValueError("project_v2_id or origin is required")
+    result = await apply_attach_project(session_id, project_v2_id=project_v2_id, origin=origin)
+    return result.model_dump()
+
+
+def _shared_identity(api_user: Optional[dict], body: AttachProjectRequest) -> dict:
+    """The project's V2 id and origin, checked against the caller's access here."""
+    access = require_origin_access(
+        api_user=api_user, project_id=body.project_id, project_v2_id=body.project_v2_id
+    )
+    return {"project_v2_id": (access.get("project_v2") or {}).get("id"), "origin": access.get("origin")}
+
+
+@router.post("/{session_id}/attach-project", response_model=AttachProjectResponse)
+async def attach_project(
+    request: Request,
+    session_id: str,
+    body: AttachProjectRequest,
+    token: str = Depends(require_admin),
+):
+    """Give this no-project session a project. One-way, owner only.
+
+    Refusals, in order: anyone but the owner (403); an archived chat (409);
+    a session that is not a no-project top-level chat (409); one with a turn
+    queued or running, or whose state can't be read (409); a project the
+    caller cannot reach or that has no checkout on the worker that runs the
+    chat (403/404 here, 409 relayed). A lost race with another attach also
+    answers 409. For a chat another worker runs: 503 when that worker can't
+    be reached, or when it may have applied the attach without confirming.
+    """
+    session = await require_session(request, session_id)
+    _check_attachable(session)
+    api_user = get_api_user_from_request(request)
+    owner = await run_sync(control.owner_of, session)
+    if owner is None:
+        return await apply_attach_project(
+            session_id, project_id=body.project_id, project_v2_id=body.project_v2_id,
+            api_user=api_user,
+        )
+
+    identity = await run_sync(_shared_identity, api_user, body)
+    try:
+        result = await control.call(owner, "attach-project", {"session_id": session_id, **identity})
+    except control.MaybeApplied as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{await _worker_name(owner)} didn't confirm the attach, and it may still have been "
+            "applied. Reopen this chat to check before trying again.",
+        ) from exc
+    except control.RunnerUnreachable as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{await _worker_name(owner)} runs this chat and must be online to attach a project. {exc}",
+        ) from exc
+    except control.ControlRefused as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    return AttachProjectResponse.model_validate(result)
+
+
+async def _worker_name(device_id: str) -> str:
+    try:
+        from app.network import engine
+        ctx = engine.context()
+        if ctx is not None:
+            name = (await run_sync(control._names, ctx, device_id))[0]
+            return name if name != "the other worker" else "The worker that runs this chat"
+    except Exception:  # noqa: BLE001 — the message must not fail
+        pass
+    return "The worker that runs this chat"
