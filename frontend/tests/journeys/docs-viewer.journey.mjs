@@ -207,7 +207,9 @@ await runJourney({
 				return (await docsGroup.getByRole('button').first().innerText()).replace(/\s+/g, ' ').trim();
 			};
 			await mark('Spotlight: "remote, access!" ranks Remote Access first');
-			await page.keyboard.press('Control+k');
+			// The sidebar's Search button, not Ctrl+K: right after load the hotkey
+			// may not be bound yet.
+			await page.getByRole('complementary', { name: 'Chats', exact: true }).getByRole('button', { name: /^Search\b/ }).click();
 			await spotlight.waitFor();
 			const spotRemote = await firstSpotlightRow('remote, access!', 'Remote Access');
 			expect(spotRemote.startsWith('Remote Access'), `Spotlight's first Documentation row is Remote Access (${spotRemote.slice(0, 80)})`);
