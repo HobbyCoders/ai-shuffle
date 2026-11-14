@@ -12,7 +12,6 @@ Enable/disable state is managed via ~/.claude/settings.json (disabledMcpServers 
 Docker mode uses /home/appuser/.claude/ for user scope.
 """
 
-import functools
 import json
 import logging
 import threading
@@ -856,26 +855,6 @@ def get_mcp_service(project_dir: Optional[Path] = None) -> McpService:
         return _mcp_services[cache_key]
 
 
-_MCP_MUTATIONS = 'add_server update_server remove_server set_server_enabled set_project_server_enabled add_project_installed_server remove_project_installed_server'
-
-# Every mutation is a read-modify-write of a shared JSON file. The API runs
-# them on worker threads (reads may back off on a Windows sharing hold), so
-# serialize them in-process; callers composing several mutations hold it too.
-MCP_WRITE_LOCK = threading.RLock()
-
-
-def _serialized_write(method):
-    @functools.wraps(method)
-    def wrapped(*args, **kwargs):
-        with MCP_WRITE_LOCK:
-            return method(*args, **kwargs)
-    return wrapped
-
-
-for _name in _MCP_MUTATIONS.split():
-    setattr(McpService, _name, _serialized_write(getattr(McpService, _name)))
-
-
 from app.core.resource_sync import install_service_mutations as _install_resource_sync
 
-_install_resource_sync(McpService, 'mcp', _MCP_MUTATIONS)
+_install_resource_sync(McpService, 'mcp', 'add_server update_server remove_server set_server_enabled set_project_server_enabled add_project_installed_server remove_project_installed_server')

@@ -297,76 +297,137 @@ def test_seed_clone_cleanup_removes_read_only_git_files_on_windows(tmp_path, win
     assert not seed.exists()
 
 
-# ── Work moved off the event loop keeps its old serialization ───────────────
+# ── The backoff never sleeps on the event loop ──────────────────────────────
 
 
-def test_concurrent_installs_of_one_project_plugin_never_interleave(project_sources, monkeypatch):
+def test_the_retry_never_sleeps_on_an_event_loop_thread(sleeps):
+    import asyncio
+
+    attempts = []
+
+    def held():
+        attempts.append(1)
+        raise _windows_error(32)
+
+    async def on_loop():
+        with pytest.raises(PermissionError):
+            fs_utils.retry_sharing_violation(held)
+
+    asyncio.run(on_loop())
+    assert len(attempts) == 1 and sleeps == []  # the one attempt it always made
+
+    with pytest.raises(PermissionError):
+        fs_utils.retry_sharing_violation(held)
+    assert len(attempts) == 1 + len(fs_utils._SHARING_RETRY_DELAYS) + 1 and len(sleeps) == len(fs_utils._SHARING_RETRY_DELAYS)
+
+
+def test_plugin_and_mcp_handlers_run_one_at_a_time_on_one_thread_off_the_loop(monkeypatch):
+    import asyncio
     import threading
     import time
 
-    from app.core import plugin_install
-
-    svc, *_ = setup(project_sources, "directory")
-    real_copy = plugin_install._copy_tree_resolving_symlinks
-    active, peak, guard = {}, [0], threading.Lock()  # copying thread -> depth (the copy recurses)
-
-    def slow_copy(*args, **kwargs):
-        me = threading.get_ident()
-        with guard:
-            active[me] = active.get(me, 0) + 1
-            peak[0] = max(peak[0], len(active))
-        time.sleep(0.2)
-        try:
-            return real_copy(*args, **kwargs)
-        finally:
-            with guard:
-                active[me] -= 1
-                if not active[me]:
-                    del active[me]
-
-    monkeypatch.setattr(plugin_install, "_copy_tree_resolving_symlinks", slow_copy)
-    errors = []
-
-    def install():
-        try:
-            svc.install_plugin_to_project("sample@sample", PluginScope.LOCAL)
-        except Exception as exc:  # pragma: no cover - reported below
-            errors.append(exc)
-
-    threads = [threading.Thread(target=install) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(30)
-    assert errors == [] and peak[0] == 1
-    assert svc.get_project_enabled_plugins() == {"sample@project-local": True}
-
-
-def test_plugin_and_mcp_handlers_run_their_file_work_off_the_event_loop(monkeypatch):
-    import asyncio
-    import threading
-
     from app.api import mcp as mcp_api
     from app.api import plugins as plugins_api
+    from app.api import project_plugins as project_api
 
-    seen = []
+    running, overlaps, threads = [0], [], set()
+
+    def work():
+        threads.add(threading.current_thread())
+        running[0] += 1
+        overlaps.append(running[0])
+        time.sleep(0.05)
+        running[0] -= 1
 
     class Service:
         def get_all_servers_with_builtins(self):
-            seen.append(threading.current_thread())
+            work()
             return []
 
         def sync_marketplace(self, marketplace_id):
-            seen.append(threading.current_thread())
-            return True
+            work()
+
+        def get_project_installed_plugins(self):
+            work()
+            return []
 
     monkeypatch.setattr(mcp_api, "get_mcp_service", lambda *a, **k: Service())
     monkeypatch.setattr(plugins_api, "get_plugin_service", lambda *a, **k: Service())
+    monkeypatch.setattr(project_api, "validate_project_access", lambda request, project_id: {})
+    monkeypatch.setattr(project_api, "_get_project_plugin_service", lambda project: Service())
 
     async def main():
-        await mcp_api.list_global_mcp_servers(request=None, token="t")
-        await plugins_api.sync_marketplace("m", token="t")
+        await asyncio.gather(
+            mcp_api.list_global_mcp_servers(request=None, token="t"),
+            plugins_api.sync_marketplace("m", token="t"),
+            plugins_api.sync_marketplace("n", token="t"),
+            project_api.list_project_plugins("p", request=None, token="t"),
+        )
         return threading.current_thread()
 
     loop_thread = asyncio.run(main())
-    assert len(seen) == 2 and loop_thread not in seen
+    assert len(overlaps) == 4 and max(overlaps) == 1
+    assert len(threads) == 1 and loop_thread not in threads
+
+
+def test_cold_service_initialisation_runs_off_the_event_loop(sources, tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    from app.api import plugins as plugins_api
+    from app.api import project_plugins as project_api
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setattr(plugin_service, "_plugin_services", {})  # nothing cached yet
+    real_ensure = plugin_service._mp_mod.ensure_default_source
+    initialised = []
+
+    def ensure_default_source(svc):
+        initialised.append((svc.project_dir, threading.current_thread()))
+        return real_ensure(svc)
+
+    monkeypatch.setattr(plugin_service._mp_mod, "ensure_default_source", ensure_default_source)
+    monkeypatch.setattr(project_api, "validate_project_access", lambda request, project_id: {})
+    monkeypatch.setattr(project_api, "get_project_path_from_dict", lambda project_dict: project)
+
+    async def main():
+        listed = await project_api.list_project_plugins("p", request=None, token="t")
+        enabled = await plugins_api.get_enabled_plugins(token="t")
+        return threading.current_thread(), listed, enabled
+
+    loop_thread, listed, enabled = asyncio.run(main())
+    assert listed == [] and enabled.enabled_plugins == {}
+    assert [path for path, _ in initialised] == [project, None]
+    assert all(thread is not loop_thread for _, thread in initialised)
+
+
+def test_a_project_plugin_list_never_races_its_uninstall(project_sources, monkeypatch):
+    import asyncio
+    import time
+
+    from app.api import project_plugins as project_api
+    from app.core import plugin_install
+
+    svc, *_ = setup(project_sources, "directory")
+    svc.install_plugin_to_project("sample@sample", PluginScope.LOCAL)
+    real_rmtree = plugin_install._force_rmtree
+
+    def slow_rmtree(*args, **kwargs):
+        time.sleep(0.3)  # a list scheduled meanwhile must not see a half-removed folder
+        return real_rmtree(*args, **kwargs)
+
+    monkeypatch.setattr(plugin_install, "_force_rmtree", slow_rmtree)
+    monkeypatch.setattr(project_api, "validate_project_access", lambda request, project_id: {})
+    monkeypatch.setattr(project_api, "_get_project_plugin_service", lambda project: svc)
+
+    async def main():
+        uninstall = asyncio.ensure_future(
+            project_api.uninstall_project_plugin("p", "sample@project-local", request=None, token="t"))
+        await asyncio.sleep(0.05)
+        listed = await project_api.list_project_plugins("p", request=None, token="t")
+        await uninstall
+        return listed
+
+    assert asyncio.run(main()) == []
+    assert svc.get_project_enabled_plugins() == {}

@@ -20,8 +20,8 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 from app.api.auth import require_auth, require_admin
-from app.db.async_database import run_sync
-from app.api.common import api_error_handler
+from app.db.async_database import run_plugin_io, run_sync
+from app.api.common import api_error_handler, on_plugin_io
 from app.network import plugins_sync
 from app.core.plugin_service import (
     get_plugin_service
@@ -232,7 +232,7 @@ async def list_marketplaces(token: str = Depends(require_auth)):
     async with api_error_handler("load marketplaces"):
         from app.core.plugin_marketplace import skipped_entries
 
-        service = get_plugin_service()
+        service = await run_sync(get_plugin_service)
         marketplaces = await run_sync(service.get_marketplaces)
         return [
             MarketplaceResponse(
@@ -253,14 +253,15 @@ async def list_marketplaces(token: str = Depends(require_auth)):
 
 
 @router.post("/marketplaces", response_model=MarketplaceResponse, status_code=status.HTTP_201_CREATED)
-async def add_marketplace(
+@on_plugin_io
+def add_marketplace(
     request: MarketplaceAddRequest,
     token: str = Depends(require_admin)
 ):
     """Add a new plugin marketplace from a git repository - Admin only"""
     service = get_plugin_service()
     try:
-        mp = await run_sync(service.add_marketplace, request.url, request.name)
+        mp = service.add_marketplace(request.url, request.name)
         return MarketplaceResponse(
             id=mp.id,
             source=mp.source,
@@ -282,14 +283,15 @@ async def add_marketplace(
 
 
 @router.delete("/marketplaces/{marketplace_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_marketplace(
+@on_plugin_io
+def remove_marketplace(
     marketplace_id: str,
     token: str = Depends(require_admin)
 ):
     """Remove a plugin marketplace and all its installed plugins - Admin only"""
     service = get_plugin_service()
     try:
-        await run_sync(service.remove_marketplace, marketplace_id)
+        service.remove_marketplace(marketplace_id)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -298,14 +300,15 @@ async def remove_marketplace(
 
 
 @router.post("/marketplaces/{marketplace_id}/sync", status_code=status.HTTP_200_OK)
-async def sync_marketplace(
+@on_plugin_io
+def sync_marketplace(
     marketplace_id: str,
     token: str = Depends(require_admin)
 ):
     """Sync a marketplace with its remote repository - Admin only"""
     service = get_plugin_service()
     try:
-        await run_sync(service.sync_marketplace, marketplace_id)
+        service.sync_marketplace(marketplace_id)
         return {"status": "synced", "marketplace_id": marketplace_id}
     except ValueError as e:
         raise HTTPException(
@@ -423,7 +426,7 @@ async def list_file_based_agents(token: str = Depends(require_auth)):
 async def check_for_updates(token: str = Depends(require_auth)):
     """Check all installed plugins for available updates"""
     async with api_error_handler("check for updates"):
-        service = get_plugin_service()
+        service = await run_sync(get_plugin_service)
         updates = await run_sync(service.check_for_updates)
         return [
             PluginUpdateInfoResponse(
@@ -442,7 +445,7 @@ async def check_for_updates(token: str = Depends(require_auth)):
 async def refresh_plugin_updates(token: str = Depends(require_admin)):
     """Refresh installed sources and check their content. Owner-only mutation."""
     async with api_error_handler("refresh plugin updates"):
-        updates = await run_sync(get_plugin_service().check_for_updates, True)
+        updates = await run_sync(lambda: get_plugin_service().check_for_updates(True))
         return [PluginUpdateInfoResponse(**u.to_dict()) for u in updates]
 
 
@@ -450,14 +453,14 @@ async def refresh_plugin_updates(token: str = Depends(require_admin)):
 async def get_plugin_update_status(token: str = Depends(require_auth)):
     """Read-only outcomes; an unchecked source is never reported as current."""
     async with api_error_handler("read plugin update status"):
-        return await run_sync(get_plugin_service().get_update_report)
+        return await run_sync(lambda: get_plugin_service().get_update_report())
 
 
 @router.post("/updates/status/check")
 async def refresh_plugin_update_status(token: str = Depends(require_admin)):
     """Owner-triggered network check including per-plugin failures."""
     async with api_error_handler("refresh plugin update status"):
-        return await run_sync(get_plugin_service().get_update_report, True)
+        return await run_sync(lambda: get_plugin_service().get_update_report(True))
 
 
 @router.post("/update", response_model=PluginResponse, status_code=status.HTTP_200_OK)
@@ -467,7 +470,7 @@ async def update_plugin(
 ):
     """Update a specific plugin to the latest version - Admin only"""
     async with api_error_handler("update plugin"):
-        service = get_plugin_service()
+        service = await run_sync(get_plugin_service)
         try:
             plugin = await run_sync(service.update_plugin, request.plugin_id)
             return PluginResponse(
@@ -498,7 +501,7 @@ async def update_plugin(
 async def update_all_plugins(token: str = Depends(require_admin)):
     """Update all plugins that have available updates - Admin only"""
     async with api_error_handler("update all plugins"):
-        service = get_plugin_service()
+        service = await run_sync(get_plugin_service)
         plugins = await run_sync(service.update_all_plugins)
         return [
             PluginResponse(
@@ -529,10 +532,11 @@ async def update_all_plugins(token: str = Depends(require_admin)):
 # ============================================================================
 
 @router.get("/auto-update/settings", response_model=AutoUpdateSettingsResponse)
-async def get_auto_update_settings(token: str = Depends(require_auth)):
+@on_plugin_io
+def get_auto_update_settings(token: str = Depends(require_auth)):
     """Get auto-update settings"""
     service = get_plugin_service()
-    au_settings = await run_sync(service.get_auto_update_settings)
+    au_settings = service.get_auto_update_settings()
     return AutoUpdateSettingsResponse(
         enabled=au_settings.enabled,
         interval_hours=au_settings.interval_hours,
@@ -548,27 +552,24 @@ async def update_auto_update_settings(
     token: str = Depends(require_admin)
 ):
     """Update auto-update settings - Admin only"""
-    from app.core.plugin_locks import state_lock
+    def merge_and_save():
+        service = get_plugin_service()
+        current = service.get_auto_update_settings()
 
-    service = get_plugin_service()
+        # Merge provided fields
+        if request.enabled is not None:
+            current.enabled = request.enabled
+        if request.interval_hours is not None:
+            current.interval_hours = request.interval_hours
+        if request.auto_sync_marketplaces is not None:
+            current.auto_sync_marketplaces = request.auto_sync_marketplaces
+        if request.auto_update_plugins is not None:
+            current.auto_update_plugins = request.auto_update_plugins
 
-    def _merge_and_save():
-        # Off the event loop (file reads may back off on Windows sharing
-        # holds); the state lock keeps concurrent PUTs from losing a field.
-        with state_lock(service):
-            current = service.get_auto_update_settings()
-            if request.enabled is not None:
-                current.enabled = request.enabled
-            if request.interval_hours is not None:
-                current.interval_hours = request.interval_hours
-            if request.auto_sync_marketplaces is not None:
-                current.auto_sync_marketplaces = request.auto_sync_marketplaces
-            if request.auto_update_plugins is not None:
-                current.auto_update_plugins = request.auto_update_plugins
-            service.save_auto_update_settings(current)
-            return current
+        service.save_auto_update_settings(current)
+        return current
 
-    current = await run_sync(_merge_and_save)
+    current = await run_plugin_io(merge_and_save)
 
     # Signal the background task to reschedule if needed
     from app.core.plugin_auto_update import reschedule_auto_update
@@ -588,7 +589,7 @@ async def run_auto_update(token: str = Depends(require_admin)):
     """Manually trigger an auto-update cycle - Admin only"""
     import asyncio
     async with api_error_handler("run auto-update"):
-        service = get_plugin_service()
+        service = await run_sync(get_plugin_service)
         summary = await asyncio.to_thread(service.run_auto_update)
         return AutoUpdateRunResponse(**summary)
 
@@ -596,7 +597,7 @@ async def run_auto_update(token: str = Depends(require_admin)):
 @router.get("/state/enabled", response_model=PluginEnableStateResponse)
 async def get_enabled_plugins(token: str = Depends(require_auth)):
     """Get all plugin enable/disable states"""
-    service = get_plugin_service()
+    service = await run_sync(get_plugin_service)
     enabled = await run_sync(service.get_enabled_plugins)
     return PluginEnableStateResponse(enabled_plugins=enabled)
 
@@ -632,7 +633,7 @@ async def get_plugin_details(
     token: str = Depends(require_auth)
 ):
     """Get detailed information about a plugin (installed or available)"""
-    service = get_plugin_service()
+    service = await run_sync(get_plugin_service)
 
     # Try installed first, then fall back to available
     plugin = await run_sync(service.get_plugin_details, plugin_id)
@@ -678,7 +679,7 @@ async def install_plugin(
     token: str = Depends(require_admin)
 ):
     """Install a plugin from a marketplace - Admin only"""
-    service = get_plugin_service()
+    service = await run_sync(get_plugin_service)
     try:
         plugin = await run_sync(
             plugins_sync.install_plugin, service, request.plugin_id, request.scope, request.enable
@@ -727,7 +728,7 @@ async def install_plugins_batch(
     (refused before anything is copied). Plugins installed before the failing
     one stay installed.
     """
-    service = get_plugin_service()
+    service = await run_sync(get_plugin_service)
     try:
         plugins = await run_sync(
             service.install_plugins_batch, request.plugin_ids, request.scope, request.enable
@@ -766,7 +767,7 @@ async def uninstall_plugin(
     token: str = Depends(require_admin)
 ):
     """Uninstall a plugin - Admin only"""
-    service = get_plugin_service()
+    service = await run_sync(get_plugin_service)
     try:
         records = await run_sync(service.get_installation_records, plugin_id)
         shared = any(record.get("scope", "user") in ("user", "global", None) for record in records)
@@ -796,7 +797,7 @@ async def enable_plugin(
     name the ``content_hash`` of the version that was reviewed; a plugin that
     changed since is refused with 409.
     """
-    service = get_plugin_service()
+    service = await run_sync(get_plugin_service)
     extra = {"content_hash": request.content_hash} if request and request.content_hash else {}
     try:
         success = await run_sync(service.enable_plugin, plugin_id, **extra)
@@ -816,7 +817,7 @@ async def disable_plugin(
     token: str = Depends(require_admin)
 ):
     """Disable a plugin globally - Admin only"""
-    service = get_plugin_service()
+    service = await run_sync(get_plugin_service)
     try:
         success = await run_sync(service.disable_plugin, plugin_id)
     except ValueError as exc:

@@ -593,8 +593,9 @@ async def build_tool_surface(*, refresh: bool = False) -> Dict[str, Any]:
     )
 
     # Browser + user MCP servers, both enumerated through fluid's MCP client.
-    # Off the loop: the MCP config read may back off on a Windows sharing hold.
-    browser_name, servers = await asyncio.to_thread(_configured_mcp_servers, errors)
+    # The MCP config read may back off on a Windows sharing hold: off the loop.
+    from app.db.async_database import run_plugin_io
+    browser_name, servers = await run_plugin_io(_configured_mcp_servers, errors)
 
     if browser_name is not None:
         rows, error = await mcp_server_tools(

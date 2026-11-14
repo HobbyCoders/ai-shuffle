@@ -1,5 +1,6 @@
 """Filesystem cleanup shared by Git and plugin installation."""
 
+import asyncio
 import os
 import shutil
 import stat
@@ -44,6 +45,14 @@ _SHARING_RETRY_DELAYS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.3)
 _sleep = time.sleep
 
 
+def _on_event_loop():
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def is_sharing_violation(exc):
     """Whether ``exc`` is a transient Windows hold on a file, not a real failure."""
     return isinstance(exc, PermissionError) and getattr(exc, "winerror", None) in _SHARING_WINERRORS
@@ -53,7 +62,12 @@ def retry_sharing_violation(operation):
     """Run ``operation()``, retrying a Windows sharing violation for under a second.
 
     Any other error, and a hold that outlasts the retries, is raised as is.
+    On an event-loop thread it makes the single attempt it always made: the
+    backoff sleeps, which would stall every request. File work that needs the
+    retry runs on a worker thread (``run_plugin_io`` or ``run_sync``).
     """
+    if _on_event_loop():
+        return operation()
     for delay in _SHARING_RETRY_DELAYS:
         try:
             return operation()
