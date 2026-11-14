@@ -252,7 +252,6 @@ let warnedUntypedRateLimit = false;
 
 export function createMessageHandlers(deps: MessageHandlerDeps): {
 	handleMessage: (data: Record<string, unknown>) => void;
-	noteSessionRows: (rows: ReadonlyArray<{ id: string; effort?: string | null }>) => void;
 } {
 	const {
 		update, getState, wsSend,
@@ -281,40 +280,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			appLoadSessions();
 			if (withApiUsers) appLoadApiUserSessions();
 		}, SESSION_LIST_RELOAD_DEBOUNCE_MS);
-	}
-
-	// ── Session effort from elsewhere (#1579) ─────────────────────────
-	/** Adopt a session's saved effort pick (null = Auto) on screen and in the
-	 *  cached copy a switch back restores. Otherwise this composer's next send
-	 *  carries the older level and pins it again. */
-	function adoptSessionEffort(sessionId: string, effort: string | null): void {
-		sessionEphemeralCache.patchEffort(sessionId, effort);
-		if (sessionId === getState().sessionId && getState().effortLevelOverride !== effort) {
-			update(s => ({ ...s, effortLevelOverride: effort }));
-			onPersistSession();
-		}
-	}
-
-	/** The last saved effort each sidebar row showed. */
-	const rowEfforts = new Map<string, string | null>();
-
-	/**
-	 * Follow committed sidebar rows. A pick made through another worker reaches
-	 * this one only as a `sessions` invalidation, never a `session_updated` frame,
-	 * so the reloaded row is the only news of it. A row's effort that CHANGED is
-	 * adopted; a row seen for the first time is not (opening a chat reads its own).
-	 * The list store keeps a read that started before a push from committing over
-	 * it, so a change here is the server's.
-	 */
-	function noteSessionRows(rows: ReadonlyArray<{ id: string; effort?: string | null }>): void {
-		for (const row of rows) {
-			if (!row || !('effort' in row)) continue;
-			const effort = typeof row.effort === 'string' ? row.effort : null;
-			const seen = rowEfforts.has(row.id);
-			const before = rowEfforts.get(row.id);
-			rowEfforts.set(row.id, effort);
-			if (seen && before !== effort) adoptSessionEffort(row.id, effort);
-		}
 	}
 
 	/**
@@ -667,7 +632,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// older level and pins it again. The row patch below covers the rest.
 				if (updatedSessionId && 'effort' in updates
 					&& (updates.effort === null || typeof updates.effort === 'string')) {
-					adoptSessionEffort(updatedSessionId, updates.effort as string | null);
+					const effort = updates.effort as string | null;
+					const cached = sessionEphemeralCache.restore(updatedSessionId);
+					if (cached) sessionEphemeralCache.save(updatedSessionId, { ...cached, effortLevelOverride: effort });
+					if (updatedSessionId === getState().sessionId) {
+						update(s => ({ ...s, effortLevelOverride: effort }));
+						onPersistSession();
+					}
 				}
 				// A settle dismisses the session's waits server-side (#2324);
 				// drop the local copies so the card and composer follow.
@@ -1753,5 +1724,5 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		}
 	}
 
-	return { handleMessage, noteSessionRows };
+	return { handleMessage };
 }

@@ -65,38 +65,6 @@ def test_catalog_mirrors_sessions_and_events_to_peers(workers):
         assert rows[0]["is_remote"] and rows[0]["device_name"] == "A"
 
 
-def test_owner_effort_pick_and_auto_reach_a_viewer_on_another_worker(workers, monkeypatch):
-    """#1579: a browser on B shows A's chat. B hears of A's effort change only as
-    the mirrored row and a ``sessions`` refetch, so both must carry it, Auto too."""
-    from unittest.mock import Mock
-    from app.core.global_events import global_events
-    from app.network import startup
-    a, b = workers("effort-owner"), workers("effort-viewer")
-    with a.active():
-        engine.create_network("Home", device_name="A")
-    join(a, b)
-    monkeypatch.setattr(engine, "_listeners", [startup._on_applied])
-    _new_session(a, "s-effort", "Effort on A")
-    with a.active():
-        database.set_session_run_binding("s-effort", effort="medium")
-        engine.scan_all()
-    converge([a, b])
-    with b.active():
-        assert database.get_session("s-effort")["effort"] == "medium"
-
-    emit = Mock()
-    monkeypatch.setattr(global_events, "resources_changed", emit)
-    with a.active():
-        # Auto, as the run-settings endpoint stores it.
-        database.set_session_run_binding("s-effort", effort=None, clear_effort=True)
-        engine.scan_all()
-    emit.reset_mock()
-    converge([a, b])
-    with b.active():
-        assert database.get_session("s-effort")["effort"] is None
-    emit.assert_any_call("sessions", user_type="admin")
-
-
 def test_last_owned_session_deletion_retracts_children_but_preserves_peer_records(workers):
     a, b = workers("last-owner"), workers("remaining-peer")
     with a.active():

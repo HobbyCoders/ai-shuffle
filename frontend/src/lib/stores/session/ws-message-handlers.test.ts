@@ -2278,36 +2278,6 @@ describe('ws-message-handlers', () => {
 			expect(sessionEphemeralCache.restore('elsewhere')?.effortLevelOverride).toBeNull();
 			expect(b.state.effortLevelOverride).toBe('high');
 		});
-
-		it('a viewer on another worker follows Auto picked on the owner, from the reloaded row', () => {
-			// That worker hears only a `sessions` invalidation; the reload is the news.
-			const b = openAtMedium();
-			handlers.noteSessionRows([{ id: 'session-1', effort: 'medium' }, { id: 'other', effort: null }]);
-			expect(b.state.effortLevelOverride).toBe('medium');
-			expect(deps.onPersistSession).not.toHaveBeenCalled();
-
-			handlers.noteSessionRows([{ id: 'session-1', effort: null }, { id: 'other', effort: null }]);
-			expect(b.state.effortLevelOverride).toBeNull();
-			expect(deps.onPersistSession).toHaveBeenCalledTimes(1);
-
-			// An unrelated reload with the same value changes nothing.
-			handlers.noteSessionRows([{ id: 'session-1', effort: null }, { id: 'other', effort: 'low' }]);
-			expect(b.state.effortLevelOverride).toBeNull();
-			expect(deps.onPersistSession).toHaveBeenCalledTimes(1);
-		});
-
-		it('a row seen for the first time is not adopted; a cached chat follows its row', () => {
-			const b = openAtMedium();
-			// Opening a chat reads its own effort; the first list read is no change.
-			handlers.noteSessionRows([{ id: 'session-1', effort: 'low' }]);
-			expect(b.state.effortLevelOverride).toBe('medium');
-
-			sessionEphemeralCache.save('elsewhere', { ...b.state, sessionId: 'elsewhere', effortLevelOverride: 'high' } as never);
-			handlers.noteSessionRows([{ id: 'elsewhere', effort: 'high' }]);
-			handlers.noteSessionRows([{ id: 'elsewhere', effort: null }]);
-			expect(sessionEphemeralCache.restore('elsewhere')?.effortLevelOverride).toBeNull();
-			expect(b.state.effortLevelOverride).toBe('medium');
-		});
 	});
 
 	describe('user_session_updated handler (working time, #1619)', () => {

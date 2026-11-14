@@ -742,7 +742,7 @@ export function handleGlobalUserEvent(data: Record<string, unknown>) {
  if (acceptUserEvent(data, 'global')) handleMessage(data);
 }
 
-const { handleMessage, noteSessionRows } = createMessageHandlers({
+const { handleMessage } = createMessageHandlers({
 	update: _update,
 	getState: () => _state,
 	wsSend: (data) => wsConn.send(data),
@@ -1510,13 +1510,6 @@ export const activeSession = {
 
 	markWorktreeDeleted() {
 		_update(s => ({ ...s, worktreeDeleted: true }));
-	},
-
-	/** Follow committed sidebar rows: a session's effort changed through another
-	 *  worker arrives only as a reloaded row, so the open chat and its cached copy
-	 *  follow a changed row (#1579). */
-	noteSessionRows(rows: ReadonlyArray<{ id: string; effort?: string | null }>) {
-		noteSessionRows(rows);
 	},
 
 	/** Remote defaults may update an idle composer, never an existing session or typed draft. */
