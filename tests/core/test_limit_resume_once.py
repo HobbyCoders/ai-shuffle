@@ -276,3 +276,25 @@ async def test_a_settle_while_snoozed_still_cancels_the_resume(stopped_chat, mon
     fired, submit = await _fires(row, monkeypatch)
     assert fired is None
     submit.assert_not_awaited()
+
+
+@pytest.mark.parametrize("settle_between", [False, True])
+async def test_a_second_wake_from_another_worker_keeps_the_resume(stopped_chat, monkeypatch, settle_between):
+    from app.network import session_active
+    turn, _, _ = stopped_chat
+    await lr.arm("once-chat", turn["id"])
+    [row] = wakeups.get_session_wakeups("once-chat", lr.LIMIT_RESUME_SOURCE)
+    before = lr._once_fence("once-chat")
+    session_active.write_shared("once-chat", False, _later())
+    session_active.write_shared("once-chat", True)  # this worker's wake
+    if settle_between:
+        session_active.write_shared("once-chat", False)
+        session_active.write_shared("once-chat", True)
+    # The other worker's independent wake lands as an active -> active projection.
+    with get_db() as conn:
+        session_active.project(conn.cursor(), {"session_id": "once-chat", "is_active": True,
+                                               "updated_at": "2099-01-01T00:00:00+00:00", "snoozed_until": None})
+    assert database.get_session("once-chat")["is_active"]
+    assert lr._same_fence(before, lr._once_fence("once-chat")) is not settle_between
+    fired, submit = await _fires(row, monkeypatch)
+    assert (fired == "resume-turn") is not settle_between
