@@ -10,6 +10,7 @@
  * `.media-*` class names). Visibility/hover styling lives in app.css.
  */
 
+import { marked, type Token } from 'marked';
 import { apiUrl } from '$lib/api/runtime';
 import { chatFileUrl } from './chat-files';
 import { escapeHtml } from './escape-html';
@@ -52,7 +53,9 @@ function mediaTarget(url: string): { path: string; fromQuery: boolean } {
 
 /** Extract a lowercase file extension from a URL, handling `?path=` serve routes. */
 function extOf(url: string): string {
-	const candidate = mediaTarget(url).path;
+	// The last path segment only: a dot in a host (`https://w.example/…/<hash>`)
+	// or a folder is not a file type.
+	const candidate = mediaTarget(url).path.split(/[/\\]/).pop() ?? '';
 	const dot = candidate.lastIndexOf('.');
 	return dot >= 0 ? candidate.slice(dot + 1).toLowerCase() : '';
 }
@@ -75,6 +78,19 @@ export function classifyMediaUrl(url: string): MediaKind | null {
 	if (VIDEO_EXTS.has(ext)) return 'video';
 	if (AUDIO_EXTS.has(ext)) return 'audio';
 	return null;
+}
+
+// The artifact store's serve route (app/api/artifacts.py): relative, or on a
+// worker's origin. Its content-addressed path names no file type.
+const ARTIFACT_URL = /^(?:https?:\/\/[^/?#\s]+)?\/api\/v1\/artifacts\/[^/?#\s]+(?:[?#]|$)/i;
+
+/**
+ * The media kind of a markdown image's URL. A generated image the reply embeds
+ * by its artifact URL is a picture: it gets the same player, download button
+ * and lightbox as the tool row it leaves the picture to (#1603).
+ */
+function imageEmbedKind(url: string): MediaKind | null {
+	return classifyMediaUrl(url) ?? (ARTIFACT_URL.test(url) ? 'image' : null);
 }
 
 /**
@@ -463,11 +479,122 @@ const MEDIA_TOKEN = /!?\[[^\]]*\]\([^)\s]+\)/g;
 const RAW_BASE64 = /"image_base64"\s*:\s*"[A-Za-z0-9+/=]{100,}"/g;
 const PLACEHOLDER = '<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">';
 
+// ── Prose or code (#1619) ───────────────────────────────────────────────────
+// Media markdown becomes a player only where marked's lexer reads it as an
+// image or link in prose, over the COMPLETE reply: never inside a fenced or
+// inline code span, whatever its backtick run, its lines or its container. It
+// is the same lexer reading the gallery dedupe uses (media-gallery.ts
+// `embedsOf`), so what the reply draws and what a tool row counts as shown
+// agree.
+//
+// Each `[` is tagged with a marker carrying its offset in the reply before
+// lexing. The marker holds no markdown syntax, so the lexer reads the same
+// structure; a prose image or link token's raw starts with its bracket's tag.
+// The regex rewrite below runs over the same tagged text and asks the set.
+const TAG_OPEN = '\uE000';
+const TAG = /\uE000(\d+)\uE001/g;
+const LEADING_TAG = /^\uE000(\d+)\uE001/;
+
+/**
+ * Where a fragment sits. A streaming render rewrites the stable prefix and the
+ * growing tail separately; `source` is the whole reply and `offset` where the
+ * fragment starts in it, so a fence opened earlier still makes it code.
+ * `'prose'` is a token the lexer already read as prose (the gallery dedupe).
+ */
+export type MediaContext = { source: string; offset: number } | 'prose';
+
+interface ProseBrackets {
+	images: ReadonlySet<number>;
+	links: ReadonlySet<number>;
+}
+
+/**
+ * Visit every token, in the order and with the children `marked.walkTokens`
+ * visits (table cells, list items, then `tokens`). marked's own walker
+ * concatenates an array per token, which is quadratic: ~60 ms on a 50 KB reply
+ * against ~6 ms for the lexing itself. Code tokens have no children, so
+ * nothing inside code is ever visited.
+ */
+export function walkMarkdownTokens(tokens: readonly Token[], visit: (token: Token) => void): void {
+	for (const token of tokens) {
+		visit(token);
+		if (token.type === 'table') {
+			for (const cell of token.header) walkMarkdownTokens(cell.tokens, visit);
+			for (const row of token.rows) for (const cell of row) walkMarkdownTokens(cell.tokens, visit);
+		} else if (token.type === 'list') {
+			walkMarkdownTokens(token.items, visit);
+		} else if ('tokens' in token && token.tokens) {
+			walkMarkdownTokens(token.tokens, visit);
+		}
+	}
+}
+
+function tagBrackets(text: string, base: number): string {
+	return text.replace(/\[/g, (_bracket, at: number) => `[\uE000${base + at}\uE001`);
+}
+
+const untag = (text: string) => text.replace(TAG, '');
+
+// Lexed once per settled reply (#1282: a transcript rebuild re-renders every
+// answer). Keyed by the reply string; the bound drops the oldest first. A
+// streaming reply changes every delta, so it gets a one-entry memo instead:
+// the prefix and the tail of one delta share it, and it never evicts history.
+const proseBracketCache = new Map<string, ProseBrackets>();
+const PROSE_BRACKET_CACHE_MAX = 1000;
+let streamingSource: string | null = null;
+let streamingBrackets: ProseBrackets | null = null;
+
+function proseBrackets(source: string, settled: boolean): ProseBrackets {
+	const cached = settled ? proseBracketCache.get(source) : source === streamingSource ? streamingBrackets : null;
+	if (cached) return cached;
+	const images = new Set<number>();
+	const links = new Set<number>();
+	walkMarkdownTokens(marked.lexer(tagBrackets(source, 0)), (token) => {
+		if (token.type !== 'image' && token.type !== 'link') return;
+		const tag = token.raw.slice(token.type === 'image' ? 2 : 1).match(LEADING_TAG);
+		if (tag) (token.type === 'image' ? images : links).add(Number(tag[1]));
+	});
+	const found = { images, links };
+	if (!settled) {
+		streamingSource = source;
+		streamingBrackets = found;
+	} else {
+		if (proseBracketCache.size >= PROSE_BRACKET_CACHE_MAX) {
+			const oldest = proseBracketCache.keys().next().value;
+			if (oldest !== undefined) proseBracketCache.delete(oldest);
+		}
+		proseBracketCache.set(source, found);
+	}
+	return found;
+}
+
+// A markdown image the media rewrite leaves alone, in every destination form
+// the lexer accepts: bare or `<angle-bracketed>`, with an optional "title",
+// 'title' or (title) (#792).
+const PLAIN_IMAGE_MD = /!\[([^\]]*)\]\(\s*(?:<([^>\n]*)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
+
+/** Whether `text` holds anything the rewrite could change: skips the lexer for most text. */
+function hasMediaCandidate(text: string, plainImages: boolean): boolean {
+	if (!text.includes('](')) return false;
+	if (plainImages && text.includes('![')) return true;
+	for (const m of text.matchAll(IMG_MD)) if (imageEmbedKind(m[2])) return true;
+	for (const m of text.matchAll(LINK_MD)) {
+		const kind = classifyMediaUrl(m[3]);
+		if (kind === 'video' || kind === 'audio') return true;
+	}
+	return false;
+}
+
 /**
  * Rewrite media markdown into inline-player HTML blocks. Used for BOTH the
  * streaming and final render, so a generated image/video/audio appears the
  * instant its complete markdown is in the buffer — no "loading" placeholder.
- * Non-media markdown is left untouched for the markdown parser.
+ * Non-media markdown, and media markdown written in code, is left untouched
+ * for the markdown parser.
+ *
+ * `plainImage` sees every other prose markdown image (a URL naming no kind, a
+ * title, an angle-bracketed destination) and returns its replacement, or null
+ * to keep it (the gallery drops a picture it already shows).
  *
  * Flicker note: the markup is stable, but Svelte's {@html} recreates DOM
  * whenever its string changes. AssistantMessage keeps settled media out of the
@@ -476,18 +603,48 @@ const PLACEHOLDER = '<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-
  */
 export function rewriteMediaMarkdown(
 	text: string,
-	renderMedia: (kind: MediaKind, url: string, label: string) => string = mediaHtml
+	renderMedia: (kind: MediaKind, url: string, label: string) => string = mediaHtml,
+	context?: MediaContext,
+	plainImage?: (url: string) => string | null
 ): string {
-	let out = text.replace(IMG_MD, (match, alt: string, url: string) => {
-		const kind = classifyMediaUrl(url);
-		return kind ? renderMedia(kind, url, alt) : match;
+	let prose: ProseBrackets | null = null;
+	let out = text;
+	if (context !== 'prose' && hasMediaCandidate(text, !!plainImage)) {
+		const source = context?.source ?? text;
+		// Text that already holds the tag character keeps the plain reading.
+		if (!source.includes(TAG_OPEN)) {
+			prose = proseBrackets(source, !context);
+			out = tagBrackets(text, context?.offset ?? 0);
+		}
+	}
+	// An image's own bracket is the tag right after `![`. A link's label can
+	// hold an earlier stray `[`, and the lexer's link starts at the last one.
+	const proseImage = (alt: string) => {
+		const tag = alt.match(LEADING_TAG);
+		return !prose || (!!tag && prose.images.has(Number(tag[1])));
+	};
+	const proseLink = (label: string) => {
+		const tags = [...label.matchAll(TAG)];
+		return !prose || (tags.length > 0 && prose.links.has(Number(tags[tags.length - 1][1])));
+	};
+	out = out.replace(IMG_MD, (match, alt: string, url: string) => {
+		const kind = imageEmbedKind(untag(url));
+		return kind && proseImage(alt) ? renderMedia(kind, untag(url), untag(alt)) : match;
 	});
 	out = out.replace(LINK_MD, (match, lead: string, label: string, url: string) => {
-		const kind = classifyMediaUrl(url);
+		const kind = classifyMediaUrl(untag(url));
 		// Only embed video/audio for link syntax; leave image links as links.
-		if (kind === 'video' || kind === 'audio') return lead + renderMedia(kind, url, label);
+		if ((kind === 'video' || kind === 'audio') && proseLink(label)) {
+			return lead + renderMedia(kind, untag(url), untag(label));
+		}
 		return match;
 	});
+	if (plainImage) {
+		out = out.replace(PLAIN_IMAGE_MD, (match, alt: string, bracketed: string | undefined, bare: string | undefined) =>
+			proseImage(alt) ? (plainImage(untag(bracketed ?? bare ?? '')) ?? match) : match
+		);
+	}
+	if (prose) out = untag(out);
 	// Never dump a raw base64 image blob as literal prose.
 	out = out.replace(RAW_BASE64, `${PLACEHOLDER}Image data omitted</div>`);
 	return out;
@@ -510,7 +667,7 @@ export function clampRevealToMediaBoundary(text: string, cut: number): number {
 		if (cut < end) {
 			// Cut straddles this token. Clamp only if it is embeddable media.
 			const urlMatch = m[0].match(/\(([^)\s]+)\)/);
-			if (urlMatch && classifyMediaUrl(urlMatch[1])) return start;
+			if (urlMatch && (m[0].startsWith('!') ? imageEmbedKind : classifyMediaUrl)(urlMatch[1])) return start;
 			break;
 		}
 	}

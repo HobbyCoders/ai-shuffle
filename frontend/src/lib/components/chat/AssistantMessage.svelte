@@ -510,7 +510,7 @@
 
 		if (lastBoundary <= 0) {
 			// No paragraph boundary yet — full parse (content is short)
-			const html = renderChatMarkdown(rewriteMediaMarkdown(text), false);
+			const html = renderChatMarkdown(rewriteMediaMarkdown(text, undefined, { source: text, offset: 0 }), false);
 			return { prefix: '', tail: sanitizeHtml(injectStreamingCursor(html)) };
 		}
 
@@ -525,7 +525,9 @@
 			// Stable prefix grew — re-parse, sanitize, and cache it once. Only this
 			// side gets syntax highlighting: its fences are closed, and Shiki's
 			// memo makes the repeat renders cheap.
-			prefixHtml = sanitizeHtml(renderChatMarkdown(rewriteMediaMarkdown(stableContent), true));
+			// Both halves are read against the whole reply, so a fence or list
+			// that spans the split keeps its media markdown as code (#1619).
+			prefixHtml = sanitizeHtml(renderChatMarkdown(rewriteMediaMarkdown(stableContent, undefined, { source: text, offset: 0 }), true));
 			_cache.stablePrefixContent = stableContent;
 			_cache.stablePrefixHtml = prefixHtml;
 		}
@@ -535,7 +537,7 @@
 		// last paragraph rather than the whole message. Highlighting is off here:
 		// the fence may not be closed yet, and tokenising per delta would be the
 		// most expensive thing in the stream loop.
-		let tailHtml = renderChatMarkdown(rewriteMediaMarkdown(tailContent), false);
+		let tailHtml = renderChatMarkdown(rewriteMediaMarkdown(tailContent, undefined, { source: text, offset: lastBoundary }), false);
 		tailHtml = sanitizeHtml(injectStreamingCursor(tailHtml));
 
 		return { prefix: prefixHtml, tail: tailHtml };
@@ -570,7 +572,8 @@
 	 * See $lib/utils/media for detection rules and produced markup.
 	 */
 	function renderMarkdownFull(text: string, isStreaming: boolean): string {
-		const source = rewriteMediaMarkdown(text);
+		// A streaming reply is read through the one-delta memo, not the settled cache.
+		const source = rewriteMediaMarkdown(text, undefined, isStreaming ? { source: text, offset: 0 } : undefined);
 		if (!isStreaming) return finishedMarkdown(source);
 		return sanitizeHtml(injectStreamingCursor(renderChatMarkdown(source, false)));
 	}
