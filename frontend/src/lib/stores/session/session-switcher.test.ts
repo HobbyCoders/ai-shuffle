@@ -14,6 +14,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
 import type { ChatMessage } from '../types';
 import { appMode } from '../sessionMode.svelte';
+import { holdPendingDraft } from './draft-persistence';
 import { composerPreferences } from '../composer-preferences';
 import { git } from '../git.svelte';
 import { api } from '$lib/api/client';
@@ -739,6 +740,29 @@ describe('session-switcher · switchSession isolation', () => {
 			project:'draft-project',projectV2Id:'draft-v2',modelOverride:'draft-model',
 			permissionModeOverride:'acceptEdits',worktreeBranch:'feature/draft',
 			worktreeBaseBranch:'develop',worktreeCreateNewBranch:true});
+		switcher.destroy();
+	});
+
+	it('keeps the project of words typed just before New Chat (still in the save debounce)', () => {
+		appMode.set('code');
+		const { switcher, getState, deps } = makeSwitcher(fullState({
+			sessionId: null, draft: '', project: 'draft-project', projectV2Id: 'draft-v2', mode: 'code',
+			worktreeBranch: '', worktreeId: null, worktreeIntent: 'local',
+		}));
+		holdPendingDraft(() => deps.update(s => ({ ...s, draft: 'quick' })));
+		expect(switcher.newChat().restoredDraft).toBe(true);
+		expect(getState()).toMatchObject({ draft: 'quick', project: 'draft-project', projectV2Id: 'draft-v2', mode: 'code' });
+		switcher.destroy();
+	});
+
+	it('still starts an untyped compose over without its project (nothing pending)', () => {
+		appMode.set('code');
+		const { switcher, getState } = makeSwitcher(fullState({
+			sessionId: null, draft: '', project: 'draft-project', projectV2Id: 'draft-v2', mode: 'code',
+			worktreeBranch: '', worktreeId: null, worktreeIntent: 'local',
+		}));
+		expect(switcher.newChat().restoredDraft).toBe(false);
+		expect(getState()).toMatchObject({ project: '', projectV2Id: null, mode: 'chat' });
 		switcher.destroy();
 	});
 

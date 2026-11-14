@@ -6,6 +6,7 @@
 	 * Centered hero with clickable workspace name dropdown.
 	 * Uses GroupedSelector for group-aware project selection.
 	 */
+	import { tick } from 'svelte';
 	import { ChevronDown, FolderClosed, FolderX } from 'lucide-svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
 	import { menuHost as hostMenu } from '$lib/components/ui/menu-host';
@@ -63,11 +64,14 @@
 	/** Opened by `openPicker` on this control instead of the trigger. */
 	let anchorOverride = $state<HTMLElement | null>(null);
 	/** Where focus goes back after a keyboard-opened pick or Escape (the message editor). */
-	let returnTo: HTMLElement | null = null;
+	/** Where focus goes after a pick or Escape: an element, or a function that puts it back. */
+	let returnTo: HTMLElement | (() => void) | null = null;
 	let autofocusSearch = $state(false);
 	const NO_PROJECT_ID = '__no_project__';
 	// The desktop row's list: the phone sheet keeps its plain full-page list.
 	const searchable = $derived(variant === 'sentence' && !sheetMode);
+	/** Its id among the one-open-at-a-time menus: opening it closes the others, and theirs closes it. */
+	const dropdownId = $derived(sheetMode ? 'sheet-new-project' as const : searchable ? 'new-project' as const : null);
 	const shortcutHint = projectPickerShortcutHint();
 	const ariaShortcut = projectPickerAriaShortcut();
 
@@ -135,26 +139,29 @@
 		} };
 	}
 
-	// In the sheet, its page's Back closes this list through the shared coordinator.
+	// Through the shared coordinator: another menu opening closes this list (and
+	// in the sheet, its page's Back does).
 	$effect(() => {
-		if (sheetMode && showDropdown && $openHeaderDropdown !== 'sheet-new-project') showDropdown = false;
+		if (dropdownId && showDropdown && $openHeaderDropdown !== dropdownId) showDropdown = false;
 	});
 	$effect(() => {
-		if (sheetMode && !showDropdown) closeDropdown('sheet-new-project');
+		if (dropdownId && !showDropdown) closeDropdown(dropdownId);
 	});
 
 	function closeOnEscape(event: KeyboardEvent) {
 		if (event.key !== 'Escape' || !showDropdown) return;
 		event.preventDefault();
 		showDropdown = false;
-		const back = takeReturnFocus() ?? anchorOverride ?? dropdownRef?.querySelector('button');
-		back?.focus({ preventScroll: true });
+		const back = takeReturnFocus();
+		if (back) back();
+		else (anchorOverride ?? dropdownRef?.querySelector('button'))?.focus({ preventScroll: true });
 	}
 
-	function takeReturnFocus(): HTMLElement | null {
-		const back = returnTo?.isConnected ? returnTo : null;
+	function takeReturnFocus(): (() => void) | null {
+		const back = returnTo;
 		returnTo = null;
-		return back;
+		if (typeof back === 'function') return back;
+		return back?.isConnected ? () => back.focus({ preventScroll: true }) : null;
 	}
 
 	// Add project modal state
@@ -202,8 +209,9 @@
 				onSelectProject(id);
 			}
 		}
-		// Opened from the message editor: keep typing there.
-		back?.focus({ preventScroll: true });
+		// Opened from the message editor: keep typing there, once the pick has
+		// re-rendered the row (a microtask: no key can land in between).
+		if (back) void tick().then(back);
 	}
 
 	function openAddModal() {
@@ -219,7 +227,7 @@
 	 * the list is open (the cursor is in its search), it only refocuses the
 	 * search and keeps the place focus goes back to.
 	 */
-	export function openPicker({ anchor = null, returnFocus = null }: { anchor?: HTMLElement | null; returnFocus?: HTMLElement | null } = {}) {
+	export function openPicker({ anchor = null, returnFocus = null }: { anchor?: HTMLElement | null; returnFocus?: HTMLElement | (() => void) | null } = {}) {
 		if (showDropdown) {
 			groupedSelector?.focusSearch();
 			return;
@@ -228,6 +236,7 @@
 		anchorOverride = anchor;
 		autofocusSearch = true;
 		showDropdown = true;
+		if (dropdownId) openDropdown(dropdownId);
 		groupedSelector?.reset();
 		void appData.loadClusterProjects();
 	}
@@ -240,7 +249,7 @@
 		// screen would raise its keyboard over the list.
 		autofocusSearch = typeof matchMedia === 'function' && matchMedia('(pointer: fine)').matches;
 		if (showDropdown) {
-			if (sheetMode) openDropdown('sheet-new-project');
+			if (dropdownId) openDropdown(dropdownId);
 			// Reset grouped selector to main panel when opening
 			groupedSelector?.reset();
 			void appData.loadClusterProjects();
@@ -278,7 +287,7 @@
 			bind:this={listRef}
 			use:mobilePopup
 			use:hostMenu={sheetMode ? menuHost : null}
-			use:floatingMenu={{ anchor: anchorOverride ?? sentenceTrigger, align: 'start', enabled: !isMobileUi() && !sheetMode }}
+			use:floatingMenu={{ anchor: anchorOverride ?? sentenceTrigger, align: 'start', enabled: !isMobileUi() && !sheetMode, keepPlacement: searchable }}
 		>
 			<GroupedSelector
 				bind:this={groupedSelector}

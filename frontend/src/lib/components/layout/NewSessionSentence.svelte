@@ -23,6 +23,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { caretOffset, placeCaret } from '$lib/services/caret';
 	import { provideProjectPicker } from '$lib/services/project-picker';
 	import { clusterProjects, projects } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
@@ -65,7 +66,7 @@
 	let picker = $state<ReturnType<typeof WorkspaceSelector> | null>(null);
 
 	/** Open the picker on the row's project control; false when the row is not usable now. */
-	function openPicker(returnFocus: HTMLElement | null): boolean {
+	function openPicker(returnFocus: HTMLElement | (() => void) | null): boolean {
 		if ($activeSession.sessionId || !row?.isConnected || !picker) return false;
 		// Hidden under another page (Settings, Agents): not on screen.
 		if (typeof row.checkVisibility === 'function' && !row.checkVisibility()) return false;
@@ -81,11 +82,30 @@
 		setTimeout(() => openPicker(trigger));
 	}
 
-	onMount(() => provideProjectPicker(() => {
+	/** The message box on this screen (the one on show, if a hidden copy is mounted). */
+	function composerEditor(): HTMLElement | null {
+		const editors = document.querySelectorAll<HTMLElement>('[data-message-editor] [contenteditable="true"]');
+		return [...editors].find(el => typeof el.checkVisibility !== 'function' || el.checkVisibility()) ?? null;
+	}
+
+	/**
+	 * After a pick or Escape, back to the message box with the caret where it
+	 * was (at the end when focus was elsewhere). Found again by then if the
+	 * pick re-rendered it.
+	 */
+	function backToComposer(): () => void {
 		const focused = document.activeElement;
 		const editor = focused instanceof HTMLElement && focused.closest('[data-message-editor]') ? focused : null;
-		return openPicker(editor);
-	}));
+		const offset = editor ? caretOffset(editor) : null;
+		return () => {
+			const target = editor?.isConnected ? editor : composerEditor();
+			if (!target) return;
+			target.focus({ preventScroll: true });
+			placeCaret(target, offset);
+		};
+	}
+
+	onMount(() => provideProjectPicker(() => openPicker(backToComposer())));
 </script>
 
 <section class="ns-context" aria-label="New chat" bind:this={row}>

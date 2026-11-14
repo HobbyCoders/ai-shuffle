@@ -10,7 +10,8 @@
 //                   reload: every time the screen shows no project.
 //   keeps-typed-draft
 //                   type a draft in a project, open another chat, press New
-//                   session: the draft and its project are back.
+//                   session: the draft and its project are back, and still
+//                   are after a reload of that tab.
 //   late-effort-capabilities-keep-controls-still
 //                   capability refreshes preserve the open phone sheet geometry.
 //   keyboard-picker (desktop) Cmd/Ctrl+P from the message box opens the
@@ -125,6 +126,10 @@ await runJourney({
 				await pressNewSession(page);
 				await expectProject(page, PROJECT, log);
 				expect((await composer(page).innerText()).includes(draft), 'the typed draft comes back with its project');
+
+				await reload(page, mark);
+				await expectProject(page, PROJECT, log);
+				expect((await composer(page).innerText()).includes(draft), 'a reload keeps the typed draft and its project');
 			}
 		},
 		{

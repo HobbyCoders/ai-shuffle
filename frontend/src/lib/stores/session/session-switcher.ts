@@ -34,6 +34,7 @@ import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
 import { setSkipRestore } from './session-init';
+import { flushPendingDraft } from './draft-persistence';
 import { pendingQueue, restoredDraftFields } from './pending-queue';
 import { queueHydration } from './queue-hydration';
 import { beginJourney } from '$lib/services/journey-timing';
@@ -1092,6 +1093,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	}
 
 	function newChat(options?: { initialLanding?: boolean }) {
+		// Words typed just before (still in the composer's save debounce) are a
+		// draft too: a compose with them keeps its project below.
+		flushPendingDraft();
 		const state = getState();
 		// Bootstrap may reconcile the new-chat surface the user is already on.
 		// Only that landing preserves a popover; actual navigation still closes it.

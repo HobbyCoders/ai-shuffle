@@ -79,6 +79,8 @@
 	const uid = $props.id();
 	let query = $state('');
 	let highlight = $state(0);
+	/** The highlight was moved by hand (arrows or pointer), not left on the top row. */
+	let navigated = $state(false);
 	let searchInput = $state<HTMLInputElement | null>(null);
 
 	function substringRank(list: Item[], q: string): Item[] {
@@ -144,7 +146,7 @@
 	});
 
 	/** The main panel's rows in screen order, for the highlight and digit keys. */
-	type Row = { kind: 'item' | 'group' | 'trailing'; id: string };
+	type Row = { kind: 'item' | 'group' | 'trailing' | 'add'; id: string };
 	const rows = $derived.by((): Row[] => {
 		if (!searchable) return [];
 		const list: Row[] = [];
@@ -156,13 +158,20 @@
 			for (const group of extraPopulated) list.push({ kind: 'group', id: group.name });
 		}
 		if (showTrailing && trailingItem) list.push({ kind: 'trailing', id: trailingItem.id });
+		if (addLabel && onAdd) list.push({ kind: 'add', id: 'add' });
 		return list;
 	});
 	const rowIndex = $derived(new Map(rows.map((row, index) => [`${row.kind}:${row.id}`, index])));
 	const active = $derived(rows.length ? Math.min(highlight, rows.length - 1) : -1);
-	/** Item ids with their 1–9 key (only while the search is empty: then a digit types). */
+	/** The row Enter takes: Add Project only once moved to, never as the default ("No matches"). */
+	const current = $derived(rows[active]?.kind === 'add' && !navigated ? -1 : active);
+	/** Digits some listed name starts with: those always type, so "3D printing" can be searched. */
+	const typedDigits = $derived(new Set(items.map(item => item.name.trim().charAt(0)).filter(char => /^[0-9]$/.test(char))));
+	/** A digit is a row key only while the search is empty and no name starts with it. */
+	const digitKey = (digit: number) => numbered && !query && !typedDigits.has(String(digit));
+	/** Item ids with their 1–9 key. */
 	const digitOf = $derived(
-		new Map(numbered && !query ? rows.filter(row => row.kind === 'item').slice(0, 9).map((row, i) => [row.id, i + 1]) : [])
+		new Map(rows.filter(row => row.kind === 'item').slice(0, 9).map((row, i) => [row.id, i + 1] as const).filter(([, digit]) => digitKey(digit)))
 	);
 	const rowId = (index: number | undefined) => (index === undefined ? undefined : `${uid}-row-${index}`);
 	/** Attributes a main-panel row carries while the menu is searchable. */
@@ -171,13 +180,14 @@
 		const index = rowIndex.get(`${kind}:${id}`);
 		return {
 			id: rowId(index),
-			'data-highlighted': index === active ? '' : undefined,
-			onpointermove: () => { if (index !== undefined) highlight = index; }
+			'data-highlighted': index === current ? '' : undefined,
+			onpointermove: () => { if (index !== undefined) { highlight = index; navigated = true; } }
 		};
 	}
 
 	function activate(row: Row) {
 		if (row.kind === 'group') openGroup(row.id);
+		else if (row.kind === 'add') onAdd?.();
 		else handleSelect(row.id);
 	}
 
@@ -187,12 +197,13 @@
 			event.preventDefault();
 			if (!rows.length) return;
 			highlight = (active + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+			navigated = true;
 			tick().then(() => document.getElementById(`${uid}-row-${highlight}`)?.scrollIntoView?.({ block: 'nearest' }));
 		} else if (event.key === 'Enter') {
 			event.preventDefault();
-			const row = rows[active];
+			const row = rows[current];
 			if (row) activate(row);
-		} else if (numbered && !query && /^[0-9]$/.test(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey) {
+		} else if (/^[0-9]$/.test(event.key) && digitKey(Number(event.key)) && !event.ctrlKey && !event.metaKey && !event.altKey) {
 			// No row for that digit: it types, as in any search.
 			const row = event.key === '0'
 				? rows.find(r => r.kind === 'trailing')
@@ -281,6 +292,7 @@
 	export function reset() {
 		query = '';
 		highlight = 0;
+		navigated = false;
 		activeGroup = null;
 		containerHeight = null;
 		isAnimating = false;
@@ -350,11 +362,11 @@
 					placeholder={searchLabel}
 					aria-label={searchLabel}
 					aria-controls="{uid}-rows"
-					aria-activedescendant={rowId(active >= 0 ? active : undefined)}
+					aria-activedescendant={rowId(current >= 0 ? current : undefined)}
 					autocomplete="off"
 					spellcheck="false"
 					enterkeyhint="go"
-					oninput={() => (highlight = 0)}
+					oninput={() => { highlight = 0; navigated = false; }}
 					onkeydown={searchKeydown}
 				/>
 			</div>
@@ -434,14 +446,14 @@
 				>
 					{#if TrailingIcon}<TrailingIcon size={16} strokeWidth={1.5} />{/if}
 					<span class="item-name">{trailing.name}</span>
-					{#if numbered && !query}<kbd class="row-key" aria-hidden="true">0</kbd>{/if}
+					{#if digitKey(0)}<kbd class="row-key" aria-hidden="true">0</kbd>{/if}
 				</button>
 			{/if}
 		</div>
 
 		{#if addLabel && onAdd}
 			<div class="menu-divider"></div>
-			<button type="button" class="menu-item add-item" onclick={onAdd}>
+			<button type="button" class="menu-item add-item" {...rowProps('add', 'add')} onclick={onAdd}>
 				<FolderPlus size={16} strokeWidth={1.5} />
 				<span class="item-name">{addLabel}</span>
 			</button>

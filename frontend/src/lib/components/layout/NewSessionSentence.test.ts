@@ -90,6 +90,7 @@ vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect()
 import NewSessionSentence from './NewSessionSentence.svelte';
 import { openProjectPicker } from '$lib/services/project-picker';
 import { resetWorkerPresence } from '$lib/stores/worker-presence';
+import { caretOffset } from '$lib/services/caret';
 
 const install = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
 	id, device_name: name, base_url: `http://${id}`, platform: 'linux', version: '1', capabilities: {},
@@ -254,6 +255,63 @@ describe('NewSessionSentence', () => {
 			await fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search projects' }), { key: 'Enter' });
 			expect(m.setProject).toHaveBeenCalledWith('p1', null, { user: true });
 			expect(document.activeElement).toBe(editor);
+		});
+
+		describe('back in a real message box', () => {
+			let box: HTMLElement;
+			beforeEach(() => {
+				box = document.createElement('div');
+				box.contentEditable = 'true';
+				box.setAttribute('contenteditable', 'true');
+				box.tabIndex = 0;
+				box.innerHTML = '<p>abc</p>';
+				editor.append(box);
+			});
+			const caretAt = (offset: number) => {
+				const range = document.createRange();
+				range.setStart(box.querySelector('p')!.firstChild!, offset);
+				range.collapse(true);
+				document.getSelection()!.removeAllRanges();
+				document.getSelection()!.addRange(range);
+			};
+			const caret = () => {
+				const sel = document.getSelection()!;
+				return { node: sel.anchorNode?.textContent, offset: sel.anchorOffset, inBox: box.contains(sel.anchorNode) };
+			};
+
+			it('puts the caret back where it was after Escape and after a pick', async () => {
+				session({ project: '', projectV2Id: null });
+				render(NewSessionSentence);
+				await tick();
+				box.focus();
+				caretAt(1);
+				openProjectPicker();
+				await tick();
+				await fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search projects' }), { key: 'Escape' });
+				expect(document.activeElement).toBe(box);
+				expect(caret()).toEqual({ node: 'abc', offset: 1, inBox: true });
+
+				caretAt(2);
+				openProjectPicker();
+				await tick();
+				await fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search projects' }), { key: 'Enter' });
+				await tick();
+				expect(m.setProject).toHaveBeenCalledWith('p1', null, { user: true });
+				expect(document.activeElement).toBe(box);
+				expect(caret()).toEqual({ node: 'abc', offset: 2, inBox: true });
+			});
+
+			it('goes to the message box, caret at the end, when nothing had focus', async () => {
+				session({ project: '', projectV2Id: null });
+				render(NewSessionSentence);
+				await tick();
+				(document.activeElement as HTMLElement | null)?.blur();
+				openProjectPicker();
+				await tick();
+				await fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search projects' }), { key: 'Escape' });
+				expect(document.activeElement).toBe(box);
+				expect(caretOffset(box)).toBe(3);
+			});
 		});
 
 		it('switches a picked project from the project word, "No project" clearing it', async () => {

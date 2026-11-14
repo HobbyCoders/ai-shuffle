@@ -203,6 +203,9 @@ describe('WorkspaceSelector sentence picker', () => {
 		expect(highlighted()).toBe('Docs site');
 		await fireEvent.keyDown(search(), { key: 'ArrowUp' });
 		await fireEvent.keyDown(search(), { key: 'ArrowUp' });
+		// Add Project sits between the last row and the first.
+		expect(within(dialog()).getByRole('button', { name: /Add Project/ }).hasAttribute('data-highlighted')).toBe(true);
+		await fireEvent.keyDown(search(), { key: 'ArrowUp' });
 		expect(highlighted()).toBe('Website');
 		await fireEvent.keyDown(search(), { key: 'Enter' });
 		expect(onSelectProject).toHaveBeenCalledWith('p1', null);
@@ -228,6 +231,70 @@ describe('WorkspaceSelector sentence picker', () => {
 		expect(onSelectProject).not.toHaveBeenCalled();
 	});
 
+	it('lets a digit a project name starts with type, and hides its hint', async () => {
+		(stores.projects as W).set([{ id: 'p1', name: 'Website' }, { id: 'p2', name: 'API' }, { id: 'p3', name: 'Docs site' }, { id: 'p4', name: '3D printing' }]);
+		await openFromEditor();
+		expect(rowNames()).toEqual(['API', 'Docs site', 'Website', '3D printing']);
+		// Row 3 would be "3", but "3D printing" starts with 3, so 3 types.
+		expect([...dialog().querySelectorAll('.panel-scroll .row-key')].map(k => k.textContent)).toEqual(['1', '2', '4']);
+		const three = new KeyboardEvent('keydown', { key: '3', bubbles: true, cancelable: true });
+		search().dispatchEvent(three);
+		expect(three.defaultPrevented).toBe(false);
+		expect(onSelectProject).not.toHaveBeenCalled();
+		await fireEvent.input(search(), { target: { value: '3D p' } });
+		expect(rowNames()).toEqual(['3D printing']);
+		await fireEvent.keyDown(search(), { key: 'Enter' });
+		expect(onSelectProject).toHaveBeenCalledWith('p4', null);
+	});
+
+	it('lets 0 type when a project name starts with 0, hiding the No project key', async () => {
+		(stores.projects as W).set([{ id: 'p1', name: 'Website' }, { id: 'p2', name: '0xide' }]);
+		await openFromEditor('p1', true);
+		expect(rowNames()).toEqual(['0xide', 'Website', 'No project']);
+		expect(dialog().querySelector('.panel-scroll .menu-item:last-child .row-key')).toBeNull();
+		const zero = new KeyboardEvent('keydown', { key: '0', bubbles: true, cancelable: true });
+		search().dispatchEvent(zero);
+		expect(zero.defaultPrevented).toBe(false);
+		expect(onClearProject).not.toHaveBeenCalled();
+	});
+
+	it('reaches Add Project with the arrows, but never makes it the default', async () => {
+		await openFromEditor();
+		await fireEvent.input(search(), { target: { value: 'zzz' } });
+		// On "No matches" Add Project is not highlighted, and Enter adds nothing.
+		expect(within(dialog()).getByRole('button', { name: /Add Project/ }).hasAttribute('data-highlighted')).toBe(false);
+		expect(search().hasAttribute('aria-activedescendant')).toBe(false);
+		await fireEvent.keyDown(search(), { key: 'Enter' });
+		expect(within(dialog()).getByRole('button', { name: /Add Project/ })).toBeTruthy();
+		await fireEvent.input(search(), { target: { value: '' } });
+		await fireEvent.keyDown(search(), { key: 'ArrowUp' });
+		expect(within(dialog()).getByRole('button', { name: /Add Project/ }).hasAttribute('data-highlighted')).toBe(true);
+		// Enter on it closes the picker for the Add Project dialog.
+		await fireEvent.keyDown(search(), { key: 'Enter' });
+		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(onSelectProject).not.toHaveBeenCalled();
+	});
+
+	it('closes other header menus when it opens, and closes when another opens', async () => {
+		const { openHeaderDropdown } = await import('$lib/stores/header-dropdowns');
+		const { get } = await import('svelte/store');
+		openHeaderDropdown.set('profile');
+		await openFromEditor();
+		expect(get(openHeaderDropdown)).toBe('new-project');
+		openHeaderDropdown.set('profile');
+		await tick();
+		expect(screen.queryByRole('dialog')).toBeNull();
+	});
+
+	it('returns to a focus function rather than an element', async () => {
+		mountSentence();
+		const back = vi.fn();
+		selector.openPicker({ returnFocus: back } as never);
+		await tick();
+		await fireEvent.keyDown(search(), { key: 'Escape' });
+		expect(back).toHaveBeenCalledOnce();
+	});
+
 	it('closes on Escape with focus back in the editor', async () => {
 		await openFromEditor();
 		await fireEvent.keyDown(search(), { key: 'Escape' });
@@ -251,6 +318,8 @@ describe('WorkspaceSelector sentence picker', () => {
 		search().dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true, cancelable: true }));
 		expect(onClearProject).toHaveBeenCalledOnce();
 		expect(onSelectProject).not.toHaveBeenCalled();
+		// Focus goes back once the pick has rendered.
+		await tick();
 		expect(document.activeElement).toBe(editor);
 		anchor.remove();
 	});
