@@ -280,3 +280,21 @@ def test_the_list_belongs_to_the_account_it_was_captured_under(cli, monkeypatch)
     monkeypatch.setattr(claude_cli_status, "announce_account_change", lambda: None)
     claude_subscriptions._switched()
     assert asked == [1]
+
+
+def test_a_throwaway_preview_may_turn_models_on_and_off_and_a_real_install_may_not():
+    """The dev loop's journeys drive the Models tab through the preview cookie."""
+    from unittest.mock import patch
+
+    from starlette.requests import Request
+
+    from app.api.auth import _preview_may_change_dev_data
+    from app.core.preview_access import mutation_allowed
+
+    request = Request({"type": "http", "method": "PUT", "path": "/api/v1/models/claude/enabled", "headers": []})
+    refresh = Request({"type": "http", "method": "POST", "path": "/api/v1/models/claude/refresh", "headers": []})
+    assert mutation_allowed("/api/v1/models/claude/enabled", "PUT")
+    for disposable in (True, False):
+        with patch("app.preview_run.disposable_preview_data", return_value=disposable):
+            assert _preview_may_change_dev_data(request) == disposable
+            assert _preview_may_change_dev_data(refresh) is False
