@@ -582,10 +582,13 @@
 	}
 
 	function openCard(event?: MouseEvent) {
-		if (suppressNextClick) {
-			suppressNextClick = false;
-			return;
-		}
+		// Only a pointer's own click (detail > 0) can be the one a swipe or
+		// long press leaves behind. Pointer capture can send that click to the
+		// frame instead, leaving the guard set; keyboard activation (no event)
+		// and an assistive-tech click (detail 0) still open the row, and clear it.
+		const gestureClick = suppressNextClick && !!event && event.detail > 0;
+		suppressNextClick = false;
+		if (gestureClick) return;
 		// A finger that lands just off the 16 px PR chip still means the chip:
 		// touch taps within 44×44 px of it open the list, not the chat.
 		if (

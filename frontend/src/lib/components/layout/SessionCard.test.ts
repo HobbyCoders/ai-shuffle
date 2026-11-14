@@ -601,7 +601,7 @@ describe('SessionCard swipe gestures', () => {
 		expect(lane?.textContent).toContain('Settle');
 		expect(lane?.classList.contains('toggle')).toBe(true);
 		await up(frame, { x: 120 });
-		await fireEvent.click(card);
+		await fireEvent.click(card, { detail: 1 });
 		clock.mockRestore();
 
 		expect(frame.classList.contains('sliding')).toBe(true);
@@ -651,7 +651,7 @@ describe('SessionCard swipe gestures', () => {
 		expect(lane?.classList.contains('toggle')).toBe(false);
 		expect(container.querySelector('.lane.r.on')).toBeNull();
 		await up(frame, { x: 200 });
-		await fireEvent.click(card);
+		await fireEvent.click(card, { detail: 1 });
 		clock.mockRestore();
 
 		// The picker opens at once; the row neither slides off nor folds.
@@ -750,7 +750,7 @@ describe('SessionCard swipe gestures', () => {
 		await move(frame, { x: 160 });
 		await up(frame, { x: 160 });
 		// The click the drag leaves behind does not open the session…
-		await fireEvent.click(card);
+		await fireEvent.click(card, { detail: 1 });
 		clock.mockRestore();
 		expect(frame.classList.contains('dragging')).toBe(false);
 		expect(frame.classList.contains('sliding')).toBe(false);
@@ -761,7 +761,7 @@ describe('SessionCard swipe gestures', () => {
 		// …but a real tap afterwards does.
 		await down(card, { x: 100, id: 2 });
 		await up(frame, { x: 100, id: 2 });
-		await fireEvent.click(card);
+		await fireEvent.click(card, { detail: 1 });
 		expect(onOpen).toHaveBeenCalledWith('session-a');
 	});
 
@@ -822,7 +822,7 @@ describe('SessionCard swipe gestures', () => {
 		await vi.advanceTimersByTimeAsync(500);
 		expect(onLongPress).toHaveBeenCalledWith('session-a');
 		await up(frame, { x: 100 });
-		await fireEvent.click(card);
+		await fireEvent.click(card, { detail: 1 });
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
@@ -854,6 +854,54 @@ describe('SessionCard swipe gestures', () => {
 	it('opens the row from the keyboard', async () => {
 		const { container, onOpen } = renderCard();
 		await fireEvent.keyDown(parts(container).card, { key: 'Enter' });
+		expect(onOpen).toHaveBeenCalledWith('session-a');
+	});
+
+	it.each([
+		['the captured frame', true],
+		['nowhere', false],
+	])('opens on the first Enter after a right swipe whose click lands on %s', async (_where, frameClick) => {
+		const clock = slowClock();
+		const onSnooze = vi.fn();
+		const { container, onOpen } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 200 });
+		await up(frame, { x: 200 });
+		// Pointer capture retargets the gesture's click to the frame, past the card.
+		if (frameClick) await fireEvent.click(frame, { detail: 1 });
+		clock.mockRestore();
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		// The picker is dismissed and focus comes back to the row: no new pointerdown.
+		await fireEvent.keyDown(card, { key: 'Enter' });
+		expect(onOpen).toHaveBeenCalledTimes(1);
+		await fireEvent.keyDown(card, { key: ' ' });
+		expect(onOpen).toHaveBeenCalledTimes(2);
+	});
+
+	it('opens on the first Enter after a left swipe that springs back with no click', async () => {
+		const clock = slowClock();
+		const { container, onOpen } = renderCard();
+		const { frame, card } = parts(container);
+		await down(card, { x: 160 });
+		await move(frame, { x: 100 });
+		await up(frame, { x: 100 });
+		clock.mockRestore();
+		await vi.advanceTimersByTimeAsync(450);
+		await fireEvent.keyDown(card, { key: 'Enter' });
+		expect(onOpen).toHaveBeenCalledWith('session-a');
+	});
+
+	it('lets an assistive-tech click open the row after a gesture left no click', async () => {
+		const onLongPress = vi.fn();
+		const { container, onOpen } = renderCard({}, { onLongPress });
+		const { frame, card } = parts(container);
+		await down(card, { x: 100 });
+		await vi.advanceTimersByTimeAsync(500);
+		await up(frame, { x: 100 });
+		expect(onLongPress).toHaveBeenCalledWith('session-a');
+		// A screen reader's activation is a click with detail 0 and no pointerdown.
+		await fireEvent.click(card, { detail: 0 });
 		expect(onOpen).toHaveBeenCalledWith('session-a');
 	});
 });
