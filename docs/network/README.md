@@ -213,16 +213,22 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   worker is served as before. Other members accept and relay those older
   streams too. Every replica orders the device's versions by (clock, device
   id), as it does any other's, so all of them agree whichever stream carried
-  a version. The one loss: a write the device makes after the restore but
-  before it hears of a later version it signed before the restore has a
-  lower clock and loses to that version on every replica, as any concurrent
-  write would; the loser is kept as a conflict. Members on an older build
-  still refuse an older incarnation once they have seen a newer one, so until
-  they update they can disagree in that case.
+  a version. The restore can leave two of the device's versions with the same
+  clock, one from each side of it: the later incarnation wins that exact tie
+  only, everywhere a version is compared (ops, state copies, transcript
+  copies), and the stored version keeps its incarnation for that. The one
+  loss: a write the device makes after the restore but before it hears of a
+  later version it signed before the restore has a lower clock and loses to
+  that version on every replica, as any concurrent write would. Whichever of
+  the device's two incarnations loses is kept as a conflict, as another
+  device's would be. Members on an older build still refuse an older
+  incarnation once they have seen a newer one and keep the first version on a
+  tie, so until they update they can disagree in those cases.
   A version it gets back for a chat it runs restores the chat's owner-only
   fields (permission mode and ceiling, account label) too; no other copy can.
-  Only the unbroken part of an old stream is sent: past an op already
-  compacted out of the log the replay stops, and no state copy stands in for
+  Only the unbroken part of an old stream is sent, decided in the statement
+  that reads it so a compaction running meanwhile cannot open a hole: past an
+  op already compacted out of the log the replay stops, and no state copy stands in for
   it: a copy is the serving peer's unsigned claim, and a device takes its own
   chats' turns and owner-only fields only from ops it signed itself. Retention
   compacts transcript ops about an hour after every member has them (daily pass,
@@ -323,7 +329,7 @@ its own database, data directory and identity:
 | Recovery certificate with every worker off | `test_engine.py::test_recovery_certificate_admits_a_device_when_everyone_is_off` |
 | Restore from backup bumps incarnation | `test_transport.py::test_peer_link_exchanges_both_ways_and_detects_rollback` |
 | A restored worker's next write outranks its own lost versions; snapshots invent no deletions | `test_restored_worker_ordering.py` |
-| A restored worker gets back what it signed after the backup (pull, push, older workers, compacted gaps, repeated restores, chats it runs and writes since the restore) | `test_restored_own_history.py` |
+| A restored worker gets back what it signed after the backup (pull, push, older workers, compacted gaps, repeated restores, chats it runs, writes since the restore, equal-clock forks, kept conflicts) | `test_restored_own_history.py` |
 | Join over HTTP with fingerprint check, then sync | `test_transport.py::test_enrollment_over_http_then_sync` |
 | Hub registration, founding the account network, device approve/reject | `test_hub.py` |
 | Session on A mirrored to B, driven from B, forked when offline | `test_control.py` |

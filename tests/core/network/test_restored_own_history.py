@@ -418,6 +418,174 @@ def test_replicas_agree_on_a_restored_chat_whatever_order_its_versions_arrive(wo
     assert _streams(a, b.device_id) == _streams(b, b.device_id) == _streams(c, b.device_id)
 
 
+# ---------------------------------------------------------------------------
+# A restore fork: B's two incarnations on one record (#1568)
+# ---------------------------------------------------------------------------
+
+def _theme(worker):
+    rows = worker.sql("SELECT clock, origin_device_id FROM sync_records "
+                      "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
+    assert len(rows) == 1
+    return int(rows[0]["clock"]), rows[0]["origin_device_id"]
+
+
+def _theme_incarnation(worker):
+    return worker.sql("SELECT origin_incarnation FROM sync_records "
+                      "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))[0]["origin_incarnation"]
+
+
+def _lost_themes(worker, origin):
+    """The values of ``origin``'s versions of the theme this worker kept as conflicts."""
+    with worker.active():
+        return sorted(conflict["losing_record"]["value"] for conflict in store.list_conflicts()
+                      if conflict["record_id"].endswith("theme") and conflict["losing_device_id"] == origin)
+
+
+def _observe(worker, clock):
+    with worker.active(), get_db() as conn:
+        store.observe_clock(conn.cursor(), clock)
+
+
+def _equal_clock_fork(workers):
+    """A holds B's first write after its backup, C the second. B restores and
+    takes its proof from A, so its next write carries the clock of the version
+    only C holds, under the same device id: (clock, origin) ties exactly."""
+    a, b, c = _network(workers, "a", "b", "c")
+    set_owner_pref(b, "theme", "v0")
+    _converge([a, b, c])
+    backup = b.raw.serialize()
+    set_owner_pref(b, "theme", "lost-0")
+    _exchange(b, a)
+    set_owner_pref(b, "theme", "lost-1")
+    _exchange(b, c)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)
+    lost = _theme(c)
+    _observe(b, lost[0] - 1)  # no-op unless the proof left B's clock lower
+    set_owner_pref(b, "theme", "new")
+    _exchange(b, a)
+    assert _theme(a) == lost and owner_pref(a, "theme") == "new" and owner_pref(c, "theme") == "lost-1"
+    return a, b, c
+
+
+def test_an_equal_clock_across_a_restore_fork_goes_to_the_later_incarnation(workers):
+    """The incarnation decides only the exact tie, the same way on every replica."""
+    a, b, c = _equal_clock_fork(workers)
+    _converge([a, b, c])
+    assert owner_pref(a, "theme") == owner_pref(b, "theme") == owner_pref(c, "theme") == "new"
+    assert _streams(a, b.device_id) == _streams(b, b.device_id) == _streams(c, b.device_id)
+    assert _theme_incarnation(a) == _theme_incarnation(b) == _theme_incarnation(c) == 2
+    # lost-1 lost the tie wherever it was held or arrived; lost-0, the version
+    # B's write displaced on A without having seen it, is kept as well.
+    assert _lost_themes(c, b.device_id) == ["lost-1"]
+    assert _lost_themes(a, b.device_id) == _lost_themes(b, b.device_id) == ["lost-0", "lost-1"]
+
+
+def test_a_state_copy_breaks_the_equal_clock_tie_the_same_way(workers):
+    a, b, c = _equal_clock_fork(workers)
+    coll = engine.policy.collection("user_preferences")
+
+    def item(worker):
+        with worker.active(), get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM sync_records WHERE collection = 'user_preferences' "
+                           "AND record_id LIKE %s", ("%theme",))
+            return engine.snapshot_item(cursor, coll, dict(cursor.fetchone()))
+
+    def copy(sender, receiver, *, older_build=False):
+        page = item(sender)
+        if older_build:
+            page.pop("origin_incarnation")
+        with receiver.active(), get_db() as conn:
+            engine.apply_snapshot_items(conn.cursor(), coll, [page], ctx=engine.context())
+
+    # A sender on an older build sends no incarnation: the version held stays.
+    copy(a, c, older_build=True)
+    assert owner_pref(c, "theme") == "lost-1"
+    copy(c, a)
+    assert owner_pref(a, "theme") == "new"
+    # B's other incarnation: kept, not dropped (lost-0 since "new" displaced it).
+    assert _lost_themes(a, b.device_id) == ["lost-0", "lost-1"]
+    copy(a, c)
+    assert owner_pref(c, "theme") == "new"
+    assert _lost_themes(c, b.device_id) == ["lost-1"]
+
+
+def test_a_transcript_copy_is_compared_with_the_same_tie_break(workers):
+    from app.network import transcripts
+    a, b = _network(workers, "a", "b")
+    coll = engine.policy.collection("session_events")
+    with a.active(), get_db() as conn:
+        cursor = conn.cursor()
+        store.put_record(cursor, coll.name, "s|1", clock=5, origin_device_id=b.device_id, content_hash="h",
+                         deleted=False, order_seq=1, origin_incarnation=2)
+        store.put_record(cursor, coll.name, "t|1", clock=5, origin_device_id=b.device_id, content_hash="h",
+                         deleted=False, order_seq=1)  # stored by an older build: incarnation not known
+
+        def newer(session_id, incarnation):
+            copied = {"record_id": f"{session_id}|1", "clock": 5, "origin_device_id": b.device_id}
+            if incarnation:
+                copied["origin_incarnation"] = incarnation
+            return transcripts._newer_than_snapshot(cursor, session_id, coll, [copied], 1)
+
+        assert newer("s", 1) and not newer("s", 2) and not newer("s", 3)
+        assert newer("s", None)  # an older build's copy does not displace a known version
+        assert not newer("t", 1) and not newer("t", None)
+
+
+def test_a_replay_keeps_the_post_restore_write_it_displaces(workers):
+    """B's published write after the restore loses to a later lost version it
+    gets back: the write is kept as a conflict, by value, like any other device's."""
+    a, b = _network(workers, "a", "b")
+    set_owner_pref(b, "theme", "v0")
+    converge([a, b])
+    backup = b.raw.serialize()
+    for n in range(30):
+        set_owner_pref(b, "theme", f"lost-{n}")
+    converge([a, b])
+    clocks = [int(row["clock"]) for row in a.sql(
+        "SELECT clock FROM sync_ops WHERE origin_device_id = ? AND incarnation = 1 "
+        "AND collection = 'user_preferences' AND record_id LIKE ? ORDER BY seq", (b.device_id, "%theme"))]
+    assert len(clocks) == 31  # v0, then lost-0..29
+    _restore(b, backup)
+    _detect_restore(a, b, 1)  # proves only B's first op past the backup
+    set_owner_pref(b, "theme", "new")
+    written = _theme(b)[0]
+    assert clocks[-1] > written
+    _exchange(b, a)
+    for _ in range(2):
+        _exchange(a, b)
+    assert owner_pref(b, "theme") == "lost-29"
+    # The lost versions "new" outranked (a tie included) came back as conflicts,
+    # and so did "new" itself once a later lost version displaced it.
+    beaten = [f"lost-{n}" for n, clock in enumerate(clocks[1:]) if clock <= written]
+    assert _lost_themes(b, b.device_id) == sorted([*beaten, "new"])
+    assert _lost_themes(a, b.device_id) == ["new"]
+    _converge([a, b])
+    assert owner_pref(a, "theme") == owner_pref(b, "theme") == "lost-29"
+
+
+def test_a_prune_between_the_prefix_check_and_the_fetch_opens_no_hole(workers, monkeypatch):
+    """Retention deleting an op after the prefix was measured: only the part
+    before it is sent, never the ops past the hole."""
+    a, b = _restored(workers)
+    _detect_restore(a, b, 1)
+    with b.active(), get_db() as conn:
+        held = store.own_watermark(conn.cursor(), b.device_id, 1)
+    measure = store._unbroken_head
+
+    def pruned_meanwhile(cursor, origin, incarnation, after, head):
+        unbroken = measure(cursor, origin, incarnation, after, head)
+        cursor.execute("DELETE FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
+                       (origin, incarnation, held + 3))
+        return unbroken
+
+    monkeypatch.setattr(store, "_unbroken_head", pruned_meanwhile)
+    sent = sorted(op["origin_seq"] for op in _offer(a, b)
+                  if op["origin_device_id"] == b.device_id and op["origin_incarnation"] == 1)
+    assert sent == [held + 1, held + 2]
+
+
 def test_another_worker_cannot_replay_owner_fields_into_a_chat(workers):
     """Only B's own signed record sets them: a member's copy still cannot."""
     a, b = _network(workers, "a", "b")

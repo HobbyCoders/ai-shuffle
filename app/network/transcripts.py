@@ -662,13 +662,16 @@ def _newer_than_snapshot(cursor, session_id: str, coll: policy.Collection, items
     reuses seqs, so a tombstone can be all that is left of a newer log.
     """
     snapshot = {item["record_id"]: item for item in items}
-    newest = max(((int(item["clock"]), str(item["origin_device_id"])) for item in items), default=None)
+    newest = max(((int(item["clock"]), str(item["origin_device_id"]), engine._item_incarnation(item))
+                  for item in items), default=None)
     for record_id, held in store.records_with_prefixes(cursor, coll.name, [f"{session_id}|"]).items():
         if int(record_id.rsplit("|", 1)[1]) > through:
             continue  # Arrived after the fetch began: it stays, and installing leaves it alone.
         copied = snapshot.get(record_id)
-        base = (int(copied["clock"]), str(copied["origin_device_id"])) if copied else newest
-        if base is None or envelope_mod.compare(int(held["clock"]), str(held["origin_device_id"]), *base) > 0:
+        base = (int(copied["clock"]), str(copied["origin_device_id"]), engine._item_incarnation(copied)) \
+            if copied else newest
+        # The same order every apply path uses, restore-fork tie included (#1568).
+        if base is None or engine._versus_held(cursor, coll.name, *base, held) < 0:
             return True
     return False
 

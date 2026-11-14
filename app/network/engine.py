@@ -1038,7 +1038,8 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     data = env.to_dict()
     store.insert_op(cursor, data, _lane(coll))
     store.put_record(cursor, collection, record_id, clock=clock, origin_device_id=ctx.device_id,
-                     content_hash=new_hash, deleted=plaintext is None, order_seq=order_seq)
+                     content_hash=new_hash, deleted=plaintext is None, order_seq=order_seq,
+                     origin_incarnation=ctx.identity.incarnation)
     if collection == "session_active":
         cursor.execute("UPDATE network_session_active SET local_pending=FALSE WHERE session_id=%s", (record_id,))
     return data
@@ -1121,7 +1122,8 @@ def keep_local_rewrite(cursor, collection: str, record_id: str, before_row: Mapp
         return False
     store.put_record(cursor, collection, record_id, clock=int(existing["clock"]),
                      origin_device_id=existing["origin_device_id"], content_hash=content_hash(coll, after),
-                     deleted=False, order_seq=existing.get("order_seq"))
+                     deleted=False, order_seq=existing.get("order_seq"),
+                     origin_incarnation=existing.get("origin_incarnation"))
     return True
 
 
@@ -1931,6 +1933,47 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
     return changed
 
 
+def _item_incarnation(item: Mapping[str, Any]) -> int:
+    """A snapshot item's origin incarnation; 0 when an older build sent none."""
+    value = item.get("origin_incarnation")
+    return value if type(value) is int and value >= 1 else 0
+
+
+def _versus_held(cursor, collection: str, clock: int, origin: str, incarnation: int,
+                 held: Mapping[str, Any], *, incoming_hash: Optional[str] = None) -> int:
+    """``envelope.compare`` of a version against the one held, on every path that picks a winner.
+
+    The held incarnation is read only for an exact (clock, origin) tie, the
+    one case it decides. A copy re-sending the version held is that tie too:
+    with ``incoming_hash`` equal to the held hash it is the same version, and
+    a row stored before incarnations were kept costs no op lookup.
+    """
+    held_clock, held_origin = int(held["clock"]), held["origin_device_id"]
+    held_incarnation = 0
+    if clock == held_clock and origin == held_origin:
+        if (held.get("origin_incarnation") is None and incoming_hash is not None
+                and incoming_hash == (held["content_hash"] or "")):
+            return 0
+        held_incarnation = store.version_incarnation(cursor, collection, held)
+    return envelope_mod.compare(clock, origin, held_clock, held_origin, incarnation, held_incarnation)
+
+
+def _restore_fork(cursor, ctx: NetworkContext, collection: str, origin: str, incarnation: int,
+                  held: Mapping[str, Any]) -> bool:
+    """Whether the held version is the same device's from another incarnation.
+
+    Those are two writes on either side of a restore, not one stream moving
+    on, so the one that loses is kept as a conflict like any other device's.
+    """
+    if held["origin_device_id"] != origin or incarnation < 1:
+        return False
+    if held.get("origin_incarnation") is None:
+        known = ctx.identity.incarnation if origin == ctx.device_id else store.highest_incarnation(cursor, origin)
+        if max(incarnation, known) <= 1:
+            return False  # one incarnation only: no fork to look up
+    return store.version_incarnation(cursor, collection, held) not in (0, incarnation)
+
+
 def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
     if env.collection in policy.RETIRED_COLLECTIONS:
         # A peer on an older build still publishes a collection this build
@@ -1993,12 +2036,13 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     existing = store.get_record(cursor, env.collection, env.record_id)
     replay = env.origin_device_id == ctx.device_id and env.origin_incarnation < ctx.identity.incarnation
     # Every replica picks the same winner from what travels with the op:
-    # (clock, origin). A device's clock rises with every op it signs, so for
-    # its own versions this is its stream order, owner-ordered rows included.
-    # Across incarnations (a restore forks the stream) the replicas still
-    # agree, which no stream-order rule can promise (#1568).
-    wins = existing is None or envelope_mod.compare(
-        env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
+    # (clock, origin), then the incarnation on an exact tie. A device's clock
+    # rises with every op it signs, so for its own versions this is its stream
+    # order, owner-ordered rows included. Across incarnations (a restore forks
+    # the stream) the replicas still agree, which no stream-order rule can
+    # promise (#1568).
+    wins = existing is None or _versus_held(cursor, env.collection, env.clock, env.origin_device_id,
+                                            env.origin_incarnation, existing) > 0
     if not wins:
         merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
             cursor, coll, env.record_id, plaintext, existing)
@@ -2033,8 +2077,12 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     if env.collection == "membership":
         _apply_membership(cursor, ctx, plaintext)
 
-    # Keep the local loser (a concurrent local edit) for the conflicts list.
-    if existing is not None and existing["origin_device_id"] != env.origin_device_id and not bool(existing["deleted"]):
+    # Keep the local loser (a concurrent local edit) for the conflicts list:
+    # another device's version, or this device's from the other side of a
+    # restore fork. A newer op of the same stream simply supersedes its own.
+    if existing is not None and not bool(existing["deleted"]) and (
+            existing["origin_device_id"] != env.origin_device_id
+            or _restore_fork(cursor, ctx, env.collection, env.origin_device_id, env.origin_incarnation, existing)):
         local_row = _read_row(cursor, coll, env.record_id)
         if local_row is not None:
             try:
@@ -2054,7 +2102,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             cursor.execute("DELETE FROM network_instance_aliases WHERE device_id = %s", (env.origin_device_id,))
         materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
-                         content_hash="", deleted=True, order_seq=env.order_seq)
+                         content_hash="", deleted=True, order_seq=env.order_seq,
+                         origin_incarnation=env.origin_incarnation)
     else:
         plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx,
                                     own_replay=replay)
@@ -2065,7 +2114,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                 store.put_record(cursor, env.collection, env.record_id, clock=env.clock,
                                  origin_device_id=env.origin_device_id, content_hash="", deleted=False,
-                                 order_seq=env.order_seq)
+                                 order_seq=env.order_seq, origin_incarnation=env.origin_incarnation)
             # Consume/forward the origin stream without relabelling the value
             # we kept. A snapshot must still carry that value's original source.
             store.insert_op(cursor, env.to_dict(), _lane(coll))
@@ -2087,7 +2136,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             # wire hash to a database row's timezone-dependent spelling.
             local_hash = ""
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
-                         content_hash=local_hash, deleted=False, order_seq=env.order_seq)
+                         content_hash=local_hash, deleted=False, order_seq=env.order_seq,
+                         origin_incarnation=env.origin_incarnation)
     # Stored for forwarding only once it applied: a failure above must not
     # leave an op in the log that this worker never materialized.
     store.insert_op(cursor, env.to_dict(), _lane(coll))
@@ -3033,6 +3083,9 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
     item = {"record_id": version["record_id"], "clock": int(version["clock"]),
             "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
             "order_seq": version.get("order_seq"), "record": None}
+    if version.get("origin_incarnation") is not None:
+        # Decides an exact (clock, origin) tie (#1568); older readers ignore it.
+        item["origin_incarnation"] = int(version["origin_incarnation"])
     if not item["deleted"]:
         if not row_known:
             row = _read_row(cursor, coll, version["record_id"])
@@ -3199,10 +3252,14 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         existing = known.get(item["record_id"]) if known is not None else store.get_record(
             cursor, coll.name, item["record_id"])
         conflict = None
-        if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":
-            comparison = envelope_mod.compare(int(item["clock"]), item["origin_device_id"],
-                                              int(existing["clock"]), existing["origin_device_id"])
-            incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
+        incarnation = _item_incarnation(item)
+        incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
+        comparison = 1 if existing is None else _versus_held(
+            cursor, coll.name, int(item["clock"]), item["origin_device_id"], incarnation, existing,
+            incoming_hash=incoming_hash)
+        if existing is not None and coll.name != "membership" and (
+                existing["origin_device_id"] != item["origin_device_id"]
+                or _restore_fork(cursor, ctx, coll.name, item["origin_device_id"], incarnation, existing)):
             if incoming_hash != existing["content_hash"]:
                 loser, winner = (existing, item) if comparison > 0 else (item, existing)
                 if loser["deleted"]:
@@ -3220,8 +3277,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                                 losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
                                 losing_record=losing_record, winning_clock=int(winner["clock"]),
                                 winning_device_id=winner["origin_device_id"])
-        if existing is not None and envelope_mod.compare(
-                int(item["clock"]), item["origin_device_id"], int(existing["clock"]), existing["origin_device_id"]) <= 0:
+        if comparison <= 0:
             if conflict:
                 store.add_conflict(cursor, **conflict)
             if not item["deleted"] and _merge_losing_provider_credentials(
@@ -3258,7 +3314,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                     store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                                      origin_device_id=item["origin_device_id"], content_hash="", deleted=False,
-                                     order_seq=item.get("order_seq"))
+                                     order_seq=item.get("order_seq"), origin_incarnation=incarnation or None)
                 continue
             _after_mirror(cursor, coll, prepared)
             # Snapshot items have no per-item signature. In particular,
@@ -3279,7 +3335,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             store.add_conflict(cursor, **conflict)
         store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                          origin_device_id=item["origin_device_id"], content_hash=local_hash,
-                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
+                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"),
+                         origin_incarnation=incarnation or None)
         applied += 1
         touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
         if not item["deleted"] and refresh_billing:
@@ -3355,7 +3412,8 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
     order = sorted(candidates)
     rows = [[_column_value(coll, name, candidates[index].get(name), ()) for name in coll.fields] for index in order]
     versions = [(items[index]["record_id"], int(items[index]["clock"]), items[index]["origin_device_id"],
-                 content_hash(coll, candidates[index]), items[index].get("order_seq")) for index in order]
+                 content_hash(coll, candidates[index]), items[index].get("order_seq"),
+                 _item_incarnation(items[index]) or None) for index in order]
     inserted = store.insert_snapshot_events(cursor, coll.fields, rows, versions, batch=SNAPSHOT_SQL_BATCH)
     # A row a local writer added meanwhile takes the per-record path instead.
     order = [index for index in order if candidates[index]["id"] in inserted]

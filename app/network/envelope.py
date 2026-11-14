@@ -215,13 +215,22 @@ def build(*, network_id: str, collection: str, record_id: str, op: str, clock: i
     return env.sign(signing_private)
 
 
-def compare(clock_a: int, device_a: str, clock_b: int, device_b: str) -> int:
-    """Last-writer-wins order: higher clock wins; equal clocks break ties on device id.
+def compare(clock_a: int, device_a: str, clock_b: int, device_b: str,
+            incarnation_a: int = 0, incarnation_b: int = 0) -> int:
+    """Last-writer-wins order: higher clock wins; equal clocks break ties on device id,
+    then on the higher origin incarnation.
 
-    Returns 1 when (a) wins, -1 when (b) wins, 0 when they are the same writer.
+    A device never signs two ops with one clock in one incarnation, but a
+    restore forks its stream: the new incarnation can reuse a clock that a
+    lost version of the old one carries. The incarnation decides only that
+    exact tie, so every replica keeps the same version (#1568). 0 stands for
+    an incarnation that is not known. Returns 1 when (a) wins, -1 when (b)
+    wins, 0 when they are the same version.
     """
     if clock_a != clock_b:
         return 1 if clock_a > clock_b else -1
-    if device_a == device_b:
-        return 0
-    return 1 if device_a > device_b else -1
+    if device_a != device_b:
+        return 1 if device_a > device_b else -1
+    if incarnation_a != incarnation_b:
+        return 1 if incarnation_a > incarnation_b else -1
+    return 0
