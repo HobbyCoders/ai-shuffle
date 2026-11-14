@@ -134,3 +134,20 @@ print("REAL_POSTGRES_BOOT: 1000 converted, timestamps retained, no deletions, se
         result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=50)
         assert result.returncode == 0, result.stderr[-4000:]
         assert "REAL_POSTGRES_BOOT" in result.stdout
+
+
+def test_boot_migration_ends_a_snooze_on_a_legacy_archived_row(mock_db):
+    from app.db.base import get_db
+    from app.db.session_archive_migration import migrate
+    database.create_session("legacy-dozing", "default", is_active=False)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE sessions SET status='archived', snoozed_until=%s WHERE id='legacy-dozing'",
+                    ("2099-01-01T09:00:00+00:00",))
+        cur.execute("INSERT INTO network_session_active (session_id,is_active,updated_at,snoozed_until) "
+                    "VALUES ('legacy-dozing',FALSE,'2026-11-01','2099-01-01T09:00:00+00:00')")
+        migrate(cur)
+        cur.execute("SELECT snoozed_until FROM network_session_active WHERE session_id='legacy-dozing'")
+        assert cur.fetchone()["snoozed_until"] is None
+    row = database.get_session("legacy-dozing")
+    assert row["status"] == "active" and not row["is_active"] and row["snoozed_until"] is None

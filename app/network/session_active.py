@@ -28,16 +28,19 @@ def project(cursor, record: dict) -> None:
     There is deliberately no FK: a membership envelope can precede the session
     catalog on a third worker. prepare_session_mirror applies it on insertion.
     """
-    # Local-only fencing counter: advance for every accepted local or mirrored
-    # membership write, even with a frozen clock or while publication is held.
-    # Scope counters to this local row's lifetime. Receipts travel with history
-    # on handoff, and network reset/rejoin can recreate the membership row.
-    cursor.execute("UPDATE network_session_active SET local_revision=local_revision+1, "
-                   "local_revision_epoch=CASE WHEN local_revision_epoch='' THEN %s ELSE local_revision_epoch END "
-                   "WHERE session_id=%s", (str(uuid4()), record["session_id"]))
     # Active is never snoozed. A record from an older peer has no snooze field:
     # its write is a plain settle/activate and ends any snooze.
     snoozed = None if record["is_active"] else record.get("snoozed_until")
+    cursor.execute("SELECT is_active, snoozed_until, status FROM sessions WHERE id=%s", (record["session_id"],))
+    before = cursor.fetchone()
+    if not _snooze_transition(before, record["is_active"], snoozed):
+        # Local-only fencing counter: advance for every accepted local or mirrored
+        # membership write, even with a frozen clock or while publication is held.
+        # Scope counters to this local row's lifetime. Receipts travel with history
+        # on handoff, and network reset/rejoin can recreate the membership row.
+        cursor.execute("UPDATE network_session_active SET local_revision=local_revision+1, "
+                       "local_revision_epoch=CASE WHEN local_revision_epoch='' THEN %s ELSE local_revision_epoch END "
+                       "WHERE session_id=%s", (str(uuid4()), record["session_id"]))
     cursor.execute("UPDATE sessions SET is_active=%s, snoozed_until=%s, "
                    "status=CASE WHEN status='archived' THEN 'active' ELSE status END WHERE id=%s RETURNING *",
                    (record["is_active"], snoozed, record["session_id"]))
@@ -52,6 +55,19 @@ def project(cursor, record: dict) -> None:
         if serialized is not None:
             cursor.execute("UPDATE sync_records SET content_hash=%s WHERE collection='sessions' AND record_id=%s",
                            (engine.content_hash(coll, serialized), record["session_id"]))
+
+
+def _snooze_transition(before, active: bool, snoozed) -> bool:
+    """A snooze, re-snooze or wake: the chat only moves between Active and Snoozed.
+
+    These writes do not advance the membership fence, so pending work fenced on
+    it (an armed limit resume) survives them. A plain settle, an unsettle of a
+    settled chat, an archived row or an unknown row still advances it.
+    """
+    from app.core import session_snooze
+    if before is None or not session_snooze.runs_work(dict(before)):
+        return False
+    return bool(snoozed) or (active and bool(before["snoozed_until"]) and not before["is_active"])
 
 
 def project_snooze(cursor, session_id: str) -> None:

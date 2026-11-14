@@ -198,3 +198,81 @@ async def test_once_wake_keeps_existing_compact_before_resume(stopped_chat, monk
     assert (await lr.state("once-chat"))["armed"] is False
     with pytest.raises(ValueError, match="already handled"):
         await lr.arm("once-chat", turn["id"])
+
+
+def _later(hours=6):
+    from datetime import datetime, timedelta, timezone
+    from app.core import session_snooze
+    return session_snooze.canonical(datetime.now(timezone.utc) + timedelta(hours=hours))
+
+
+async def _fires(row, monkeypatch):
+    assert wakeups.claim_wakeup(row["id"]) is True
+    submit = AsyncMock(return_value="resume-turn")
+    monkeypatch.setattr("app.core.turn_manager.submit_async", submit)
+    return await lr.fire(row), submit
+
+
+async def test_armed_resume_fires_at_reset_while_snoozed_without_waking(stopped_chat, monkeypatch):
+    from app.network import session_active
+    turn, _, _ = stopped_chat
+    await lr.arm("once-chat", turn["id"])
+    [row] = wakeups.get_session_wakeups("once-chat", lr.LIMIT_RESUME_SOURCE)
+    session_active.write_shared("once-chat", False, _later())
+    session_active.write_shared("once-chat", False, _later(8))  # a re-snooze
+    assert (await lr.state("once-chat"))["armed"] is True
+    fired, submit = await _fires(row, monkeypatch)
+    assert fired == "resume-turn" and submit.await_args.args[1] == "wakeup"
+    chat = database.get_session("once-chat")
+    assert not chat["is_active"] and chat["snoozed_until"] is not None
+
+
+@pytest.mark.parametrize("wake", ["unsnooze", "due", "attention"])
+async def test_armed_resume_survives_a_snooze_and_its_wake(stopped_chat, monkeypatch, wake):
+    from app.core import session_snooze
+    from app.network import engine, session_active
+    turn, _, _ = stopped_chat
+    await lr.arm("once-chat", turn["id"])
+    [row] = wakeups.get_session_wakeups("once-chat", lr.LIMIT_RESUME_SOURCE)
+    before = lr._once_fence("once-chat")
+    when = _later()
+    session_active.write_shared("once-chat", False, when)
+    if wake == "unsnooze":
+        session_active.write_shared("once-chat", True)
+    else:
+        from types import SimpleNamespace
+        ctx = SimpleNamespace(device_id="dev-here", member=lambda device: None)
+        monkeypatch.setattr(engine, "context", lambda: ctx)  # the networked wake write
+        monkeypatch.setattr(engine, "kick", lambda: None)
+        monkeypatch.setattr(engine, "record", lambda *args, **kwargs: None)  # signing is out of scope
+        assert session_active.write_wake("once-chat", when if wake == "due" else None)
+    assert database.get_session("once-chat")["is_active"]
+    assert lr._same_fence(before, lr._once_fence("once-chat"))
+    fired, _ = await _fires(row, monkeypatch)
+    assert fired == "resume-turn"
+
+
+@pytest.mark.parametrize("change", ["settle", "settle_then_unsettle", "older_peer_settle", "archive"])
+async def test_a_settle_while_snoozed_still_cancels_the_resume(stopped_chat, monkeypatch, change):
+    from app.network import session_active
+    turn, _, _ = stopped_chat
+    await lr.arm("once-chat", turn["id"])
+    [row] = wakeups.get_session_wakeups("once-chat", lr.LIMIT_RESUME_SOURCE)
+    session_active.write_shared("once-chat", False, _later())
+    if change in ("settle", "settle_then_unsettle"):
+        session_active.write_shared("once-chat", False)
+        if change == "settle_then_unsettle":
+            session_active.write_shared("once-chat", True)
+    elif change == "older_peer_settle":
+        # A mirrored envelope from a build without snoozed_until: a plain settle.
+        with get_db() as conn:
+            session_active.project(conn.cursor(), {"session_id": "once-chat", "is_active": False,
+                                                   "updated_at": "2026-01-01T00:00:00+00:00"})
+    else:
+        from app.network.session_active import update_membership
+        await update_membership(database.get_session("once-chat"), False, archived=True)
+    assert database.get_session("once-chat")["snoozed_until"] is None
+    assert (await lr.state("once-chat"))["armed"] is False
+    fired, submit = await _fires(row, monkeypatch)
+    assert fired is None
+    submit.assert_not_awaited()

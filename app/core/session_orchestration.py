@@ -168,8 +168,11 @@ def _caller(session_id, *, allow_settled=False):
     from app.db import sessions
     from app.core import mobile_tool_identity
     from app.core.task_registry import task_registry
+    from app.core.session_snooze import runs_work
     row = sessions.get_session(session_id) if session_id else None
-    if not _local_top_level(row, allow_settled=allow_settled):
+    # A snoozed chat's own running work (a watch turn, a limit resume) keeps its
+    # tools; as a receiver or in a listing it still counts as settled.
+    if not _local_top_level(row, allow_settled=allow_settled or runs_work(row)):
         raise ValueError("Top-level orchestration requires an active, local, visible top-level chat.")
     if task_registry.is_user_stopped(session_id):
         raise ValueError("The user stopped this session; only the user may continue it.")
@@ -2160,8 +2163,10 @@ async def defer_started_report(starter_id, frame, admit=None):
     from contextlib import nullcontext
     from app.db import sessions, session_events
     from app.core.task_registry import user_stop_holds
+    from app.core.session_snooze import runs_work
     row = await asyncio.to_thread(sessions.get_session, starter_id)
-    if row and row.get("is_active") and row.get("status") != "archived" and not await user_stop_holds(starter_id):
+    # A snoozed starter still takes its report (without waking), like an active one.
+    if runs_work(row) and not await user_stop_holds(starter_id):
         return False
     event_id = "deferred-report:" + hashlib.sha256(
         f"{starter_id}:{frame.get('task_id')}:{frame.get('agent_message_turn_id')}".encode()).hexdigest()

@@ -301,3 +301,29 @@ async def test_legacy_archive_form_ends_the_snooze(mock_db, broadcasts):
     assert row["status"] == "active" and row["is_active"] in (False, 0)
     assert row["snoozed_until"] is None
     assert session_snooze.due_snoozes(_soon(10)) == []
+
+
+async def _snoozed_and_settled(broadcasts):
+    dozing, settled = _new(), _new()
+    await _patch(dozing, False, _soon())
+    await _patch(settled, False)
+    return dozing, settled
+
+
+async def test_a_snoozed_starter_still_takes_its_child_report(mock_db, broadcasts, monkeypatch):
+    from app.core import session_orchestration
+    monkeypatch.setattr("app.core.task_registry.user_stop_holds", AsyncMock(return_value=False))
+    dozing, settled = await _snoozed_and_settled(broadcasts)
+    frame = {"task_id": _new(), "agent_message_turn_id": "t1"}
+    assert await session_orchestration.defer_started_report(dozing, frame) is False
+    assert await session_orchestration.defer_started_report(settled, frame) is not False
+    assert database.get_session(dozing)["snoozed_until"] is not None  # delivered without waking
+
+
+async def test_a_snooze_keeps_owner_waits_and_scratch(mock_db, broadcasts):
+    from app.core import session_scratch
+    from app.core.session_settlement import dismiss_owner_waits
+    dozing, settled = await _snoozed_and_settled(broadcasts)
+    assert not await dismiss_owner_waits(dozing)
+    assert session_scratch._idle(dozing) is None
+    assert session_scratch._idle(settled) is not None
