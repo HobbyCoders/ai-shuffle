@@ -183,22 +183,6 @@ def newest_utterance(entries) -> str:
     return "" if is_noise(text) else text
 
 
-def typed_attachments(entries) -> tuple[str, dict | None]:
-    """The attachment note and turn fields of the typed messages in ``entries``.
-
-    They ride each typed message's transcript entry, so whichever handoff
-    takes the words (the typed path, a spoken handoff that settled meanwhile,
-    or Grok's check_work) sends its files with them (#1505).
-    """
-    notes, uploads = [], {}
-    for entry in entries:
-        typed = entry.get("typed") or {}
-        notes.append(typed.get("note") or "")
-        for key, values in (typed.get("uploads") or {}).items():
-            uploads.setdefault(key, []).extend(values)
-    return "".join(notes), uploads or None
-
-
 def live_session_config(config: dict, history: list[dict]) -> dict:
     from app.core.query_options import decode_provider_model
     model = config.get("model") if config.get("model") in LIVE_MODELS else LIVE_MODEL
@@ -863,7 +847,7 @@ class VoiceStream:
                 return None
             marker = self.progress.approvals.current.marker or 0
             entries = [e for e in self.transcript if e["role"] == "user" and e.get("seq", 0) > marker
-                       and e.get("seq") not in self.approval_consumed]
+                       and e.get("seq") not in self.approval_consumed and not e.get("typed")]
             text = "".join(e["text"] for e in entries).strip()
             if not text:
                 return None
@@ -903,13 +887,14 @@ class VoiceStream:
 
     async def caption(self, role: str, delta: str, offset: int = 0, *, start_ms: float | None = None,
                       response_id: str | None = None, item_id: str | None = None,
-                      typed_uploads: list[str] | None = None, typed: dict | None = None):
+                      typed_uploads: list[str] | None = None, typed: str | None = None):
         """One transcript fragment. ``start_ms`` is where it starts on the
         provider session's timeline (GPT Live), None when unknown. Provider
         response/item ids distinguish new assistant utterances from word pieces.
         ``typed_uploads`` (even empty) marks ``delta`` as text typed into the
-        call, with the files it carries. ``typed`` rides the transcript entry
-        (see :func:`typed_attachments`)."""
+        call, with the files it carries. ``typed`` is a typed message's request
+        key: its entry is handed off by the typed path alone (see
+        :meth:`receive_text`), never by a spoken one."""
         if not delta:
             return
         if role == "assistant" and self.last_caption_role == "user" and self.approval_waiting():
@@ -989,17 +974,15 @@ class VoiceStream:
         if len(self.pending[role]) >= 2000:
             await self.flush()
 
-    async def run_delegation(self, delegation_id: str | None, entries=None, *, request_key: str | None = None):
+    async def run_delegation(self, delegation_id: str | None, entries=None, *, file_note: str = "",
+                             uploads: dict | None = None, request_key: str | None = None):
         """Hand the caller's words to the chat agent. ``request_key`` names the
-        request for the forwarded command id when it has no ``delegation_id``.
-        Typed messages among ``entries`` bring their attachments (#1505)."""
+        request for the forwarded command id when it has no ``delegation_id``."""
         try:
-            entries = list(self.transcript if entries is None else entries)
-            file_note, uploads = typed_attachments(entries)
             # Keep the read loop free. Group partial captions into readable
             # turns; the Live delegation event itself carries no task text.
             conversation = []
-            for entry in entries:
+            for entry in (self.transcript if entries is None else entries):
                 if conversation and conversation[-1]["role"] == entry["role"]:
                     conversation[-1]["text"] += entry["text"]
                 else:
@@ -1071,9 +1054,9 @@ class VoiceStream:
             ids, self.settling = self.settling or [], None
         turn = self.settling_turn
         # Capture only speech since the previous handoff. The chat already
-        # owns the earlier history.
+        # owns the earlier history, and typed messages go on their own path.
         before = self.delegated_seq
-        entries = [e for e in self.transcript if e.get("seq", 0) > before]
+        entries = [e for e in self.transcript if e.get("seq", 0) > before and not e.get("typed")]
         self.delegated_seq = self.transcript_seq
         for extra in ids[1:]:
             try:
@@ -1294,25 +1277,31 @@ class VoiceStream:
             # Typed requests reuse the existing same-session delegation
             # path, not a guessed provider text event or a second conversation.
             await self.flush()
-            await self.caption("user", "\n\n" + TYPED_MESSAGE_PREFIX + text, typed_uploads=recorded,
-                               typed={"key": key, "note": file_note, "uploads": uploads})
+            words = "\n\n" + TYPED_MESSAGE_PREFIX + text
+            await self.caption("user", words, typed_uploads=recorded, typed=key)
             await self.flush()  # Durable admission before acknowledging/dispatching.
-            entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
+            # Only this path hands off the typed entry, always with its files
+            # and under its own key (#1505, #1543): spoken handoffs, check_work
+            # and the approval desk skip it, so it is never sent under another
+            # request's id or lost to one that settled during the awaits above.
+            # Unsent speech before it is its context; speech after it stays
+            # for the next handoff.
+            own = next((e for e in self.transcript if e.get("typed") == key),
+                       {"role": "user", "text": words, "seq": self.transcript_seq})
+            entries = [e for e in self.transcript if self.delegated_seq < e.get("seq", 0) < own["seq"]
+                       and e.get("seq") not in self.approval_consumed and not e.get("typed")] + [own]
+            self.delegated_seq = max(self.delegated_seq, own["seq"])
             # A resent draft is accepted once; typed ids stay out of the
             # provider session's handoff count.
             self.typed_ids[key] = None
             while len(self.typed_ids) > MAX_TYPED_IDS:
                 del self.typed_ids[next(iter(self.typed_ids))]
-            # While the awaits above ran, a spoken handoff can have taken these
-            # words, files included (#1505): then there is nothing to send, and
-            # words spoken since stay for the next handoff.
-            if any((e.get("typed") or {}).get("key") == key for e in entries):
-                self.delegated_seq = self.transcript_seq
-                # Its own command id: the owner of a chat on another worker
-                # dedupes by it, and a retry of this message keeps it (#1543).
-                self.delegation_task = asyncio.create_task(self.run_delegation(None, entries, request_key=key))
-                _workers.add(self.delegation_task)
-                self.delegation_task.add_done_callback(_workers.discard)
+            # Its own command id: the owner of a chat on another worker dedupes
+            # by it, so a resend of this message never runs twice (#1543).
+            self.delegation_task = asyncio.create_task(
+                self.run_delegation(None, entries, file_note=file_note, uploads=uploads, request_key=key))
+            _workers.add(self.delegation_task)
+            self.delegation_task.add_done_callback(_workers.discard)
         await self.emit({"type": "text.accepted", "id": identity})
 
     async def receive_browser(self):

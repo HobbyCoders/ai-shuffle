@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 from websockets.exceptions import ConnectionClosed
 
-from app.core import voice_progress, voice_status, voice_stream
+from app.core import voice_grok, voice_progress, voice_status, voice_stream
 from app.core.voice_grok import (
     APP_NOTE_LEAD,
     CHECK_WORK_HANDED_OFF,
@@ -473,11 +473,14 @@ async def test_an_open_handoff_counts_as_work_in_flight(monkeypatch, delegate):
 
 
 @pytest.mark.asyncio
-async def test_a_conversion_mid_typed_send_carries_the_typed_attachment(monkeypatch, delegate):
-    """#1505 on Grok: check_work at idle can take a typed message's words while
-    the typed path awaits; its files go with them, and nothing is sent twice."""
+@pytest.mark.parametrize("speech", ["", "Fix the login test."], ids=["typed-only", "after-speech"])
+async def test_check_work_mid_typed_send_leaves_the_typed_message_to_its_own_request(monkeypatch, delegate, speech):
+    """#1505 and #1543 on Grok: check_work at idle took a typed message's words
+    while the typed path awaited, so they went without their files and under
+    ``check-<call id>``. The typed message is its own request, files and key."""
     from app.core import upload_transfer
     from app.core.voice_prompts import ATTACHMENT_NOTE_OPENER
+    monkeypatch.setattr(voice_grok, "CHECK_WORK_WORDS_WAIT_S", 0.05)
     call = idle_call(monkeypatch)
     call.settle_speech = AsyncMock()
     monkeypatch.setattr(voice_stream.database, "get_session", lambda session_id: {"id": session_id, "mode": "chat"})
@@ -485,24 +488,41 @@ async def test_a_conversion_mid_typed_send_carries_the_typed_attachment(monkeypa
     monkeypatch.setattr(upload_transfer, "resolve_upload_references", lambda payload, session: payload)
     monkeypatch.setattr(upload_transfer, "validate_turn_uploads", lambda payload, session: None)
     send_json = call.websocket.send_json
+    checked = []
 
     async def gate(event):
-        if event.get("type") == "caption" and voice_stream.TYPED_MESSAGE_PREFIX in event.get("delta", ""):
+        if event.get("type") == "caption" and voice_stream.TYPED_MESSAGE_PREFIX in event.get("delta", "") \
+                and not checked:
+            checked.append(True)
             await call.answer_check_work("look-1")  # The voice checks on work right now.
         await send_json(event)
     call.websocket.send_json = gate
+    frame = json.dumps({"type": "input_text", "id": "a", "text": "Read this", "upload_paths": ["/up/a.pdf"]})
+    if speech:
+        await call.caption("user", speech)
 
-    await call.receive_text(json.dumps({"type": "input_text", "id": "a", "text": "Read this", "upload_paths": ["/up/a.pdf"]}))
-    await call.delegation_task
+    await call.receive_text(frame)
+    await asyncio.gather(*list(voice_stream._workers))  # The conversion and the typed request.
 
+    if speech:  # check_work handed off the speech, and only the speech.
+        converted = delegate.pop(0)
+        assert converted["command"] == command_id(call.call_key, "check-look-1")
+        assert speech in converted["transcript"] and "Read this" not in converted["transcript"]
+        assert "uploads" not in converted
     (handed,) = delegate
-    assert handed["command"] == command_id(call.call_key, "check-look-1")
+    assert handed["command"] == command_id(call.call_key, "typed-a")
     assert handed["uploads"] == {"upload_paths": ["/up/a.pdf"]}
     assert ATTACHMENT_NOTE_OPENER in handed["transcript"] and '"/up/a.pdf"' in handed["transcript"]
-    # The typed path found its words gone: no "no request" note for an empty request.
-    notes = [e["item"]["content"][0]["text"] for e in sent(call.upstream)
-             if e["type"] == "conversation.item.create" and e["item"]["type"] == "message"]
-    assert not any(voice_stream.NO_REQUEST_NOTE in note for note in notes)
+    # Without speech, check_work answered with the status: the typed words
+    # were not a request for it to hand off.
+    assert [output for call_id, output in outputs(call.upstream) if call_id == "look-1"] == [
+        CHECK_WORK_HANDED_OFF if speech else STATUS_NOTE + "Nothing is running."]
+
+    # A resend past the call's bounded id list names the same request.
+    call.typed_ids.clear()
+    await call.receive_text(frame)
+    await call.delegation_task
+    assert [h["command"] for h in delegate] == [command_id(call.call_key, "typed-a")] * 2
 
 
 @pytest.mark.asyncio
