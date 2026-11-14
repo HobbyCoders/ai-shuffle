@@ -164,6 +164,8 @@ const seatCase = (call) => ({
 
 await runJourney({
 	name: 'composer-no-empty-seat',
+	// without-call overrides the voice settings with page.route, which a service worker's fetch would bypass.
+	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	allow: DEV_INSTANCE_NOISE,
 	cases: [seatCase(true), seatCase(false), {
 		name: 'double-tap-send',
