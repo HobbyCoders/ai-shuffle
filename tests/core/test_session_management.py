@@ -329,6 +329,20 @@ async def test_all_settled_leaves_a_snoozed_chat_and_its_wake_time(chats):
     assert session_snooze.canonical(sessions.get_session("dozing")["snoozed_until"]) == when
 
 
+async def test_settled_listing_omits_a_snoozed_chat_and_all_shows_its_wake_time(chats):
+    from app.core import session_snooze
+    sessions.create_session("dozing", "agent", title="dozing", is_active=True)
+    when = _snooze("dozing")
+    await invoke(chats, "SettleSession", session_id="target")
+    settled = orch.list_sessions("caller", {"state": "settled", "scope": "all"})["sessions"]
+    assert [r["id"] for r in settled] == ["target"]
+    assert settled[0]["snoozed_until"] is None
+    listed = {r["id"]: r for r in orch.list_sessions("caller", {"state": "all", "scope": "all"})["sessions"]}
+    assert session_snooze.canonical(listed["dozing"]["snoozed_until"]) == when
+    assert isinstance(listed["dozing"]["snoozed_until"], str) and not listed["dozing"]["is_active"]
+    assert "dozing" not in {r["id"] for r in orch.list_sessions("caller", {"scope": "all"})["sessions"]}
+
+
 async def test_ids_use_one_set_based_update(chats, monkeypatch):
     for sid in ("a", "b", "c"):
         sessions.create_session(sid, "agent", title=sid, is_active=True)

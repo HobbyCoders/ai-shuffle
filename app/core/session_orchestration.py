@@ -54,7 +54,7 @@ OFFLINE_PEERS_TIMEOUT = 1
 _COMMAND_RE = re.compile(r"orchestration:start:[0-9a-f]{64}")
 _MESSAGE_COMMAND_RE = re.compile(r"orchestration:message:[0-9a-f]{64}")
 _LIST_FIELDS = ("id", "title", "status", "profile_id", "project_id", "project_v2_id",
-                "branch", "model", "updated_at", "is_active", "owner_device_id")
+                "branch", "model", "updated_at", "is_active", "snoozed_until", "owner_device_id")
 REPORT_STATUSES = ("completed", "failed", "stopped")
 MAX_NEEDS_OWNER = 10
 # Turn sources that begin work in a chat. Continuations (unpark, auto-continue,
@@ -118,9 +118,10 @@ def _as_owner_chat(owner, memo=None):
 
 def _list_entry(row):
     entry = {key: row.get(key) for key in _LIST_FIELDS}
-    stamp = entry.get("updated_at")
-    if hasattr(stamp, "isoformat"):
-        entry["updated_at"] = stamp.isoformat()
+    for key in ("updated_at", "snoozed_until"):
+        stamp = entry.get(key)
+        if hasattr(stamp, "isoformat"):
+            entry[key] = stamp.isoformat()
     return entry
 
 
@@ -253,7 +254,8 @@ def list_sessions(session_id, data):
             eligible = visible_session(row)
         if row["id"] == session_id or not eligible or _owner(row) != caller_owner:
             continue
-        if state == "settled" and row.get("is_active"):
+        # A snoozed chat is not settled: it wakes on its own (state='all' shows it).
+        if state == "settled" and (row.get("is_active") or row.get("snoozed_until")):
             continue
         if scope == "project" and (
             row.get("project_v2_id") or row.get("project_id")

@@ -73,6 +73,20 @@ def validate_future(value: datetime, *, now: Optional[datetime] = None) -> str:
     return stamp
 
 
+def runs_work(session: Optional[dict]) -> bool:
+    """Whether authorized work already running for this chat may continue.
+
+    True for an active chat and for a snoozed one: a snooze only defers the
+    chat in the sidebar, it never stops its running work. A plain settled or
+    archived chat stops it. Stop, deadline and budget checks stay separate.
+    """
+    if not session:
+        return False
+    if session.get("is_active"):
+        return True
+    return bool(session.get("snoozed_until")) and session.get("status") != "archived"
+
+
 def _snoozed_chat(session_id: str) -> Optional[str]:
     """The snoozed chat a needs-you event in ``session_id`` belongs to, if any.
 

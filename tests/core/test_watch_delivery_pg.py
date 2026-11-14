@@ -7,6 +7,7 @@ import json
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -204,6 +205,15 @@ async def test_active_creator_ack_loss_restart_and_transfer(peers: dict[str, Any
         forged = dict(meta, permissions={"tools": ["Bash"], "read_only": True})
         with pytest.raises(ValueError, match="provenance"):
             await asyncio.to_thread(watches.assert_allowed, forged, peers["session"]["id"])
+        # A snoozed creator keeps its running remote watch turn; a settled one stops it.
+        sid = peers["session"]["id"]
+        wake_at = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(microsecond=0)
+        database.set_session_active(sid, False, snoozed_until=wake_at.isoformat())
+        await asyncio.to_thread(watches.assert_allowed, meta, sid)
+        database.set_session_active(sid, False)
+        with pytest.raises(ValueError, match="settled"):
+            await asyncio.to_thread(watches.assert_allowed, meta, sid)
+        database.set_session_active(sid, True)
         from app.core.session_modes import proactive_tool_denial
 
         assert "read-only" in proactive_tool_denial(meta, peers["session"]["id"], "Bash")
