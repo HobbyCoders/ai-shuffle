@@ -206,11 +206,16 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   backup that peers still hold (#1506). Those later versions also come back to
   it (#1568): an exchange, and a peer's push, send a device its own streams
   from incarnations older than its current one, past what it holds, and it
-  re-imports them like any other stream. Its current incarnation is never sent
-  back. Only a worker that advertises the `own-history-reimport` capability
-  gets them; an older worker is served as before. A pruned hole in that old
-  stream makes its next pull take a state copy, whose frontier it then adopts
-  for its older streams too; a push skips that stream instead. Until the first
+  re-imports them. Its current incarnation is never sent back. Only a worker
+  that advertises the `own-history-reimport` capability gets them; an older
+  worker is served as before. The restore forked the device's stream, so its
+  own versions order by (incarnation, clock): what it wrote since the restore,
+  published or not, beats a version it gets back, which is kept as a conflict.
+  A version it gets back for a chat it runs restores the chat's owner-only
+  fields (permission mode and ceiling, account label) too; no other copy can.
+  Only the unbroken part of an old stream is sent: past an op already
+  compacted out of the log the replay stops, and no state copy stands in for
+  it (a copy carries no transcripts of the chats the device runs). Until the first
   comparison with a peer after start, the outbox is held so a restored worker
   never reuses sequence numbers peers already hold.
 - **Snapshots carry only signed deletions.** A snapshot page lists a record as
@@ -306,7 +311,7 @@ its own database, data directory and identity:
 | Recovery certificate with every worker off | `test_engine.py::test_recovery_certificate_admits_a_device_when_everyone_is_off` |
 | Restore from backup bumps incarnation | `test_transport.py::test_peer_link_exchanges_both_ways_and_detects_rollback` |
 | A restored worker's next write outranks its own lost versions; snapshots invent no deletions | `test_restored_worker_ordering.py` |
-| A restored worker gets back what it signed after the backup (pull, push, older workers, pruned holes, repeated restores) | `test_restored_own_history.py` |
+| A restored worker gets back what it signed after the backup (pull, push, older workers, compacted gaps, repeated restores, chats it runs and writes since the restore) | `test_restored_own_history.py` |
 | Join over HTTP with fingerprint check, then sync | `test_transport.py::test_enrollment_over_http_then_sync` |
 | Hub registration, founding the account network, device approve/reject | `test_hub.py` |
 | Session on A mirrored to B, driven from B, forked when offline | `test_control.py` |

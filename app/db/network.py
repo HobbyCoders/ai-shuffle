@@ -786,6 +786,22 @@ def _excluded(origin: str, incarnation, exclude_origin: str | None, own_history_
     return not own_history_before or int(incarnation) >= int(own_history_before)
 
 
+def _unbroken_head(cursor, origin: str, incarnation: int, after: int, head: int) -> int:
+    """The last seq past ``after`` this worker holds without a gap (``after`` if none).
+
+    A requester's own older stream (#1568) is sent only that far: past a
+    compacted op it would sit unapplied, and no state copy stands in for it,
+    since a copy cannot carry the transcripts of chats the requester runs.
+    """
+    # Seqs are distinct and past ``after``: the n-th held one is ``after + n``
+    # exactly as long as nothing below it is missing.
+    cursor.execute(
+        "SELECT COUNT(*) AS n FROM (SELECT seq, ROW_NUMBER() OVER (ORDER BY seq) AS n FROM sync_ops "
+        "WHERE origin_device_id = %s AND incarnation = %s AND seq > %s AND seq <= %s) held "
+        "WHERE seq = %s + n", (origin, incarnation, after, head, after))
+    return after + int(cursor.fetchone()["n"])
+
+
 def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: Optional[str] = None,
               exclude_origin: Optional[str] = None, own_history_before: int | None = None, _conn=None,
               _heads: Optional[Dict[str, Dict[str, int]]] = None) -> List[dict]:
@@ -828,6 +844,8 @@ def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: 
             if _excluded(origin, incarnation, exclude_origin, own_history_before):
                 continue
             last = int((watermarks.get(origin) or {}).get(str(incarnation), (watermarks.get(origin) or {}).get(incarnation, 0)) or 0)
+            if origin == exclude_origin and last < head:
+                head = _unbroken_head(cursor, origin, incarnation, last, head)
             if last < head:
                 lagging.append((origin, incarnation, last, head))
         if not lagging or limit <= 0:
@@ -871,6 +889,18 @@ def ops_after_ingest(ingest_id: int, *, limit: int = 200, _conn=None) -> List[Tu
 
 def own_watermark(cursor, device_id: str, incarnation: int) -> int:
     return next_origin_seq(cursor, device_id, incarnation) - 1
+
+
+def own_version_incarnation(cursor, device_id: str, collection: str, record_id: str, clock: int) -> Optional[int]:
+    """The incarnation of ours that signed this record's version at ``clock``.
+
+    ``None`` once that op left the log. Clocks can repeat across incarnations
+    (a restore puts an older clock back): the latest such incarnation counts.
+    """
+    cursor.execute("SELECT MAX(incarnation) AS incarnation FROM sync_ops WHERE collection = %s AND record_id = %s "
+                   "AND origin_device_id = %s AND clock = %s", (collection, record_id, device_id, clock))
+    row = cursor.fetchone()
+    return int(row["incarnation"]) if row is not None and row["incarnation"] is not None else None
 
 
 def local_watermarks(_conn=None) -> Dict[str, Dict[str, int]]:
@@ -2184,12 +2214,12 @@ def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = 
     """Read one frontier for a bounded batch and its snapshot-gap check.
 
     ``own_history_before`` is the requester's current incarnation when it can
-    re-import its own older streams (see ``_excluded``).
+    re-import its own older streams (see ``_excluded``). Those never ask for a
+    state copy: only their unbroken prefix is sent (see ``ops_since``).
     """
     with get_db() as conn:
         heads = local_watermarks(conn)
-        snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin,
-                                     own_history_before=own_history_before, _conn=conn, _heads=heads)
+        snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
         ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
                         own_history_before=own_history_before, _conn=conn, _heads=heads)
         from app.network import nested_secret_sync
@@ -2214,7 +2244,6 @@ def preserved_builtin_ids(_conn=None) -> List[str]:
 
 
 def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
-                      own_history_before: int | None = None,
                       check_tail_compatibility: bool = False, _conn=None,
                       _heads: Optional[Dict[str, Dict[str, int]]] = None) -> bool:
     """Detect log gaps; only cached snapshots need whole-tail compatibility.
@@ -2233,9 +2262,9 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
         legacy_recipient = None
         protected = ()
         for origin, streams in heads.items():
+            if origin == exclude_origin:
+                continue
             for incarnation, head in streams.items():
-                if _excluded(origin, incarnation, exclude_origin, own_history_before):
-                    continue
                 last = int((watermarks.get(origin) or {}).get(str(incarnation), 0))
                 if last >= head:
                     continue

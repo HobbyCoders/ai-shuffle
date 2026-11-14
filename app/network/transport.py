@@ -844,11 +844,6 @@ class PeerLink:
             outbound, _, snapshot = await asyncio.to_thread(
                 store.exchange_batch, theirs, limit=BATCH_LIMIT, exclude_origin=self.device_id,
                 own_history_before=own_history)
-            if snapshot and own_history:
-                # A hole in its old stream needs a state copy, which only its
-                # own pull asks for. Keep pushing everything else meanwhile.
-                own_history = None
-                continue
             if snapshot:
                 # The other worker's next pull requests our state. Do not send
                 # an incomplete log prefix and pretend it was acknowledged.

@@ -443,7 +443,7 @@ OWNER_ONLY_SESSION_FIELDS = ("provenance_owner", "permission_mode", "permission_
 
 
 def _provenance_from(cursor, record: Dict[str, Any], origin_device_id: Optional[str],
-                     device_id: Optional[str]) -> bool:
+                     device_id: Optional[str], *, own_replay: bool = False) -> bool:
     """True when this copy may set the chat's owner-only columns (#1849, #1887).
 
     Only the worker that runs the chat knows whose it is, so only a copy that
@@ -453,7 +453,12 @@ def _provenance_from(cursor, record: Dict[str, Any], origin_device_id: Optional[
     worker the copy names as its owner. A copy from any other worker, or one
     whose sender cannot be identified, never sets, clears or changes it. The
     permission binding (:data:`OWNER_ONLY_SESSION_FIELDS`) follows the same rule.
+
+    ``own_replay``: this worker's own record of a chat it ran, signed in an
+    earlier incarnation and newer than what it holds since the restore (#1568).
     """
+    if own_replay and origin_device_id and origin_device_id == device_id:
+        return (record.get("owner_device_id") or device_id) == device_id
     if not origin_device_id or origin_device_id == device_id:
         return False
     cursor.execute("SELECT owner_device_id, instance_id FROM sessions WHERE id = %s", (record["id"],))
@@ -472,7 +477,7 @@ def _provenance_from(cursor, record: Dict[str, Any], origin_device_id: Optional[
 
 
 def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: Optional[str] = None,
-                           device_id: Optional[str] = None) -> Dict[str, Any]:
+                           device_id: Optional[str] = None, own_replay: bool = False) -> Dict[str, Any]:
     """A mirrored session must not reference local-only rows it cannot see.
 
     ``origin_device_id`` is the worker that signed the copy and ``device_id``
@@ -502,7 +507,8 @@ def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: 
         local = cursor.fetchone()
         if local is not None and local["api_user_id"]:
             record["api_user_id"] = local["api_user_id"]
-    if record.get("id") and not _provenance_from(cursor, record, origin_device_id, device_id):
+    if record.get("id") and not _provenance_from(cursor, record, origin_device_id, device_id,
+                                                 own_replay=own_replay):
         # Only the owning worker labels the chat (#1849) and sets its
         # permission binding (#1887): any other copy leaves those columns as
         # this worker holds them (none for a new row). An owner on an older

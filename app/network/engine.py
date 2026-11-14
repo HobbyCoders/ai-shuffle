@@ -1980,7 +1980,10 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             if record(cursor, coll.name, env.record_id, local, ctx=ctx, force=True) is None:
                 raise TransientApplyError("Local session membership is waiting for publishing")
     existing = store.get_record(cursor, env.collection, env.record_id)
-    if coll.mode == policy.MODE_OWNER_ORDERED:
+    replay = env.origin_device_id == ctx.device_id and env.origin_incarnation < ctx.identity.incarnation
+    if replay:
+        wins = _own_replay_wins(cursor, ctx, coll, env, existing)
+    elif coll.mode == policy.MODE_OWNER_ORDERED:
         # Owner-ordered: the owner's stream order is the order. No clock race.
         wins = existing is None or env.origin_device_id == existing["origin_device_id"] or \
             envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
@@ -1988,6 +1991,10 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         wins = existing is None or envelope_mod.compare(
             env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     if not wins:
+        if existing is None:
+            # Our write since the restore, not published yet (_own_replay_wins).
+            existing = {"clock": env.clock, "origin_device_id": ctx.device_id, "content_hash": None,
+                        "deleted": False}
         merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
             cursor, coll, env.record_id, plaintext, existing)
         if merged:
@@ -2044,7 +2051,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
-        plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx)
+        plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx,
+                                    own_replay=replay)
         refresh_billing = _billing_refresh_needed(cursor, coll, env.record_id, plaintext)
         try:
             row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
@@ -2084,17 +2092,43 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     return "applied"
 
 
+def _own_replay_wins(cursor, ctx: NetworkContext, coll: policy.Collection, env: Envelope,
+                     existing: Optional[Mapping[str, Any]]) -> bool:
+    """Whether an op we signed in an earlier incarnation replaces what we hold (#1568).
+
+    A restore forks our stream: every later incarnation continued from the
+    backup, so it is newer than anything an earlier one wrote, whatever the
+    clocks say (the restore put an older clock back too). So our own versions
+    order by (incarnation, clock), and a replay that loses is kept as a
+    conflict like any other. Another device's version compares by clock, as
+    usual. A row we hold but never published is a write since the restore.
+    """
+    if existing is None:
+        return _read_row(cursor, coll, env.record_id) is None
+    if existing["origin_device_id"] != ctx.device_id:
+        return envelope_mod.compare(env.clock, env.origin_device_id,
+                                    int(existing["clock"]), existing["origin_device_id"]) > 0
+    held = store.own_version_incarnation(cursor, ctx.device_id, env.collection, env.record_id,
+                                         int(existing["clock"]))
+    # Compacted out of the log: a version older than the backup, so the clock decides.
+    held = env.origin_incarnation if held is None else held
+    return (env.origin_incarnation, env.clock) > (held, int(existing["clock"]))
+
+
 def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any], *,
-                    origin_device_id: Optional[str] = None, ctx: Optional[NetworkContext] = None) -> Mapping[str, Any]:
+                    origin_device_id: Optional[str] = None, ctx: Optional[NetworkContext] = None,
+                    own_replay: bool = False) -> Mapping[str, Any]:
     """Owner-ordered rows may reference local-only rows; drop what we cannot see.
 
     ``origin_device_id`` is the worker that wrote the copy (the envelope's
-    signer, or a snapshot item's recorded origin).
+    signer, or a snapshot item's recorded origin). ``own_replay``: a verified
+    op this device signed before a restore that won ``_own_replay_wins``.
     """
     if coll.name == "sessions":
         from app.network import catalog
         return catalog.prepare_session_mirror(cursor, dict(plaintext), origin_device_id=origin_device_id,
-                                              device_id=ctx.device_id if ctx is not None else None)
+                                              device_id=ctx.device_id if ctx is not None else None,
+                                              own_replay=own_replay)
     return plaintext
 
 
@@ -3363,18 +3397,14 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
 
 
 def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: NetworkContext | None = None, _conn=None) -> None:
-    """After a snapshot, start tailing from the sender's view of every stream.
-
-    That includes our own streams from earlier incarnations, whose versions the
-    copy carries (#1568); never the outbox we are writing now.
-    """
+    """After a snapshot, start tailing from the sender's view of every stream."""
     ctx = ctx or require_context()
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
         for origin, streams in (watermarks or {}).items():
+            if origin == ctx.device_id:
+                continue
             for incarnation, last_seq in (streams or {}).items():
-                if origin == ctx.device_id and int(incarnation) >= ctx.identity.incarnation:
-                    continue
                 current = store.get_watermark(cursor, origin, int(incarnation))
                 if int(last_seq) > current:
                     store.set_watermark(cursor, origin, int(incarnation), int(last_seq))
