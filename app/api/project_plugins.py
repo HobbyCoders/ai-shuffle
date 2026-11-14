@@ -14,8 +14,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_auth
-from app.db.async_database import run_sync
-from app.api.common import validate_project_access, get_project_path_from_dict
+from app.api.common import validate_project_access, get_project_path_from_dict, on_plugin_io
 from app.core.plugin_service import (
     get_plugin_service,
     PluginService,
@@ -143,7 +142,8 @@ def _available_to_response(
 # ============================================================================
 
 @router.get("/{project_id}/plugins/installed", response_model=List[ProjectPluginResponse])
-async def list_project_plugins(
+@on_plugin_io
+def list_project_plugins(
     project_id: str,
     request: Request,
     token: str = Depends(require_auth)
@@ -161,7 +161,8 @@ async def list_project_plugins(
 
 
 @router.get("/{project_id}/plugins/available", response_model=List[AvailablePluginResponse])
-async def list_available_plugins(
+@on_plugin_io
+def list_available_plugins(
     project_id: str,
     request: Request,
     marketplace: Optional[str] = None,
@@ -177,7 +178,7 @@ async def list_available_plugins(
 
     # Get available plugins from global service (marketplaces are global)
     global_service = get_plugin_service()
-    available = await run_sync(global_service.get_available_plugins, marketplace)
+    available = global_service.get_available_plugins(marketplace)
 
     # Get installed project plugins to mark which are already installed
     installed = service.get_project_installed_plugins()
@@ -188,7 +189,8 @@ async def list_available_plugins(
 
 
 @router.post("/{project_id}/plugins/install", response_model=ProjectPluginResponse, status_code=status.HTTP_201_CREATED)
-async def install_project_plugin(
+@on_plugin_io
+def install_project_plugin(
     project_id: str,
     install_data: InstallPluginRequest,
     request: Request,
@@ -225,7 +227,8 @@ async def install_project_plugin(
 
 
 @router.delete("/{project_id}/plugins/{plugin_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def uninstall_project_plugin(
+@on_plugin_io
+def uninstall_project_plugin(
     project_id: str,
     plugin_id: str,
     request: Request,
@@ -249,7 +252,8 @@ async def uninstall_project_plugin(
 
 
 @router.post("/{project_id}/plugins/{plugin_id}/enable", status_code=status.HTTP_204_NO_CONTENT)
-async def enable_project_plugin(
+@on_plugin_io
+def enable_project_plugin(
     project_id: str,
     plugin_id: str,
     request: Request,
@@ -275,7 +279,8 @@ async def enable_project_plugin(
 
 
 @router.post("/{project_id}/plugins/{plugin_id}/disable", status_code=status.HTTP_204_NO_CONTENT)
-async def disable_project_plugin(
+@on_plugin_io
+def disable_project_plugin(
     project_id: str,
     plugin_id: str,
     request: Request,
@@ -301,7 +306,8 @@ async def disable_project_plugin(
 
 
 @router.get("/{project_id}/plugins/hooks", response_model=List[PluginHookResponse])
-async def get_project_plugin_hooks(
+@on_plugin_io
+def get_project_plugin_hooks(
     project_id: str,
     request: Request,
     token: str = Depends(require_auth)

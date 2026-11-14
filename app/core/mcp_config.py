@@ -448,9 +448,13 @@ def _build_plugins_list(
     try:
         if installed_plugins_file.exists():
             import json
-            with open(installed_plugins_file, 'r') as f:
-                data = json.load(f)
-                installed_plugins = data.get("plugins", {})
+
+            from app.core.fs_utils import retry_sharing_violation
+
+            # Replaced atomically by plugin operations; Windows briefly refuses
+            # the open during that replace, which would drop every plugin here.
+            data = retry_sharing_violation(lambda: json.loads(installed_plugins_file.read_text()))
+            installed_plugins = data.get("plugins", {})
     except Exception as e:
         logger.warning(f"Failed to load installed_plugins.json: {e}")
 

@@ -162,6 +162,22 @@ async def run_event_write(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     return await _await_thread(asyncio.get_running_loop().run_in_executor(_event_executor, call))
 
 
+# Plugin, marketplace and MCP-config file work, one job at a time. These ran on
+# the event loop, which serialized them, and their read-modify-write steps were
+# written for that; one thread keeps the guarantee while sparing the loop the
+# Windows sharing-violation backoff (app.core.fs_utils).
+_plugin_io_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="plugin-io")
+
+
+async def run_plugin_io(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Run plugin/MCP-config file work on the single plugin I/O thread.
+
+    A job must never wait for another plugin I/O job: there is one thread.
+    """
+    call = functools.partial(contextvars.copy_context().run, fn, *args, **kwargs)
+    return await _await_thread(asyncio.get_running_loop().run_in_executor(_plugin_io_executor, call))
+
+
 async def run_lease(fn: Callable[..., T], *args: Any) -> T:
     """Heartbeats only: never queue bulk/reaper work ahead of lease renewal."""
     call = functools.partial(contextvars.copy_context().run, fn, *args)

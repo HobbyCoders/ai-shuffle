@@ -203,9 +203,8 @@ def test_killed_removal_is_retryable_and_updates_cannot_resurrect_it(sources, ki
     svc, _, _, info = setup(sources, "directory")
     record = svc._read_json_file(svc.INSTALLED_FILE, {})
     code = """
-from app.core import plugin_marketplace
+import shutil
 save = svc._write_json_file
-remove = plugin_marketplace.shutil.rmtree
 phase = sys.argv[2]
 def interrupt_write(path, data):
     if phase == 'settings' and path == svc.SETTINGS_FILE:
@@ -217,7 +216,7 @@ def interrupt_remove(*args, **kwargs):
     os._exit(73)
 svc._write_json_file = interrupt_write
 if phase == 'cache':
-    plugin_marketplace.shutil.rmtree = interrupt_remove
+    shutil.rmtree = interrupt_remove
 svc.remove_marketplace('sample')
 """
     child = _child(svc, code, kill_at)
@@ -382,10 +381,10 @@ def test_remove_many_plugins_and_update_all_finish_without_resurrection(sources,
 
 
 def test_remove_sharing_violation_stays_closed_until_retry(sources, monkeypatch):
-    from app.core import plugin_marketplace
+    import shutil
 
     svc, _, _, info = setup(sources, "directory")
-    remove = plugin_marketplace.shutil.rmtree
+    remove = shutil.rmtree
 
     def refuse_cache(path, *args, **kwargs):
         if Path(path) == svc.CACHE_DIR / "sample":
@@ -393,7 +392,7 @@ def test_remove_sharing_violation_stays_closed_until_retry(sources, monkeypatch)
         return remove(path, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(plugin_marketplace.shutil, "rmtree", refuse_cache)
+        patch.setattr(shutil, "rmtree", refuse_cache)
         assert svc.remove_marketplace("sample") is False
     assert svc._read_json_file(svc.MARKETPLACES_FILE, {})["sample"]["removing"]
     assert not svc.get_installation_records(info.id)
