@@ -7,6 +7,7 @@ included in the main sessions router for backward compatibility.
 
 import asyncio
 import contextlib
+import functools
 import shutil
 import uuid
 import weakref
@@ -126,6 +127,7 @@ def _migrate_uploads_to_dir(
     target_dir: Path,
     file_paths: List[str],
     migrated_paths: Optional[dict] = None,
+    composer: bool = False,
 ) -> List[str]:
     """Copy uploaded files from the project dir into ``target_dir``.
 
@@ -134,6 +136,11 @@ def _migrate_uploads_to_dir(
     non-worktree (cloud "run in main checkout") flow. Returns a list of
     human-readable error messages; a missing or mis-rooted file does not abort
     the whole migration.
+
+    ``composer`` (owner requests only) also admits the areas the owner's
+    composer stages into before a project is picked
+    (``upload_transfer.composer_staging_roots``); such a file lands in
+    ``target_dir/uploads`` under a free name.
     """
     from app.core.project_utils import get_project_working_dir
 
@@ -149,7 +156,7 @@ def _migrate_uploads_to_dir(
     base_session = {"id": "branch-compose", "project_id": project_id}
     for file_path in file_paths:
         try:
-            upload_transfer.validate_upload_paths([file_path], base_session)
+            upload_transfer.validate_upload_paths([file_path], base_session, composer=composer)
             src = Path(file_path).resolve()
             if not src.exists():
                 errors.append(f"File not found: {file_path}")
@@ -157,7 +164,13 @@ def _migrate_uploads_to_dir(
             try:
                 rel = src.relative_to(project_dir)
             except ValueError:
-                errors.append(f"File not in project directory: {file_path}")
+                if not composer:
+                    errors.append(f"File not in project directory: {file_path}")
+                    continue
+                from app.core.confined_files import upload
+                dest = upload(target_dir, upload_transfer.UPLOADS_SUBDIR, src.name, src.read_bytes())
+                if migrated_paths is not None:
+                    migrated_paths[file_path] = str(dest)
                 continue
             dest = target_dir / rel
             if not upload_transfer._is_under(dest.resolve(), target_dir.resolve()):
@@ -401,16 +414,16 @@ async def _create_remote_branch_session(
         upload_blob_ids: List[str] = []
         if body.pending_upload_paths and prompt:
             try:
-                await run_sync(upload_transfer.validate_upload_paths, body.pending_upload_paths, {
-                    "id": session_id, "project_id": body.project_id, "project_v2_id": pv2["id"],
-                })
-                upload_blob_ids = await run_sync(
-                    upload_transfer.lift_paths_to_blobs,
+                # Each file lifts from the admitted area that holds it. The
+                # owner's chip may have been staged before the project,
+                # worktree or worker was picked (chat-uploads, another project).
+                upload_blob_ids = await run_sync(functools.partial(
+                    upload_transfer.lift_session_paths_to_blobs,
                     body.pending_upload_paths,
-                    project,
-                    session_id,
-                    pv2["id"],
-                )
+                    {"id": session_id, "project_id": body.project_id, "project_v2_id": pv2["id"]},
+                    composer=entry is True,
+                    project_v2_id=pv2["id"],
+                ))
             except Exception as e:  # noqa: BLE001 — refuse, never half-create
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -753,6 +766,7 @@ async def _create_v2_branch_session(
                 Path(checkout_path),
                 body.pending_upload_paths,
                 migrated_paths,
+                entry is True,
             ) or None
             if upload_migration_errors:
                 logger.warning(

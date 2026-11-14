@@ -8,6 +8,7 @@ become methods.  Behaviour is identical to the original implementation.
 
 import asyncio
 from contextvars import ContextVar
+import functools
 import json
 import logging
 import time
@@ -1157,15 +1158,22 @@ class ChatWebSocketHandler:
         upload_paths: List[str],
         project_id: Optional[str],
         session_id: str,
+        *,
+        composer: bool = False,
     ) -> List[str]:
         """Lift this send's staged uploads into durable blobs.
 
+        ``composer``: an owner send, which also admits the areas the owner's
+        composer stages into (``upload_transfer.composer_staging_roots``).
         Raises ``UploadLiftError`` (or anything the DB layer raises) so the
         caller can refuse the send — never returns partial results.
         """
         from app.core import upload_transfer
 
-        return await run_sync(upload_transfer.lift_send_uploads, upload_paths, project_id, session_id)
+        return await run_sync(functools.partial(
+            upload_transfer.lift_send_uploads, upload_paths, project_id, session_id,
+            composer=composer,
+        ))
 
     async def _authorize_mobile_session(self, session_id, *, claim=False):
         from app.core.mobile_tool_identity import bind_session
@@ -1754,12 +1762,27 @@ class ChatWebSocketHandler:
         upload_references = []
         if upload_paths or data.get("upload_references"):
             from app.core import upload_transfer
+            # The owner's composer may have staged a file under an earlier
+            # project or the chat lane before the project, worktree or worker
+            # changed. Only the owner's send admits those areas.
+            composer = self._person_entry is True
             try:
                 upload_session = await run_sync(database.get_session, session_id)
                 local_upload_paths, upload_references = await run_sync(
-                    upload_transfer.partition_upload_paths, upload_paths, upload_session,
-                    references=data.get("upload_references"),
+                    functools.partial(
+                        upload_transfer.partition_upload_paths, upload_paths, upload_session,
+                        references=data.get("upload_references"), composer=composer,
+                    )
                 )
+                if composer and not placed_remote and local_upload_paths:
+                    # A turn here re-checks its paths against the session's own
+                    # areas, and a confined agent reads only those: copy in.
+                    adopted = await run_sync(
+                        upload_transfer.adopt_composer_uploads, local_upload_paths, upload_session,
+                    )
+                    if adopted:
+                        local_upload_paths = [adopted.get(p, p) for p in local_upload_paths]
+                        prompt = upload_transfer.rewrite_prompt(prompt, adopted)
                 upload_paths = local_upload_paths + [ref["path"] for ref in upload_references]
             except (upload_transfer.UploadLiftError, OSError, ValueError, RuntimeError):
                 await self.send_json({
@@ -1860,7 +1883,8 @@ class ChatWebSocketHandler:
         if placed_remote and local_upload_paths:
             try:
                 blob_ids = await self._lift_uploads(
-                    local_upload_paths, project_id, session_id
+                    local_upload_paths, project_id, session_id,
+                    composer=self._person_entry is True,
                 )
             except Exception as lift_exc:  # noqa: BLE001 — refuse, never half-send
                 logger.warning(
