@@ -138,9 +138,12 @@ def _create_subagent_tools(is_admin: bool) -> list:
                     "enum": ["user", "project", "local"],
                     "description": "Memory scope for the subagent.",
                 },
+                # Gemini (Antigravity) refuses the whole request when an array
+                # has no ``items``: tests/core/test_acp_tool_schemas_gemini.py.
                 "mcp_servers": {
                     "type": "array",
-                    "description": "MCP servers the subagent can access.",
+                    "items": {"type": "string"},
+                    "description": "Names of the MCP servers the subagent can access.",
                 },
                 "provider_models": _PROVIDER_MODELS_SCHEMA,
             },
@@ -237,7 +240,8 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 },
                 "mcp_servers": {
                     "type": "array",
-                    "description": "MCP servers the subagent can access.",
+                    "items": {"type": "string"},
+                    "description": "Names of the MCP servers the subagent can access.",
                 },
                 "provider_models": nullable({
                     **_PROVIDER_MODELS_SCHEMA,
