@@ -70,6 +70,28 @@ from scripts.devloop.fake_claude import COMPACTION_DIR, FAKE_EMAIL, SCENARIOS_DI
 FIXTURE = ROOT / "fluid" / "tests" / "fixtures" / "fake_claude_script.py"
 VERSION = "2.1.312 (Claude Code)"
 MODEL = "claude-sonnet-4-5"
+
+def _cli_model(value: str, label: str, resolved: str, levels: list[str] | None) -> dict:
+    return {"value": value, "resolvedModel": resolved, "displayName": label, "description": "",
+            "supportsEffort": True if levels else None, "supportedEffortLevels": levels}
+
+
+_ALL = ["low", "medium", "high", "xhigh", "max"]
+# The shape of the stock CLI's ``initialize`` ``models`` list (labels are
+# illustrative): aliases resolve to concrete ids; some versions lack xhigh;
+# Haiku 4.5 has no effort control.
+FAKE_CLI_MODELS = [
+    _cli_model("default", "Default (recommended)", "claude-opus-5-5", _ALL),
+    _cli_model("opus", "Opus 5.5", "claude-opus-5-5", _ALL),
+    _cli_model("fable", "Fable 5.2", "claude-fable-5-2", _ALL),
+    _cli_model("sonnet", "Sonnet 5.5", "claude-sonnet-5-5", _ALL),
+    _cli_model("haiku", "Haiku 5.5", "claude-haiku-5-5", _ALL),
+    _cli_model("claude-fable-5-1", "Fable 5.1", "claude-fable-5-1", _ALL),
+    _cli_model("claude-opus-5", "Opus 5", "claude-opus-5", _ALL),
+    _cli_model("claude-opus-4-6", "Opus 4.6", "claude-opus-4-6", ["low", "medium", "high", "max"]),
+    _cli_model("claude-sonnet-4-6", "Sonnet 4.6", "claude-sonnet-4-6", ["low", "medium", "high", "max"]),
+    _cli_model("claude-haiku-4-5-20251001", "Haiku 4.5", "claude-haiku-4-5-20251001", None),
+]
 BUILTIN_TOOLS = ("Task", "Bash", "Glob", "Grep", "ExitPlanMode", "Read", "Edit", "Write",
                  "NotebookEdit", "WebFetch", "TodoWrite", "WebSearch", "BashOutput", "KillShell",
                  "ToolSearch")
@@ -460,6 +482,11 @@ class DevClaude(script.Fake):
         return handle
 
     # ── protocol ──
+    def initialize_extra(self) -> dict:
+        """The model list a subscription CLI reports at ``initialize``."""
+        return {"claude_code_version": str(self.script.get("version") or "2.1.280").split()[0],
+                "models": FAKE_CLI_MODELS, **super().initialize_extra()}
+
     def answer_control(self, msg: dict) -> None:
         request = msg.get("request") or {}
         subtype = request.get("subtype")

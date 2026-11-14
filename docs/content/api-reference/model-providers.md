@@ -781,4 +781,34 @@ curl http://localhost:8000/api/v1/models \
 - `models`: built-in Claude models. Use `value` as the model id.
 - `default`: the default model, what a new chat runs when you pick none: the model you use most while its provider can run it, else the default model of the oldest provider that can run (adding another key never moves it), Claude's last. `inherit_value`: the value that means "inherit from the parent" (for subagents). `legacy_map`: full Claude model ids and the short id each maps to.
 - `providers`: enabled providers only, never with keys. `auth_kind` is `subscription` for ChatGPT and Grok subscription providers and `api` otherwise; `plan_type` names the subscription plan when known. `capability_generation` changes whenever the provider is edited. `effort_levels` lists the reasoning-effort levels a model accepts: `[]` means none, `null` means unknown (see [refresh-capabilities](#post-apiv1model-providersrefresh-capabilities)).
-- `claude`: how this install signs in to Claude (`auth_kind` `api`, `subscription` or `null`, with `plan_type` when known).
+- `claude`: how this install signs in to Claude (`auth_kind` `api`, `subscription` or `null`, with `plan_type` when known). On a subscription sign-in it also has `cli_models` (`cli_version`, `captured_at`) once Claude Code has listed its models on this worker.
+- `versioned_models`: on a subscription sign-in, the versioned models this worker's Claude Code lists (for example `claude-opus-4-6`), each with `enabled`. Enabled ones are also in `models`. Empty in other modes.
+
+### Claude subscription models
+
+On a Claude subscription, the model list comes from the worker's Claude Code CLI. Claude Code sends it when a chat starts, and AI Shuffle also asks for it at startup and on refresh, without sending a prompt. The four short ids (`haiku`, `sonnet`, `opus`, `fable`) are always offered, labelled with the version Claude Code currently runs for them, such as "Opus 5.5". Their effort levels follow what Claude Code reports. The versioned models Claude Code lists are off until you check them in **Settings → Providers → Claude → Models**. A checked version runs exactly that model, with its own effort levels and context window. Before Claude Code has listed its models, only the four short ids are offered.
+
+Each worker keeps its own list. A model id goes unchanged to the Claude Code that runs the chat. If that worker's Claude Code does not know the id, the turn fails with Claude Code's error; it never runs another model in its place. API-key and cloud sign-ins keep the built-in list.
+
+#### POST /api/v1/models/claude/refresh
+
+Asks this worker's Claude Code for its model list again, then returns the same body as `GET /api/v1/models`. No prompt is sent.
+
+**Auth:** Owner only
+
+**Errors:** `409` when this install is not signed in with a Claude subscription, or Claude Code did not answer.
+
+#### PUT /api/v1/models/claude/enabled
+
+Sets which versioned Claude models appear in the model pickers. Send the whole list; short ids and repeats are dropped.
+
+**Auth:** Owner only
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/models/claude/enabled \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"models": ["claude-opus-4-6"]}'
+```
+
+**Response:** `{ "models": ["claude-opus-4-6"] }`

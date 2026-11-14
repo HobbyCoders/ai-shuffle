@@ -38,6 +38,7 @@
 	import ClaudeCliTerminal from './setup/ClaudeCliTerminal.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
 	import BuiltInModels from './tabs/BuiltInModels.svelte';
+	import ClaudeCliModels from './tabs/ClaudeCliModels.svelte';
 	import ClaudeUsage from './tabs/ClaudeUsage.svelte';
 	import ClaudePolicy from './tabs/ClaudePolicy.svelte';
 	import { ClaudeCliLogin } from './claude-cli-login.svelte';
@@ -276,7 +277,7 @@
 		{#if inactive}
 			{#if tab === 'Models'}<BuiltInModels />{/if}
 		{:else if tab === 'Models'}
-			<BuiltInModels />
+			{#if mode === 'subscription'}<ClaudeCliModels readOnly={access.readOnly} />{:else}<BuiltInModels />{/if}
 		{:else if tab === 'Usage'}
 			<ClaudeUsage {guard} plan={status?.plan ?? summaryCli?.plan ?? null} />
 		{:else if tab === 'Policy'}

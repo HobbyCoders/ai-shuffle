@@ -954,6 +954,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         claude_mod_compaction: bool = True,
         compaction_window: int | None = None,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
+        on_initialize: Callable[[dict[str, Any]], None] | None = None,
         compact_context: Callable[
             [], Awaitable[str | Sequence[RestorationSection] | None]
         ] | None = None,
@@ -1187,6 +1188,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # The host's taker of the plan usage the mod reports (see
         # ``CLAUDE_MOD_URL_ENV``), and the token for that route alone.
         self.plan_usage_sink = plan_usage_sink
+        # The host's taker of the CLI's ``initialize`` reply payload (its
+        # model list and version). Called once per spawned process; it must
+        # not raise or block.
+        self.on_initialize = on_initialize
         self._mod_token = secrets.token_urlsafe(32)
         self._usage_route = False
         # Main-conversation compaction through Fluid (``claude_mod_compaction``)
@@ -4558,6 +4563,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 if reply is not None and reply.request_id == request_id:
                     if reply.ok:
                         self.cli_hooks_registered = True
+                        if self.on_initialize is not None and reply.payload is not None:
+                            try:
+                                self.on_initialize(reply.payload)
+                            except Exception:  # noqa: BLE001 - a host hook never fails the turn
+                                logger.warning("on_initialize hook failed", exc_info=True)
                         return "ok"
                     logger.warning(
                         "claude CLI refused initialize (%s); its hooks are "

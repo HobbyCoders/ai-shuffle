@@ -120,6 +120,16 @@ _VERSIONED_MODELS: Tuple[ModelOption, ...] = (
     ModelOption("claude-haiku-4-5-20251001", "Haiku 4.5", "haiku", 200_000),
     ModelOption("claude-opus-5-5", "Opus 5.5", "opus", 1_000_000),
     ModelOption("claude-sonnet-5-5", "Sonnet 5.5", "sonnet", 1_000_000),
+    # Versions the subscription CLI offers by id (``claude_cli_models``).
+    ModelOption("claude-fable-5-2", "Fable 5.2", "fable", 1_000_000),
+    ModelOption("claude-fable-5-1", "Fable 5.1", "fable", 1_000_000),
+    ModelOption("claude-fable-5", "Fable 5", "fable", 1_000_000),
+    ModelOption("claude-opus-5", "Opus 5", "opus", 1_000_000),
+    ModelOption("claude-opus-4-8", "Opus 4.8", "opus", 1_000_000),
+    ModelOption("claude-opus-4-7", "Opus 4.7", "opus", 1_000_000),
+    ModelOption("claude-opus-4-6", "Opus 4.6", "opus", 1_000_000),
+    ModelOption("claude-sonnet-5", "Sonnet 5", "sonnet", 1_000_000),
+    ModelOption("claude-sonnet-4-6", "Sonnet 4.6", "sonnet", 1_000_000),
 )
 _BY_VALUE: Dict[str, ModelOption] = {m.value: m for m in (*MODELS, *_VERSIONED_MODELS)}
 
@@ -146,8 +156,50 @@ def normalize_model(value: Optional[str]) -> str:
     return value
 
 
+def _family_of(*texts: Optional[str]) -> Optional[ModelFamily]:
+    for text in texts:
+        lowered = (text or "").lower()
+        for family in ("haiku", "sonnet", "opus", "fable"):
+            if family in lowered:
+                return family  # type: ignore[return-value]
+    return None
+
+
+def _cli_model(value: str) -> Optional[ModelOption]:
+    """A subscription CLI catalog entry as a ``ModelOption`` (labelled as the
+    CLI names it, sized by the model it runs), or None."""
+    from app.core import claude_cli_models
+
+    found = claude_cli_models.entry(value)
+    if found is None:
+        return None
+    concrete = found.get("resolved") or value
+    base = _BY_VALUE.get(concrete) or _BY_VALUE.get(re.sub(r"-\d{8}$", "", concrete))
+    family = _family_of(value, concrete, found.get("label")) or (base.family if base else None)
+    if family is None:
+        return None
+    window = base.context_window if base else (200_000 if "haiku-4" in concrete else 1_000_000)
+    return ModelOption(value, found.get("label") or value, family, window)
+
+
+def cli_offers(value: Optional[str]) -> bool:
+    """Whether the subscription CLI lists ``value`` by name (it then means itself)."""
+    from app.core import claude_cli_models
+
+    return bool(value) and claude_cli_models.entry(value) is not None
+
+
 def get_model(value: Optional[str], *, delegated: bool = True) -> Optional[ModelOption]:
-    """Look up a stored value; cloud CLI aliases apply only to delegated routes."""
+    """Look up a stored value; cloud CLI aliases apply only to delegated routes.
+
+    On the delegated route with a subscription sign-in, an id the CLI lists
+    describes that model (``claude-opus-4-6`` is Opus 4.6, not today's
+    ``opus``), and an alias is labelled and sized as the model it resolves to.
+    """
+    if delegated and value:
+        listed = _cli_model(value)
+        if listed is not None:
+            return listed
     normalized = normalize_model(value)
     if delegated and normalized == "haiku" and delegated_model_aliases()["haiku"] != API_MODEL_IDS["haiku"]:
         return _BY_VALUE["claude-haiku-4-5"]
@@ -396,12 +448,21 @@ API_MODEL_IDS: Dict[str, str] = {
 
 
 def delegated_model_aliases() -> Dict[str, str]:
-    """CLI aliases differ on cloud/gateway auth; first-party Haiku is 5.5."""
+    """The concrete model each alias runs on the delegated (CLI) route.
+
+    Cloud/gateway auth runs Haiku 4.5; a subscription CLI that reported its
+    list (``claude_cli_models``) names its own targets; otherwise
+    ``API_MODEL_IDS``."""
     from app.core import claude_auth_mode
 
     aliases = dict(API_MODEL_IDS)
     if claude_auth_mode.current_mode() == claude_auth_mode.MODE_CLOUD:
         aliases["haiku"] = "claude-haiku-4-5"
+    else:
+        # A subscription CLI says which model each alias runs today.
+        from app.core import claude_cli_models
+
+        aliases.update(claude_cli_models.alias_targets())
     return aliases
 
 
@@ -640,27 +701,51 @@ def _default_selection() -> str:
 
 def registry_payload() -> Dict[str, object]:
     """Serialized registry for the ``GET /api/models`` endpoint."""
+    from app.core import claude_cli_models
+
     aliases = delegated_model_aliases()
     legacy_map = dict(LEGACY_MODEL_MAP)
     if aliases["haiku"] != API_MODEL_IDS["haiku"]:
         legacy_map.pop("claude-haiku-5-5", None)
+    snapshot = claude_cli_models.catalog()
+    listed = {m["value"] for m in snapshot["models"]} if snapshot else set()
+    # An id the subscription CLI lists means itself, not today's alias.
+    legacy_map = {k: v for k, v in legacy_map.items() if k not in listed}
+
+    def entry(value: str, fallback: ModelOption) -> Dict[str, object]:
+        # Labels follow the CLI only for what it lists; other modes keep today's.
+        option = (get_model(value) if value in listed else None) or fallback
+        return {
+            "value": value,
+            "label": option.label,
+            "family": option.family,
+            "auto_permission_supported": supports_auto_permission(value),
+            "context_window": (_BY_VALUE[aliases["haiku"]].context_window
+                               if value == "haiku" and value not in listed else option.context_window),
+            **effort_capabilities(value, route="delegated"),
+        }
+
+    enabled = set(claude_cli_models.enabled_models()) if snapshot else set()
+    versioned = []
+    for item in claude_cli_models.versioned_entries():
+        option = get_model(item["value"])
+        if option is None:
+            continue
+        versioned.append({**entry(item["value"], option), "description": item.get("description") or "",
+                          "enabled": item["value"] in enabled})
+    claude = _claude_payload()
+    if snapshot:
+        claude["cli_models"] = {"cli_version": snapshot.get("cli_version"),
+                                "captured_at": snapshot.get("captured_at")}
     return {
-        "models": [
-            {
-                "value": m.value,
-                "label": m.label,
-                "family": m.family,
-                "auto_permission_supported": supports_auto_permission(m.value),
-                "context_window": (_BY_VALUE[aliases["haiku"]].context_window
-                                   if m.value == "haiku" else m.context_window),
-                **effort_capabilities(m.value, route="delegated"),
-            }
-            for m in MODELS
-        ],
+        # The four aliases, then the CLI versions the owner turned on.
+        "models": [entry(m.value, m) for m in MODELS] + [v for v in versioned if v["enabled"]],
+        # Every version the subscription CLI lists (Settings > Claude > Models).
+        "versioned_models": versioned,
         "default": _default_selection(),
         "inherit_value": INHERIT_VALUE,
         "legacy_map": legacy_map,
         "effort_model_aliases": aliases,
         "providers": _providers_payload(),
-        "claude": _claude_payload(),
+        "claude": claude,
     }
