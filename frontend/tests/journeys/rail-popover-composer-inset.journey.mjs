@@ -1,7 +1,9 @@
 // The rail's notification history floats beside the rail (council pass 4: a
 // 300px popover over the list column, bottom-aligned with the bell; where it
 // still lands on page content, the modal scrim dims the page so no sliced words read),
-// and the empty-chat composer does not hold an empty Stop seat at its right edge.
+// and the composer does not hold an empty Stop seat at its right edge: not on the
+// empty-chat screen (#1166) and, by the owner's decision of 2026-11-14, not in a
+// chat either (composer-no-empty-seat covers every state of the row).
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp, holdBootLoad, openNewChat, seededChatId, waitChat, SEEDED, settleServiceWorker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -18,8 +20,7 @@ const composerInsets = page => page.evaluate(() => {
 	const outer = box.getBoundingClientRect();
 	return {
 		left: Math.round(attach.getBoundingClientRect().left - outer.left),
-		right: Math.round(outer.right - last),
-		stopSeats: cluster.querySelectorAll('.stop-slot').length
+		right: Math.round(outer.right - last)
 	};
 });
 
@@ -176,13 +177,14 @@ await runJourney({ name: 'rail-popover-composer-inset', allow: DEV_INSTANCE_NOIS
 		const hero = await composerInsets(page);
 		log(JSON.stringify({ hero }));
 		expect(hero, 'the composer box and its controls are measurable');
-		expect(hero.stopSeats === 0, 'no empty Stop seat on the empty-chat composer');
 		expect(Math.abs(hero.right - hero.left) <= 6, `right inset (${hero.right}px) matches the left inset (${hero.left}px)`);
-		await mark('a chat keeps the Stop seat so Stop arriving never moves Send');
+		// Owner decision (2026-11-14): an idle chat holds no Stop seat either.
+		await mark('an idle chat: circles sit flush with the box edge too');
 		await gotoApp(page, status, `/?session=${seededChatId(status, 'long')}`);
 		await waitChat(page, { surface: 'active' }, { timeout: 90_000 });
 		const chat = await composerInsets(page);
 		log(JSON.stringify({ chat, seeded: SEEDED.long }));
-		expect(chat?.stopSeats === 1, 'the chat composer still reserves the Stop seat');
+		expect(chat, 'the chat composer box and its controls are measurable');
+		expect(Math.abs(chat.right - chat.left) <= 6, `idle chat: right inset (${chat.right}px) matches the left inset (${chat.left}px), no empty Stop seat`);
 	}
 }]) });

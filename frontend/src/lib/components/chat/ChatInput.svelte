@@ -1128,9 +1128,13 @@
 	// Send clears the composer at the click, and an empty composer offers Talk
 	// in Send's place. The Send circle keeps the slot through a double click's
 	// window, and until the send has passed its checks, so the second click of
-	// a double click on Send cannot start a call.
+	// a double click on Send cannot start a call. Stop arriving takes the
+	// place Send leaves, so it ignores presses for the same window after a
+	// send (not after it mounts: Stop remounts at every turn handoff).
 	const DOUBLE_ACTIVATION_MS = 500;
+	let lastSendAt = -Infinity;
 	function holdSendCircle(): () => void {
+		lastSendAt = performance.now();
 		sendCircleHolds += 1;
 		let windowOver = false;
 		let sendSettled = false;
@@ -2053,12 +2057,13 @@
 						/>
 					</div>
 
-					<!-- The circles: dictate, then the send slot, then Stop. Talk holds
-					     the slot while there is nothing to send; Send takes it once
-					     there is. Stop must remain reachable whenever session work is
-					     live, including with a draft; Send can queue that draft
+					<!-- The circles: dictate, then Talk, Send or the spinner, then Stop.
+					     Talk shows while there is nothing to send; Send once there is.
+					     Stop must remain reachable whenever session work is live,
+					     including with a draft; Send can queue that draft
 					     independently. StopButton confirms first when background
-					     agents are live. -->
+					     agents are live. A circle that is not shown takes no room:
+					     the others move over (owner decision, 2026-11-14). -->
 					<div class="send-cluster" bind:this={sendClusterRef}>
 						{@render recorder()}
 						<PromptStashMenu
@@ -2068,7 +2073,6 @@
 							onRestore={restoreStashed}
 							onDelete={deleteStashed}
 						/>
-						<span class="send-slot">
 						{#if circles.includes('busy')}
 							<!-- Creating worktree, or a send held for the project catalog or a project setup - show spinner -->
 							{#if heldForCatalog}<span class="sr-only" role="status">Loading projects…</span>{/if}
@@ -2097,19 +2101,15 @@
 						     voice availability is read once and a starting call is
 						     never torn down by a keystroke. -->
 						<span class="talk-slot" hidden={!showTalk}>{@render talk()}</span>
-						</span>
-						<!-- The empty Stop seat is held only inside a chat, where work
-						     can start and stop under the reader. The empty-chat hero
-						     has no work to stop, so its circles sit flush right. -->
-						{#if compact || circles.includes('stop')}
-						<span class="stop-slot">
 						{#if circles.includes('stop')}
 							<StopButton
 								activeTasks={$activeSession.activeTasks}
-								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
+								onStop={() => {
+									if (performance.now() - lastSendAt < DOUBLE_ACTIVATION_MS) return;
+									composerSuggestion.invalidate();
+									activeSession.stopGeneration();
+								}}
 							/>
-						{/if}
-						</span>
 						{/if}
 					</div>
 				</div>
@@ -2381,17 +2381,6 @@
 		align-self: center;
 		gap: 6px;
 		flex-shrink: 0;
-	}
-
-	/* Stop arriving/leaving must not change the editor's width (and trigger a
-	   second wrapped layout), nor move Send under the reader's finger. Empty
-	   slots are layout only: no disabled or invisible focusable buttons. */
-	.send-slot, .stop-slot {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		min-width: var(--composer-action-size, 32px);
-		min-height: var(--composer-action-size, 32px);
 	}
 
 	/* Only one of Talk and Send shows; the hidden one stays mounted. */

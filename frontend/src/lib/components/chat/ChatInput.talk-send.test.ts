@@ -108,6 +108,20 @@ describe('Talk turns into Send', () => {
 		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Send', 'Stop generating']));
 	});
 
+	it('holds no empty seat for Send or Stop when it is not shown', async () => {
+		// Owner decision (2026-11-14): a circle that is not shown takes no room;
+		// the others move over. Working with nothing to send and no call: mic · Stop.
+		voice.enabled = false;
+		startTurn();
+		const { container } = render(ChatInput);
+		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Stop generating']));
+		const cluster = container.querySelector('.send-cluster')!;
+		const empty = [...cluster.children]
+			.filter((el) => !el.matches('[hidden], .stash') && !el.matches('button') && !el.querySelector('button'))
+			.map((el) => el.outerHTML.slice(0, 80));
+		expect(empty).toEqual([]);
+	});
+
 	it('keeps Send in its seat through a double click after the composer clears', async () => {
 		// Send clears the composer at the click; Talk taking the seat at once
 		// would put a call under the second click of a double click.
@@ -131,6 +145,30 @@ describe('Talk turns into Send', () => {
 		// Past the double-click window the empty composer offers the call again.
 		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Start a call in this conversation']), { timeout: 2000 });
 		expect(sends).toHaveBeenCalledOnce();
+	});
+
+	it('ignores Stop for a double tap after Send, then stops', async () => {
+		// With no seat held, Stop arrives in the place Send just left: the second
+		// press of a double tap on Send must not cancel the turn it started.
+		voice.enabled = false;
+		Object.assign(activeSession.current, { sessionId: 'local-idle', mode: 'code', profile: 'coding',
+			isStreaming: false, liveTurnId: null, error: null, worktreeError: null });
+		activeSession.setDraft('');
+		vi.spyOn(activeSession, 'sendMessage').mockImplementation(async () => { startTurn(); return true; });
+		const stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
+		const { container } = render(ChatInput);
+		await type(container, 'Ship it');
+		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Send']));
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+		const stop = await screen.findByRole('button', { name: 'Stop generating' });
+		await fireEvent.click(stop);
+		expect(stops).not.toHaveBeenCalled();
+
+		const later = performance.now() + 1000;
+		vi.spyOn(performance, 'now').mockReturnValue(later);
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop generating' }));
+		expect(stops).toHaveBeenCalledOnce();
 	});
 
 	it('names the agent on a new session', async () => {
