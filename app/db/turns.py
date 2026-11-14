@@ -1691,8 +1691,14 @@ def turn_failed(turn: Optional[Dict[str, Any]]) -> bool:
 
 
 def turn_stopped(turn: Optional[Dict[str, Any]]) -> bool:
-    """Whether a person's Stop ended this turn, not a failure or a finish (#1340)."""
+    """Whether a person's Stop ended this turn, not a failure or a finish (#1340).
+
+    A turn parked on background work that Stop settles completes (its reply
+    stands) with ``interrupt_mode='stop'``: see :func:`settle_parked_turns`.
+    """
     turn = turn or {}
+    if turn.get("state") == "completed":
+        return turn.get("stop_reason") == "parked_settled" and turn.get("interrupt_mode") == "stop"
     return turn.get("state") == "aborted" and not abort_was_failure(turn.get("stop_reason"))
 
 
@@ -1720,8 +1726,10 @@ def latest_turn_outcomes(session_ids: List[str]) -> Dict[str, str]:
             ids = ", ".join(["%s"] * len(chunk))
             cursor.execute(
                 "SELECT s.id AS session_id, s.outcome_baseline_failed, "
-                "ranked.state, ranked.stop_reason, ranked.error FROM sessions s LEFT JOIN ("
-                "  SELECT t.session_id, t.state, t.stop_reason, t.error, ROW_NUMBER() OVER ("
+                "ranked.state, ranked.stop_reason, ranked.error, ranked.interrupt_mode "
+                "FROM sessions s LEFT JOIN ("
+                "  SELECT t.session_id, t.state, t.stop_reason, t.error, t.interrupt_mode, "
+                "  ROW_NUMBER() OVER ("
                 "    PARTITION BY t.session_id "
                 "    ORDER BY t.insert_order DESC, t.created_at DESC, t.position DESC, t.id DESC"
                 "  ) AS newest FROM turns t JOIN sessions b ON b.id = t.session_id "
@@ -2349,6 +2357,7 @@ def settle_parked_turns(
     only_if_idle: bool = False,
     observed_park: Optional[Dict[str, Any]] = None,
     can_settle: Optional[Callable[[], bool]] = None,
+    user_stop: bool = False,
 ) -> int:
     """Settle every ``parked`` turn row for ``session_id`` to ``completed``.
 
@@ -2376,12 +2385,17 @@ def settle_parked_turns(
     ``can_settle`` rechecks in-memory work under the admission lock (it must
     not open another DB transaction). A changed interval or failed recheck
     returns zero so the caller retries from a fresh observation.
+    ``user_stop`` marks a settlement the owner's Stop caused with
+    ``interrupt_mode='stop'``, like any stopped turn, so the chat reads Stopped
+    (:func:`turn_stopped`) and a reboot keeps the Stop. The row still completes
+    as ``parked_settled``: its reply and usage stand.
     Returns the row count.
     """
     sql = (
         "UPDATE turns SET state='completed', "
-        "stop_reason=COALESCE(stop_reason, 'parked_settled'), ended_at=NOW() "
-        "WHERE session_id=%s AND state='parked' "
+        "stop_reason=COALESCE(stop_reason, 'parked_settled'), ended_at=NOW()"
+        + (", interrupt_mode='stop' " if user_stop else " ")
+        + "WHERE session_id=%s AND state='parked' "
     )
     params: tuple = (session_id,)
     if turn_ids is not None:

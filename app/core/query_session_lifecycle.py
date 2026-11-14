@@ -799,6 +799,7 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
         for park in receipt.get("parks") or []:
             parked_settled += await asyncio.to_thread(
                 turns_db.settle_parked_turns, session_id, observed_park=park,
+                user_stop=True,
             )
         if parked_settled:
             # Settling banked the park's working time; show the final total.
