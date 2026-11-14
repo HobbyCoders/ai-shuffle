@@ -22,6 +22,7 @@
 	import {
 		buildValues,
 		canSave,
+		cloudWarning,
 		initialChoice,
 		initialInputs,
 		methodOf,
@@ -74,6 +75,10 @@
 		...config.methods.map((m) => ({ value: m.id, label: m.label }))
 	]);
 	const gatewayNotice = $derived(methodId === 'gateway' && (showWarning || config.method !== 'gateway'));
+	// The chosen method's warning. In the detail, its banner already shows the
+	// saved method's, so a pick whose warning reads differently shows it here.
+	const warning = $derived(cloudWarning(config, methodId || null));
+	const warningNotice = $derived(showWarning || warning !== cloudWarning(config, config.method));
 
 	async function save(activate: boolean) {
 		if (!method || !ready || busy) return;
@@ -91,8 +96,8 @@
 	}
 </script>
 
-{#if showWarning}
-	<InlineBanner tone="warn">{config.warning}</InlineBanner>
+{#if warningNotice}
+	<InlineBanner tone="warn">{warning}</InlineBanner>
 {/if}
 {#if gatewayNotice}
 	<InlineBanner tone="warn">{config.gateway_warning}</InlineBanner>

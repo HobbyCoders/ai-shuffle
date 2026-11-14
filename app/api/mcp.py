@@ -16,7 +16,13 @@ from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import get_api_user_from_request, require_auth, require_admin
-from app.api.common import validate_project_access, get_project_path_from_dict, api_error_handler
+from app.api.common import (
+    api_error_handler,
+    api_errors,
+    get_project_path_from_dict,
+    on_plugin_io,
+    validate_project_access,
+)
 from app.core.mcp_service import (
     get_mcp_service,
     McpScope,
@@ -370,25 +376,27 @@ def _parse_scope(scope_str: str) -> McpScope:
 # ============================================================================
 
 @router.get("/mcp/servers", response_model=List[McpServerResponse])
-async def list_global_mcp_servers(request: Request, token: str = Depends(require_auth)):
+@on_plugin_io
+def list_global_mcp_servers(request: Request, token: str = Depends(require_auth)):
     """List all globally available MCP servers including builtins.
 
     Readable by API keys (the web UI's search lists them); secret values are
     the owner's only.
     """
-    async with api_error_handler("list MCP servers"):
+    with api_errors("list MCP servers"):
         service = get_mcp_service()
         servers = service.get_all_servers_with_builtins()
         return [_server_view(s, request) for s in servers]
 
 
 @router.post("/mcp/servers", response_model=McpServerResponse, status_code=status.HTTP_201_CREATED)
-async def add_global_mcp_server(
+@on_plugin_io
+def add_global_mcp_server(
     request: McpServerCreateRequest,
     token: str = Depends(require_admin)
 ):
     """Add a new global (USER scope) MCP server - Admin only"""
-    async with api_error_handler("add MCP server"):
+    with api_errors("add MCP server"):
         try:
             service = get_mcp_service()
 
@@ -415,13 +423,14 @@ async def add_global_mcp_server(
 
 
 @router.put("/mcp/servers/{server_name}", response_model=McpServerResponse)
-async def update_global_mcp_server(
+@on_plugin_io
+def update_global_mcp_server(
     server_name: str,
     request: McpServerUpdateRequest,
     token: str = Depends(require_admin)
 ):
     """Update a global (USER scope) MCP server - Admin only"""
-    async with api_error_handler("update MCP server"):
+    with api_errors("update MCP server"):
         try:
             service = get_mcp_service()
 
@@ -476,12 +485,13 @@ async def update_global_mcp_server(
 
 
 @router.delete("/mcp/servers/{server_name}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_global_mcp_server(
+@on_plugin_io
+def remove_global_mcp_server(
     server_name: str,
     token: str = Depends(require_admin)
 ):
     """Remove a global (USER scope) MCP server - Admin only"""
-    async with api_error_handler("remove MCP server"):
+    with api_errors("remove MCP server"):
         try:
             service = get_mcp_service()
             service.remove_server(server_name, McpScope.USER)
@@ -493,13 +503,14 @@ async def remove_global_mcp_server(
 
 
 @router.patch("/mcp/servers/{server_name}/toggle", response_model=McpServerResponse)
-async def toggle_global_mcp_server(
+@on_plugin_io
+def toggle_global_mcp_server(
     server_name: str,
     request: McpServerToggleRequest,
     token: str = Depends(require_admin)
 ):
     """Toggle a global MCP server enabled/disabled via settings.json - Admin only"""
-    async with api_error_handler("toggle MCP server"):
+    with api_errors("toggle MCP server"):
         service = get_mcp_service()
 
         # Set enabled state in settings.json
@@ -524,13 +535,14 @@ async def toggle_global_mcp_server(
 # ============================================================================
 
 @router.get("/projects/{project_id}/mcp/servers", response_model=McpServersResponse)
-async def list_project_mcp_servers(
+@on_plugin_io
+def list_project_mcp_servers(
     project_id: str,
     http_request: Request,
     token: str = Depends(require_auth)
 ):
     """List all MCP servers for a project (all scopes)"""
-    async with api_error_handler("list project MCP servers"):
+    with api_errors("list project MCP servers"):
         project = validate_project_access(http_request, project_id)
         project_path = get_project_path_from_dict(project)
 
@@ -553,14 +565,15 @@ async def list_project_mcp_servers(
     response_model=McpServerResponse,
     status_code=status.HTTP_201_CREATED
 )
-async def add_project_mcp_server(
+@on_plugin_io
+def add_project_mcp_server(
     project_id: str,
     request: ProjectMcpServerCreateRequest,
     http_request: Request,
     token: str = Depends(require_admin)
 ):
     """Add an MCP server to a project (LOCAL, PROJECT, or INSTALLED scope) - Admin only"""
-    async with api_error_handler("add project MCP server"):
+    with api_errors("add project MCP server"):
         try:
             project = validate_project_access(http_request, project_id)
             project_path = get_project_path_from_dict(project)
@@ -600,7 +613,8 @@ async def add_project_mcp_server(
 
 
 @router.put("/projects/{project_id}/mcp/servers/{server_name}", response_model=McpServerResponse)
-async def update_project_mcp_server(
+@on_plugin_io
+def update_project_mcp_server(
     project_id: str,
     server_name: str,
     request: McpServerUpdateRequest,
@@ -609,7 +623,7 @@ async def update_project_mcp_server(
     token: str = Depends(require_admin)
 ):
     """Update a project-scoped MCP server - Admin only"""
-    async with api_error_handler("update project MCP server"):
+    with api_errors("update project MCP server"):
         try:
             project = validate_project_access(http_request, project_id)
             project_path = get_project_path_from_dict(project)
@@ -685,7 +699,8 @@ async def update_project_mcp_server(
     "/projects/{project_id}/mcp/servers/{server_name}",
     status_code=status.HTTP_204_NO_CONTENT
 )
-async def remove_project_mcp_server(
+@on_plugin_io
+def remove_project_mcp_server(
     project_id: str,
     server_name: str,
     http_request: Request,
@@ -699,7 +714,7 @@ async def remove_project_mcp_server(
     - user: removes from ~/.claude.json root mcpServers (global)
     - local/project: removes from .claude/.mcp.json or .mcp.json
     """
-    async with api_error_handler("remove project MCP server"):
+    with api_errors("remove project MCP server"):
         try:
             project = validate_project_access(http_request, project_id)
             project_path = get_project_path_from_dict(project)
@@ -725,7 +740,8 @@ async def remove_project_mcp_server(
     "/projects/{project_id}/mcp/servers/{server_name}/toggle",
     response_model=McpServerResponse
 )
-async def toggle_project_mcp_server(
+@on_plugin_io
+def toggle_project_mcp_server(
     project_id: str,
     server_name: str,
     request: McpServerToggleRequest,
@@ -737,7 +753,7 @@ async def toggle_project_mcp_server(
     Writes to ~/.claude.json projects[path].disabledMcpServers.
     This is the per-project disable mechanism that Claude Code uses.
     """
-    async with api_error_handler("toggle project MCP server"):
+    with api_errors("toggle project MCP server"):
         project = validate_project_access(http_request, project_id)
         project_path = get_project_path_from_dict(project)
 
@@ -828,9 +844,10 @@ async def list_mcp_tools(
 
 
 @router.get("/mcp/stats")
-async def get_mcp_stats(token: str = Depends(require_auth)):
+@on_plugin_io
+def get_mcp_stats(token: str = Depends(require_auth)):
     """Get MCP server statistics"""
-    async with api_error_handler("get MCP stats"):
+    with api_errors("get MCP stats"):
         service = get_mcp_service()
         user_servers = service.get_servers_for_scope(McpScope.USER)
 
