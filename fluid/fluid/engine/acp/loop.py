@@ -53,6 +53,7 @@ from fluid.events.model import (
     ErrorEvent,
     Event,
     Interrupted,
+    ModelServed,
     PermissionRequest,
     QuestionAnswered,
     QuestionRequest,
@@ -164,6 +165,13 @@ class AcpAgentSpec:
     def effort_value(self, effort: str | None) -> str | None:
         return effort
 
+    def offered_models(self, options: Sequence[Mapping[str, Any]],
+                       models: Mapping[str, Any] | None) -> list[dict[str, Any]] | None:
+        """The models the agent says it offers (``{"id", "label", "levels"}``),
+        from its config options and ``models`` reply; None when this spec
+        does not read them."""
+        return None
+
     def mode_id(self, permission_mode: str | None, available: Sequence[str]) -> str | None:
         """The agent's mode for a client permission mode, from ``available``.
 
@@ -241,12 +249,17 @@ class AcpLoop:
         system_append: str | None = None,
         connection_factory: Callable[..., AcpConnection] = AcpConnection,
         deferred: Callable[[str], bool] | None = None,
+        on_models: Callable[[list[dict[str, Any]], str | None], Any] | None = None,
     ) -> None:
         """``deferred`` names the registry tools the agent reaches only through
         the bridge's ``LoadTools``/``CallTool`` proxies (ACP has no deferral of
         its own; see ``fluid.tools.mcp.call_through``). With it the bridge also
         serves the registry's deferred tier and host-connected MCP servers.
         None lists every served tool with its schema, the old behaviour.
+
+        ``on_models(models, agent_version)`` hears the models the agent offers
+        (``AcpAgentSpec.offered_models``) when a session starts and whenever
+        that list changes; it may be a coroutine. A failure is logged only.
         """
         self.store = store
         self.spec = spec
@@ -279,6 +292,11 @@ class AcpLoop:
         self._acp_session: str | None = None
         self._session_resumed = False
         self._config_options: list[dict[str, Any]] = []
+        # The legacy ``models`` part of the session reply (combined ids).
+        self._acp_models: Mapping[str, Any] | None = None
+        self._on_models = on_models
+        self._reported_models: list[dict[str, Any]] | None = None
+        self._starting = False  # a session is starting: its report comes at the end
         self._modes: list[str] = []
         # The mode the agent last said it is in (session reply, a successful
         # ``session/set_mode``, or its own ``current_mode_update``).
@@ -629,6 +647,11 @@ class AcpLoop:
                 return
             if self._conn is not None:
                 await self._stop_process()
+            # Every agent process and session start reports its list once (at
+            # the end, after the session's own config updates); dedup holds
+            # only within one lifetime.
+            self._reported_models = None
+            self._acp_models = None  # a resume reply may omit it: not the old agent's
             conn = self._connection_factory(
                 self.spec.argv, cwd=self.cwd, env=self.spec.env,
                 on_notification=self._on_notification, on_request=self._on_request,
@@ -636,6 +659,7 @@ class AcpLoop:
             )
             await conn.start()
             self._conn = conn
+            self._starting = True  # the agent speaks only after initialize
             try:
                 info = await conn.initialize(self.spec.client_capabilities(), self.spec.client_info)
                 self.last_init = info.raw
@@ -686,13 +710,54 @@ class AcpLoop:
                     logger.warning("ACP agent kept mode %s: %s", self._agent_mode, exc)
             except BaseException:
                 self._acp_session = None
+                self._starting = False
                 await self._stop_process()
                 raise
+            self._starting = False
+            await self._report_models()
+
+    async def _report_models(self) -> None:
+        """Tell ``on_models`` what the agent offers, when that changed."""
+        if self._on_models is None or self._starting:
+            return
+        try:
+            offered = self.spec.offered_models(self._config_options, self._acp_models)
+            if not offered or offered == self._reported_models:
+                return
+            self._reported_models = offered
+            outcome = self._on_models([dict(m) for m in offered], self.cli_version)
+            if inspect.isawaitable(outcome):
+                await outcome
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a host's bookkeeping never fails a turn
+            logger.warning("could not report the ACP agent's models", exc_info=True)
+
+    def _model_not_offered(self) -> str | None:
+        """What runs instead when the agent is not running the chosen model.
+
+        The agent's current model (or "its default model" when it names
+        none); None when it runs the chosen one, or says nothing about models.
+        """
+        wanted = self.model
+        if not wanted or not self._config_options:
+            return None
+        option = next((o for o in self._config_options
+                       if o.get("id") == "model" or o.get("category") == "model"), None)
+        if option is None:
+            return None
+        choice = self.spec.config_value(self._config_options, "model", wanted)
+        current = option.get("currentValue")
+        if choice is not None and self._current_config(choice[0]) == choice[1]:
+            return None
+        return str(current) if current else "its default model"
 
     def _read_session_state(self, result: Mapping[str, Any]) -> None:
         options = result.get("configOptions")
         if isinstance(options, list):
             self._config_options = [o for o in options if isinstance(o, dict)]
+        if isinstance(result.get("models"), Mapping):
+            self._acp_models = result["models"]
         modes = result.get("modes") if isinstance(result.get("modes"), Mapping) else {}
         available = [str(m.get("id")) for m in modes.get("availableModes") or [] if isinstance(m, Mapping)]
         if not available:
@@ -845,6 +910,14 @@ class AcpLoop:
             if self._interrupted.is_set():
                 await self._emit(Interrupted(session_id=sid, node_id=user_node.node_id, turn_id=turn_id))
                 return
+            instead = self._model_not_offered()
+            if instead is not None:
+                # The agent does not offer the chosen model (or refused it): it
+                # runs its own. The host shows which, in the chat, and labels
+                # the reply with it.
+                await self._emit(ModelServed(session_id=sid, turn_id=turn_id,
+                                             requested_model=self.model or "", served_model=instead,
+                                             provider=self.provider, rerouted=True, reason="not_offered"))
             await self._drive(sid, turn_id, user_node, content)
         except asyncio.CancelledError:
             raise
@@ -1013,6 +1086,7 @@ class AcpLoop:
             kind = update.get("sessionUpdate")
             if kind == "config_option_update" and isinstance(update.get("configOptions"), list):
                 self._config_options = [o for o in update["configOptions"] if isinstance(o, dict)]
+                await self._report_models()
             elif kind == "current_mode_update" and update.get("currentModeId"):
                 self._agent_mode = str(update["currentModeId"])
             return
@@ -1022,6 +1096,7 @@ class AcpLoop:
             await self._emit(event)
         if mapper.config_options is not None:
             self._config_options, mapper.config_options = mapper.config_options, None
+            await self._report_models()
 
     async def _on_request(self, method: str, params: dict[str, Any]) -> Any:
         if method == "session/request_permission":

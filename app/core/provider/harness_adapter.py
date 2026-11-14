@@ -2044,6 +2044,10 @@ class HarnessAdapter(ProviderAdapter):
         except FileNotFoundError as exc:
             raise ProviderConfigError(str(exc)) from exc
         self._antigravity_binding = await run_sync(antigravity.spawn_binding, row, binary=binary)
+        # What the agent's model list is saved under: the credential in this
+        # spec. This engine's own holder, so a later connect never changes it.
+        capture = {"bound": await run_sync(antigravity.capture_binding, row)}
+        self._antigravity_capture = capture
         self._workspace_card = None if one_shot else await run_sync(
             self._build_workspace_card, options
         )
@@ -2114,6 +2118,8 @@ class HarnessAdapter(ProviderAdapter):
                 _delegated_tool_policy(options, self._build_permissions(options), blocked)
             ),
             system_append=instructions,
+            # The models the agent offers become the row's model catalog.
+            on_models=antigravity.capture_offered_models(str(row["id"]), lambda: capture["bound"]),
         )
         # Sign-out, delete, disable or a new key ends this engine's process.
         antigravity.register_agent(str(row["id"]), self._engine, self._antigravity_binding)
@@ -2148,8 +2154,12 @@ class HarnessAdapter(ProviderAdapter):
                                       binary=binary)
             except FileNotFoundError as exc:
                 raise ProviderConfigError(str(exc)) from exc
+            bound = await run_sync(antigravity.capture_binding, row)
+            # The old process may still report while it stops: it keeps the
+            # old binding until replace_spec has ended it.
             await self._engine.replace_spec(spec)
             self._antigravity_binding = binding
+            self._antigravity_capture["bound"] = bound
             antigravity.register_agent(str(row["id"]), self._engine, binding)
 
     def set_turn_source(self, app_source: Optional[str]) -> None:

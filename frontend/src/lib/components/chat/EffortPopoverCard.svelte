@@ -31,7 +31,7 @@
 		defaultValue?: string | null;
 		value: string | null;
 		/** A level pins it; `null` returns to Auto (the model's default). */
-		onSelect: (value: string | null) => void;
+		onSelect: (value: string | null) => void | Promise<unknown>;
 		/** Whether the picked model carries the fast service tier. */
 		fastSupported?: boolean;
 		fastEnabled?: boolean;
@@ -65,8 +65,13 @@
 	const progress = $derived(maxIndex > 0 ? (index / maxIndex) * 100 : 0);
 
 	function handleInput(event: Event) {
-		const option = options[Number((event.currentTarget as HTMLInputElement).value)];
-		if (option && option.value !== value) onSelect(option.value);
+		const input = event.currentTarget as HTMLInputElement;
+		const option = options[Number(input.value)];
+		if (!option || option.value === value) return;
+		// The thumb moves before the chat answers. Once it has, put the thumb on
+		// the level in force: a refused pick leaves `index` unchanged, so Svelte
+		// would not move it back by itself.
+		void Promise.resolve(onSelect(option.value)).finally(() => { input.value = String(index); });
 	}
 </script>
 
