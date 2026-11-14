@@ -172,6 +172,25 @@ def _words(text: str) -> str:
     return " ".join(re.sub(r"[\W]+", " ", text.lower()).split())
 
 
+_SENTENCE_MARKS = ".,;:!?()[]{}\"'"
+
+
+def _phrase_span(text: str, phrase: str) -> tuple[int, int] | None:
+    """Where ``text`` holds ``phrase`` (already ``_words``) as words together, in
+    order, with any punctuation or spacing between them, at the text's own
+    offsets: the first whole match, else the first whose last word is still
+    being typed."""
+    parts = [re.escape(word) for word in phrase.split()]
+    if len(parts) < 2:
+        return None
+    body = r"(?<!\w)" + r"\W+".join(parts)
+    for pattern in (body + r"(?!\w)", body):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.start(), match.end()
+    return None
+
+
 def _snippet(text: str, at: int, length: int) -> str:
     start = max(0, at - 60)
     end = min(len(text), at + length + 60)
@@ -311,9 +330,12 @@ class DocsIndex:
             return []
 
         query_lower = " ".join(query.lower().split())
-        terms = query_lower.split()
+        # Sentence punctuation around a word (`remote,` `(its`) isn't part of it.
+        terms = [term.strip(_SENTENCE_MARKS) or term for term in query_lower.split()]
         # Several words together, as typed (the last may still be being typed).
-        phrase = _words(query) if len(terms) > 1 else ""
+        phrase = _words(query)
+        if " " not in phrase:
+            phrase = ""
         results: list[tuple[bool, float, DocEntry, list[str]]] = []
 
         for entry in self.docs.values():
@@ -323,9 +345,10 @@ class DocsIndex:
             text_lower = entry.text.lower()
             has_phrase = bool(phrase) and f" {phrase}" in f" {entry.words}"
 
-            # The snippet shows the query as typed first, where the text has it.
-            if len(terms) > 1 and query_lower in text_lower:
-                snippets.append(_snippet(entry.text, text_lower.index(query_lower), len(query_lower)))
+            # The snippet shows the words together first, where ranking found them.
+            span = _phrase_span(entry.text, phrase) if has_phrase else None
+            if span:
+                snippets.append(_snippet(entry.text, span[0], span[1] - span[0]))
 
             for term in terms:
                 # Title matches score higher
@@ -342,7 +365,9 @@ class DocsIndex:
                     if snippet not in snippets:
                         snippets.append(snippet)
 
-            if score > 0:
+            # A phrase match counts even when the raw terms, carrying the
+            # query's punctuation (`remote, access!`), score nothing.
+            if score > 0 or has_phrase:
                 results.append((has_phrase, score, entry, snippets[:3]))
 
         # A document holding the words together ranks above any that only has

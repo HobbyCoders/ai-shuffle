@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { docs, preloadAllDocs } from './index';
-import { DocsSearchEngine } from './search';
+import { DocsSearchEngine, findMatch } from './search';
 import type { DocEntry } from './types';
 
 const doc = (slug: string, title: string, content: string): DocEntry =>
@@ -24,6 +24,28 @@ describe('docs search ranking (#1581)', () => {
 			doc('exact', 'Other', 'Turn on remote access in Settings.')
 		]);
 		expect(engine.search('remote acc')[0].slug).toBe('features/exact');
+	});
+
+	it('keeps a phrase match whose punctuation differs from the query', () => {
+		const engine = new DocsSearchEngine([
+			doc('loose', 'Hosts', 'Remote, hosts. Access! permissions.'),
+			doc('exact', 'Other', 'Turn on remote access in Settings.')
+		]);
+		for (const query of ['remote, access!', 'remote-access']) {
+			expect(engine.search(query)[0]?.slug, query).toBe('features/exact');
+		}
+	});
+
+	it('puts the snippet and the jump at the phrase, not an earlier lone word', () => {
+		const text = `Remote hosts are supported. ${'Padding unrelated context. '.repeat(12)}Enable remote-access here.`;
+		const lower = text.toLowerCase();
+		expect(findMatch(lower, 'remote access')).toEqual({ at: lower.indexOf('remote-access'), term: 'remote-access' });
+		// A whole last word before a half-typed one, and one word as before.
+		expect(findMatch('remote accessibility. remote access', 'remote access')).toEqual({ at: 22, term: 'remote access' });
+		expect(findMatch(lower, 'remote')).toEqual({ at: 0, term: 'remote' });
+		const [result] = new DocsSearchEngine([doc('page', 'Page', text)]).search('remote access');
+		expect(result.snippets[0]).toContain('Enable remote-access here');
+		expect(result.snippets[0]).not.toContain('Remote hosts');
 	});
 
 	it('gives each query word found in the title its own boost', () => {

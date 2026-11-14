@@ -45,6 +45,24 @@ function holdsPhrase(haystack: string, phrase: string): boolean {
 	return phrase.includes(' ') && ` ${haystack}`.includes(` ${phrase}`);
 }
 
+/**
+ * Where `text` holds a query of several words together, in order, with any
+ * punctuation or spacing between them (as `holdsPhrase` reads it), at the
+ * text's own offsets: the first whole match, else the first whose last word is
+ * still being typed. `words()` leaves only letters, digits and `_`, so the
+ * words need no escaping in the pattern.
+ */
+function phraseSpan(text: string, query: string): { at: number; term: string } | null {
+	const parts = words(query).split(' ');
+	if (parts.length < 2) return null;
+	const body = `(?<![\\p{L}\\p{N}_])${parts.join('[^\\p{L}\\p{N}_]+')}`;
+	for (const pattern of [`${body}(?![\\p{L}\\p{N}_])`, body]) {
+		const hit = new RegExp(pattern, 'iu').exec(text);
+		if (hit) return { at: hit.index, term: hit[0] };
+	}
+	return null;
+}
+
 /** Where `term` best occurs in `text`: 2 a whole word, 1 the start of a word, 0 inside one. */
 function bestOccurrence(text: string, term: string): [rank: number, at: number] | null {
 	let best: [number, number] | null = null;
@@ -60,13 +78,16 @@ function bestOccurrence(text: string, term: string): [rank: number, at: number] 
 }
 
 /**
- * The place a query matches in lower-case readable text: the first of
+ * The place a query matches in lower-case readable text: the query's words
+ * together, as ranking counts them (`phraseSpan`); else the first of
  * `matchTerms` that starts a word (as the index matches a prefix, so a phrase
  * still being typed counts), as a whole word where it is one; else the first
  * found anywhere. The snippet and the jump into the opened document both use
  * this, so they show the same place.
  */
 export function findMatch(text: string, query: string): { at: number; term: string } | null {
+	const phrase = phraseSpan(text, query);
+	if (phrase) return phrase;
 	let anywhere: { at: number; term: string } | null = null;
 	for (const term of matchTerms(query)) {
 		const hit = bestOccurrence(text, term);
@@ -141,15 +162,21 @@ export class DocsSearchEngine {
 			}
 		}
 
-		// Boost title matches: each query word found in the title counts.
+		// A document holding the words together counts even when the query's
+		// tokens, split differently (`remote-access`), score nothing in it.
 		const phrase = words(query);
 		const hasPhrase = new Set<string>();
+		for (const [key, run] of this.wordRuns) {
+			if (!holdsPhrase(run, phrase)) continue;
+			hasPhrase.add(key);
+			if (!scores.has(key)) scores.set(key, 0);
+		}
+
+		// Boost title matches: each query word found in the title counts.
 		for (const [key, score] of scores) {
-			const entry = this.docs.get(key)!;
-			const titleLower = entry.title.toLowerCase();
+			const titleLower = this.docs.get(key)!.title.toLowerCase();
 			const titleHits = queryTokens.filter((token) => titleLower.includes(token)).length;
 			scores.set(key, score + 5 * titleHits);
-			if (holdsPhrase(this.wordRuns.get(key) ?? '', phrase)) hasPhrase.add(key);
 		}
 
 		// A document holding the words together, as typed, ranks above any that

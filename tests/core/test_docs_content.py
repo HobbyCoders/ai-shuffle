@@ -143,7 +143,7 @@ def test_search_snippets_are_readable_text_not_markdown(tmp_path, monkeypatch):
     ]
     # Link targets are not readable text, so they don't match either.
     assert DocsIndex().search("example") == []
-    assert DocsIndex().search("paid-plans") == []
+    assert DocsIndex().search("docs/getting-started") == []
 
 
 def test_plain_text_keeps_words_that_only_look_like_markup():
@@ -173,6 +173,32 @@ def test_search_ranks_the_exact_phrase_first(tmp_path, monkeypatch):
     assert query in results[0]["snippets"][0].lower()
     # A phrase whose last word is still being typed counts too.
     assert DocsIndex().search("choose its too")[0]["slug"] == "quick-start"
+
+
+def test_search_keeps_a_phrase_match_whose_punctuation_differs(tmp_path, monkeypatch):
+    """`remote, access!` finds the page saying "remote access", though its raw terms don't occur there."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "features/loose.md", "<!--\ntitle: Hosts\n-->\nRemote, hosts. Access! permissions.\n")
+    _doc(root, "features/exact.md", "<!--\ntitle: Other\n-->\nTurn on remote access in Settings.\n")
+    for query in ("remote, access!", "remote-access"):
+        assert [r["slug"] for r in DocsIndex().search(query)][:1] == ["exact"], query
+
+
+def test_search_snippet_shows_the_phrase_not_an_earlier_lone_word(tmp_path, monkeypatch):
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "features/page.md",
+         "<!--\ntitle: Page\n-->\nRemote hosts are supported. "
+         + "Padding unrelated context. " * 12 + "Enable remote-access here.\n")
+    [page] = DocsIndex().search("remote access")
+    assert "Enable remote-access here" in page["snippets"][0]
+    assert "Remote hosts" not in page["snippets"][0]
+    # Offsets are the text's own, though punctuation sits between the words.
+    text = "A remote accessory. Then remote,  ACCESS it."
+    assert dc._phrase_span(text, "remote access") == (text.index("remote,"), text.index(" it."))
+    assert dc._phrase_span("remote accessory", "remote access") == (0, len("remote access"))
+    assert dc._phrase_span(text, "remote") is None
 
 
 def test_real_docs_find_a_pasted_sentence_first():
