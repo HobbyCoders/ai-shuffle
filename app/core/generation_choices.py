@@ -167,12 +167,22 @@ def save(identity: tuple[str, str], kind: str, value: Any, *, remember: bool, or
 
 
 def forget(identity: tuple[str, str], kind: str) -> bool:
-    """Ask again next time: drop the remembered choice (the last one stays)."""
+    """Ask again next time: drop the remembered choice (the last one stays).
+
+    A choice remembered from Settings or the migration was never a card pick,
+    so there may be no last choice. It becomes the last choice then, and the
+    next card still offers it first as "Same as last time" instead of losing
+    the model the user had been running (#1603).
+    """
     from app.db import database
 
     if kind not in KINDS:
         raise ValueError("Unknown generation kind.")
     migrate(identity)
+    row = database.get_user_preference(*identity, choice_key(kind))
+    remembered = clean(row.get("value")) if row else None
+    if remembered:
+        database.set_user_preference(*identity, last_key(kind), remembered, only_if_missing=True)
     return database.delete_user_preference(*identity, choice_key(kind))
 
 

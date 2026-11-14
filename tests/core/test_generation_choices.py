@@ -190,3 +190,23 @@ def test_query_options_reads_choices_only_with_generation_tools(monkeypatch):
     calls.clear()
     assert query_options._generation_choices({"image_generation": True}, {"id": "s"}, "user-b")["migrated"] is True
     assert calls == [{"id": "s", "api_user_id": "user-b"}]
+
+
+def test_forget_keeps_a_settings_choice_as_the_last_pick():
+    # "Ask me next time" on a choice that was never a card pick (migrated or
+    # saved in Settings) must not drop the model from the next card (#1603).
+    database.set_system_setting("image_model", "fal-ai/nano-banana-2")
+    assert choices.load(OWNER)["last"] == {}
+    choices.forget(OWNER, "image")
+    loaded = choices.load(OWNER)
+    assert "image" not in loaded["remembered"]
+    assert loaded["last"]["image"]["model"] == "fal-ai/nano-banana-2"
+
+
+def test_forget_never_overwrites_a_newer_last_pick():
+    choices.save(OWNER, "image", {"source": "fal", "account": "fal-ai", "model": "fal-ai/remembered"}, remember=True)
+    choices.save(OWNER, "image", {"source": "fal", "account": "fal-ai", "model": "fal-ai/once"}, remember=False)
+    choices.forget(OWNER, "image")
+    loaded = choices.load(OWNER)
+    assert "image" not in loaded["remembered"]
+    assert loaded["last"]["image"]["model"] == "fal-ai/once"

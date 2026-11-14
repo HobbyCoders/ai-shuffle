@@ -267,7 +267,9 @@ preferences:
   `card`, `settings`, `migrated` or `conversation` (saved through
   `generationPreferences`).
 - `generation.lastChoice.<kind>`: the latest pick from a card, offered first as
-  "Same as last time" but never run without asking.
+  "Same as last time" but never run without asking. Forgetting a remembered
+  choice ("Ask me next time") keeps it here when there is no last pick yet, so
+  a choice saved in Settings stays first on the next card.
 - `generation.choicesMigrated`: set once the saved Settings defaults were
   copied. A remembered choice is never overwritten by the migration.
 
