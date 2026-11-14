@@ -1,7 +1,7 @@
 """Authorize edge publication from a full-suite pass on protected main.
 
 Accept either the owner's successful ``local/full-suite`` commit status or a
-successful hosted main-suite run on the exact main revision. Hosted evidence
+successful hosted CI run on the exact main revision. Hosted evidence
 must come from this repository's main workflow, including its aggregate job.
 Only the newest attested unpublished first-parent revision is eligible; later
 untested changes wait for their own exact-revision evidence. One pass covers
@@ -29,10 +29,10 @@ OWNER_ID = "76577322"
 CONTEXT = "local/full-suite"
 REFUSAL_TITLE = "Edge publication refused"
 # app/core/deploy_status.py shows this refusal, with the command, to the owner.
-MAIN_SUITE_REFUSAL = "Edge publication waits for a hosted main-suite pass or an owner local full-suite pass on main"
-MAIN_SUITE_PATH = ".github/workflows/main-suite.yml"
-MAIN_SUITE_NAME = "main-suite"
-MAIN_SUITE_AGGREGATE = "Main suite"
+MAIN_SUITE_REFUSAL = "Edge publication waits for a hosted CI pass or an owner local full-suite pass on main"
+MAIN_SUITE_PATH = ".github/workflows/ci.yml"
+MAIN_SUITE_NAME = "CI"
+MAIN_SUITE_AGGREGATE = "CI"
 COMMAND = "python scripts/local_ci.py full --attest"
 
 
@@ -242,7 +242,7 @@ def hosted_status(api, revision, *, metadata=None):
     """
     if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{40}", revision):
         return None
-    listing = api(f"actions/workflows/main-suite.yml/runs?branch=main&head_sha={revision}&per_page=100")
+    listing = api(f"actions/workflows/ci.yml/runs?branch=main&head_sha={revision}&per_page=100")
     runs = listing.get("workflow_runs")
     if not isinstance(runs, list):
         raise ValueError("Unexpected GitHub workflow runs response")
@@ -261,7 +261,7 @@ def hosted_status(api, revision, *, metadata=None):
     if metadata is None:
         metadata = {}
     if "identity" not in metadata:
-        metadata["identity"] = (api(""), api("actions/workflows/main-suite.yml"))
+        metadata["identity"] = (api(""), api("actions/workflows/ci.yml"))
     repository, workflow = metadata["identity"]
     repository_id = repository.get("id")
     if (not repository_id or repository.get("full_name") != REPOSITORY
@@ -296,7 +296,7 @@ def hosted_status(api, revision, *, metadata=None):
     if api(f"actions/runs/{run_id}") != run:
         return None
     return {"state": "success", "context": MAIN_SUITE_NAME, "run_id": run_id, "run_attempt": attempt,
-            "description": f"Hosted main-suite run {run_id}, attempt {attempt}",
+            "description": f"Hosted CI run {run_id}, attempt {attempt}",
             "target_url": f"https://github.com/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}"}
 
 
@@ -326,7 +326,7 @@ def exact_main_readiness(api, revision):
         return False, "main moved; a superseded revision cannot publish"
     status = suite_status(api, revision)
     if status is None:
-        return False, f"{MAIN_SUITE_REFUSAL}. Wait for main-suite or run on a clean checkout of main:\n{COMMAND}"
+        return False, f"{MAIN_SUITE_REFUSAL}. Wait for CI or run on a clean checkout of main:\n{COMMAND}"
     # Recheck after the API reads. The publisher also checks main before writing its pointer.
     if api("branches/main")["commit"]["sha"] != revision:
         return False, "main moved during verification; skipping superseded revision"
@@ -465,7 +465,7 @@ def main(argv=None):
         evidence = hosted_status(api, trigger.get("head_sha"), metadata=metadata)
         if (not evidence or evidence["run_id"] != trigger["id"]
                 or evidence["run_attempt"] != trigger.get("run_attempt")):
-            raise ValueError("Triggering hosted main-suite run could not be verified")
+            raise ValueError("Triggering hosted CI run could not be verified")
     published = published_edge_revision()
     if args.select:
         revision, _ = newest_attested(api, unpublished_history(main_history(api, root=args.source_root), published), metadata=metadata)

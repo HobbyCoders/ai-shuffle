@@ -36,18 +36,23 @@ PARITY = {
 REQUIRED = (
     "backend", "javascript", "fluid", "windows", "browser-workspace",
     "container", "identity", "policy", "desktop-source", "desktop",
+    "android", "android-minified",
     "android-and-docs", "supply-chain", "update-reach",
 )
 
-# Areas whose pull-request checks are the same as main's: a push may skip one
-# when the "proven" job found a pull request's pass record for the same files.
-PROVABLE = ("backend", "fluid", "windows", "browser-workspace", "container", "identity", "desktop-source")
-LOOKUP = "proven"
+# Areas the "plan" job may skip: it found a pass recorded for exactly the files
+# the area reads (scripts/ci/plan.py). JavaScript is never skipped as a whole;
+# its checks are skipped inside it and the journeys make their own selection.
+PROVABLE = ("backend", "fluid", "windows", "browser-workspace", "container", "identity", "desktop-source",
+            "desktop", "android", "android-minified")
+# Checked on main only: what main has published and the reach of merged pull requests.
+MAIN_ONLY = ("update-reach",)
+LOOKUP = "plan"
 
 
-def aggregate(results):
+def aggregate(results, event=""):
     if not isinstance(results, dict) or set(results) != {*REQUIRED, LOOKUP}:
-        raise ValueError("Missing or unexpected main-suite dependency")
+        raise ValueError("Missing or unexpected CI dependency")
     lookup = results[LOOKUP]
     # The lookup may fail without failing the run; its outputs are then empty.
     found = lookup.get("outputs") or {}
@@ -55,8 +60,10 @@ def aggregate(results):
         result = results[name].get("result")
         if result == "skipped" and name in PROVABLE and found.get(name) == "true":
             continue
+        if result == "skipped" and name in MAIN_ONLY and event == "pull_request":
+            continue
         if result != "success":
-            raise ValueError(f"Main-suite dependency {name} did not succeed")
+            raise ValueError(f"CI dependency {name} did not succeed")
 
 
 def main(argv=None):
@@ -64,8 +71,8 @@ def main(argv=None):
     parser.add_argument("stage", choices=("aggregate", "android-and-docs", "update-reach"))
     args = parser.parse_args(argv)
     if args.stage == "aggregate":
-        aggregate(json.loads(os.environ["RESULTS"]))
-        print("Every hosted full-suite dependency succeeded, or a pull request passed it on these exact files.")
+        aggregate(json.loads(os.environ["RESULTS"]), os.environ.get("GITHUB_EVENT_NAME", ""))
+        print("Every required area succeeded, or already passed on exactly the files it reads.")
     elif args.stage == "android-and-docs":
         import local_ci
         ctx = local_ci.Context("full", "HEAD^", None, sys.executable)

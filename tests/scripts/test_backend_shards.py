@@ -141,16 +141,12 @@ def workflow():
 
 def test_workflow_stable_fail_closed_gate_and_free_runner():
     config = workflow()
-    assert "pull_request" in config["on"]
-    assert not config["on"]["pull_request"]
+    # ci.yml starts it, for a pull request and for main, and records the pass itself.
+    assert set(config["on"]) == {"workflow_call", "workflow_dispatch"}
     jobs = config["jobs"]
     assert jobs["backend"]["name"] == "Backend tests"
     assert jobs["backend"]["if"] == "always() && inputs.gated_by_caller != true"
     assert set(jobs["backend"]["needs"]) == {"backend-shard", "backend-contracts", "backend-security"}
-    # After the gate passes on a pull request, "record" leaves a pass record for main-suite.
-    record = jobs.pop("record")
-    assert record["needs"] == ["backend"] and record["uses"] == "./.github/workflows/record-pass.yml"
-    assert record["if"].startswith("needs.backend.result == 'success' && github.event_name == 'pull_request'")
     assert set(jobs) == {"backend", "backend-shard", "backend-contracts", "backend-security"}
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     assert all("continue-on-error" not in json.dumps(job) for job in jobs.values())

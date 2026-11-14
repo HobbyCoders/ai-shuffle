@@ -2,15 +2,14 @@ name: CI JavaScript
 
 # Full JavaScript package checks on every PR, including drafts.
 on:
-  pull_request:
   workflow_call:
     inputs:
       checks_proven:
-        description: main-suite found a pull request's record for every check here but the journeys
+        description: ci.yml found a recorded pass for every check here but the journeys
         type: boolean
         default: false
       gated_by_caller:
-        description: The caller judges these jobs itself (main-suite), so the verdict job here does not queue for a runner
+        description: The caller judges these jobs itself (ci.yml), so the verdict job here does not queue for a runner
         type: boolean
         default: false
   workflow_dispatch:
@@ -21,7 +20,7 @@ permissions:
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  # main-suite's daily run gets its own group so it never queues with a push run.
+  # CI's daily run gets its own group so it never queues with a push run.
   group: ci-frontend-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -286,7 +285,7 @@ jobs:
     # A pull request runs the journeys its changed files need
     # (frontend/tests/journeys/map.json; an uncovered UI source file, or a diff
     # that cannot be read, runs them all). A push to main runs what changed
-    # since the last commit main-suite passed on, and nothing when a pull
+    # since the last commit CI passed on, and nothing when a pull
     # request already passed those journeys on these exact files. A scheduled
     # or dispatched run always runs every journey.
     runs-on: ubuntu-24.04
@@ -303,14 +302,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # A pull request needs its merge commit's parents; a push needs the
-          # history back to the last commit main-suite passed on.
+          # history back to the last commit CI passed on.
           fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
       - name: Select the journeys and their shards
         id: select
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -m scripts.devloop.ci matrix --shards 18 >> "$GITHUB_OUTPUT"
-      # The selection in a step name, where main-suite's gate reads it from the
+      # The selection in a step name, where CI's gate reads it from the
       # run's job list (scripts/ci/main_gate.py) to wait for every chosen shard.
       - name: 'Selected UI journey shards: ${{ steps.select.outputs.shards }}'
         run: 'true'
@@ -500,7 +499,7 @@ jobs:
           // The journeys are skipped only when the selection succeeded and chose none.
           const plan = results['journey-plan'];
           const noJourneys = plan.result === 'success' && plan.outputs?.shards === '[]';
-          // main-suite skips the other checks only on a pull request's record for these files.
+          // CI skips the other checks only on a pull request's record for these files.
           const proven = process.env.CHECKS_PROVEN === 'true';
           for (const name of expected) {
             const skipped = name === 'journeys' ? noJourneys : name !== 'journey-plan' && proven;
@@ -509,16 +508,7 @@ jobs:
           JS
 
   # Leave a record that these checks passed on exactly these files, so
-  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
-  record-checks:
-    needs: [frontend, contracts, build, typechecks, mobile, tools, browser-mcp, visual]
-    if: needs.frontend.result == 'success' && needs.contracts.result == 'success' && needs.build.result == 'success' && needs.typechecks.result == 'success' && needs.mobile.result == 'success' && needs.tools.result == 'success' && needs.browser-mcp.result == 'success' && needs.visual.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    uses: ./.github/workflows/record-pass.yml
-    with:
-      area: javascript-checks
-
-  # Leave a record that these checks passed on exactly these files, so
-  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
+  # CI need not repeat them after the merge (scripts/ci/proven.py).
   record-journeys:
     needs: [journey-plan, journeys]
     if: needs.journey-plan.result == 'success' && needs.journeys.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository

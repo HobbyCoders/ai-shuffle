@@ -1,4 +1,4 @@
-"""Stage a main-suite UI artifact as data, or pin a version for the normal rebuild.
+"""Stage a CI UI artifact as data, or pin a version for the normal rebuild.
 
 This is a cache, never publication authorization. The caller must first select an
 eligible revision with edge_publication_gate, which the signer rechecks unchanged.

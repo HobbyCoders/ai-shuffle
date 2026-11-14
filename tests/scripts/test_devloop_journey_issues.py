@@ -18,8 +18,8 @@ from scripts.devloop import journey_retry
 RUN = reporter.Run("example/project", 401, "a" * 40)
 CASE = reporter.FlakyCase("copy", "copy@phone-slow", "fail", "pass")
 METADATA = {
-    "id": RUN.id, "event": "push", "head_branch": "main", "name": "main-suite",
-    "path": ".github/workflows/main-suite.yml", "head_sha": RUN.commit,
+    "id": RUN.id, "event": "push", "head_branch": "main", "name": "CI",
+    "path": ".github/workflows/ci.yml", "head_sha": RUN.commit,
     "repository": {"full_name": RUN.repository}, "head_repository": {"full_name": RUN.repository},
 }
 
@@ -441,13 +441,13 @@ def test_non_main_push_sources_are_rejected(key, value):
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_ineligible_real_run_warns_but_dry_run_is_plain_log(dry_run, monkeypatch, capsys):
     api = FakeGitHub()
-    api.metadata["name"] = "renamed-main-suite"
+    api.metadata["name"] = "renamed-CI"
     monkeypatch.setattr(reporter, "GitHub", lambda _: api)
     args = ["--repository", RUN.repository, "--run-id", str(RUN.id)]
     assert reporter.main(args + (["--dry-run"] if dry_run else [])) == 0
     output = capsys.readouterr().out
     assert ("::warning" in output) is not dry_run
-    assert "Not a push-to-main main-suite run" in output
+    assert "Not a push-to-main CI run" in output
     assert [method for _, method, _ in api.calls] == ["GET"]
 
 

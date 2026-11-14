@@ -71,7 +71,7 @@ def promote_nightly(root, digest):
     # notion of green. Recheck after the image pull, before moving nightly.
     ready, _ = gate.exact_main_readiness(gate.GitHub(), revision)
     if not ready:
-        raise ValueError("Nightly promotion requires an owner-local full-suite pass or verified hosted main-suite pass on exact main")
+        raise ValueError("Nightly promotion requires an owner-local full-suite pass or verified hosted CI pass on exact main")
     move_aliases(digest, ["nightly"])
 
 

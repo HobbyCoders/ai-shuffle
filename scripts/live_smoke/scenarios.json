@@ -1138,7 +1138,7 @@
           "kind": "journey",
           "journeys": ["chat-send-stream", "phone-composer"],
           "how": "Every UI journey starts a disposable dev instance (scripts.devloop, the same app.preview_run launcher and bootstrap as python -m app.preview run), opens its printed access link once and drives the chat UI on that preview cookie: chat-send-stream at desktop (1440) and phone (390) widths, phone-composer at phone and the Fold cover screen (360). The 403s on setup and onboarding-complete POSTs with the preview cookie, and the refusal to auto-complete non-preview or unmarked data, are in tests/core/test_preview_run.py.",
-          "pass_when": "The journeys pass in main-suite at the candidate: each width reaches the chat UI (never the setup wizard) and sends a message. Setup and onboarding mutations stay refused with 403 (unit tests).",
+          "pass_when": "The journeys pass in CI at the candidate: each width reaches the chat UI (never the setup wizard) and sends a message. Setup and onboarding mutations stay refused with 403 (unit tests).",
           "past_bug": "#623: the access cookie correctly refused setup mutations, but disposable bootstrap left the web shell stuck at the setup wizard."
         },
         {

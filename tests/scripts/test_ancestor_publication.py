@@ -34,7 +34,7 @@ def lane(tmp_path, monkeypatch):
     def api(endpoint):
         if endpoint == "branches/main":
             return {"protected": True, "commit": {"sha": git("rev-parse", "main")}}
-        if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+        if endpoint.startswith("actions/workflows/ci.yml/runs?"):
             return {"workflow_runs": []}
         revision = endpoint.split("/")[1]
         state["hook"](revision)

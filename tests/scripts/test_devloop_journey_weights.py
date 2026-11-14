@@ -467,7 +467,7 @@ def _gh(logs, **metadata):
 
 def _run_state(command, *, attempt=1, conclusion="success", **metadata):
     state = {"status": "completed", "conclusion": conclusion, "attempt": attempt,
-             "headSha": "a" * 40, "event": "push", "headBranch": "main", "workflowName": "main-suite"}
+             "headSha": "a" * 40, "event": "push", "headBranch": "main", "workflowName": "CI"}
     state.update(metadata)
     # Emulate gh: fields not requested by the implementation are not returned.
     return json.dumps({field: state[field] for field in command[-1].split(",")})
@@ -746,7 +746,7 @@ def test_refresh_refuses_ambiguous_checkout_before_logs_or_writing(
         return _archive(_log("a", 30, 3) + _log("b", 10, 2))
 
     monkeypatch.setattr(ci.subprocess, "check_output", gh)
-    with pytest.raises(ValueError, match="push to main.*main-suite"):
+    with pytest.raises(ValueError, match="push to main.*CI"):
         ci.refresh_weights([10], path)
     assert not any(command[:2] == ["gh", "api"] for command in calls)
     assert path.read_bytes() == original

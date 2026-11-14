@@ -37,7 +37,7 @@ class FakeGitHub:
         if endpoint.startswith(f"commits/{REVISION}/statuses"):
             page = int(endpoint.rsplit("page=", 1)[1])
             return self.statuses[(page - 1) * 100:page * 100]
-        if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+        if endpoint.startswith("actions/workflows/ci.yml/runs?"):
             return {"workflow_runs": []}
         raise AssertionError(endpoint)
 
@@ -65,9 +65,9 @@ class HostedGitHub(FakeGitHub):
             self.calls.append(endpoint)
             if endpoint == "":
                 return {"id": 42, "full_name": gate.REPOSITORY}
-            if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+            if endpoint.startswith("actions/workflows/ci.yml/runs?"):
                 return {"workflow_runs": [{**self.run, "id": value} for value in self.run_ids]}
-            if endpoint == "actions/workflows/main-suite.yml":
+            if endpoint == "actions/workflows/ci.yml":
                 return {"id": 7, "path": gate.MAIN_SUITE_PATH}
             if "/jobs?" in endpoint:
                 assert f"/attempts/{self.run['run_attempt']}/" in endpoint
@@ -84,7 +84,7 @@ class HostedGitHub(FakeGitHub):
 def test_off_main_dispatch_or_pr_at_same_sha_cannot_shadow_main():
     api = HostedGitHub()
     def listing(endpoint):
-        if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+        if endpoint.startswith("actions/workflows/ci.yml/runs?"):
             assert "branch=main&" in endpoint
             return {"workflow_runs": [
                 {**api.run, "id": 99, "head_branch": "feature", "event": "workflow_dispatch"},
@@ -100,14 +100,14 @@ def test_backlog_fetches_metadata_once_but_keeps_run_evidence_fresh():
     def backlog(endpoint):
         if endpoint.startswith(f"commits/{OTHER}/statuses?"):
             return []
-        if endpoint.startswith("actions/workflows/main-suite.yml/runs?") and f"head_sha={OTHER}" in endpoint:
+        if endpoint.startswith("actions/workflows/ci.yml/runs?") and f"head_sha={OTHER}" in endpoint:
             return {"workflow_runs": [{**api.run, "id": 40}]}
         if endpoint == "actions/runs/40":
             return {**api.run, "id": 40, "head_sha": OTHER, "conclusion": "failure"}
         return api(endpoint)
     assert gate.newest_attested(backlog, [OTHER, REVISION])[0] == REVISION
     assert api.calls.count("") == 1
-    assert api.calls.count("actions/workflows/main-suite.yml") == 1
+    assert api.calls.count("actions/workflows/ci.yml") == 1
     assert api.calls.count("actions/runs/41") == 2
 
 
@@ -117,7 +117,7 @@ def test_readiness_rechecks_runs_without_refetching_metadata(monkeypatch):
     monkeypatch.setattr(gate, "published_edge_revision", lambda: OTHER)
     assert gate.publication_readiness(api, REVISION, published=OTHER)[0]
     assert api.calls.count("") == 1
-    assert api.calls.count("actions/workflows/main-suite.yml") == 1
+    assert api.calls.count("actions/workflows/ci.yml") == 1
     assert api.calls.count("actions/runs/41") == 4
     assert api.calls.count("actions/runs/41/attempts/2/jobs?per_page=100&page=1") == 2
 
@@ -294,7 +294,7 @@ def test_trigger_cannot_add_workflow_requirements(kind, passed):
         assert gate.COMMAND in reason
     expected = {"branches/main", f"commits/{REVISION}/statuses?per_page=100&page=1"}
     if not passed:
-        expected.add(f"actions/workflows/main-suite.yml/runs?branch=main&head_sha={REVISION}&per_page=100")
+        expected.add(f"actions/workflows/ci.yml/runs?branch=main&head_sha={REVISION}&per_page=100")
     assert set(api.calls) == expected
 
 
