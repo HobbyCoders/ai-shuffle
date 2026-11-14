@@ -6,10 +6,11 @@
 	 * Left: an icon rail (SidebarRail) holding New, the destinations the user
 	 * put there, More and Settings. Right: one column with the mode toggle and
 	 * header buttons, search and filter, and the ledger itself: Needs you,
-	 * Active and Settled.
+	 * Active, Snoozed and Settled.
 	 *
 	 * Rows follow the inbox model. Swipe left settles an active session (or
-	 * brings a settled one back); swipe right is inert. A long press starts a
+	 * brings a settled or snoozed one back); swipe right opens the snooze
+	 * picker for that row, which snoozes it once a time is picked. A long press starts a
 	 * multi-select whose bar offers the same moves in bulk. On desktop the
 	 * same moves sit in each row's hover actions.
 	 *
@@ -1333,7 +1334,7 @@
 	   to the system. Hold the rows off the right edge so the whole row, and
 	   the place a thumb starts a left (settle) swipe, sit inside the app's own
 	   touch area. The left edge needs no guard: the icon rail already keeps
-	   the rows, and the start of a right (archive) swipe, clear of it. */
+	   the rows, and the start of a right (snooze) swipe, clear of it. */
 	.list.edge-guard { padding-right: 24px; }
 	.cards, .proj-group { display: flex; flex-direction: column; gap: 2px; }
 	/* Tiers: the lane label, then this quieter project label, then its rows. */

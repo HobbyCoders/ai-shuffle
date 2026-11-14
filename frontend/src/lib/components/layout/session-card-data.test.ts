@@ -10,6 +10,7 @@ import {
 	snoozeLabel,
 	snoozePresets,
 	snoozeUntilMs,
+	swipeActions,
 	toLocalInputValue,
 	withinTapTarget,
 	sessionNeedsYou,
@@ -755,16 +756,38 @@ describe('snooze', () => {
 	const iso = (date: Date) => date.toISOString();
 	const now = at(2026, 11, 13, 10, 0).getTime(); // a Friday morning
 
-	it('offers Snooze beside Settle, and Unsnooze + Settle on a snoozed row', () => {
+	it('offers Snooze on every row that is not archived, and Unsnooze + Settle on a snoozed row', () => {
 		const until = iso(at(2026, 11, 13, 15));
 		expect(cardActions({ is_active: true, status: 'active' }, now, true)).toEqual(['settle', 'snooze']);
-		expect(cardActions({ is_active: false, status: 'active', snoozed_until: until }, now, true)).toEqual(['unsnooze', 'settle']);
+		expect(cardActions({ is_active: false, status: 'active', snoozed_until: until }, now, true)).toEqual(['unsnooze', 'snooze', 'settle']);
+		expect(cardActions({ is_active: false, status: 'active', snoozed_until: until }, now, false)).toEqual(['unsnooze', 'settle']);
 		// Settle stays the swipe-left action of an Active row.
 		expect(cardActions({ is_active: true, status: 'active' }, now, true)[0]).toBe('settle');
 		// Once its time passes the row is Active again, before the server says so.
 		const later = at(2026, 11, 13, 15, 1).getTime();
 		expect(cardActions({ is_active: false, status: 'active', snoozed_until: until }, later, true)).toEqual(['settle', 'snooze']);
-		expect(cardActions({ is_active: false, status: 'active', snoozed_until: null }, now, true)).toEqual(['activate']);
+		// A settled row can be snoozed too: it comes back to Active at that time.
+		expect(cardActions({ is_active: false, status: 'active', snoozed_until: null }, now, true)).toEqual(['activate', 'snooze']);
+		expect(cardActions({ is_active: false, status: 'active', snoozed_until: null }, now, false)).toEqual(['activate']);
+		// Legacy archived metadata only ever moves back to Active, snoozed or not.
+		expect(cardActions({ is_active: false, status: 'archived' }, now, true)).toEqual(['activate']);
+		expect(cardActions({ is_active: false, status: 'archived', snoozed_until: until }, now, true)).toEqual(['activate']);
+	});
+
+	it('swipes left to the first action and right to the snooze picker', () => {
+		const until = iso(at(2026, 11, 13, 15));
+		const swipe = (row: Parameters<typeof cardActions>[0], canSnooze = true) => swipeActions(cardActions(row, now, canSnooze));
+		// Active, snoozed and settled rows all snooze on a right swipe; left keeps its meaning.
+		expect(swipe({ is_active: true, status: 'active' })).toEqual({ left: 'settle', right: 'snooze' });
+		expect(swipe({ is_active: false, status: 'active', snoozed_until: until })).toEqual({ left: 'unsnooze', right: 'snooze' });
+		expect(swipe({ is_active: false, status: 'active' })).toEqual({ left: 'activate', right: 'snooze' });
+		// A snooze that has run out swipes like an Active row.
+		const later = at(2026, 11, 13, 15, 1).getTime();
+		expect(swipeActions(cardActions({ is_active: false, status: 'active', snoozed_until: until }, later, true))).toEqual({ left: 'settle', right: 'snooze' });
+		// No right swipe on archived metadata, or where the list has no picker to open.
+		expect(swipe({ is_active: false, status: 'archived' })).toEqual({ left: 'activate', right: null });
+		expect(swipe({ is_active: true, status: 'active' }, false)).toEqual({ left: 'settle', right: null });
+		expect(swipe({ is_active: false, status: 'active', snoozed_until: until }, false)).toEqual({ left: 'unsnooze', right: null });
 	});
 
 	it('reads the wake time only from a settled row', () => {

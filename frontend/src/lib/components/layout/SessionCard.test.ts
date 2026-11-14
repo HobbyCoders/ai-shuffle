@@ -230,15 +230,31 @@ describe('SessionCard snooze', () => {
 		expect(screen.queryByTitle('Snooze session')).toBeNull();
 	});
 
-	it('shows the wake time on a snoozed row and offers Unsnooze and Settle', async () => {
-		renderCard({ is_active: false, snoozed_until: until }, { onSnooze: vi.fn(), status: 'idle', compact: true });
+	it('shows the wake time on a snoozed row and offers Unsnooze, Snooze and Settle', async () => {
+		const onSnooze = vi.fn();
+		renderCard({ is_active: false, snoozed_until: until }, { onSnooze, status: 'idle', compact: true });
 		const label = document.querySelector('.snooze-until')?.textContent ?? '';
 		expect(label).toMatch(/^until /);
 		expect(document.querySelector('.details')?.textContent).toContain(`Snoozed ${label}`);
+		const buttons = Array.from(document.querySelectorAll('.hover-acts button')).map((b) => b.getAttribute('title'));
+		expect(buttons).toEqual(['Unsnooze: move to Active', 'Snooze session', 'Settle session']);
+		// Snooze on a snoozed row picks a new wake time.
+		await fireEvent.click(screen.getByTitle('Snooze session'));
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
 		await fireEvent.click(screen.getByTitle('Unsnooze: move to Active'));
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
 		await fireEvent.click(screen.getByTitle('Settle session'));
 		expect(mocks.setSessionActive).toHaveBeenLastCalledWith('session-a', false);
+	});
+
+	it('offers Snooze beside Move to Active on a settled row', async () => {
+		const onSnooze = vi.fn();
+		renderCard({ is_active: false }, { onSnooze, compact: true });
+		const buttons = Array.from(document.querySelectorAll('.hover-acts button')).map((b) => b.getAttribute('title'));
+		expect(buttons).toEqual(['Move to Active', 'Snooze session']);
+		await fireEvent.click(screen.getByTitle('Snooze session'));
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
 	});
 
 	it('drops the label and offers the Active actions once the time has passed', () => {
@@ -598,7 +614,7 @@ describe('SessionCard swipe gestures', () => {
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
-	it.each([true, false])('right swipe has no lifecycle side effects (active=%s)', async (is_active) => {
+	it.each([true, false])('right swipe has no lifecycle side effects without a picker (active=%s)', async (is_active) => {
 		const clock = slowClock();
 		const { container } = renderCard({ is_active });
 		const { frame, card } = parts(container);
@@ -611,6 +627,92 @@ describe('SessionCard swipe gestures', () => {
 		expect(mocks.setSessionArchived).not.toHaveBeenCalled();
 		expect(mocks.setSessionActive).not.toHaveBeenCalled();
 		expect(mocks.banner).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		['an active row', { is_active: true }],
+		['a settled row', { is_active: false }],
+		['a snoozed row', { is_active: false, snoozed_until: '2026-08-20T15:00:00Z' }],
+	])('opens the snooze picker on a long right swipe of %s, and springs back', async (_label, row) => {
+		const clock = slowClock();
+		const onSnooze = vi.fn();
+		const { container, onOpen } = renderCard(row, { onSnooze, compact: !row.is_active });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 100 });
+		expect(frame.classList.contains('dragging')).toBe(true);
+		expect(frame.classList.contains('armed')).toBe(false);
+		await move(frame, { x: 200 });
+		expect(frame.classList.contains('armed')).toBe(true);
+		// The lane uncovered on the left is the snooze lane, not the settle one.
+		const lane = container.querySelector('.lane.l.on');
+		expect(lane?.textContent?.trim()).toBe('Snooze');
+		expect(lane?.classList.contains('snooze')).toBe(true);
+		expect(lane?.classList.contains('toggle')).toBe(false);
+		expect(container.querySelector('.lane.r.on')).toBeNull();
+		await up(frame, { x: 200 });
+		await fireEvent.click(card);
+		clock.mockRestore();
+
+		// The picker opens at once; the row neither slides off nor folds.
+		expect(onSnooze).toHaveBeenCalledTimes(1);
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		expect(frame.classList.contains('sliding')).toBe(false);
+		expect(frame.classList.contains('dragging')).toBe(false);
+		expect(card.style.transform).toBe('');
+		await vi.advanceTimersByTimeAsync(450);
+		expect(frame.classList.contains('folded')).toBe(false);
+		expect(container.querySelector('.lane')).toBeNull();
+		// Only a picked time changes the session; the drag's click opens nothing.
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		expect(onOpen).not.toHaveBeenCalled();
+	});
+
+	it('springs a short right drag back without opening the picker', async () => {
+		const clock = slowClock();
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 90 });
+		expect(container.querySelector('.lane.l.on')?.textContent?.trim()).toBe('Snooze');
+		await up(frame, { x: 90 });
+		clock.mockRestore();
+		await vi.advanceTimersByTimeAsync(450);
+		expect(onSnooze).not.toHaveBeenCalled();
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
+	it('opens the snooze picker on a fast right flick short of the arm point', async () => {
+		const ticks = [1000, 1020, 1040];
+		vi.spyOn(performance, 'now').mockImplementation(() => ticks.shift() ?? 1040);
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 60 });
+		await move(frame, { x: 110 });
+		expect(frame.classList.contains('armed')).toBe(false);
+		await up(frame, { x: 110 });
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
+	it('still settles on a left swipe when the row can snooze', async () => {
+		const clock = slowClock();
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await down(card, { x: 300 });
+		await move(frame, { x: 120 });
+		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Settle');
+		expect(container.querySelector('.lane.l.on')).toBeNull();
+		await up(frame, { x: 120 });
+		clock.mockRestore();
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		expect(onSnooze).not.toHaveBeenCalled();
 	});
 
 	it('moves a settled row back to Active on a left swipe', async () => {
@@ -703,8 +805,8 @@ describe('SessionCard swipe gestures', () => {
 		expect(screen.getByTitle('Settle session')).toBeTruthy();
 	});
 
-	it('does not swipe an archived row right, since it is archived already', async () => {
-		const { container } = renderCard({ is_active: false, status: 'archived' });
+	it('does not swipe an archived row right, even where the list can snooze', async () => {
+		const { container } = renderCard({ is_active: false, status: 'archived' }, { onSnooze: vi.fn() });
 		const { frame, card } = parts(container);
 		await down(card, { x: 20 });
 		await move(frame, { x: 220 });
