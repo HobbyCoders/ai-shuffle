@@ -12,6 +12,7 @@ import { appMode } from '$lib/stores/sessionMode.svelte';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from './attach-disable';
 import { auth } from '$lib/stores/auth.svelte';
 import { initialState, reduce } from '$lib/stores/session/v2/reducer';
+import { bumpInitGeneration } from '$lib/stores/session/session-init';
 import '$lib/test-stubs/composer-dom';
 
 const voice = vi.hoisted(() => ({ enabled: true }));
@@ -65,10 +66,10 @@ async function type(container: HTMLElement, text: string) {
 	await tick();
 }
 
-function startTurn() {
-	Object.assign(activeSession.current, { sessionId: 'local-working', mode: 'code', profile: 'coding', draft: '' });
+function startTurn(sessionId = 'local-working') {
+	Object.assign(activeSession.current, { sessionId, mode: 'code', profile: 'coding', draft: '' });
 	const live = reduce(initialState(), { type: 'turn.started', id: 'started', seq: 1,
-		session_id: 'local-working', turn_id: 'live-turn' });
+		session_id: sessionId, turn_id: 'live-turn' });
 	Object.assign(activeSession.current, { isStreaming: live.isStreaming, liveTurnId: live.liveTurnId });
 	activeSession.setDraft('');
 }
@@ -160,7 +161,7 @@ describe('Talk turns into Send', () => {
 			Object.assign(activeSession.current, { sessionId: 'local-idle', mode: 'code', profile: 'coding',
 				isStreaming: false, liveTurnId: null, error: null, worktreeError: null, activeTasks: [], ...extra });
 			activeSession.setDraft('');
-			sends = vi.spyOn(activeSession, 'sendMessage').mockImplementation(async () => { startTurn(); return true; });
+			sends = vi.spyOn(activeSession, 'sendMessage').mockImplementation(async () => { startTurn('local-idle'); return true; });
 			stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
 		}
 
@@ -197,7 +198,7 @@ describe('Talk turns into Send', () => {
 			// Running agents keep Stop shown, so they start with the turn here.
 			idle();
 			sends.mockImplementation(async () => {
-				startTurn();
+				startTurn('local-idle');
 				Object.assign(activeSession.current, { activeTasks: [{ id: 'agent-1', status: 'running' }] });
 				activeSession.setDraft('');
 				return true;
@@ -209,6 +210,18 @@ describe('Talk turns into Send', () => {
 			// Inside the same window: the keyboard opens it, and confirming stops.
 			await fireEvent.click(stop);
 			await fireEvent.click(await screen.findByRole('button', { name: 'Stop everything' }));
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
+		it("never ignores another chat's Stop after a switch inside the window", async () => {
+			idle();
+			const { container } = render(ChatInput, { props: { compact: true } });
+			await sendDraft(container);
+			// Switch to chat B, already running (as switchSession does: a new
+			// navigation, then B's state).
+			bumpInitGeneration();
+			startTurn('chat-b');
+			await tap(await screen.findByRole('button', { name: 'Stop generating' }));
 			expect(stops).toHaveBeenCalledOnce();
 		});
 

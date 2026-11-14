@@ -1141,9 +1141,12 @@
 	// presses: the second press of a double tap on Send. Armed only when a
 	// press on the Send circle sends in a chat while Stop is not shown (on the
 	// start screen the composer moves away as the chat opens), and ended by
-	// the next submit; Stop's keyboard activation and its confirmation are
-	// never ignored.
-	let strayStopUntil = -Infinity;
+	// the next submit, and it holds only for the chat the send went to (a chat
+	// switch inside the window shows another chat's Stop); Stop's keyboard
+	// activation and its confirmation are never ignored.
+	let strayStop: { until: number; destination: SendDestination } | null = null;
+	const isStrayStopPress = () => !!strayStop && performance.now() < strayStop.until
+		&& stillAtDestination(strayStop.destination, composerPlace());
 	function holdSendCircle(): () => void {
 		sendCircleHolds += 1;
 		let windowOver = false;
@@ -1160,7 +1163,7 @@
 
 	/** `sendPressAt`: when the Send circle was pressed in a chat with no Stop beside it. */
 	async function handleSubmit(compactBeforeSend = false, sendPressAt: number | null = null) {
-		strayStopUntil = -Infinity;
+		strayStop = null;
 		if (pendingSubmit) {
 			if (!pendingSubmit.cleared) return;
 			// Nothing typed since the clear (a second Enter): the same action
@@ -1307,7 +1310,7 @@
 		// sendMessage clears the composer before its first await, and holds the
 		// next send until the cold check has answered so two sends keep order.
 		// It sends in the place taken at the click (handleSubmit).
-		if (sendPressAt !== null) strayStopUntil = sendPressAt + DOUBLE_ACTIVATION_MS;
+		if (sendPressAt !== null) strayStop = { until: sendPressAt + DOUBLE_ACTIVATION_MS, destination };
 		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm, turn);
 	}
 
@@ -2121,7 +2124,7 @@
 						{#if circles.includes('stop')}
 							<StopButton
 								activeTasks={$activeSession.activeTasks}
-								ignoresPress={() => performance.now() < strayStopUntil}
+								ignoresPress={isStrayStopPress}
 								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
 							/>
 						{/if}
