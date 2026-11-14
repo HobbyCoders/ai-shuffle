@@ -184,6 +184,15 @@ def resolve_worker(worker: str) -> Dict[str, Any]:
     return row
 
 
+def _refuse_incapable(session_id: str, target_id: str) -> None:
+    """Raise ``ValueError`` when the chat's provider row cannot run on the target (#1519)."""
+    from app.core import provider_capability
+
+    reason = provider_capability.session_refusal(target_id, session_id)
+    if reason:
+        raise ValueError(f"{reason} Nothing was queued; pick another worker.")
+
+
 def _without_checkout(session_id: str) -> bool:
     """True for a no-project chat: it moves its history only, with no branch (#639).
 
@@ -210,6 +219,7 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
 
     check_unfinished_wakes(session_id)
     row = resolve_worker(worker)
+    _refuse_incapable(session_id, row["device_id"])
     how = ("moves this session and its history there" if _without_checkout(session_id)
            else "commits and pushes the branch and moves this session there")
     # Read before taking _state_lock: busy_state does DB work (#1416).
@@ -1538,6 +1548,7 @@ async def queue_move(session_id: str, target: str, *, stop: bool = False) -> Dic
     if not stop and await asyncio.to_thread(_open_prompt, session_id):
         raise ValueError(OPEN_PROMPT)
     row = await asyncio.to_thread(resolve_worker, runners.resolve_runner_id(target) or target)
+    await asyncio.to_thread(_refuse_incapable, session_id, row["device_id"])
     label = str(row.get("device_name") or row["device_id"])
     pending = PendingHandoff(row["device_id"], label, "", time.time(), by="owner")
     await asyncio.to_thread(_queue_owner, session_id, pending)

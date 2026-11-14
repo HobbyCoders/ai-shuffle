@@ -41,10 +41,18 @@ def require_owner(session_id: str | dict[str, Any] | None) -> None:
         raise PermissionError("WorkingRecord is only available to the owner's top-level sessions")
 
 
-def record_report(starter_id: str, frame: dict[str, Any]) -> None:
+def record_report(starter_id: str, frame: dict[str, Any], *, started_here: bool = False) -> None:
+    """``started_here``: the report of a chat this worker started for
+    ``starter_id`` on another worker's StartSession, which it keeps here
+    (``report_settled_start``, #1519). The starter's row may not have
+    reached this worker (or was deleted): the authority is the start receipt
+    this worker wrote when it accepted that StartSession. A starter row that
+    is here must still be an owner chat."""
     from app.core.session_orchestration import is_owner_session
     if not is_owner_session(starter_id):
-        return
+        from app.db import sessions
+        if not started_here or not starter_id or sessions.get_session(starter_id) is not None:
+            return
     child = str(frame.get("task_id") or "")
     turn = str(frame.get("agent_message_turn_id") or "")
     if not child or not turn:

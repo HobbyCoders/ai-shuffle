@@ -325,18 +325,11 @@ class McpClient:
         input_responses: Any = None,
         request_state: str | None = None,
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"allow_input_required": True}
-        if input_responses is not None:
-            kwargs["input_responses"] = input_responses
-        if request_state is not None:
-            kwargs["request_state"] = request_state
         try:
             async with asyncio.timeout(self.call_timeout):
-                try:
-                    result = await session.call_tool(tool, input or {}, **kwargs)
-                except TypeError:
-                    # Legacy SDKs lack ``allow_input_required``/MRTR kwargs.
-                    result = await session.call_tool(tool, input or {})
+                result = await _call_tool(
+                    session, tool, input or {}, input_responses, request_state
+                )
         except TimeoutError:
             return self._timed_out(tool)
         except Exception as exc:
@@ -414,6 +407,71 @@ def _open_http_transport(config: dict[str, Any]) -> tuple[Any, Any]:
             http_client = httpx.AsyncClient(headers=headers, follow_redirects=True)
         return connect(url, http_client=http_client), http_client
     return connect(url, headers=headers), None
+
+
+async def _call_tool(
+    session: Any,
+    tool: str,
+    arguments: dict[str, Any],
+    input_responses: Any,
+    request_state: str | None,
+) -> Any:
+    """One ``tools/call`` that may pause on ``input_required`` and resume.
+
+    mcp 2.x's ``call_tool`` takes the MRTR keywords itself. mcp 1.x, which the
+    app ships, has none of them, and its ``CallToolResult`` requires
+    ``content``, which an ``input_required`` reply does not carry. So on 1.x
+    the request is built here: the answers and the request state go on the
+    wire as ``inputResponses``/``requestState`` (1.x's
+    ``CallToolRequestParams`` allows extra fields), and the reply is parsed as
+    a ``CallToolResult`` only when it is a final result. Never resend a call
+    without its answers: the server would just ask again (#1560).
+    """
+    if _call_tool_takes_mrtr(session):
+        kwargs: dict[str, Any] = {"allow_input_required": True}
+        if input_responses is not None:
+            kwargs["input_responses"] = input_responses
+        if request_state is not None:
+            kwargs["request_state"] = request_state
+        return await session.call_tool(tool, arguments, **kwargs)
+
+    from mcp import types
+
+    fields: dict[str, Any] = {}
+    if input_responses is not None:
+        fields["inputResponses"] = input_responses
+    if request_state is not None:
+        fields["requestState"] = request_state
+    request = types.ClientRequest(types.CallToolRequest(
+        params=types.CallToolRequestParams(name=tool, arguments=arguments, **fields),
+    ))
+    # The base ``Result`` keeps unknown fields, so either reply shape parses.
+    reply = await session.send_request(request, types.Result)
+    if _field(reply, "resultType") == "input_required":
+        return reply
+    result = types.CallToolResult.model_validate(
+        reply.model_dump(by_alias=True, exclude_none=True)
+    )
+    # The output-schema check 1.x's own ``call_tool`` runs on a final result.
+    validate = getattr(session, "_validate_tool_result", None)
+    if validate is not None and not result.isError:
+        await validate(tool, result)
+    return result
+
+
+def _call_tool_takes_mrtr(session: Any) -> bool:
+    """True when ``session.call_tool`` accepts the MRTR keywords (mcp 2.x).
+
+    A signature that cannot be read, or one taking ``**kwargs`` (a test
+    double), is passed the keywords as before.
+    """
+    try:
+        params = inspect.signature(session.call_tool).parameters
+    except (TypeError, ValueError):
+        return True
+    return "input_responses" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
 
 
 def _session_notification_kwargs(session_cls: Any, handler: Any) -> dict[str, Any]:
