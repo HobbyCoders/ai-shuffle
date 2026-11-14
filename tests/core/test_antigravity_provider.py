@@ -1262,6 +1262,58 @@ async def test_a_sign_in_rows_list_holds_only_for_that_sign_in_on_this_worker(cl
     assert fetched["source"] == "preset" and not fetched.get("fetched_at")
 
 
+@pytest.mark.parametrize("content", ["", "  \n", "not-a-nonce", "\xff\xfe"], ids=["empty", "blank", "garbage", "binary"])
+def test_a_cut_short_or_bad_tag_file_is_replaced(client, content):
+    """A write cut short (or any bad content) is no tag, not a tag forever
+    missing: the next agent start replaces it, and engines connecting at
+    once for the row agree on the one tag."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    row = _create(client)
+    path = ag._signin_tag_path(row["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content.encode("latin-1"))
+    path.with_name("~" + path.name).write_text("left by a killed write")
+    assert ag.signin_tag(row["id"]) is None  # a reader alone never writes
+    with ThreadPoolExecutor(4) as pool:
+        bound = list(pool.map(lambda _: _bound(row["id"]), range(8)))
+    assert bound[0] and bound[0]["signin"] and all(b == bound[0] for b in bound)
+    assert ag.signin_tag(row["id"]) == bound[0]["signin"]
+
+
+async def test_a_signed_out_answer_keeps_the_sign_ins_list_and_a_new_sign_in_replaces_warm_agents(
+        client, session_row, monkeypatch):
+    """A status check answering signed-out once does not end the sign-in, so
+    a warm chat's captures still count. A completed new sign-in does: the old
+    list stops counting, the warm chat's next turn runs a replaced agent with
+    a new capture binding, and a new chat captures under the same new tag."""
+    from app.core import model_catalogs
+
+    monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-local-hmac-key", "local"))
+    row = _create(client)
+    adapter = _connected(row["id"])
+    holder = adapter._antigravity_capture
+    capture = ag.capture_offered_models(row["id"], lambda: holder["bound"])
+    ag._note_signin(row["id"], "signed_out")  # a transient answer...
+    ag._note_signin(row["id"], "signed_in")  # ...then signed in again
+    capture(_REPORTED, "1.5.9")
+    await asyncio.gather(*ag._capture_tasks)
+    assert model_catalogs.read(row["id"])["source"] == "agent"
+    old = dict(holder["bound"])
+    started = client.post(f"{BASE}/providers/{row['id']}/login").json()
+    done = client.post(f"{BASE}/providers/{row['id']}/login/{started['login_id']}/complete",
+                       json={"code": "good"}).json()
+    assert done["state"] == "signed_in", done
+    assert model_catalogs.read(row["id"]) is None  # the previous account's list
+    await _turn(adapter, "user")
+    assert len(adapter._engine.specs) == 1  # a new agent for the warm chat
+    assert holder["bound"]["signin"] and holder["bound"] != old
+    assert _bound(row["id"]) == holder["bound"]  # a new chat: the same new tag
+    capture(_REPORTED, "1.5.9")
+    await asyncio.gather(*ag._capture_tasks)
+    assert model_catalogs.read(row["id"])["source"] == "agent"
+
+
 @pytest.mark.parametrize("mode,billing", [
     ("oauth-personal", "subscription"), ("oauth-business", "subscription"),
     ("gemini-api-key", "api"),
