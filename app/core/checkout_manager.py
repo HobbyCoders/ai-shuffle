@@ -39,7 +39,6 @@ import ntpath
 import os
 import posixpath
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -49,6 +48,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fluid.tools.child_env import scrub_child_env
 
 from app.core.config import settings
+from app.core.fs_utils import force_rmtree
 from app.core.git_service import git_service
 from app.core.git_worktree_ops import WorktreeAddError, repo_worktree_lock, worktree_error_detail
 from app.core.project_links import auto_link_group_id
@@ -614,9 +614,13 @@ def _seed_base_checkout(
 
 
 def _rmtree_quiet(path: str) -> None:
-    """Best-effort recursive delete of a seed temp dir; never raises."""
+    """Best-effort recursive delete of a seed temp dir; never raises.
+
+    The seed is a Git clone: force_rmtree also removes Git's read-only
+    objects, which a plain rmtree leaves behind on Windows.
+    """
     try:
-        shutil.rmtree(path, ignore_errors=True)
+        force_rmtree(path, ignore_errors=True)
     except Exception as e:  # pragma: no cover - ignore_errors already swallows
         logger.warning("checkout_manager: temp-dir cleanup failed for %s: %s", path, e)
 

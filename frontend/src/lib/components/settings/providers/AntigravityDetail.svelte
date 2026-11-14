@@ -29,6 +29,7 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import TextField from '../rows/TextField.svelte';
 	import Switch from '../rows/Switch.svelte';
+	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ModelCuration from './ModelCuration.svelte';
 	import SavedSecretRow from './SavedSecretRow.svelte';
@@ -37,7 +38,7 @@
 	import AntigravityInstall from './setup/AntigravityInstall.svelte';
 	import AntigravitySignIn from './setup/AntigravitySignIn.svelte';
 	import { antigravity } from './antigravity.svelte';
-	import { antigravityGuarded, type CredentialView, type ProviderView } from './providers-model';
+	import { antigravityGuarded, needsUpdateNote, type CredentialView, type ProviderView } from './providers-model';
 
 	interface Props {
 		credential: CredentialView;
@@ -47,6 +48,7 @@
 	let { credential, provider }: Props = $props();
 
 	const row = $derived(credential.row!);
+	const updateNote = $derived(needsUpdateNote(row));
 	const keyRow = $derived(credential.flavor === 'agy-key');
 	const personal = $derived(credential.flavor === 'agy-personal');
 	const business = $derived(credential.flavor === 'agy-business');
@@ -250,6 +252,9 @@
 			<button type="button" class="st-btn warn" onclick={() => { settingsNav.setTab('providers', credential.item, 'Overview'); signingIn = true; }}><RefreshCw />Sign in</button>
 		{/if}
 		<CredentialControl {credential} showState />
+	{/snippet}
+	{#snippet banner()}
+		{#if updateNote}<InlineBanner tone="info"><span role="status">{updateNote}</span></InlineBanner>{/if}
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}

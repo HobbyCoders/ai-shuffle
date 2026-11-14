@@ -960,3 +960,16 @@ export function supportsNativeImages(row: ModelProvider | undefined): boolean {
 		['chatgpt', 'grok'].includes(row.auth_mode ?? '')
 	);
 }
+
+/**
+ * "Office PC needs an update to use this." for a row some network workers
+ * cannot run yet (they do not report support for its provider), else null.
+ * The same rule refuses those workers when a chat on this row would move or
+ * start there.
+ */
+export function needsUpdateNote(row: Pick<ModelProvider, 'workers_requiring_update'> | undefined): string | null {
+	const names = (row?.workers_requiring_update ?? []).filter(Boolean);
+	if (!names.length) return null;
+	if (names.length === 1) return `${names[0]} needs an update to use this.`;
+	return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} need an update to use this.`;
+}

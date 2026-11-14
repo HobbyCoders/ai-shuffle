@@ -24,6 +24,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, NoReturn, Optional, Dict, Any
 
+from app.core.fs_utils import retry_sharing_violation
 from app.core.mcp_service import McpConfigUnreadable
 from app.core.plugin_locks import serialized_plugin, serialized_state, serialized_marketplace, state_lock
 
@@ -283,11 +284,17 @@ class PluginService:
         replace the whole file.
         """
         fallback = default if default is not None else {}
+
+        def load():
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
         try:
             if not path.exists():
                 return fallback
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            # Another plugin operation's atomic replace briefly blocks opens
+            # on Windows; wait that out rather than calling the file unreadable.
+            data = retry_sharing_violation(load)
             # Every caller indexes the result as an object; a file holding
             # ``null`` or a list would otherwise raise AttributeError.
             if not isinstance(data, dict):
@@ -370,15 +377,18 @@ class PluginService:
     def _refuse_unreadable(self, path: Path, cause: BaseException) -> NoReturn:
         """Raise :class:`PluginConfigUnreadable` for ``path``, leaving it untouched.
 
-        When the file's bytes can be read (it failed to parse rather than to
-        open), a copy is kept at ``<name>.<timestamp>.bak`` (see
-        :meth:`_keep_backup`) so the owner can recover it even after deleting
-        or hand-editing the original.
+        When the file failed to parse (rather than to open), a copy is kept at
+        ``<name>.<timestamp>.bak`` (see :meth:`_keep_backup`) so the owner can
+        recover it even after deleting or hand-editing the original. A failed
+        open says nothing about the contents, so it leaves no copy: bytes that
+        read fine a moment later belong to a healthy file.
         """
-        try:
-            raw: Optional[bytes] = path.read_bytes()
-        except OSError:
-            raw = None
+        raw: Optional[bytes] = None
+        if not isinstance(cause, OSError):
+            try:
+                raw = retry_sharing_violation(path.read_bytes)
+            except OSError:
+                raw = None
         backup = self._keep_backup(path, raw) if raw is not None else None
         raise PluginConfigUnreadable(path, backup) from cause
 
@@ -398,7 +408,7 @@ class PluginService:
         opened at all is still refused, since no copy can be kept.
         """
         try:
-            raw = path.read_bytes()
+            raw = retry_sharing_violation(path.read_bytes)
         except FileNotFoundError:
             return
         except OSError as e:
@@ -446,7 +456,8 @@ class PluginService:
             ) as f:
                 temp_path = Path(f.name)
                 json.dump(data, f, indent=2)
-            temp_path.replace(path)
+            # Windows refuses the rename while a reader has the file open.
+            retry_sharing_violation(lambda: temp_path.replace(path))
             return True
         except IOError as e:
             logger.error(f"Error writing {path}: {e}")

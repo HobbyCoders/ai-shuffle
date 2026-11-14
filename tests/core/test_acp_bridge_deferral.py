@@ -335,7 +335,6 @@ async def test_a_bridged_tool_that_asks_gets_the_owners_answer_through_the_app(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="#1560: the pinned mcp SDK drops inputResponses on the retry")
 async def test_an_external_tool_that_asks_the_owner_finishes_through_call_tool(
         tmp_path, client, monkeypatch):  # noqa: F811
     adapter = await _connected(tmp_path, client, monkeypatch)
