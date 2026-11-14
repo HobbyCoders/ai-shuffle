@@ -115,11 +115,11 @@ def scratch_prompt(ctx: ToolCtx) -> str:
     return (
         "<system-reminder>\n"
         f"{SCRATCH_HEADER}"
-        f"Use {scratch_dir(ctx)} (absolute, per-session) for temporary briefs, "
-        "artifacts and review evidence; create it only when needed. Cleared once "
-        "settled and quiet. Never put "
+        f"Use {scratch_dir(ctx)} (absolute, per-session) for briefs, "
+        "artifacts and review evidence; create only when needed. Cleared once "
+        "settled and quiet; chat cannot link it. Never put "
         "harness state or scratch in the working folder's .fluid/. Project "
-        ".fluid is for loading skills, agents, commands, plugins and settings "
+        ".fluid holds skills, agents, commands, plugins and settings "
         "(and host-managed worktrees); explicit skill/plugin authoring is unchanged."
         "\n</system-reminder>"
     )

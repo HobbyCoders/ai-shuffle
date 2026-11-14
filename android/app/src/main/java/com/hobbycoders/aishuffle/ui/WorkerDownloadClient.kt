@@ -16,6 +16,15 @@ import java.util.concurrent.TimeUnit
 internal class ExternalRedirectException :
     IllegalArgumentException("The file redirects outside this worker. Its credentials were not forwarded.")
 
+/**
+ * A 403 the worker itself wrote (its JSON error body): it accepted this phone's credentials
+ * and refused the file, such as a path outside the folders it serves. Updating the worker or
+ * pairing again cannot change that. A 403 from anything in front of the worker (a proxy's or
+ * Cloudflare Access's HTML page) stays an authorization failure, like a 401.
+ */
+internal fun Response.refusedByWorker(): Boolean =
+    code == 403 && header("Content-Type").orEmpty().startsWith("application/json", ignoreCase = true)
+
 /** Shared streaming transport for WebView assets and SAF downloads. Credentials never leave the paired HTTPS origin. */
 internal class WorkerDownloadClient(
     client: OkHttpClient = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
@@ -78,10 +87,16 @@ internal class WorkerDownloadClient(
     fun save(server: Server, url: String, cookie: String?, userAgent: String, output: OutputStream,
              allowed: () -> Boolean, onCall: (Call) -> Unit, authorization: String? = null) {
         open(server, url, cookie, userAgent, allowed, onCall, authorization).use { response ->
+            require(!response.refusedByWorker()) { REFUSED_MESSAGE }
             require(response.code !in listOf(401, 403)) { "Your worker session expired or this worker needs an update. Refresh chat after updating the worker; pair again if needed." }
             require(response.isSuccessful) { "The worker could not send this file. Try again." }
             val body = requireNotNull(response.body) { "The worker sent an empty response." }
             ChatDownloadPolicy.copy(body.byteStream(), output, body.contentLength(), allowed)
         }
+    }
+
+    companion object {
+        /** Starts with "The worker could not" so ChatDownloads shows it as written. */
+        const val REFUSED_MESSAGE = "The worker could not send this file. It is outside what this worker shares."
     }
 }

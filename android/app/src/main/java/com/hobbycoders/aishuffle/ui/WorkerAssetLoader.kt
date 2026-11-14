@@ -19,6 +19,8 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
 
     companion object {
         const val AUTH_MESSAGE = "This worker could not authorize a file. Update the worker, refresh chat, then pair again if needed."
+        /** The worker knew this phone and refused the file itself ([refusedByWorker]): nothing to update or pair. */
+        const val REFUSED_MESSAGE = "A file could not be loaded. It is outside what this worker shares."
         /** A timeout, refused or dropped connection: what a worker restart looks like from here. */
         const val RESTARTING_MESSAGE = "A file could not be loaded. The worker may be restarting."
         const val ACCESS_MESSAGE = "A file could not be loaded. Cloudflare Access asked this phone to sign in. Refresh chat; pair again if it keeps happening."
@@ -29,7 +31,8 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
         /**
          * What to tell the owner about one failed element load, or null to say nothing
          * (a cancelled load). Cloudflare Access is named only when the failure was Access's
-         * sign-in redirect on a worker paired through Access; 401/403 answers have [AUTH_MESSAGE].
+         * sign-in redirect on a worker paired through Access. Answers the worker did send are
+         * reported in [load]: its own 403 has [REFUSED_MESSAGE], other 401/403 answers [AUTH_MESSAGE].
          */
         fun failureMessage(error: Throwable, cfAccess: Boolean): String? = when {
             error is CancellationException -> null
@@ -74,7 +77,8 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
                     activeCall?.let(calls::remove)
                     return failure(502, "Refresh chat to reload this file.")
                 }
-                if (response.code in listOf(401, 403)) status(AUTH_MESSAGE)
+                if (response.refusedByWorker()) status(REFUSED_MESSAGE)
+                else if (response.code in listOf(401, 403)) status(AUTH_MESSAGE)
                 val body = requireNotNull(response.body)
                 val mime = body.contentType()
                 val range = if (response.code == 206 && headers.keys.any { it.equals("Range", true) }) {
