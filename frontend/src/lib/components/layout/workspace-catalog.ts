@@ -128,3 +128,84 @@ export function pickerItemName(
 	if (!selectedId) return null;
 	return items.find((i) => i.id === selectedId)?.name ?? null;
 }
+
+/** The session fields recency ordering reads. */
+export interface ProjectRecencySession {
+	project_id: string | null;
+	project_v2_id?: string | null;
+	last_user_message_at?: string | null;
+	updated_at?: string | null;
+	created_at?: string | null;
+}
+
+/**
+ * When each picker item was last used: the newest session in that project
+ * (its last user message, else its last update), from the session list the
+ * sidebar already holds. A session counts for the item with its shared
+ * project id first (a project only on another worker has no local id), then
+ * its local id or an alias. Items with no session are absent.
+ */
+export function projectRecency(
+	items: WorkspacePickerItem[],
+	sessions: ProjectRecencySession[]
+): Map<string, number> {
+	const itemByShared = new Map<string, string>();
+	const itemByProject = new Map<string, string>();
+	for (const item of items) {
+		if (item.projectV2Id) itemByShared.set(item.projectV2Id, item.id);
+		if (item.project) itemByProject.set(item.project, item.id);
+		for (const alias of item.projectAliases ?? []) itemByProject.set(alias, item.id);
+	}
+	const recency = new Map<string, number>();
+	for (const session of sessions) {
+		const id =
+			(session.project_v2_id ? itemByShared.get(session.project_v2_id) : undefined) ??
+			(session.project_id ? itemByProject.get(session.project_id) : undefined);
+		if (!id) continue;
+		const at = Date.parse(session.last_user_message_at || session.updated_at || session.created_at || '');
+		if (!Number.isFinite(at)) continue;
+		if (at > (recency.get(id) ?? -Infinity)) recency.set(id, at);
+	}
+	return recency;
+}
+
+/**
+ * How well `name` matches `query` (both lowercased); lower is better, null is
+ * no match: whole name, prefix, start of a word, anywhere, then the query's
+ * letters in order (fuzzy).
+ */
+function matchRank(name: string, query: string): number | null {
+	if (name === query) return 0;
+	if (name.startsWith(query)) return 1;
+	const at = name.indexOf(query);
+	if (at > 0 && /[^a-z0-9]/.test(name[at - 1])) return 2;
+	if (at > 0) return 3;
+	let from = 0;
+	for (const char of query) {
+		if (/\s/.test(char)) continue;
+		from = name.indexOf(char, from) + 1;
+		if (from === 0) return null;
+	}
+	return 4;
+}
+
+/**
+ * The quick project picker's rows. With no query: the most recently used
+ * projects first, then the rest in catalog order. With a query: only the
+ * matching projects, best match first, ties by recency then catalog order.
+ */
+export function rankPickerItems<T extends { id: string; name: string }>(
+	items: T[],
+	query: string,
+	recency: Map<string, number> = new Map()
+): T[] {
+	const q = query.trim().toLowerCase();
+	const scored: { item: T; rank: number; at: number; index: number }[] = [];
+	items.forEach((item, index) => {
+		const rank = q ? matchRank(item.name.toLowerCase(), q) : 0;
+		if (rank === null) return;
+		scored.push({ item, rank, at: recency.get(item.id) ?? -Infinity, index });
+	});
+	scored.sort((a, b) => a.rank - b.rank || b.at - a.at || a.index - b.index);
+	return scored.map((entry) => entry.item);
+}

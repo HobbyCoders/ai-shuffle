@@ -5,8 +5,15 @@
 	 * Shows items organized by groups. Groups appear as parent rows;
 	 * clicking one slides to a sub-panel with that group's items.
 	 * Back button slides back. Works well on mobile and desktop.
+	 *
+	 * `searchable` adds a search field over the main panel and lists the items
+	 * flat, ignoring groups, in the resting order `rank` gives (a quick picker:
+	 * most recently used first). Typing lists the matches best first, ↑/↓ move
+	 * the highlight, Enter
+	 * picks it, and with `numbered` a digit picks one of the first nine rows
+	 * while the field is empty. Escape is left to the menu's owner.
 	 */
-	import { Check, ChevronRight, ChevronLeft, FolderClosed, FolderPlus } from 'lucide-svelte';
+	import { Check, ChevronRight, ChevronLeft, FolderClosed, FolderPlus, Search } from 'lucide-svelte';
 	import { groups, organizeByGroups, type EntityType } from '$lib/stores/groups.svelte';
 	import { tick } from 'svelte';
 
@@ -31,6 +38,21 @@
 		extraGroups?: { name: string; items: Item[] }[];
 		/** One line of each item's description under its name (a full-page list). */
 		showDescriptions?: boolean;
+		/** A search field over the main panel (see the header). */
+		searchable?: boolean;
+		searchLabel?: string;
+		/**
+		 * The items to show for a search, in order; `''` gives the list's resting
+		 * order. Default: the given order, filtered by a case-insensitive substring.
+		 */
+		rank?: (items: Item[], query: string) => Item[];
+		/** Number the first nine item rows; a digit with an empty search picks one. */
+		numbered?: boolean;
+		/** A row after the items that is not one of them ("No project"); 0 picks it. */
+		trailingItem?: Item | null;
+		trailingIcon?: any;
+		/** Focus the search field when the menu mounts. */
+		autofocus?: boolean;
 	}
 
 	let {
@@ -44,8 +66,35 @@
 		emptyMessage = 'No items available',
 		itemIcon,
 		extraGroups = [],
-		showDescriptions = false
+		showDescriptions = false,
+		searchable = false,
+		searchLabel = 'Search',
+		rank,
+		numbered = false,
+		trailingItem = null,
+		trailingIcon,
+		autofocus = false
 	}: Props = $props();
+
+	const uid = $props.id();
+	let query = $state('');
+	let highlight = $state(0);
+	/** The highlight was moved by hand (arrows or pointer), not left on the top row. */
+	let navigated = $state(false);
+	let searchInput = $state<HTMLInputElement | null>(null);
+
+	function substringRank(list: Item[], q: string): Item[] {
+		const needle = q.trim().toLowerCase();
+		return needle ? list.filter(item => item.name.toLowerCase().includes(needle)) : list;
+	}
+	const rankItems = $derived(rank ?? substringRank);
+	/** The resting order (e.g. most recently used first). */
+	const ordered = $derived(rankItems(items, ''));
+	const searching = $derived(searchable && query.trim() !== '');
+	const matches = $derived(searching ? rankItems(items, query) : []);
+	const showTrailing = $derived(
+		!!trailingItem && (!searching || trailingItem.name.toLowerCase().includes(query.trim().toLowerCase()))
+	);
 
 	/** With a description showing, a row is still called by its name alone. */
 	const itemNaming = (item: Item): Record<string, string | undefined> =>
@@ -61,7 +110,7 @@
 	// Organize items by groups
 	const organized = $derived.by(() => {
 		const groupsState = $groups;
-		return organizeByGroups(items, entityType, groupsState);
+		return organizeByGroups(ordered, entityType, groupsState);
 	});
 
 	// Groups that actually have items
@@ -78,6 +127,9 @@
 
 	// Has any groups at all
 	const hasGroups = $derived(populatedGroups.length > 0);
+	/** Group rows on the main panel. A searchable list stays flat, so its
+	 *  resting order and 1–9 keys cover every item, grouped or not. */
+	const grouped = $derived(hasGroups && !searchable);
 
 	const extraPopulated = $derived(extraGroups.filter(g => g.items.length > 0));
 
@@ -92,6 +144,87 @@
 		if (!activeGroup) return [];
 		return extraGroupMap.get(activeGroup) || organized.grouped.get(activeGroup) || [];
 	});
+
+	/** The main panel's rows in screen order, for the highlight and digit keys. */
+	type Row = { kind: 'item' | 'group' | 'trailing' | 'add'; id: string };
+	const rows = $derived.by((): Row[] => {
+		if (!searchable) return [];
+		const list: Row[] = [];
+		if (searching) {
+			for (const item of matches) list.push({ kind: 'item', id: item.id });
+		} else {
+			if (grouped) for (const group of populatedGroups) list.push({ kind: 'group', id: group.name });
+			for (const item of grouped ? organized.ungrouped : ordered) list.push({ kind: 'item', id: item.id });
+			for (const group of extraPopulated) list.push({ kind: 'group', id: group.name });
+		}
+		if (showTrailing && trailingItem) list.push({ kind: 'trailing', id: trailingItem.id });
+		if (addLabel && onAdd) list.push({ kind: 'add', id: 'add' });
+		return list;
+	});
+	const rowIndex = $derived(new Map(rows.map((row, index) => [`${row.kind}:${row.id}`, index])));
+	const active = $derived(rows.length ? Math.min(highlight, rows.length - 1) : -1);
+	/** The row Enter takes: Add Project only once moved to, never as the default ("No matches"). */
+	const current = $derived(rows[active]?.kind === 'add' && !navigated ? -1 : active);
+	/** Digits some listed name starts with: those always type, so "3D printing" can be searched. */
+	const typedDigits = $derived(new Set(items.map(item => item.name.trim().charAt(0)).filter(char => /^[0-9]$/.test(char))));
+	/** A digit is a row key only while the search is empty and no name starts with it. */
+	const digitKey = (digit: number) => numbered && !query && !typedDigits.has(String(digit));
+	/** Item ids with their 1–9 key. */
+	const digitOf = $derived(
+		new Map(rows.filter(row => row.kind === 'item').slice(0, 9).map((row, i) => [row.id, i + 1] as const).filter(([, digit]) => digitKey(digit)))
+	);
+	const rowId = (index: number | undefined) => (index === undefined ? undefined : `${uid}-row-${index}`);
+	/** Attributes a main-panel row carries while the menu is searchable. */
+	function rowProps(kind: Row['kind'], id: string): Record<string, unknown> {
+		if (!searchable) return {};
+		const index = rowIndex.get(`${kind}:${id}`);
+		return {
+			id: rowId(index),
+			'data-highlighted': index === current ? '' : undefined,
+			onpointermove: () => { if (index !== undefined) { highlight = index; navigated = true; } }
+		};
+	}
+
+	function activate(row: Row) {
+		if (row.kind === 'group') openGroup(row.id);
+		else if (row.kind === 'add') onAdd?.();
+		else handleSelect(row.id);
+	}
+
+	function searchKeydown(event: KeyboardEvent) {
+		if (event.isComposing) return;
+		if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+			event.preventDefault();
+			if (!rows.length) return;
+			highlight = (active + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+			navigated = true;
+			tick().then(() => document.getElementById(`${uid}-row-${highlight}`)?.scrollIntoView?.({ block: 'nearest' }));
+		} else if (event.key === 'Enter') {
+			event.preventDefault();
+			const row = rows[current];
+			if (row) activate(row);
+		} else if (/^[0-9]$/.test(event.key) && digitKey(Number(event.key)) && !event.ctrlKey && !event.metaKey && !event.altKey) {
+			// No row for that digit: it types, as in any search.
+			const row = event.key === '0'
+				? rows.find(r => r.kind === 'trailing')
+				: rows.find(r => r.kind === 'item' && digitOf.get(r.id) === Number(event.key));
+			if (row) {
+				event.preventDefault();
+				activate(row);
+			}
+		}
+	}
+
+	function focusOnMount(node: HTMLInputElement) {
+		// After the owner's menu actions: a menu floated to <body> moves this
+		// node, and moving a focused node drops its focus.
+		if (autofocus) queueMicrotask(() => { if (node.isConnected) node.focus({ preventScroll: true }); });
+	}
+
+	/** Put the cursor in the search field (the menu was opened from the keyboard). */
+	export function focusSearch() {
+		searchInput?.focus({ preventScroll: true });
+	}
 
 	// Panel height tracking for smooth resize
 	let mainPanelEl = $state<HTMLDivElement | null>(null);
@@ -157,12 +290,40 @@
 
 	// Reset state when menu closes/opens (items change significantly)
 	export function reset() {
+		query = '';
+		highlight = 0;
+		navigated = false;
 		activeGroup = null;
 		containerHeight = null;
 		isAnimating = false;
 		opener = null;
 	}
 </script>
+
+{#snippet rowKey(id: string)}
+	{#if digitOf.has(id)}<kbd class="row-key" aria-hidden="true">{digitOf.get(id)}</kbd>{/if}
+{/snippet}
+
+{#snippet itemButton(item: Item)}
+	<button
+		type="button"
+		class="menu-item"
+		class:selected={selectedId === item.id}
+		{...itemNaming(item)}
+		{...rowProps('item', item.id)}
+		onclick={() => handleSelect(item.id)}
+	>
+		{#if itemIcon}
+			{@const ItemIcon = itemIcon}
+			<ItemIcon size={16} strokeWidth={1.5} />
+		{/if}
+		{@render itemLabel(item)}
+		{#if selectedId === item.id}
+			<Check size={16} strokeWidth={2} class="check-icon" />
+		{/if}
+		{@render rowKey(item.id)}
+	</button>
+{/snippet}
 
 {#snippet itemLabel(item: Item)}
 	{#if showDescriptions && item.description?.trim()}
@@ -189,26 +350,41 @@
 			<p class="panel-label">{label}</p>
 		{/if}
 
-		<div class="panel-scroll">
-			{#if !hasGroups}
-				<!-- No groups: show flat list -->
-				{#each items as item (item.id)}
-					<button
-						type="button"
-						class="menu-item"
-						class:selected={selectedId === item.id}
-						{...itemNaming(item)}
-						onclick={() => handleSelect(item.id)}
-					>
-						{#if itemIcon}
-							{@const ItemIcon = itemIcon}
-							<ItemIcon size={16} strokeWidth={1.5} />
-						{/if}
-						{@render itemLabel(item)}
-						{#if selectedId === item.id}
-							<Check size={16} strokeWidth={2} class="check-icon" />
-						{/if}
-					</button>
+		{#if searchable}
+			<div class="search-row">
+				<Search size={14} strokeWidth={1.75} aria-hidden="true" />
+				<input
+					bind:this={searchInput}
+					bind:value={query}
+					use:focusOnMount
+					type="text"
+					class="search-input"
+					placeholder={searchLabel}
+					aria-label={searchLabel}
+					aria-controls="{uid}-rows"
+					aria-activedescendant={rowId(current >= 0 ? current : undefined)}
+					autocomplete="off"
+					spellcheck="false"
+					enterkeyhint="go"
+					oninput={() => { highlight = 0; navigated = false; }}
+					onkeydown={searchKeydown}
+				/>
+			</div>
+		{/if}
+
+		<div class="panel-scroll" id="{uid}-rows">
+			{#if searching}
+				{#each matches as item (item.id)}
+					{@render itemButton(item)}
+				{:else}
+					{#if !showTrailing}
+						<p class="empty-message">No matches</p>
+					{/if}
+				{/each}
+			{:else if !grouped}
+				<!-- No groups (or searchable): show flat list -->
+				{#each ordered as item (item.id)}
+					{@render itemButton(item)}
 				{:else}
 					{#if extraPopulated.length === 0}
 						<p class="empty-message">{emptyMessage}</p>
@@ -220,6 +396,7 @@
 					<button
 						type="button"
 						class="menu-item group-item"
+						{...rowProps('group', group.name)}
 						onclick={() => openGroup(group.name)}
 					>
 						<FolderClosed size={16} strokeWidth={1.5} />
@@ -234,34 +411,20 @@
 						<div class="menu-divider"></div>
 					{/if}
 					{#each organized.ungrouped as item (item.id)}
-						<button
-							type="button"
-							class="menu-item"
-							class:selected={selectedId === item.id}
-							{...itemNaming(item)}
-							onclick={() => handleSelect(item.id)}
-						>
-							{#if itemIcon}
-								{@const ItemIcon = itemIcon}
-								<ItemIcon size={16} strokeWidth={1.5} />
-							{/if}
-							{@render itemLabel(item)}
-							{#if selectedId === item.id}
-								<Check size={16} strokeWidth={2} class="check-icon" />
-							{/if}
-						</button>
+						{@render itemButton(item)}
 					{/each}
 				{/if}
 			{/if}
 
-			{#if extraPopulated.length > 0}
-				{#if items.length > 0 || hasGroups}
+			{#if extraPopulated.length > 0 && !searching}
+				{#if items.length > 0}
 					<div class="menu-divider"></div>
 				{/if}
 				{#each extraPopulated as group (group.name)}
 					<button
 						type="button"
 						class="menu-item group-item"
+						{...rowProps('group', group.name)}
 						onclick={() => openGroup(group.name)}
 					>
 						<FolderClosed size={16} strokeWidth={1.5} />
@@ -271,11 +434,26 @@
 					</button>
 				{/each}
 			{/if}
+
+			{#if showTrailing && trailingItem}
+				{@const trailing = trailingItem}
+				{@const TrailingIcon = trailingIcon ?? itemIcon}
+				<button
+					type="button"
+					class="menu-item trailing-item"
+					{...rowProps('trailing', trailing.id)}
+					onclick={() => handleSelect(trailing.id)}
+				>
+					{#if TrailingIcon}<TrailingIcon size={16} strokeWidth={1.5} />{/if}
+					<span class="item-name">{trailing.name}</span>
+					{#if digitKey(0)}<kbd class="row-key" aria-hidden="true">0</kbd>{/if}
+				</button>
+			{/if}
 		</div>
 
 		{#if addLabel && onAdd}
 			<div class="menu-divider"></div>
-			<button type="button" class="menu-item add-item" onclick={onAdd}>
+			<button type="button" class="menu-item add-item" {...rowProps('add', 'add')} onclick={onAdd}>
 				<FolderPlus size={16} strokeWidth={1.5} />
 				<span class="item-name">{addLabel}</span>
 			</button>
@@ -514,6 +692,61 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	/* Search (searchable) */
+	.search-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 0 0 4px;
+		padding: 6px 10px;
+		border-bottom: 1px solid var(--border-subtle);
+		color: var(--muted-foreground);
+	}
+
+	.search-row :global(svg) {
+		flex-shrink: 0;
+	}
+
+	.search-input {
+		flex: 1;
+		min-width: 0;
+		padding: 2px 0;
+		background: transparent;
+		border: 0;
+		outline: none;
+		color: var(--foreground);
+		font-size: 0.875rem;
+	}
+
+	.search-input::placeholder {
+		color: var(--subtle-foreground);
+	}
+
+	.menu-item[data-highlighted] {
+		background: var(--hover-overlay);
+	}
+
+	.menu-item.selected[data-highlighted] {
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+	}
+
+	.trailing-item {
+		color: var(--muted-foreground);
+	}
+
+	.row-key {
+		flex-shrink: 0;
+		min-width: 18px;
+		padding: 0 4px;
+		border: 1px solid var(--border-subtle);
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
+		color: var(--subtle-foreground);
+		font-family: var(--font-mono, ui-monospace, monospace);
+		font-size: 0.6875rem;
+		line-height: 16px;
+		text-align: center;
 	}
 
 	/* Divider */

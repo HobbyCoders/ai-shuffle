@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-	resolveNewChatProject,
 	resolvePersistedProject,
 	resolveSessionProject
 } from './session-project';
@@ -56,22 +55,6 @@ describe('resolvePersistedProject', () => {
 	it('uses the last local default when the snapshot has no project at all', () => {
 		expect(resolvePersistedProject(
 			{ project: '', projectV2Id: null },
-			'proj-default'
-		)).toEqual({ project: 'proj-default', projectV2Id: null });
-	});
-});
-
-describe('resolveNewChatProject', () => {
-	it('restores a v2-only new-chat compose from ephemeral', () => {
-		expect(resolveNewChatProject(
-			{ project: '', projectV2Id: 'pv2-remote' },
-			'proj-default'
-		)).toEqual({ project: '', projectV2Id: 'pv2-remote' });
-	});
-
-	it('uses the last local default when ephemeral is a local pick', () => {
-		expect(resolveNewChatProject(
-			{ project: 'proj-1', projectV2Id: 'pv2-1' },
 			'proj-default'
 		)).toEqual({ project: 'proj-default', projectV2Id: null });
 	});

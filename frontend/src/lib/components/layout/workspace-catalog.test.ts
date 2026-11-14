@@ -5,6 +5,8 @@ import { projectIdentity, projectKey } from './session-card-data';
 import {
 	buildWorkspacePickerItems,
 	pickerItemName,
+	projectRecency,
+	rankPickerItems,
 	selectedPickerId
 } from './workspace-catalog';
 
@@ -175,5 +177,81 @@ describe('selectedPickerId / pickerItemName', () => {
 	it('resolves a remote-only selection name from the unified list', () => {
 		const items = buildWorkspacePickerItems([], [catalog({ name: 'Studio repo' })]);
 		expect(pickerItemName(items, 'pv2-remote')).toBe('Studio repo');
+	});
+});
+
+// The new-session quick picker (Cmd/Ctrl+P): most recently used first, then
+// catalog order; a search keeps only matches, best first.
+describe('quick picker ordering', () => {
+	const items = [
+		{ id: 'web', name: 'Website', project: 'web', projectV2Id: null, remoteOnly: false, projectAliases: ['web-old'] },
+		{ id: 'api', name: 'API', project: 'api', projectV2Id: null, remoteOnly: false },
+		{ id: 'docs', name: 'Docs site', project: 'docs', projectV2Id: null, remoteOnly: false },
+		{ id: 'pv2-x', name: 'Infra', project: '', projectV2Id: 'pv2-x', remoteOnly: true }
+	];
+	const ids = (list: { id: string }[]) => list.map(item => item.id);
+
+	it('takes each project\'s newest session, by its last user message, aliases included', () => {
+		const recency = projectRecency(items, [
+			{ project_id: 'api', last_user_message_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-09T00:00:00Z' },
+			{ project_id: 'web-old', updated_at: '2026-11-05T00:00:00Z' },
+			{ project_id: 'docs', updated_at: '2026-10-01T00:00:00Z' },
+			{ project_id: 'docs', updated_at: 'not a date' },
+			{ project_id: null, updated_at: '2026-11-10T00:00:00Z' },
+			{ project_id: 'gone', updated_at: '2026-11-10T00:00:00Z' }
+		]);
+		expect(Object.fromEntries(recency)).toEqual({
+			api: Date.parse('2026-11-01T00:00:00Z'),
+			web: Date.parse('2026-11-05T00:00:00Z'),
+			docs: Date.parse('2026-10-01T00:00:00Z')
+		});
+	});
+
+	it('counts a session by its shared project id first: a project only on another worker, or a linked one once', () => {
+		const linked = [
+			{ id: 'web', name: 'Website', project: 'web', projectV2Id: 'pv2-web', remoteOnly: false },
+			{ id: 'pv2-x', name: 'Infra', project: '', projectV2Id: 'pv2-x', remoteOnly: true }
+		];
+		const recency = projectRecency(linked, [
+			// Started on another worker: no local id here, only the shared one.
+			{ project_id: null, project_v2_id: 'pv2-x', updated_at: '2026-11-07T00:00:00Z' },
+			{ project_id: 'remote-local-id', project_v2_id: 'pv2-x', updated_at: '2026-11-03T00:00:00Z' },
+			// The linked project, from here and from another worker: one item, the newest.
+			{ project_id: 'web', project_v2_id: 'pv2-web', updated_at: '2026-11-02T00:00:00Z' },
+			{ project_id: 'web', updated_at: '2026-11-01T00:00:00Z' },
+			{ project_id: 'other-worker-web', project_v2_id: 'pv2-web', updated_at: '2026-11-04T00:00:00Z' }
+		]);
+		expect(Object.fromEntries(recency)).toEqual({
+			'pv2-x': Date.parse('2026-11-07T00:00:00Z'),
+			web: Date.parse('2026-11-04T00:00:00Z')
+		});
+		expect(ids(rankPickerItems(linked, '', recency))).toEqual(['pv2-x', 'web']);
+	});
+
+	it('lists recent projects first, then the rest in catalog order', () => {
+		const recency = new Map([['docs', 2], ['api', 1]]);
+		expect(ids(rankPickerItems(items, '', recency))).toEqual(['docs', 'api', 'web', 'pv2-x']);
+		expect(ids(rankPickerItems(items, '   '))).toEqual(['web', 'api', 'docs', 'pv2-x']);
+	});
+
+	it('ranks matches: whole name, prefix, word start, inside a word, then letters in order', () => {
+		const list = [
+			{ id: 'inside', name: 'Mysite' },
+			{ id: 'fuzzy', name: 'Some idea test' },
+			{ id: 'word', name: 'Docs site' },
+			{ id: 'prefix', name: 'Site builder' },
+			{ id: 'exact', name: 'SITE' },
+			{ id: 'none', name: 'API' }
+		];
+		expect(ids(rankPickerItems(list, 'Site'))).toEqual(['exact', 'prefix', 'word', 'inside', 'fuzzy']);
+	});
+
+	it('breaks ties by recency, then catalog order', () => {
+		const recency = new Map([['api', 5]]);
+		expect(ids(rankPickerItems(items, 'i', recency))).toEqual(['pv2-x', 'api', 'web', 'docs']);
+	});
+
+	it('returns nothing when nothing matches', () => {
+		expect(rankPickerItems(items, 'zzz')).toEqual([]);
 	});
 });
