@@ -139,8 +139,8 @@ it("names the worker that captured an agent's list as the app does elsewhere", a
 	});
 	render(ModelCuration, { row: row({ id: 'ag', provider_type: 'antigravity', catalog_binding: 'ag-binding', models }) });
 	const line = await screen.findByTestId('curation-agent-list');
-	await waitFor(() => expect(line.textContent).toMatch(/ on Local\. Each new chat updates it\.$/));
-	expect(line.textContent).toMatch(/^Listed by the agent 1\.5\.6 when a chat started, /);
+	await waitFor(() => expect(line.textContent).toMatch(/ on Local\. Refresh or a new chat updates it\.$/));
+	expect(line.textContent).toMatch(/^Listed by the agent 1\.5\.6 /);
 	expect(line.textContent).not.toContain('75c733a3514a');
 });
 

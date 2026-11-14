@@ -1,6 +1,6 @@
 /**
  * Google Antigravity facts the provider screens share: the static metadata
- * (auth kinds, Google's terms warning, links, models) and this worker's
+ * (auth kinds, links, models) and this worker's
  * install status. One copy for every screen; loaded on first use.
  */
 import { getErrorMessage } from '$lib/api/client';

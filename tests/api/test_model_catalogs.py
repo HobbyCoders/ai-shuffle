@@ -224,6 +224,19 @@ def test_success_shares_sanitized_snapshot_not_selection(authenticated_client, p
     assert authenticated_client.get(f"{ROOT}/{provider['id']}/model-catalog").json() == snapshot
 
 
+async def test_preset_reply_is_not_stored_over_the_shared_catalog(provider):
+    """A built-in preset (Kimi Code's plan key, Antigravity's seed) is no
+    discovery: it never replaces the provider's one shared list."""
+    from app.api.model_catalogs import store_catalog
+
+    key = model_catalogs.key(provider["id"])
+    db.set_system_setting(key, '{"models":[]}')
+    reply = api.FetchModelsResponse(source="preset", models=[{"id": "seed", "label": "Seed"}],
+                                    binding=provider["catalog_binding"])
+    assert await store_catalog(provider["id"], reply) == reply
+    assert db.get_system_setting(key) == '{"models":[]}'
+
+
 @pytest.mark.parametrize("failure", ["http_401", "http_500", "timeout"])
 def test_failed_fetch_keeps_last_snapshot(authenticated_client, provider, monkeypatch, failure):
     db.set_system_setting(model_catalogs.key(provider["id"]), '{"models":[]}')

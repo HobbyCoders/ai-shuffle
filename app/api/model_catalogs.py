@@ -28,8 +28,10 @@ async def get_catalog(provider_id: str, token: str = Depends(require_admin)) -> 
 
 async def store_catalog(provider_id: str, response: FetchModelsResponse) -> FetchModelsResponse:
     """Share discovery best-effort, returning the complete live result regardless."""
-    if response.source == "agent":
-        # Already the stored list, stamped when the agent reported it.
+    if response.source in ("agent", "preset"):
+        # An agent list is already stored, stamped when the agent reported it.
+        # A preset is no discovery: stored, it would replace the provider's one
+        # shared list (another worker's agent list included) with the seed.
         return response
     try:
         snapshot = await run_sync(model_catalogs.save, provider_id, response.model_dump(), expected_binding=response.binding)

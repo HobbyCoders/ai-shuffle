@@ -1460,6 +1460,13 @@ async def _record_credential_check(
 @router.post("/{provider_id}/fetch-models", response_model=FetchModelsResponse)
 async def fetch_models(provider_id: str, token: str = Depends(require_admin)) -> FetchModelsResponse:
     """Fetch live discovery and share it only for the credential that was checked."""
+    from app.core import antigravity
+    row = await run_sync(db.get_model_provider, provider_id, include_token=True)
+    if row and row.get("provider_type") == antigravity.PROVIDER_TYPE:
+        # Google's agent owns the list: ask it (`agy models`, no session) and
+        # store its answer, as every session start also does. Only here, on
+        # the owner's request; capability hydration serves what is stored.
+        await antigravity.refresh_models(row)
     return await catalog_api.store_catalog(provider_id, await _fetch_models(provider_id))
 
 
@@ -1493,11 +1500,10 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
 
     from app.core import antigravity
     if row.get("provider_type") == antigravity.PROVIDER_TYPE:
-        # No HTTP catalog: Google's agent binary owns the model list, and says
-        # it at every session start (antigravity.record_offered_models). Refresh
-        # serves the last list it reported, with when; it starts no agent, as a
-        # probe would leave a session in the agent's own list. The seed stands
-        # in until a first chat has run on this credential.
+        # No HTTP catalog: Google's agent binary owns the model list, stored
+        # when it lists it (fetch_models above, antigravity.refresh_models)
+        # and at every session start (antigravity.record_offered_models). The
+        # last list it gave on this credential answers, else the seed.
         seeded = {m["id"] for m in antigravity.DEFAULT_MODELS}
         captured = await run_sync(model_catalogs.read, provider_id)
         if captured and captured.get("source") == "agent" and captured.get("models"):
