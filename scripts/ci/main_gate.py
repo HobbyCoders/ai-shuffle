@@ -25,6 +25,7 @@ It never judges its own job, and a run it cannot read is a failure, not a pass.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 from pathlib import Path
@@ -73,6 +74,10 @@ MAX_FAILED_READS = 30
 # this wait and the reporting step after it must both fit well inside that.
 SETTLE_SECONDS = 90
 CANCELLED_JOB_LIMIT_SECONDS = 300
+# What one read of GitHub's API can raise while the next may still succeed: no
+# answer, an answer cut short mid-body (http.client.IncompleteRead, which is not
+# an OSError), or one that is not the JSON expected.
+UNREADABLE = (urllib.error.URLError, http.client.HTTPException, TimeoutError, ValueError, OSError)
 EXPRESSION = re.compile(r"\$\{\{.*?\}\}")
 
 
@@ -507,7 +512,7 @@ def settle(plan, repository, run, attempt, token, call, sleep, clock, out):
     while clock() - started < SETTLE_SECONDS:
         try:
             jobs = judged(plan, jobs_of(repository, run, attempt, token, call))
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as error:
+        except UNREADABLE as error:
             print(f"could not read the run's jobs ({error})", file=out, flush=True)
         else:
             if all(job.get("status") == "completed" for job in jobs):
@@ -536,7 +541,7 @@ def watch(plan, repository, run, attempt, token, call=request, sleep=time.sleep,
     while True:
         try:
             jobs = judged(plan, jobs_of(repository, run, attempt, token, call))
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as error:
+        except UNREADABLE as error:
             unreadable += 1
             print(f"could not read the run's jobs ({error})", file=out, flush=True)
             if unreadable >= MAX_FAILED_READS:
@@ -552,7 +557,7 @@ def watch(plan, repository, run, attempt, token, call=request, sleep=time.sleep,
             report(bad, out, summary_path)
             try:
                 call("POST", f"/repos/{repository}/actions/runs/{run}/cancel", token)
-            except (urllib.error.URLError, TimeoutError, ValueError, OSError) as error:
+            except UNREADABLE as error:
                 # A run already cancelling answers 409; it fails either way.
                 print(f"could not cancel the run ({error})", file=out, flush=True)
             raise SystemExit(1)

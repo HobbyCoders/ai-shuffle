@@ -1,5 +1,6 @@
 """The CI gate judges the run from its start, so its verdict never queues."""
 import copy
+import http.client
 import importlib.util
 import io
 import json
@@ -223,8 +224,9 @@ def test_inner_rules_match_the_pull_request_verdict_jobs():
 class Run:
     """A fake Actions API: each GET returns the next listing (the last one repeats)."""
 
-    def __init__(self, *listings, errors=0):
+    def __init__(self, *listings, errors=0, error=None):
         self.listings, self.errors, self.calls, self.slept = list(listings), errors, [], []
+        self.error = error or urllib.error.URLError("unreachable")
 
     def __call__(self, method, path, token):
         self.calls.append((method, path))
@@ -232,7 +234,7 @@ class Run:
             return {}
         if self.errors:
             self.errors -= 1
-            raise urllib.error.URLError("unreachable")
+            raise self.error
         jobs = self.listings.pop(0) if len(self.listings) > 1 else self.listings[0]
         return {"total_count": len(jobs), "jobs": jobs}
 
@@ -336,13 +338,34 @@ def test_an_expected_job_that_never_appears_fails_instead_of_hanging():
     assert "UI journeys" in out.getvalue() and not run.cancelled
 
 
-def test_an_unreadable_run_is_not_proven():
-    run = Run(listing(), errors=gate.MAX_FAILED_READS)
+# What a read of GitHub's API raised on real runs, or can: no answer, a timeout,
+# a reset connection, a body cut short, a body that is not the JSON expected.
+UNREADABLE = [
+    urllib.error.URLError("unreachable"),
+    TimeoutError("timed out"),
+    ConnectionResetError("reset"),
+    http.client.IncompleteRead(b"", 225289),
+    http.client.RemoteDisconnected("closed without response"),
+    json.JSONDecodeError("cut short", "{", 1),
+]
+
+
+@pytest.mark.parametrize("error", UNREADABLE, ids=lambda error: type(error).__name__)
+def test_an_unreadable_run_is_not_proven(error):
+    run = Run(listing(), errors=gate.MAX_FAILED_READS, error=error)
     with pytest.raises(SystemExit):
         watch(run)
     # A few failed reads are retried.
-    run = Run(listing() + [SELF], errors=3)
-    watch(run)
+    run = Run(listing() + [SELF], errors=3, error=error)
+    jobs, out = watch(run)
+    assert jobs and out.count("could not read the run's jobs") == 3
+
+
+@pytest.mark.parametrize("error", UNREADABLE, ids=lambda error: type(error).__name__)
+def test_settling_survives_an_unreadable_poll(error):
+    run = Run(listing() + [SELF], errors=2, error=error)
+    ticks = iter(range(0, 10**6, gate.POLL_SECONDS))
+    assert gate.settle(PLAN, "o/r", 7, 1, "t", run, run.sleep, lambda: next(ticks), io.StringIO())
 
 
 def test_main_writes_the_evidence_flags(tmp_path):
