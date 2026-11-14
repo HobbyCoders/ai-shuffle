@@ -765,6 +765,12 @@
 		getEditor: () => (editorRef?.getEditor()?.view.dom as HTMLElement | undefined) ?? null,
 		getIsland: () => islandRef,
 		getCircles: () => sendClusterRef,
+		// In a chat Stop can arrive or leave under a draft; the wrap is decided
+		// as if it were there, so that never moves the composer. The phone sets
+		// the seat (Stop and its gap); the desktop text has its own row.
+		getReserve: () => compact && !circles.includes('stop') && sendClusterRef
+			? parseFloat(getComputedStyle(sendClusterRef).getPropertyValue('--composer-stop-seat')) || 0
+			: 0,
 		isWrapped: () => composerWrapped,
 		setWrapped: (wrapped) => {
 			// The observer can run while the lazy editor is still mounting. Its
@@ -1130,6 +1136,19 @@
 	// window, and until the send has passed its checks, so the second click of
 	// a double click on Send cannot start a call.
 	const DOUBLE_ACTIVATION_MS = 500;
+	// With no seat held, Stop appears in a chat in the place Send just left
+	// (the circles sit at the row's end). Until this time, Stop ignores pointer
+	// presses: the second press of a double tap on Send. Armed only when a
+	// press on the Send circle sends in a chat while Stop is not shown (on the
+	// start screen the composer moves away as the chat opens), and ended by
+	// the next submit, and it holds only for the chat the send went to (a chat
+	// switch inside the window shows another chat's Stop); Stop's keyboard
+	// activation and its confirmation are never ignored. A Stop press is judged
+	// by when it was made, so a stall right after the send cannot use up the
+	// window.
+	let strayStop: { until: number; destination: SendDestination } | null = null;
+	const isStrayStopPress = (pressedAt: number) => !!strayStop && pressedAt < strayStop.until
+		&& stillAtDestination(strayStop.destination, composerPlace());
 	function holdSendCircle(): () => void {
 		sendCircleHolds += 1;
 		let windowOver = false;
@@ -1144,7 +1163,9 @@
 		return () => { sendSettled = true; end(); };
 	}
 
-	async function handleSubmit(compactBeforeSend = false) {
+	/** `sendPressAt`: when the Send circle was pressed in a chat with no Stop beside it. */
+	async function handleSubmit(compactBeforeSend = false, sendPressAt: number | null = null) {
+		strayStop = null;
 		if (pendingSubmit) {
 			if (!pendingSubmit.cleared) return;
 			// Nothing typed since the clear (a second Enter): the same action
@@ -1158,13 +1179,13 @@
 		// nothing gives it up.
 		const turn = activeSession.reserveSend();
 		try {
-			await submitInTurn(compactBeforeSend, turn);
+			await submitInTurn(compactBeforeSend, turn, sendPressAt);
 		} finally {
 			turn.cancel();
 		}
 	}
 
-	async function submitInTurn(compactBeforeSend: boolean, turn: SendReservation) {
+	async function submitInTurn(compactBeforeSend: boolean, turn: SendReservation, sendPressAt: number | null) {
 		if (pendingSubmit) {
 			// New chat or a switch during the wait: the words stay as the draft
 			// of the chat they were typed in (session-change effect).
@@ -1187,13 +1208,13 @@
 			releaseSendCircle();
 		};
 		try {
-			await submitComposer(compactBeforeSend, release, turn);
+			await submitComposer(compactBeforeSend, release, turn, sendPressAt);
 		} finally {
 			release();
 		}
 	}
 
-	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void, turn: SendReservation) {
+	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void, turn: SendReservation, sendPressAt: number | null) {
 		if (!ownsComposer() || heldForCatalog || heldForSetup || (compacting && !compactBeforeSend)) return;
 		// The chat this message was typed in. The checks below and the store's
 		// restore wait can await; a New chat or chat switch in that window must
@@ -1291,6 +1312,7 @@
 		// sendMessage clears the composer before its first await, and holds the
 		// next send until the cold check has answered so two sends keep order.
 		// It sends in the place taken at the click (handleSubmit).
+		if (sendPressAt !== null) strayStop = { until: sendPressAt + DOUBLE_ACTIVATION_MS, destination };
 		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm, turn);
 	}
 
@@ -1968,7 +1990,11 @@
 
 		<form
 			use:composerOpenGesture
-			onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}
+			onsubmit={(e) => {
+				e.preventDefault();
+				const sendCircle = compact && !!(e.submitter as HTMLElement | null)?.classList.contains('send-btn') && !circles.includes('stop');
+				handleSubmit(false, sendCircle ? performance.now() : null);
+			}}
 			onpointerdown={handleComposerPointerDown}
 		>
 			<!-- The box: the text across the top, and under it attach, the controls
@@ -2053,12 +2079,13 @@
 						/>
 					</div>
 
-					<!-- The circles: dictate, then the send slot, then Stop. Talk holds
-					     the slot while there is nothing to send; Send takes it once
-					     there is. Stop must remain reachable whenever session work is
-					     live, including with a draft; Send can queue that draft
+					<!-- The circles: dictate, then Talk, Send or the spinner, then Stop.
+					     Talk shows while there is nothing to send; Send once there is.
+					     Stop must remain reachable whenever session work is live,
+					     including with a draft; Send can queue that draft
 					     independently. StopButton confirms first when background
-					     agents are live. -->
+					     agents are live. A circle that is not shown takes no room:
+					     the others move over (owner decision, 2026-11-14). -->
 					<div class="send-cluster" bind:this={sendClusterRef}>
 						{@render recorder()}
 						<PromptStashMenu
@@ -2068,7 +2095,6 @@
 							onRestore={restoreStashed}
 							onDelete={deleteStashed}
 						/>
-						<span class="send-slot">
 						{#if circles.includes('busy')}
 							<!-- Creating worktree, or a send held for the project catalog or a project setup - show spinner -->
 							{#if heldForCatalog}<span class="sr-only" role="status">Loading projects…</span>{/if}
@@ -2097,19 +2123,12 @@
 						     voice availability is read once and a starting call is
 						     never torn down by a keystroke. -->
 						<span class="talk-slot" hidden={!showTalk}>{@render talk()}</span>
-						</span>
-						<!-- The empty Stop seat is held only inside a chat, where work
-						     can start and stop under the reader. The empty-chat hero
-						     has no work to stop, so its circles sit flush right. -->
-						{#if compact || circles.includes('stop')}
-						<span class="stop-slot">
 						{#if circles.includes('stop')}
 							<StopButton
 								activeTasks={$activeSession.activeTasks}
+								ignoresPress={isStrayStopPress}
 								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
 							/>
-						{/if}
-						</span>
 						{/if}
 					</div>
 				</div>
@@ -2381,17 +2400,6 @@
 		align-self: center;
 		gap: 6px;
 		flex-shrink: 0;
-	}
-
-	/* Stop arriving/leaving must not change the editor's width (and trigger a
-	   second wrapped layout), nor move Send under the reader's finger. Empty
-	   slots are layout only: no disabled or invisible focusable buttons. */
-	.send-slot, .stop-slot {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		min-width: var(--composer-action-size, 32px);
-		min-height: var(--composer-action-size, 32px);
 	}
 
 	/* Only one of Talk and Send shows; the hidden one stays mounted. */

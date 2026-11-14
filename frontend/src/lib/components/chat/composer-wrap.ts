@@ -16,9 +16,11 @@
  * in the single-line layout, whichever layout is showing, so the composer
  * never flips back and forth at the boundary. While wrapped, that width is
  * estimated from the last single-line measurement, moved by any change in the
- * box's width and in the circles' width (Stop appearing, the mic widening
- * while it listens). The circles keep one size in both layouts so the
- * estimate stays exact.
+ * box's width and in the circles' width (the mic widening while it
+ * listens). The circles keep one size in both layouts so the estimate stays
+ * exact. Stop takes no seat while it is not shown, so in a chat, where it can
+ * arrive and leave under a draft, the text is measured as if it were there
+ * (`getReserve`): Stop coming or going never flips the layout.
  */
 
 export type ComposerCircle = 'talk' | 'send' | 'stop' | 'busy';
@@ -100,6 +102,8 @@ export interface WrapWatcherOptions {
 	getIsland: () => HTMLElement | null;
 	/** The circles right of the text; their width changes move it the other way. */
 	getCircles?: () => HTMLElement | null;
+	/** Width of circles not shown now that the text must leave room for: Stop's seat. */
+	getReserve?: () => number;
 	isWrapped: () => boolean;
 	setWrapped: (wrapped: boolean) => void;
 	/** Lines the text takes at a width. Defaults to a hidden copy of the editor's text. */
@@ -155,12 +159,13 @@ export function createWrapWatcher(options: WrapWatcherOptions) {
 		// A hidden/unlaid-out box has no line width. Keep the seeded/current
 		// layout until attachment or the size observer supplies real geometry.
 		if (!editor || !island || !editor.isConnected || editor.clientWidth <= 0 || island.clientWidth <= 0) return;
-		const now = { island: island.clientWidth, circles: options.getCircles?.()?.offsetWidth ?? 0 };
+		const reserve = options.getReserve?.() ?? 0;
+		const now = { island: island.clientWidth, circles: (options.getCircles?.()?.offsetWidth ?? 0) + reserve };
 		const wrapped = options.isWrapped();
 		let width: number;
 		if (!wrapped || !base) {
 			// Measured directly while the single-line layout shows.
-			width = contentWidth(editor);
+			width = contentWidth(editor) - reserve;
 			if (!wrapped) base = { text: width, ...now };
 		} else {
 			width = singleLineTextWidth(base, now);

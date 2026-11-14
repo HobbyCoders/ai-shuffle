@@ -96,7 +96,7 @@ describe('createWrapWatcher', () => {
 			Object.defineProperty(node, 'clientWidth', { configurable: true, get: () => width });
 			return node;
 		};
-		const state = { text, wrapped: false, island: 672, circles: 70, editorWidth: 500, widths: [] as number[], measured: [] as number[] };
+		const state = { text, wrapped: false, island: 672, circles: 70, reserve: 0, editorWidth: 500, widths: [] as number[], measured: [] as number[] };
 		const editor = el(0);
 		Object.defineProperty(editor, 'clientWidth', { configurable: true, get: () => state.editorWidth });
 		const island = el(0);
@@ -108,6 +108,7 @@ describe('createWrapWatcher', () => {
 			getEditor: () => editor,
 			getIsland: () => island,
 			getCircles: () => circles,
+			getReserve: () => state.reserve,
 			isWrapped: () => state.wrapped,
 			setWrapped: (w) => { state.wrapped = w; },
 			countLines: (t, _e, width) => { state.widths.push(width); state.measured.push(t.length); return Math.ceil((t.length * 10) / width); }
@@ -204,5 +205,30 @@ describe('createWrapWatcher', () => {
 		state.editorWidth = 500;
 		run();
 		expect(state.wrapped).toBe(false);
+	});
+
+	// Stop takes no seat while hidden; a chat reserves its 38px in the
+	// decision, so a one-line draft keeps its layout when Stop comes or goes.
+	it.each([
+		['a draft that fits beside Stop stays inline', 44, false],
+		['a draft that only fits without Stop stays wrapped', 48, true]
+	])('decides as if Stop were shown: %s', (_name, chars, wraps) => {
+		const { state, run } = composer('x'.repeat(chars));
+		state.reserve = 38;
+		run();
+		expect(state.wrapped).toBe(wraps);
+		// Stop arrives: the circles widen by its seat, the reserve goes.
+		if (!wraps) state.editorWidth = 462; else state.editorWidth = 640;
+		state.circles = 108;
+		state.reserve = 0;
+		run();
+		expect(state.wrapped).toBe(wraps);
+		// Stop leaves again.
+		if (!wraps) state.editorWidth = 500;
+		state.circles = 70;
+		state.reserve = 38;
+		run();
+		expect(state.wrapped).toBe(wraps);
+		expect(state.widths).toEqual([462, 462, 462]);
 	});
 });

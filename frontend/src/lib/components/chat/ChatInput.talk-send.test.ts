@@ -12,6 +12,7 @@ import { appMode } from '$lib/stores/sessionMode.svelte';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from './attach-disable';
 import { auth } from '$lib/stores/auth.svelte';
 import { initialState, reduce } from '$lib/stores/session/v2/reducer';
+import { bumpInitGeneration } from '$lib/stores/session/session-init';
 import '$lib/test-stubs/composer-dom';
 
 const voice = vi.hoisted(() => ({ enabled: true }));
@@ -65,10 +66,10 @@ async function type(container: HTMLElement, text: string) {
 	await tick();
 }
 
-function startTurn() {
-	Object.assign(activeSession.current, { sessionId: 'local-working', mode: 'code', profile: 'coding', draft: '' });
+function startTurn(sessionId = 'local-working') {
+	Object.assign(activeSession.current, { sessionId, mode: 'code', profile: 'coding', draft: '' });
 	const live = reduce(initialState(), { type: 'turn.started', id: 'started', seq: 1,
-		session_id: 'local-working', turn_id: 'live-turn' });
+		session_id: sessionId, turn_id: 'live-turn' });
 	Object.assign(activeSession.current, { isStreaming: live.isStreaming, liveTurnId: live.liveTurnId });
 	activeSession.setDraft('');
 }
@@ -108,6 +109,20 @@ describe('Talk turns into Send', () => {
 		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Send', 'Stop generating']));
 	});
 
+	it('holds no empty seat for Send or Stop when it is not shown', async () => {
+		// Owner decision (2026-11-14): a circle that is not shown takes no room;
+		// the others move over. Working with nothing to send and no call: mic · Stop.
+		voice.enabled = false;
+		startTurn();
+		const { container } = render(ChatInput);
+		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Stop generating']));
+		const cluster = container.querySelector('.send-cluster')!;
+		const empty = [...cluster.children]
+			.filter((el) => !el.matches('[hidden], .stash') && !el.matches('button') && !el.querySelector('button'))
+			.map((el) => el.outerHTML.slice(0, 80));
+		expect(empty).toEqual([]);
+	});
+
 	it('keeps Send in its seat through a double click after the composer clears', async () => {
 		// Send clears the composer at the click; Talk taking the seat at once
 		// would put a call under the second click of a double click.
@@ -131,6 +146,132 @@ describe('Talk turns into Send', () => {
 		// Past the double-click window the empty composer offers the call again.
 		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Start a call in this conversation']), { timeout: 2000 });
 		expect(sends).toHaveBeenCalledOnce();
+	});
+
+	describe('Stop under a double tap on Send', () => {
+		// With no seat held, Stop arrives in the place Send just left: the second
+		// press of a double tap on Send must not cancel the turn it started.
+		// fireEvent.click's detail is 0, a keyboard click; a tap has detail 1.
+		const tap = (el: HTMLElement) => fireEvent.click(el, { detail: 1 });
+		let stops: ReturnType<typeof vi.spyOn>;
+		let sends: ReturnType<typeof vi.spyOn>;
+
+		function idle(extra: Record<string, unknown> = {}) {
+			voice.enabled = false;
+			Object.assign(activeSession.current, { sessionId: 'local-idle', mode: 'code', profile: 'coding',
+				isStreaming: false, liveTurnId: null, error: null, worktreeError: null, activeTasks: [], ...extra });
+			activeSession.setDraft('');
+			sends = vi.spyOn(activeSession, 'sendMessage').mockImplementation(async () => { startTurn('local-idle'); return true; });
+			stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
+		}
+
+		async function sendDraft(container: HTMLElement) {
+			await type(container, 'Ship it');
+			await waitFor(() => expect(circles(container)).toContain('Send'));
+			await tap(screen.getByRole('button', { name: 'Send' }));
+			return screen.findByRole('button', { name: 'Stop generating' });
+		}
+
+		it('ignores the second tap, but not Stop from the keyboard or a later tap', async () => {
+			idle();
+			const { container } = render(ChatInput, { props: { compact: true } });
+			const stop = await sendDraft(container);
+			await tap(stop);
+			expect(stops).not.toHaveBeenCalled();
+			await fireEvent.click(stop);
+			expect(stops).toHaveBeenCalledOnce();
+
+			vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 1000);
+			await tap(screen.getByRole('button', { name: 'Stop generating' }));
+			expect(stops).toHaveBeenCalledTimes(2);
+		});
+
+		it('judges the second tap by when it was made, not when a stalled page handles it', async () => {
+			idle();
+			const { container } = render(ChatInput, { props: { compact: true } });
+			await type(container, 'Ship it');
+			await waitFor(() => expect(circles(container)).toContain('Send'));
+			const before = performance.now();
+			await tap(screen.getByRole('button', { name: 'Send' }));
+			const stop = await screen.findByRole('button', { name: 'Stop generating' });
+			const after = performance.now();
+			// The page was busy: both taps are handled a second after the send.
+			vi.spyOn(performance, 'now').mockReturnValue(after + 1000);
+			const tapAt = (timeStamp: number) => {
+				const event = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 });
+				Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+				return fireEvent(stop, event);
+			};
+			// Made inside the window (the send was handled at or after `before`).
+			await tapAt(before + 400);
+			expect(stops).not.toHaveBeenCalled();
+			// Made after it (the send was handled at or before `after`).
+			await tapAt(after + 550);
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
+		it('never ignores Stop after a send from the start screen (the composer moves away)', async () => {
+			idle();
+			const { container } = render(ChatInput);
+			const stop = await sendDraft(container);
+			await tap(stop);
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
+		it('ignores the stray tap before the background-agents confirmation, never after it', async () => {
+			// Running agents keep Stop shown, so they start with the turn here.
+			idle();
+			sends.mockImplementation(async () => {
+				startTurn('local-idle');
+				Object.assign(activeSession.current, { activeTasks: [{ id: 'agent-1', status: 'running' }] });
+				activeSession.setDraft('');
+				return true;
+			});
+			const { container } = render(ChatInput, { props: { compact: true } });
+			const stop = await sendDraft(container);
+			await tap(stop);
+			expect(screen.queryByRole('button', { name: 'Stop everything' })).toBeNull();
+			// Inside the same window: the keyboard opens it, and confirming stops.
+			await fireEvent.click(stop);
+			await fireEvent.click(await screen.findByRole('button', { name: 'Stop everything' }));
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
+		it("never ignores another chat's Stop after a switch inside the window", async () => {
+			idle();
+			const { container } = render(ChatInput, { props: { compact: true } });
+			await sendDraft(container);
+			// Switch to chat B, already running (as switchSession does: a new
+			// navigation, then B's state).
+			bumpInitGeneration();
+			startTurn('chat-b');
+			await tap(await screen.findByRole('button', { name: 'Stop generating' }));
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
+		it('never ignores Stop after a queued send, with Stop already shown at the press', async () => {
+			idle();
+			startTurn();
+			const { container } = render(ChatInput, { props: { compact: true } });
+			const stop = await sendDraft(container);
+			await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+			await tap(stop);
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
+		it('never ignores Stop after a press that sent nothing', async () => {
+			// No agent to send with: the submit is refused before it sends.
+			idle({ profile: '' });
+			const { container } = render(ChatInput, { props: { compact: true } });
+			await type(container, 'Ship it');
+			await waitFor(() => expect(circles(container)).toContain('Send'));
+			await tap(screen.getByRole('button', { name: 'Send' }));
+			await tick();
+			expect(sends).not.toHaveBeenCalled();
+			startTurn();
+			await tap(await screen.findByRole('button', { name: 'Stop generating' }));
+			expect(stops).toHaveBeenCalledOnce();
+		});
 	});
 
 	it('names the agent on a new session', async () => {

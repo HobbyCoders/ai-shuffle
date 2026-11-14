@@ -200,7 +200,7 @@
 			"globs": ["app/core/docs_content.py", "frontend/src/lib/components/docs/DocsCard.svelte", "frontend/src/lib/components/docs/DocsContent.svelte", "frontend/src/lib/components/docs/DocsSearch.svelte", "frontend/src/lib/docs/markdown.ts", "frontend/src/lib/docs/search.ts"]
 		},
 		{
-			"why": "the rail's notification history opens inside the Sidebar, and the empty-chat composer holds no empty Stop seat",
+			"why": "the rail's notification history opens inside the Sidebar, and the composer holds no empty Stop seat",
 			"journeys": ["rail-popover-composer-inset"],
 			"globs": ["frontend/src/lib/components/NotificationCenter.svelte", "frontend/src/lib/components/layout/Sidebar.svelte"]
 		},
@@ -532,6 +532,11 @@
 			"why": "stopping a turn",
 			"journeys": ["stop-midstream", "chat-send-stream", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2"],
 			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
+		},
+		{
+			"why": "the composer's action row holds no empty seat for Send or Stop, and a double tap on Send never lands on the Stop that takes its place",
+			"journeys": ["composer-no-empty-seat"],
+			"globs": ["frontend/tests/journeys/composer-no-empty-seat.journey.mjs", "frontend/src/lib/components/chat/composer-wrap*", "frontend/src/lib/components/chat/phone/phone-composer.css"]
 		},
 		{
 			"why": "queued (pending) messages",
