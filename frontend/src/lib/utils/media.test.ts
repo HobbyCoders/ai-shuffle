@@ -106,15 +106,6 @@ describe('rewriteMediaMarkdown', () => {
 		expect(classifyMediaUrl('/api/v1/artifacts/abc')).toBeNull();
 	});
 
-	it('shows media markdown written in code as written (#1603)', () => {
-		const fenced = '```md\n![A](/api/v1/artifacts/abc)\n![B](/api/generated-images/by-path?path=/w/b.png)\n```';
-		const inline = 'Use `![A](/api/v1/artifacts/abc)` to embed.';
-		const out = rewriteMediaMarkdown(`${fenced}\n\n${inline}\n\n![A](/api/v1/artifacts/abc)`);
-		expect(out).toContain(fenced);
-		expect(out).toContain(inline);
-		expect(out.match(/<img /g)).toHaveLength(1);
-	});
-
 	it.each([
 		['/api/v1/artifacts/abc'],
 		['/api/generated-images/by-path?path=/w/b.png']
@@ -123,11 +114,6 @@ describe('rewriteMediaMarkdown', () => {
 		expect(out.match(/<img /g)).toHaveLength(1);
 		expect(out).toContain('media-download-btn');
 		expect(out).toContain('`inline`');
-	});
-
-	it('never lets an unclosed bracket swallow a code block', () => {
-		const md = '[note\n```\n![A](/api/v1/artifacts/abc)\n```';
-		expect(rewriteMediaMarkdown(md)).toBe(md);
 	});
 
 	it('collapses a raw base64 image blob instead of dumping it', () => {

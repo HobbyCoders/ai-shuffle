@@ -1,7 +1,6 @@
 import type { ChatMessage } from '$lib/stores/types';
 import { marked } from 'marked';
 import {
-	mapOutsideCode,
 	mediaHtml,
 	resolveMediaUrl,
 	rewriteMediaMarkdown,
@@ -146,6 +145,8 @@ export function galleryMediaForTurn(messages: ChatMessage[], sessionId?: string 
 // every destination form the lexer accepts: bare or `<angle-bracketed>`, with
 // an optional "title", 'title' or (title) (#792).
 const PLAIN_IMAGE_MD = /!\[[^\]]*\]\(\s*(?:<([^>\n]*)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
+// Fenced blocks and inline code spans: their text is code, never an embed.
+const CODE_SPAN = /(^|\n)( {0,3})(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\3[`~]*[ \t]*(?=\n|$)|$)|`+[^`\n]*?`+/g;
 
 /** Suppress only media represented by the gallery; keep prose, audio and links. */
 export function rewriteWithGallery(text: string, sources: ReadonlySet<string>, sessionId?: string | null): string {
@@ -159,5 +160,11 @@ export function rewriteWithGallery(text: string, sources: ReadonlySet<string>, s
 			);
 	// Code renders exactly as it does without a gallery: nothing is dropped
 	// from it, since the lexer never counted it as an embed.
-	return mapOutsideCode(text, prose, (code) => rewriteMediaMarkdown(code));
+	let out = '';
+	let at = 0;
+	for (const code of text.matchAll(CODE_SPAN)) {
+		out += prose(text.slice(at, code.index)) + rewriteMediaMarkdown(code[0]);
+		at = code.index + code[0].length;
+	}
+	return out + prose(text.slice(at));
 }

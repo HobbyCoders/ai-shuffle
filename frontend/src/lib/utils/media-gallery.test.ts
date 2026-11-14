@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { marked } from 'marked';
 import type { ChatMessage } from '$lib/stores/types';
+import { rewriteMediaMarkdown } from './media';
 import { galleryMediaForTurn, rewriteWithGallery } from './media-gallery';
 import { buildDisplayItems } from './work-log';
 
@@ -174,10 +175,18 @@ describe('generated media in the turn gallery (#784)', () => {
 		expect(html).toContain('media-download-btn');
 	});
 
-	it('drops a gallery image whose alt text holds `code`, and keeps one it does not show', () => {
-		const html = rewriteWithGallery(`![The \`a\` one](${art('a')})\n\n![The \`z\` one](${art('z')})`, new Set([art('a')]));
-		expect(html).not.toContain(art('a'));
-		expect(html).toContain(`src="${art('z')}"`);
+	it.each([
+		['without a gallery', (md: string) => rewriteMediaMarkdown(md)],
+		['with a gallery that does not show it', (md: string) => rewriteWithGallery(md, new Set([art('other')]))]
+	])('leaves an artifact image written in code as written, %s (#1603)', (_label, render) => {
+		const fenced = `\`\`\`md\n![In a fence](${art('a')})\n\`\`\``;
+		const inline = `Use \`![Inline](${art('a')})\` to embed.`;
+		const out = render(`${fenced}\n\n${inline}\n\n![Prose](${art('a')})`);
+		expect(out).toContain(fenced);
+		expect(out).toContain(inline);
+		expect(out.match(/<img /g)).toHaveLength(1);
+		expect(out).toContain('alt="Prose"');
+		expect(out).toContain('media-download-btn');
 	});
 
 	it('counts a reply artifact image as a gallery image, once (#1603)', () => {

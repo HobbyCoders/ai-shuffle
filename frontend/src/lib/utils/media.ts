@@ -10,6 +10,7 @@
  * `.media-*` class names). Visibility/hover styling lives in app.css.
  */
 
+import { marked } from 'marked';
 import { apiUrl } from '$lib/api/runtime';
 import { chatFileUrl } from './chat-files';
 import { escapeHtml } from './escape-html';
@@ -90,6 +91,33 @@ const ARTIFACT_URL = /^(?:https?:\/\/[^/?#\s]+)?\/api\/v1\/artifacts\/[^/?#\s]+(
  */
 function imageEmbedKind(url: string): MediaKind | null {
 	return classifyMediaUrl(url) ?? (ARTIFACT_URL.test(url) ? 'image' : null);
+}
+
+/**
+ * The raw artifact-URL images marked's lexer renders as images in `text`, the
+ * same reading `embedsOf` (media-gallery.ts) uses, so one written in code stays
+ * as written (#1603). Other media URLs keep the plain regex reading. Lexed once
+ * per text, and only for text naming the artifact route (#1282).
+ */
+const proseArtifactCache = new Map<string, ReadonlySet<string>>();
+const PROSE_ARTIFACT_CACHE_MAX = 500;
+const NO_ARTIFACTS: ReadonlySet<string> = new Set();
+
+function proseArtifactImages(text: string): ReadonlySet<string> {
+	if (!text.includes('/api/v1/artifacts/')) return NO_ARTIFACTS;
+	const cached = proseArtifactCache.get(text);
+	if (cached) return cached;
+	const found = new Set<string>();
+	marked.walkTokens(marked.lexer(text), (token) => {
+		if (token.type === 'image' && ARTIFACT_URL.test(token.href ?? '')) found.add(token.raw);
+	});
+	if (proseArtifactCache.size >= PROSE_ARTIFACT_CACHE_MAX) {
+		const oldest = proseArtifactCache.keys().next().value;
+		if (oldest !== undefined) proseArtifactCache.delete(oldest);
+	}
+	const images = found.size ? found : NO_ARTIFACTS;
+	proseArtifactCache.set(text, images);
+	return images;
 }
 
 /**
@@ -476,27 +504,6 @@ const MEDIA_TOKEN = /!?\[[^\]]*\]\([^)\s]+\)/g;
 // A raw base64 image blob accidentally dumped into prose — collapse it instead
 // of rendering ~100k chars of literal text.
 const RAW_BASE64 = /"image_base64"\s*:\s*"[A-Za-z0-9+/=]{100,}"/g;
-// Fenced blocks and inline code spans: their text is code, never an embed.
-const CODE_SPAN = /(^|\n)( {0,3})(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\3[`~]*[ \t]*(?=\n|$)|$)|`+[^`\n]*?`+/;
-// One line's complete media token, read whole: its alt text may hold `code`.
-const ONE_LINE_MEDIA_TOKEN = /!?\[[^\]\n]*\]\([^)\s]+\)/;
-const PROSE_OR_CODE = new RegExp(`${ONE_LINE_MEDIA_TOKEN.source}|${CODE_SPAN.source}`, 'g');
-
-/**
- * Apply `prose` to the text outside fenced blocks and inline code spans, and
- * `code` to those (as written by default). A complete media token is never
- * split by backticks in its alt text: `![The \`model\` result](url)` is prose.
- */
-export function mapOutsideCode(text: string, prose: (part: string) => string, code: (part: string) => string = (part) => part): string {
-	let out = '';
-	let at = 0;
-	for (const match of text.matchAll(PROSE_OR_CODE)) {
-		if (/^!?\[/.test(match[0])) continue; // a media token stays in its prose run
-		out += prose(text.slice(at, match.index)) + code(match[0]);
-		at = match.index + match[0].length;
-	}
-	return out + prose(text.slice(at));
-}
 const PLACEHOLDER = '<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">';
 
 /**
@@ -514,15 +521,11 @@ export function rewriteMediaMarkdown(
 	text: string,
 	renderMedia: (kind: MediaKind, url: string, label: string) => string = mediaHtml
 ): string {
-	// Code shows its markdown as written (#1603): only prose embeds media.
-	const out = mapOutsideCode(text, (part) => rewriteProseMedia(part, renderMedia));
-	// Never dump a raw base64 image blob as literal prose.
-	return out.replace(RAW_BASE64, `${PLACEHOLDER}Image data omitted</div>`);
-}
-
-function rewriteProseMedia(text: string, renderMedia: (kind: MediaKind, url: string, label: string) => string): string {
+	let artifacts: ReadonlySet<string> | undefined;
 	let out = text.replace(IMG_MD, (match, alt: string, url: string) => {
-		const kind = imageEmbedKind(url);
+		const kind =
+			classifyMediaUrl(url) ??
+			(ARTIFACT_URL.test(url) && (artifacts ??= proseArtifactImages(text)).has(match) ? 'image' : null);
 		return kind ? renderMedia(kind, url, alt) : match;
 	});
 	out = out.replace(LINK_MD, (match, lead: string, label: string, url: string) => {
@@ -531,6 +534,8 @@ function rewriteProseMedia(text: string, renderMedia: (kind: MediaKind, url: str
 		if (kind === 'video' || kind === 'audio') return lead + renderMedia(kind, url, label);
 		return match;
 	});
+	// Never dump a raw base64 image blob as literal prose.
+	out = out.replace(RAW_BASE64, `${PLACEHOLDER}Image data omitted</div>`);
 	return out;
 }
 
