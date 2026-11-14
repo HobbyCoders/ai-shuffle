@@ -24,7 +24,10 @@ function makeTask(over: Partial<Task> = {}): Task {
 	};
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+	cleanup();
+	vi.restoreAllMocks();
+});
 
 function stopButton() {
 	return screen.getByRole('button', { name: /stop generating/i });
@@ -149,5 +152,26 @@ describe('StopButton', () => {
 		stray = false;
 		await fireEvent.click(stopButton(), { detail: 1 });
 		expect(screen.getByRole('dialog')).toBeTruthy();
+	});
+
+	it('judges a tap by when it was made, and a missing or impossible stamp as now', async () => {
+		const ignoresPress = vi.fn(() => false);
+		render(StopButton, { props: { activeTasks: [], onStop: vi.fn(), ignoresPress } });
+		const now = performance.now();
+		vi.spyOn(performance, 'now').mockReturnValue(now);
+		const tapAt = (timeStamp: number, detail = 1) => {
+			const event = new MouseEvent('click', { bubbles: true, cancelable: true, detail });
+			Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+			return fireEvent(stopButton(), event);
+		};
+
+		// Made 300ms ago, handled only now behind a busy main thread.
+		await tapAt(now - 300);
+		await tapAt(0);
+		await tapAt(now + 5000);
+		expect(ignoresPress.mock.calls).toEqual([[now - 300], [now], [now]]);
+		// The keyboard is never asked about.
+		await tapAt(now - 300, 0);
+		expect(ignoresPress).toHaveBeenCalledTimes(3);
 	});
 });

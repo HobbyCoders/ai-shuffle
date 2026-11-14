@@ -1143,9 +1143,11 @@
 	// start screen the composer moves away as the chat opens), and ended by
 	// the next submit, and it holds only for the chat the send went to (a chat
 	// switch inside the window shows another chat's Stop); Stop's keyboard
-	// activation and its confirmation are never ignored.
+	// activation and its confirmation are never ignored. A Stop press is judged
+	// by when it was made, so a stall right after the send cannot use up the
+	// window.
 	let strayStop: { until: number; destination: SendDestination } | null = null;
-	const isStrayStopPress = () => !!strayStop && performance.now() < strayStop.until
+	const isStrayStopPress = (pressedAt: number) => !!strayStop && pressedAt < strayStop.until
 		&& stillAtDestination(strayStop.destination, composerPlace());
 	function holdSendCircle(): () => void {
 		sendCircleHolds += 1;

@@ -13,7 +13,7 @@
 //
 // double-tap-send: Stop now arrives where Send was (Send moves one seat left).
 // A double tap on Send must not land on that Stop and cancel the turn it just
-// started.
+// started, also when the page is busy and handles the second press late.
 //
 // draft-in-stop-band: a one-line draft that fits the field without Stop but
 // not beside it. Stop arriving (a turn sent from another tab) and leaving
@@ -176,24 +176,59 @@ await runJourney({
 			await firstExchange(ctx);
 		},
 		async act({ page, mark, variant, log }) {
-			await composer(page).click();
-			await page.keyboard.type(`double tapped tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 3 })}`);
-			const send = await sendButton(page).boundingBox();
-			const at = { x: send.x + send.width / 2, y: send.y + send.height / 2 };
-			const tap = () => (isPhone(variant) ? page.touchscreen.tap(at.x, at.y) : page.mouse.click(at.x, at.y));
-
-			await mark('double tap Send');
-			await tap();
-			// A brisk double tap: the second press 250ms after the first.
-			await page.waitForTimeout(250);
-			const under = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('button')?.getAttribute('aria-label') ?? null, at);
-			log(`second tap lands on: ${under}`);
-			await tap();
-			await page.waitForTimeout(1500);
-			const streaming = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-streaming');
-			expect(streaming === 'true', `the second tap did not stop the turn it started (streaming=${streaming}, under the finger: ${under})`);
-			await stopButton(page).click();
-			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+			// Each click's own stamp (when it was made) and when the page handled it.
+			await page.evaluate(() => document.addEventListener('click', (e) => window.__clicks?.push({
+				made: e.timeStamp, handled: performance.now(), on: e.target.closest?.('button')?.getAttribute('aria-label') ?? null
+			}), true));
+			const cdp = await page.context().newCDPSession(page);
+			for (const stalled of [false, true]) {
+				const what = stalled ? 'a double tap the page handles late, behind a busy main thread' : 'a brisk double tap';
+				await mark(what);
+				let proved = false;
+				for (let attempt = 1; attempt <= 3 && !proved; attempt++) {
+					await composer(page).click();
+					await page.keyboard.type(`double tapped tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 3 })}`);
+					const send = await sendButton(page).boundingBox();
+					const at = { x: send.x + send.width / 2, y: send.y + send.height / 2 };
+					await page.evaluate(() => { window.__clicks = []; });
+					await (isPhone(variant) ? page.touchscreen.tap(at.x, at.y) : page.mouse.click(at.x, at.y));
+					if (stalled) {
+						// Stop is in Send's place; the page then stalls for 700ms, and the
+						// second press is made during the stall. Press and release are sent
+						// together, as a finger does, so the browser stamps both as they
+						// arrive and the page handles them when it is free again.
+						await stopButton(page).waitFor({ timeout: 2000 });
+						void page.evaluate(() => { const end = performance.now() + 700; while (performance.now() < end); }).catch(() => {});
+						await page.waitForTimeout(50);
+						const point = { x: at.x, y: at.y };
+						await Promise.all(isPhone(variant)
+							? [cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] }),
+								cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })]
+							: [cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 }),
+								cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })]);
+					} else {
+						await page.waitForTimeout(250);
+						await (isPhone(variant) ? page.touchscreen.tap(at.x, at.y) : page.mouse.click(at.x, at.y));
+					}
+					await page.waitForTimeout(1500);
+					const [first, second] = await page.evaluate(() => window.__clicks);
+					const madeAfter = second ? Math.round(second.made - first.handled) : null;
+					const handledAfter = second ? Math.round(second.handled - first.handled) : null;
+					log(`${what}, attempt ${attempt}: second press made ${madeAfter}ms and handled ${handledAfter}ms after the send, on ${second?.on}`);
+					// Only a second press made well inside the 500ms window, landing on
+					// Stop (and, stalled, handled after the window) tests the guard; a
+					// late dispatch by this test is retried, not judged.
+					proved = !!second && second.on === 'Stop generating' && madeAfter < 450 && (!stalled || handledAfter > 520);
+					const streaming = await page.locator('[data-ui-state="chat"]').getAttribute('data-ui-streaming');
+					if (proved) expect(streaming === 'true', `${what}: the second press did not stop the turn it started (streaming=${streaming})`);
+					if (streaming === 'true') {
+						await stopButton(page).click();
+						await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+					}
+					await clearDraft(page);
+				}
+				expect(proved, `${what}: no attempt pressed Stop inside the window as intended (see the log)`);
+			}
 		}
 	}, {
 		name: 'draft-in-stop-band',

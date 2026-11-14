@@ -17,10 +17,11 @@
 		activeTasks: Task[];
 		/** Fire the interrupt (always a full stop). */
 		onStop: () => void;
-		/** True while a pointer press is a stray one (the composer: the second
-		 *  press of a double tap on Send, landing where Send was). Checked before
-		 *  the confirmation; keyboard activation is never ignored. */
-		ignoresPress?: () => boolean;
+		/** True when a pointer press made at `pressedAt` (performance.now()
+		 *  clock) is a stray one (the composer: the second press of a double tap
+		 *  on Send, landing where Send was). Checked before the confirmation;
+		 *  keyboard activation is never ignored. */
+		ignoresPress?: (pressedAt: number) => boolean;
 	}
 
 	let { activeTasks, onStop, ignoresPress }: Props = $props();
@@ -38,9 +39,17 @@
 			: `${runningCount} background agents are still running. Stopping will also stop them.`
 	);
 
+	// When the press was made, not when it is handled: a press queued behind a
+	// busy main thread is still judged by its own time. The event's stamp is on
+	// the performance.now() clock; a missing or impossible one counts as now.
+	function pressedAt(event: Event): number {
+		const now = performance.now();
+		return event.timeStamp > 0 && event.timeStamp <= now ? event.timeStamp : now;
+	}
+
 	function handleClick(event: MouseEvent) {
 		// detail is 0 for a click from the keyboard (Enter, Space).
-		if (event.detail > 0 && ignoresPress?.()) return;
+		if (event.detail > 0 && ignoresPress?.(pressedAt(event))) return;
 		if (runningCount > 0) {
 			showConfirm = true;
 		} else {

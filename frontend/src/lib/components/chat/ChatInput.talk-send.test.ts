@@ -186,6 +186,30 @@ describe('Talk turns into Send', () => {
 			expect(stops).toHaveBeenCalledTimes(2);
 		});
 
+		it('judges the second tap by when it was made, not when a stalled page handles it', async () => {
+			idle();
+			const { container } = render(ChatInput, { props: { compact: true } });
+			await type(container, 'Ship it');
+			await waitFor(() => expect(circles(container)).toContain('Send'));
+			const before = performance.now();
+			await tap(screen.getByRole('button', { name: 'Send' }));
+			const stop = await screen.findByRole('button', { name: 'Stop generating' });
+			const after = performance.now();
+			// The page was busy: both taps are handled a second after the send.
+			vi.spyOn(performance, 'now').mockReturnValue(after + 1000);
+			const tapAt = (timeStamp: number) => {
+				const event = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 });
+				Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+				return fireEvent(stop, event);
+			};
+			// Made inside the window (the send was handled at or after `before`).
+			await tapAt(before + 400);
+			expect(stops).not.toHaveBeenCalled();
+			// Made after it (the send was handled at or before `after`).
+			await tapAt(after + 550);
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
 		it('never ignores Stop after a send from the start screen (the composer moves away)', async () => {
 			idle();
 			const { container } = render(ChatInput);
