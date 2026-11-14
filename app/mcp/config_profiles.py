@@ -8,7 +8,6 @@ permission mode, system prompt, etc.).
 import logging
 from typing import Any, Dict, Optional, cast
 
-from app.core.models import AGENT_AVATAR_COLORS
 from app.mcp.config_agent_edits import (
     PROMPT_EDITS_SCHEMA,
     apply_list_ops,
@@ -52,7 +51,6 @@ _AGENT_SETTINGS_SCHEMA: Dict[str, Any] = {
     },
     "enabled_plugins": {**_STRINGS, "description": "Plugins to load."},
     "add_dirs": {**_STRINGS, "description": "Extra directories it may access."},
-    "avatar_color": {"type": "string", "enum": list(AGENT_AVATAR_COLORS)},
 }
 _AGENT_SETTINGS = ("enabled_agents", "agent_invoke_mode", "provider_models",
                    "enabled_plugins", "add_dirs")
@@ -62,16 +60,6 @@ _PROMPT_ONLY_ONE = (
     "Pass only one way to change the system prompt: system_prompt_content, "
     "system_prompt_append, reset_system_prompt or prompt_edits."
 )
-
-
-def _avatar_color_error(value: Any) -> Optional[str]:
-    from app.core.models import _check_avatar_color
-
-    try:
-        _check_avatar_color(value)
-    except ValueError as exc:
-        return str(exc)
-    return None
 
 
 def _masked_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -175,8 +163,11 @@ def _create_profile_tools(is_admin: bool) -> list:
         if not profile:
             return _error(f"Profile not found: {args['profile_id']}")
         from app.core.builtin_subagents import DEFAULTS_RECORD_KEY  # internal seeding record
-        config = {k: v for k, v in (profile.get("config") or {}).items() if k != DEFAULTS_RECORD_KEY}
-        return _tool_result(cast(dict, {**profile, "config": _masked_config(config)}))
+        # Retired avatar values may still be stored (column and config key); never shown.
+        config = {k: v for k, v in (profile.get("config") or {}).items()
+                  if k not in (DEFAULTS_RECORD_KEY, "avatar_id")}
+        shown = {k: v for k, v in profile.items() if k != "avatar_color"}
+        return _tool_result(cast(dict, {**shown, "config": _masked_config(config)}))
 
     tools.append(get_profile)
 
@@ -262,9 +253,6 @@ def _create_profile_tools(is_admin: bool) -> list:
         if settings_error:
             return _error(settings_error)
         settings.update(normalized)
-        color_error = _avatar_color_error(args.get("avatar_color"))
-        if color_error:
-            return _error(color_error)
 
         import re
         # Generate ID from name
@@ -327,13 +315,11 @@ def _create_profile_tools(is_admin: bool) -> list:
                     "preset": "claude_code",
                 }
 
-            extra = {"avatar_color": args["avatar_color"].strip()} if args.get("avatar_color") else {}
             return None, database.create_profile(
                 profile_id=profile_id,
                 name=args["name"],
                 description=args.get("description"),
                 config=config,
-                **extra,
             )
 
         error, profile = await run_sync(_check_and_create)
@@ -413,10 +399,6 @@ def _create_profile_tools(is_admin: bool) -> list:
             prompt_ways.append("prompt_edits")
         if len(prompt_ways) > 1 and {"reset_system_prompt", "prompt_edits"} & set(prompt_ways):
             return _error(_PROMPT_ONLY_ONE)
-        if "avatar_color" in args:
-            color_error = _avatar_color_error(args["avatar_color"])
-            if color_error:
-                return _error(color_error)
 
         def _read_merge_write():
             """READ-MODIFY-WRITE — must stay in ONE hop.
@@ -564,11 +546,6 @@ def _create_profile_tools(is_admin: bool) -> list:
                 mark("name")
             if description is not None:
                 mark("description")
-            extra = {}
-            if "avatar_color" in args:
-                color = args["avatar_color"]
-                extra["avatar_color"] = color.strip() if isinstance(color, str) else None
-                mark("avatar_color")
 
             if not updated_fields:
                 return "No fields provided to update.", None, None, None
@@ -581,7 +558,6 @@ def _create_profile_tools(is_admin: bool) -> list:
                 description=description,
                 config=config,
                 allow_builtin=True,
-                **extra,
             ), updated_fields, details
 
         error, updated, updated_fields, details = await run_sync(_read_merge_write)

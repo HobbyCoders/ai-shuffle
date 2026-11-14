@@ -121,15 +121,14 @@ def test_migration_strips_stored_rows_and_keeps_everything_else():
 
 def test_api_schemas_accept_and_drop_the_key():
     """An older client still sending it is accepted; the key never comes back."""
-    from app.api.agents import ProfilePresentation
-    from app.core.models import ProfileCreate, SystemPromptConfig
+    from app.core.models import Profile, ProfileCreate, SystemPromptConfig
 
     assert "inject_env_details" not in SystemPromptConfig.model_fields
     created = ProfileCreate.model_validate({"name": "A", "config": _legacy_config(True)})
     dumped = created.config.model_dump(exclude_none=True)
     assert dumped["system_prompt"] == {"type": "custom", "preset": "claude_code",
                                        "content": "Custom agent prompt"}
-    read = ProfilePresentation.model_validate({
+    read = Profile.model_validate({
         "id": "a", "name": "A", "config": _legacy_config(True),
         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
     })

@@ -181,21 +181,12 @@ def _seed_default_templates():
         )
 
 
-def preserve_profile_presentation(existing_config, config, raw_config=None):
+def preserve_profile_presentation(existing_config, config):
     """Editor replacement keeps fields its typed schema does not represent."""
     from app.core.models import ProfileConfig
-    from app.core.owner_services import AVATAR_PRESETS
     result = {key: value for key, value in (existing_config or {}).items()
               if key not in ProfileConfig.model_fields and key != "allowed_tools"}
     result.update(config)
-    if raw_config is not None and "avatar_id" in raw_config:
-        avatar = raw_config["avatar_id"]
-        if avatar is not None and (not isinstance(avatar, str) or avatar not in AVATAR_PRESETS):
-            raise ValueError("Unknown avatar preset")
-        if avatar is None:
-            result.pop("avatar_id", None)
-        else:
-            result["avatar_id"] = avatar
     return result
 
 
