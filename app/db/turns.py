@@ -2476,6 +2476,28 @@ def settle_parked_turns(
     return len(rows or [])
 
 
+def mark_settled_park_stopped(session_id: str, observed_park: Dict[str, Any]) -> int:
+    """Mark a park a Stop named as stopped after another writer settled it first.
+
+    A Stop's receipt names the parks it applies to, and :func:`settle_parked_turns`
+    with ``user_stop`` settles each one. Other cleanup can settle that park in
+    between, such as the post-park Monitor check while the Stop latch holds, so the
+    Stop's guarded write finds no parked row. The park was still the Stop's, so its
+    settlement keeps the Stop: the same row and run, settled as a park, with no
+    interrupt mode yet. A park that resumed has a new run id and is left alone.
+    Returns the row count.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE turns SET interrupt_mode='stop' WHERE session_id=%s AND id=%s "
+            "AND run_id IS NOT DISTINCT FROM %s AND state='completed' "
+            "AND stop_reason='parked_settled' AND interrupt_mode IS NULL",
+            (session_id, observed_park["id"], observed_park.get("run_id")),
+        )
+        return cursor.rowcount or 0
+
+
 def requeue_turn(turn_id: str) -> Optional[Dict[str, Any]]:
     """Return a live turn to the ``queued`` state, releasing the session's live
     slot while KEEPING its ``position`` (so it re-enters at the front, ahead of
