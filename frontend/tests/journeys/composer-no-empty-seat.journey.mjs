@@ -14,8 +14,13 @@
 // double-tap-send: Stop now arrives where Send was (Send moves one seat left).
 // A double tap on Send must not land on that Stop and cancel the turn it just
 // started.
+//
+// draft-in-stop-band: a one-line draft that fits the field without Stop but
+// not beside it. Stop arriving (a turn sent from another tab) and leaving
+// must not flip the phone's wrapped layout: the composer keeps its height
+// and the message list its place.
 import { runJourney } from './runner.mjs';
-import { composer, expect, isPhone, openNewChat, scriptTag, sendButton, stopButton, typeAndSend, uniq, waitChat } from './lib/app.mjs';
+import { chatIdByToken, composer, expect, isPhone, openNewChat, scriptTag, sendButton, stopButton, typeAndSend, uniq, waitChat, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const VIEWPORTS = ['desktop', 'phone', 'fold-cover'];
@@ -89,6 +94,28 @@ async function withoutCalls(page) {
 	});
 }
 
+/** Height and wrap of the composer, and where the message list ends. */
+const composerPlace = (page) =>
+	page.evaluate(() => {
+		const box = document.querySelector('[aria-label="Chat input with file drop"]')?.getBoundingClientRect();
+		const log = document.querySelector('[role="log"][aria-label="Conversation messages"]')?.getBoundingClientRect();
+		return {
+			composerHeight: box ? Math.round(box.height) : null,
+			wrapped: !!document.querySelector('.chat-island.wrapped'),
+			listBottom: log ? Math.round(log.bottom) : null,
+			stop: !!document.querySelector('.send-cluster .stop-btn')
+		};
+	});
+
+/** Open a first exchange, so this is a chat, where Stop can come and go under a draft. */
+async function firstExchange(ctx) {
+	await openNewChat(ctx);
+	await ctx.page.waitForTimeout(800);
+	ctx.token = `tok-${uniq()}`;
+	await typeAndSend(ctx.page, `first ${ctx.token} ${scriptTag(ctx.variant, 'default')}`);
+	await waitChat(ctx.page, { streaming: 'false', messagesAtLeast: 2 }, { timeout: 60_000 });
+}
+
 const seatCase = (call) => ({
 	name: call ? 'with-call' : 'without-call',
 	viewports: VIEWPORTS,
@@ -143,11 +170,8 @@ await runJourney({
 		viewports: VIEWPORTS,
 		async setup(ctx) {
 			await withoutCalls(ctx.page);
-			await openNewChat(ctx);
-			await ctx.page.waitForTimeout(800);
 			// A first exchange makes this a chat, where Stop takes Send's old place.
-			await typeAndSend(ctx.page, `first tok-${uniq()} ${scriptTag(ctx.variant, 'default')}`);
-			await waitChat(ctx.page, { streaming: 'false', messagesAtLeast: 2 }, { timeout: 60_000 });
+			await firstExchange(ctx);
 		},
 		async act({ page, mark, variant, log }) {
 			await composer(page).click();
@@ -168,6 +192,71 @@ await runJourney({
 			expect(streaming === 'true', `the second tap did not stop the turn it started (streaming=${streaming}, under the finger: ${under})`);
 			await stopButton(page).click();
 			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+		}
+	}, {
+		name: 'draft-in-stop-band',
+		viewports: VIEWPORTS,
+		setup: firstExchange,
+		async act({ page, mark, variant, log, token }) {
+			// A run of letters as wide as the field without Stop, less half of
+			// Stop's seat: it fits there, but not beside Stop.
+			const draft = await page.evaluate(() => {
+				const editor = document.querySelector('.chat-island .ProseMirror');
+				const cluster = [...document.querySelectorAll('.send-cluster')].find((el) => el.getClientRects().length);
+				const css = getComputedStyle(editor);
+				const field = editor.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+				const seat = parseFloat(getComputedStyle(cluster).getPropertyValue('--composer-stop-seat')) || 38;
+				const ruler = document.createElement('span');
+				ruler.style.cssText = 'position:fixed;visibility:hidden;white-space:pre';
+				for (const key of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing', 'wordSpacing']) ruler.style[key] = css[key];
+				document.body.append(ruler);
+				let text = '';
+				while (ruler.getBoundingClientRect().width < field - seat / 2) ruler.textContent = text += 'ab'.charAt(text.length % 2);
+				ruler.remove();
+				return { text, field: Math.round(field), seat };
+			});
+			log(`draft: ${draft.text.length} letters for a ${draft.field}px field, Stop's seat ${draft.seat}px`);
+			await composer(page).click();
+			await page.keyboard.type(draft.text);
+			await page.waitForTimeout(500);
+			const before = await composerPlace(page);
+			log(`idle: ${JSON.stringify(before)}`);
+
+			await mark('Stop arrives: a turn from another tab');
+			const other = await page.context().newPage();
+			try {
+				// The same chat in a second tab of this browser.
+				const url = new URL(page.url());
+				url.searchParams.set('session', await chatIdByToken(page, token));
+				await other.goto(url.toString());
+				await waitChatOpen(other, { messagesAtLeast: 2 });
+				await typeAndSend(other, `from another tab tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 3 })}`);
+				await stopButton(page).waitFor({ timeout: 20_000 });
+				await page.waitForTimeout(700);
+				const working = await composerPlace(page);
+				log(`working: ${JSON.stringify(working)}`);
+				expect(working.stop, "Stop shows while the other tab's turn runs");
+				expect(working.wrapped === before.wrapped && working.composerHeight === before.composerHeight,
+					`Stop arriving keeps the composer (${JSON.stringify(before)} → ${JSON.stringify(working)})`);
+				expect(working.listBottom === before.listBottom,
+					`Stop arriving keeps the message list in place (bottom ${before.listBottom} → ${working.listBottom})`);
+
+				await mark('Stop leaves: the turn ends');
+				await stopButton(other).click();
+				await stopButton(page).waitFor({ state: 'detached', timeout: 15_000 });
+				await page.waitForTimeout(700);
+				const after = await composerPlace(page);
+				log(`idle again: ${JSON.stringify(after)}`);
+				expect(after.wrapped === before.wrapped && after.composerHeight === before.composerHeight,
+					`Stop leaving keeps the composer (${JSON.stringify(working)} → ${JSON.stringify(after)})`);
+				expect(after.listBottom === before.listBottom,
+					`Stop leaving keeps the message list in place (bottom ${working.listBottom} → ${after.listBottom})`);
+				const kept = await composer(page).innerText();
+				expect(kept.trim() === draft.text, 'the draft stays in the composer throughout');
+			} finally {
+				await other.close();
+			}
+			await clearDraft(page);
 		}
 	}]
 });

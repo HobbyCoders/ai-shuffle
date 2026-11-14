@@ -765,6 +765,12 @@
 		getEditor: () => (editorRef?.getEditor()?.view.dom as HTMLElement | undefined) ?? null,
 		getIsland: () => islandRef,
 		getCircles: () => sendClusterRef,
+		// In a chat Stop can arrive or leave under a draft; the wrap is decided
+		// as if it were there, so that never moves the composer. The phone sets
+		// the seat (Stop and its gap); the desktop text has its own row.
+		getReserve: () => compact && !circles.includes('stop') && sendClusterRef
+			? parseFloat(getComputedStyle(sendClusterRef).getPropertyValue('--composer-stop-seat')) || 0
+			: 0,
 		isWrapped: () => composerWrapped,
 		setWrapped: (wrapped) => {
 			// The observer can run while the lazy editor is still mounting. Its
@@ -1128,13 +1134,21 @@
 	// Send clears the composer at the click, and an empty composer offers Talk
 	// in Send's place. The Send circle keeps the slot through a double click's
 	// window, and until the send has passed its checks, so the second click of
-	// a double click on Send cannot start a call. Stop arriving takes the
-	// place Send leaves, so it ignores presses for the same window after a
-	// send (not after it mounts: Stop remounts at every turn handoff).
+	// a double click on Send cannot start a call.
 	const DOUBLE_ACTIVATION_MS = 500;
-	let lastSendAt = -Infinity;
+	// With no seat held, Stop appears in the place Send just left. Through the
+	// window, Stop ignores a pointer press inside Send's old box: the second
+	// press of a double tap on Send. Armed only when a press on the Send circle
+	// sends while Stop is not shown, and ended by the next submit; Stop's
+	// keyboard activation and its confirmation are never ignored.
+	type SendPress = { at: number; box: DOMRect };
+	let strayStop: { until: number; box: DOMRect } | null = null;
+	function isStrayStopPress(event: MouseEvent): boolean {
+		if (!strayStop || performance.now() >= strayStop.until) return false;
+		const { left, right, top, bottom } = strayStop.box;
+		return event.clientX >= left && event.clientX <= right && event.clientY >= top && event.clientY <= bottom;
+	}
 	function holdSendCircle(): () => void {
-		lastSendAt = performance.now();
 		sendCircleHolds += 1;
 		let windowOver = false;
 		let sendSettled = false;
@@ -1148,7 +1162,9 @@
 		return () => { sendSettled = true; end(); };
 	}
 
-	async function handleSubmit(compactBeforeSend = false) {
+	/** `sendPress`: the Send circle, pressed with no Stop beside it. */
+	async function handleSubmit(compactBeforeSend = false, sendPress: SendPress | null = null) {
+		strayStop = null;
 		if (pendingSubmit) {
 			if (!pendingSubmit.cleared) return;
 			// Nothing typed since the clear (a second Enter): the same action
@@ -1162,13 +1178,13 @@
 		// nothing gives it up.
 		const turn = activeSession.reserveSend();
 		try {
-			await submitInTurn(compactBeforeSend, turn);
+			await submitInTurn(compactBeforeSend, turn, sendPress);
 		} finally {
 			turn.cancel();
 		}
 	}
 
-	async function submitInTurn(compactBeforeSend: boolean, turn: SendReservation) {
+	async function submitInTurn(compactBeforeSend: boolean, turn: SendReservation, sendPress: SendPress | null) {
 		if (pendingSubmit) {
 			// New chat or a switch during the wait: the words stay as the draft
 			// of the chat they were typed in (session-change effect).
@@ -1191,13 +1207,13 @@
 			releaseSendCircle();
 		};
 		try {
-			await submitComposer(compactBeforeSend, release, turn);
+			await submitComposer(compactBeforeSend, release, turn, sendPress);
 		} finally {
 			release();
 		}
 	}
 
-	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void, turn: SendReservation) {
+	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void, turn: SendReservation, sendPress: SendPress | null) {
 		if (!ownsComposer() || heldForCatalog || heldForSetup || (compacting && !compactBeforeSend)) return;
 		// The chat this message was typed in. The checks below and the store's
 		// restore wait can await; a New chat or chat switch in that window must
@@ -1295,6 +1311,7 @@
 		// sendMessage clears the composer before its first await, and holds the
 		// next send until the cold check has answered so two sends keep order.
 		// It sends in the place taken at the click (handleSubmit).
+		if (sendPress) strayStop = { until: sendPress.at + DOUBLE_ACTIVATION_MS, box: sendPress.box };
 		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm, turn);
 	}
 
@@ -1972,7 +1989,12 @@
 
 		<form
 			use:composerOpenGesture
-			onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}
+			onsubmit={(e) => {
+				e.preventDefault();
+				const send = e.submitter as HTMLElement | null;
+				const sendCircle = !!send?.classList.contains('send-btn') && !circles.includes('stop');
+				handleSubmit(false, sendCircle ? { at: performance.now(), box: send!.getBoundingClientRect() } : null);
+			}}
 			onpointerdown={handleComposerPointerDown}
 		>
 			<!-- The box: the text across the top, and under it attach, the controls
@@ -2104,11 +2126,8 @@
 						{#if circles.includes('stop')}
 							<StopButton
 								activeTasks={$activeSession.activeTasks}
-								onStop={() => {
-									if (performance.now() - lastSendAt < DOUBLE_ACTIVATION_MS) return;
-									composerSuggestion.invalidate();
-									activeSession.stopGeneration();
-								}}
+								ignoresPress={isStrayStopPress}
+								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
 							/>
 						{/if}
 					</div>

@@ -132,4 +132,25 @@ describe('StopButton', () => {
 		expect(onStop).not.toHaveBeenCalled();
 		expect(screen.queryByRole('dialog')).toBeNull();
 	});
+
+	it('drops a stray tap before the confirm, but never a keyboard press or a confirmation', async () => {
+		// The composer's double tap on Send: the second tap lands on Stop.
+		const onStop = vi.fn();
+		let stray = true;
+		const ignoresPress = vi.fn((_event: MouseEvent) => stray);
+		render(StopButton, { props: { activeTasks: [makeTask()], onStop, ignoresPress } });
+
+		await fireEvent.click(stopButton(), { detail: 1, clientX: 12 });
+		expect(screen.queryByRole('dialog')).toBeNull();
+		// It is asked with the press, for where it landed.
+		expect(ignoresPress.mock.calls[0]?.[0].clientX).toBe(12);
+		// detail 0: Enter or Space on the focused button.
+		await fireEvent.click(stopButton(), { detail: 0 });
+		await fireEvent.click(screen.getByRole('button', { name: /stop everything/i }));
+		expect(onStop).toHaveBeenCalledTimes(1);
+
+		stray = false;
+		await fireEvent.click(stopButton(), { detail: 1 });
+		expect(screen.getByRole('dialog')).toBeTruthy();
+	});
 });

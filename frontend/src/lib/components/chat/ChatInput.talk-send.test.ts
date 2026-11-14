@@ -147,28 +147,95 @@ describe('Talk turns into Send', () => {
 		expect(sends).toHaveBeenCalledOnce();
 	});
 
-	it('ignores Stop for a double tap after Send, then stops', async () => {
+	describe('Stop under a double tap on Send', () => {
 		// With no seat held, Stop arrives in the place Send just left: the second
 		// press of a double tap on Send must not cancel the turn it started.
-		voice.enabled = false;
-		Object.assign(activeSession.current, { sessionId: 'local-idle', mode: 'code', profile: 'coding',
-			isStreaming: false, liveTurnId: null, error: null, worktreeError: null });
-		activeSession.setDraft('');
-		vi.spyOn(activeSession, 'sendMessage').mockImplementation(async () => { startTurn(); return true; });
-		const stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
-		const { container } = render(ChatInput);
-		await type(container, 'Ship it');
-		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Send']));
+		// fireEvent.click's detail is 0, a keyboard click; a tap has detail 1.
+		const tap = (el: HTMLElement) => fireEvent.click(el, { detail: 1 });
+		let stops: ReturnType<typeof vi.spyOn>;
+		let sends: ReturnType<typeof vi.spyOn>;
 
-		await fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-		const stop = await screen.findByRole('button', { name: 'Stop generating' });
-		await fireEvent.click(stop);
-		expect(stops).not.toHaveBeenCalled();
+		function idle(extra: Record<string, unknown> = {}) {
+			voice.enabled = false;
+			Object.assign(activeSession.current, { sessionId: 'local-idle', mode: 'code', profile: 'coding',
+				isStreaming: false, liveTurnId: null, error: null, worktreeError: null, activeTasks: [], ...extra });
+			activeSession.setDraft('');
+			sends = vi.spyOn(activeSession, 'sendMessage').mockImplementation(async () => { startTurn(); return true; });
+			stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
+		}
 
-		const later = performance.now() + 1000;
-		vi.spyOn(performance, 'now').mockReturnValue(later);
-		await fireEvent.click(screen.getByRole('button', { name: 'Stop generating' }));
-		expect(stops).toHaveBeenCalledOnce();
+		async function sendDraft(container: HTMLElement) {
+			await type(container, 'Ship it');
+			await waitFor(() => expect(circles(container)).toContain('Send'));
+			await tap(screen.getByRole('button', { name: 'Send' }));
+			return screen.findByRole('button', { name: 'Stop generating' });
+		}
+
+		it('ignores the second tap, but not Stop from the keyboard or a later tap', async () => {
+			idle();
+			const { container } = render(ChatInput);
+			const stop = await sendDraft(container);
+			await tap(stop);
+			expect(stops).not.toHaveBeenCalled();
+			await fireEvent.click(stop);
+			expect(stops).toHaveBeenCalledOnce();
+
+			vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 1000);
+			await tap(screen.getByRole('button', { name: 'Stop generating' }));
+			expect(stops).toHaveBeenCalledTimes(2);
+		});
+
+		it('never ignores a tap away from where Send was (the composer moved)', async () => {
+			idle();
+			const { container } = render(ChatInput);
+			const stop = await sendDraft(container);
+			// jsdom lays nothing out: Send's old box is the point 0,0.
+			await fireEvent.click(stop, { detail: 1, clientX: 120, clientY: 40 });
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
+		it('ignores the stray tap before the background-agents confirmation, never after it', async () => {
+			// Running agents keep Stop shown, so they start with the turn here.
+			idle();
+			sends.mockImplementation(async () => {
+				startTurn();
+				Object.assign(activeSession.current, { activeTasks: [{ id: 'agent-1', status: 'running' }] });
+				activeSession.setDraft('');
+				return true;
+			});
+			const { container } = render(ChatInput);
+			const stop = await sendDraft(container);
+			await tap(stop);
+			expect(screen.queryByRole('button', { name: 'Stop everything' })).toBeNull();
+			// Inside the same window: the keyboard opens it, and confirming stops.
+			await fireEvent.click(stop);
+			await fireEvent.click(await screen.findByRole('button', { name: 'Stop everything' }));
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
+		it('never ignores Stop after a queued send, with Stop already shown at the press', async () => {
+			idle();
+			startTurn();
+			const { container } = render(ChatInput);
+			const stop = await sendDraft(container);
+			await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+			await tap(stop);
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
+		it('never ignores Stop after a press that sent nothing', async () => {
+			// No agent to send with: the submit is refused before it sends.
+			idle({ profile: '' });
+			const { container } = render(ChatInput);
+			await type(container, 'Ship it');
+			await waitFor(() => expect(circles(container)).toContain('Send'));
+			await tap(screen.getByRole('button', { name: 'Send' }));
+			await tick();
+			expect(sends).not.toHaveBeenCalled();
+			startTurn();
+			await tap(await screen.findByRole('button', { name: 'Stop generating' }));
+			expect(stops).toHaveBeenCalledOnce();
+		});
 	});
 
 	it('names the agent on a new session', async () => {

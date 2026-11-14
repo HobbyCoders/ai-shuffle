@@ -114,6 +114,8 @@ html:root .phone-composer .send-cluster .stash {
 html:root .phone-composer .send-cluster {
 	align-self: flex-end;
 	gap: 6px;
+	/* Stop's 40px and the gap: the text wraps as if Stop were shown (ChatInput). */
+	--composer-stop-seat: 46px;
 }
 
 html:root .phone-composer .send-btn,
@@ -180,7 +182,7 @@ html:root .phone-composer .ProseMirror p.is-editor-empty:first-child::before {
 @media (max-width: 360px) {
 	/* The mic stays beside send while there is a draft, so the cluster
 	   tightens its gap here and the text field keeps the room. */
-	html:root .phone-composer .send-cluster { gap: 4px; }
+	html:root .phone-composer .send-cluster { gap: 4px; --composer-stop-seat: 44px; }
 }
 
 /* The field's padding makes the target; the editor grows to five lines. */
