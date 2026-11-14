@@ -120,9 +120,9 @@ def offered_models(options: Sequence[Mapping[str, Any]],
     The ``model`` config option is the list (it is what ``set_config_option``
     can select); without one, the base ids of the legacy ``models`` reply.
     ``levels`` are the agent's own thought_level values for that model, from
-    the combined ids in ``models.availableModels`` (``gemini-3.1-pro-high``)
-    and, for the current model, the ``thought_level`` option. None when the
-    agent said nothing about a model's levels.
+    the combined ids in ``models.availableModels`` (``gemini-3.1-pro-high``);
+    for the current model the ``thought_level`` option instead, when it has
+    one. None when the agent said nothing about a model's levels.
     """
     choices = _values(_option(options, "model"))
     combined: list[str] = []
@@ -148,7 +148,10 @@ def offered_models(options: Sequence[Mapping[str, Any]],
     model_option = _option(options, "model")
     current = str(model_option.get("currentValue")) if model_option and model_option.get("currentValue") else None
     thought = [value for value, _ in _values(_option(options, "thought_level"))]
-    if current and thought and current not in levels:
+    if current and thought:
+        # The thought_level option is the current model's list right now: it
+        # wins over the combined ids (it may add or drop a level). It says
+        # nothing about any other model.
         levels[current] = thought
     return [{"id": value, "label": name,
              "levels": sorted(levels[value], key=lambda v: _LEVEL_RANK.get(v, len(_LEVEL_RANK)))

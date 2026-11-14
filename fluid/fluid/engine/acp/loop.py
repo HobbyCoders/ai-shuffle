@@ -296,6 +296,7 @@ class AcpLoop:
         self._acp_models: Mapping[str, Any] | None = None
         self._on_models = on_models
         self._reported_models: list[dict[str, Any]] | None = None
+        self._starting = False  # a session is starting: its report comes at the end
         self._modes: list[str] = []
         # The mode the agent last said it is in (session reply, a successful
         # ``session/set_mode``, or its own ``current_mode_update``).
@@ -646,6 +647,11 @@ class AcpLoop:
                 return
             if self._conn is not None:
                 await self._stop_process()
+            # Every agent process and session start reports its list once (at
+            # the end, after the session's own config updates); dedup holds
+            # only within one lifetime.
+            self._reported_models = None
+            self._acp_models = None  # a resume reply may omit it: not the old agent's
             conn = self._connection_factory(
                 self.spec.argv, cwd=self.cwd, env=self.spec.env,
                 on_notification=self._on_notification, on_request=self._on_request,
@@ -653,6 +659,7 @@ class AcpLoop:
             )
             await conn.start()
             self._conn = conn
+            self._starting = True  # the agent speaks only after initialize
             try:
                 info = await conn.initialize(self.spec.client_capabilities(), self.spec.client_info)
                 self.last_init = info.raw
@@ -703,13 +710,15 @@ class AcpLoop:
                     logger.warning("ACP agent kept mode %s: %s", self._agent_mode, exc)
             except BaseException:
                 self._acp_session = None
+                self._starting = False
                 await self._stop_process()
                 raise
+            self._starting = False
             await self._report_models()
 
     async def _report_models(self) -> None:
         """Tell ``on_models`` what the agent offers, when that changed."""
-        if self._on_models is None:
+        if self._on_models is None or self._starting:
             return
         try:
             offered = self.spec.offered_models(self._config_options, self._acp_models)

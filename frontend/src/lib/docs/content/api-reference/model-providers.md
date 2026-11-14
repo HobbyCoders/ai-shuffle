@@ -464,7 +464,7 @@ Fetch the provider's live model list from upstream so you can pick which ones to
 
 - A provider signed in with ChatGPT lists the ChatGPT/Codex models for that account.
 - A provider signed in with Grok, and every other provider, calls `{base_url}/models` when `base_url` already ends in `/v1`, otherwise `{base_url}/v1/models`, with the stored key.
-- A Google Antigravity provider has no HTTP model list: Google's agent names its models (and each model's thinking levels) when a chat starts, and that list is saved for the row. This call returns the saved list with `source: "agent"`, `agent_version` (the agent's version) and `fetched_at` (when the agent reported it); it does not start the agent. Before a first chat on the row's current sign-in or key it returns the built-in preset list (`source: "preset"`).
+- A Google Antigravity provider has no HTTP model list: Google's agent names its models (and each model's thinking levels) when a chat starts, and that list is saved for the row. This call returns the saved list with `source: "agent"`, `agent_version` (the agent's version) and `fetched_at` (when the agent reported it); it does not start the agent. Before a first chat on the row's current sign-in or key it returns the built-in preset list (`source: "preset"`). A list captured on a stored Google sign-in holds only on the worker that captured it and only until that sign-in ends (sign-out, a new sign-in, or the row's removal); elsewhere, or after that, this call returns the preset until a chat on the current sign-in reports again. A list captured on a Gemini API key is shared by paired workers while the row keeps that key.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61-2d4f7b9e0c11/fetch-models \

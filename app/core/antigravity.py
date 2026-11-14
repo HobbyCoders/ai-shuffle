@@ -156,37 +156,109 @@ def offered_catalog(models: List[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def worker_scoped(row: Mapping[str, Any]) -> bool:
+    """A stored Google sign-in row: its model list holds only on the worker
+    that captured it, for that sign-in. The row has no key, so its catalog
+    binding is the same whichever account is signed in on whichever worker."""
+    return row.get("provider_type") == PROVIDER_TYPE and row.get("auth_mode") != agy_spec.GEMINI_API_KEY
+
+
+def _signin_tag_path(row_id: str) -> Path:
+    # The app's own file, outside the binary's home, like the signed-in marker.
+    return _root() / "catalog-scope" / re.sub(r"[^A-Za-z0-9_.-]", "_", str(row_id))
+
+
+def signin_tag(row_id: str, *, create: bool = False) -> Optional[str]:
+    """This worker's tag for the row's current sign-in, kept in a file so it
+    survives a restart; a new one after each sign-out, new sign-in, signed-out
+    answer or delete. Only its digest leaves the worker (in the catalog)."""
+    path = _signin_tag_path(row_id)
+    try:
+        nonce = path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        nonce = ""
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not nonce and create:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "x", encoding="ascii") as handle:
+                nonce = uuid.uuid4().hex
+                handle.write(nonce)
+        except FileExistsError:
+            return signin_tag(row_id)
+        except OSError:
+            return None
+    return hashlib.sha256(nonce.encode("ascii")).hexdigest()[:32] if nonce else None
+
+
+def _forget_signin_tag(row_id: str) -> None:
+    try:
+        _signin_tag_path(row_id).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("[antigravity] could not drop the catalog tag of %s", row_id, exc_info=True)
+
+
+def capture_binding(row: Mapping[str, Any]) -> Optional[Dict[str, Optional[str]]]:
+    """What a list from an agent started for ``row`` is saved under (blocking):
+    the row's catalog binding and, for a stored sign-in, this worker's
+    sign-in tag. Take it from the row the agent's spec is built from."""
+    from app.core import model_catalogs
+
+    bound = model_catalogs.binding(row)
+    if not bound:
+        return None
+    if not worker_scoped(row):
+        return {"binding": bound, "signin": None}
+    tag = signin_tag(str(row.get("id") or ""), create=True)
+    return {"binding": bound, "signin": tag} if tag else None
+
+
+def catalog_in_scope(row: Mapping[str, Any], snapshot: Mapping[str, Any]) -> bool:
+    """A stored sign-in row's catalog counts only with this worker's current
+    sign-in tag; any other row's needs nothing more than its binding."""
+    if not worker_scoped(row):
+        return True
+    tag = signin_tag(str(row.get("id") or ""))
+    return tag is not None and snapshot.get("signin") == tag
+
+
 def record_offered_models(row_id: str, models: List[Mapping[str, Any]],
-                          agent_version: Optional[str]) -> Optional[Dict[str, Any]]:
+                          agent_version: Optional[str],
+                          bound: Optional[Mapping[str, Optional[str]]]) -> Optional[Dict[str, Any]]:
     """Store the agent's model list as the row's model catalog (blocking).
 
+    ``bound`` is :func:`capture_binding` of the row the reporting agent was
+    started with, never a later read: a list is saved only while the row
+    still has that credential (and, for a sign-in, that sign-in here).
     ``fetch-models`` serves it from then on in place of :data:`DEFAULT_MODELS`;
     curation on the row is untouched (new models wait to be ticked).
     """
     from app.core import model_catalogs
-    from app.db import database as db
 
     entries = offered_catalog(models)
-    row = db.get_model_provider(row_id, include_token=True)
-    if not entries or not row or row.get("provider_type") != PROVIDER_TYPE:
+    if not entries or not bound or not bound.get("binding"):
         return None
     return model_catalogs.save_agent(row_id, entries, agent_version=agent_version,
-                                     expected_binding=model_catalogs.binding(row))
+                                     expected_binding=bound["binding"], signin=bound.get("signin"))
 
 
 _capture_tasks: "set[asyncio.Task[Any]]" = set()
 
 
-def capture_offered_models(row_id: str) -> Any:
+def capture_offered_models(row_id: str, bound: Any) -> Any:
     """An ``AcpLoop(on_models=...)`` callback that stores the list in the
     background: the engine calls it from its reader, which must not wait on
-    the database."""
+    the database. ``bound()`` returns :func:`capture_binding` for the agent
+    running now; it is read when the agent reports, not when the write runs."""
     def capture(models: List[Dict[str, Any]], agent_version: Optional[str]) -> None:
         from app.db.async_database import run_sync
 
+        reported_under = bound()
+
         async def run() -> None:
             try:
-                await run_sync(record_offered_models, row_id, models, agent_version)
+                await run_sync(record_offered_models, row_id, models, agent_version, reported_under)
             except Exception:  # noqa: BLE001 — bookkeeping never fails a turn
                 logger.warning("Could not store the models Google's agent offered for provider %s", row_id)
 
@@ -675,6 +747,8 @@ def _note_signin(row_id: str, state: str) -> None:
     if not row_id or state not in ("signed_in", "signed_out"):
         return  # not installed or an error says nothing about the sign-in
     marker = _signed_in_marker(row_id)
+    if state == "signed_out":
+        _forget_signin_tag(row_id)  # the model list was this sign-in's
     try:
         if state == "signed_in":
             marker.parent.mkdir(parents=True, exist_ok=True)
@@ -942,6 +1016,7 @@ async def complete_login(login: LoginSession, code: str, row: Mapping[str, Any])
             login.message += " This worker is still signed in with the earlier account."
     elif result.get("state") == "signed_in":
         login.state, login.message = "signed_in", None
+        _forget_signin_tag(login.row_id)  # a new sign-in: the old account's model list no longer holds
     else:
         login.state = "failed"
         login.message = ("Antigravity did not accept the sign-in. Start the sign-in again; "

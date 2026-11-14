@@ -619,6 +619,22 @@ def test_offered_models_read_levels_from_combined_ids_and_the_current_option() -
     assert only == [{"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen", "levels": ["low", "extra"]}]
 
 
+def test_the_current_models_level_option_wins_over_its_combined_ids() -> None:
+    """A later config_option_update may add or drop a level for the current model."""
+    combined = {"availableModels": [{"modelId": f"gemini-4-hydrogen-{lvl}"} for lvl in ("low", "high")]}
+    ids = ["gemini-4-hydrogen", "gemini-4-carbon"]
+    added = offered_models(_options("gemini-4-hydrogen", ["low", "high", "xhigh"], ids), combined)
+    assert added[0]["levels"] == ["low", "high", "xhigh"]
+    dropped = offered_models(_options("gemini-4-hydrogen", ["low"], ids), combined)
+    assert dropped[0]["levels"] == ["low"]
+    # The option is the current model's only: Carbon's levels stay unknown,
+    # and with Carbon current Hydrogen keeps its combined-id levels.
+    assert added[1]["levels"] is None
+    other = offered_models(_options("gemini-4-carbon", ["medium"], ids), combined)
+    assert {m["id"]: m["levels"] for m in other} == {"gemini-4-hydrogen": ["low", "high"],
+                                                     "gemini-4-carbon": ["medium"]}
+
+
 @pytest.mark.parametrize(("offered", "chosen"), [
     (["low", "medium", "high", "xhigh"], "xhigh"),
     (["low", "high", "extra"], "extra"),  # the agent's older word for the same step
@@ -651,6 +667,35 @@ async def test_session_start_reports_offered_models_and_xhigh_reaches_the_agent(
         models, version = reports[0]
         assert version == "1.5.6"
         assert {m["id"]: m["levels"] for m in models} == HYDROGEN
+    finally:
+        await d.close()
+
+
+async def test_every_agent_start_reports_once_even_with_the_same_list(tmp_path: Path) -> None:
+    """A new key on the same chat: the replacement agent's list is captured
+    again (the stored one was dropped with the old key). Within one agent's
+    lifetime an unchanged list is not reported twice."""
+    reports: list[list[dict[str, Any]]] = []
+    spec = _spec(tmp_path, auth_mode="gemini-api-key", api_key="test-key-old", catalog=HYDROGEN)
+    assert spec.env is not None
+    spec.env["FAKE_ACP_CONFIG_UPDATES"] = "1"  # the session's own config updates during start
+    d = Driver(AcpLoop(store=SerializingStore(), spec=spec, cwd=str(tmp_path), session_id="s-1",
+                       model="gemini-4-hydrogen", effort="xhigh",
+                       on_models=lambda models, version: reports.append(models)))
+    await d.start()
+    try:
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        assert len(reports) == 1  # session reply and its config updates: one report
+        await d.loop._on_notification("session/update", {"update": {
+            "sessionUpdate": "config_option_update", "configOptions": d.loop._config_options}})
+        assert len(reports) == 1
+        replacement = _spec(tmp_path, auth_mode="gemini-api-key", api_key="test-key-new", catalog=HYDROGEN)
+        assert replacement.env is not None
+        replacement.env["FAKE_ACP_CONFIG_UPDATES"] = "1"
+        await d.loop.replace_spec(replacement)
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert _received(tmp_path, "session/resume")
+        assert len(reports) == 2 and reports[1] == reports[0]
     finally:
         await d.close()
 

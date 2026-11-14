@@ -24,7 +24,9 @@ FAKE_ACP_MODES (comma-separated mode ids it offers; default
 "default,accept-edits,plan"), FAKE_ACP_REJECT_MODES (mode ids
 ``session/set_mode`` refuses with an RPC error), FAKE_ACP_CATALOG (JSON
 ``{model: [thought levels]}`` it offers, in place of 1.5.6's three models with
-low/high; a session keeps the model and level it was set to).
+low/high; a session keeps the model and level it was set to),
+FAKE_ACP_CONFIG_UPDATES=1 (also announce each config change as a
+``config_option_update`` before answering it).
 
 Other entry points, like the real binary's: ``acp --login`` prints a sign-in
 link and reads the code on stdin (code ``good`` signs in by writing a marker
@@ -206,6 +208,9 @@ class Agent:
             config[option["id"]] = params["value"]
             if option["id"] == "model" and config["thought_level"] not in catalog()[config["model"]]:
                 config["thought_level"] = catalog()[config["model"]][0]
+            if os.environ.get("FAKE_ACP_CONFIG_UPDATES") == "1":
+                await self.update(params.get("sessionId"), {"sessionUpdate": "config_option_update",
+                                                            "configOptions": config_options(config)})
             return {"configOptions": config_options(config)}
         if method == "session/set_mode":
             rejected = (os.environ.get("FAKE_ACP_REJECT_MODES") or "").split(",")
