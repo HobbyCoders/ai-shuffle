@@ -439,10 +439,19 @@ def test_an_unrunnable_default_reads_as_none(lane):
 # Validation and storage
 # ---------------------------------------------------------------------------
 
-def test_write_normalizes_and_validates(lane):
+def test_write_normalizes_and_validates(lane, monkeypatch):
+    from app.core import claude_auth_mode
+
+    # A subscription keeps a full Claude id; API-key and cloud fold it.
+    saved = subagent_default.write("claude-opus-4-6")
+    assert saved == subagent_default.SubagentDefault("claude-opus-4-6")
+    assert subagent_default.read() == saved
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_API_KEY)
     saved = subagent_default.write("claude-opus-4-6")
     assert saved == subagent_default.SubagentDefault("opus")
     assert subagent_default.read() == saved
+    with pytest.raises(ValueError):
+        subagent_default.write("claude-3-opus")  # not a Claude model the API leg offers
 
 
 def test_a_stored_allowed_list_from_before_1830_is_ignored(lane):
@@ -459,7 +468,6 @@ def test_a_stored_allowed_list_from_before_1830_is_ignored(lane):
     "prov:lane:unlisted",    # not curated on the provider
     "prov:missing:sol",      # no such provider
     "prov:lane",             # malformed composite
-    "claude-3-opus",         # not a Claude model the app offers
 ])
 def test_write_refuses_models_this_install_cannot_run(lane, model):
     subagent_default.write("sonnet")

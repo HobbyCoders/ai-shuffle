@@ -310,6 +310,12 @@ def check_prerequisites() -> None:
     cli = claude_cli_status.get_status(force=True)
     if cli.signed_in:
         logger.info("Claude Code CLI %s: signed in", cli.cli_version or "")
+        # The picker's model list: asked of the CLI without a prompt when none
+        # is saved yet or the CLI was updated. Off the startup path.
+        import threading
+        from app.core import claude_cli_models
+        threading.Thread(target=claude_cli_models.refresh_if_stale, args=(cli.cli_version,),
+                         name="claude-cli-models-startup", daemon=True).start()
     elif cli.installed:
         # Claude is one provider among several: not signed in is information.
         # Whether any agent can run is logged by the credential gate below.

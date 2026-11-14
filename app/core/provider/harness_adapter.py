@@ -759,6 +759,7 @@ class HarnessAdapter(ProviderAdapter):
             delegated_blocked = _delegated_disallowed(options, self._registry)
             _install_bridge_tool_filter(options)
             from app.core.usage_limits import claude_mod_usage_sink
+            from app.core import claude_cli_models
             from app.core import claude_compaction
 
             # Settings > Providers > Claude > Sessions, read on the executing
@@ -892,6 +893,9 @@ class HarnessAdapter(ProviderAdapter):
                 # the same Claude usage store the stream's rate_limit events
                 # feed (usage panel, peer publication, broadcast).
                 plan_usage_sink=claude_mod_usage_sink,
+                # The CLI's model list arrives in its initialize reply; keep
+                # it for the picker (subscription sign-ins only).
+                on_initialize=claude_cli_models.record_initialize,
                 # The turn's note (memory, Away mode, date and branch), put
                 # back after a CLI compaction: mid-turn, the CLI folds the
                 # user message that carried it into its summary.

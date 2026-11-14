@@ -650,6 +650,19 @@
 			]
 		},
 		{
+			"why": "a Claude subscription's models come from Claude Code: turning a version on in Settings and running a turn on exactly that version",
+			"journeys": ["claude-cli-models"],
+			"globs": [
+				"frontend/tests/journeys/claude-cli-models.journey.mjs",
+				"frontend/src/lib/components/settings/providers/tabs/ClaudeCliModels.svelte",
+				"frontend/src/lib/components/settings/providers/ClaudeSubDetail.svelte",
+				"frontend/src/lib/constants/models.svelte.ts",
+				"app/core/claude_cli_models.py",
+				"app/core/model_registry.py",
+				"app/api/model_registry.py"
+			]
+		},
+		{
 			"why": "Claude Code Fast mode: mid-turn toggle notices, reported turn speed, refusals and reload persistence",
 			"journeys": ["fast-midturn"],
 			"globs": [
