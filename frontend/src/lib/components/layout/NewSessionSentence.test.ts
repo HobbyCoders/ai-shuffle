@@ -90,7 +90,8 @@ vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect()
 import NewSessionSentence from './NewSessionSentence.svelte';
 import { openProjectPicker } from '$lib/services/project-picker';
 import { resetWorkerPresence } from '$lib/stores/worker-presence';
-import { caretOffset } from '$lib/services/caret';
+import TiptapEditor from '$lib/components/chat/TiptapEditor.svelte';
+import type { Editor } from '$lib/components/chat/tiptap/editorConfig';
 
 const install = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
 	id, device_name: name, base_url: `http://${id}`, platform: 'linux', version: '1', capabilities: {},
@@ -209,14 +210,46 @@ describe('NewSessionSentence', () => {
 	});
 
 	describe('Cmd/Ctrl+P', () => {
+		// The real message box: a TipTap editor, as ChatInput mounts it.
+		let composer: Editor;
 		let editor: HTMLElement;
-		beforeEach(() => {
-			editor = document.createElement('div');
-			editor.tabIndex = 0;
-			editor.setAttribute('data-message-editor', '');
-			document.body.append(editor);
-		});
-		afterEach(() => editor.remove());
+		let unmountComposer: () => void;
+		async function mountComposer(content?: object) {
+			const view = render(TiptapEditor, { props: {} });
+			await tick();
+			composer = view.component.getEditor()!;
+			if (content) composer.commands.setContent(content);
+			editor = composer.view.dom as HTMLElement;
+			unmountComposer = view.unmount;
+		}
+		const p = (...content: object[]) => ({ type: 'paragraph', ...(content.length ? { content } : {}) });
+		const t = (text: string) => ({ type: 'text', text });
+		const doc = (...content: object[]) => ({ type: 'doc', content });
+		/** Focus the message box with the caret at a document position. */
+		function caretAt(pos: number) {
+			composer.commands.setTextSelection(pos);
+			composer.view.focus();
+		}
+		const caret = () => ({ from: composer.state.selection.from, to: composer.state.selection.to });
+		const searchBox = () => screen.getByRole('textbox', { name: 'Search projects' });
+		/** Typing goes where the caret is: "X" after it. */
+		function type(text: string) {
+			composer.commands.insertContent(text);
+			return composer.getJSON();
+		}
+		async function noProjectScreen() {
+			session({ project: '', projectV2Id: null });
+			render(NewSessionSentence);
+			await tick();
+		}
+		async function openThenEscape() {
+			expect(openProjectPicker()).toBe(true);
+			await tick();
+			expect(document.activeElement).toBe(searchBox());
+			await fireEvent.keyDown(searchBox(), { key: 'Escape' });
+			expect(screen.queryByRole('textbox', { name: 'Search projects' })).toBeNull();
+		}
+		beforeEach(async () => { await mountComposer(); });
 
 		it('declines with no new-session row on screen, so the browser keeps the key', () => {
 			expect(openProjectPicker()).toBe(false);
@@ -231,86 +264,108 @@ describe('NewSessionSentence', () => {
 		});
 
 		it('opens the picker on "No project" from the editor, and Escape returns there', async () => {
-			session({ project: '', projectV2Id: null });
-			render(NewSessionSentence);
-			await tick();
-			editor.focus();
+			await noProjectScreen();
+			composer.view.focus();
 			expect(openProjectPicker()).toBe(true);
 			await tick();
-			const search = screen.getByRole('textbox', { name: 'Search projects' });
-			expect(document.activeElement).toBe(search);
+			expect(document.activeElement).toBe(searchBox());
 			expect(screen.getByRole('button', { name: /^No project\. Add a project/ }).getAttribute('aria-expanded')).toBe('true');
-			await fireEvent.keyDown(search, { key: 'Escape' });
+			await fireEvent.keyDown(searchBox(), { key: 'Escape' });
 			expect(screen.queryByRole('textbox', { name: 'Search projects' })).toBeNull();
 			expect(document.activeElement).toBe(editor);
 		});
 
 		it('picks with Enter and keeps the cursor in the editor', async () => {
-			session({ project: '', projectV2Id: null });
-			render(NewSessionSentence);
-			await tick();
-			editor.focus();
+			await noProjectScreen();
+			composer.view.focus();
 			openProjectPicker();
 			await tick();
-			await fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search projects' }), { key: 'Enter' });
+			await fireEvent.keyDown(searchBox(), { key: 'Enter' });
+			await tick();
 			expect(m.setProject).toHaveBeenCalledWith('p1', null, { user: true });
 			expect(document.activeElement).toBe(editor);
 		});
 
-		describe('back in a real message box', () => {
-			let box: HTMLElement;
-			beforeEach(() => {
-				box = document.createElement('div');
-				box.contentEditable = 'true';
-				box.setAttribute('contenteditable', 'true');
-				box.tabIndex = 0;
-				box.innerHTML = '<p>abc</p>';
-				editor.append(box);
-			});
-			const caretAt = (offset: number) => {
-				const range = document.createRange();
-				range.setStart(box.querySelector('p')!.firstChild!, offset);
-				range.collapse(true);
-				document.getSelection()!.removeAllRanges();
-				document.getSelection()!.addRange(range);
-			};
-			const caret = () => {
-				const sel = document.getSelection()!;
-				return { node: sel.anchorNode?.textContent, offset: sel.anchorOffset, inBox: box.contains(sel.anchorNode) };
-			};
+		describe('puts the caret back where it was', () => {
+			it('at the start of the second paragraph, after Escape and after a pick', async () => {
+				composer.commands.setContent(doc(p(t('ab')), p(t('cd'))));
+				await noProjectScreen();
+				// <p>ab</p><p>|cd</p>: position 5.
+				caretAt(5);
+				await openThenEscape();
+				expect(document.activeElement).toBe(editor);
+				expect(caret()).toEqual({ from: 5, to: 5 });
+				expect(type('X')).toEqual(doc(p(t('ab')), p(t('Xcd'))));
 
-			it('puts the caret back where it was after Escape and after a pick', async () => {
-				session({ project: '', projectV2Id: null });
-				render(NewSessionSentence);
-				await tick();
-				box.focus();
-				caretAt(1);
+				caretAt(6);
 				openProjectPicker();
 				await tick();
-				await fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search projects' }), { key: 'Escape' });
-				expect(document.activeElement).toBe(box);
-				expect(caret()).toEqual({ node: 'abc', offset: 1, inBox: true });
-
-				caretAt(2);
-				openProjectPicker();
-				await tick();
-				await fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search projects' }), { key: 'Enter' });
+				await fireEvent.keyDown(searchBox(), { key: 'Enter' });
 				await tick();
 				expect(m.setProject).toHaveBeenCalledWith('p1', null, { user: true });
-				expect(document.activeElement).toBe(box);
-				expect(caret()).toEqual({ node: 'abc', offset: 2, inBox: true });
+				expect(document.activeElement).toBe(editor);
+				expect(type('Y')).toEqual(doc(p(t('ab')), p(t('XYcd'))));
 			});
 
-			it('goes to the message box, caret at the end, when nothing had focus', async () => {
-				session({ project: '', projectV2Id: null });
-				render(NewSessionSentence);
+			it('in an empty last paragraph', async () => {
+				composer.commands.setContent(doc(p(t('ab')), p()));
+				await noProjectScreen();
+				caretAt(5);
+				await openThenEscape();
+				expect(type('X')).toEqual(doc(p(t('ab')), p(t('X'))));
+			});
+
+			it('after a hard break', async () => {
+				composer.commands.setContent(doc(p(t('ab'), { type: 'hardBreak' }, t('cd'))));
+				await noProjectScreen();
+				// <p>ab<br>|cd</p>: 1 + 2 + 1.
+				caretAt(4);
+				await openThenEscape();
+				expect(type('X')).toEqual(doc(p(t('ab'), { type: 'hardBreak' }, t('Xcd'))));
+			});
+
+			it('keeps a selection, not just a caret', async () => {
+				composer.commands.setContent(doc(p(t('abcd'))));
+				await noProjectScreen();
+				composer.commands.setTextSelection({ from: 2, to: 4 });
+				composer.view.focus();
+				await openThenEscape();
+				expect(caret()).toEqual({ from: 2, to: 4 });
+			});
+
+			it('in the message box rebuilt while the picker was open (the project changed)', async () => {
+				composer.commands.setContent(doc(p(t('ab')), p(t('cd'))));
+				await noProjectScreen();
+				caretAt(5);
+				expect(openProjectPicker()).toBe(true);
 				await tick();
-				(document.activeElement as HTMLElement | null)?.blur();
+				// The composer remounts with the same draft.
+				unmountComposer();
+				await mountComposer(doc(p(t('ab')), p(t('cd'))));
+				await fireEvent.keyDown(searchBox(), { key: 'Escape' });
+				expect(document.activeElement).toBe(editor);
+				expect(type('X')).toEqual(doc(p(t('ab')), p(t('Xcd'))));
+			});
+
+			it('at the end when the rebuilt draft is shorter than the saved place', async () => {
+				composer.commands.setContent(doc(p(t('abcdef'))));
+				await noProjectScreen();
+				caretAt(6);
 				openProjectPicker();
 				await tick();
-				await fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search projects' }), { key: 'Escape' });
-				expect(document.activeElement).toBe(box);
-				expect(caretOffset(box)).toBe(3);
+				unmountComposer();
+				await mountComposer(doc(p(t('ab'))));
+				await fireEvent.keyDown(searchBox(), { key: 'Escape' });
+				expect(type('X')).toEqual(doc(p(t('abX'))));
+			});
+
+			it('at the end of the message box when nothing had focus', async () => {
+				composer.commands.setContent(doc(p(t('ab')), p(t('cd'))));
+				await noProjectScreen();
+				(document.activeElement as HTMLElement | null)?.blur();
+				await openThenEscape();
+				expect(document.activeElement).toBe(editor);
+				expect(type('X')).toEqual(doc(p(t('ab')), p(t('cdX'))));
 			});
 		});
 
@@ -318,12 +373,13 @@ describe('NewSessionSentence', () => {
 			render(NewSessionSentence);
 			const word = await screen.findByRole('button', { name: /^Workspace folders: ai-shuffle$/ });
 			expect(word.getAttribute('aria-keyshortcuts')).toMatch(/^(Control|Meta)\+P$/);
-			editor.focus();
+			composer.view.focus();
 			expect(openProjectPicker()).toBe(true);
 			await tick();
 			const picker = screen.getByRole('dialog', { name: 'Switch project' });
 			await fireEvent.click(within(picker).getByRole('button', { name: 'No project' }));
 			expect(m.clearProject).toHaveBeenCalledWith({ user: true });
+			await tick();
 			expect(document.activeElement).toBe(editor);
 		});
 

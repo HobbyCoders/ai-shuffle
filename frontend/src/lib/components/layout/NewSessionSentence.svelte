@@ -23,7 +23,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { caretOffset, placeCaret } from '$lib/services/caret';
+	import { composerReturn } from '$lib/components/chat/composer-editors';
 	import { provideProjectPicker } from '$lib/services/project-picker';
 	import { clusterProjects, projects } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
@@ -82,30 +82,9 @@
 		setTimeout(() => openPicker(trigger));
 	}
 
-	/** The message box on this screen (the one on show, if a hidden copy is mounted). */
-	function composerEditor(): HTMLElement | null {
-		const editors = document.querySelectorAll<HTMLElement>('[data-message-editor] [contenteditable="true"]');
-		return [...editors].find(el => typeof el.checkVisibility !== 'function' || el.checkVisibility()) ?? null;
-	}
-
-	/**
-	 * After a pick or Escape, back to the message box with the caret where it
-	 * was (at the end when focus was elsewhere). Found again by then if the
-	 * pick re-rendered it.
-	 */
-	function backToComposer(): () => void {
-		const focused = document.activeElement;
-		const editor = focused instanceof HTMLElement && focused.closest('[data-message-editor]') ? focused : null;
-		const offset = editor ? caretOffset(editor) : null;
-		return () => {
-			const target = editor?.isConnected ? editor : composerEditor();
-			if (!target) return;
-			target.focus({ preventScroll: true });
-			placeCaret(target, offset);
-		};
-	}
-
-	onMount(() => provideProjectPicker(() => openPicker(backToComposer())));
+	// After a pick or Escape, back to the message box with the caret (the
+	// editor's own selection) where it was, or at the end of the one on screen.
+	onMount(() => provideProjectPicker(() => openPicker(composerReturn())));
 </script>
 
 <section class="ns-context" aria-label="New chat" bind:this={row}>
