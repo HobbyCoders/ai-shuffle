@@ -2110,7 +2110,9 @@ def _own_replay_wins(cursor, ctx: NetworkContext, coll: policy.Collection, env: 
                                     int(existing["clock"]), existing["origin_device_id"]) > 0
     held = store.own_version_incarnation(cursor, ctx.device_id, env.collection, env.record_id,
                                          int(existing["clock"]))
-    # Compacted out of the log: a version older than the backup, so the clock decides.
+    # Compacted out of the log (in practice a version from before the backup):
+    # the clock decides, as it did before #1568. The restore already moved the
+    # clock past the versions it saw signed after the backup (#1506).
     held = env.origin_incarnation if held is None else held
     return (env.origin_incarnation, env.clock) > (held, int(existing["clock"]))
 

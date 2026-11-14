@@ -215,7 +215,11 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   fields (permission mode and ceiling, account label) too; no other copy can.
   Only the unbroken part of an old stream is sent: past an op already
   compacted out of the log the replay stops, and no state copy stands in for
-  it (a copy carries no transcripts of the chats the device runs). Until the first
+  it: a copy is the serving peer's unsigned claim, and a device takes its own
+  chats' turns and owner-only fields only from ops it signed itself. Retention
+  compacts transcript ops about an hour after every member has them (daily pass,
+  [sync log retention](../internal/sync-log-retention.md)), so a restore made
+  after that pass gets back only what comes before the first compacted op. Until the first
   comparison with a peer after start, the outbox is held so a restored worker
   never reuses sequence numbers peers already hold.
 - **Snapshots carry only signed deletions.** A snapshot page lists a record as
