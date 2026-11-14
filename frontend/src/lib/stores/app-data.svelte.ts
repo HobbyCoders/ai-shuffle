@@ -504,6 +504,9 @@ function commitSessions(rows: Session[], meta: SessionsPageMeta): void {
 		sessionsCursor: meta.cursor,
 		sessionsCursorId: meta.cursorId,
 	}));
+	// A session's effort changed through another worker arrives only as this
+	// reloaded row, so the open chat and its cached copy follow it (#1579).
+	if (rowsChanged) activeSession.noteSessionRows(rows);
 }
 
 // ─── Internal Data Loading ───────────────────────────────────────────────────

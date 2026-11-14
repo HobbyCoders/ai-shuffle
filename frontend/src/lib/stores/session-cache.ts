@@ -93,6 +93,13 @@ class SessionEphemeralCache {
 		if (entry) entry.draft = draft;
 	}
 
+	/** Update just the effort pick of an already-cached session, in place, so a
+	 *  switch back restores the session's current pick (#1579). No-op if absent. */
+	patchEffort(sessionId: string, effort: string | null): void {
+		const entry = this.cache.get(sessionId);
+		if (entry) entry.effortLevelOverride = effort;
+	}
+
 	/**
 	 * Move a cached entry still on project `projectId` under the retired shared
 	 * ID `from` to `to`, in place; the draft and checkout stay. No-op otherwise.

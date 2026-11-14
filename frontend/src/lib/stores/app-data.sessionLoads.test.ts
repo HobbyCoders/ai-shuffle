@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
 	renameSession: vi.fn(),
 	setSessionActive: vi.fn(),
 	setSessionArchived: vi.fn(),
+	noteSessionRows: vi.fn(),
 }));
 
 vi.mock('$lib/api/client', () => ({
@@ -39,6 +40,7 @@ vi.mock('./active-session', () => ({
 		newChat: vi.fn(),
 		validateSelectedProfile: vi.fn(),
 		snapshotPrompts: vi.fn(() => null),
+		noteSessionRows: mocks.noteSessionRows,
 	},
 }));
 
@@ -104,6 +106,30 @@ beforeEach(() => {
 		return { id, title };
 	});
 	mocks.delete.mockResolvedValue(undefined);
+});
+
+describe('reloaded rows reach the open chat (#1579)', () => {
+	it('hands a changed committed list to the active session, and skips an unchanged one', async () => {
+		// The first load of this module commits a list, then a viewer on another
+		// worker hears of an effort change only as a reload with the new row.
+		await appData.loadSessions(null);
+		mocks.noteSessionRows.mockClear();
+		await appData.loadSessions(null);
+		expect(mocks.noteSessionRows).not.toHaveBeenCalled();
+
+		const base = mocks.get.getMockImplementation()!;
+		mocks.get.mockImplementation(async (url: string) => {
+			const result = await base(url);
+			if (url.startsWith('/sessions/cursor') && !url.includes('membership=active') && result?.items) {
+				result.items = result.items.map((r: Row) => (r.id === 's1' ? { ...r, effort: null } : r));
+			}
+			return result;
+		});
+		await appData.loadSessions(null);
+		expect(mocks.noteSessionRows).toHaveBeenCalledTimes(1);
+		const rows = mocks.noteSessionRows.mock.calls[0][0] as Array<{ id: string; effort?: string | null }>;
+		expect(rows.find(r => r.id === 's1')).toMatchObject({ effort: null });
+	});
 });
 
 describe('capped initial load (W1)', () => {
