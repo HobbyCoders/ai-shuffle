@@ -74,7 +74,6 @@
 	import './phone/phone-composer.css';
 	import { platform } from '$lib/stores/platform.svelte';
 	import Banner from '$lib/components/Banner.svelte';
-	import { detectProjectMismatch } from './project-mismatch';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import { notesGoAsReferences } from './runs-elsewhere';
@@ -801,16 +800,6 @@
 
 	// Error display — shared between file upload errors and voice recording errors
 	let errorMessage = $state('');
-
-	// Wrong-project nudge: a new chat's draft names another registered project
-	// (and not the selected one). Offer a one-click switch before sending.
-	let dismissedMismatch = $state<string | null>(null);
-	// Without a project the nudge offers to add the one the draft names.
-	const projectMismatch = $derived(
-		!$activeSession.sessionId && plainTextValue.length >= 8
-			? detectProjectMismatch(plainTextValue, appData.current.projects, $activeSession.project)
-			: null
-	);
 
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
@@ -1940,18 +1929,6 @@
 			multiple
 			accept="*/*"
 		/>
-
-		{#if projectMismatch && dismissedMismatch !== projectMismatch.id}
-			<Banner
-				severity="info"
-				message={$activeSession.project
-					? `This looks like it's about ${projectMismatch.name}. Start it there instead?`
-					: `This looks like it's about ${projectMismatch.name}. Add it as this session's project?`}
-				action={{ label: $activeSession.project ? `Switch to ${projectMismatch.name}` : `Add ${projectMismatch.name} as project`, onClick: () => activeSession.setProject(projectMismatch.id, undefined, { user: true }) }}
-				dismissible
-				onDismiss={() => (dismissedMismatch = projectMismatch?.id ?? null)}
-			/>
-		{/if}
 
 		<!-- Error Message (upload errors, voice recording errors) -->
 		{#if errorMessage}
