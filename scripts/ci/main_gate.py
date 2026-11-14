@@ -437,13 +437,34 @@ def evidence_of(plan, jobs):
     return evidence
 
 
-def passes(plan, jobs, lookup):
-    """{area: record name} for the areas of scripts/ci/plan.py that passed in this run.
+def passed(plan, jobs, area):
+    """True when an area of scripts/ci/plan.py passed in these judged jobs.
 
     An area counts on its own, whatever another area did: every job its
     workflow defines is listed and finished, none failed, at least one ran,
-    and its own verdict job's rules hold. An area the plan skipped ran nothing
-    and is not recorded again.
+    and its own verdict job's rules hold. scripts/ci/plan.py applies the same
+    rule to the run behind a record before it skips the area.
+    """
+    caller = ci_plan.AREAS[area]["jobs"][0]
+    try:
+        if not complete(plan, jobs, caller) or not ci_plan.area_passed(area, jobs):
+            return False
+        if caller == "javascript":
+            needs, _ = inner_needs(plan, jobs, caller)
+            return all(needs.get(name, {}).get("result") == "success"
+                       for name in plan.called[caller][CALLER_GATED[caller]]["needs"]
+                       if name not in ("journey-plan", "journeys"))
+        if caller in CALLER_GATED:
+            check_inner(plan, jobs, caller, False)
+    except (ValueError, KeyError):
+        return False
+    return True
+
+
+def passes(plan, jobs, lookup):
+    """{area: record name} for the areas of scripts/ci/plan.py that passed in this run.
+
+    An area the plan skipped ran nothing and is not recorded again.
     """
     jobs = judged(plan, jobs)
     outputs = lookup.get("outputs") or {}
@@ -452,25 +473,10 @@ def passes(plan, jobs, lookup):
     except ValueError:
         return {}
     found = {}
-    for area, rule in ci_plan.AREAS.items():
+    for area in ci_plan.AREAS:
         record = records.get(area) if isinstance(records, dict) else None
-        if not isinstance(record, str) or not record or outputs.get(area) == "true":
-            continue
-        caller = rule["jobs"][0]
-        try:
-            if not complete(plan, jobs, caller) or not ci_plan.area_passed(area, jobs):
-                continue
-            if caller == "javascript":
-                needs, _ = inner_needs(plan, jobs, caller)
-                if any(needs.get(name, {}).get("result") != "success"
-                       for name in plan.called[caller][CALLER_GATED[caller]]["needs"]
-                       if name not in ("journey-plan", "journeys")):
-                    continue
-            elif caller in CALLER_GATED:
-                check_inner(plan, jobs, caller, False)
-        except (ValueError, KeyError):
-            continue
-        found[area] = record
+        if isinstance(record, str) and record and outputs.get(area) != "true" and passed(plan, jobs, area):
+            found[area] = record
     return found
 
 

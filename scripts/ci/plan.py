@@ -14,7 +14,9 @@ only when GitHub's own data agrees:
 - the run is ``ci.yml`` of this repository, never a fork's;
 - the commit GitHub says the run took its workflows from holds the same files
   for this area, hashed again here from GitHub's copy of that commit;
-- the area's jobs in that run finished and none failed.
+- every job the area's workflow defines is listed for that run, finished, and
+  none failed: the rule the ``CI`` job applied before it wrote the record
+  (``main_gate.passed``), applied again to the run as it is now.
 
 Every area's files include ``ci.yml``, this script, the gate and the area's
 own workflow, so a record can only stand for the same checks. Any doubt or
@@ -46,6 +48,10 @@ COMMON = (WORKFLOW, "scripts/ci/plan.py", "scripts/ci/main_gate.py", "scripts/ci
 PYTHON_PINS = ("requirements.txt", "requirements.lock", "requirements-dev.txt", "requirements-native.txt",
                "requirements-native.lock", "requirements-voice.txt", "requirements-voice.lock",
                "requirements-build.txt")
+# Test helpers the app's conftest files load for any test (tests/conftest.py).
+TEST_HARNESS = ("conftest.py", "pytest.ini", "tests/__init__.py", "tests/conftest.py",
+                "tests/_admission_cleanup.py", "tests/_directory_fixtures.py", "tests/_xdist_gate.py",
+                "tests/pg_shim.py", "tests/settings_guard.py", "tests/shared_fixtures.py")
 # Prose, and the UI's own source: the JavaScript checks build and test that.
 PROSE = ("docs/", "README.md", "SUPPORT.md", "SECURITY.md", "TRADEMARKS.md", "LOCAL_SETUP.md")
 WEB_UI_SOURCE = ("frontend/src/", "frontend/tests/")
@@ -77,17 +83,19 @@ AREAS = {
     },
     "fluid": {
         "jobs": ("fluid",),
-        # Its tests run and load the repository's scripts.
-        "include": ("fluid/", "scripts/", ".github/workflows/ci-fluid.yml"),
+        # Its tests run and load the repository's scripts, and through
+        # scripts/ci/test_scratch.py the app's scratch-folder module.
+        "include": ("fluid/", "scripts/", "conftest.py", "app/__init__.py", "app/core/__init__.py",
+                    "app/core/temp_scratch.py", ".github/workflows/ci-fluid.yml"),
     },
     "windows": {"jobs": ("windows",), **DESKTOP},
     "desktop": {"jobs": ("desktop",), **DESKTOP},
     "desktop-source": {"jobs": ("desktop-source",), **DESKTOP},
     "browser-workspace": {
         "jobs": ("browser-workspace",),
-        "include": ("browser-mcp/", "frontend/", "app/", "fluid/", "desktop/", *PYTHON_PINS,
-                    "conftest.py", "pytest.ini", "tests/conftest.py",
-                    "tests/test_browser_workspace_integration.py", "scripts/ci/bounded_apt.py",
+        # app/ imports modules of docker/ and scripts/.
+        "include": ("browser-mcp/", "frontend/", "app/", "fluid/", "desktop/", "docker/", "scripts/",
+                    *PYTHON_PINS, *TEST_HARNESS, "tests/test_browser_workspace_integration.py",
                     ".github/workflows/ci-browser-workspace.yml"),
     },
     # Everything the image is built from and started with. The UI's own source
@@ -95,13 +103,16 @@ AREAS = {
     # change to how the UI is built.
     "container": {
         "jobs": ("container",),
+        # Of the excluded folders its checks read the image's update key and
+        # notices, the buyer's install files and the UI smoke script.
         "include": ("", ".github/workflows/container-postgres.yml", "desktop/build/application-update-key.pem",
-                    "THIRD_PARTY_NOTICES.md"),
+                    "THIRD_PARTY_NOTICES.md", "docs/install/compose/", "tests/integration/container_ui_smoke.mjs"),
         "exclude": (*PROSE, *UI_SOURCE, ".github/", "tests/", "android/", "ios/", "desktop/", "fluid/tests/"),
     },
     "identity": {
         "jobs": ("identity",),
-        "include": ("app/", "fluid/", "tests/", "conftest.py", "pytest.ini", *PYTHON_PINS,
+        # app/ imports modules of docker/ and scripts/.
+        "include": ("app/", "fluid/", "tests/", "docker/", "scripts/", "conftest.py", "pytest.ini", *PYTHON_PINS,
                     ".github/workflows/ci-instance-identity.yml"),
     },
     # The app shell, the phone UI it packages as its offline demo and the build
@@ -115,7 +126,9 @@ AREAS = {
         "jobs": ("android",),
         # android.yml lets this emulator fail (`continue-on-error`) until it is reliable.
         "advisory": ("android / Android emulator verification (API 36)",),
-        "include": ("android/", "mobile/", "frontend/", ".github/workflows/android.yml"),
+        # android/ci/test-ci-webview.py reads both Android workflows.
+        "include": ("android/", "mobile/", "frontend/", ".github/workflows/android.yml",
+                    ".github/workflows/ci-android-minified.yml"),
         "exclude": WEB_UI_SOURCE,
     },
     "android-minified": {
@@ -247,7 +260,11 @@ def tested_commit(run: dict, repository: str) -> str | None:
 
 
 def area_passed(area: str, jobs) -> bool:
-    """True when every job of the area finished without a failure and at least one ran."""
+    """True when every listed job of the area finished without a failure and at least one ran.
+
+    Not enough on its own: a job that waits on another is not listed until
+    that one finishes. ``main_gate.passed`` adds that every job is listed.
+    """
     rule = AREAS[area]
     mine = [job for job in jobs or [] if isinstance(job, dict)
             and any(str(job.get("name", "")).startswith(key + " / ") for key in rule["jobs"])
@@ -276,23 +293,39 @@ def proven(area: str, key: str, lookup: Lookup) -> str | None:
         entries = lookup.entries(commit) if commit else None
         if entries is None or key_of(area, entries) != key:
             continue
-        if area_passed(area, lookup.jobs(origin["id"])):
+        if run_passed(area, lookup.jobs(origin["id"])):
             return str(run.get("html_url") or origin["id"])
     return None
 
 
+def run_passed(area: str, jobs) -> bool:
+    """The rule the ``CI`` job records a pass by, applied to another run's jobs.
+
+    The record's files include ci.yml and the area's workflow, so the jobs this
+    checkout defines for the area are the jobs that run had to list.
+    """
+    if not jobs:
+        return False
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
+    from ci import main_gate  # here, not at the top: main_gate imports this module
+
+    gate = main_gate.Plan()
+    return main_gate.passed(gate, main_gate.judged(gate, jobs), area)
+
+
 def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dict[str, dict]:
-    """{area: {key, record, proven, by}}. Any doubt or error means not proven: run it."""
+    """{area: {key, record, proven, by, error}}. Any doubt or error means not proven: run it."""
     names = list(areas or AREAS)
     try:
         entries = local_entries(root)
     except Exception as error:  # noqa: BLE001 - without keys nothing can be skipped or recorded
         print(f"[plan] could not read the commit's files, running everything: {error}", file=sys.stderr)
-        return {area: {"key": "", "record": "", "proven": False, "by": ""} for area in names}
+        return {area: {"key": "", "record": "", "proven": False, "by": "", "error": str(error)} for area in names}
     found = {}
     for area in names:
         key = key_of(area, entries)
-        found[area] = {"key": key, "record": record_name(area, key), "proven": False, "by": ""}
+        found[area] = {"key": key, "record": record_name(area, key), "proven": False, "by": "", "error": ""}
     repository = environ.get("GITHUB_REPOSITORY", "")
     token = environ.get("GH_TOKEN") or environ.get("GITHUB_TOKEN") or ""
     # The scheduled run proves everything again, so a file an area reads
@@ -306,6 +339,7 @@ def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dic
             by = proven(area, found[area]["key"], lookup)
         except Exception as error:  # noqa: BLE001 - a lookup must never fail the run
             print(f"[plan] lookup for {area} failed, it runs: {error}", file=sys.stderr)
+            found[area]["error"] = str(error) or type(error).__name__
             continue
         if by:
             found[area].update(proven=True, by=by)
@@ -336,6 +370,11 @@ def main(argv=None) -> int:
         print(f"{area}={'true' if state['proven'] else 'false'}")
         if state["proven"]:
             lines.append(f"| `{area}` | skipped | its files are unchanged since it passed in {state['by']} |")
+        elif state["error"]:
+            # Named apart, so a lookup that breaks does not pass for "nothing recorded" run after run.
+            lines.append(f"| `{area}` | runs | the lookup failed: {state['error']} |")
+            print(f"::warning title=Pass records::The lookup for {area} failed, so it runs: {state['error']}",
+                  file=sys.stderr)
         else:
             lines.append(f"| `{area}` | runs | no pass is recorded for these files |")
     print("records=" + json.dumps({area: state["record"] for area, state in found.items() if state["record"]},

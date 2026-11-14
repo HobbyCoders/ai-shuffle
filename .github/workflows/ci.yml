@@ -73,11 +73,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The lookup reads the workflow files to know every job a recorded run had to list.
+      - run: python -m pip install PyYAML==6.0.3
       - name: Compare each area's files with its recorded passes
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"
+        run: python scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"
 
   backend:
     needs: [plan]

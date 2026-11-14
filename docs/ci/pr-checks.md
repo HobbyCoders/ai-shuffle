@@ -121,11 +121,11 @@ request, or main after the merge) finds the record and skips the area.
 | --- | --- |
 | `backend` | anything: its tests read sources all over the repository |
 | `javascript-checks` (every `ci-frontend.yml` job but the journeys) | `frontend/`, `mobile/`, `tools/`, `browser-mcp/`, the docs content, and the backend files those tests read (transcript views, the API contract, the connector catalog, shared fixtures) |
-| `fluid` | `fluid/`, `scripts/` |
+| `fluid` | `fluid/`, `scripts/`, and the app's scratch-folder module its test setup loads |
 | `windows`, `desktop`, `desktop-source` | anything but prose, the UI's own source (`frontend/src/`, `frontend/tests/`, `mobile/src/`), `ios/` and `android/` (except `android/ci/`) |
-| `browser-workspace` | `browser-mcp/`, `frontend/`, `app/`, `fluid/`, `desktop/`, the Python pins |
-| `container` | what the image is built from and started with: not prose, the UI's own source, tests, other workflows, `android/`, `ios/` or `desktop/` |
-| `identity` | `app/`, `fluid/`, `tests/`, the Python pins |
+| `browser-workspace` | `browser-mcp/`, `frontend/`, `app/`, `fluid/`, `desktop/`, `docker/`, `scripts/`, the Python pins, its one test and the helpers every test loads |
+| `container` | what the image is built from and started with: not prose, the UI's own source, tests, other workflows, `android/`, `ios/` or `desktop/`. Of those it still reads the buyer's install files (`docs/install/compose/`) and its UI smoke script |
+| `identity` | `app/`, `fluid/`, `tests/`, `docker/`, `scripts/`, the Python pins |
 | `android`, `android-minified` | `android/`, `mobile/`, and `frontend/` except the web UI's own source (`frontend/src/`, `frontend/tests/`) |
 
 Every area also reads its own workflow file and the four files that decide and
@@ -139,11 +139,18 @@ and which earlier run proved it.
   can upload an artifact. A record counts only when all of this holds: it is
   live; its run is `ci.yml` of this repository (never a fork's); the commit
   GitHub itself says that run took its workflows from, read again from GitHub,
-  gives the same key for the area; and the area's jobs in that run all finished
-  and none failed. Records expire after 7 days. A failed lookup, a missing
-  token or any error answers "not proven": the area runs. If the `plan` job
-  itself fails, every area runs and the run can still pass. Losing a record
-  only loses the shortcut, so the record steps never fail a run.
+  gives the same key for the area; and every job the area's workflow defines
+  is listed for that run, finished, and none failed. That last check is the
+  rule the `CI` job applied before it wrote the record (`passed` in
+  `scripts/ci/main_gate.py`), applied again to the run as it is now: a job
+  that waits on another is not listed until that one finishes, so a run that
+  shows only an area's first, passed jobs proves nothing. Records expire after
+  7 days. A failed lookup, a missing token or any error answers "not proven":
+  the area runs, and the `plan` job's summary and a warning say the lookup
+  failed, so a broken lookup cannot pass for "nothing recorded" run after run.
+  If the `plan` job itself fails, every area runs and the run can still pass.
+  Losing a record only loses the shortcut, so the record steps never fail a
+  run.
 - The `CI` job accepts a skipped area only when the `plan` job answered `true`
   for it. Missing, failed, cancelled or unproven skipped jobs fail closed.
 - Dependency audits depend on advisory lists, which change without any file
@@ -159,11 +166,14 @@ and which earlier run proved it.
 The file lists are what makes a skip safe, and they have limits:
 
 - A check that reads a file its area does not list could be skipped on a pass
-  older than a change to that file. The lists are broad on purpose,
-  `tests/scripts/test_ci_plan.py` fails when a workflow step names a path
-  outside its area's list, and the daily run checks everything on main within
-  a day. When a test starts reading another part of the repository, add that
-  part to its area in `scripts/ci/plan.py`.
+  older than a change to that file. The lists are broad on purpose, and
+  `tests/scripts/test_ci_plan.py` fails when a path is outside its area's list
+  that a workflow step names, that a Python file named there imports (however
+  deep, test helpers and pytest plugins included), or that such a script
+  spells out itself. It cannot see a path a program builds at run time or a
+  file read by JavaScript or a shell script; the daily run checks everything
+  on main within a day. When a test starts reading another part of the
+  repository, add that part to its area in `scripts/ci/plan.py`.
 - Android does not run for the web UI's own source, although the phone UI
   imports it (`$lib` is `frontend/src/lib`) and the APK bundles the phone UI as
   its offline demo. That source changes in most pull requests; the JavaScript

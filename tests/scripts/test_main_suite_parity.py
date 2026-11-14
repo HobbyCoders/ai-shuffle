@@ -147,7 +147,10 @@ def test_a_run_skips_only_the_areas_whose_files_already_passed():
                                  "records": "${{ steps.plan.outputs.records }}"}
     step = lookup["steps"][-1]
     assert step["id"] == "plan"
-    assert step["run"] == 'python3 scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"'
+    assert step["run"] == 'python scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"'
+    # The lookup applies the gate's rule to a recorded run, and the gate reads the workflow files.
+    assert [item.get("run") for item in lookup["steps"][-2:]] == [
+        "python -m pip install PyYAML==6.0.3", step["run"]]
     # The JavaScript workflow always runs: it decides the journeys itself.
     javascript = jobs["javascript"]
     assert javascript["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "read"}
