@@ -57,7 +57,7 @@ router.include_router(provider_balances.router)
 router.include_router(openrouter_billing.router)
 router.include_router(catalog_api.router)
 
-from app.core import gemini_provider, native_providers
+from app.core import gemini_provider, native_providers, provider_capability
 
 _VALID_PROVIDER_TYPES = ("openrouter", "custom", "openai", "chatgpt", "xai", "grok", *native_providers.PROVIDERS,
                          gemini_provider.PROVIDER)
@@ -141,6 +141,9 @@ class ModelProviderResponse(BaseModel):
     # Antigravity Google sign-in rows only: whether Google's agent last said
     # this worker is signed in (null on every other row). Never the sign-in.
     antigravity_signed_in: Optional[bool] = None
+    # Capability-gated rows only (#1519): network members that cannot run
+    # this row yet (they report no support for it in signed presence).
+    workers_requiring_update: List[str] = []
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     revision: Optional[str] = None
@@ -980,6 +983,13 @@ async def list_providers(token: str = Depends(require_admin)):
     """List all model providers (public/masked view — no tokens)."""
     rows = await run_sync(db.get_all_model_providers, include_token=True)
     providers = [_public_provider(_apply_token_flags(row)) for row in rows]
+    try:
+        lacking = await run_sync(provider_capability.workers_requiring_update_for_rows, rows)
+    except Exception:  # noqa: BLE001 — the list still loads; selection re-checks live
+        logger.warning("Could not check which workers can run each provider", exc_info=True)
+        lacking = {}
+    for provider in providers:
+        provider.workers_requiring_update = lacking.get(provider.id, [])
     return ModelProviderListResponse(providers=providers)
 
 

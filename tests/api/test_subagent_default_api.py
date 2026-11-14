@@ -1,4 +1,4 @@
-"""``GET/PUT /api/v1/settings/subagent-default`` (#1827, #1830) and agent ``avatar_color``."""
+"""``GET/PUT /api/v1/settings/subagent-default`` (#1827, #1830) and the retired agent ``avatar_color``."""
 import pytest
 
 from app.db import database as db
@@ -67,56 +67,43 @@ class TestSubagentDefaultApi:
         assert is_shared_setting_key(SETTING_KEY)
 
 
-class TestAgentAvatarColor:
-    def test_create_read_update_and_clear(self, authenticated_client, mock_db):
+class TestRetiredAgentAvatarColor:
+    """The avatar feature was removed. Older clients may still send a colour:
+    it is accepted, ignored and never returned."""
+
+    @pytest.mark.parametrize("color", ["emerald", None, "red", "#ff0000", 3])
+    def test_create_and_update_accept_and_ignore_a_colour(self, authenticated_client, mock_db, color):
         resp = authenticated_client.post("/api/v1/agents", json={
-            "name": "Painter", "config": {}, "avatar_color": "emerald"})
+            "name": "Painter", "config": {}, "avatar_color": color})
         assert resp.status_code == 201, resp.text
         agent_id = resp.json()["id"]
-        assert resp.json()["avatar_color"] == "emerald"
-        assert authenticated_client.get(f"/api/v1/agents/{agent_id}").json()["avatar_color"] == "emerald"
+        assert "avatar_color" not in resp.json()
+        resp = authenticated_client.put(f"/api/v1/agents/{agent_id}", json={"name": "Painter 2", "avatar_color": color})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["name"] == "Painter 2" and "avatar_color" not in resp.json()
+        assert "avatar_color" not in authenticated_client.get(f"/api/v1/agents/{agent_id}").json()
+        assert db.get_profile(agent_id)["avatar_color"] is None
 
-        # Omitted keeps it; a name-only update does not clear the colour.
-        body = authenticated_client.put(f"/api/v1/agents/{agent_id}", json={"name": "Painter 2"}).json()
-        assert body["avatar_color"] == "emerald"
-        body = authenticated_client.put(f"/api/v1/agents/{agent_id}", json={"avatar_color": "rose"}).json()
-        assert body["avatar_color"] == "rose"
-        body = authenticated_client.put(f"/api/v1/agents/{agent_id}", json={"avatar_color": None}).json()
-        assert body["avatar_color"] is None
+    def test_a_stored_colour_is_kept_but_never_shown(self, authenticated_client, mock_db):
+        from app.db.base import get_db
 
-    @pytest.mark.parametrize("color", ["red", "#ff0000", "Emerald", 3])
-    def test_unknown_colours_are_refused(self, authenticated_client, mock_db, color):
-        resp = authenticated_client.post("/api/v1/agents", json={
-            "name": "Bad", "config": {}, "avatar_color": color})
-        assert resp.status_code == 422
-        db.create_profile("ok", "Ok", None, {})
-        resp = authenticated_client.put("/api/v1/agents/ok", json={"avatar_color": color})
-        assert resp.status_code == 422
+        db.create_profile("peer", "Peer", None, {})
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE agents SET avatar_color='blue' WHERE id='peer'")
+        assert "avatar_color" not in authenticated_client.get("/api/v1/agents/peer").json()
+        authenticated_client.put("/api/v1/agents/peer", json={"name": "Peer 2"})
+        assert db.get_profile("peer")["avatar_color"] == "blue"
 
-    def test_allowed_colours_match_the_frontend_accent_tokens(self):
-        """Every allowed name is a colour token app.css defines for both themes."""
-        from pathlib import Path
-
-        from app.core.models import AGENT_AVATAR_COLORS
-
-        css = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "app.css").read_text(
-            encoding="utf-8")
-        for name in AGENT_AVATAR_COLORS:
-            assert css.count(f"--{name}:") >= 2, name
-
-    def test_an_unknown_stored_colour_reads_as_null(self, authenticated_client, mock_db):
-        db.create_profile("peer", "Peer", None, {}, avatar_color="ultraviolet")
-        assert authenticated_client.get("/api/v1/agents/peer").json()["avatar_color"] is None
-
-    def test_the_colour_syncs_with_the_agent_row(self):
+    def test_the_retired_column_still_travels_with_the_agent_row(self):
+        # Kept so content hashes and old peers' records stay the same.
         from app.network.policy import COLLECTIONS
 
         assert "avatar_color" in COLLECTIONS["agents"].fields
 
 
 def test_upgrade_adds_the_avatar_color_column(mock_db):
-    """An install whose agents table predates the column gets it at startup;
-    existing rows read as no colour."""
+    """The column is retired but still added at startup, so upgraded and fresh
+    schemas match; existing rows read as no colour."""
     from app.db.base import column_exists, get_db
     from app.db import database
 

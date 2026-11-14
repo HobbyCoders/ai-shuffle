@@ -541,6 +541,7 @@ async def test_runtime_pushes_work_fields_to_every_device(mock_db, monkeypatch):
     assert sent[0]["updates"]["last_turn_failed"] is False
     assert sent[1]["updates"] == {
         "work_ms": _work(sid)[0], "work_started_at": None, "last_turn_failed": False,
+        "last_turn_stopped": False,
     }
     assert sent[1]["updates"]["work_ms"] >= 2_000
 
@@ -566,6 +567,30 @@ async def test_runtime_push_says_when_the_latest_turn_failed_and_when_that_is_ov
     await session_runtime._broadcast_work_time(sid)
 
     assert sent == [True, False, False]
+
+
+async def test_runtime_push_says_when_the_latest_turn_was_stopped_and_when_that_is_over(mock_db, monkeypatch):
+    """A sidebar not watching the chat learns of a Stop from this push alone (#1340)."""
+    from app.core import session_runtime
+    from app.core.sync_engine import sync_engine
+
+    sid = _mk("wt-push-stopped")
+    sent = []
+
+    async def capture(**kwargs):
+        updates = kwargs["updates"]
+        sent.append((updates["last_turn_stopped"], updates["last_turn_failed"]))
+
+    monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", capture)
+    stopped = _run(sid)
+    turns.settle_turn(stopped["id"], "aborted", "interrupted")
+    await session_runtime._broadcast_work_time(sid)
+    retry = _run(sid)
+    await session_runtime._broadcast_work_time(sid)
+    turns.settle_turn(retry["id"], "completed")
+    await session_runtime._broadcast_work_time(sid)
+
+    assert sent == [(True, False), (False, False), (False, False)]
 
 
 # ---------------------------------------------------------------------------

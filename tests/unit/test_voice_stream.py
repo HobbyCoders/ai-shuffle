@@ -1025,6 +1025,157 @@ async def test_typed_attachments_travel_as_files_to_the_worker_running_the_chat(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("remote", [False, True], ids=["local", "another-worker"])
+async def test_a_spoken_handoff_settling_mid_typed_send_leaves_the_typed_message_its_own_request(monkeypatch, remote):
+    """#1505 and #1543: the spoken dispatch can run while the typed path awaits
+    between appending its words and reading them. It took the typed words,
+    without their attachment and under the spoken request's id. The typed
+    message stays its own request, with its files and its own key."""
+    import asyncio
+
+    from app.core import turn_recorder, upload_transfer
+    from app.core.voice_prompts import ATTACHMENT_NOTE_OPENER
+    from app.core.voice_remote import command_id
+    call = stream()
+    call.upstream = Upstream([])
+    if remote:
+        call.remote_owner = "worker-2"
+        monkeypatch.setattr(upload_transfer, "lift_send_uploads", lambda paths, project, session: ["blob-1"])
+    _upload_row(monkeypatch, {"id": "s1", "mode": "chat", "project_id": "p1"})
+    monkeypatch.setattr(upload_transfer, "partition_upload_paths", lambda paths, session, references=None: (paths, []))
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", AsyncMock())
+    spoken_sent = asyncio.Event()
+    requests = []
+
+    async def delegate(session, context, **kwargs):
+        requests.append((context, kwargs))
+        if not spoken_sent.is_set():
+            # The caller carries on speaking before the typed path reads its entries.
+            await call.caption("user", " Also the config.")
+        spoken_sent.set()
+        return "On it."
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    call.settle_speech = AsyncMock()
+
+    # The caller spoke and the provider opened a handoff that is settling.
+    await call.caption("user", "Can you check the logs?")
+    call.settling = ["d1"]
+    spoken = {}
+    emit = call.emit
+
+    async def gate(event):
+        # Typed words are in the transcript; the spoken handoff settles now.
+        if event.get("type") == "caption" and voice_stream.TYPED_MESSAGE_PREFIX in event.get("delta", "") and not spoken:
+            spoken["task"] = asyncio.create_task(call.dispatch_when_settled())
+            await asyncio.wait_for(spoken_sent.wait(), 2)
+        await emit(event)
+    call.emit = gate
+    frame = json.dumps({"type": "input_text", "id": "a", "text": "Read this", "upload_paths": ["/up/a.pdf"]})
+
+    await call.receive_text(frame)
+    await spoken["task"]
+    await call.delegation_task
+
+    (spoken_context, spoken_kwargs), (typed_context, typed_kwargs) = requests
+    assert "Can you check the logs?" in spoken_context and "Read this" not in spoken_context
+    assert spoken_kwargs["command"] == command_id(call.call_key, "d1") and "uploads" not in spoken_kwargs
+    assert "Read this" in typed_context and "check the logs" not in typed_context
+    assert typed_kwargs["command"] == command_id(call.call_key, "typed-a")
+    assert typed_kwargs["uploads"] == {"upload_paths": ["/up/a.pdf"], **({"upload_blob_ids": ["blob-1"]} if remote else {})}
+    if not remote:  # Unmentioned in the words: the chat agent is told where it is.
+        assert ATTACHMENT_NOTE_OPENER in typed_context and '"/up/a.pdf"' in typed_context
+    # Words spoken since the spoken handoff wait for the next one.
+    assert [e["text"] for e in call.transcript if e["seq"] > call.delegated_seq] == [" Also the config."]
+    events = [c.args[0] for c in call.websocket.send_json.await_args_list]
+    assert [e for e in events if e["type"].startswith("text.")] == [{"type": "text.accepted", "id": "a"}]
+
+    # A resend past the call's bounded id list names the same request, so the
+    # owner of the chat answers it with the turn it already has.
+    call.typed_ids.clear()
+    await call.receive_text(frame)
+    await call.delegation_task
+    assert requests[-1][1]["command"] == command_id(call.call_key, "typed-a")
+
+
+def _typed_call(monkeypatch, *, buffer):
+    """A call whose chat turns are recorded, with a ``buffer``-entry transcript."""
+    from collections import deque
+
+    from app.core import turn_recorder
+    call = stream()
+    call.upstream = Upstream([])
+    call.settle_speech = AsyncMock()
+    call.transcript = deque(maxlen=buffer)  # The 200-entry buffer, smaller: same rule.
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", AsyncMock())
+    requests = []
+
+    async def delegate(session, context, **kwargs):
+        requests.append((context, kwargs))
+        return "On it."
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    return call, requests
+
+
+def _typed(identity, text):
+    return json.dumps({"type": "input_text", "id": identity, "text": text})
+
+
+@pytest.mark.asyncio
+async def test_a_typed_resend_the_owner_drops_never_uses_up_fresh_speech(monkeypatch):
+    """Review S4: a resend past the call's id list and transcript took the speech
+    spoken since and moved the handoff cursor past it. The owner dropped it as a
+    duplicate of the first copy, so those words never reached the agent."""
+    from app.core.voice_remote import command_id
+    monkeypatch.setattr(voice_stream, "MAX_TYPED_IDS", 2)
+    call, requests = _typed_call(monkeypatch, buffer=4)
+    for identity in "abcde":  # "a" leaves both the id list and the transcript.
+        await call.receive_text(_typed(identity, f"Typed {identity}."))
+        await call.delegation_task
+    await call.caption("user", "Please also fix export.")
+
+    await call.receive_text(_typed("a", "Typed a."))  # The browser replays the first frame.
+    await call.delegation_task
+    context, kwargs = requests[-1]
+    assert kwargs["command"] == command_id(call.call_key, "typed-a")
+    assert "Typed a." in context and "export" not in context
+
+    call.settling = ["d1"]
+    await call.dispatch_when_settled()
+    context, kwargs = requests[-1]
+    assert kwargs["command"] == command_id(call.call_key, "d1") and "Please also fix export." in context
+
+
+@pytest.mark.asyncio
+async def test_speech_arriving_while_a_typed_message_is_stored_waits_for_its_handoff(monkeypatch):
+    """Review S5: captions that pushed the typed entry out of the transcript during
+    its durable flush were split by the latest one's position: earlier ones went
+    early in the typed request, the last was skipped, and the cursor passed all."""
+    from app.core.voice_remote import command_id
+    call, requests = _typed_call(monkeypatch, buffer=4)
+    flush, spoke = call.flush, []
+
+    async def storing(**kwargs):
+        if any(e.get("typed") for e in call.transcript) and not spoke:
+            spoke.append(True)
+            for n in range(1, 7):  # The caller talks on while the typed message is stored.
+                await call.caption("user", f" part{n}")
+        await flush(**kwargs)
+    call.flush = storing
+
+    await call.receive_text(_typed("a", "Read this."))
+    await call.delegation_task
+    (context, kwargs), = requests
+    assert kwargs["command"] == command_id(call.call_key, "typed-a")
+    assert "Read this." in context and "part" not in context
+
+    call.settling = ["d1"]
+    await call.dispatch_when_settled()
+    context, kwargs = requests[-1]
+    assert kwargs["command"] == command_id(call.call_key, "d1")
+    assert "part6" in context and "Read this." not in context
+
+
+@pytest.mark.asyncio
 async def test_a_typed_attachment_past_the_caption_limit_keeps_its_typed_record(monkeypatch):
     """The length flush inside ``caption`` stores this message, so it must carry the files."""
     from app.core import turn_recorder, upload_transfer

@@ -100,6 +100,7 @@ def test_legacy_dedicated_metadata_is_not_live_identity_policy(assistant_fixture
     database.update_profile("assistant-agent", config=config)
     identity = next(a for a in service.agent_identities() if a["id"] == "assistant-agent")
     assert identity["dedicated"] is False
-    assert identity["avatar_id"] == "spark"
+    # A stored retired avatar stays in config, unread.
+    assert "avatar_id" not in identity
     service.update_agent_identity("assistant-agent", name="Ordinary agent")
     assert database.get_profile("assistant-agent")["config"] == config

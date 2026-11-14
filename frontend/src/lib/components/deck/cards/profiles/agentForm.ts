@@ -46,8 +46,6 @@ export interface AgentForm {
 	env_vars: { key: string; value: string }[];
 	/** Setting sources (fluid scope filter). null = all scopes (default). */
 	setting_sources: string[] | null;
-	/** Avatar colour name; null = default. Saved only when the API has the field. */
-	avatar_color: string | null;
 }
 
 /** A DB agent as GET /agents lists it (the roster of subagents). */
@@ -97,15 +95,14 @@ export function isAgentTab(value: unknown): value is AgentTab {
 /**
  * Config keys the Agents page owns on save: the fields it edits (a cleared
  * one is left out, which the full-replace `PUT /agents/{id}` turns into a
- * clear), the legacy bindings it retires (model, provider, permission mode,
- * effort), and the avatar, which belongs to the identity PATCH.
+ * clear) and the legacy bindings it retires (model, provider, permission mode,
+ * effort).
  */
 const EDITOR_CONFIG_KEYS = new Set([
 	'include_partial_messages', 'provider_models', 'max_turns', 'setting_sources',
 	'tool_selection_mode', 'allowed_tools', 'disallowed_tools', 'enabled_agents',
 	'agent_invoke_mode', 'cwd', 'add_dirs', 'env', 'system_prompt',
-	'model', 'provider', 'permission_mode', 'effort',
-	'avatar_id'
+	'model', 'provider', 'permission_mode', 'effort'
 ]);
 
 /**

@@ -18,7 +18,7 @@ from app.db.async_database import run_sync
 from app.db.api_users import get_api_users_by_ids
 from app.db.tags import get_tags_for_sessions
 from app.db.background_tasks import get_running_task_presence
-from app.db.turns import sessions_with_failed_latest_turn
+from app.db.turns import latest_turn_outcomes
 from app.db.sessions import get_fork_info_for_sessions
 from app.db.projects import get_projects_by_ids
 from app.db.projects_v2 import (
@@ -797,6 +797,8 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             # Any turns kept here predate the move: the owner's summary alone says how
             # its latest ended, failed or not. An older owner never reports a failure.
             session["last_turn_failed"] = reported == "failed"
+            # The owner's summary has no stopped state, so a mirror's row reads Done.
+            session["last_turn_stopped"] = False
             session["remote_runtime_state"] = (
                 "offline" if not online else
                 "idle" if reported == "failed" else reported or "unknown"
@@ -868,7 +870,7 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
     # Batch: fork info for all sessions (2 queries instead of N)
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
     presence = get_running_task_presence(session_ids)
-    failed = sessions_with_failed_latest_turn(session_ids)
+    outcomes = latest_turn_outcomes(session_ids)
     start_queued = start_admission.admission.queued_sessions()
     busy = streaming_status.busy_session_ids(session_ids)
 
@@ -876,7 +878,8 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
         sid = session["id"]
         session["tags"] = tags_by_session.get(sid, [])
         session["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
-        session["last_turn_failed"] = sid in failed
+        session["last_turn_failed"] = outcomes.get(sid) == "failed"
+        session["last_turn_stopped"] = outcomes.get(sid) == "stopped"
         # A turn runs now: a page that just loaded reads it here until the
         # socket's streaming snapshot arrives (#1527).
         session["is_streaming"] = sid in busy
@@ -909,13 +912,14 @@ def enrich_search_results_with_tags(results: list) -> list:
     # Batch: fork info for all results (2 queries instead of N)
     fork_info_by_session = get_fork_info_for_sessions(session_ids)
     presence = get_running_task_presence(session_ids)
-    failed = sessions_with_failed_latest_turn(session_ids)
+    outcomes = latest_turn_outcomes(session_ids)
 
     for result in results:
         sid = result["id"]
         result["tags"] = tags_by_session.get(sid, [])
         result["has_running_tasks"] = presence.get(sid, {}).get("has_running_tasks", False)
-        result["last_turn_failed"] = sid in failed
+        result["last_turn_failed"] = outcomes.get(sid) == "failed"
+        result["last_turn_stopped"] = outcomes.get(sid) == "stopped"
         fork_info = fork_info_by_session.get(sid)
         result["has_forks"] = fork_info["has_forks"] if fork_info else False
 

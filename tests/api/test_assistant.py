@@ -58,13 +58,26 @@ def test_retired_source_api_does_not_reenable_research(client: Any, assistant_fi
 
 def test_identity_specialist_endpoint_preserves_all_other_config(client, assistant_fixture):
     before = database.get_profile("assistant-agent")
+    # Older clients still send the retired avatar with a rename: accepted and ignored.
     response = client.patch("/api/v1/owner/agents/assistant-agent/identity", json={"name": "New name", "avatar_id": "spark"})
-    assert response.status_code == 200 and response.json()["avatar_id"] == "spark"
-    assert next(a for a in client.get("/api/v1/owner/agents").json() if a["id"] == "assistant-agent")["avatar_id"] == "spark"
+    assert response.status_code == 200 and response.json() == {"id": "assistant-agent", "name": "New name"}
+    listed = next(a for a in client.get("/api/v1/owner/agents").json() if a["id"] == "assistant-agent")
+    assert listed == {"id": "assistant-agent", "name": "New name", "dedicated": False}
     after = database.get_profile("assistant-agent")
     assert after["mcp_tools"] == before["mcp_tools"]
-    assert {k: v for k, v in after["config"].items() if k != "avatar_id"} == before["config"]
-    assert client.patch("/api/v1/owner/agents/assistant-agent/identity", json={"avatar_id": "https://host/avatar.svg"}).status_code == 422
+    assert after["config"] == before["config"]
+
+
+@pytest.mark.parametrize("prefix", ["/api/v1/owner", "/api/v1/assistant"])
+def test_identity_patch_with_only_the_retired_avatar_is_a_no_op(client, assistant_fixture, prefix):
+    before = database.get_profile("assistant-agent")
+    for avatar in ("spark", "https://host/avatar.svg", None):
+        response = client.patch(prefix + "/agents/assistant-agent/identity", json={"avatar_id": avatar})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"id": "assistant-agent", "name": before["name"]}
+    assert database.get_profile("assistant-agent") == before
+    # Unknown keys other than the retired avatar are still refused.
+    assert client.patch(prefix + "/agents/assistant-agent/identity", json={"colour": "red"}).status_code == 422
 
 
 

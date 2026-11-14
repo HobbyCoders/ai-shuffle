@@ -249,7 +249,10 @@ export interface ClaudeCloudConfig {
 	secrets: Record<string, { set: boolean }>;
 	status: ClaudeCloudStatus;
 	methods: ClaudeCloudMethod[];
+	/** The warning before a method is chosen. */
 	warning: string;
+	/** Each method's warning (only Vertex AI names a key file). Older workers omit it. */
+	method_warnings?: Partial<Record<ClaudeCloudMethodId, string>>;
 	gateway_warning: string;
 }
 

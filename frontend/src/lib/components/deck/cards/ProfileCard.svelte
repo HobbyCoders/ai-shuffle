@@ -10,14 +10,13 @@
 	 * a new agent saves once it has a name. Delete and restore confirm inline
 	 * in the detail's danger zone.
 	 */
-	import { onMount, tick, untrack } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { ViewShell, ViewPanel, PanelSearch, PanelIconButton } from '$lib/components/layout/view';
 	import { Bot, Plus, Users } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { updateAgentIdentity, apiErrorText, type AvatarId } from '$lib/api/agent-identity';
 	import { getSubagentDefault, putSubagentDefault, type SubagentDefault } from '$lib/api/subagentDefault';
 	import {
 		STARTER_TEAM_ID,
@@ -26,7 +25,6 @@
 		listTeamTemplates,
 		type TeamTemplate
 	} from '$lib/api/teamTemplates';
-	import { refreshAgentIdentities, agentIdentities } from '$lib/stores/agent-identities';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -87,20 +85,6 @@
 
 	const SELECTED_KEY = 'agents.selected';
 
-	// The list shows each agent's avatar.
-	let identityError = $state('');
-	async function loadIdentities() {
-		identityError = '';
-		try {
-			await refreshAgentIdentities();
-		} catch (e) {
-			identityError = apiErrorText(e);
-		}
-	}
-	onMount(() => {
-		if ($isAdminStore) void loadIdentities();
-	});
-
 	// Internal data state - loaded from stores/API
 	let allSubagents = $state<RosterAgent[]>([]);
 	// The live tool surface (T1). One inventory for the picker and the facts.
@@ -119,8 +103,6 @@
 	const groups = $derived<GroupState>($groupsStore);
 	const assignments = $derived(groups?.profiles?.assignments ?? {});
 	const folders = $derived((groups?.profiles?.groups ?? []).map((g) => g.name));
-	/** The agent API returns `avatar_color` (feat/subagent-default); without it the colour choice hides. */
-	const colorSupported = $derived(profiles.some((p) => Object.hasOwn(p, 'avatar_color')));
 
 	// Load data on mount
 	$effect(() => {
@@ -306,8 +288,7 @@
 			add_dirs: '',
 			env_vars: [],
 			// null = all scopes (default, key omitted); [] = filesystem-isolated.
-			setting_sources: null,
-			avatar_color: null
+			setting_sources: null
 		};
 	}
 	let profileForm = $state<AgentForm>(emptyForm());
@@ -358,20 +339,6 @@
 
 	/** Every DB agent but the open one: the subagent roster. */
 	const others = $derived(allSubagents.filter((a) => a.id !== editingProfile?.id));
-
-	// ── Avatars ────────────────────────────────────────────────────────────
-	function avatarOf(id: string): AvatarId {
-		return ($agentIdentities.find((a) => a.id === id)?.avatar_id ?? 'robot') as AvatarId;
-	}
-	function colorOfProfile(p: Profile): string | null {
-		if (p.is_builtin) return null;
-		if (viewMode === 'form' && editingProfile?.id === p.id) return profileForm.avatar_color;
-		return p.avatar_color ?? null;
-	}
-	function colorOfId(id: string): string | null {
-		const p = profiles.find((x) => x.id === id);
-		return p ? colorOfProfile(p) : null;
-	}
 
 	// ── Model summaries ────────────────────────────────────────────────────
 	/** Right-hand meta on a list row: the agent's model. */
@@ -506,8 +473,7 @@
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
 			setting_sources: Array.isArray((config as any).setting_sources)
 				? ((config as any).setting_sources as string[])
-				: null,
-			avatar_color: profile.avatar_color ?? null
+				: null
 		};
 
 		viewMode = 'form';
@@ -616,8 +582,7 @@
 		// `PUT /agents/{id}` replaces the typed config, so a schema key left out
 		// here is genuinely cleared — that is how 'all'/'none' drop a stale list and
 		// how hidden legacy bindings (model, provider, permission mode, effort) are
-		// retired. The backend keeps keys outside the schema, including the avatar
-		// (owned by the identity PATCH), so neither is sent from this snapshot.
+		// retired.
 		// Settings this page does not edit (plugins, config tools, thinking mode,
 		// ...) start from the stored agent and go back unchanged (#1546).
 		const stored = editingProfile
@@ -692,14 +657,12 @@
 			profileForm.name,
 			profiles.map((p) => p.id)
 		);
-		const data: { id: string; name: string; description?: string; config: any; avatar_color?: string | null } = {
+		const data: { id: string; name: string; description?: string; config: any } = {
 			id: editingProfile ? editingProfile.id : derivedId,
 			name: profileForm.name,
 			description: profileForm.description || undefined,
 			config
 		};
-		// The colour rides the agent save only where the API knows the field.
-		if (colorSupported) data.avatar_color = profileForm.avatar_color;
 		return data;
 	}
 
@@ -850,26 +813,14 @@
 		const name = `${latest.name} copy`;
 		const id = uniqueAgentId(name, profiles.map((p) => p.id));
 		const config = JSON.parse(JSON.stringify(latest.config ?? {}));
-		// The avatar belongs to the identity PATCH, not the agent's config.
-		delete config.avatar_id;
-		const data: { id: string; name: string; description?: string; config: Record<string, unknown>; avatar_color?: string | null } = {
+		const data: { id: string; name: string; description?: string; config: Record<string, unknown> } = {
 			id,
 			name,
 			description: latest.description ?? undefined,
 			config
 		};
-		if (colorSupported) data.avatar_color = latest.is_builtin ? null : (latest.avatar_color ?? null);
 		try {
 			await tabsStore.createProfile(data);
-			const shape = avatarOf(latest.id);
-			if ($isAdminStore && shape) {
-				try {
-					const identity = await updateAgentIdentity(id, { avatar_id: shape });
-					agentIdentities.update((rows) => [...rows.filter((r) => r.id !== id), identity]);
-				} catch {
-					// The copy keeps the default avatar; nothing else depends on it.
-				}
-			}
 			void loadData(true);
 			const fresh = profiles.find((p) => p.id === id);
 			if (fresh) await selectProfile(fresh, 'profile');
@@ -1096,7 +1047,7 @@
 			<AgentList
 				{sections}
 				draft={viewMode === 'form' && !editingProfile
-					? { name: profileForm.name, color: profileForm.avatar_color }
+					? { name: profileForm.name }
 					: null}
 				{selectedId}
 				loading={loading}
@@ -1105,8 +1056,6 @@
 				{narrowed}
 				{query}
 				showYours={filter !== 'builtin'}
-				{avatarOf}
-				colorOf={colorOfProfile}
 				{metaOf}
 				onSelect={(p) => selectProfile(p)}
 				onSelectDraft={showDetail}
@@ -1130,9 +1079,7 @@
 						{toolSelectionMode}
 						{editingProfile}
 						{isNew}
-						avatar={editingProfile ? avatarOf(editingProfile.id) : 'robot'}
 						isAdmin={$isAdminStore}
-						{colorSupported}
 						folder={openFolder}
 						{saveState}
 						{remoteChange}
@@ -1146,9 +1093,6 @@
 						{others}
 						{subagentDefault}
 						{defaultError}
-						{identityError}
-						{avatarOf}
-						colorOf={colorOfId}
 						onTab={(t) => (tab = t)}
 						onBack={back}
 						onFormChange={handleFormChange}
@@ -1162,7 +1106,6 @@
 						onRemoveFromGroup={removeFromGroup}
 						onCreateGroup={createGroup}
 						onDeleteGroup={deleteGroup}
-						onRetryIdentity={loadIdentities}
 						onDefaultModel={(model) => saveSubagentDefault({ model })}
 						onDuplicate={duplicateAgent}
 						onExport={() => editingProfile && handleExportProfile(editingProfile.id)}

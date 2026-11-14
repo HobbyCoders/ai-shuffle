@@ -628,3 +628,34 @@ def test_provenance_sidecar_never_overwrites_an_earlier_record(tmp_path: Path) -
     assert first.read_text(encoding="utf-8") == "earlier record"
     second = json.loads((first.parent / f"{item.id}-1.json").read_text(encoding="utf-8"))
     assert second["item_id"] == item.id and second["destination"] == item.destination
+
+
+def test_rollback_removes_a_copied_tree_with_read_only_git_files(tmp_path: Path, monkeypatch) -> None:
+    """Windows refuses to delete read-only files (Git objects); the rollback must not leave them."""
+    source, destination = tmp_path / "src", tmp_path / "dst"
+    write(source / ".claude/skills/review/SKILL.md", "review\n")
+    obj = source / ".claude/skills/review/.git/objects/ab/cdef"
+    write(obj, "blob\n")
+    obj.chmod(0o444)
+    preview = preview_settings_import(sources=("claude",), source_home=source, destination_home=destination)
+    item = next(it for it in by_kind(preview.items, "global_skill") if it.status == "ready")
+
+    def refuse(_home, _item):
+        raise OSError("provenance disk full")
+
+    real_unlink = os.unlink
+
+    def windows_unlink(path, *, dir_fd=None):
+        mode = os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode
+        if stat.S_ISREG(mode) and not mode & stat.S_IWRITE:
+            error = PermissionError(13, "Access is denied", path)
+            error.winerror = 5
+            raise error
+        return real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(si, "_provenance", refuse)
+    monkeypatch.setattr(os, "unlink", windows_unlink)
+    result = apply_settings_import(preview, selected_ids=[item.id])
+
+    assert outcome(result, item.id).status == "skipped"
+    assert not Path(item.destination).exists()

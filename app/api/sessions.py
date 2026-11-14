@@ -406,6 +406,14 @@ async def move_session_to(session_id: str, session: dict, target_instance_id: st
 
     device = (install or {}).get("device_name") or target
 
+    # A chat on a capability-gated provider row cannot run on a worker that
+    # does not report the capability (#1519): refuse now, not on its next turn.
+    from app.core import provider_capability
+
+    refusal = await run_sync(provider_capability.session_refusal, target, session_id)
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
+
     # Online + capability check, with NO checkout filter — the same validation
     # `resolve_placement` applies to an explicit `runner:<id>` pin.
     from app.core.placement import capable_runners
@@ -1988,7 +1996,7 @@ async def clear_session(
         await sync_engine.broadcast_user_session_updated(
             user_id=existing.get("api_user_id") or "admin",
             session_id=session_id,
-            updates={"last_turn_failed": False},
+            updates={"last_turn_failed": False, "last_turn_stopped": False},
         )
     except Exception:  # noqa: BLE001 — sync fan-out is best-effort
         logger.debug("session clear broadcast failed", exc_info=True)

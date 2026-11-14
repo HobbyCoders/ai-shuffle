@@ -1,7 +1,9 @@
-// Docs viewer (#1475, #1476, #1478): "On this page" is there on every open and
-// reaches a repeated heading by its own anchor; a reload reopens the document;
-// Docs adds no browser history entry of its own; and every search result opened
-// marks and shows its match, a whole word before letters inside another word.
+// Docs viewer (#1475, #1476, #1478, #1554, #1581): "On this page" is there on
+// every open and reaches a repeated heading by its own anchor; a reload reopens
+// the document; Docs adds no browser history entry of its own; every search
+// result opened marks and shows its match, a whole word before letters inside
+// another word; and a page holding the query's words together ranks first in
+// the Docs panel and in Spotlight, whose rows read as text, not Markdown.
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp, settleServiceWorker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -155,6 +157,82 @@ await runJourney({
 			const word = await hit(page);
 			const around = await page.evaluate(() => document.querySelector('mark.doc-find-hit')?.parentElement?.textContent ?? '');
 			expect(word.text === 'script' && word.visible && around.includes('your own script'), `the mark is the word "script" (${JSON.stringify({ ...word, around })})`);
+		}
+	}, {
+		// #1581: a page holding the query's words together ranks first in the
+		// Docs panel, whatever the query's punctuation, and opening it marks them.
+		name: 'search-phrase-ranking',
+		viewports: ['desktop', 'phone'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await openDestination(page, 'Docs');
+			await docsList(page).waitFor();
+		},
+		async act({ page, mark }) {
+			const sentence = 'write its prompt (its instructions), and choose its tools';
+			const docsResults = page.locator('[aria-label="Doc search results"]');
+			const firstDocsRow = async (query) => {
+				await page.getByRole('searchbox', { name: 'Search docs', exact: true }).fill(query);
+				await docsResults.getByRole('button').first().waitFor();
+				return (await docsResults.getByRole('button').first().innerText()).replace(/\s+/g, ' ').trim();
+			};
+			// The hyphenated word also counts as its separate words, so among the
+			// pages holding them together the one titled with them wins.
+			await mark('Docs panel: "remote-access" ranks Remote Access first');
+			const hyphen = await firstDocsRow('remote-access');
+			expect(hyphen.startsWith('Remote Access'), `the first Docs result for "remote-access" is Remote Access (${hyphen.slice(0, 80)})`);
+			await mark('Docs panel: "remote, access!" ranks Remote Access first');
+			const remote = await firstDocsRow('remote, access!');
+			expect(remote.startsWith('Remote Access'), `the first Docs result is Remote Access (${remote.slice(0, 80)})`);
+			await mark('Docs panel: a pasted sentence ranks its page first, and opening it marks the sentence');
+			const pasted = await firstDocsRow(sentence);
+			expect(pasted.startsWith('Quick Start') && pasted.includes('write its prompt'), `the first Docs result is Quick Start (${pasted.slice(0, 80)})`);
+			await docsResults.getByRole('button').first().click();
+			await page.locator('mark.doc-find-hit').first().waitFor();
+			await page.waitForTimeout(300);
+			const marked = await hit(page);
+			expect(marked.text === sentence && marked.visible, `the opened page marks and shows the sentence (${JSON.stringify(marked)})`);
+		}
+	}, {
+		// #1581, #1554: Spotlight ranks from the backend index the same way, and its
+		// rows read as text, not Markdown. Desktop only: on a phone the Spotlight
+		// sheet jumps whenever its results change, whatever the query (#1600).
+		name: 'spotlight-phrase-ranking',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+		},
+		async act({ page, mark }) {
+			const sentence = 'write its prompt (its instructions), and choose its tools';
+			const spotlight = page.getByRole('textbox', { name: 'Search everything', exact: true });
+			const docsGroup = page.getByRole('dialog', { name: 'Search everything' }).getByRole('region', { name: 'Documentation', exact: true });
+			const firstSpotlightRow = async (query, title) => {
+				await spotlight.fill(query);
+				await docsGroup.getByRole('button').filter({ hasText: title }).first().waitFor({ timeout: 8000 });
+				return (await docsGroup.getByRole('button').first().innerText()).replace(/\s+/g, ' ').trim();
+			};
+			await mark('Spotlight: "remote, access!" ranks Remote Access first');
+			// The sidebar's Search button, not Ctrl+K: right after load the hotkey
+			// may not be bound yet.
+			await page.getByRole('complementary', { name: 'Chats', exact: true }).getByRole('button', { name: /^Search\b/ }).click();
+			await spotlight.waitFor();
+			const spotRemote = await firstSpotlightRow('remote, access!', 'Remote Access');
+			expect(spotRemote.startsWith('Remote Access'), `Spotlight's first Documentation row is Remote Access (${spotRemote.slice(0, 80)})`);
+			await mark('Spotlight: the pasted sentence ranks Quick Start first, as readable text');
+			const spotPasted = await firstSpotlightRow(sentence, 'Quick Start');
+			expect(spotPasted.startsWith('Quick Start') && spotPasted.includes(sentence), `Spotlight's first Documentation row is Quick Start with the sentence (${spotPasted.slice(0, 120)})`);
+			expect(!/[|*`]|\]\(/.test(spotPasted), `Spotlight's row has no Markdown (${spotPasted.slice(0, 120)})`);
+			// After the sentence, whose first row is Quick Start, so a row left over
+			// from an earlier query can't pass for this one.
+			await mark('Spotlight: "remote-access" ranks Remote Access first');
+			await spotlight.fill('remote-access');
+			const firstRow = docsGroup.getByRole('button').first();
+			let spotHyphen = '';
+			for (const end = Date.now() + 8000; Date.now() < end; await page.waitForTimeout(200)) {
+				spotHyphen = ((await firstRow.innerText({ timeout: 500 }).catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+				if (spotHyphen.startsWith('Remote Access')) break;
+			}
+			expect(spotHyphen.startsWith('Remote Access'), `Spotlight's first Documentation row for "remote-access" is Remote Access (${spotHyphen.slice(0, 80)})`);
 		}
 	}]
 });

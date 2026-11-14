@@ -156,10 +156,10 @@ def _supports(presence_row) -> bool:
 def _snapshot_readers(ctx) -> bool:
     """Whether another active worker may still need the whole-store record.
 
-    Membership defines the set, signed presence the support (the
-    ``native_providers.workers_requiring_update`` rule): an unknown or missing
-    presence counts as an old worker. Consumers (phones, browsers) do not
-    merge fact stores.
+    Membership defines the set, signed presence the support (the rule in
+    ``app.core.provider_capability``): an unknown or missing presence counts
+    as an old worker. Unlike provider rows, consumers (phones, browsers) are
+    left out here: they do not merge fact stores.
     """
     from app.db import network as store
     from app.network import membership

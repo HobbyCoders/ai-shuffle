@@ -19,7 +19,6 @@
 	import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
 	import type { AnimationConfig } from 'svelte/animate';
 	import { cubicOut } from 'svelte/easing';
-	import { refreshAgentIdentities } from '$lib/stores/agent-identities';
 	import {
 		Search,
 		ListFilter,
@@ -89,6 +88,7 @@
 		isVisibleSidebarSession,
 		sidebarGroup,
 		lastWorkFailed,
+		lastWorkStopped,
 		openSessionNeeds,
 		sessionNeedsInput,
 		liveProjectKeys,
@@ -411,6 +411,7 @@
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
 						isActive: !!s.is_active,
 						failed: lastWorkFailed(s),
+						stopped: lastWorkStopped(s),
 						open: sessionNeedsInput(
 							s.id === openNeedsId,
 							openNeedsNow,
@@ -454,8 +455,6 @@
 	const settledLaneShown = $derived(settledRows.length > 0 || ($settledTotal ?? 0) > 0 || loadingOlder || $sessionsHasMore);
 	onMount(() => {
 		if (!isAdmin) return;
-		// Agent names and avatars for the new-session agent card.
-		void refreshAgentIdentities().catch(() => {});
 		// The worker's answer is the only terminal gate (see terminal/gating.ts).
 		void terminals.ensureCapability();
 	});

@@ -25,12 +25,6 @@ _routes = APIRouter(dependencies=[Depends(require_admin)])
 router = APIRouter(tags=["Owner coordination"])
 
 
-def _avatar(value: str | None) -> str | None:
-    if value is not None and value not in service.AVATAR_PRESETS:
-        raise ValueError("Unknown avatar preset")
-    return value
-
-
 class LimitsUpdate(BaseModel):
     """The owner's spending and job time limits; omitted fields keep their value.
 
@@ -51,18 +45,14 @@ class LimitsUpdate(BaseModel):
 class AgentIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(None, min_length=1, max_length=80)
-    avatar_id: str | None = None
+    # Retired: older clients still send an avatar preset. Accepted and ignored.
+    avatar_id: Any = Field(None, exclude=True)
 
     @field_validator("name", mode="before")
     @classmethod
     def stripped_name(cls: type[AgentIdentity], value: Any) -> Any:
         # Strip before min_length runs, so a whitespace-only name is a 422.
         return value.strip() if isinstance(value, str) else value
-
-    @field_validator("avatar_id")
-    @classmethod
-    def avatar(cls: type[AgentIdentity], value: str | None) -> str | None:
-        return _avatar(value)
 
 
 async def _value_error_call(fn: Callable[..., Any], *args: Any) -> Any:
@@ -104,7 +94,7 @@ async def read_agent_identities() -> Any:
 
 @_routes.patch("/agents/{agent_id}/identity")
 async def update_agent_identity(agent_id: str, body: AgentIdentity) -> Any:
-    return await _value_error_call(service.update_agent_identity, agent_id, body.name, body.avatar_id)
+    return await _value_error_call(service.update_agent_identity, agent_id, body.name)
 
 
 router.include_router(_routes, prefix="/api/v1/owner")

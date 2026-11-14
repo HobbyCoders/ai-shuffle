@@ -117,3 +117,137 @@ def test_frontmatter_parser_edges():
     # Not at the very top -> not frontmatter.
     raw = "\n<!--\ntitle: x\n-->\nrest"
     assert dc._parse_frontmatter(raw) == ({}, raw)
+
+
+def test_search_snippets_are_readable_text_not_markdown(tmp_path, monkeypatch):
+    """Spotlight shows the first snippet as the row description (#1554)."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "getting-started/cloud.md", "\n".join([
+        "<!--\ntitle: AI Shuffle Cloud\n-->",
+        "## Paid plans", "",
+        "| Plan | Workers |", "| --- | :---: |", "| **Ultimate** | 30 |", "",
+        "See [the plans](/docs/getting-started/cloud#paid-plans), `code` and <span>this</span>.",
+        "- [x] ~~old~~ _new_ ![logo](/img/logo.png)", "",
+        "> quoted", "", "```sh", "echo hi", "```", "",
+        "[ref]: https://example.com/target",
+    ]))
+    index = DocsIndex()
+    [hit] = index.search("Ultimate")
+    assert index.docs["getting-started/cloud"].text == (
+        "Paid plans Plan Workers Ultimate 30 See the plans, code and this. "
+        "old new logo quoted echo hi"
+    )
+    assert hit["snippets"] == [
+        "Paid plans Plan Workers Ultimate 30 See the plans, code and this. old new logo quoted echo h..."
+    ]
+    # Link targets are not readable text, so they don't match either.
+    assert DocsIndex().search("example") == []
+    assert DocsIndex().search("docs/getting-started") == []
+
+
+def test_plain_text_keeps_words_that_only_look_like_markup():
+    assert dc._markdown_to_plain_text("set snake_case_name to 2*3*4 then # not a heading") == (
+        "set snake_case_name to 2*3*4 then # not a heading"
+    )
+    assert dc._markdown_to_plain_text("Line one\nline two\n\n***\n\n# Title #\nbody") == (
+        "Line one line two Title body"
+    )
+
+
+def test_search_ranks_the_exact_phrase_first(tmp_path, monkeypatch):
+    """A pasted sentence finds the page it came from above loose word matches (#1581)."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "features/loose.md",
+         "<!--\ntitle: Prompt tools\n-->\nWrite a prompt. Choose tools. Its tools write prompts. "
+         "Instructions for tools and prompts, its tools, its prompt.\n")
+    _doc(root, "getting-started/quick-start.md",
+         "<!--\ntitle: Quick Start\n-->\n"
+         + "Intro words. " * 10
+         + "3. Give it a **name**, write its **prompt** (its instructions), and choose its **tools**.\n")
+    query = "write its prompt (its instructions), and choose its tools"
+    results = DocsIndex().search(query)
+    assert [r["slug"] for r in results] == ["quick-start", "loose"]
+    # The snippet shows the phrase, not the first place one of its words occurs.
+    assert query in results[0]["snippets"][0].lower()
+    # A phrase whose last word is still being typed counts too.
+    assert DocsIndex().search("choose its too")[0]["slug"] == "quick-start"
+
+
+def test_search_keeps_a_phrase_match_whose_punctuation_differs(tmp_path, monkeypatch):
+    """`remote, access!` finds the page saying "remote access", though its raw terms don't occur there."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "features/loose.md", "<!--\ntitle: Hosts\n-->\nRemote, hosts. Access! permissions.\n")
+    _doc(root, "features/exact.md", "<!--\ntitle: Other\n-->\nTurn on remote access in Settings.\n")
+    for query in ("remote, access!", "remote-access"):
+        assert [r["slug"] for r in DocsIndex().search(query)][:1] == ["exact"], query
+
+
+def test_search_snippet_shows_the_phrase_not_an_earlier_lone_word(tmp_path, monkeypatch):
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "features/page.md",
+         "<!--\ntitle: Page\n-->\nRemote hosts are supported. "
+         + "Padding unrelated context. " * 12 + "Enable remote-access here.\n")
+    [page] = DocsIndex().search("remote access")
+    assert "Enable remote-access here" in page["snippets"][0]
+    assert "Remote hosts" not in page["snippets"][0]
+    # Offsets are the text's own, though punctuation sits between the words.
+    text = "A remote accessory. Then remote,  ACCESS it."
+    assert dc._phrase_span(text, "remote access") == (text.index("remote,"), text.index(" it."))
+    assert dc._phrase_span("remote accessory", "remote access") == (0, len("remote access"))
+    assert dc._phrase_span(text, "remote") is None
+
+
+def test_search_scores_a_hyphenated_word_by_its_separate_words(tmp_path, monkeypatch):
+    """`remote-access` puts the page titled "Remote access" above pages that only
+    spell the hyphenated word literally, such as an API path or a changelog line."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "api-reference/endpoints.md",
+         "<!--\ntitle: Endpoints\n-->\n"
+         "`GET /api/v1/remote-access/status` and `POST /api/v1/remote-access/enable`.\n")
+    _doc(root, "changelog.md", "<!--\ntitle: Changelog\n-->\nAdded a remote-access toggle.\n")
+    _doc(root, "getting-started/remote-access.md",
+         "<!--\ntitle: Remote access\ndescription: Reach your worker from anywhere\n-->\n"
+         "Turn on remote access in Settings, then open the link on your phone.\n")
+    _doc(root, "features/hosts.md", "<!--\ntitle: Hosts\n-->\nRemote hosts need access keys.\n")
+    slugs = [r["slug"] for r in DocsIndex().search("remote-access")]
+    assert slugs[0] == "remote-access", slugs
+    # Every page holding the words together ranks above the one that has them apart.
+    assert slugs[-1] == "hosts", slugs
+
+
+def test_search_splits_words_as_the_docs_panel_does(tmp_path, monkeypatch):
+    """Parity with the Docs panel's tokens: every occurrence of a part counts,
+    a hyphen at either edge still leaves the word, and short parts don't count."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "features/access.md", "<!--\ntitle: Access\n-->\nremote access remote\n")
+    _doc(root, "features/remote.md", "<!--\ntitle: Remote\n-->\nremote access remote\n")
+    _doc(root, "features/letters.md", "<!--\ntitle: Letters\n-->\nEvery letter here.\n")
+    _doc(root, "features/mail.md", "<!--\ntitle: Mail\n-->\nSend mail.\n")
+    # `remote` from the compound and `remote` typed again both count.
+    assert [r["slug"] for r in DocsIndex().search("remote-access remote")] == ["remote", "access"]
+    for query in ("remote-", "-remote"):
+        assert [r["slug"] for r in DocsIndex().search(query)][:1] == ["remote"], query
+    # `e-mail` counts `mail`, not `e`, which would match inside nearly every word.
+    assert [r["slug"] for r in DocsIndex().search("e-mail")] == ["mail"]
+
+
+def test_real_docs_find_a_pasted_sentence_first():
+    index = DocsIndex()
+    [first, *_] = index.search("write its prompt (its instructions), and choose its tools")
+    assert first["slug"] == "quick-start"
+    # Short words together find the FAQ first, as the Docs panel does.
+    assert index.search("do I")[0]["slug"] == "faq"
+    # A hyphenated word finds the page about it first, as the Docs panel does.
+    for query in ("remote-access", "remote, access!", "remote access"):
+        assert index.search(query)[0]["slug"] == "remote-access", query
+    # A hyphen at either edge leaves the word, so its page is still found.
+    for query in ("remote-", "-remote"):
+        assert "remote-access" in [r["slug"] for r in index.search(query, limit=10)], query
+    [cloud] = [r for r in index.search("Ultimate") if r["slug"] == "cloud"]
+    assert not any(ch in cloud["snippets"][0] for ch in "|*`") and "](" not in cloud["snippets"][0]

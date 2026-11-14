@@ -59,12 +59,21 @@ _vertex_files_lock = Lock()
 CONFIG_SETTING = "claude_cloud_config"
 SECRETS_SETTING = "claude_cloud_secrets"
 
-WARNING_TEXT = (
-    "Agents on this worker can run shell commands and can read these credentials, "
-    "including the Vertex AI key file on this worker's disk, with their own tools and in "
-    "terminals. A project's or your own .claude/settings.json can still change where Claude "
+_WARNING_REST = (
+    "A project's or your own .claude/settings.json can still change where Claude "
     "connects, and this worker's proxy and certificate settings still apply. Use an account "
     "with the smallest permissions that work, and only on a worker you trust."
+)
+# Shown before a method is chosen and for every method without a key file.
+WARNING_TEXT = (
+    "Agents on this worker can run shell commands and can read these credentials "
+    "with their own tools and in terminals. " + _WARNING_REST
+)
+# Only Vertex AI writes a key file to disk (the service account JSON).
+VERTEX_WARNING_TEXT = (
+    "Agents on this worker can run shell commands and can read these credentials, "
+    "including the Vertex AI key file on this worker's disk, with their own tools and in "
+    "terminals. " + _WARNING_REST
 )
 GATEWAY_WARNING_TEXT = (
     "All Claude traffic from this worker goes to the address you enter. "
@@ -160,6 +169,11 @@ GATEWAY = Method(
 )
 
 METHODS: Dict[str, Method] = {m.id: m for m in (BEDROCK, VERTEX, FOUNDRY, GATEWAY)}
+
+
+def method_warning(method_id: Optional[str]) -> str:
+    """The warning for one method: only Vertex AI names its key file."""
+    return VERTEX_WARNING_TEXT if method_id == VERTEX.id else WARNING_TEXT
 
 # Worker-environment configuration is also an owner configuration of the stock
 # CLI, not a credential for Fluid/tools. Keep a finite allowlist per method,
@@ -517,6 +531,7 @@ def public_config() -> dict:
             for m in METHODS.values()
         ],
         "warning": WARNING_TEXT,
+        "method_warnings": {m.id: method_warning(m.id) for m in METHODS.values()},
         "gateway_warning": GATEWAY_WARNING_TEXT,
     }
 

@@ -41,7 +41,7 @@
 		summary?: string;
 		meta?: string;
 		icon?: SettingsIcon;
-		/** Opt in only when the icon carries information; avatars use lead. Pinned notes keep their mark automatically. */
+		/** Opt in only when the icon carries information; custom marks use lead. Pinned notes keep their mark automatically. */
 		showIcon?: boolean;
 		/** Item rows stay 48px even without an excerpt; navigation rows are 34px (44px on phone). */
 		rowKind?: 'item' | 'navigation';
@@ -172,11 +172,11 @@
 	.lead { display: flex; align-items: center; justify-content: center; min-width: 0; }
 	/* A list panel's rows share the Chats session row grid (SessionCard .scard):
 	   an 8px inset, a 16px leading slot that is always reserved, then a 6px gap,
-	   so every panel's titles start on the Chats title x. The pin, status dot or
-	   avatar sits centred in the slot; a row with no marker leaves it empty. On a
+	   so every panel's titles start on the Chats title x. The pin or status dot
+	   sits centred in the slot; a row with no marker leaves it empty. On a
 	   phone the slot starts on the 16px page gutter, so the row reaches 8px into
 	   the gutter and pads back by the same 8px: the highlight gets the desktop
-	   inset round its avatar and trailing text, and the title x does not move. */
+	   inset round its marker and trailing text, and the title x does not move. */
 	:global(.view-panel) .st-it:not(.value):not(.card) {
 		grid-template-columns: 16px minmax(0, 1fr) auto;
 		column-gap: 6px;
