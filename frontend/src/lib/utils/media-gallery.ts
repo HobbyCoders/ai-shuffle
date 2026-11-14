@@ -1,6 +1,7 @@
 import type { ChatMessage } from '$lib/stores/types';
 import { marked } from 'marked';
 import {
+	CODE_SPAN,
 	mediaHtml,
 	resolveMediaUrl,
 	rewriteMediaMarkdown,
@@ -23,10 +24,11 @@ export function safeMediaSource(src: string): boolean {
 }
 
 /**
- * `kind` is null for a markdown image whose URL names no media kind (an
- * artifact URL, `/api/v1/artifacts/<hash>`): the markdown renderer still draws
- * it as a picture, so a tool row must count it as shown, but it only joins the
- * gallery through the tool row that made it.
+ * `kind` is null for a markdown image the media rewrite leaves alone (a URL
+ * that names no media kind, or a titled or angle-bracketed embed): the markdown
+ * renderer still draws it as a picture, so a tool row must count it as shown,
+ * but it only joins the gallery through the tool row that made it. A plain
+ * `![…](/api/v1/artifacts/<hash>)` embed is an image (#1603).
  */
 type ProseEmbed = readonly [kind: MediaKind | null, src: string, label: string];
 
@@ -144,8 +146,6 @@ export function galleryMediaForTurn(messages: ChatMessage[], sessionId?: string 
 // every destination form the lexer accepts: bare or `<angle-bracketed>`, with
 // an optional "title", 'title' or (title) (#792).
 const PLAIN_IMAGE_MD = /!\[[^\]]*\]\(\s*(?:<([^>\n]*)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
-// Fenced blocks and inline code spans: their text is code, never an embed.
-const CODE_SPAN = /(^|\n)( {0,3})(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\3[`~]*[ \t]*(?=\n|$)|$)|`+[^`\n]*?`+/g;
 
 /** Suppress only media represented by the gallery; keep prose, audio and links. */
 export function rewriteWithGallery(text: string, sources: ReadonlySet<string>, sessionId?: string | null): string {

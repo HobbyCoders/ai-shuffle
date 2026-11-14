@@ -88,6 +88,33 @@ describe('rewriteMediaMarkdown', () => {
 		expect(out).not.toContain('media-placeholder');
 	});
 
+	it.each([
+		['/api/v1/artifacts/e0b8f9e9?session_id=s-1'],
+		['https://worker.example:8000/api/v1/artifacts/e0b8f9e9'],
+		['/api/v1/artifacts/e0b8f9e9#view']
+	])('gives a generated image embedded by its artifact URL a download button (%s, #1603)', (url) => {
+		const out = rewriteMediaMarkdown(`Here: ![Alley](${url})`);
+		expect(out).toContain('<img');
+		expect(out).toContain('media-expand-btn');
+		expect(out).toContain('media-download-btn');
+		expect(out).toContain('download="generated-image.png"');
+	});
+
+	it('leaves an artifact URL alone outside image syntax or the artifact route (#1603)', () => {
+		const md = 'See [the result](/api/v1/artifacts/abc) and ![x](/api/v1/artifacts) ![y](/other/api/v1/artifacts/abc)';
+		expect(rewriteMediaMarkdown(md)).toBe(md);
+		expect(classifyMediaUrl('/api/v1/artifacts/abc')).toBeNull();
+	});
+
+	it('shows media markdown written in code as written (#1603)', () => {
+		const fenced = '```md\n![A](/api/v1/artifacts/abc)\n![B](/api/generated-images/by-path?path=/w/b.png)\n```';
+		const inline = 'Use `![A](/api/v1/artifacts/abc)` to embed.';
+		const out = rewriteMediaMarkdown(`${fenced}\n\n${inline}\n\n![A](/api/v1/artifacts/abc)`);
+		expect(out).toContain(fenced);
+		expect(out).toContain(inline);
+		expect(out.match(/<img /g)).toHaveLength(1);
+	});
+
 	it('collapses a raw base64 image blob instead of dumping it', () => {
 		const blob = 'A'.repeat(200);
 		const out = rewriteMediaMarkdown(`prefix "image_base64":"${blob}" suffix`);
@@ -119,6 +146,13 @@ describe('clampRevealToMediaBoundary', () => {
 		const link = 'Read [the docs](https://example.com/docs) please';
 		const mid = link.indexOf('[') + 6;
 		expect(clampRevealToMediaBoundary(link, mid)).toBe(mid);
+	});
+
+	it('pops an artifact image in whole, but types an artifact link out (#1603)', () => {
+		const image = 'See ![a](/api/v1/artifacts/abc?session_id=s) now';
+		expect(clampRevealToMediaBoundary(image, image.indexOf('![') + 8)).toBe(image.indexOf('!['));
+		const link = 'See [a](/api/v1/artifacts/abc) now';
+		expect(clampRevealToMediaBoundary(link, link.indexOf('[') + 8)).toBe(link.indexOf('[') + 8);
 	});
 });
 

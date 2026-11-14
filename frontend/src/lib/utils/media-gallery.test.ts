@@ -168,8 +168,18 @@ describe('generated media in the turn gallery (#784)', () => {
 	it('drops a reply image the gallery shows even by its extension-less artifact URL', () => {
 		const html = rewriteWithGallery(`Both:\n\n![A](${art('a')})\n\n![Other](${art('z')})`, new Set([art('a')]));
 		expect(html).toContain('Both:');
-		expect(html).not.toContain(`![A](${art('a')})`);
-		expect(html).toContain(`![Other](${art('z')})`);
+		expect(html).not.toContain(art('a'));
+		// One the gallery does not show keeps its own player and download (#1603).
+		expect(html).toContain(`src="${art('z')}"`);
+		expect(html).toContain('media-download-btn');
+	});
+
+	it('counts a reply artifact image as a gallery image, once (#1603)', () => {
+		const gallery = galleryMediaForTurn([
+			made('g1', unified({ image_url: art('a') })),
+			message('reply', { type: 'text', content: `![A](${art('a')}) ![Z](${art('z')})` })
+		]);
+		expect(gallery.map((item) => [item.kind, item.src])).toEqual([['image', art('a')], ['image', art('z')]]);
 	});
 
 	it.each([

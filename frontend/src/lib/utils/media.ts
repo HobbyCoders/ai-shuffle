@@ -52,7 +52,9 @@ function mediaTarget(url: string): { path: string; fromQuery: boolean } {
 
 /** Extract a lowercase file extension from a URL, handling `?path=` serve routes. */
 function extOf(url: string): string {
-	const candidate = mediaTarget(url).path;
+	// The last path segment only: a dot in a host (`https://w.example/…/<hash>`)
+	// or a folder is not a file type.
+	const candidate = mediaTarget(url).path.split(/[/\\]/).pop() ?? '';
 	const dot = candidate.lastIndexOf('.');
 	return dot >= 0 ? candidate.slice(dot + 1).toLowerCase() : '';
 }
@@ -75,6 +77,19 @@ export function classifyMediaUrl(url: string): MediaKind | null {
 	if (VIDEO_EXTS.has(ext)) return 'video';
 	if (AUDIO_EXTS.has(ext)) return 'audio';
 	return null;
+}
+
+// The artifact store's serve route (app/api/artifacts.py): relative, or on a
+// worker's origin. Its content-addressed path names no file type.
+const ARTIFACT_URL = /^(?:https?:\/\/[^/?#\s]+)?\/api\/v1\/artifacts\/[^/?#\s]+(?:[?#]|$)/i;
+
+/**
+ * The media kind of a markdown image's URL. A generated image the reply embeds
+ * by its artifact URL is a picture: it gets the same player, download button
+ * and lightbox as the tool row it leaves the picture to (#1603).
+ */
+function imageEmbedKind(url: string): MediaKind | null {
+	return classifyMediaUrl(url) ?? (ARTIFACT_URL.test(url) ? 'image' : null);
 }
 
 /**
@@ -461,6 +476,8 @@ const MEDIA_TOKEN = /!?\[[^\]]*\]\([^)\s]+\)/g;
 // A raw base64 image blob accidentally dumped into prose — collapse it instead
 // of rendering ~100k chars of literal text.
 const RAW_BASE64 = /"image_base64"\s*:\s*"[A-Za-z0-9+/=]{100,}"/g;
+// Fenced blocks and inline code spans: their text is code, never an embed.
+export const CODE_SPAN = /(^|\n)( {0,3})(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\3[`~]*[ \t]*(?=\n|$)|$)|`+[^`\n]*?`+/g;
 const PLACEHOLDER = '<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">';
 
 /**
@@ -478,8 +495,21 @@ export function rewriteMediaMarkdown(
 	text: string,
 	renderMedia: (kind: MediaKind, url: string, label: string) => string = mediaHtml
 ): string {
+	// Code shows its markdown as written (#1603): only prose embeds media.
+	let out = '';
+	let at = 0;
+	for (const code of text.matchAll(CODE_SPAN)) {
+		out += rewriteProseMedia(text.slice(at, code.index), renderMedia) + code[0];
+		at = code.index + code[0].length;
+	}
+	out += rewriteProseMedia(text.slice(at), renderMedia);
+	// Never dump a raw base64 image blob as literal prose.
+	return out.replace(RAW_BASE64, `${PLACEHOLDER}Image data omitted</div>`);
+}
+
+function rewriteProseMedia(text: string, renderMedia: (kind: MediaKind, url: string, label: string) => string): string {
 	let out = text.replace(IMG_MD, (match, alt: string, url: string) => {
-		const kind = classifyMediaUrl(url);
+		const kind = imageEmbedKind(url);
 		return kind ? renderMedia(kind, url, alt) : match;
 	});
 	out = out.replace(LINK_MD, (match, lead: string, label: string, url: string) => {
@@ -488,8 +518,6 @@ export function rewriteMediaMarkdown(
 		if (kind === 'video' || kind === 'audio') return lead + renderMedia(kind, url, label);
 		return match;
 	});
-	// Never dump a raw base64 image blob as literal prose.
-	out = out.replace(RAW_BASE64, `${PLACEHOLDER}Image data omitted</div>`);
 	return out;
 }
 
@@ -510,7 +538,7 @@ export function clampRevealToMediaBoundary(text: string, cut: number): number {
 		if (cut < end) {
 			// Cut straddles this token. Clamp only if it is embeddable media.
 			const urlMatch = m[0].match(/\(([^)\s]+)\)/);
-			if (urlMatch && classifyMediaUrl(urlMatch[1])) return start;
+			if (urlMatch && (m[0].startsWith('!') ? imageEmbedKind : classifyMediaUrl)(urlMatch[1])) return start;
 			break;
 		}
 	}
