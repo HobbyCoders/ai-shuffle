@@ -3,6 +3,7 @@
  * Code mode summary shaped like the worker's answers.
  */
 import type { ModelProvider, NativeProviderId, NativeProviderOption } from '$lib/api/model-providers';
+import { CLOUD_WARNING, VERTEX_CLOUD_WARNING } from './claude-cloud';
 
 /** Deliberately different endpoints: enrollment UI must use server metadata. */
 export const nativeEnrollment: NativeProviderOption[] = (['kimi', 'minimax', 'opencode'] as const satisfies readonly NativeProviderId[]).flatMap((provider_type) => {
@@ -252,8 +253,8 @@ export function cloudConfig(partial: Partial<ClaudeCloudConfig> = {}): ClaudeClo
 		secrets: {},
 		status: { method: null, method_label: null, configured: false, ready: false, missing: [], storage_locked: false },
 		methods: CLOUD_METHODS,
-		warning:
-			'Agents on this worker can run shell commands and can read these credentials, including the Vertex AI key file on this worker\'s disk, with their own tools and in terminals. A project\'s or your own .claude/settings.json can still change where Claude connects, and this worker\'s proxy and certificate settings still apply. Use an account with the smallest permissions that work, and only on a worker you trust.',
+		warning: CLOUD_WARNING,
+		method_warnings: { bedrock: CLOUD_WARNING, vertex: VERTEX_CLOUD_WARNING, foundry: CLOUD_WARNING, gateway: CLOUD_WARNING },
 		gateway_warning: 'All Claude traffic from this worker goes to the address you enter. The browser tool also receives this address and token.',
 		...partial
 	};

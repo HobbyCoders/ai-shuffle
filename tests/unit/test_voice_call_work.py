@@ -488,6 +488,47 @@ async def test_live_spoken_yes_answers_the_approval_and_is_not_sent_to_chat(monk
 
 
 @pytest.mark.asyncio
+async def test_a_typed_message_mid_send_is_never_taken_as_a_spoken_approval_answer(monkeypatch):
+    """#1505/#1543 review: a spoken handoff settling while a typed message is
+    being admitted asks the approval desk first. The desk took the typed entry
+    as part of the spoken answer and the handoff then dropped it, so the typed
+    words and files never reached the agent though the browser was told they had."""
+    import json
+
+    from app.core.voice_remote import command_id
+    desk, calls, _ = _desk(monkeypatch)
+    delegate = AsyncMock(return_value="")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    call = _live_call(monkeypatch, desk=desk)
+    call.progress.consume(_requested())
+    await call.progress.flush(force=True)
+    assert desk.awaiting
+    await call.caption("user", "Yes, go ahead.")
+    call.settling = ["d1"]  # GPT Live opened a handoff for the spoken answer.
+    emit, settled = call.emit, []
+
+    async def gate(event):
+        # The typed words are in the transcript; the spoken handoff settles now.
+        if event.get("type") == "caption" and voice_stream.TYPED_MESSAGE_PREFIX in event.get("delta", "") \
+                and not settled:
+            settled.append(True)
+            await call.dispatch_when_settled()
+        await emit(event)
+    call.emit = gate
+
+    await call.receive_text(json.dumps({"type": "input_text", "id": "m1", "text": "Also update the docs."}))
+    await call.delegation_task
+
+    assert calls[0]["decision"] == "allow"  # The spoken answer alone decided it.
+    delegate.assert_awaited_once()
+    assert "Also update the docs." in delegate.await_args.args[1]
+    assert "go ahead" not in delegate.await_args.args[1]
+    assert delegate.await_args.kwargs["command"] == command_id(call.call_key, "typed-m1")
+    if call.approval_task is not None:
+        call.approval_task.cancel()
+
+
+@pytest.mark.asyncio
 async def test_live_answer_is_heard_when_the_voice_starts_replying(monkeypatch):
     desk, calls, _ = _desk(monkeypatch)
     call = _live_call(monkeypatch, desk=desk)

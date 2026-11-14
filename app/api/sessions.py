@@ -406,6 +406,14 @@ async def move_session_to(session_id: str, session: dict, target_instance_id: st
 
     device = (install or {}).get("device_name") or target
 
+    # A chat on a capability-gated provider row cannot run on a worker that
+    # does not report the capability (#1519): refuse now, not on its next turn.
+    from app.core import provider_capability
+
+    refusal = await run_sync(provider_capability.session_refusal, target, session_id)
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=refusal)
+
     # Online + capability check, with NO checkout filter — the same validation
     # `resolve_placement` applies to an explicit `runner:<id>` pin.
     from app.core.placement import capable_runners
@@ -681,7 +689,7 @@ async def count_sessions(
     api_user_id: Optional[str] = Query(None),
     admin_only: bool = Query(False),
     api_users_only: bool = Query(False),
-    membership: Optional[Literal["active", "settled"]] = Query(None),
+    membership: Optional[Literal["active", "settled", "snoozed"]] = Query(None),
     device_id: Optional[str] = Query(None),
     tag_id: Optional[str] = Query(None),
     exclude_archived: bool = Query(False),
@@ -714,7 +722,7 @@ async def list_sessions_cursor(
     limit: int = Query(50, ge=1, le=100),
     cursor: Optional[str] = Query(None, description="Cursor from previous response (updated_at timestamp)"),
     cursor_id: Optional[str] = Query(None, description="Cursor ID from previous response (session ID tiebreaker)"),
-    membership: Optional[Literal["active", "settled"]] = Query(None),
+    membership: Optional[Literal["active", "settled", "snoozed"]] = Query(None),
     device_id: Optional[str] = Query(None),
     token: str = Depends(require_auth)
 ):
@@ -1988,7 +1996,7 @@ async def clear_session(
         await sync_engine.broadcast_user_session_updated(
             user_id=existing.get("api_user_id") or "admin",
             session_id=session_id,
-            updates={"last_turn_failed": False},
+            updates={"last_turn_failed": False, "last_turn_stopped": False},
         )
     except Exception:  # noqa: BLE001 — sync fan-out is best-effort
         logger.debug("session clear broadcast failed", exc_info=True)
@@ -2291,12 +2299,27 @@ async def set_session_active(
     payload: SessionActiveUpdate,
     token: str = Depends(require_auth),
 ):
-    """Set the active status of a session. Returns the updated session."""
+    """Set the active status of a session. Returns the updated session.
+
+    ``snoozed_until`` with ``is_active=False`` snoozes it: Settled until that
+    time, then Active again on its own (or earlier, when it needs the owner or
+    the owner sends it a message). Any other change clears a snooze.
+    """
+    snoozed_until = None
+    if payload.snoozed_until is not None:
+        from app.core import session_snooze
+        if payload.is_active or payload.archived:
+            raise HTTPException(422, "Only a settled session can be snoozed (is_active must be false)")
+        try:
+            snoozed_until = session_snooze.validate_future(payload.snoozed_until)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     existing = await require_session(request, session_id)
 
     from app.network import control, session_active
     try:
-        return await session_active.update_membership(existing, payload.is_active, payload.archived)
+        return await session_active.update_membership(
+            existing, payload.is_active, payload.archived, snoozed_until=snoozed_until)
     except session_active.MembershipUpdateFailed as exc:
         raise HTTPException(500, str(exc)) from exc
     except control.RunnerUnreachable as exc:

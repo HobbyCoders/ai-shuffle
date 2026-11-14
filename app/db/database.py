@@ -2553,6 +2553,14 @@ def _run_column_migrations(cursor: Any) -> None:
         cursor.execute("ALTER TABLE sessions ADD COLUMN fast_pinned BOOLEAN")
         migrations_applied.append("sessions.fast_pinned")
 
+    # Snooze (sidebar): a settled chat that returns to Active on its own at
+    # this time. NULL on every pre-existing row = not snoozed. Projected from
+    # the shared membership record. Additive/nullable, no index, no
+    # SCHEMA_VERSION bump (the migrations fingerprint covers this block).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "snoozed_until"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN snoozed_until TIMESTAMP WITH TIME ZONE")
+        migrations_applied.append("sessions.snoozed_until")
+
     # The chat's account record (#1849): the owner of its mobile_tool_identity
     # row, copied onto the session so the catalog carries it to the workers
     # that mirror the chat. Additive/nullable, no index, no SCHEMA_VERSION
@@ -2590,10 +2598,9 @@ def _run_column_migrations(cursor: Any) -> None:
             cursor.execute(f"ALTER TABLE api_users ADD COLUMN {_col} TEXT")
             migrations_applied.append(f"api_users.{_col}")
 
-    # Agent colour for the Agents page (#1827): one of the frontend's accent
-    # token names (``app.core.models.AGENT_AVATAR_COLORS``), NULL = the page's
-    # own choice. Additive/nullable, no index, no SCHEMA_VERSION bump (the
-    # migrations fingerprint covers this block).
+    # Retired agent colour column (the removed avatar feature): nothing reads or
+    # writes it, but it stays so upgraded and fresh schemas match and older
+    # peers' values survive. Additive/nullable, no SCHEMA_VERSION bump.
     if table_exists(cursor, "agents") and not column_exists(cursor, "agents", "avatar_color"):
         cursor.execute("ALTER TABLE agents ADD COLUMN avatar_color TEXT")
         migrations_applied.append("agents.avatar_color")

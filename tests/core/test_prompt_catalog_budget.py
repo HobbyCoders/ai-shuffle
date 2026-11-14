@@ -60,7 +60,11 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # docs stay deferred and each new parameter is also listed in the signature
 # line: pre-Plan full 133,602 -> 136,469. Eager and both delegated budgets
 # unchanged.
-MEASURED_FULL = 136_469
+# Agent avatars removed (Nov 2026, owner decision): createProfile/updateProfile
+# lose avatar_color. Remeasured with scripts/measure_prompt_catalog.py on
+# 2026-11-14: pre-Plan full 136,573 -> 136,345 (main had drifted from 136,469
+# within the allowance); eager and both delegated budgets unchanged.
+MEASURED_FULL = 136_345
 MEASURED_EAGER = 53_138
 MEASURED_DELEGATED_APPEND = 14_877
 MEASURED_DELEGATED_LOADED_TOOLS = 7_327

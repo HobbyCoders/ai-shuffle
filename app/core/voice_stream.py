@@ -847,7 +847,7 @@ class VoiceStream:
                 return None
             marker = self.progress.approvals.current.marker or 0
             entries = [e for e in self.transcript if e["role"] == "user" and e.get("seq", 0) > marker
-                       and e.get("seq") not in self.approval_consumed]
+                       and e.get("seq") not in self.approval_consumed and not e.get("typed")]
             text = "".join(e["text"] for e in entries).strip()
             if not text:
                 return None
@@ -887,12 +887,14 @@ class VoiceStream:
 
     async def caption(self, role: str, delta: str, offset: int = 0, *, start_ms: float | None = None,
                       response_id: str | None = None, item_id: str | None = None,
-                      typed_uploads: list[str] | None = None):
+                      typed_uploads: list[str] | None = None, typed: str | None = None):
         """One transcript fragment. ``start_ms`` is where it starts on the
         provider session's timeline (GPT Live), None when unknown. Provider
         response/item ids distinguish new assistant utterances from word pieces.
         ``typed_uploads`` (even empty) marks ``delta`` as text typed into the
-        call, with the files it carries."""
+        call, with the files it carries. ``typed`` is a typed message's request
+        key: its entry is handed off by the typed path alone (see
+        :meth:`receive_text`), never by a spoken one."""
         if not delta:
             return
         if role == "assistant" and self.last_caption_role == "user" and self.approval_waiting():
@@ -945,7 +947,7 @@ class VoiceStream:
         self.last_caption_role = role
         self.transcript_seq += 1
         self.transcript.append({"role": role, "text": delta, "offset_ms": offset, "start_ms": start_ms,
-                                "seq": self.transcript_seq})
+                                "seq": self.transcript_seq, **({"typed": typed} if typed else {})})
         if role == "assistant":
             if start_ms is None:
                 self.reply_timed = False
@@ -1052,9 +1054,9 @@ class VoiceStream:
             ids, self.settling = self.settling or [], None
         turn = self.settling_turn
         # Capture only speech since the previous handoff. The chat already
-        # owns the earlier history.
+        # owns the earlier history, and typed messages go on their own path.
         before = self.delegated_seq
-        entries = [e for e in self.transcript if e.get("seq", 0) > before]
+        entries = [e for e in self.transcript if e.get("seq", 0) > before and not e.get("typed")]
         self.delegated_seq = self.transcript_seq
         for extra in ids[1:]:
             try:
@@ -1275,17 +1277,25 @@ class VoiceStream:
             # Typed requests reuse the existing same-session delegation
             # path, not a guessed provider text event or a second conversation.
             await self.flush()
-            await self.caption("user", "\n\n" + TYPED_MESSAGE_PREFIX + text, typed_uploads=recorded)
+            words = "\n\n" + TYPED_MESSAGE_PREFIX + text
+            await self.caption("user", words, typed_uploads=recorded, typed=key)
             await self.flush()  # Durable admission before acknowledging/dispatching.
-            entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
-            self.delegated_seq = self.transcript_seq
+            # A typed message is its own request: its words and files only,
+            # under its own key (#1505, #1543). Spoken handoffs, check_work and
+            # the approval desk skip its entry, so it is never sent under
+            # another request's id or lost to one that settled during the
+            # awaits above. Speech stays theirs: this path takes none of it and
+            # leaves ``delegated_seq`` alone, so a resend the owner drops as a
+            # duplicate never uses up words spoken since.
             # A resent draft is accepted once; typed ids stay out of the
             # provider session's handoff count.
             self.typed_ids[key] = None
             while len(self.typed_ids) > MAX_TYPED_IDS:
                 del self.typed_ids[next(iter(self.typed_ids))]
-            self.delegation_task = asyncio.create_task(
-                self.run_delegation(None, entries, file_note=file_note, uploads=uploads))
+            # Its own command id: the owner of a chat on another worker dedupes
+            # by it, so a resend of this message never runs twice (#1543).
+            self.delegation_task = asyncio.create_task(self.run_delegation(
+                None, [{"role": "user", "text": words}], file_note=file_note, uploads=uploads, request_key=key))
             _workers.add(self.delegation_task)
             self.delegation_task.add_done_callback(_workers.discard)
         await self.emit({"type": "text.accepted", "id": identity})

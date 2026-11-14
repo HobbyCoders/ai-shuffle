@@ -2659,67 +2659,69 @@ async def test_normal_agent_put_preserves_unrepresented_identity_and_custom_conf
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("avatar", ["orbit", None, "invalid", ["robot"]])
-async def test_normal_agent_put_deliberate_avatar_change_clear_and_validation(avatar):
+async def test_normal_agent_put_ignores_a_retired_avatar_from_older_clients(avatar):
+    """The avatar feature was removed: an older client's avatar_id is accepted
+    and dropped, and a stored one is kept untouched rather than rewritten."""
     from app.api.agents import update_profile
-    from app.core.models import ProfileUpdate, ProfileConfig
-    from fastapi import HTTPException
-    from unittest.mock import AsyncMock
-    http_request = AsyncMock()
-    http_request.json.return_value = {"config": {"avatar_id": avatar}}
+    from app.core.models import ProfileUpdate
     existing = {**sample_profile(), "config": {"avatar_id": "robot", "custom_extension": "keep"}}
+    body = ProfileUpdate.model_validate({"config": {"avatar_id": avatar}, "avatar_color": "blue"})
     with patch("app.api.agents.database") as mocked:
         mocked.get_profile.return_value = existing
         mocked.update_profile.return_value = existing
-        if isinstance(avatar, list) or avatar == "invalid":
-            with pytest.raises(HTTPException) as caught:
-                await update_profile("test-profile", ProfileUpdate(config=ProfileConfig()), token="t", http_request=http_request)
-            assert caught.value.status_code == 400
-            mocked.update_profile.assert_not_called()
-        else:
-            await update_profile("test-profile", ProfileUpdate(config=ProfileConfig()), token="t", http_request=http_request)
-            written = mocked.update_profile.call_args.kwargs["config"]
-            assert written.get("avatar_id") == avatar
-            assert written["custom_extension"] == "keep"
+        await update_profile("test-profile", body, token="t")
+    call = mocked.update_profile.call_args.kwargs
+    assert call["config"]["avatar_id"] == "robot" and call["config"]["custom_extension"] == "keep"
+    assert "avatar_color" not in call
 
 
-@pytest.mark.parametrize("payload", [{"model": "opus"}, {"avatar_id": "orbit"}, {"avatar_id": None}])
-def test_http_agent_put_preserves_or_deliberately_changes_identity(mock_db, payload):
+@pytest.mark.parametrize("payload", [
+    {"config": {"model": "opus"}},
+    {"config": {"avatar_id": "orbit"}},
+    {"config": {"avatar_id": None}, "avatar_color": None},
+    {"name": "Renamed", "avatar_color": "emerald"},
+])
+def test_http_agent_put_accepts_retired_avatar_fields_and_never_returns_them(mock_db, payload):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from app.api import agents
     from app.db import database
     from app.api import owner_services as assistant
-    database.create_profile("identity-editor", "Identity", None, {"extension": "keep"})
+    database.create_profile("identity-editor", "Identity", None, {"extension": "keep", "avatar_id": "robot"})
     app = FastAPI()
     app.include_router(agents.router)
     app.include_router(assistant.router)
     app.dependency_overrides[agents.require_admin] = lambda: "owner"
     app.dependency_overrides[agents.require_auth] = lambda: "owner"
     with TestClient(app) as client:
-        identity = client.patch("/api/v1/owner/agents/identity-editor/identity", json={"avatar_id": "robot"})
+        identity = client.patch("/api/v1/owner/agents/identity-editor/identity", json={"avatar_id": "spark"})
         assert identity.status_code == 200, identity.text
         detail = client.get("/api/v1/agents/identity-editor")
-        assert detail.status_code == 200 and detail.json()["config"]["avatar_id"] == "robot"
+        assert detail.status_code == 200
+        assert "avatar_id" not in detail.json()["config"] and "avatar_color" not in detail.json()
         listing = client.get("/api/v1/agents")
         assert listing.status_code == 200
-        assert next(row for row in listing.json() if row["id"] == "identity-editor")["config"]["avatar_id"] == "robot"
-        response = client.put("/api/v1/agents/identity-editor", json={"config": payload})
+        row = next(row for row in listing.json() if row["id"] == "identity-editor")
+        assert "avatar_id" not in row["config"] and "avatar_color" not in row
+        response = client.put("/api/v1/agents/identity-editor", json=payload)
         assert response.status_code == 200, response.text
-        expected_avatar = payload.get("avatar_id", "robot")
-        assert response.json()["config"]["avatar_id"] == expected_avatar
-        reloaded = client.get("/api/v1/agents/identity-editor")
-        assert reloaded.status_code == 200 and reloaded.json()["config"]["avatar_id"] == expected_avatar
-    written = database.get_profile("identity-editor")["config"]
-    assert written.get("avatar_id") == payload.get("avatar_id", "robot")
-    assert written["extension"] == "keep"
+        assert "avatar_id" not in response.json()["config"] and "avatar_color" not in response.json()
+        created = client.post("/api/v1/agents", json={"id": "coloured", "name": "Coloured", "config": {},
+                                                      "avatar_color": "rose"})
+        assert created.status_code == 201, created.text
+        assert "avatar_color" not in created.json()
+    written = database.get_profile("identity-editor")
+    # The stored retired value stays, unread; nothing new is written to it.
+    assert written["config"]["avatar_id"] == "robot"
+    assert written["config"]["extension"] == "keep"
+    assert written.get("avatar_color") is None
+    assert database.get_profile("coloured").get("avatar_color") is None
 
 
-@pytest.mark.parametrize("stored", ["robot", "spark", "orbit", "sprout", "pixel", None, "invalid", ["robot"]])
-def test_profile_presentation_validates_avatar_without_changing_update_schema(stored):
-    from app.api.agents import ProfilePresentation
-    from app.core.models import ProfileConfig
-    profile = {**sample_profile(), "config": {"avatar_id": stored}}
-    response = ProfilePresentation.model_validate(profile).model_dump()
-    expected = stored if isinstance(stored, str) and stored in {"robot", "spark", "orbit", "sprout", "pixel"} else None
-    assert response["config"]["avatar_id"] == expected
+@pytest.mark.parametrize("stored", ["robot", None, "invalid", ["robot"]])
+def test_profile_response_drops_retired_avatar_values(stored):
+    from app.core.models import Profile, ProfileConfig
+    profile = {**sample_profile(), "avatar_color": "blue", "config": {"avatar_id": stored}}
+    response = Profile.model_validate(profile).model_dump()
+    assert "avatar_id" not in response["config"] and "avatar_color" not in response
     assert "avatar_id" not in ProfileConfig.model_fields

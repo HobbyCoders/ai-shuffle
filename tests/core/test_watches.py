@@ -85,6 +85,60 @@ async def test_schedule_restart_real_turn_and_idempotent_outbox(
 
 
 @pytest.mark.asyncio
+async def test_snooze_keeps_a_running_watch_turn_and_settle_stops_it(
+    owner: dict[str, Any], monkeypatch: MonkeyPatch
+) -> None:
+    from datetime import datetime, timezone
+
+    watch = make_watch(owner)
+    await manager.WatchManager().run_once()
+    event = store.events(watch["id"])[0]
+    turn = turns.get_turn_by_command(owner["id"], event["id"])
+    assert turn and turn["state"] not in turns.TERMINAL_STATES
+    interrupt = AsyncMock()
+    monkeypatch.setattr(turn_manager, "interrupt_async", interrupt)
+    wake_at = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(microsecond=0)
+    database.set_session_active(owner["id"], False, snoozed_until=wake_at.isoformat())
+    meta = watches.metadata(watch, store.events(watch["id"])[0])
+    assert watches.assert_allowed(meta, owner["id"])
+    await manager.WatchManager().run_once()
+    interrupt.assert_not_awaited()
+    assert store.events(watch["id"])[0]["status"] != "cancelled"
+    # Waking it behaves like active; settling it stops the turn.
+    database.set_session_active(owner["id"], True)
+    await manager.WatchManager().run_once()
+    interrupt.assert_not_awaited()
+    database.set_session_active(owner["id"], False)
+    with pytest.raises(ValueError, match="settled"):
+        watches.assert_allowed(meta, owner["id"])
+    await manager.WatchManager().run_once()
+    interrupt.assert_awaited_once()
+    assert interrupt.await_args.args[:2] == (owner["id"], "stop")
+
+
+def test_snoozed_exemption_never_covers_archived_or_stopped(owner: dict[str, Any]) -> None:
+    from app.core.session_snooze import runs_work
+
+    later = "2999-01-01T00:00:00+00:00"
+    assert runs_work({"is_active": True})
+    assert runs_work({"is_active": False, "snoozed_until": later, "status": "active"})
+    assert not runs_work({"is_active": False, "snoozed_until": None})
+    assert not runs_work({"is_active": False, "snoozed_until": later, "status": "archived"})
+    assert not runs_work(None)
+    watch = make_watch(owner)
+    store.append_events(watch, [("stopped", {})])
+    event = store.events(watch["id"])[0]
+    store.reserve(watch["id"], event["id"], 1)
+    store.update_event(event["id"], session_id=owner["id"])
+    meta = watches.metadata(watch, dict(store.events(watch["id"])[0], session_id=owner["id"]))
+    database.set_session_active(owner["id"], False, snoozed_until=later)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET status='stopped' WHERE id=%s", (owner["id"],))
+    with pytest.raises(ValueError, match="stopped"):
+        watches.assert_allowed(meta, owner["id"])
+
+
+@pytest.mark.asyncio
 async def test_alert_after_creator_settled_and_stop_from_chat(
     owner: dict[str, Any], monkeypatch: MonkeyPatch
 ) -> None:

@@ -95,7 +95,6 @@ vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.apiGet, post: mocks.apiPost },
 	getErrorMessage: (error: Error, fallback: string) => error?.message || fallback,
 }));
-vi.mock('$lib/api/agent-identity', () => ({ getAgentIdentities: vi.fn().mockResolvedValue([]) }));
 
 vi.mock('$lib/stores/notifications', async (importOriginal) => ({
 	...await importOriginal<typeof import('$lib/stores/notifications')>(),
@@ -1329,6 +1328,138 @@ describe('Sidebar multi-select (R15)', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe('Sidebar Snoozed lane', () => {
+	const NOW = Date.parse('2026-08-20T12:10:00Z');
+	const inMin = (m: number) => new Date(NOW + m * 60_000).toISOString();
+	const snoozed = (id: string, title: string, minutes: number) =>
+		session(id, title, 'visible-project', false, false, { snoozed_until: inMin(minutes) });
+	const snoozedIds = () => cardIds(document.querySelector('[data-group="snoozed"]') ?? document.createElement('div'));
+
+	afterEach(() => vi.useRealTimers());
+
+	it('sits between Active and Settled, soonest wake first, each row with its time', () => {
+		vi.useFakeTimers({ toFake: ['Date'], now: NOW });
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			snoozed('late', 'Late snooze', 300),
+			snoozed('soon', 'Soon snooze', 30),
+			session('settled', 'Settled chat', 'visible-project', false),
+		]);
+		render(Sidebar, sidebarProps);
+		expect(sectLabels().map((l) => l.replace(/ \d+$/, ''))).toEqual(['Active', 'Snoozed', 'Settled']);
+		expect(sectLabels()[1]).toBe('Snoozed 2');
+		expect(snoozedIds()).toEqual(['soon', 'late']);
+		expect(cardFrame('Soon snooze').textContent).toMatch(/until /);
+		expect(cardIds(document.querySelector('[data-group="settled"]')!)).toEqual(['settled']);
+	});
+
+	it('is hidden when nothing is snoozed, and collapses like the others', async () => {
+		render(Sidebar, sidebarProps);
+		expect(sectLabels().some((l) => l.startsWith('Snoozed'))).toBe(false);
+		cleanup();
+
+		vi.useFakeTimers({ toFake: ['Date'], now: NOW });
+		mocks.sessions.set([snoozed('soon', 'Soon snooze', 30)]);
+		render(Sidebar, sidebarProps);
+		const header = screen.getByRole('button', { name: /^Snoozed/ });
+		expect(header.getAttribute('aria-expanded')).toBe('true');
+		await fireEvent.click(header);
+		expect(header.getAttribute('aria-expanded')).toBe('false');
+		expect(screen.queryByText('Soon snooze')).toBeNull();
+	});
+
+	it('moves a row back to Active on its own the moment its time passes', async () => {
+		vi.useFakeTimers({ now: NOW });
+		mocks.sessions.set([snoozed('soon', 'Soon snooze', 1), session('settled', 'Settled chat', 'visible-project', false)]);
+		render(Sidebar, sidebarProps);
+		expect(snoozedIds()).toEqual(['soon']);
+
+		await vi.advanceTimersByTimeAsync(59_000);
+		expect(snoozedIds()).toEqual(['soon']);
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(sectLabels().some((l) => l.startsWith('Snoozed'))).toBe(false);
+		expect(cardIds(document.querySelector('[data-group="active"]')!)).toEqual(['soon']);
+	});
+
+	it('snoozes a row from its Snooze button through the picker', async () => {
+		vi.useFakeTimers({ toFake: ['Date'], now: NOW });
+		render(Sidebar, sidebarProps);
+		await fireEvent.click(within(cardFrame('Active chat')).getByTitle('Snooze session'));
+		const picker = screen.getByRole('dialog', { name: 'Snooze chat' });
+		await fireEvent.click(within(picker).getByRole('button', { name: /^Tomorrow, / }));
+		const tomorrow = new Date(NOW);
+		tomorrow.setDate(tomorrow.getDate() + 1);
+		tomorrow.setHours(9, 0, 0, 0);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false, tomorrow.toISOString());
+		expect(screen.queryByRole('dialog', { name: 'Snooze chat' })).toBeNull();
+	});
+
+	it('closes the picker on Escape without snoozing', async () => {
+		render(Sidebar, sidebarProps);
+		await fireEvent.click(within(cardFrame('Active chat')).getByTitle('Snooze session'));
+		expect(screen.getByRole('dialog', { name: 'Snooze chat' })).toBeTruthy();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.queryByRole('dialog', { name: 'Snooze chat' })).toBeNull();
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
+	it('offers Snooze beside Settle in the selection bar', async () => {
+		vi.useFakeTimers();
+		platform.set('mobile');
+		const nowMs = Date.now();
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			session('later', 'Later chat', 'visible-project', true),
+		]);
+		render(Sidebar, sidebarProps);
+		const frame = document.querySelector('[data-session-card="active"]') as HTMLElement;
+		const card = frame.querySelector('.scard') as HTMLElement;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		await vi.advanceTimersByTimeAsync(520);
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		await fireEvent.click(document.querySelector('[data-session-card="later"] .scard') as HTMLElement);
+		const bar = document.querySelector('.selbar') as HTMLElement;
+		const labels = within(bar).getAllByRole('button').map((b) => b.textContent?.trim());
+		expect(labels.slice(-2)).toEqual(['Snooze', 'Settle']);
+
+		await fireEvent.click(within(bar).getByRole('button', { name: 'Snooze' }));
+		const picker = screen.getByRole('dialog', { name: 'Snooze chats' });
+		expect(within(picker).getByText('Snooze 2 chats until')).toBeTruthy();
+		const field = within(picker).getByLabelText('Pick a date and time');
+		const when = new Date(nowMs + 2 * 86_400_000);
+		when.setSeconds(0, 0);
+		const pad = (n: number) => String(n).padStart(2, '0');
+		const value = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}T${pad(when.getHours())}:${pad(when.getMinutes())}`;
+		await fireEvent.input(field, { target: { value } });
+		await fireEvent.click(within(picker).getByRole('button', { name: 'Snooze' }));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false, when.toISOString());
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('later', false, when.toISOString());
+		expect(bar.getAttribute('aria-hidden')).toBe('true');
+	});
+
+	it('offers Active, Snooze and Settle for a selected snoozed row, each with an accessible name', async () => {
+		vi.useFakeTimers({ now: NOW });
+		platform.set('mobile');
+		mocks.sessions.set([snoozed('soon', 'Soon snooze', 30)]);
+		render(Sidebar, sidebarProps);
+		const frame = document.querySelector('[data-session-card="soon"]') as HTMLElement;
+		const card = frame.querySelector('.scard') as HTMLElement;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		await vi.advanceTimersByTimeAsync(520);
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		const bar = document.querySelector('.selbar') as HTMLElement;
+		// The labels can collapse to icons in a narrow bar, so the names live on aria-label.
+		expect(within(bar).getAllByRole('button').slice(1).map((b) => b.getAttribute('aria-label'))).toEqual(['Active', 'Snooze', 'Settle']);
+		expect(bar.classList.contains('crowded')).toBe(true);
+		expect(bar.textContent).toContain('1 selected');
+
+		await fireEvent.click(within(bar).getByRole('button', { name: 'Active' }));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('soon', true);
 	});
 });
 

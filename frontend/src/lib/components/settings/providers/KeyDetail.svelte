@@ -29,16 +29,18 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import TextField from '../rows/TextField.svelte';
 	import Segmented from '../rows/Segmented.svelte';
+	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ModelCuration from './ModelCuration.svelte';
 	import LocalTuning from './LocalTuning.svelte';
 	import KeyUsage from './tabs/KeyUsage.svelte';
 	import { passthroughModels } from './curation';
 	import { supportsLocalTuning, tunedModels } from './local-tuning';
-	import { hostOf, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
+	import { hostOf, needsUpdateNote, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
 	import CredentialControl from './CredentialControl.svelte';
 	import SavedSecretRow from './SavedSecretRow.svelte';
-	import { detailLine } from './credential-display';
+	import { balanceDisplay } from './credential-display';
+	import DetailLine from './DetailLine.svelte';
 
 	interface Props {
 		credential: CredentialView;
@@ -54,6 +56,7 @@
 	];
 
 	const row = $derived(credential.row!);
+	const updateNote = $derived(needsUpdateNote(row));
 	const gateway = $derived(credential.flavor === 'gateway');
 	const native = $derived(isNativeProvider(row.provider_type));
 	const option = $derived(nativeOption(row.provider_type, row.auth_mode === 'plan_key') ?? row.native_provider);
@@ -82,21 +85,9 @@
 	let credits = $state<OpenRouterUsageStatus | null>(null);
 
 	const openRouter = $derived(supportsOpenRouterBilling(row));
-	const balance = $derived(
-		openRouter && credits?.credits
-			? `$${credits.credits.balance_remaining.toFixed(2)}`
-			: null
-	);
+	const balance = $derived(openRouter ? balanceDisplay(credits?.credits?.balance_remaining, ' left') : null);
 
 	const title = $derived(row.name?.trim() || credential.name);
-	const line = $derived(
-		detailLine(
-			`${row.models.length} ${row.models.length === 1 ? 'model' : 'models'}`,
-			gateway ? (dialect === 'openai' ? 'OpenAI chat' : 'Anthropic Messages') : hostOf(row.base_url),
-			balance && `${balance} left`,
-			!row.auth_token_set && 'No token'
-		)
-	);
 
 	/** Positive integer or null; '' is null; anything else is invalid. */
 	function parseOptionalInt(value: string): number | null | 'invalid' {
@@ -200,9 +191,20 @@
 	const rowValue = (r: ModelProvider, f: 'context_window' | 'max_output_tokens') => (r[f] != null ? String(r[f]) : '');
 </script>
 
+{#snippet subtitle()}
+	<DetailLine
+		parts={[
+			`${row.models.length} ${row.models.length === 1 ? 'model' : 'models'}`,
+			gateway ? (dialect === 'openai' ? 'OpenAI chat' : 'Anthropic Messages') : hostOf(row.base_url),
+			balance,
+			!row.auth_token_set && 'No token'
+		]}
+	/>
+{/snippet}
+
 <DetailPane
 	name={title}
-	subtitle={line}
+	{subtitle}
 	tabs={gateway ? (tuning ? ['Overview', 'Models', 'Tuning'] : ['Overview', 'Models']) : row.provider_type === 'openai' || native ? ['Overview', 'Models'] : ['Overview', 'Models', 'Usage']}
 	{danger}
 	item={credential.item}
@@ -210,6 +212,9 @@
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		<CredentialControl {credential} showState />
+	{/snippet}
+	{#snippet banner()}
+		{#if updateNote}<InlineBanner tone="info"><span role="status">{updateNote}</span></InlineBanner>{/if}
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}

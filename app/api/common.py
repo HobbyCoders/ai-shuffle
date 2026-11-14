@@ -7,9 +7,10 @@ projects, github, git, project_agents, mcp, project_plugins, hooks).
 """
 
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from functools import wraps
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Awaitable, Callable, Iterator, Optional, TypeVar
 
 from fastapi import HTTPException, Request, status
 
@@ -20,9 +21,11 @@ from app.core.project_utils import (
     get_worktree_working_dir_as_path,
 )
 from app.db import database
+from app.db.async_database import run_plugin_io
 from app.api.auth import get_api_user_from_request
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 # =============================================================================
@@ -423,6 +426,13 @@ async def api_error_handler(
             sdk_rename_session(session_id=sdk_sid, title=title)
             return {"status": "ok"}
     """
+    with api_errors(action, status_code):
+        yield
+
+
+@contextmanager
+def api_errors(action: str, status_code: int = 500) -> Iterator[None]:
+    """:func:`api_error_handler` for a synchronous handler body."""
     try:
         yield
     except HTTPException:
@@ -433,3 +443,15 @@ async def api_error_handler(
             status_code=status_code,
             detail=f"Failed to {action}"
         ) from e
+
+
+def on_plugin_io(handler: Callable[..., T]) -> Callable[..., Awaitable[T]]:
+    """Run a synchronous route handler on the plugin I/O thread.
+
+    For handlers that read or write plugin, marketplace or MCP config files:
+    they run one at a time, as they did on the event loop, without blocking it.
+    """
+    @wraps(handler)
+    async def endpoint(*args, **kwargs):
+        return await run_plugin_io(handler, *args, **kwargs)
+    return endpoint

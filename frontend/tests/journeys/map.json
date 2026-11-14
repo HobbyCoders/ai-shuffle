@@ -195,9 +195,9 @@
 			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
 		},
 		{
-			"why": "Docs: \"On this page\" on every open with unique heading anchors, a reload reopens the document, Docs adds no history entry, and every search result opened marks its phrase",
+			"why": "Docs: \"On this page\" on every open with unique heading anchors, a reload reopens the document, Docs adds no history entry, every search result opened marks its phrase, and a phrase match ranks first in the Docs panel and in Spotlight",
 			"journeys": ["docs-viewer"],
-			"globs": ["frontend/src/lib/components/docs/DocsCard.svelte", "frontend/src/lib/components/docs/DocsContent.svelte", "frontend/src/lib/components/docs/DocsSearch.svelte", "frontend/src/lib/docs/markdown.ts", "frontend/src/lib/docs/search.ts"]
+			"globs": ["app/core/docs_content.py", "frontend/src/lib/components/docs/DocsCard.svelte", "frontend/src/lib/components/docs/DocsContent.svelte", "frontend/src/lib/components/docs/DocsSearch.svelte", "frontend/src/lib/docs/markdown.ts", "frontend/src/lib/docs/search.ts"]
 		},
 		{
 			"why": "the rail's notification history opens inside the Sidebar, and the empty-chat composer holds no empty Stop seat",
@@ -256,6 +256,22 @@
 				"frontend/src/lib/components/layout/SessionCard*",
 				"frontend/src/lib/components/layout/session-card-data*",
 				"frontend/src/lib/components/chat/ContextPillBar.svelte",
+				"app/api/sessions_helpers.py"
+			]
+		},
+		{
+			"why": "snooze from a sidebar row: the row moves to the Snoozed group with its wake time, and Unsnooze brings it back to Active",
+			"journeys": ["sidebar-snooze"],
+			"globs": [
+				"frontend/tests/journeys/sidebar-snooze.journey.mjs",
+				"frontend/src/lib/stores/app-data*",
+				"frontend/src/lib/components/layout/Sidebar.svelte",
+				"frontend/src/lib/components/layout/SessionCard*",
+				"frontend/src/lib/components/layout/session-card-data*",
+				"frontend/src/lib/components/layout/sidebar/SnoozePicker*",
+				"frontend/src/lib/components/layout/sidebar/SidebarSheet*",
+				"app/core/session_snooze.py",
+				"app/network/session_active.py",
 				"app/api/sessions_helpers.py"
 			]
 		},

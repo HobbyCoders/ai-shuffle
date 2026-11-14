@@ -9,10 +9,10 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from app.core.models import (
-    Profile, ProfileConfig, ProfileCreate, ProfileUpdate,
+    Profile, ProfileCreate, ProfileUpdate,
     AgentExport, AgentExportData, AgentImportRequest
 )
 from app.db import database
@@ -26,21 +26,6 @@ from app.core.project_agent_service import get_project_agent_service, get_user_a
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/agents", tags=["Agents"])
-
-
-class ProfilePresentationConfig(ProfileConfig):
-    """Read projection; presentation is independently written by identity APIs."""
-    avatar_id: Optional[str] = None
-
-    @field_validator("avatar_id", mode="before")
-    @classmethod
-    def validated_avatar(cls, value):
-        from app.core.owner_services import AVATAR_PRESETS
-        return value if isinstance(value, str) and value in AVATAR_PRESETS else None
-
-
-class ProfilePresentation(Profile):
-    config: ProfilePresentationConfig
 
 
 # Response model for subagent (matches frontend expectations)
@@ -142,7 +127,7 @@ async def list_agent_templates(token: str = Depends(require_auth)):
     ]
 
 
-@router.get("", response_model=List[ProfilePresentation])
+@router.get("", response_model=List[Profile])
 async def list_profiles(request: Request, token: str = Depends(require_auth)):
     """List all agent profiles. API users only see their assigned profiles."""
     api_user = get_api_user_from_request(request)
@@ -195,7 +180,7 @@ async def install_starter_team_template(token: str = Depends(require_admin)):
     return await run_sync(install_starter_team)
 
 
-@router.get("/{profile_id}", response_model=ProfilePresentation)
+@router.get("/{profile_id}", response_model=Profile)
 async def get_profile(request: Request, profile_id: str, token: str = Depends(require_auth)):
     """Get a specific profile. API users can only access their assigned profiles."""
     api_user = get_api_user_from_request(request)
@@ -781,7 +766,7 @@ async def delete_profile_agent(
     return await run_sync(_load)
 
 
-@router.post("", response_model=ProfilePresentation, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=Profile, status_code=status.HTTP_201_CREATED)
 async def create_profile(request: ProfileCreate, token: str = Depends(require_admin)):
     """Create a custom profile - Admin only"""
     def _load() -> dict:
@@ -819,7 +804,6 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
             description=request.description,
             config=request.config.model_dump(exclude_none=True),
             is_builtin=False,
-            avatar_color=request.avatar_color,
         )
 
         return profile
@@ -827,17 +811,13 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
     return await run_sync(_load)
 
 
-@router.put("/{profile_id}", response_model=ProfilePresentation)
+@router.put("/{profile_id}", response_model=Profile)
 async def update_profile(
     profile_id: str,
     request: ProfileUpdate,
     token: str = Depends(require_admin),
-    http_request: Request = None,
 ):
     """Update a profile - Admin only. All profiles (including defaults) are editable."""
-    raw_config = None
-    if http_request is not None:
-        raw_config = (await http_request.json()).get("config")
     _refuse_assistant_agent(profile_id)
     def _load() -> dict:
         """Existence check + update in ONE hop (the check gates the write).
@@ -852,25 +832,17 @@ async def update_profile(
         config = None
         if request.config:
             from app.core.profiles import preserve_profile_presentation
-            try:
-                config = preserve_profile_presentation(
-                    existing.get("config") or {},
-                    request.config.model_dump(exclude_none=True), raw_config,
-                )
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
+            config = preserve_profile_presentation(
+                existing.get("config") or {},
+                request.config.model_dump(exclude_none=True),
+            )
 
-        extra = (
-            {"avatar_color": request.avatar_color}
-            if "avatar_color" in request.model_fields_set else {}
-        )
         profile = database.update_profile(
             profile_id=profile_id,
             name=request.name,
             description=request.description,
             config=config,
             allow_builtin=True,  # All profiles are editable
-            **extra,
         )
 
         return profile
@@ -913,7 +885,7 @@ async def delete_profile(profile_id: str, token: str = Depends(require_admin)):
     return await run_sync(_load)
 
 
-@router.post("/{profile_id}/restore", response_model=ProfilePresentation)
+@router.post("/{profile_id}/restore", response_model=Profile)
 async def restore_profile_defaults(
     profile_id: str,
     token: str = Depends(require_admin)
@@ -1221,7 +1193,7 @@ async def export_profile(
     return response
 
 
-@router.post("/import", response_model=ProfilePresentation, status_code=status.HTTP_201_CREATED)
+@router.post("/import", response_model=Profile, status_code=status.HTTP_201_CREATED)
 async def import_profile(
     import_request: AgentImportRequest,
     token: str = Depends(require_admin)

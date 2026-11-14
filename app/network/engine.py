@@ -372,6 +372,15 @@ def _notify(touched: List[Tuple[str, str, str]]) -> None:
             recover_revoked_transfers()
         except Exception:  # noqa: BLE001 — retry when status is read or at boot
             logger.warning("Could not recover revoked-source transfers", exc_info=True)
+    collections = {collection for collection, _, _ in touched}
+    if collections & {"membership", "presence", "model_providers"}:
+        # A member joined or left, its presence changed or a provider row
+        # arrived: judge the capability-gated provider rows again (#1519).
+        # Presence records are keyed by device id; anything else re-judges all.
+        from app.core import provider_capability
+        provider_capability.recheck(
+            {record_id for collection, record_id, _ in touched if collection == "presence"}
+            if not (collections & {"membership", "model_providers"}) else None)
     for listener in list(_listeners):
         try:
             listener(touched)
@@ -600,7 +609,8 @@ def content_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
     if coll.name == "sessions":
         from app.db.session_archive_migration import canonical_session
         record = canonical_session(record)
-    subset = {name: record.get(name) for name in coll.hash_fields if name not in coll.local_fields}
+    subset = {name: record.get(name) for name in coll.hash_fields if name not in coll.local_fields
+              and not (name in coll.late_fields and record.get(name) is None)}
     if coll.name == "model_providers":
         # An explicit local disconnect is an update even when the previously
         # published row omitted an untrusted/restored billing credential.
@@ -1959,7 +1969,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
 
     if coll.name == "session_active":
         if env.op == OP_UPSERT and (
-                plaintext.get("session_id") != env.record_id or not isinstance(plaintext.get("is_active"), bool)):
+                plaintext.get("session_id") != env.record_id or not isinstance(plaintext.get("is_active"), bool)
+                or not _valid_snooze(plaintext.get("snoozed_until"))):
             raise ApplyError("malformed session membership")
         # A sidebar click committed while the outbox was held must survive
         # reconnect. Sign it after observing the incoming clock, before the
@@ -2077,6 +2088,18 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     return "applied"
 
 
+def _valid_snooze(value: Any) -> bool:
+    """A membership record's optional wake time: absent/None or ISO-8601 with a zone."""
+    if value is None:
+        return True
+    if not isinstance(value, str) or len(value) > 64:
+        return False
+    try:
+        return datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
+
+
 def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any], *,
                     origin_device_id: Optional[str] = None, ctx: Optional[NetworkContext] = None) -> Mapping[str, Any]:
     """Owner-ordered rows may reference local-only rows; drop what we cannot see.
@@ -2095,6 +2118,11 @@ def _after_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any])
     if coll.name == "session_active":
         from app.network import session_active
         session_active.project(cursor, plaintext)
+    elif coll.name == "sessions" and plaintext.get("id"):
+        # The snooze is not a catalog field. When membership arrived before
+        # the catalog row existed, carry its wake time onto the new row.
+        from app.network import session_active
+        session_active.project_snooze(cursor, plaintext["id"])
     elif coll.name == "session_events":
         from app.network import catalog
         catalog.after_event_mirrored(cursor, dict(plaintext))
@@ -3434,6 +3462,9 @@ def admit_device(*, device_id: str, signing_public: bytes, encryption_public: by
             backfill_owner_device_ids(ctx.device_id, include_unscoped=False)
         except Exception:  # noqa: BLE001
             logger.debug("Legacy owner backfill failed", exc_info=True)
+    # Gated provider rows reach this member too: judge them for it now (#1519).
+    from app.core import provider_capability
+    provider_capability.recheck([device_id])
     kick()
     return join_response(device_id=device_id, encryption_public=encryption_public, certificate=certificate)
 

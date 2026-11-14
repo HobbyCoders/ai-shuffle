@@ -180,8 +180,10 @@ describe('startup fan-out (journey 1)', () => {
 		expect(sent.filter((r) => r.startsWith('GET /sessions/count?') && r.includes('membership=settled'))).toHaveLength(1);
 		// The global Away switch and its band need the shared state at startup.
 		expect(sent.filter((r) => r === 'GET /away-mode')).toHaveLength(1);
+		// The Snoozed group is its own small list, read in parallel with Active.
+		expect(sent.filter((r) => r.startsWith('GET /sessions/cursor?') && r.includes('membership=snoozed'))).toHaveLength(1);
 		// Ratchet: the replay's reads, each once, including those new readers.
-		expect(sent.length).toBeLessThanOrEqual(17);
+		expect(sent.length).toBeLessThanOrEqual(18);
 	});
 
 	it('sends the sidebar list as soon as auth answers, ahead of the page fan-out', async () => {

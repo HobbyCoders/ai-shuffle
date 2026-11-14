@@ -107,6 +107,8 @@ On a computer nobody works at, such as a virtual machine set aside for agents, y
 
 On models that support it, pick how hard the model thinks in the composer: **low**, **medium**, **high**, and on some models **xhigh** and **max**. Higher effort is slower and uses more tokens.
 
+Until you pick a level the composer reads **Auto** and the model runs at its own default. To go back to the model's default after picking a level, choose **Auto** in the effort picker.
+
 ## Text the app writes for you
 
 Session titles, commit messages, pull request descriptions, branch names and generated agents use their own model. Set it once under **Settings → Default models → Text tasks**.

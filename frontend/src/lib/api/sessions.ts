@@ -41,6 +41,8 @@ export interface Session {
 	has_running_tasks?: boolean;
 	/** The latest turn that ran ended in a failure, so the row says so. */
 	last_turn_failed?: boolean | null;
+	/** The latest turn that ran was stopped, so the row says so, not Done (#1340). */
+	last_turn_stopped?: boolean | null;
 	/** A new turn was accepted but is waiting for the database to have room. */
 	start_queued?: boolean | null;
 	/** A turn runs now. Listed rows only; the streaming map is live after the
@@ -49,6 +51,9 @@ export interface Session {
 	/** Read-only state sampled on the owning worker, never local runner state. */
 	remote_runtime_state?: 'working' | 'parked' | 'permission' | 'question' | 'idle' | 'offline' | 'unknown' | null;
 	is_active: boolean;
+	/** Snooze: a settled chat goes back to Active at this time (ISO, UTC).
+	 *  Null or absent when it is not snoozed. */
+	snoozed_until?: string | null;
 	api_user_id?: string | null;
 	api_user_name?: string | null;
 	total_cost_usd: number;
@@ -256,8 +261,11 @@ export async function searchSessionsPaginated(
  * `PATCH /sessions/{id}/active` endpoint takes the new value as a JSON body and
  * returns the updated Session.
  */
-export async function setSessionActive(sessionId: string, isActive: boolean): Promise<Session> {
-	return api.patch<Session>(`/sessions/${sessionId}/active`, { is_active: isActive });
+export async function setSessionActive(sessionId: string, isActive: boolean, snoozedUntil?: string | null): Promise<Session> {
+	// A wake time snoozes a settled chat; without one a settle or activate ends any snooze.
+	const body: Record<string, unknown> = { is_active: isActive };
+	if (snoozedUntil && !isActive) body.snoozed_until = snoozedUntil;
+	return api.patch<Session>(`/sessions/${sessionId}/active`, body);
 }
 
 /**

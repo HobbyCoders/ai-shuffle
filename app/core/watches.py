@@ -242,8 +242,10 @@ def assert_allowed(
     if session_id:
         session = owner_session(session_id)
         from app.core.owner_services import session_stopped
+        from app.core.session_snooze import runs_work
 
-        if not session.get("is_active") or session_stopped(session_id):
+        # A snooze defers the chat; it does not stop an admitted watch turn.
+        if not runs_work(session) or session_stopped(session_id):
             raise ValueError("Watch delivery session was stopped or settled")
     if watch["source"]["kind"] == "connector":
         sources.connector_allowed(watch)

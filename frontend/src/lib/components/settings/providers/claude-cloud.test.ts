@@ -3,6 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
 	buildValues,
 	canSave,
+	cloudWarning,
+	CLOUD_WARNING,
+	VERTEX_CLOUD_WARNING,
 	initialChoice,
 	initialInputs,
 	methodOf,
@@ -120,5 +123,28 @@ describe('placeholderFor', () => {
 		expect(placeholderFor(empty, gateway, token)).toBe('');
 		expect(placeholderFor(empty, gateway, gateway.fields[0])).toBe('https://');
 		expect(placeholderFor(empty, vertex, vertex.fields[0])).toBe('us-east5');
+	});
+});
+
+describe('cloudWarning (#1583)', () => {
+	const LEGACY = `Agents on this worker can run shell commands and can read these credentials, including the Vertex AI key file on this worker's disk, with their own tools and in terminals. Use an account with the smallest permissions that work.`;
+	/** An older worker: one warning naming the key file, no per-method warnings. */
+	const legacy = { ...cloudConfig(), warning: LEGACY, method_warnings: undefined };
+
+	it('uses the worker copy for each method when it sends one', () => {
+		const config = { ...cloudConfig(), method_warnings: { gateway: 'Gateway copy', vertex: 'Vertex copy' } };
+		expect(cloudWarning(config, 'gateway')).toBe('Gateway copy');
+		expect(cloudWarning(config, 'vertex')).toBe('Vertex copy');
+		expect(cloudWarning(config, 'bedrock')).toBe(CLOUD_WARNING);
+	});
+
+	it('names the key file only for Vertex AI when an older worker sends one shared warning', () => {
+		for (const method of ['gateway', 'bedrock', 'foundry'] as const) {
+			expect(cloudWarning(legacy, method), method).toBe(CLOUD_WARNING);
+			expect(cloudWarning(legacy, method), method).not.toContain('key file');
+		}
+		expect(cloudWarning(legacy, 'vertex')).toBe(VERTEX_CLOUD_WARNING);
+		expect(cloudWarning(legacy, null)).toBe(CLOUD_WARNING);
+		expect(cloudWarning(null, 'vertex')).toBe(VERTEX_CLOUD_WARNING);
 	});
 });

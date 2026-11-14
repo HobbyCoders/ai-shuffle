@@ -340,6 +340,9 @@ async def lifespan(app: FastAPI):
         bg_tasks = start_background_tasks()
         from app.services.attention_dispatcher import dispatcher
         bg_tasks.append(asyncio.create_task(dispatcher.run(), name="attention-push"))
+        # Snoozed chats go back to Active at their time, with no browser open.
+        from app.core.session_snooze import maintain_snoozes
+        bg_tasks.append(asyncio.create_task(maintain_snoozes(), name="snooze-wake"))
         # Memory-folder pushes a previous process was stopped during (#1305);
         # off the boot path, and retained for the next start if cut off again.
         from app.core.memory_sync import publish_pending_memory

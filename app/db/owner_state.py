@@ -15,10 +15,6 @@ from datetime import datetime, timedelta, timezone
 
 from app.db.base import get_db, row_to_dict, column_exists
 
-AVATAR_PRESETS = ("robot", "spark", "orbit", "sprout", "pixel",
-                  "owl", "fox", "cat", "bear", "ghost", "cloud",
-                  "moon", "sun", "bolt", "gem", "drop",
-                  "king", "queen", "jack", "joker")
 ACCOUNT_ID = "owner"
 from app.core.owner_compat import RETIRED_AGENT_ID
 

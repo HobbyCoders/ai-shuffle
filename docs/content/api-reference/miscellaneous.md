@@ -15,8 +15,8 @@ These shared services use the owner-only `/api/v1/owner` prefix:
 - `GET /api/v1/owner/limits` reads the daily spending cap, job time limit and today's spend.
 - `PATCH` or `PUT /api/v1/owner/limits` changes only supplied limit fields. Disabling
   the daily cap requires `confirm_spend_limit_off: true`; it is not a model-facing tool.
-- `GET /api/v1/owner/agents` lists names and avatar presets for ordinary agents.
-- `PATCH /api/v1/owner/agents/{id}/identity` changes only the name/avatar, preserving
+- `GET /api/v1/owner/agents` lists the names of ordinary agents.
+- `PATCH /api/v1/owner/agents/{id}/identity` changes only the name, preserving
   the agent's prompts, tools, model and other configuration.
 
 Both reads and writes require owner authentication (API keys are refused), and writes
@@ -1849,4 +1849,4 @@ Get a specific documentation page with full markdown content.
 
 ### GET /api/v1/documentation/search?q={query}
 
-Search across all documentation.
+Search across all documentation. Pages that hold the query's words together, in order, rank above pages that only have them apart. Each result's `snippets` are readable text around the match, without Markdown such as table pipes, link targets or emphasis marks.

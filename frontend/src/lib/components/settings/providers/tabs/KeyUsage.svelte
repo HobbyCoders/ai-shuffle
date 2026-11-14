@@ -6,6 +6,7 @@
 	import SettingRow from '../../rows/SettingRow.svelte';
 	import ValueText from '../../rows/ValueText.svelte';
 	import ProviderBalance from './ProviderBalance.svelte';
+	import { balanceDisplay } from '../credential-display';
 
 	interface Props {
 		providerId: string;
@@ -15,6 +16,7 @@
 	}
 
 	let { providerId, credits, openRouter, xai = false }: Props = $props();
+	const balance = $derived(balanceDisplay(credits?.credits?.balance_remaining));
 </script>
 
 {#if xai}
@@ -28,10 +30,7 @@
 			hint="Read with this key"
 			help="Refreshes on demand, at most once every five minutes. If this key cannot read account credits, Usage shows its key limit or an unavailable balance, never spending as credit left."
 		>
-			<ValueText
-				tone="fg"
-				value={credits?.credits ? `$${credits.credits.balance_remaining.toFixed(2)}` : 'Not reported yet'}
-			/>
+			<ValueText tone={balance?.danger ? 'danger' : 'fg'} value={balance?.text ?? 'Not reported yet'} />
 		</SettingRow>
 		{#if credits?.configured}
 			<SettingRow label="Legacy management key" hint="Kept, not changed">

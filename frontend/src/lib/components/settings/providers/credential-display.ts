@@ -15,3 +15,6 @@ export function safeKeyHint(masked: string | null | undefined): string {
 export function detailLine(...parts: (string | number | null | undefined | false)[]): string {
 	return parts.filter((p) => p !== null && p !== undefined && p !== false && p !== '').join(' · ');
 }
+
+/** The one balance rule (sign first, warning colour at zero or below), shared with the chat's usage popover. */
+export { balanceDisplay } from '$lib/components/chat/provider-credit';
