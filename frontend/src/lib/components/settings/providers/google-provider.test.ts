@@ -99,6 +99,21 @@ it('checks the saved key and offers no usage tab', async () => {
 	expect(worker.sent('POST', `/model-providers/${row.id}/check-key`)).toHaveLength(1);
 });
 
+it('names the workers that need an update to use the row, and drops the note once none do (#1519)', async () => {
+	const row = nativeRow(googleEnrollment, { workers_requiring_update: ['Office PC'] });
+	worker = fakeWorker({ rows: [row] });
+	vi.stubGlobal('fetch', worker.fetch);
+	await providers.refreshAll();
+	settingsNav.go({ category: 'providers', item: `mp:${row.id}` });
+	render(ProvidersCollection);
+	expect((await screen.findByText('Office PC needs an update to use this.')).getAttribute('role')).toBe('status');
+
+	worker = fakeWorker({ rows: [{ ...row, workers_requiring_update: [] }] });
+	vi.stubGlobal('fetch', worker.fetch);
+	providers.invalidate(); // what the server's "settings" change event does on an open page
+	await waitFor(() => expect(document.body.textContent).not.toMatch(/needs an update/));
+});
+
 it('first-run setup goes straight to the key form and finishes after a model is picked', async () => {
 	const onConnected = vi.fn();
 	const saved = nativeRow(googleEnrollment, { models: [], catalog_binding: 'google-key-binding' });

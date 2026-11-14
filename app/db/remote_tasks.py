@@ -497,13 +497,15 @@ def settle_report(worker_session_id: str, state: str, *, error: Optional[str] = 
                 (state, error, utc_now_iso(), worker_session_id, OWED, completion_id))
 
 
-def retry_report_later(worker_session_id: str, *, next_attempt_at: str, error: str) -> None:
+def retry_report_later(worker_session_id: str, *, next_attempt_at: str, error: str,
+                       attempt: bool = True) -> None:
+    """``attempt=False``: a wait that is not a failed send (no backoff step)."""
     with get_db() as conn:
         init_schema(conn)
         conn.cursor().execute(
-            "UPDATE remote_task_children SET attempts=attempts+1, next_attempt_at=%s, last_error=%s, "
+            "UPDATE remote_task_children SET attempts=attempts+%s, next_attempt_at=%s, last_error=%s, "
             "updated_at=%s WHERE worker_session_id=%s AND state=%s",
-            (next_attempt_at, error[:500], utc_now_iso(), worker_session_id, OWED))
+            (1 if attempt else 0, next_attempt_at, error[:500], utc_now_iso(), worker_session_id, OWED))
 
 
 # --- messages and resumes (S9) -------------------------------------------------

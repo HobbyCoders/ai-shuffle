@@ -171,6 +171,8 @@ export interface ModelProvider {
 	account_plan?: string | null;
 	/** Antigravity Google sign-in rows: whether Google's agent last said this worker is signed in. Null elsewhere. */
 	antigravity_signed_in?: boolean | null;
+	/** Capability-gated rows: network workers that cannot run this row until they update. */
+	workers_requiring_update?: string[];
 	created_at: string | null;
 	updated_at: string | null;
 	/** Fingerprint of the current endpoint/credential, not curation or token ciphertext. */
