@@ -388,6 +388,9 @@ class Session(SessionBase):
     sdk_session_id: Optional[str] = None
     status: str = "active"
     is_active: bool = False
+    # Snooze: a settled chat that goes back to Active at this time (UTC).
+    # Null when it is not snoozed.
+    snoozed_until: Optional[datetime] = None
     parked_task_kind: Optional[str] = None
     has_running_tasks: bool = False
     remote_runtime_state: Optional[str] = None

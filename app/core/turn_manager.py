@@ -669,6 +669,7 @@ def _reactivate_for_send(
     if row and not row.get("is_active", True):
         # On the sending worker this supersedes its own possibly unreplicated
         # settle with a newer membership clock. The runner still does this too.
+        # Activating also ends a snooze: the owner's message wakes it early.
         database.set_session_active(session_id, True)
         if reactivated is not None:
             reactivated.update(user_id=row.get("api_user_id") or "admin",
@@ -692,7 +693,7 @@ def _announce_reactivated_sync(session_id: str, reactivated: dict[str, Any]) -> 
 
     try:
         global_events.lifecycle(reactivated["user_id"], {
-            "type": "user_session_updated", "session_id": session_id, "updates": {"is_active": True},
+            "type": "user_session_updated", "session_id": session_id, "updates": {"is_active": True, "snoozed_until": None},
         }, user_type=reactivated["user_type"])
     except Exception:  # noqa: BLE001 — a durable membership write still needs its turn.
         logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)
@@ -704,10 +705,10 @@ async def _announce_reactivated(session_id: str, user_id: str) -> None:
 
     try:
         await sync_engine.broadcast_session_updated(
-            session_id=session_id, updates={"is_active": True}, source_device_id=None,
+            session_id=session_id, updates={"is_active": True, "snoozed_until": None}, source_device_id=None,
         )
         await sync_engine.broadcast_user_session_updated(
-            user_id=user_id, session_id=session_id, updates={"is_active": True}, source_device_id=None,
+            user_id=user_id, session_id=session_id, updates={"is_active": True, "snoozed_until": None}, source_device_id=None,
         )
     except Exception:  # noqa: BLE001 — membership and the queued turn are durable.
         logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)

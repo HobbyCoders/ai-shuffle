@@ -60,6 +60,13 @@ class Collection:
     # Map schema-defined secret leaves, returning their containing columns.
     # Those columns are redacted as secrets, but not encrypted as outer blobs.
     map_secrets: Optional[Callable[[Dict[str, Any], Callable[[str], str]], Tuple[str, ...]]] = None
+    # Optional fields added after the collection shipped. While one is None it
+    # is left out of the content hash (and the serialize hook leaves it out of
+    # the record), so rows that never use it keep the hash an older build
+    # stored and an upgrade does not re-sign every row. Older builds ignore
+    # record keys outside their ``fields``; the materialize hook decides what
+    # a record without the field means.
+    late_fields: Tuple[str, ...] = ()
     notes: str = ""
 
     def record_id(self, row: Mapping[str, Any]) -> str:
@@ -396,15 +403,37 @@ def _serialize_session_active(record: Dict[str, Any]) -> Dict[str, Any]:
     value = record.get("is_active")
     if isinstance(value, int) and value in (0, 1):
         record["is_active"] = bool(value)
+    if record.get("is_active") is True or record.get("snoozed_until") is None:
+        # Active is never snoozed. An unsnoozed record omits the late field,
+        # exactly as an older build signs it.
+        record.pop("snoozed_until", None)
+    return record
+
+
+def _materialize_session_active(record: Dict[str, Any]) -> Dict[str, Any]:
+    # ``snoozed_until`` was added after ``is_active``. A peer on an older build
+    # signs records without it, and every such write is a plain settle or
+    # activate, which ends any snooze. Materialize skips fields a record does
+    # not carry, so make the absence an explicit clear rather than keeping a
+    # stale local snooze. Older peers ignore the field they do not know.
+    record = dict(record)
+    if record.get("is_active") is not False:
+        record["snoozed_until"] = None
+    else:
+        record.setdefault("snoozed_until", None)
     return record
 
 
 _register(Collection(
     name="session_active", table="network_session_active", keys=("session_id",),
-    fields=("session_id", "is_active", "updated_at"), resource="sessions", priority=89,
+    fields=("session_id", "is_active", "updated_at", "snoozed_until"), resource="sessions", priority=89,
     serialize_hook=_serialize_session_active,
-    notes="Active/Settled membership editable on any worker, including while the execution owner is offline. "
-          "Last writer wins; projected onto the session catalog without changing execution ownership."))
+    materialize_hook=_materialize_session_active,
+    late_fields=("snoozed_until",),
+    notes="Active/Settled/Snoozed membership editable on any worker, including while the execution owner is "
+          "offline. Last writer wins; projected onto the session catalog without changing execution ownership. "
+          "snoozed_until (ISO-8601 UTC, settled rows only) is optional: an older peer's record omits it, "
+          "which clears the snooze."))
 
 def _materialize_session_questions(record: Dict[str, Any]) -> Dict[str, Any]:
     # An older owner's full catalog row cannot retain a newer peer's stale mark.

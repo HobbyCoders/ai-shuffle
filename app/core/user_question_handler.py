@@ -415,6 +415,8 @@ class UserQuestionHandler:
         interaction_id = row["id"]
         if nonblocking and row["state"] != "pending":
             return {"status": row["state"], "request_id": request_id}
+        from app.core.session_snooze import wake_for_attention
+        await wake_for_attention(session_id)  # needs the owner: a snooze ends early
 
         question_payload = {
             "type": "user_question",

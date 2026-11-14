@@ -2553,6 +2553,14 @@ def _run_column_migrations(cursor: Any) -> None:
         cursor.execute("ALTER TABLE sessions ADD COLUMN fast_pinned BOOLEAN")
         migrations_applied.append("sessions.fast_pinned")
 
+    # Snooze (sidebar): a settled chat that returns to Active on its own at
+    # this time. NULL on every pre-existing row = not snoozed. Projected from
+    # the shared membership record. Additive/nullable, no index, no
+    # SCHEMA_VERSION bump (the migrations fingerprint covers this block).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "snoozed_until"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN snoozed_until TIMESTAMP WITH TIME ZONE")
+        migrations_applied.append("sessions.snoozed_until")
+
     # The chat's account record (#1849): the owner of its mobile_tool_identity
     # row, copied onto the session so the catalog carries it to the workers
     # that mirror the chat. Additive/nullable, no index, no SCHEMA_VERSION

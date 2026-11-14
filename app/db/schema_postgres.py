@@ -370,6 +370,10 @@ def create_postgres_schema(cursor: Any) -> None:
             -- chat; a parent's fast-mode toggle skips it. NULL/FALSE =
             -- follows its parent.
             fast_pinned BOOLEAN,
+            -- Snooze: when a settled (is_active = FALSE) chat returns to
+            -- Active on its own. NULL = not snoozed. Projected from the shared
+            -- membership record (network_session_active.snoozed_until).
+            snoozed_until TIMESTAMP WITH TIME ZONE,
             -- Who the chat belongs to (``mobile_tool_identity.owner``:
             -- 'install-admin', 'account:<id>', 'paired:<id>' or
             -- 'api_user:<id>'). Written with that record on the worker that
