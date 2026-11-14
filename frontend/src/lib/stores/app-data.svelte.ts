@@ -523,12 +523,13 @@ function commitSessions(rows: Session[], meta: SessionsPageMeta): void {
  * below the first page of the recency-ordered list. One extra request (in
  * PARALLEL with the first page, and filtered server-side) keeps it complete.
  */
-async function fetchActiveSessions(tagId?: string | null): Promise<Session[]> {
+async function fetchActiveSessions(tagId?: string | null, membership: 'active' | 'snoozed' = 'active'): Promise<Session[]> {
 	const rows = new Map<string, Session>();
 	let cursor: string | null = null;
 	let cursorId: string | null = null;
+	const filter = membership === 'active' ? 'membership=active&active_only=true' : 'membership=snoozed';
 	for (;;) {
-		let url = SESSION_LIST_BASE.replace('membership=settled', 'membership=active&active_only=true');
+		let url = SESSION_LIST_BASE.replace('membership=settled', filter);
 		if (tagId) url += `&tag_id=${encodeURIComponent(tagId)}`;
 		if (cursor && cursorId) url += `&cursor=${encodeURIComponent(cursor)}&cursor_id=${encodeURIComponent(cursorId)}`;
 		const result = await api.get<CursorPaginatedSessions>(url);
@@ -617,7 +618,12 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 	const pages = requestedPages ?? refreshPageCount(tagId ?? null);
 	_update(s => ({ ...s, sessionsLoading: true }));
 	try {
-		const activeRowsPromise = fetchActiveSessions(tagId);
+		// Snoozed chats are their own small, complete list: the settled history
+		// pages leave them out, like the Active set.
+		const activeRowsPromise = Promise.all([
+			fetchActiveSessions(tagId),
+			fetchActiveSessions(tagId, 'snoozed'),
+		]).then(([active, snoozed]) => [...active, ...snoozed]);
 		const countUrl = '/sessions/count?admin_only=true&exclude_archived=true&membership=settled' +
 			(tagId ? `&tag_id=${encodeURIComponent(tagId)}` : '');
 		const countPromise = api.get<{ total: number }>(countUrl).catch(() => null);
@@ -1178,22 +1184,26 @@ export const appData = {
 		return found;
 	},
 
-	async setSessionActive(sessionId: string, isActive: boolean) {
+	/** `snoozedUntil` (an ISO time) settles the chat as snoozed until then; the
+	 *  server moves it back to Active at that time. Any other call clears it. */
+	async setSessionActive(sessionId: string, isActive: boolean, snoozedUntil?: string | null) {
 		// Optimistic Active-membership flip, so the row re-groups between the Active
 		// and Recent sections without a full paginated refetch. Registered BEFORE the
 		// PATCH resolves: a load already in flight when the user clicked (e.g. the
 		// turn-done refresh) carries the PRE-patch row, and re-applying this edit on
 		// its commit is what stops the card snapping back into Active for the length
 		// of the round-trip. The in-flight load's OTHER rows still land.
-		const change = beginRowChange(sessionId, { is_active: isActive });
+		const snooze = isActive ? null : (snoozedUntil ?? null);
+		const change = beginRowChange(sessionId, { is_active: isActive, snoozed_until: snooze });
 
 		// Only the waits that exist now are this settle's to dismiss: by the time
 		// the PATCH resolves another device may have unsettled the session and
 		// started a turn whose new prompt must survive.
-		const promptSnapshot = isActive ? null : activeSession.snapshotPrompts(sessionId);
+		// A snooze keeps them: a needs-you prompt is what wakes a snoozed chat early.
+		const promptSnapshot = isActive || snooze ? null : activeSession.snapshotPrompts(sessionId);
 
 		try {
-			await apiSetSessionActive(sessionId, isActive);
+			await apiSetSessionActive(sessionId, isActive, snooze);
 		} catch (err) {
 			refuseRowChange(change);
 			throw err;

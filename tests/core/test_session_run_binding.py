@@ -504,7 +504,7 @@ class TestSubmitPersistsTheBinding:
                 overrides={"model": "opus", "context_window": sent, "context_window_base": base},
                 no_kick=True,
             )
-        expected = [call(session_id="s-push", updates={"is_active": True}, source_device_id=None)]
+        expected = [call(session_id="s-push", updates={"is_active": True, "snoozed_until": None}, source_device_id=None)]
         if pushed is not None:
             expected.append(call(session_id="s-push", updates={"context_window": pushed}, source_device_id=None))
             assert db.get_session("s-push")["context_window"] == pushed

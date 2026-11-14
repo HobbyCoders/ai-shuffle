@@ -1015,3 +1015,17 @@ def test_started_chat_never_stores_its_own_project_as_an_extra_folder(peers):
     assert child["project_id"] == "main"
     from app.core.workspace_folders import normalize_workspace_project_ids
     assert normalize_workspace_project_ids(child["workspace_project_ids"]) == ["docs"]
+
+
+@pytest.mark.parametrize("snoozed", [True, False])
+def test_a_snoozed_chat_keeps_its_orchestration_tools_but_is_no_peer(peers, snoozed):
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET is_active=FALSE, snoozed_until=%s WHERE id IN ('caller','peer')",
+                              ("2099-01-01T09:00:00+00:00" if snoozed else None,))
+    if snoozed:
+        assert orch._caller("caller")["id"] == "caller"  # its own running work may still delegate
+    else:
+        with pytest.raises(ValueError, match="active, local, visible"):
+            orch._caller("caller")
+    with pytest.raises(ValueError, match="not an eligible peer"):
+        orch._target({"id": "other"}, "peer")

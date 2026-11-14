@@ -55,7 +55,7 @@ async def test_forwarded_send_supersedes_delayed_sender_settle(workers, monkeypa
         # told its clients before the network mutation is dispatched.
         assert database.get_session("forwarded")["is_active"]
         broadcast.assert_awaited_once_with(
-            session_id="forwarded", updates={"is_active": True}, source_device_id=None,
+            session_id="forwarded", updates={"is_active": True, "snoozed_until": None}, source_device_id=None,
         )
         with runner.active():
             return await control._turns(body, sender.device_id)

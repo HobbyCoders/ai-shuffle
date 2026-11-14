@@ -103,6 +103,9 @@ def _issue(session_id, outcome, reason):
 def _settled_matches(caller, caller_id, caller_owner, scope):
     """The settled chats ListSessions(state='settled', scope) would show, capped.
 
+    Snoozed chats are not selected (``get_settled_sessions``): an explicit
+    snooze survives a sweep, though naming the chat in ``session_ids`` ends it.
+
     The current chat is never selected. Returns ``(ids, rows, remaining)``.
     """
     project = caller.get("project_v2_id") or caller.get("project_id")
@@ -144,7 +147,10 @@ def plan(caller_id, action, key, value):
             log.exception("Session check failed for %s", session_id)
             issues.append(_issue(session_id, "failed", exc))
             continue
-        if bool(row.get("is_active")) is (action == "unsettle"):
+        # A snoozed chat is inactive but not settled yet: settling (or the
+        # archive form) must still clear its wake time, or it comes back.
+        settled = not row.get("is_active") and not row.get("snoozed_until")
+        if (bool(row.get("is_active")) if action == "unsettle" else settled):
             already += 1
         else:
             targets.append(row)

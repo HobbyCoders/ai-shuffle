@@ -10,7 +10,7 @@ vi.mock('./v2/feed-controller', () => ({
 	},
 }));
 
-import { bumpInitGeneration, claimBootSend, createSessionInit, finishBootReconciliation, getInitGeneration, hasBootSendClaim, releaseBootSend, setSkipRestore, tabRestoreTarget, tabWillRestoreChat, type SessionInitDeps } from './session-init';
+import { bumpInitGeneration, claimBootSend, createSessionInit, finishBootReconciliation, getInitGeneration, hasBootSendClaim, noteBootProjectPick, releaseBootSend, setSkipRestore, tabRestoreTarget, tabWillRestoreChat, type SessionInitDeps } from './session-init';
 import { feedController } from './v2/feed-controller';
 import { holdPendingDraft, releasePendingDraft, writeDraft } from './draft-persistence';
 import { bindSessionOwner } from '../session-owner';
@@ -585,6 +585,71 @@ describe('session-init · boot waterfall (S5)', () => {
 		const { init } = makeInit(persisted(null));
 		await init();
 		expect(feedController.start).not.toHaveBeenCalled();
+	});
+});
+
+describe('session-init · a reload after New Chat keeps this tab\'s own compose project', () => {
+	const SKIP = '__aihub_skipSessionRestore';
+	const SLOT = 'ai-shuffle-active-session';
+	beforeEach(() => sessionStorage.clear());
+
+	it('brings back the project a draft was typed in (local, no staged checkout)', async () => {
+		sessionStorage.setItem(SKIP, '1');
+		sessionStorage.setItem(SLOT, JSON.stringify({ sessionId: null, project: 'gamma-docs', projectV2Id: 'pv2-gamma', mode: 'code', worktreeIntent: 'local' }));
+		const { init, getState } = makeInit(null);
+		await init();
+		expect(getState()).toMatchObject({ sessionId: null, mode: 'code', project: 'gamma-docs', projectV2Id: 'pv2-gamma', worktreeIntent: 'local', isRestoringSession: false });
+	});
+
+	it('keeps its staged checkout', async () => {
+		sessionStorage.setItem(SKIP, '1');
+		sessionStorage.setItem(SLOT, JSON.stringify({ sessionId: null, project: 'gamma-docs', projectV2Id: null, worktreeBranch: 'feat/x', worktreeMode: 'new' }));
+		const { init, getState } = makeInit(null);
+		await init();
+		expect(getState()).toMatchObject({ project: 'gamma-docs', worktreeBranch: 'feat/x', worktreeMode: 'new' });
+	});
+
+	it('starts without a project when the compose had none, and never takes the device default', async () => {
+		sessionStorage.setItem(SKIP, '1');
+		sessionStorage.setItem(SLOT, JSON.stringify({ sessionId: null, project: '', projectV2Id: null, mode: 'chat' }));
+		const { init, getState } = makeInit(null);
+		await init();
+		expect(getState().project).toBe('');
+		expect(getState().projectV2Id ?? null).toBeNull();
+	});
+
+	it('leaves a new tab (no slot of its own) without a project', async () => {
+		sessionStorage.setItem(SKIP, '1');
+		const { init, getState } = makeInit(null);
+		await init();
+		expect(getState().project).toBe('');
+	});
+
+	it('does not reopen a saved chat from the slot (New Chat still wins)', async () => {
+		sessionStorage.setItem(SKIP, '1');
+		sessionStorage.setItem(SLOT, JSON.stringify({ sessionId: 'chat-a', project: 'gamma-docs' }));
+		const { init, getState } = makeInit(null);
+		await init();
+		expect(getState()).toMatchObject({ sessionId: null, project: '' });
+	});
+
+	it('lets a pick made while boot loaded win, cleared to no project included (#930)', async () => {
+		sessionStorage.setItem(SKIP, '1');
+		sessionStorage.setItem(SLOT, JSON.stringify({ sessionId: null, project: 'gamma-docs' }));
+		const { init, getState } = makeInit(null);
+		const running = init();
+		noteBootProjectPick(); // the user chose "No project" during the first loads
+		await running;
+		expect(getState().project).toBe('');
+	});
+
+	it('never overwrites a project the compose already holds (a remount)', async () => {
+		sessionStorage.setItem(SKIP, '1');
+		sessionStorage.setItem(SLOT, JSON.stringify({ sessionId: null, project: 'gamma-docs' }));
+		const { init, getState, deps } = makeInit(null);
+		deps.setState(baseState({ project: 'beta-api', mode: 'code' } as Partial<ActiveSessionState>));
+		await init();
+		expect(getState().project).toBe('beta-api');
 	});
 });
 

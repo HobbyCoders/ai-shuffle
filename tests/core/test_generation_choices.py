@@ -190,3 +190,57 @@ def test_query_options_reads_choices_only_with_generation_tools(monkeypatch):
     calls.clear()
     assert query_options._generation_choices({"image_generation": True}, {"id": "s"}, "user-b")["migrated"] is True
     assert calls == [{"id": "s", "api_user_id": "user-b"}]
+
+
+def _pick(model):
+    return {"source": "fal", "account": "fal-ai", "model": model}
+
+
+def test_forget_keeps_a_settings_choice_as_the_last_pick():
+    # "Ask me next time" on a choice that was never a card pick (migrated or
+    # saved in Settings) must not drop the model from the next card (#1603).
+    database.set_system_setting("image_model", "fal-ai/nano-banana-2")
+    assert choices.load(OWNER)["last"] == {}
+    choices.forget(OWNER, "image")
+    loaded = choices.load(OWNER)
+    assert "image" not in loaded["remembered"]
+    assert loaded["last"]["image"]["model"] == "fal-ai/nano-banana-2"
+    # Kept under its own key: forgetting never writes the last pick, which
+    # replicates last-writer-wins and could overwrite a real pick elsewhere.
+    assert database.get_user_preference(*OWNER, choices.last_key("image")) is None
+
+
+def test_forget_never_overwrites_a_newer_last_pick():
+    choices.save(OWNER, "image", _pick("fal-ai/remembered"), remember=True)
+    choices.save(OWNER, "image", _pick("fal-ai/once"), remember=False)
+    choices.forget(OWNER, "image")
+    loaded = choices.load(OWNER)
+    assert "image" not in loaded["remembered"]
+    assert loaded["last"]["image"]["model"] == "fal-ai/once"
+
+
+@pytest.mark.parametrize("pick_first", [True, False])
+def test_a_real_last_pick_outranks_a_forgotten_choice_in_any_write_order(pick_first):
+    # Another worker's real card pick can replicate in before or after this
+    # worker forgets its migrated choice: the real pick wins either way.
+    database.set_system_setting("image_model", "fal-ai/migrated")
+    choices.migrate(OWNER)
+    real = choices.clean({**_pick("fal-ai/real"), "origin": "card"})
+    if pick_first:
+        database.set_user_preference(*OWNER, choices.last_key("image"), real)
+    choices.forget(OWNER, "image")
+    if not pick_first:
+        database.set_user_preference(*OWNER, choices.last_key("image"), real)
+    assert choices.load(OWNER)["last"]["image"]["model"] == "fal-ai/real"
+
+
+def test_forget_remember_forget_offers_the_latest_pick():
+    database.set_system_setting("image_model", "fal-ai/migrated")
+    choices.forget(OWNER, "image")
+    choices.save(OWNER, "image", _pick("fal-ai/chosen"), remember=True)
+    loaded = choices.load(OWNER)
+    assert loaded["remembered"]["image"]["model"] == "fal-ai/chosen"
+    choices.forget(OWNER, "image")
+    loaded = choices.load(OWNER)
+    assert "image" not in loaded["remembered"]
+    assert loaded["last"]["image"]["model"] == "fal-ai/chosen"

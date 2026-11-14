@@ -67,3 +67,10 @@ def test_unknown_ignored_target_is_still_protected(repository, monkeypatch):
 def test_sweep_capacity_exceeds_daily_creation_and_grace_is_short():
     assert rc.MAX_ITEMS * 86400 / rc.INTERVAL_SECONDS > 30
     assert rc.GRACE_SECONDS <= 15 * 60
+
+
+@pytest.mark.parametrize("snoozed,removed", [("2099-01-01T09:00:00+00:00", False), (None, True)])
+def test_a_snoozed_worker_keeps_its_checkout_until_it_settles(repository, monkeypatch, snoozed, removed):
+    _, path, _ = abandoned(repository, monkeypatch, is_active=False, snoozed_until=snoozed)
+    assert bool(reclaim(dry_run=False)["reclaimed"]) is removed
+    assert path.exists() is not removed

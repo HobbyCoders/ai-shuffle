@@ -31,6 +31,7 @@ def migrate(cursor):
         cursor.execute("ALTER TABLE session_archive_retirement ADD COLUMN cancelled_wakes TEXT NOT NULL DEFAULT '[]'")
     cursor.execute("SELECT id FROM sessions WHERE status='archived' ORDER BY id FOR UPDATE")
     ids = [row["id"] for row in cursor.fetchall()]
+    snooze_shared = bool(ids) and column_exists(cursor, "network_session_active", "snoozed_until")
     for sid in ids:
         cursor.execute("""INSERT INTO network_session_active
             (session_id,is_active,updated_at,local_pending,local_revision,local_revision_epoch)
@@ -46,7 +47,10 @@ def migrate(cursor):
             ON CONFLICT (session_id) DO UPDATE SET membership_revision=EXCLUDED.membership_revision,
             membership_epoch=EXCLUDED.membership_epoch,done=FALSE""",
             (sid, revision["local_revision"], revision["local_revision_epoch"]))
-        cursor.execute("UPDATE sessions SET status='active',is_active=FALSE WHERE id=%s", (sid,))
+        # An archived chat is never snoozed (it must not wake, and keeps no waits).
+        cursor.execute("UPDATE sessions SET status='active',is_active=FALSE,snoozed_until=NULL WHERE id=%s", (sid,))
+        if snooze_shared:
+            cursor.execute("UPDATE network_session_active SET snoozed_until=NULL WHERE session_id=%s", (sid,))
         # Old archive queues are evidence, never invitations to resume on boot.
         cursor.execute("""UPDATE turns SET state='aborted',stop_reason='removed_from_queue',ended_at=NOW()
             WHERE session_id=%s AND state='queued' RETURNING id,source""", (sid,))

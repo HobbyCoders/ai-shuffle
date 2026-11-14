@@ -50,7 +50,8 @@ async def test_native_round_trip_keeps_work_and_transcript(chats, monkeypatch):
         assert receipt["status"] == row["status"]
         if not archived:
             assert turns.get_turn(turn["id"]) == before
-        assert broadcast.await_args.kwargs["updates"] == {"is_active": active, "status": row["status"]}
+        assert broadcast.await_args.kwargs["updates"] == {"is_active": active, "status": row["status"],
+                                                          "snoozed_until": None}
     assert turns.get_turn(turn["id"]) == before
     assert "not stop" in receipt["note"]
     kick.assert_not_called()
@@ -283,6 +284,63 @@ async def test_ids_settle_refuses_archived_and_counts_already(chats):
     assert (result["settled"], result["already_in_state"], result["refused"]) == (1, 2, 0)
     assert result["issues"] == []
     assert _state("caller") == (False, "active")  # explicit self is allowed, as with session_id
+
+
+def _snooze(sid):
+    from datetime import datetime, timedelta, timezone
+    from app.core import session_snooze
+    when = session_snooze.canonical(datetime.now(timezone.utc) + timedelta(hours=1))
+    database.set_session_active(sid, False, None, when)
+    return when
+
+
+@pytest.mark.parametrize("name", ["SettleSession", "ArchiveSession"])
+async def test_ids_settle_ends_a_snooze_so_it_never_wakes(chats, name):
+    from datetime import datetime, timedelta, timezone
+    from app.core import session_snooze
+    sessions.create_session("dozing", "agent", title="dozing", is_active=True)
+    _snooze("dozing")
+    result = await bulk(chats, name, session_ids=["dozing", "target"])
+    # Inactive, but not settled yet: it is a target, not "already".
+    assert (result["settled"], result["already_in_state"]) == (2, 0)
+    row = sessions.get_session("dozing")
+    assert not row["is_active"] and row["snoozed_until"] is None
+    assert session_snooze.due_snoozes(datetime.now(timezone.utc) + timedelta(hours=3)) == []
+    again = await bulk(chats, name, session_ids=["dozing", "target"])
+    assert (again["settled"], again["already_in_state"]) == (0, 2)
+
+
+async def test_ids_unsettle_wakes_a_snoozed_chat(chats):
+    sessions.create_session("dozing", "agent", title="dozing", is_active=True)
+    _snooze("dozing")
+    result = await bulk(chats, "UnsettleSession", session_ids=["dozing"])
+    assert (result["unsettled"], result["already_in_state"]) == (1, 0)
+    row = sessions.get_session("dozing")
+    assert row["is_active"] and row["snoozed_until"] is None
+
+
+async def test_all_settled_leaves_a_snoozed_chat_and_its_wake_time(chats):
+    sessions.create_session("dozing", "agent", title="dozing", is_active=True)
+    when = _snooze("dozing")
+    await bulk(chats, "SettleSession", session_id="target")
+    result = await bulk(chats, "ArchiveSession", all_settled=True, scope="all")
+    assert (result["matched"], result["settled"]) == (1, 0)  # only "target"
+    from app.core import session_snooze
+    assert session_snooze.canonical(sessions.get_session("dozing")["snoozed_until"]) == when
+
+
+async def test_settled_listing_omits_a_snoozed_chat_and_all_shows_its_wake_time(chats):
+    from app.core import session_snooze
+    sessions.create_session("dozing", "agent", title="dozing", is_active=True)
+    when = _snooze("dozing")
+    await invoke(chats, "SettleSession", session_id="target")
+    settled = orch.list_sessions("caller", {"state": "settled", "scope": "all"})["sessions"]
+    assert [r["id"] for r in settled] == ["target"]
+    assert settled[0]["snoozed_until"] is None
+    listed = {r["id"]: r for r in orch.list_sessions("caller", {"state": "all", "scope": "all"})["sessions"]}
+    assert session_snooze.canonical(listed["dozing"]["snoozed_until"]) == when
+    assert isinstance(listed["dozing"]["snoozed_until"], str) and not listed["dozing"]["is_active"]
+    assert "dozing" not in {r["id"] for r in orch.list_sessions("caller", {"scope": "all"})["sessions"]}
 
 
 async def test_ids_use_one_set_based_update(chats, monkeypatch):

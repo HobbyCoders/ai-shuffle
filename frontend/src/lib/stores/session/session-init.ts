@@ -8,7 +8,7 @@
  * Plain .ts file — no $state/$derived/$effect runes (rune-free so it can be imported before component init).
  */
 
-import type { ActiveSessionState } from '../active-session';
+import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 // V2 Phase 1: the SSE-fed reducer owns the transcript; destroy() tears its feed down.
 import { feedController } from './v2/feed-controller';
@@ -107,6 +107,22 @@ function savedTabChat(): { sessionId: string; title: string } | null {
  * first (found by the reload-midstream journey). init clears the window on every
  * path that ends up restoring nothing.
  */
+/**
+ * This tab's own saved compose (an unbound new chat), if the slot holds one.
+ * "New chat" makes a reload skip the saved-chat restore, but the compose it
+ * opened is still this tab's own: a project picked there comes back with the
+ * draft typed in it. A new tab has no slot, so it never borrows one.
+ */
+function savedTabCompose(): PersistedSession | null {
+	try {
+		const raw = sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY);
+		const saved = raw ? JSON.parse(raw) : null;
+		return saved && typeof saved === 'object' && !saved.sessionId ? saved as PersistedSession : null;
+	} catch {
+		return null;
+	}
+}
+
 export function tabWillRestoreChat(): boolean {
 	return tabRestoreTarget() !== null;
 }
@@ -215,6 +231,27 @@ export function createSessionInit(deps: SessionInitDeps) {
 	 *   title, sidebar highlight and composer showed (and took sends) until the
 	 *   link opened after the first loads.
 	 */
+	/**
+	 * The lane, project and checkout of a saved unbound compose, as the restore
+	 * below puts them back (a compose is a project session only when it was
+	 * saved with the project the user picked there).
+	 */
+	function savedComposePlace(saved: PersistedSession) {
+		const place = resolvePersistedProject(saved, '');
+		return {
+			mode: (place.project || place.projectV2Id ? 'code' : 'chat') as ActiveSessionState['mode'],
+			...place,
+			workspaceProjectIds: saved.workspaceProjectIds ?? [],
+			worktreeIntent: switcher.getPersistedWorktreeIntent(place.project, place.projectV2Id),
+			worktreeBranch: saved.worktreeBranch || '',
+			worktreeBaseBranch: saved.worktreeBaseBranch || 'main',
+			worktreeId: saved.worktreeId ?? null,
+			worktreeMode: saved.worktreeMode || 'new',
+			selectedWorktreeBranch: saved.selectedWorktreeBranch ?? null,
+			worktreeDeleted: saved.worktreeDeleted ?? false,
+		};
+	}
+
 	async function init(options: { deepLinkSessionId?: string | null } = {}) {
 		const initGen = bumpInitGeneration();
 		bootSend = { generation: initGen, pendingSends: new Map(), projectPicked: false };
@@ -279,6 +316,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 			}
 
 			const defaultProfile = backendSelection?.selectedProfile || switcher.getPersistedProfile();
+			// Only an EXISTING session saved without its project falls back to
+			// the device's last pick; a compose never does (a new session starts
+			// without a project, owner decision 2026-11-13).
 			const defaultProject = backendSelection?.selectedProject || switcher.getPersistedProject();
 
 			if (deepLinkSessionId) {
@@ -290,17 +330,26 @@ export function createSessionInit(deps: SessionInitDeps) {
 			} else if (skipRestore || hasBootSendClaim(initGen)) {
 				// A send owns the live chat, not init's saved snapshot. Still fill
 				// missing defaults and re-arm the socket below, even after remount.
-				update(s => ({
-					...s,
-					isRestoringSession: false,
-					profile: s.profile || defaultProfile,
-					// A new session starts without a project (#371 step 4);
-					// only a compose that already picked one keeps it.
-					...(s.mode === 'chat' ? {} : resolvePersistedProject(
-						{ project: s.project, projectV2Id: s.projectV2Id },
-						defaultProject,
-					)),
-				}));
+				// After "New chat", a reload still brings back this tab's own
+				// compose's project (a draft typed in it keeps it): unless a send
+				// or a pick made while this loaded (#930) already owns the compose.
+				const ownCompose = hasBootSendClaim(initGen) || hasBootProjectPick(initGen) ? null : savedTabCompose();
+				update(s => {
+					const restoreOwn = !!ownCompose && !s.sessionId && !s.project && !s.projectV2Id
+						&& !!(ownCompose.project || ownCompose.projectV2Id);
+					return {
+						...s,
+						isRestoringSession: false,
+						profile: s.profile || defaultProfile,
+						// A new session starts without a project (owner decision
+						// 2026-11-13); a compose keeps exactly the project it holds.
+						...(restoreOwn && ownCompose ? savedComposePlace(ownCompose)
+							: s.mode === 'chat' || !s.sessionId ? {} : resolvePersistedProject(
+								{ project: s.project, projectV2Id: s.projectV2Id },
+								defaultProject,
+							)),
+					};
+				});
 			} else {
 				if (persisted) {
 					// An existing session's agent, access and Fast: the snapshot's
@@ -351,9 +400,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						// Bypass, #371).
 						...(persisted.sessionId && normalizeSessionMode(persisted.mode) === 'chat'
 							? { project: persisted.project ?? '', projectV2Id: persisted.projectV2Id ?? null }
-							: persisted.sessionId || persisted.project || persisted.projectV2Id
-								? resolvePersistedProject(persisted, defaultProject)
-								: { project: '', projectV2Id: null }),
+							: resolvePersistedProject(persisted, persisted.sessionId ? defaultProject : '')),
 						// Run binding. A restored EXISTING session keeps whatever the
 						// record holds — null included, which lets the backend fall
 						// back to what that session actually last ran on. Only an
@@ -373,7 +420,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 							persisted.contextWindowChoice ??
 							(persisted.sessionId ? DEFAULT_CONTEXT_WINDOW_CHOICE : s.contextWindowChoice),
 						worktreeIntent: persisted.sessionId ? persisted.worktreeIntent || 'local'
-							: switcher.getPersistedWorktreeIntent(resolvePersistedProject(persisted, defaultProject).project, persisted.projectV2Id ?? null),
+							: switcher.getPersistedWorktreeIntent(resolvePersistedProject(persisted, '').project, persisted.projectV2Id ?? null),
 						worktreeBranch: persisted.worktreeBranch || '',
 						worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
 						worktreeId: persisted.worktreeId ?? null,
@@ -399,11 +446,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 						void switcher.refreshSessionMetadata(persisted.sessionId);
 					}
 				} else {
-					// No saved compose: the owner's last project choice applies
-					// after init (applyComposerDefaults). One the user picked
-					// while this loaded is theirs (#930).
-					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile,
-						...(s.mode === 'chat' || hasBootProjectPick(initGen) ? {} : { project: defaultProject }) }));
+					// No saved compose: a new session, without a project. One the
+					// user picked while this loaded is theirs (#930) and stays.
+					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile }));
 				}
 			}
 

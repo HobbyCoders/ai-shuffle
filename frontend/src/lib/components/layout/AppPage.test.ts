@@ -35,7 +35,7 @@ vi.mock('$lib/stores/layout.svelte', async () => {
 });
 vi.mock('$lib/stores/sessionMode.svelte', () => ({ appMode: { current: 'code', set: vi.fn() } }));
 vi.mock('$lib/services/session-navigation', () => ({ openSession: mocks.openSession, openSessionFromList: mocks.openSession, followChatHistory: vi.fn() }));
-vi.mock('$lib/services/keyboard', () => ({ registerShortcut: vi.fn(() => ({ unregister: vi.fn() })) }));
+vi.mock('$lib/services/keyboard', () => ({ NOT_HANDLED: Symbol('not-handled'), registerShortcut: vi.fn(() => ({ unregister: vi.fn() })) }));
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
 vi.mock('$lib/services/resource-sync', () => ({ resourceSync: { invalidate: vi.fn() } }));
 vi.mock('$lib/services/globalStt', () => ({ initGlobalStt: mocks.initGlobalStt }));
@@ -404,6 +404,40 @@ describe('AppPage memory health answer (#1042)', () => {
    expect(reset).toHaveBeenCalledTimes(2);
   } finally {
    reset.mockRestore();
+  }
+ });
+});
+
+describe('AppPage project picker shortcut', () => {
+ // Cmd/Ctrl+P belongs to the new-session row's project picker; anywhere else
+ // it declines so the browser's own Cmd/Ctrl+P (print) runs.
+ it('registers Cmd/Ctrl+P for the message editor, declining with no picker on offer', async () => {
+  const { registerShortcut, NOT_HANDLED } = await import('$lib/services/keyboard');
+  const { provideProjectPicker } = await import('$lib/services/project-picker');
+  await boot();
+  const config = vi.mocked(registerShortcut).mock.calls.map(([c]) => c).find(c => c.id === 'pick-project')!;
+  expect(config).toMatchObject({ key: 'p', cmdOrCtrl: true, category: 'chat', description: 'Pick a project (new session)' });
+  expect(config.action()).toBe(NOT_HANDLED);
+
+  const editor = document.createElement('div');
+  editor.setAttribute('data-message-editor', '');
+  const plain = document.createElement('input');
+  const keyIn = (target: Element) => {
+   const event = new KeyboardEvent('keydown', { key: 'p', ctrlKey: true });
+   Object.defineProperty(event, 'target', { value: target });
+   return event;
+  };
+  const allow = config.allowInInput as (e: KeyboardEvent) => boolean;
+  expect(allow(keyIn(editor))).toBe(true);
+  expect(allow(keyIn(plain))).toBe(false);
+
+  const open = vi.fn(() => true);
+  const withdraw = provideProjectPicker(open);
+  try {
+   expect(config.action()).toBeUndefined();
+   expect(open).toHaveBeenCalledOnce();
+  } finally {
+   withdraw();
   }
  });
 });
