@@ -1155,7 +1155,9 @@ def test_bad_envelopes_are_rejected_without_side_effects(workers):
     assert owner_pref(b, "x") == 1
 
 
-def test_stale_incarnation_is_rejected(workers):
+def test_older_incarnation_of_an_active_member_is_applied_by_clock(workers):
+    """An active member's older stream is not stale (#1568): a peer may relay
+    what it signed before a restore, and every replica orders it by clock."""
     a, b = workers("a"), workers("b")
     with a.active():
         engine.create_network("Home")
@@ -1169,4 +1171,32 @@ def test_stale_incarnation_is_rejected(workers):
         with store.get_db() as conn:
             store.set_watermark(conn.cursor(), a.device_id, 2, 0)
         result = engine.apply_batch([op])
+        assert result.applied == 1 and result.rejected == 0
+        with store.get_db() as conn:
+            assert store.get_watermark(conn.cursor(), a.device_id, 1) == op["origin_seq"]
+    assert owner_pref(b, "x") == 1
+
+
+def test_revoked_members_older_incarnation_is_still_refused(workers):
+    """Its key can sign a fresh op into an older stream, which no revocation
+    limit covers: once a newer incarnation was seen, that stream is closed."""
+    from dataclasses import replace
+
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    converge([a, b])
+    set_owner_pref(a, "x", 1)
+    with a.active():
+        [op] = [o for o in store.ops_since({a.device_id: {"1": 1}}, exclude_origin=b.device_id)
+                if o["collection"] == "user_preferences"]
+    with b.active():
+        with store.get_db() as conn:
+            store.set_watermark(conn.cursor(), a.device_id, 2, 0)
+        ctx = engine.require_context()
+        ctx.members[a.device_id] = replace(ctx.member(a.device_id), status=membership.STATUS_REVOKED,
+                                           last_seq_accepted=5, last_incarnation_accepted=2)
+        result = engine.apply_batch([op])
         assert result.rejected == 1 and "stale incarnation" in result.reasons
+    assert owner_pref(b, "x") is None

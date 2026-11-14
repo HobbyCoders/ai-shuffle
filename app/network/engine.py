@@ -1038,7 +1038,8 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     data = env.to_dict()
     store.insert_op(cursor, data, _lane(coll))
     store.put_record(cursor, collection, record_id, clock=clock, origin_device_id=ctx.device_id,
-                     content_hash=new_hash, deleted=plaintext is None, order_seq=order_seq)
+                     content_hash=new_hash, deleted=plaintext is None, order_seq=order_seq,
+                     origin_incarnation=ctx.identity.incarnation)
     if collection == "session_active":
         cursor.execute("UPDATE network_session_active SET local_pending=FALSE WHERE session_id=%s", (record_id,))
     return data
@@ -1121,7 +1122,8 @@ def keep_local_rewrite(cursor, collection: str, record_id: str, before_row: Mapp
         return False
     store.put_record(cursor, collection, record_id, clock=int(existing["clock"]),
                      origin_device_id=existing["origin_device_id"], content_hash=content_hash(coll, after),
-                     deleted=False, order_seq=existing.get("order_seq"))
+                     deleted=False, order_seq=existing.get("order_seq"),
+                     origin_incarnation=existing.get("origin_incarnation"))
     return True
 
 
@@ -1480,8 +1482,10 @@ def _origin_allowed(cursor, ctx: NetworkContext, env: Envelope) -> Optional[Memb
 
     A revoked device is honoured only up to the stream position recorded in
     its revocation: nothing from a newer incarnation (a removed device could
-    otherwise open a fresh stream with a fresh sequence budget) and nothing
-    past ``last_seq_accepted`` in the incarnation the revoker knew.
+    otherwise open a fresh stream with a fresh sequence budget), nothing
+    past ``last_seq_accepted`` in the incarnation the revoker knew, and
+    nothing from an incarnation older than the newest this worker has seen.
+    An active member's older incarnations are ordinary streams (#1568).
     """
     member = ctx.member(env.origin_device_id)
     if member is None:
@@ -1497,6 +1501,10 @@ def _origin_allowed(cursor, ctx: NetworkContext, env: Envelope) -> Optional[Memb
             raise ApplyError("origin revoked")
         if env.origin_incarnation == int(limit_incarnation) and env.origin_seq > int(limit):
             raise ApplyError("origin revoked")
+        if env.origin_incarnation < store.highest_incarnation(cursor, env.origin_device_id):
+            # Its key can still sign a fresh op into an older stream, which
+            # carries no recorded limit: once a newer one was seen, refuse it.
+            raise ApplyError("stale incarnation")
     return member
 
 
@@ -1564,6 +1572,11 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
         member = ctx.member(ctx.device_id)
         if member is None:
             return "duplicate"
+        # The restored outbox still holds that stream up to its last op, and
+        # peers resume it from there (#1568): count that prefix as received.
+        held = store.own_watermark(cursor, ctx.device_id, env.origin_incarnation)
+        if held > store.get_watermark(cursor, ctx.device_id, env.origin_incarnation):
+            store.set_watermark(cursor, ctx.device_id, env.origin_incarnation, held)
     else:
         refused: Optional[str] = None
         try:
@@ -1588,10 +1601,10 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     if env.key_version not in ctx.keyring:
         raise TransientApplyError("unknown key version %d" % env.key_version)
 
-    # Stream ordering per (origin, incarnation).
-    highest = store.highest_incarnation(cursor, env.origin_device_id)
-    if env.origin_incarnation < highest:
-        raise ApplyError("stale incarnation")
+    # Stream ordering per (origin, incarnation). An active member's older
+    # incarnation is not stale: after a restore from backup, a peer may still
+    # relay what it signed there, and versions order by (clock, origin) on
+    # every replica alike, whichever stream carried them (#1568).
     watermark = store.get_watermark(cursor, env.origin_device_id, env.origin_incarnation)
     if env.origin_seq <= watermark:
         # A previous catch-up may have stopped between committed chunks.
@@ -1608,8 +1621,6 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     outcome = _apply_next(cursor, ctx, env, member, result)
     store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
     store.drop_pending_upto(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
-    if env.origin_incarnation > highest and highest:
-        store.clear_pending_stream(cursor, env.origin_device_id, highest)
     # Continue only after this transaction commits, not recursively under its
     # state lock. A legacy pending buffer can contain thousands of successors.
     result._pending_drains.add((env.origin_device_id, env.origin_incarnation))
@@ -1922,6 +1933,47 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
     return changed
 
 
+def _item_incarnation(item: Mapping[str, Any]) -> int:
+    """A snapshot item's origin incarnation; 0 when an older build sent none."""
+    value = item.get("origin_incarnation")
+    return value if type(value) is int and value >= 1 else 0
+
+
+def _versus_held(cursor, collection: str, clock: int, origin: str, incarnation: int,
+                 held: Mapping[str, Any], *, incoming_hash: Optional[str] = None) -> int:
+    """``envelope.compare`` of a version against the one held, on every path that picks a winner.
+
+    The held incarnation is read only for an exact (clock, origin) tie, the
+    one case it decides. A copy re-sending the version held is that tie too:
+    with ``incoming_hash`` equal to the held hash it is the same version, and
+    a row stored before incarnations were kept costs no op lookup.
+    """
+    held_clock, held_origin = int(held["clock"]), held["origin_device_id"]
+    held_incarnation = 0
+    if clock == held_clock and origin == held_origin:
+        if (held.get("origin_incarnation") is None and incoming_hash is not None
+                and incoming_hash == (held["content_hash"] or "")):
+            return 0
+        held_incarnation = store.version_incarnation(cursor, collection, held)
+    return envelope_mod.compare(clock, origin, held_clock, held_origin, incarnation, held_incarnation)
+
+
+def _restore_fork(cursor, ctx: NetworkContext, collection: str, origin: str, incarnation: int,
+                  held: Mapping[str, Any]) -> bool:
+    """Whether the held version is the same device's from another incarnation.
+
+    Those are two writes on either side of a restore, not one stream moving
+    on, so the one that loses is kept as a conflict like any other device's.
+    """
+    if held["origin_device_id"] != origin or incarnation < 1:
+        return False
+    if held.get("origin_incarnation") is None:
+        known = ctx.identity.incarnation if origin == ctx.device_id else store.highest_incarnation(cursor, origin)
+        if max(incarnation, known) <= 1:
+            return False  # one incarnation only: no fork to look up
+    return store.version_incarnation(cursor, collection, held) not in (0, incarnation)
+
+
 def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
     if env.collection in policy.RETIRED_COLLECTIONS:
         # A peer on an older build still publishes a collection this build
@@ -1982,13 +2034,15 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             if record(cursor, coll.name, env.record_id, local, ctx=ctx, force=True) is None:
                 raise TransientApplyError("Local session membership is waiting for publishing")
     existing = store.get_record(cursor, env.collection, env.record_id)
-    if coll.mode == policy.MODE_OWNER_ORDERED:
-        # Owner-ordered: the owner's stream order is the order. No clock race.
-        wins = existing is None or env.origin_device_id == existing["origin_device_id"] or \
-            envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
-    else:
-        wins = existing is None or envelope_mod.compare(
-            env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
+    replay = env.origin_device_id == ctx.device_id and env.origin_incarnation < ctx.identity.incarnation
+    # Every replica picks the same winner from what travels with the op:
+    # (clock, origin), then the incarnation on an exact tie. A device's clock
+    # rises with every op it signs, so for its own versions this is its stream
+    # order, owner-ordered rows included. Across incarnations (a restore forks
+    # the stream) the replicas still agree, which no stream-order rule can
+    # promise (#1568).
+    wins = existing is None or _versus_held(cursor, env.collection, env.clock, env.origin_device_id,
+                                            env.origin_incarnation, existing) > 0
     if not wins:
         merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
             cursor, coll, env.record_id, plaintext, existing)
@@ -2023,8 +2077,12 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     if env.collection == "membership":
         _apply_membership(cursor, ctx, plaintext)
 
-    # Keep the local loser (a concurrent local edit) for the conflicts list.
-    if existing is not None and existing["origin_device_id"] != env.origin_device_id and not bool(existing["deleted"]):
+    # Keep the local loser (a concurrent local edit) for the conflicts list:
+    # another device's version, or this device's from the other side of a
+    # restore fork. A newer op of the same stream simply supersedes its own.
+    if existing is not None and not bool(existing["deleted"]) and (
+            existing["origin_device_id"] != env.origin_device_id
+            or _restore_fork(cursor, ctx, env.collection, env.origin_device_id, env.origin_incarnation, existing)):
         local_row = _read_row(cursor, coll, env.record_id)
         if local_row is not None:
             try:
@@ -2044,9 +2102,11 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             cursor.execute("DELETE FROM network_instance_aliases WHERE device_id = %s", (env.origin_device_id,))
         materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
-                         content_hash="", deleted=True, order_seq=env.order_seq)
+                         content_hash="", deleted=True, order_seq=env.order_seq,
+                         origin_incarnation=env.origin_incarnation)
     else:
-        plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx)
+        plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx,
+                                    own_replay=replay)
         refresh_billing = _billing_refresh_needed(cursor, coll, env.record_id, plaintext)
         try:
             row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
@@ -2054,7 +2114,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                 store.put_record(cursor, env.collection, env.record_id, clock=env.clock,
                                  origin_device_id=env.origin_device_id, content_hash="", deleted=False,
-                                 order_seq=env.order_seq)
+                                 order_seq=env.order_seq, origin_incarnation=env.origin_incarnation)
             # Consume/forward the origin stream without relabelling the value
             # we kept. A snapshot must still carry that value's original source.
             store.insert_op(cursor, env.to_dict(), _lane(coll))
@@ -2076,7 +2136,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             # wire hash to a database row's timezone-dependent spelling.
             local_hash = ""
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
-                         content_hash=local_hash, deleted=False, order_seq=env.order_seq)
+                         content_hash=local_hash, deleted=False, order_seq=env.order_seq,
+                         origin_incarnation=env.origin_incarnation)
     # Stored for forwarding only once it applied: a failure above must not
     # leave an op in the log that this worker never materialized.
     store.insert_op(cursor, env.to_dict(), _lane(coll))
@@ -2087,16 +2148,20 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
 
 
 def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any], *,
-                    origin_device_id: Optional[str] = None, ctx: Optional[NetworkContext] = None) -> Mapping[str, Any]:
+                    origin_device_id: Optional[str] = None, ctx: Optional[NetworkContext] = None,
+                    own_replay: bool = False) -> Mapping[str, Any]:
     """Owner-ordered rows may reference local-only rows; drop what we cannot see.
 
     ``origin_device_id`` is the worker that wrote the copy (the envelope's
-    signer, or a snapshot item's recorded origin).
+    signer, or a snapshot item's recorded origin). ``own_replay``: a winning
+    op this device signed, verified with its own key, in an earlier
+    incarnation (#1568).
     """
     if coll.name == "sessions":
         from app.network import catalog
         return catalog.prepare_session_mirror(cursor, dict(plaintext), origin_device_id=origin_device_id,
-                                              device_id=ctx.device_id if ctx is not None else None)
+                                              device_id=ctx.device_id if ctx is not None else None,
+                                              own_replay=own_replay)
     return plaintext
 
 
@@ -2475,7 +2540,6 @@ class _WireStream:
     origin: str
     incarnation: int
     first_seq: int
-    highest: int
     watermark: int
     pending: int
 
@@ -2498,15 +2562,14 @@ def _wire_stream(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext
     # Fetch them together to retain the existing per-chunk round-trip budget
     # while keeping the counter reservation's separate fresh existence check.
     cursor.execute(
-        "SELECT COALESCE(MAX(incarnation), 0) AS highest, "
-        "COALESCE(MAX(CASE WHEN incarnation = %s THEN last_seq END), 0) AS watermark, "
+        "SELECT COALESCE(MAX(CASE WHEN incarnation = %s THEN last_seq END), 0) AS watermark, "
         "(SELECT COUNT(*) FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s) AS pending "
         "FROM sync_watermarks WHERE origin_device_id = %s",
         (first.origin_incarnation, first.origin_device_id, first.origin_incarnation, first.origin_device_id),
     )
     stream = cursor.fetchone()
     return _WireStream(first.origin_device_id, first.origin_incarnation, first.origin_seq,
-                       int(stream["highest"]), int(stream["watermark"]), int(stream["pending"]))
+                       int(stream["watermark"]), int(stream["pending"]))
 
 
 def _duplicate_prefix(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
@@ -2519,8 +2582,7 @@ def _duplicate_prefix(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
     network, member, incarnation, key and signature gates. Unusual runs retain
     the per-envelope path, including its revocation/backup and pending evidence.
     """
-    if (stream.first_seq > stream.watermark or stream.incarnation < stream.highest
-            or stream.pending):
+    if stream.first_seq > stream.watermark or stream.pending:
         return 0
     member = ctx.member(stream.origin)
     if (stream.origin == ctx.device_id or member is None
@@ -2550,7 +2612,7 @@ def _buffer_pending_chunk(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Netwo
     existing duplicate-at-cap behavior. Payload validation still happens when
     the missing head arrives, exactly as for single-row buffering.
     """
-    if (stream.first_seq <= stream.watermark + 1 or stream.incarnation < stream.highest
+    if (stream.first_seq <= stream.watermark + 1
             or stream.pending + len(chunk) > PENDING_CAP_PER_STREAM):
         return False  # Ordered appends must not parse the entire chunk twice.
     member = ctx.member(stream.origin)
@@ -2597,14 +2659,13 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
         if origin == ctx.device_id or member is None or member.status != membership.STATUS_ACTIVE:
             return False
         if _stream is None:
-            highest = store.highest_incarnation(cursor, origin)
             watermark = store.get_watermark(cursor, origin, incarnation)
             pending = 0 if _from_pending else store.count_pending(cursor, origin, incarnation)
         else:
             if (_stream.origin, _stream.incarnation) != (origin, incarnation):
                 return False
-            highest, watermark, pending = _stream.highest, _stream.watermark, _stream.pending
-        if incarnation < highest or (not _from_pending and pending):
+            watermark, pending = _stream.watermark, _stream.pending
+        if not _from_pending and pending:
             return False
         rows = []
         for index, env in enumerate(envs):
@@ -2658,8 +2719,6 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
         catalog.after_event_mirrored(cursor, max((row for row in rows if row["session_id"] == sid),
                                                 key=lambda row: int(row["seq"])))
     store.set_watermark(cursor, origin, incarnation, last_seq)
-    if incarnation > highest and highest:
-        store.clear_pending_stream(cursor, origin, highest)
     result.applied += len(envs)
     result.touched.extend((coll.name, env.record_id, env.op) for env in envs)
     return True
@@ -2708,8 +2767,7 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                 part._pending_drains.add((stream.origin, stream.incarnation))
                 chunk = chunk[skipped:]
                 stream = _WireStream(stream.origin, stream.incarnation,
-                                     stream.first_seq + skipped, stream.highest,
-                                     stream.watermark, stream.pending)
+                                     stream.first_seq + skipped, stream.watermark, stream.pending)
             appended = not chunk or (stream is not None and _buffer_pending_chunk(cursor, chunk, ctx, part, stream))
             if not appended:
                 # Fast append reserves the whole chunk itself. Pure gap
@@ -2903,8 +2961,9 @@ def restored_from_backup(evidence_seq: int, evidence_incarnation: int, *,
     key, at a sequence past our outbox), never on a peer's bare claim.
 
     The restore also put back an older Lamport clock, while peers keep the
-    versions this device signed after the backup (they never send a device
-    its own ops). ``evidence_clock`` is the highest clock among those proofs:
+    versions this device signed after the backup (they send them back only
+    once this device is on the new incarnation, #1568). ``evidence_clock`` is
+    the highest clock among those proofs:
     the clock moves past it before anything is signed in the new stream, or
     this device's next write, a tombstone included, would lose to its own
     older version on every peer that holds it (#1506).
@@ -3024,6 +3083,9 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
     item = {"record_id": version["record_id"], "clock": int(version["clock"]),
             "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
             "order_seq": version.get("order_seq"), "record": None}
+    if version.get("origin_incarnation") is not None:
+        # Decides an exact (clock, origin) tie (#1568); older readers ignore it.
+        item["origin_incarnation"] = int(version["origin_incarnation"])
     if not item["deleted"]:
         if not row_known:
             row = _read_row(cursor, coll, version["record_id"])
@@ -3190,10 +3252,14 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         existing = known.get(item["record_id"]) if known is not None else store.get_record(
             cursor, coll.name, item["record_id"])
         conflict = None
-        if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":
-            comparison = envelope_mod.compare(int(item["clock"]), item["origin_device_id"],
-                                              int(existing["clock"]), existing["origin_device_id"])
-            incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
+        incarnation = _item_incarnation(item)
+        incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
+        comparison = 1 if existing is None else _versus_held(
+            cursor, coll.name, int(item["clock"]), item["origin_device_id"], incarnation, existing,
+            incoming_hash=incoming_hash)
+        if existing is not None and coll.name != "membership" and (
+                existing["origin_device_id"] != item["origin_device_id"]
+                or _restore_fork(cursor, ctx, coll.name, item["origin_device_id"], incarnation, existing)):
             if incoming_hash != existing["content_hash"]:
                 loser, winner = (existing, item) if comparison > 0 else (item, existing)
                 if loser["deleted"]:
@@ -3211,8 +3277,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                                 losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
                                 losing_record=losing_record, winning_clock=int(winner["clock"]),
                                 winning_device_id=winner["origin_device_id"])
-        if existing is not None and envelope_mod.compare(
-                int(item["clock"]), item["origin_device_id"], int(existing["clock"]), existing["origin_device_id"]) <= 0:
+        if comparison <= 0:
             if conflict:
                 store.add_conflict(cursor, **conflict)
             if not item["deleted"] and _merge_losing_provider_credentials(
@@ -3249,7 +3314,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                     store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                                      origin_device_id=item["origin_device_id"], content_hash="", deleted=False,
-                                     order_seq=item.get("order_seq"))
+                                     order_seq=item.get("order_seq"), origin_incarnation=incarnation or None)
                 continue
             _after_mirror(cursor, coll, prepared)
             # Snapshot items have no per-item signature. In particular,
@@ -3270,7 +3335,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             store.add_conflict(cursor, **conflict)
         store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                          origin_device_id=item["origin_device_id"], content_hash=local_hash,
-                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
+                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"),
+                         origin_incarnation=incarnation or None)
         applied += 1
         touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
         if not item["deleted"] and refresh_billing:
@@ -3346,7 +3412,8 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
     order = sorted(candidates)
     rows = [[_column_value(coll, name, candidates[index].get(name), ()) for name in coll.fields] for index in order]
     versions = [(items[index]["record_id"], int(items[index]["clock"]), items[index]["origin_device_id"],
-                 content_hash(coll, candidates[index]), items[index].get("order_seq")) for index in order]
+                 content_hash(coll, candidates[index]), items[index].get("order_seq"),
+                 _item_incarnation(items[index]) or None) for index in order]
     inserted = store.insert_snapshot_events(cursor, coll.fields, rows, versions, batch=SNAPSHOT_SQL_BATCH)
     # A row a local writer added meanwhile takes the per-record path instead.
     order = [index for index in order if candidates[index]["id"] in inserted]

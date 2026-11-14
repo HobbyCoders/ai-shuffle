@@ -110,24 +110,43 @@ def test_buffer_phase_preserves_partial_acceptance_at_stream_limits(workers, mon
             assert replay.rejected == len(ops) - 1 and replay.pending == 0
 
 
-@pytest.mark.parametrize("refusal", ["revoked", "stale"])
-def test_buffer_phase_refuses_revoked_and_stale_streams(workers, refusal):
+@pytest.mark.parametrize("refusal", ["revoked", "revoked_older_incarnation"])
+def test_buffer_phase_refuses_revoked_streams(workers, refusal):
     from dataclasses import replace
     from app.network import membership
 
     a, b, ops = backlog(workers, 193, buffer=False)
     with b.active():
+        ctx = engine.require_context()
         if refusal == "revoked":
-            ctx = engine.require_context()
             ctx.members[a.device_id] = replace(ctx.member(a.device_id), status=membership.STATUS_REVOKED,
                 last_seq_accepted=ops[0]["origin_seq"] - 1, last_incarnation_accepted=1)
         else:
+            # Within its limit, but a newer incarnation was seen: closed (#1568).
             with store.get_db() as conn:
                 store.set_watermark(conn.cursor(), a.device_id, 2, 0)
+            ctx.members[a.device_id] = replace(ctx.member(a.device_id), status=membership.STATUS_REVOKED,
+                last_seq_accepted=10, last_incarnation_accepted=2)
         result = engine.apply_batch(ops[1:])
         assert result.rejected == len(ops) - 1 and result.pending == result.retry == 0
         with store.get_db() as conn:
             assert store.count_pending(conn.cursor(), a.device_id, 1) == 0
+
+
+def test_buffer_phase_buffers_an_active_members_older_incarnation(workers):
+    """An older stream of an active member buffers and drains like any other (#1568)."""
+    a, b, ops = backlog(workers, 193, buffer=False)
+    with b.active():
+        with store.get_db() as conn:
+            store.set_watermark(conn.cursor(), a.device_id, 2, 0)
+        buffered = engine.apply_batch(ops[1:])
+        assert buffered.pending == len(ops) - 1 and buffered.rejected == buffered.retry == 0
+        drained = engine.apply_batch(ops[:1])
+        assert drained.rejected == drained.retry == 0
+        with store.get_db() as conn:
+            cur = conn.cursor()
+            assert store.count_pending(cur, a.device_id, 1) == 0
+            assert store.get_watermark(cur, a.device_id, 1) == ops[-1]["origin_seq"]
 
 
 @pytest.mark.parametrize("use_postgres,failure", [(False, "runtime"), (True, "sql")])

@@ -65,6 +65,13 @@ def test_last_writer_wins_order():
     assert envelope.compare(4, "dev_a", 5, "dev_b") == -1
     assert envelope.compare(5, "dev_b", 5, "dev_a") == 1
     assert envelope.compare(5, "dev_a", 5, "dev_a") == 0
+    # A restore fork: the incarnation decides only an exact (clock, origin) tie (#1568).
+    assert envelope.compare(5, "dev_a", 5, "dev_a", 2, 1) == 1
+    assert envelope.compare(5, "dev_a", 5, "dev_a", 1, 2) == -1
+    assert envelope.compare(5, "dev_a", 5, "dev_a", 2, 2) == 0
+    assert envelope.compare(5, "dev_a", 5, "dev_a", 1, 0) == 1  # 0: not known
+    assert envelope.compare(4, "dev_a", 5, "dev_a", 9, 1) == -1
+    assert envelope.compare(5, "dev_a", 5, "dev_b", 9, 1) == -1
 
 
 # ---------------------------------------------------------------------------

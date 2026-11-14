@@ -92,8 +92,10 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    cadence is 10 s; after a local write the pass runs at once, so two workers on
    a LAN converge within about two seconds.
 4. **Applying.** Verify signature against the members table, reject a revoked
-   origin past its `last_seq_accepted`, order per stream (holes wait in
-   `sync_pending`), decrypt, last-writer-wins on (clock, device id), materialize
+   origin past its `last_seq_accepted` (and in an incarnation older than the
+   newest one seen), order per stream (holes wait in `sync_pending`; an active
+   member's older incarnation is an ordinary stream), decrypt, last-writer-wins
+   on (clock, device id) for every collection and every origin, materialize
    into the domain table, keep the loser in `sync_conflicts` for 30 days
    (columns encrypted at rest are stored as `<secret>`, never in plaintext),
    advance the watermark. All in one transaction per envelope.
@@ -203,8 +205,35 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   put back an older Lamport clock, so the device first moves its clock past
   that op's clock, then bumps its incarnation and starts a fresh stream: its
   next write, a deletion included, outranks the versions it signed after the
-  backup that peers still hold (#1506). Peers never send a device its own ops,
-  so those later versions are not copied back to it (#1568). Until the first
+  backup that peers still hold (#1506). Those later versions also come back to
+  it (#1568): an exchange, and a peer's push, send a device its own streams
+  from incarnations older than its current one, past what it holds, and it
+  re-imports them. Its current incarnation is never sent back. Only a worker
+  that advertises the `own-history-reimport` capability gets them; an older
+  worker is served as before. Other members accept and relay those older
+  streams too. Every replica orders the device's versions by (clock, device
+  id), as it does any other's, so all of them agree whichever stream carried
+  a version. The restore can leave two of the device's versions with the same
+  clock, one from each side of it: the later incarnation wins that exact tie
+  only, everywhere a version is compared (ops, state copies, transcript
+  copies), and the stored version keeps its incarnation for that. The one
+  loss: a write the device makes after the restore but before it hears of a
+  later version it signed before the restore has a lower clock and loses to
+  that version on every replica, as any concurrent write would. Whichever of
+  the device's two incarnations loses is kept as a conflict, as another
+  device's would be. Members on an older build still refuse an older
+  incarnation once they have seen a newer one and keep the first version on a
+  tie, so until they update they can disagree in those cases.
+  A version it gets back for a chat it runs restores the chat's owner-only
+  fields (permission mode and ceiling, account label) too; no other copy can.
+  Only the unbroken part of an old stream is sent, decided in the statement
+  that reads it so a compaction running meanwhile cannot open a hole: past an
+  op already compacted out of the log the replay stops, and no state copy stands in for
+  it: a copy is the serving peer's unsigned claim, and a device takes its own
+  chats' turns and owner-only fields only from ops it signed itself. Retention
+  compacts transcript ops about an hour after every member has them (daily pass,
+  [sync log retention](../internal/sync-log-retention.md)), so a restore made
+  after that pass gets back only what comes before the first compacted op. Until the first
   comparison with a peer after start, the outbox is held so a restored worker
   never reuses sequence numbers peers already hold.
 - **Snapshots carry only signed deletions.** A snapshot page lists a record as
@@ -300,6 +329,7 @@ its own database, data directory and identity:
 | Recovery certificate with every worker off | `test_engine.py::test_recovery_certificate_admits_a_device_when_everyone_is_off` |
 | Restore from backup bumps incarnation | `test_transport.py::test_peer_link_exchanges_both_ways_and_detects_rollback` |
 | A restored worker's next write outranks its own lost versions; snapshots invent no deletions | `test_restored_worker_ordering.py` |
+| A restored worker gets back what it signed after the backup (pull, push, older workers, compacted gaps, repeated restores, chats it runs, writes since the restore, equal-clock forks, kept conflicts) | `test_restored_own_history.py` |
 | Join over HTTP with fingerprint check, then sync | `test_transport.py::test_enrollment_over_http_then_sync` |
 | Hub registration, founding the account network, device approve/reject | `test_hub.py` |
 | Session on A mirrored to B, driven from B, forked when offline | `test_control.py` |

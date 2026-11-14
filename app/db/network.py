@@ -16,7 +16,7 @@ import math
 import os
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from app.db.base import background_database_work, get_db, row_to_dict, rows_to_list, utc_now_iso as _now
 
@@ -189,6 +189,7 @@ def create_schema(cursor) -> None:
             deleted BOOLEAN NOT NULL DEFAULT FALSE,
             order_seq BIGINT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            origin_incarnation INTEGER,
             PRIMARY KEY (collection, record_id)
         )
     """)
@@ -391,10 +392,18 @@ def _ensure_columns(cursor) -> None:
                 ("network_session_active", "local_revision", "BIGINT NOT NULL DEFAULT 0"),
                 ("network_session_active", "local_revision_epoch", "TEXT NOT NULL DEFAULT ''"),
                 ("network_transcript_backfill_state", "generation", "BIGINT NOT NULL DEFAULT 1"),
-                ("network_transcript_backfill_state", "stalled_since", "BIGINT"))
+                ("network_transcript_backfill_state", "stalled_since", "BIGINT"),
+                # Breaks an exact (clock, origin) tie across a restore fork (#1568).
+                # NULL on a version stored before it was kept: unknown.
+                ("sync_records", "origin_incarnation", "INTEGER"))
     if type(cursor).__module__.startswith("psycopg2"):
         for table, column, kind in additive:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}")
+            # Even a no-op ALTER takes an exclusive lock: on a busy table
+            # (sync_records) a boot would wait behind a peer's sync.
+            cursor.execute("SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass(%s) AND attname = %s "
+                           "AND NOT attisdropped", (table, column))
+            if cursor.fetchone() is None:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}")
         return
     from app.db.base import column_exists
     for table, column, kind in additive:
@@ -773,8 +782,39 @@ def _log_heads(cursor) -> list[dict]:
     return rows
 
 
+def _excluded(origin: str, incarnation, exclude_origin: str | None, own_history_before: int | None) -> bool:
+    """Whether a stream stays out of what ``exclude_origin`` (the requester) is sent.
+
+    The requester never gets its own streams back, except, with
+    ``own_history_before``, those of incarnations older than the one it is on:
+    after a restore from backup, peers hold what it signed after the backup and
+    it re-imports them (#1568). Its current incarnation stays excluded.
+    """
+    if origin != exclude_origin:
+        return False
+    return not own_history_before or int(incarnation) >= int(own_history_before)
+
+
+def _unbroken_head(cursor, origin: str, incarnation: int, after: int, head: int) -> int:
+    """The last seq past ``after`` this worker holds without a gap (``after`` if none).
+
+    A requester's own older stream (#1568) is sent only that far: past a
+    compacted op it would sit unapplied, and no state copy stands in for it,
+    since a copy cannot carry the transcripts of chats the requester runs.
+    This decides whether the stream lags; ``ops_since``'s fetch re-checks the
+    prefix in the statement that reads the envelopes.
+    """
+    # Seqs are distinct and past ``after``: the n-th held one is ``after + n``
+    # exactly as long as nothing below it is missing.
+    cursor.execute(
+        "SELECT COUNT(*) AS n FROM (SELECT seq, ROW_NUMBER() OVER (ORDER BY seq) AS n FROM sync_ops "
+        "WHERE origin_device_id = %s AND incarnation = %s AND seq > %s AND seq <= %s) held "
+        "WHERE seq = %s + n", (origin, incarnation, after, head, after))
+    return after + int(cursor.fetchone()["n"])
+
+
 def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: Optional[str] = None,
-              exclude_origin: Optional[str] = None, _conn=None,
+              exclude_origin: Optional[str] = None, own_history_before: int | None = None, _conn=None,
               _heads: Optional[Dict[str, Dict[str, int]]] = None) -> List[dict]:
     """Ops the caller lacks: per origin/incarnation, everything past its watermark.
 
@@ -795,6 +835,15 @@ def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: 
         params: List[Any] = [origin, incarnation, after, head]
         sql = ("SELECT seq, envelope FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s "
                "AND seq > %s AND seq <= %s")
+        if origin == exclude_origin:
+            # The requester's own older stream: only its gap-free prefix past
+            # ``after``, decided in this same statement (one snapshot), so a
+            # retention delete committed after ``_unbroken_head`` read the
+            # stream cannot open a hole in what is sent (#1568).
+            sql += (" AND seq IN (SELECT seq FROM (SELECT seq, ROW_NUMBER() OVER (ORDER BY seq) AS n FROM sync_ops"
+                    " WHERE origin_device_id = %s AND incarnation = %s AND seq > %s AND seq <= %s) held"
+                    " WHERE seq = %s + n)")
+            params.extend([origin, incarnation, after, head, after])
         if lane:
             sql += " AND lane = %s"
             params.append(lane)
@@ -812,9 +861,11 @@ def ops_since(watermarks: Dict[str, Dict[str, int]], *, limit: int = 500, lane: 
                              for origin, incarnations in _heads.items() for inc, head in incarnations.items())
         lagging = []
         for origin, incarnation, head in streams:
-            if origin == exclude_origin:
+            if _excluded(origin, incarnation, exclude_origin, own_history_before):
                 continue
             last = int((watermarks.get(origin) or {}).get(str(incarnation), (watermarks.get(origin) or {}).get(incarnation, 0)) or 0)
+            if origin == exclude_origin and last < head:
+                head = _unbroken_head(cursor, origin, incarnation, last, head)
             if last < head:
                 lagging.append((origin, incarnation, last, head))
         if not lagging or limit <= 0:
@@ -1374,7 +1425,7 @@ def insert_snapshot_events(cursor, fields, rows: List[List[Any]], versions: List
     """Transcript rows from a state copy, with their sync records, in multi-row INSERTs.
 
     ``versions`` holds ``(record_id, clock, origin_device_id, content_hash,
-    order_seq)`` per row; ``fields`` must include ``id``. The caller
+    order_seq[, origin_incarnation])`` per row; ``fields`` must include ``id``. The caller
     checked that neither the rows nor the records existed. A row a local
     writer inserted since then is left alone (``ON CONFLICT DO NOTHING``) and
     gets no record here; the ids of the rows inserted come back, and the
@@ -1393,9 +1444,9 @@ def insert_snapshot_events(cursor, fields, rows: List[List[Any]], versions: List
     position = list(fields).index("id")
     ids = [row[position] for row in rows]
     _insert_rows(cursor, "sync_records", ("collection", "record_id", "clock", "origin_device_id", "content_hash",
-                                          "deleted", "order_seq", "updated_at"),
-                 [("session_events", record_id, clock, origin, digest, False, order_seq, now)
-                  for event_id, (record_id, clock, origin, digest, order_seq) in zip(ids, versions)
+                                          "deleted", "order_seq", "updated_at", "origin_incarnation"),
+                 [("session_events", *version[:4], False, version[4], now, version[5] if len(version) > 5 else None)
+                  for event_id, version in zip(ids, versions)
                   if event_id in inserted], "ON CONFLICT (collection, record_id) DO NOTHING", batch=batch)
     return inserted
 
@@ -1411,9 +1462,10 @@ def insert_event_batch(cursor, coll, rows: List[dict], envelopes: List[dict], ha
            [[_json(row.get(name)) if name in coll.json_fields else row.get(name) for name in coll.fields]
             for row in rows], "")
     insert("sync_records", ("collection", "record_id", "clock", "origin_device_id", "content_hash",
-                            "deleted", "order_seq", "updated_at"),
+                            "deleted", "order_seq", "updated_at", "origin_incarnation"),
            [(env["collection"], env["record_id"], env["clock"], env["origin_device_id"], digest,
-             False, env.get("order_seq"), now) for env, digest in zip(envelopes, hashes)], "")
+             False, env.get("order_seq"), now, env["origin_incarnation"])
+            for env, digest in zip(envelopes, hashes)], "")
     insert("sync_ops", ("origin_device_id", "incarnation", "seq", "collection", "record_id", "op",
                         "clock", "lane", "envelope", "created_at"),
            [(env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], env["collection"],
@@ -1433,9 +1485,10 @@ def insert_published_events(cursor, envelopes: List[dict], hashes: List[str]) ->
                  [(env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], env["collection"],
                    env["record_id"], env["op"], env["clock"], LANE_HISTORY, _json(env), now) for env in envelopes])
     _insert_rows(cursor, "sync_records", ("collection", "record_id", "clock", "origin_device_id", "content_hash",
-                                         "deleted", "order_seq", "updated_at"),
+                                         "deleted", "order_seq", "updated_at", "origin_incarnation"),
                  [(env["collection"], env["record_id"], env["clock"], env["origin_device_id"], digest,
-                   False, env.get("order_seq"), now) for env, digest in zip(envelopes, hashes)])
+                   False, env.get("order_seq"), now, env["origin_incarnation"])
+                  for env, digest in zip(envelopes, hashes)])
 
 
 def get_record(cursor, collection: str, record_id: str) -> Optional[dict]:
@@ -1445,15 +1498,37 @@ def get_record(cursor, collection: str, record_id: str) -> Optional[dict]:
 
 
 def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_device_id: str, content_hash: str,
-               deleted: bool, order_seq: Optional[int] = None) -> None:
+               deleted: bool, order_seq: Optional[int] = None, origin_incarnation: Optional[int] = None) -> None:
+    """Store a record's version. ``origin_incarnation`` None means not known."""
     cursor.execute(
-        """INSERT INTO sync_records (collection, record_id, clock, origin_device_id, content_hash, deleted, order_seq, updated_at)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """INSERT INTO sync_records (collection, record_id, clock, origin_device_id, content_hash, deleted, order_seq,
+                                     updated_at, origin_incarnation)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT (collection, record_id) DO UPDATE SET
                clock = EXCLUDED.clock, origin_device_id = EXCLUDED.origin_device_id,
                content_hash = EXCLUDED.content_hash, deleted = EXCLUDED.deleted,
-               order_seq = EXCLUDED.order_seq, updated_at = EXCLUDED.updated_at""",
-        (collection, record_id, clock, origin_device_id, content_hash, bool(deleted), order_seq, _now()))
+               order_seq = EXCLUDED.order_seq, updated_at = EXCLUDED.updated_at,
+               origin_incarnation = EXCLUDED.origin_incarnation""",
+        (collection, record_id, clock, origin_device_id, content_hash, bool(deleted), order_seq, _now(),
+         origin_incarnation))
+
+
+def version_incarnation(cursor, collection: str, version: Mapping[str, Any]) -> int:
+    """The origin incarnation of a stored record version (0 when not known).
+
+    Versions stored before it was kept (#1568) have none; the op that
+    carried one names it while this worker still holds that op. Two held
+    ops of one (record, origin, clock) are a restore fork stored by an older
+    build, which refused the earlier incarnation's op once it held a later
+    one and kept the version it held on a tie: the version kept is the lowest.
+    """
+    if version.get("origin_incarnation") is not None:
+        return int(version["origin_incarnation"])
+    cursor.execute("SELECT MIN(incarnation) AS incarnation FROM sync_ops WHERE collection = %s AND record_id = %s "
+                   "AND origin_device_id = %s AND clock = %s",
+                   (collection, version["record_id"], version["origin_device_id"], int(version["clock"])))
+    row = cursor.fetchone()
+    return int(row["incarnation"]) if row and row["incarnation"] is not None else 0
 
 
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:
@@ -2166,13 +2241,19 @@ def finish_backfill(generation: int, _conn=None) -> bool:
 
 
 def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = None,
-                   exclude_origin: str | None = None) -> tuple[List[dict], dict, bool]:
-    """Read one frontier for a bounded batch and its snapshot-gap check."""
+                   exclude_origin: str | None = None,
+                   own_history_before: int | None = None) -> tuple[List[dict], dict, bool]:
+    """Read one frontier for a bounded batch and its snapshot-gap check.
+
+    ``own_history_before`` is the requester's current incarnation when it can
+    re-import its own older streams (see ``_excluded``). Those never ask for a
+    state copy: only their unbroken prefix is sent (see ``ops_since``).
+    """
     with get_db() as conn:
         heads = local_watermarks(conn)
         snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
         ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
-                        _conn=conn, _heads=heads)
+                        own_history_before=own_history_before, _conn=conn, _heads=heads)
         from app.network import nested_secret_sync
         if not nested_secret_sync.ops_compatible(ops, exclude_origin, conn.cursor()):
             # Signed history cannot be rewritten or filtered without stream
