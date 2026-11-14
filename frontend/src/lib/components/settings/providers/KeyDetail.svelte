@@ -29,13 +29,14 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import TextField from '../rows/TextField.svelte';
 	import Segmented from '../rows/Segmented.svelte';
+	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ModelCuration from './ModelCuration.svelte';
 	import LocalTuning from './LocalTuning.svelte';
 	import KeyUsage from './tabs/KeyUsage.svelte';
 	import { passthroughModels } from './curation';
 	import { supportsLocalTuning, tunedModels } from './local-tuning';
-	import { hostOf, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
+	import { hostOf, needsUpdateNote, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
 	import CredentialControl from './CredentialControl.svelte';
 	import SavedSecretRow from './SavedSecretRow.svelte';
 	import { balanceDisplay } from './credential-display';
@@ -55,6 +56,7 @@
 	];
 
 	const row = $derived(credential.row!);
+	const updateNote = $derived(needsUpdateNote(row));
 	const gateway = $derived(credential.flavor === 'gateway');
 	const native = $derived(isNativeProvider(row.provider_type));
 	const option = $derived(nativeOption(row.provider_type, row.auth_mode === 'plan_key') ?? row.native_provider);
@@ -210,6 +212,9 @@
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		<CredentialControl {credential} showState />
+	{/snippet}
+	{#snippet banner()}
+		{#if updateNote}<InlineBanner tone="info"><span role="status">{updateNote}</span></InlineBanner>{/if}
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}

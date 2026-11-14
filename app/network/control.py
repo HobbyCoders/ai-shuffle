@@ -291,6 +291,19 @@ def _unreachable_message(peer: str, me: str, failures: List[BaseException], rout
     return f"Couldn't reach {peer} from {me} ({' / '.join(reasons) or 'unreachable'} {where})."
 
 
+async def refuse_incapable(device_id: str, session_id: Optional[str],
+                           overrides: Optional[Dict[str, Any]] = None) -> None:
+    """Raise ``ControlRefused`` when ``device_id`` does not report the
+    capability of a gated provider row the session or ``overrides`` names
+    (``provider_capability.session_refusal``, #1519). Every control action
+    that wakes a session on another worker checks this before sending."""
+    from app.core import provider_capability
+
+    reason = await run_sync(provider_capability.session_refusal, device_id, session_id, overrides)
+    if reason:
+        raise ControlRefused(reason)
+
+
 async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: str = "user",
                       profile_id: Optional[str] = None, project_id: Optional[str] = None,
                       overrides: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None,
@@ -317,7 +330,12 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
     replays was so admitted). Always sent, so the owner can tell "no" from a
     worker too old to say (``turns.UNSTATED_ENTRY_KEY``). Never in ``payload``:
     the owner drops the key from any payload.
+
+    A turn of a session that names a capability-gated provider row (its own
+    or in ``overrides``) is refused here, with the reason, when the owner
+    does not report that capability (#1519).
     """
+    await refuse_incapable(device_id, session_id, overrides)
     body = {
         "session_id": session_id, "source": source, "prompt": prompt, "profile_id": profile_id,
         "project_id": project_id, "overrides": overrides, "payload": payload,

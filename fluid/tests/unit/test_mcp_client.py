@@ -101,6 +101,28 @@ async def test_mrtr_input_required_surfaces_marker() -> None:
         await reg.aclose()
 
 
+async def test_mrtr_retry_delivers_the_answers_and_request_state() -> None:
+    """#1560: the retry reaches the server with ``inputResponses`` AND the
+    echoed ``requestState``; the fixture completes only when both arrive."""
+    import json
+
+    answers = {"confirm": {"action": "accept", "content": {"ok": True}}}
+    reg = ToolRegistry()
+    try:
+        await reg.connect_mcp("srv", _config())
+        first = await reg.dispatch("mcp__srv__need_input", {}, ToolCtx())
+        assert first.input_required is not None
+        out = await reg.dispatch(
+            "mcp__srv__need_input", {}, ToolCtx(),
+            input_responses=answers, request_state=first.input_required.request_state,
+        )
+        assert out.input_required is None and not out.is_error, out.text
+        echoed = json.loads(out.text.split("confirmed ", 1)[1].split("\n", 1)[0])
+        assert echoed == {"inputResponses": answers, "requestState": "rs-1"}
+    finally:
+        await reg.aclose()
+
+
 async def test_trusted_server_annotations_lower_the_risk() -> None:
 
     reg = ToolRegistry()
