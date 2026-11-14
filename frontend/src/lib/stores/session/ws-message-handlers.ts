@@ -200,12 +200,15 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'start_queued',
 	'has_running_tasks',
 	// A turn started or ended: a sidebar not watching that chat learns here
-	// whether its latest turn failed.
+	// whether its latest turn failed or was stopped.
 	'last_turn_failed',
+	'last_turn_stopped',
 	'work_ms',
 	'work_started_at',
 	// A context-window pick made on another tab or device (#1895).
 	'context_window',
+	// An effort pick, or Auto (null), made on another tab or device (#1579).
+	'effort',
 	// A user message was persisted (any device): patched at once so a
 	// remembered prose question clears (spec §5); see STALE_COMPANION_FIELDS.
 	'last_user_message_at',
@@ -624,6 +627,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						contextWindowPin: updates.context_window as number,
 					}));
 					onPersistSession();
+				}
+				// An effort pick saved from another tab or device, Auto (null)
+				// included (#1579): adopt it on screen and in the cached copy a
+				// switch-back restores, or this composer's next send carries the
+				// older level and pins it again. The row patch below covers the rest.
+				if (updatedSessionId && 'effort' in updates
+					&& (updates.effort === null || typeof updates.effort === 'string')) {
+					const effort = updates.effort as string | null;
+					const cached = sessionEphemeralCache.restore(updatedSessionId);
+					if (cached) sessionEphemeralCache.save(updatedSessionId, { ...cached, effortLevelOverride: effort });
+					if (updatedSessionId === getState().sessionId) {
+						update(s => ({ ...s, effortLevelOverride: effort }));
+						onPersistSession();
+					}
 				}
 				// A settle dismisses the session's waits server-side (#2324);
 				// drop the local copies so the card and composer follow. A snooze

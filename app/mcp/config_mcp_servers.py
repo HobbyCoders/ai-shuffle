@@ -24,6 +24,7 @@ def _create_mcp_tools(is_admin: bool, project_dir: Optional[str] = None) -> list
     """
     from app.mcp.inproc import tool
     from app.core.mcp_service import get_mcp_service, McpScope, McpServerType
+    from app.db.async_database import run_plugin_io
 
     _is_admin = is_admin
     _project_dir = project_dir
@@ -63,7 +64,7 @@ def _create_mcp_tools(is_admin: bool, project_dir: Optional[str] = None) -> list
         scope_filter = args.get("scope", "all")
 
         if scope_filter == "all":
-            all_servers = service.get_all_servers()
+            all_servers = await run_plugin_io(service.get_all_servers)
             result = {}
             for scope_name, servers in all_servers.items():
                 result[scope_name] = [_server_to_dict(s) for s in servers]
@@ -74,7 +75,7 @@ def _create_mcp_tools(is_admin: bool, project_dir: Optional[str] = None) -> list
             scope = scope_map.get(scope_filter)
             if not scope:
                 return _error(f"Invalid scope: {scope_filter}")
-            servers = service.get_servers_for_scope(scope)
+            servers = await run_plugin_io(service.get_servers_for_scope, scope)
             return _tool_result({
                 "scope": scope_filter,
                 "servers": [_server_to_dict(s) for s in servers],
@@ -160,7 +161,7 @@ def _create_mcp_tools(is_admin: bool, project_dir: Optional[str] = None) -> list
 
         try:
             service = get_mcp_service(project_dir=_project_dir)
-            service.add_server(args["name"], config, scope)
+            await run_plugin_io(service.add_server, args["name"], config, scope)
             return _tool_result({
                 "success": True,
                 "name": args["name"],
@@ -211,7 +212,7 @@ def _create_mcp_tools(is_admin: bool, project_dir: Optional[str] = None) -> list
 
         try:
             service = get_mcp_service(project_dir=_project_dir)
-            service.remove_server(args["name"], scope)
+            await run_plugin_io(service.remove_server, args["name"], scope)
             return _tool_result({
                 "success": True,
                 "message": f"MCP server '{args['name']}' removed from {args['scope']} scope.",
@@ -241,7 +242,7 @@ def _create_mcp_tools(is_admin: bool, project_dir: Optional[str] = None) -> list
 
         try:
             service = get_mcp_service(project_dir=_project_dir)
-            service.set_server_enabled(args["name"], args["enabled"])
+            await run_plugin_io(service.set_server_enabled, args["name"], args["enabled"])
             state = "enabled" if args["enabled"] else "disabled"
             return _tool_result({
                 "success": True,

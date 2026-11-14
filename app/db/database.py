@@ -2598,10 +2598,9 @@ def _run_column_migrations(cursor: Any) -> None:
             cursor.execute(f"ALTER TABLE api_users ADD COLUMN {_col} TEXT")
             migrations_applied.append(f"api_users.{_col}")
 
-    # Agent colour for the Agents page (#1827): one of the frontend's accent
-    # token names (``app.core.models.AGENT_AVATAR_COLORS``), NULL = the page's
-    # own choice. Additive/nullable, no index, no SCHEMA_VERSION bump (the
-    # migrations fingerprint covers this block).
+    # Retired agent colour column (the removed avatar feature): nothing reads or
+    # writes it, but it stays so upgraded and fresh schemas match and older
+    # peers' values survive. Additive/nullable, no SCHEMA_VERSION bump.
     if table_exists(cursor, "agents") and not column_exists(cursor, "agents", "avatar_color"):
         cursor.execute("ALTER TABLE agents ADD COLUMN avatar_color TEXT")
         migrations_applied.append("agents.avatar_color")

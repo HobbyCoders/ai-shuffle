@@ -1418,7 +1418,7 @@
           "check": "Neutral owner routes preserve installed-client aliases and stored history",
           "kind": "owner",
           "needs": ["install"],
-          "how": "On a disposable candidate with synthetic retained identity/spend data, use Settings > Usage and the agent editor to save limits, a name and an avatar through the owner-prefixed routes. Read and update the same records through both owner and legacy assistant prefixes, including PUT/PATCH limits and identity PATCH. Refuse API-key and cross-origin writes on both. Restart only the candidate and replay a stored conversational approval. Delete an ordinary disposable chat and try the retired home and research routes. With a disposable older peer when available, sync the historical account collection and complete/replay a bounded remote coordination job. Keep receipts private; no production data or credentials.",
+          "how": "On a disposable candidate with synthetic retained identity/spend data, use Settings > Usage and the agent editor to save limits and a name through the owner-prefixed routes. Read and update the same records through both owner and legacy assistant prefixes, including PUT/PATCH limits and identity PATCH. Refuse API-key and cross-origin writes on both. Restart only the candidate and replay a stored conversational approval. Delete an ordinary disposable chat and try the retired home and research routes. With a disposable older peer when available, sync the historical account collection and complete/replay a bounded remote coordination job. Keep receipts private; no production data or credentials.",
           "pass_when": "The UI uses owner routes; both HTTP prefixes share handlers, authorization and records. Identity config, owner memory and local/remote spending history survive restart without double charging. Stored assistant_confirm approvals still replay. Old-peer assistant collection and remote-usage actions remain understood; no home, research runner or selectable retired agent returns, retired routes stay unavailable and ordinary chat deletion succeeds. Missing real older-peer/provider receipts remain unverified, not a pass.",
           "past_bug": "#561: shared owner services retained retired implementation names; a partial rename could break imports, installed clients or accounting. #557: shared service naming, dead research constants and stale deletion documentation outlived home retirement."
         },
@@ -1587,6 +1587,15 @@
           "how": "On a disposable candidate, gate fsync/source reads; stop/start, release, stop.",
           "pass_when": "Stop avoids source I/O, logs 32 frames max, retains ownership and rejoins.",
           "past_bug": "#547: stop cleared a live thread handle while fsync was blocked."
+        },
+        {
+          "id": "harness-basics.windows-git-plugin-files",
+          "check": "On Windows, Git-sourced plugins install, update, uninstall and their marketplace removes cleanly",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "On a disposable Windows candidate with a throwaway project (#1602), add a Git-sourced marketplace and install one of its plugins at LOCAL and at PROJECT scope. Sync the marketplace, update the plugin and reinstall it over itself. While a sync runs, open the plugin, MCP server and project plugin lists. Uninstall both project plugins, then remove the marketplace. Never touch a live worker's plugins or data.",
+          "pass_when": "Every step succeeds without a 409 'unreadable' or a leftover folder; the plugin and clone folders, .git objects included, are gone. No .bak appears for a file that was only being replaced. The plugin list answers during the sync; the MCP server and project plugin lists may wait for the sync but then answer; no list fails during an uninstall.",
+          "past_bug": "#1482: removing a Git-sourced plugin failed on read-only .git objects. #1488: a read during another write's replace was refused as unreadable and left a .bak."
         }
       ]
     }

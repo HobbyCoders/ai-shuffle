@@ -21,6 +21,7 @@ export type SessionCardStatus =
 	| 'has_question'
 	| 'await'
 	| 'failed'
+	| 'stopped'
 	| 'pr'
 	| 'pr_merged'
 	| 'done'
@@ -36,6 +37,7 @@ export const STATUS_LABELS: Record<SessionCardStatus, string> = {
 	has_question: 'Has Question',
 	await: 'Awaiting input',
 	failed: 'Failed',
+	stopped: 'Stopped',
 	pr: 'PR Opened',
 	pr_merged: 'PR Merged',
 	done: 'Done',
@@ -60,6 +62,7 @@ export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 	has_question: 'Has question',
 	await: 'Awaiting input',
 	failed: 'Failed',
+	stopped: 'Stopped',
 	pr: 'Done',
 	pr_merged: 'Done',
 	done: 'Done',
@@ -84,6 +87,11 @@ export function isAttentionStatus(status: SessionCardStatus): boolean {
  *  owner's turns are read for it on the server, and a mirror is told. */
 export function lastWorkFailed(s: Pick<Session, 'status'> & Partial<Pick<Session, 'last_turn_failed'>>): boolean {
 	return !!s.last_turn_failed || s.status === 'failed';
+}
+
+/** The latest turn was stopped, before any reply text or after it (#1340). */
+export function lastWorkStopped(s: Partial<Pick<Session, 'last_turn_stopped'>>): boolean {
+	return !!s.last_turn_stopped;
 }
 
 /** Which sidebar lane a row belongs to. An active row parked on a prompt, or
@@ -334,6 +342,8 @@ export function deriveStatus(input: {
 	open?: OpenSessionNeeds | null;
 	/** The latest turn ended in a failure (see `lastWorkFailed`). */
 	failed?: boolean;
+	/** The latest turn was stopped (see `lastWorkStopped`). */
+	stopped?: boolean;
 }): SessionCardStatus {
 	// A private-access request blocks the agent on the owner like a permission
 	// prompt. It is tracked apart from the run state, so it also outranks a
@@ -378,6 +388,8 @@ export function deriveStatus(input: {
 	if (input.parked || input.backgroundWork) return 'parked';
 	// A failure is what happened last, so no earlier question or PR speaks over it.
 	if (input.failed) return 'failed';
+	// So is a Stop: the row must not read Done for a turn that never finished (#1340).
+	if (input.stopped) return 'stopped';
 	if (proseQuestion) return 'await';
 	if (input.prState === 'open' || (!input.prState && input.openPr)) return 'pr';
 	if (input.prState === 'merged') return 'pr_merged';

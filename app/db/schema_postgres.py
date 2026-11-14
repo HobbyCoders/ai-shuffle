@@ -152,6 +152,8 @@ def create_postgres_schema(cursor: Any) -> None:
     # ------------------------------------------------------------------
     # 4. Agents (unified agent entity — was `profiles`)
     # ------------------------------------------------------------------
+    # avatar_color is retired (the avatar feature was removed): unread and
+    # unwritten, kept so fresh and upgraded schemas match.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS agents (
             id TEXT PRIMARY KEY,

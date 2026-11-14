@@ -1838,6 +1838,9 @@
 	@media (max-width: 768px), (hover: none), (pointer: coarse) {
 		.provider-hide { min-width: 44px; min-height: 44px; }
 		.provider-restore { min-height: 44px; }
+		/* The closed row that leads to Show is a finger's target too (#1580).
+		   Line-height, not flex, so the summary keeps its disclosure marker. */
+		.hidden-providers summary { min-height: 44px; line-height: 44px; }
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.provider-header, .provider-hide, .provider-header .section-device, .row-fill {

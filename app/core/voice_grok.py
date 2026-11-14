@@ -163,9 +163,10 @@ class GrokVoiceStream(VoiceStream):
                     or (self.progress is not None and self.progress.has_open_handoff()))
 
     def words_this_turn(self) -> str:
-        """The caller's newest utterance not yet handed off (approval answers excluded)."""
+        """The caller's newest utterance not yet handed off (approval answers
+        and typed messages, which have their own path, excluded)."""
         return newest_utterance([e for e in self.transcript if e.get("seq", 0) > self.delegated_seq
-                                 and e.get("seq") not in self.approval_consumed])
+                                 and e.get("seq") not in self.approval_consumed and not e.get("typed")])
 
     async def awaited_words(self) -> str:
         """The caller's newest utterance, once their words have settled."""
@@ -242,8 +243,8 @@ class GrokVoiceStream(VoiceStream):
         (a chat another worker owns included). Its notes arrive with no call
         id: the check_work call is answered here, so nothing waits on it.
         """
-        entries = [e for e in self.transcript
-                   if e.get("seq", 0) > self.delegated_seq and e.get("seq") not in self.approval_consumed]
+        entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq
+                   and e.get("seq") not in self.approval_consumed and not e.get("typed")]
         self.delegated_seq = self.converted_seq = self.transcript_seq
         logger.info("Voice trace %s: check_work at idle taken as a new request", self.session_id)
         try:

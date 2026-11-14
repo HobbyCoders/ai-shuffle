@@ -52,13 +52,15 @@ await runJourney({
     const noteFrame=await page.locator('.st-dh').filter({visible:true}).boundingBox();
     expect(noteFrame.x===settingsFrame.x&&noteFrame.width===settingsFrame.width,
      'short Notes and long Settings reserve the same centered reading frame '+JSON.stringify({noteFrame,settingsFrame}));
-    await mark('preserve real avatar and provider-logo header columns');
+    await mark('anonymous agent header and provider-logo header column');
     await open('Agents');
     await page.locator('.st-it').filter({visible:true}).first().click();
-    const avatarHeader=page.locator('.st-dh').filter({has:page.locator('.st-identity > .agent-avatar')});
-    const avatar=await avatarHeader.locator('.st-identity > *').boundingBox();
-    const agentTitle=await avatarHeader.locator('h2').boundingBox();
-    expect(Math.abs(agentTitle.x-avatar.x-avatar.width-14)<1,'Agent avatar keeps the original 14px title gap '+JSON.stringify({avatar,agentTitle}));
+    const agentHeader=page.locator('[data-view-shell=Agents] .st-dh').filter({visible:true}).first();
+    await agentHeader.locator('h2').waitFor();
+    // Agents carry no identity art: the title starts on the header's own inset, with no empty art column.
+    const agentGap=await agentHeader.evaluate(el=>({art:el.querySelectorAll('.st-identity > *').length,
+     gap:el.querySelector('h2').getBoundingClientRect().left-el.getBoundingClientRect().left-parseFloat(getComputedStyle(el).paddingLeft)}));
+    expect(agentGap.art===0&&Math.abs(agentGap.gap)<1,'Agent header has no art and no leftover title gap '+JSON.stringify(agentGap));
     await open('Settings');
     await page.getByRole('navigation',{name:'Settings',exact:true}).getByRole('button',{name:'Providers',exact:true}).click();
     await page.locator('.pgn').first().click();
@@ -144,7 +146,7 @@ await runJourney({
   }
  }, {
   // Phone list rows reach into the page gutter and pad back, so the highlight
-  // keeps the desktop inset round the avatar and trailing text while every
+  // keeps the desktop inset round its marker and trailing text while every
   // panel's title stays on the shared x.
   name: 'phone-list-rows-inset',
   async setup({page,status,variant}) {
@@ -180,7 +182,7 @@ await runJourney({
     for(const r of m.rows) {
      expect(r.row.l>=8&&r.row.r<=m.vw-8,label+' row highlight stays off the screen edges '+JSON.stringify(r.row));
      for(const k of r.marks)expect(k.l-r.row.l>=4&&r.row.r-k.r>=8,
-      label+' avatar/trailing text sits inside the highlight with the desktop inset '+JSON.stringify({row:r.row,mark:k}));
+      label+' marker/trailing text sits inside the highlight with the desktop inset '+JSON.stringify({row:r.row,mark:k}));
     }
     titles[label]=m.rows.map(r=>Math.round(r.nm.l));
    }

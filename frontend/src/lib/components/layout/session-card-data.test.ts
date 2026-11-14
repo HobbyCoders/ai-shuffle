@@ -23,6 +23,7 @@ import {
 	deriveStatus,
 	projectIdentity,
 	lastWorkFailed,
+	lastWorkStopped,
 	diffCounts,
 	isAttentionStatus,
 	sidebarGroup,
@@ -314,6 +315,42 @@ describe('a turn that failed', () => {
 		expect(lastWorkFailed({ status: 'failed' })).toBe(true);
 		expect(lastWorkFailed({ status: 'active', last_turn_failed: false })).toBe(false);
 		expect(lastWorkFailed({ status: 'active' })).toBe(false);
+	});
+});
+
+// #1340: a Stop before any reply text read Done; so did a Stop after it.
+describe('a turn that was stopped', () => {
+	const base = { streaming: false, attention: null as { count: number; kind: 'permission' | 'question' } | null, isActive: true };
+
+	it('says Stopped, not Done', () => {
+		expect(deriveStatus({ ...base, stopped: true })).toBe('stopped');
+		expect(STATUS_LABELS.stopped).toBe('Stopped');
+		expect(runtimeStatusWord('stopped')).toBe('Stopped');
+	});
+
+	it('gives way to whatever is happening now, and to a failure', () => {
+		expect(deriveStatus({ ...base, stopped: true, streaming: true })).toBe('working');
+		expect(deriveStatus({ ...base, stopped: true, optimisticStreaming: true, remoteRuntimeState: 'idle' })).toBe('working');
+		expect(deriveStatus({ ...base, stopped: true, parked: true })).toBe('parked');
+		expect(deriveStatus({ ...base, stopped: true, startQueued: true })).toBe('queued');
+		expect(deriveStatus({ ...base, stopped: true, attention: { count: 1, kind: 'question' } })).toBe('has_question');
+		expect(deriveStatus({ ...base, stopped: true, failed: true })).toBe('failed');
+	});
+
+	it('is what happened last, so an older question or PR does not speak over it', () => {
+		expect(deriveStatus({ ...base, stopped: true, open: REMEMBERED_PROSE_NEEDS })).toBe('stopped');
+		expect(deriveStatus({ ...base, stopped: true, prState: 'open' })).toBe('stopped');
+	});
+
+	it('stays in its lane: nothing waits on the owner', () => {
+		expect(sidebarGroup('stopped', true)).toBe('active');
+		expect(sidebarGroup('stopped', false)).toBe('settled');
+	});
+
+	it('is read from the turn', () => {
+		expect(lastWorkStopped({ last_turn_stopped: true })).toBe(true);
+		expect(lastWorkStopped({ last_turn_stopped: false })).toBe(false);
+		expect(lastWorkStopped({})).toBe(false);
 	});
 });
 

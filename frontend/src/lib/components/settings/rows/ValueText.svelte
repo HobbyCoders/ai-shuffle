@@ -10,8 +10,11 @@
 	interface Props {
 		value?: string | number | null;
 		mono?: boolean;
-		/** Retained for callers; read-only values share the secondary-ink style. */
-		tone?: 'muted' | 'fg';
+		/**
+		 * `muted` and `fg` are retained for callers; read-only values share the
+		 * secondary-ink style. `danger` is a value that needs action (a spent balance).
+		 */
+		tone?: 'muted' | 'fg' | 'danger';
 		status?: StatusTone;
 		children?: Snippet;
 	}
@@ -19,7 +22,7 @@
 	let { value, mono = false, tone = 'muted', status, children }: Props = $props();
 </script>
 
-<span class="st-val" class:st-mono={mono} class:fg={tone === 'fg'}>
+<span class="st-val" class:st-mono={mono} class:fg={tone === 'fg'} class:danger={tone === 'danger'}>
 	{#if status}<StatusDot tone={status} />{/if}
 	{#if children}{@render children()}{:else}{value ?? ''}{/if}
 </span>
@@ -38,6 +41,9 @@
 	}
 	.st-val.fg {
 		color: var(--st-mfg);
+	}
+	.st-val.danger {
+		color: var(--st-destructive);
 	}
 	.st-val.st-mono {
 		font-size: 13px;

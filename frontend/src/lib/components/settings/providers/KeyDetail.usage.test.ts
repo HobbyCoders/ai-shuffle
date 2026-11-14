@@ -28,9 +28,9 @@ const router = row({
 	provider_type: 'openrouter',
 	base_url: 'https://openrouter.ai/api'
 });
-const credits = (configured: boolean) => ({
+const credits = (configured: boolean, balance_remaining = 20.75) => ({
 	configured,
-	credits: { total_credits: 25, total_usage: 4.25, balance_remaining: 20.75 },
+	credits: { total_credits: 25, total_usage: 4.25, balance_remaining },
 	fetched_at: 1000,
 	last_error_kind: null,
 	source: 'OpenRouter credits API',
@@ -51,10 +51,10 @@ async function usageOf(item: string) {
 	return screen.getByRole('tabpanel');
 }
 
-function start(configured = false) {
+function start(configured = false, balance = 20.75) {
 	worker = fakeWorker(
 		{ rows: [router, row()] },
-		{ 'GET /model-providers/:id/openrouter-usage': () => credits(configured),
+		{ 'GET /model-providers/:id/openrouter-usage': () => credits(configured, balance),
 			'GET /model-providers/:id/balance-access': () => ({ configured: false, credits: null }) }
 	);
 	vi.stubGlobal('fetch', worker.fetch);
@@ -94,6 +94,16 @@ it.each([false, true])(
 		expect(screen.getByRole('heading', { level: 2 }).parentElement?.parentElement?.textContent).toContain('$20.75 left');
 	}
 );
+
+it('OpenRouter: a spent balance reads -$2.50 in the warning colour, as in the usage popover (#1583)', async () => {
+	start(false, -2.5);
+	const panel = await usageOf('mp:router');
+	const value = within(panel).getByText('-$2.50');
+	expect(value.classList.contains('danger')).toBe(true);
+	const left = screen.getByText('-$2.50 left');
+	expect(left.classList.contains('danger')).toBe(true);
+	expect(document.body.textContent).not.toContain('$-2.50');
+});
 
 it('OpenAI: has no Usage tab or billing requests, even from an old Usage deep link', async () => {
 	await usageOf('mp:p1');

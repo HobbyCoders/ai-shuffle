@@ -46,7 +46,7 @@ export default defineConfig({
 			{ find: /^\$app\/state$/, replacement: `${stubs}/app-state.svelte.ts` }
 		]
 	},
-	// Shared components import assets from ../frontend (avatar SVGs);
+	// Shared components and their assets load from ../frontend;
 	// mirrors server.fs.allow in vite.config.js.
 	server: {
 		fs: { allow: ['..'] }

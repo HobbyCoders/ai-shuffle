@@ -135,8 +135,9 @@
 			: (effortValue ? effortOptions.find((o) => o.value === effortValue)?.label : undefined)
 				?? autoEffortLabel(effortOptions, effortDefaultValue)
 	);
+	const effortPinned = $derived(effortOptions.some((o) => o.value === effortValue));
 	/** The level that runs: the pinned one, else the model's default (#1526). */
-	const effortChecked = $derived(effortOptions.some((o) => o.value === effortValue) ? effortValue : effortDefaultValue);
+	const effortChecked = $derived(effortPinned ? effortValue : effortDefaultValue);
 	/**
 	 * Capability refreshes may arrive after the sheet opens. Keep one effort slot
 	 * in every state, with the truthful explanation replacing its controls. All
@@ -973,6 +974,12 @@
 								<div class="mcp-rowhead">
 									<span class="mcp-ic" aria-hidden="true"><Lightbulb size={18} /></span>
 									<span class="mcp-lbl"><span>Reasoning effort</span></span>
+									{#if !effortLocked}
+										<!-- The way back from a pinned level to the model's default (#1579). -->
+										<button type="button" class="mcp-chip mcp-auto" aria-pressed={!effortPinned}
+											title={effortPinned ? "Back to Auto: run at the model's default" : "Auto: the model's default is in use"}
+											onclick={() => { if (effortPinned) onEffortSelect(null); }}>Auto</button>
+									{/if}
 									<span class="mcp-val">{panelEffortValue}</span>
 								</div>
 								<div class="mcp-effort-body">
@@ -1495,6 +1502,11 @@
 	.mcp-chip.run { color: var(--primary); background: color-mix(in oklab, var(--primary) 14%, transparent); font-weight: 600; }
 	.mcp-chip.run:active { background: color-mix(in oklab, var(--primary) 22%, transparent); }
 	.mcp-chip.run i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; animation: mcp-pulse 1.6s ease-in-out infinite; }
+	/* Effort's Auto toggle sits in the row head beside the value. The negative
+	   block margin keeps it out of the head's height, so late effort metadata
+	   adding or removing it never moves the open groups. */
+	.mcp-chip.mcp-auto { flex: none; min-height: 26px; padding: 3px 10px; margin-block: -4px; }
+	.mcp-chip.mcp-auto[aria-pressed='true'] { color: var(--primary); background: color-mix(in oklab, var(--primary) 14%, transparent); font-weight: 600; cursor: default; }
 	.mcp-chip.run.quiet i { animation: none; opacity: 0.6; }
 	@keyframes mcp-pulse { 50% { opacity: 0.3; } }
 

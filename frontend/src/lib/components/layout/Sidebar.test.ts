@@ -95,7 +95,6 @@ vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.apiGet, post: mocks.apiPost },
 	getErrorMessage: (error: Error, fallback: string) => error?.message || fallback,
 }));
-vi.mock('$lib/api/agent-identity', () => ({ getAgentIdentities: vi.fn().mockResolvedValue([]) }));
 
 vi.mock('$lib/stores/notifications', async (importOriginal) => ({
 	...await importOriginal<typeof import('$lib/stores/notifications')>(),

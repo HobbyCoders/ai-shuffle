@@ -1,30 +1,22 @@
 <script lang="ts">
 	/**
-	 * The Profile tab: Identity (avatar, name, description, folder). The
+	 * The Profile tab: Identity (name, description, folder). The
 	 * danger zone comes after it (AgentDetail).
 	 */
 	import { tick } from 'svelte';
-	import { Check, FolderPlus, Lock, Trash2, X } from 'lucide-svelte';
+	import { Check, FolderPlus, Trash2, X } from 'lucide-svelte';
 	import type { Profile } from '$lib/api/client';
-	import type { AvatarId } from '$lib/api/agent-identity';
 	import RowGroup from '$lib/components/settings/rows/RowGroup.svelte';
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import SelectField from '$lib/components/settings/rows/SelectField.svelte';
-	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
-	import AvatarPicker from './AvatarPicker.svelte';
 	import type { AgentForm, GroupState } from './agentForm';
 
 	interface Props {
 		form: AgentForm;
 		/** null while the agent is an unsaved draft. */
 		editingProfile: Profile | null;
-		avatar: AvatarId;
-		isAdmin: boolean;
-		colorSupported: boolean;
 		groups: GroupState;
-		identityError?: string;
-		onRetryIdentity?: () => void;
 		onFormChange: (field: keyof AgentForm, value: unknown) => void;
 		onAssignToGroup: (profileId: string, groupName: string) => void;
 		onRemoveFromGroup: (profileId: string) => void;
@@ -35,12 +27,7 @@
 	let {
 		form,
 		editingProfile,
-		avatar,
-		isAdmin,
-		colorSupported,
 		groups,
-		identityError = '',
-		onRetryIdentity,
 		onFormChange,
 		onAssignToGroup,
 		onRemoveFromGroup,
@@ -48,9 +35,7 @@
 		onDeleteGroup
 	}: Props = $props();
 
-	const builtin = $derived(!!editingProfile?.is_builtin);
 	const nameMissing = $derived(!form.name.trim());
-	let picking = $state(false);
 
 	// ── Folder ───────────────────────────────────────────────────────────
 	let creatingFolder = $state(false);
@@ -86,19 +71,6 @@
 	}
 </script>
 
-{#snippet picker()}
-	{#if editingProfile}
-		<AvatarPicker
-			agentId={editingProfile.id}
-			{builtin}
-			color={form.avatar_color}
-			{colorSupported}
-			loadError={identityError}
-			onRetry={onRetryIdentity}
-			onColor={(c) => onFormChange('avatar_color', c)}
-		/>
-	{/if}
-{/snippet}
 {#snippet description()}
 	<textarea
 		class="desc-area"
@@ -111,23 +83,6 @@
 {/snippet}
 
 <RowGroup title="Identity">
-	{#if editingProfile && isAdmin}
-		<SettingRow
-			label="Avatar"
-			hint={builtin ? 'Locked for built-ins.' : colorSupported ? 'Shape and colour.' : 'Pick a shape.'}
-			expanded={picking && !builtin ? picker : undefined}
-		>
-			<AgentAvatar {avatar} size={30} color={builtin ? null : form.avatar_color} neutral={builtin} />
-			{#if builtin}
-				<button type="button" class="st-btn sm" disabled><Lock />Locked</button>
-			{:else}
-				<button type="button" class="st-btn sm" aria-expanded={picking} onclick={() => (picking = !picking)}>
-					{picking ? 'Done' : 'Change'}
-				</button>
-			{/if}
-		</SettingRow>
-	{/if}
-
 	<SettingRow label="Name" hint={nameMissing ? 'Required to save.' : 'Shown in pickers and chats.'}>
 		<TextField
 			value={form.name}

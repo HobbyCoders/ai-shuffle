@@ -4,7 +4,7 @@
 	 * Uses GroupedSelector for group-aware profile selection.
 	 *
 	 * In the Assistant's own conversation the agent is fixed, so the chip turns
-	 * into the way to the Assistant's settings: its avatar, its name and a gear.
+	 * into the way to the Assistant's settings: its name and a gear.
 	 * The conversation itself carries no header, so this chip (in the composer
 	 * on desktop, in the controls sheet on the phone) is that door.
 	 */

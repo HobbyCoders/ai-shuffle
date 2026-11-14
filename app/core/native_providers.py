@@ -25,22 +25,11 @@ KEY_PAGES = {
 def workers_requiring_update() -> list[str]:
     """All current members must understand these rows before they are created.
 
-    Membership, not online presence, defines the set: offline/unknown peers
-    can consume the synced credential later. Revoked members cannot sync.
-    Support comes from signed presence, not contact descriptors, which may
-    omit this capability even on an updated worker.
+    The rule lives in :mod:`app.core.provider_capability` (#1519).
     """
-    from app.db import network as store
-    from app.network import engine
+    from app.core import provider_capability
 
-    ctx = engine.context()
-    if ctx is None:
-        return []
-    presence = engine.all_presence()
-    return [member.get("name") or member["device_id"]
-            for member in store.list_members(include_revoked=False)
-            if member["device_id"] != ctx.device_id
-            and (presence.get(member["device_id"], {}).get("capabilities") or {}).get(CAPABILITY) != 1]
+    return provider_capability.workers_requiring_update(CAPABILITY)
 
 
 def is_plan_key(row) -> bool:

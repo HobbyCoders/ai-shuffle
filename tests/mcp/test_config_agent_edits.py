@@ -216,7 +216,6 @@ class TestProfileSettings:
             "enabled_agents": ["helper"],
             "enabled_plugins": ["plug@market"],
             "add_dirs": ["/srv/data"],
-            "avatar_color": "rose",
         })
         assert body["success"] is True, body
         await _call(profile_tools, "updateProfile", {
@@ -230,16 +229,12 @@ class TestProfileSettings:
         assert config["enabled_agents"] == ["helper"]
         assert config["enabled_plugins"] == ["plug@market", "other@market"]
         assert "add_dirs" not in config
-        assert got["avatar_color"] == "rose"
-        await _call(profile_tools, "updateProfile", {"profile_id": "settings", "avatar_color": "blue"})
-        assert (await _call(profile_tools, "getProfile", {"profile_id": "settings"}))["avatar_color"] == "blue"
-        await _call(profile_tools, "updateProfile", {"profile_id": "settings", "avatar_color": None})
-        assert (await _call(profile_tools, "getProfile", {"profile_id": "settings"}))["avatar_color"] is None
+        # The avatar feature was removed: retired values never show.
+        assert "avatar_color" not in got and "avatar_id" not in config
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("args, phrase", [
         ({"agent_invoke_mode": "some"}, "agent_invoke_mode"),
-        ({"avatar_color": "purple"}, "avatar_color"),
         ({"enabled_agents": "helper"}, "enabled_agents"),
         ({"provider_models": {"__native__": 3}}, "provider_models"),
     ])
@@ -258,8 +253,24 @@ class TestProfileSettings:
     def test_retired_and_pinned_settings_not_exposed(self, profile_tools, name):
         props = get_tool(profile_tools, name).input_schema["properties"]
         for key in ("ai_tools", "computer_use", "effort", "model", "provider",
-                    "permission_mode", "env", "extra_args", "cwd", "setting_sources"):
+                    "permission_mode", "env", "extra_args", "cwd", "setting_sources",
+                    "avatar_color", "avatar_id"):
             assert key not in props
+
+    @pytest.mark.asyncio
+    async def test_stored_retired_avatar_values_are_not_shown(self, mock_db, profile_tools):
+        from app.db import database
+        from app.db.base import get_db
+        database.create_profile("old", "Old", None, {"avatar_id": "spark", "max_turns": 5})
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE agents SET avatar_color='blue' WHERE id='old'")
+        got = await _call(profile_tools, "getProfile", {"profile_id": "old"})
+        assert "avatar_color" not in got and "avatar_id" not in got["config"]
+        assert got["config"]["max_turns"] == 5
+        # An edit through the tools keeps the stored values untouched.
+        await _call(profile_tools, "updateProfile", {"profile_id": "old", "description": "d"})
+        stored = database.get_profile("old")
+        assert stored["config"]["avatar_id"] == "spark" and stored["avatar_color"] == "blue"
 
     @pytest.mark.asyncio
     async def test_env_values_masked_on_read(self, mock_db, profile_tools):
@@ -494,7 +505,7 @@ class TestSubagentToolsSetTheMode:
 
 
 class TestClearingWithNull:
-    _PROFILE_CLEARS = {"avatar_color": None, "agent_invoke_mode": None, "enabled_agents": None,
+    _PROFILE_CLEARS = {"agent_invoke_mode": None, "enabled_agents": None,
                        "provider_models": None, "enabled_plugins": None, "add_dirs": None}
     _SUBAGENT_CLEARS = {"tools": None, "model": None, "provider_models": None}
 
@@ -504,13 +515,12 @@ class TestClearingWithNull:
         args = {"profile_id": "full", **self._PROFILE_CLEARS}
         validate(args, get_tool(profile_tools, "updateProfile").input_schema)
         await _call(profile_tools, "createProfile", {
-            "name": "Full", "avatar_color": "rose", "agent_invoke_mode": "custom",
+            "name": "Full", "agent_invoke_mode": "custom",
             "enabled_agents": ["helper"], "provider_models": {"__native__": "haiku"},
             "enabled_plugins": ["plug@market"], "add_dirs": ["/srv"]})
         body = await _call(profile_tools, "updateProfile", args)
         assert body["success"] is True, body
         got = await _call(profile_tools, "getProfile", {"profile_id": "full"})
-        assert got["avatar_color"] is None
         assert not set(self._PROFILE_CLEARS) & set(got["config"])
 
     @pytest.mark.asyncio

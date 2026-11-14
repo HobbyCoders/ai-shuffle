@@ -84,9 +84,10 @@ async def _plugin_auto_update_loop():
     while True:
         try:
             from app.core.plugin_service import get_plugin_service
+            from app.db.async_database import run_plugin_io
 
-            service = get_plugin_service()
-            settings = service.get_auto_update_settings()
+            service = await asyncio.to_thread(get_plugin_service)
+            settings = await run_plugin_io(service.get_auto_update_settings)
 
             if not settings.enabled:
                 # Auto-update disabled — park on the reschedule event with NO

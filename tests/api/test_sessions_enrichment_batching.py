@@ -82,6 +82,30 @@ class TestBothListProducersCarryTheFailure:
         assert [row["last_turn_failed"] for row in result] == [True, False]
 
 
+class TestBothListProducersCarryTheStop:
+    """A stopped chat's row reads Stopped on the list and in search (#1340)."""
+
+    def _stopped_turn(self, session_id):
+        from app.db import database, turns
+
+        database.create_session(session_id=session_id, profile_id="default")
+        turn = turns.enqueue_turn(session_id, "user", prompt="go")
+        turns.start_turn(turn["id"])
+        turns.settle_turn(turn["id"], "aborted", "interrupted")
+
+    def test_list_rows(self, install_settings, mock_db):
+        self._stopped_turn("s0")
+        result, *_ = _enrich(_sessions(2), install_settings)
+        assert [(row["last_turn_stopped"], row["last_turn_failed"]) for row in result] == [(True, False), (False, False)]
+
+    def test_search_results(self, install_settings, mock_db):
+        self._stopped_turn("s0")
+        with patch.object(sessions_helpers.database, "get_installs_map",
+                          return_value={"me-install": {"device_name": "Mine", "online": True}}):
+            result = sessions_helpers.enrich_search_results_with_tags(_sessions(2))
+        assert [row["last_turn_stopped"] for row in result] == [True, False]
+
+
 class TestListRowsSayWhichChatsRun:
     """A page that just loaded knows a running chat before the socket's snapshot (#1527)."""
 
@@ -131,6 +155,7 @@ class TestEnrichmentOutputIsUnchanged:
             "api_user_name": "Ada",
             "has_running_tasks": False,
             "last_turn_failed": False,
+            "last_turn_stopped": False,
             "is_streaming": False,
             "tags": [{"id": "t1", "name": "Bug"}],
             "has_forks": True,
