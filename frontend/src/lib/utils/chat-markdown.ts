@@ -136,41 +136,9 @@ function isPlacedMedia(token: Token): boolean {
 	return !!embedKind(token.type, token.href) || (token.type === 'image' && !!_media?.hide?.has(token.href));
 }
 
-/**
- * The last block of the most recent parse when a later blank line can still
- * continue it: a fence that has not closed, or a list. A streaming reply must
- * not be split there (AssistantMessage's prefix/tail render).
- */
-export type OpenBlock = 'fence' | 'list' | null;
-let _openBlock: OpenBlock = null;
-
-const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})/;
-
-function openBlockOf(tokens: Token[]): OpenBlock {
-	let last: Token | undefined;
-	for (let i = tokens.length - 1; i >= 0 && !last; i--) if (tokens[i].type !== 'space') last = tokens[i];
-	if (last?.type === 'list') return 'list';
-	if (last?.type !== 'code' || last.codeBlockStyle === 'indented') return null;
-	const lines = last.raw.trimEnd().split('\n');
-	const open = lines[0].match(FENCE_LINE)?.[1];
-	const close = lines.length > 1 ? lines[lines.length - 1].match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/)?.[1] : undefined;
-	const closed = !!open && !!close && close[0] === open[0] && close.length >= open.length;
-	return closed ? null : 'fence';
-}
-
-export function lastOpenBlock(): OpenBlock {
-	return _openBlock;
-}
-
 const chatMarked = new Marked({
 	breaks: true,
 	gfm: true,
-	hooks: {
-		processAllTokens(tokens: Token[]): Token[] {
-			_openBlock = openBlockOf(tokens);
-			return tokens;
-		}
-	},
 	renderer: {
 		image(this: Renderer, token: Tokens.Image): string {
 			if (!_media) return Renderer.prototype.image.call(this, token);
@@ -212,6 +180,29 @@ const chatMarked = new Marked({
 		}
 	}
 });
+
+/**
+ * Where a streaming reply splits into a settled prefix and a re-parsed tail:
+ * the start of the last top-level block marked's lexer finds in `text`. Each
+ * earlier block was ended by the lexer itself, so appended text cannot change
+ * it. The last one can still grow (a fence or an HTML block such as <pre> or
+ * a comment that has not closed, a list a later line continues), so it is
+ * always parsed together with what follows (#1619).
+ *
+ * `from` is an earlier split of the same growing text: the blocks before it are
+ * final, so only the rest is lexed.
+ */
+export function streamingSplit(text: string, from = 0): number {
+	let offset = from;
+	let last = from;
+	for (const token of chatMarked.lexer(text.substring(from))) {
+		// The lexer normalises line endings; offsets hold only while each raw is the source.
+		if (!text.startsWith(token.raw, offset)) return from;
+		if (token.type !== 'space') last = offset;
+		offset += token.raw.length;
+	}
+	return last;
+}
 
 /**
  * Parse chat markdown to HTML. The caller still sanitises the result.

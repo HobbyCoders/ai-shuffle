@@ -179,16 +179,50 @@ describe('media markdown while a reply streams (#1619)', () => {
 	const art = '/api/v1/artifacts/abc123?session_id=remote-chat';
 	const players = (root: HTMLElement) => root.querySelectorAll('.generated-media-container img');
 
-	async function stream(deltas: string[]) {
+	async function stream(deltas: string[], marker = deltas[deltas.length - 1].trim().slice(-4)) {
 		let text = deltas[0];
 		const view = render(AssistantMessage, { content: text, streaming: true, sessionId: 'remote-chat' });
 		for (const delta of deltas.slice(1)) {
 			text += delta;
 			await view.rerender({ content: text, streaming: true, sessionId: 'remote-chat' });
 		}
-		await waitFor(() => expect(view.container.textContent).toContain(deltas[deltas.length - 1].trim().slice(-4)));
+		await waitFor(() => expect(view.container.textContent).toContain(marker));
 		return view;
 	}
+
+	// An HTML block that holds blank lines runs to its closing tag, or to the
+	// end of a reply that has not closed it yet: nothing in it is markdown,
+	// while it streams or once it settles (#1622 review). Reduced motion hands
+	// each delta through whole, so the checks see the complete text.
+	const reducedMotion = () =>
+		vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), addEventListener() {}, removeEventListener() {} }));
+	afterEach(() => vi.unstubAllGlobals());
+
+	it.each([art, image])('keeps an image written in a raw <pre> block as text, streaming and settled (%s)', async (url) => {
+		reducedMotion();
+		const view = await stream(['Intro.\n\n<pre>\nfirst\n', '\n', `![x](${url})\n`], '![x]');
+		expect(view.container.querySelector('img')).toBeNull();
+		expect(view.container.querySelector('pre')?.textContent).toContain(`![x](${url})`);
+		// A reply that ends inside the block settles to the same reading.
+		await view.rerender({ content: `Intro.\n\n<pre>\nfirst\n\n![x](${url})\n`, streaming: false, sessionId: 'remote-chat' });
+		expect(view.container.querySelector('img')).toBeNull();
+		await view.rerender({ content: `Intro.\n\n<pre>\nfirst\n\n![x](${url})\n</pre>\n\nAfter.`, streaming: false, sessionId: 'remote-chat' });
+		await waitFor(() => expect(view.container.textContent).toContain('After.'));
+		expect(view.container.querySelector('img')).toBeNull();
+		expect(view.container.querySelector('pre')?.textContent).toContain(`![x](${url})`);
+	});
+
+	it.each([art, image])('draws nothing for an image inside an HTML comment, streaming and settled (%s)', async (url) => {
+		reducedMotion();
+		const view = await stream(['Intro.\n\n<!--\nnote\n', '\n', `![x](${url})\n`], 'Intro.');
+		expect(view.container.querySelector('img')).toBeNull();
+		expect(view.container.textContent).not.toContain('![x]');
+		await view.rerender({ content: `Intro.\n\n<!--\nnote\n\n![x](${url})\n-->\n\nAfter.`, streaming: true, sessionId: 'remote-chat' });
+		await waitFor(() => expect(view.container.textContent).toContain('After.'));
+		expect(view.container.querySelector('img')).toBeNull();
+		await view.rerender({ content: `Intro.\n\n<!--\nnote\n\n![x](${url})\n-->\n\nAfter.`, streaming: false, sessionId: 'remote-chat' });
+		expect(view.container.querySelector('img')).toBeNull();
+	});
 
 	it.each([art, image])('keeps an image written in a fence that is still open as code (%s)', async (url) => {
 		// The blank line inside the fence is where the streaming render splits.

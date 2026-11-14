@@ -42,10 +42,11 @@ const NO_EMBEDS: readonly ProseEmbed[] = [];
 
 /**
  * The image and link tokens the chat renderer draws, each read from its own
- * href by the renderer's classifier (`embedKind`). Code has no child tokens,
- * and an image's alt text renders as plain text, so neither is entered.
- * marked's own walkTokens concatenates arrays per token, which is quadratic on
- * a long reply.
+ * href by the renderer's classifier (`embedKind`). The walk enters exactly the
+ * children the renderer renders: code has none, an image's alt text renders as
+ * plain text, and a media link becomes a player that replaces its whole label,
+ * so none of those is entered. marked's own walkTokens concatenates arrays per
+ * token, which is quadratic on a long reply.
  */
 function collectEmbeds(tokens: readonly Token[], embeds: ProseEmbed[]): void {
 	for (const token of tokens) {
@@ -53,8 +54,10 @@ function collectEmbeds(tokens: readonly Token[], embeds: ProseEmbed[]): void {
 			const kind = embedKind(token.type, token.href);
 			// Audio is kept here so a tool row can tell its clip is already in
 			// the reply; the gallery itself takes only images and video.
-			if (kind || token.type === 'image') embeds.push([kind, token.href, token.text ?? '']);
-			if (token.type === 'image') continue;
+			if (kind || token.type === 'image') {
+				embeds.push([kind, token.href, token.text ?? '']);
+				continue;
+			}
 		}
 		if (token.type === 'table') {
 			for (const cell of token.header) collectEmbeds(cell.tokens, embeds);

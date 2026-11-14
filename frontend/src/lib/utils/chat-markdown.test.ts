@@ -2,7 +2,7 @@
  * Fence-meta parsing and the code-block chrome the transcript renders.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { parseFenceMeta, renderCodeBlock, renderChatMarkdown } from './chat-markdown';
+import { parseFenceMeta, renderCodeBlock, renderChatMarkdown, streamingSplit } from './chat-markdown';
 import { isHighlightReady, warmHighlighter } from './shiki';
 
 describe('parseFenceMeta', () => {
@@ -82,5 +82,33 @@ describe('renderChatMarkdown', () => {
 	it('does not highlight when asked not to', () => {
 		const html = renderChatMarkdown('```ts\nconst a = 1;\n```\n', false);
 		expect(html).not.toContain('--shiki-light');
+	});
+});
+
+describe('streamingSplit (#1619)', () => {
+	it.each([
+		['a closed paragraph', 'One.\n\nTwo', 'One.\n\n'],
+		['an open fence', 'One.\n\n```md\nx\n\n![a](/a.png)', 'One.\n\n'],
+		['a closed fence', '```md\nx\n\ny\n```\n\nAfter', '```md\nx\n\ny\n```\n\n'],
+		['an open <pre> block', 'One.\n\n<pre>\nx\n\n![a](/a.png)', 'One.\n\n'],
+		['an open comment', 'One.\n\n<!--\nx\n\n![a](/a.png)', 'One.\n\n'],
+		['a list', 'One.\n\n- a\n\n    ![a](/a.png)', 'One.\n\n'],
+		['no block before the last', 'Just one', '']
+	])('keeps the last block of %s in the tail', (_case, text, prefix) => {
+		expect(text.substring(0, streamingSplit(text))).toBe(prefix);
+	});
+
+	it('resumes from an earlier split with the same result as a full lex', () => {
+		const text = 'A.\n\n```md\nx\n\ny\n```\n\n- item\n\n  more\n\n<pre>\np\n\nq\n</pre>\n\nEnd';
+		let from = 0;
+		for (let n = 1; n <= text.length; n++) {
+			from = streamingSplit(text.slice(0, n), from);
+			expect(from).toBe(streamingSplit(text.slice(0, n)));
+		}
+		expect(text.substring(from)).toBe('End');
+	});
+
+	it('does not advance when the lexer rewrote line endings', () => {
+		expect(streamingSplit('One.\r\n\r\nTwo', 0)).toBe(0);
 	});
 });

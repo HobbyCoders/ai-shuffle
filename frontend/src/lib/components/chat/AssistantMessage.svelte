@@ -53,7 +53,7 @@
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { clampRevealToMediaBoundary, retryImages } from '$lib/utils/media';
-	import { lastOpenBlock, renderChatMarkdown, type OpenBlock } from '$lib/utils/chat-markdown';
+	import { renderChatMarkdown, streamingSplit } from '$lib/utils/chat-markdown';
 	import { routeChatFiles } from '$lib/utils/chat-files';
 	import { galleryHiddenEmbeds } from '$lib/utils/media-gallery';
 	import { highlightGenerationForSource, onHighlighterReady } from '$lib/utils/shiki';
@@ -206,11 +206,6 @@
 		wasStreaming: false,
 		stablePrefixContent: '',
 		stablePrefixHtml: '',
-		stablePrefixOpen: null as OpenBlock,
-		// The latest stable prefix that ends no open block: the split falls back
-		// to it while a blank line sits inside a fence or a list item.
-		goodPrefixContent: '',
-		goodPrefixHtml: '',
 		highlightGen: 0,
 		result: { prefix: '', tail: '' }
 	};
@@ -498,9 +493,6 @@
 		// (carries the streaming cursor); otherwise it is one settled block.
 		_cache.stablePrefixContent = '';
 		_cache.stablePrefixHtml = '';
-		_cache.stablePrefixOpen = null;
-		_cache.goodPrefixContent = '';
-		_cache.goodPrefixHtml = '';
 		_cache.content = text;
 		_cache.wasStreaming = isStreaming;
 		_cache.result = isStreaming
@@ -510,23 +502,18 @@
 	}
 
 	/**
-	 * Incremental render: reuse cached HTML for completed paragraphs,
-	 * only re-parse from the last paragraph boundary onwards. Returns the
-	 * stable prefix and the growing tail separately so the template can render
-	 * them as independent {@html} blocks (settled media stays put).
+	 * Incremental render: reuse cached HTML for completed blocks, only re-parse
+	 * the last block onwards. Returns the stable prefix and the growing tail
+	 * separately so the template can render them as independent {@html} blocks
+	 * (settled media stays put).
 	 */
 	function renderMarkdownIncremental(text: string): { prefix: string; tail: string } {
-		// Find the last paragraph boundary (\n\n) in the text.
-		// Everything before it is "stable" — its markdown structure is complete.
-		const lastBoundary = text.lastIndexOf('\n\n');
-
-		if (lastBoundary <= 0) {
-			// No paragraph boundary yet — full parse (content is short)
-			const html = renderChatMarkdown(text, false, STREAM_MEDIA);
-			return { prefix: '', tail: sanitizeHtml(injectStreamingCursor(html)) };
-		}
-
-		const stableContent = text.substring(0, lastBoundary);
+		// Split where marked's lexer starts the reply's last top-level block:
+		// every block before it is closed for good, while the last one (an
+		// unclosed fence, <pre> or comment, a list) is parsed whole with what
+		// follows, never cut at a blank line inside it (#1619).
+		const split = streamingSplit(text, _cache.stablePrefixContent.length);
+		const stableContent = text.substring(0, split);
 
 		// When the stable prefix grows, re-parse, sanitize, and cache it once.
 		// Only this side gets syntax highlighting, and Shiki's memo makes the
@@ -534,29 +521,17 @@
 		if (stableContent !== _cache.stablePrefixContent) {
 			_cache.stablePrefixHtml = sanitizeHtml(renderChatMarkdown(stableContent, true, STREAM_MEDIA));
 			_cache.stablePrefixContent = stableContent;
-			_cache.stablePrefixOpen = lastOpenBlock();
-			if (!_cache.stablePrefixOpen) {
-				_cache.goodPrefixContent = stableContent;
-				_cache.goodPrefixHtml = _cache.stablePrefixHtml;
-			}
 		}
 
-		// A blank line inside a fence, or before a list item's indented
-		// continuation, ends no block: parsed alone, the tail would read code as
-		// prose or prose as code. Split at the last boundary that ends a block.
-		const open = _cache.stablePrefixOpen === 'fence'
-			|| (_cache.stablePrefixOpen === 'list' && /^\n+[ \t]/.test(text.substring(lastBoundary)));
-		const prefixContent = open ? _cache.goodPrefixContent : stableContent;
-
-		// Always re-parse the tail (last incomplete paragraph + new content).
-		// This is the only DOMPurify pass that runs every delta — bounded to the
-		// last block rather than the whole message. Highlighting is off here:
-		// the fence may not be closed yet, and tokenising per delta would be the
-		// most expensive thing in the stream loop.
-		let tailHtml = renderChatMarkdown(text.substring(prefixContent.length), false, STREAM_MEDIA);
+		// Always re-parse the tail (the last block + new content). This is the
+		// only DOMPurify pass that runs every delta — bounded to the last block
+		// rather than the whole message. Highlighting is off here: the fence may
+		// not be closed yet, and tokenising per delta would be the most
+		// expensive thing in the stream loop.
+		let tailHtml = renderChatMarkdown(text.substring(split), false, STREAM_MEDIA);
 		tailHtml = sanitizeHtml(injectStreamingCursor(tailHtml));
 
-		return { prefix: open ? _cache.goodPrefixHtml : _cache.stablePrefixHtml, tail: tailHtml };
+		return { prefix: _cache.stablePrefixHtml, tail: tailHtml };
 	}
 
 	/**

@@ -289,5 +289,48 @@ describe('media markdown in code and in prose (#1619)', () => {
 		expect(root.querySelector('a.media-download-btn')).toBeTruthy();
 		expect(root.querySelector('p')).toBeNull();
 	});
+
+	// The dedupe enters exactly the children the renderer draws: a media link's
+	// player replaces its whole label, while any other link, emphasis, heading,
+	// table cell or list item renders its children (#1622 review).
+	describe.each(urls)('the dedupe counts exactly what the render draws, with %s', (_label, url) => {
+		const drawn = (text: string) => {
+			const root = fragment(renderChatMarkdown(text, false, {}));
+			return new Set([...root.querySelectorAll('img, video, audio')].map(el => el.getAttribute('src')));
+		};
+		it.each([
+			['an image labelling an audio link', `[![thumb](${url})](/clip.mp3)`, ['/clip.mp3']],
+			['an image labelling a video link', `[![thumb](${url})](/clip.mp4)`, ['/clip.mp4']],
+			['an image in emphasis labelling an audio link', `[*see ![a](${url})*](/clip.mp3)`, ['/clip.mp3']],
+			['an image in strong inside an ordinary link', `[**![a](${url})**](https://example.com)`, [url]],
+			['a linked image inside strong', `**[![a](${url})](https://example.com)**`, [url]],
+			['an image in a heading', `# ![a](${url})`, [url]],
+			['an image in a table cell', `| A |\n| - |\n| ![a](${url}) |`, [url]],
+			['an image in struck-through text', `~~![a](${url})~~`, [url]],
+			['an image in a task item', `- [ ] ![a](${url})`, [url]]
+		])('%s', (_case, text, expected) => {
+			expect([...drawn(text)]).toEqual(expected);
+			const sources = proseMediaSources([{ id: 'r', role: 'assistant', type: 'text', content: text }]);
+			expect([...sources]).toEqual(expected);
+		});
+	});
+
+	it('leaves the tool row its picture when the reply only links it under an audio player', () => {
+		const art = '/api/v1/artifacts/abc123';
+		const made = message('g', {
+			type: 'tool_use', toolName: 'generateImage', toolStatus: 'complete',
+			toolResult: JSON.stringify({ status: 'completed', success: true, result: { success: true, image_url: art } })
+		});
+		const rowOf = (content: string) => {
+			const items = buildDisplayItems([user, made, message('r', { type: 'text', content })], { ...options, groupingEnabled: false });
+			return items.find(item => item.kind === 'message' && item.message.id === 'g');
+		};
+		const audioOnly = `[![thumb](${art})](/clip.mp3)`;
+		expect(rowOf(audioOnly)).toMatchObject({ kind: 'message' });
+		expect(rowOf(audioOnly)).not.toHaveProperty('hiddenMedia');
+		expect(galleryMediaForTurn([made, message('r', { type: 'text', content: audioOnly })])).toEqual([]);
+		// Control: the same image drawn in prose is the reply's copy.
+		expect(rowOf(`![thumb](${art})`)).toHaveProperty('hiddenMedia', new Set([art]));
+	});
 });
 
