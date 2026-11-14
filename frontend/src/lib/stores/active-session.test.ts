@@ -727,38 +727,6 @@ describe('live effort and Fast mode selection', () => {
 		expect(activeSession.current.effortLevelOverride).toBe('high');
 	});
 
-	describe('with a model picked that the chat does not run yet', () => {
-		beforeEach(() => {
-			const catalog = { ...appData.current, sessions: [{ id: 'live-knobs', model: 'gemini-4-argon', provider_id: 'ag' }] } as typeof appData.current;
-			vi.spyOn(appData, 'current', 'get').mockReturnValue(catalog);
-			activeSession.current.modelOverride = 'prov:ag:gemini-4-hydrogen';
-		});
-		afterEach(() => { activeSession.current.modelOverride = null; composerPreferences.rememberEffort('prov:ag:gemini-4-hydrogen', null); });
-
-		it('keeps a level for that model for the next message instead of asking the running chat', async () => {
-			const put = vi.spyOn(api, 'put');
-			await activeSession.setEffortLevelOverride('xhigh');
-			expect(put).not.toHaveBeenCalled();
-			expect(activeSession.current.effortLevelOverride).toBe('xhigh');
-			expect(composerPreferences.effortForModel('prov:ag:gemini-4-hydrogen')).toBe('xhigh');
-		});
-
-		it('still sends Auto to the chat, so a refusal leaves the level in force', async () => {
-			const put = vi.spyOn(api, 'put').mockRejectedValue({ status: 409, detail: 'The session is still connecting. Try again in a moment.' });
-			vi.spyOn(notify, 'error').mockImplementation(() => '');
-			await activeSession.setEffortLevelOverride(null);
-			expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: null });
-			expect(activeSession.current.effortLevelOverride).toBe('high');
-		});
-
-		it('asks the chat again once the picked model is the one it runs', async () => {
-			activeSession.current.modelOverride = 'prov:ag:gemini-4-argon';
-			const put = vi.spyOn(api, 'put').mockResolvedValue({ effort: 'low', fast: false });
-			await activeSession.setEffortLevelOverride('low');
-			expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: 'low' });
-		});
-	});
-
 	it('retains picks after rejection and does not submit a message', async () => {
 		vi.spyOn(api, 'put').mockRejectedValue(new Error('unreachable'));
 		await activeSession.setFastMode(true);

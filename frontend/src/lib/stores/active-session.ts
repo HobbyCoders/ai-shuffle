@@ -32,7 +32,7 @@ import {
 	getPersistedProfile,
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode,
-	getPersistedContextWindowChoice, setPersistedRunBinding, sessionModelBinding,
+	getPersistedContextWindowChoice, setPersistedRunBinding,
 	reconciledSessionMode, attachedSinceSaved, listedComposeMode, type AttachRowFields,
 } from './session/session-switcher';
 
@@ -876,18 +876,6 @@ let permissionSelectionGeneration = 0;
 const runSettingGenerations = { effort: 0, fast: 0, context_window: 0 };
 const runSettingQueues = new Map<string, Promise<unknown>>();
 
-/**
- * A model picked in this open chat that it does not run yet: the switch goes
- * with the next message. The chat checks an effort pick against the model it
- * still runs, while the picker shows the picked model's levels, so an explicit
- * level stays here and that message carries it (`buildOverrides`), where the
- * new model's levels apply. Unknown when the chat is not in the loaded list.
- */
-function modelSwitchUnsent(sessionId: string, selectedModel: string | null): boolean {
-	const running = sessionModelBinding(appData.current.sessions.find(s => s.id === sessionId));
-	return !!running && !!selectedModel && running !== selectedModel;
-}
-
 async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', value: string | null | boolean | number, remember = true) {
 	const generation = ++runSettingGenerations[field];
 	const ownerEpoch = sessionOwnerEpoch();
@@ -897,7 +885,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	let selected = value;
 	let savedWindow: number | null = null;
 	let fastAppliesTurn: string | null = null;
-	if (sessionId && !(field === 'effort' && value !== null && modelSwitchUnsent(sessionId, selectedModel))) {
+	if (sessionId) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
 		const queueKey = `${ownerEpoch}:${sessionId}`;
