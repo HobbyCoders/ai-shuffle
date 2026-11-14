@@ -11,12 +11,13 @@
  *  2. Highlighting itself is memoised in `$lib/utils/shiki` on code + language,
  *     so the settled PREFIX re-renders are cache hits.
  */
-import { Marked, Renderer, type Tokens } from 'marked';
+import { Marked, Renderer, type Token, type Tokens } from 'marked';
 import { highlightToInnerHtml, resolveShikiLang } from './shiki';
 import { escapeHtml } from './escape-html';
 import { renderInlineCode } from './inline-code';
 import { registerTable } from './table-export';
 import { commandBlock, registerCommandBlock } from '$lib/terminal/commands';
+import { collapseRawBase64, embedKind, mediaHtml } from './media';
 
 /** Parsed fence info string: ```ts title="src/a.ts" / ```ts:src/a.ts / ```ts src/a.ts */
 export interface FenceMeta {
@@ -117,10 +118,47 @@ export function renderCodeBlock(code: string, info: string | undefined, highligh
 // setter wraps — there is no await between the two, so no interleaving.
 let _highlightEnabled = true;
 
+/**
+ * Media options for one render. Media markdown becomes a player inside
+ * marked's own image and link renderers, so only what marked reads as an image
+ * or a link in prose gets one: never anything in code, with nested brackets,
+ * titles and container blocks resolved by the same parse (#1619). `hide` holds
+ * the hrefs a turn's gallery already shows (media-gallery `galleryHiddenEmbeds`).
+ */
+export interface ChatMedia {
+	hide?: ReadonlySet<string>;
+}
+let _media: ChatMedia | null = null;
+
+/** A token that renders as a player, or as nothing because the gallery shows it. */
+function isPlacedMedia(token: Token): boolean {
+	if (token.type !== 'image' && token.type !== 'link') return false;
+	return !!embedKind(token.type, token.href) || (token.type === 'image' && !!_media?.hide?.has(token.href));
+}
+
 const chatMarked = new Marked({
 	breaks: true,
 	gfm: true,
 	renderer: {
+		image(this: Renderer, token: Tokens.Image): string {
+			if (!_media) return Renderer.prototype.image.call(this, token);
+			if (_media.hide?.has(token.href)) return '';
+			const kind = embedKind('image', token.href);
+			return kind ? mediaHtml(kind, token.href, token.text) : Renderer.prototype.image.call(this, token);
+		},
+		link(this: Renderer, token: Tokens.Link): string {
+			const kind = _media && embedKind('link', token.href);
+			if (!kind) return Renderer.prototype.link.call(this, token);
+			return _media?.hide?.has(token.href) ? '' : mediaHtml(kind, token.href, token.text);
+		},
+		// A paragraph of players alone gets no <p>: a player is a block, and the
+		// browser would close the <p> before it and leave empty paragraphs.
+		paragraph(this: Renderer, token: Tokens.Paragraph): string {
+			const bare = _media && token.tokens.some(isPlacedMedia) && token.tokens.every(
+				(t) => isPlacedMedia(t) || t.type === 'br' || (t.type === 'text' && !t.raw.trim())
+			);
+			return bare ? this.parser.parseInline(token.tokens) + '\n' : Renderer.prototype.paragraph.call(this, token);
+		},
 		// Short inline code stays one chip on one line (see inline-code.ts).
 		codespan: renderInlineCode,
 		code(token: Tokens.Code): string {
@@ -144,17 +182,49 @@ const chatMarked = new Marked({
 });
 
 /**
+ * Where a streaming reply splits into a prefix and a tail that are parsed
+ * apart: the start of the last top-level block marked's lexer finds in the
+ * whole of `text`. Parsing the blocks before it and the blocks from it on
+ * gives the same markup as parsing `text` at once, so a streaming render shows
+ * what the full render would (#1619). The last block (a fence or HTML block
+ * such as <pre> or a comment that has not closed, a list a later line
+ * continues) is always in the tail.
+ *
+ * Lexed fresh each time: appended text can turn earlier lines into another
+ * block (a setext heading), so no earlier split is trusted. A reply that
+ * defines link references is parsed whole (0), since a definition reaches
+ * across blocks.
+ */
+export function streamingSplit(text: string): number {
+	const tokens = chatMarked.lexer(text);
+	if (Object.keys(tokens.links).length > 0) return 0;
+	let offset = 0;
+	let last = 0;
+	for (const token of tokens) {
+		// The lexer normalises line endings; offsets hold only while each raw is the source.
+		if (!text.startsWith(token.raw, offset)) return 0;
+		if (token.type !== 'space') last = offset;
+		offset += token.raw.length;
+	}
+	return last;
+}
+
+/**
  * Parse chat markdown to HTML. The caller still sanitises the result.
  *
  * @param highlight - false for the still-streaming tail (a fence that has not
  *   closed yet must not be tokenised, and re-tokenising per token would be the
  *   single most expensive thing in the stream loop).
+ * @param media - render media markdown as players (the chat reply); omitted,
+ *   images and links render as plain markdown.
  */
-export function renderChatMarkdown(text: string, highlight: boolean): string {
+export function renderChatMarkdown(text: string, highlight: boolean, media?: ChatMedia): string {
 	_highlightEnabled = highlight;
+	_media = media ?? null;
 	try {
-		return chatMarked.parse(text, { async: false }) as string;
+		return chatMarked.parse(media ? collapseRawBase64(text) : text, { async: false }) as string;
 	} finally {
 		_highlightEnabled = true;
+		_media = null;
 	}
 }

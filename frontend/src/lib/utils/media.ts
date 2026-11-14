@@ -3,7 +3,8 @@
  *
  * One source of truth for: which URLs are media, what kind they are, and the
  * HTML block (player + download + lightbox hook) that represents them. Used by
- * AssistantMessage (markdown rewrite) and SubagentMessage (tool-result render).
+ * the chat markdown renderer (chat-markdown.ts image/link hooks) and the tool
+ * rows (tool-result render).
  *
  * The markup here is rendered via Svelte's {@html} and must survive the
  * sanitizer in sanitize.ts — keep the two in sync (allowed tags/attrs, and the
@@ -52,7 +53,9 @@ function mediaTarget(url: string): { path: string; fromQuery: boolean } {
 
 /** Extract a lowercase file extension from a URL, handling `?path=` serve routes. */
 function extOf(url: string): string {
-	const candidate = mediaTarget(url).path;
+	// The last path segment only: a dot in a host (`https://w.example/…/<hash>`)
+	// or a folder is not a file type.
+	const candidate = mediaTarget(url).path.split(/[/\\]/).pop() ?? '';
 	const dot = candidate.lastIndexOf('.');
 	return dot >= 0 ? candidate.slice(dot + 1).toLowerCase() : '';
 }
@@ -75,6 +78,31 @@ export function classifyMediaUrl(url: string): MediaKind | null {
 	if (VIDEO_EXTS.has(ext)) return 'video';
 	if (AUDIO_EXTS.has(ext)) return 'audio';
 	return null;
+}
+
+// The artifact store's serve route (app/api/artifacts.py): relative, or on a
+// worker's origin. Its content-addressed path names no file type.
+const ARTIFACT_URL = /^(?:https?:\/\/[^/?#\s]+)?\/api\/v1\/artifacts\/[^/?#\s]+(?:[?#]|$)/i;
+
+/**
+ * The media kind of a markdown image's URL (`![alt](url)` embeds by URL kind).
+ * A generated image the reply embeds by its artifact URL is a picture: it gets
+ * the same player, download button and lightbox as the tool row (#1603).
+ */
+function imageEmbedKind(url: string): MediaKind | null {
+	return classifyMediaUrl(url) ?? (ARTIFACT_URL.test(url) ? 'image' : null);
+}
+
+/**
+ * The player a markdown image or link token gets, or null for plain markdown.
+ * The one classifier the chat renderer and the gallery dedupe share, so what a
+ * reply draws and what a tool row counts as shown agree. Link syntax embeds
+ * only video and audio; an image link stays a link.
+ */
+export function embedKind(type: 'image' | 'link', href: string): MediaKind | null {
+	if (type === 'image') return imageEmbedKind(href);
+	const kind = classifyMediaUrl(href);
+	return kind === 'video' || kind === 'audio' ? kind : null;
 }
 
 /**
@@ -451,10 +479,6 @@ export function extractToolResultMedia(content: string): ResultMedia | null {
 	return first ? { kind: first.kind as MediaKind, src: first.src, filename: first.filename } : null;
 }
 
-// Markdown media patterns. Convention: image syntax ![alt](url) → image;
-// link syntax [text](url) → video/audio/other embeddable media.
-const IMG_MD = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
-const LINK_MD = /(^|[^!])\[([^\]]*)\]\(([^)\s]+)\)/g;
 // A single complete media-markdown token (image or link syntax). Used to keep
 // the typewriter from revealing a half-typed URL mid-stream.
 const MEDIA_TOKEN = /!?\[[^\]]*\]\([^)\s]+\)/g;
@@ -463,34 +487,9 @@ const MEDIA_TOKEN = /!?\[[^\]]*\]\([^)\s]+\)/g;
 const RAW_BASE64 = /"image_base64"\s*:\s*"[A-Za-z0-9+/=]{100,}"/g;
 const PLACEHOLDER = '<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">';
 
-/**
- * Rewrite media markdown into inline-player HTML blocks. Used for BOTH the
- * streaming and final render, so a generated image/video/audio appears the
- * instant its complete markdown is in the buffer — no "loading" placeholder.
- * Non-media markdown is left untouched for the markdown parser.
- *
- * Flicker note: the markup is stable, but Svelte's {@html} recreates DOM
- * whenever its string changes. AssistantMessage keeps settled media out of the
- * re-rendered tail (see its prefix/tail split) so a rendered <img> is never
- * torn down and refetched as later text streams in.
- */
-export function rewriteMediaMarkdown(
-	text: string,
-	renderMedia: (kind: MediaKind, url: string, label: string) => string = mediaHtml
-): string {
-	let out = text.replace(IMG_MD, (match, alt: string, url: string) => {
-		const kind = classifyMediaUrl(url);
-		return kind ? renderMedia(kind, url, alt) : match;
-	});
-	out = out.replace(LINK_MD, (match, lead: string, label: string, url: string) => {
-		const kind = classifyMediaUrl(url);
-		// Only embed video/audio for link syntax; leave image links as links.
-		if (kind === 'video' || kind === 'audio') return lead + renderMedia(kind, url, label);
-		return match;
-	});
-	// Never dump a raw base64 image blob as literal prose.
-	out = out.replace(RAW_BASE64, `${PLACEHOLDER}Image data omitted</div>`);
-	return out;
+/** Never dump a raw base64 image blob as literal text. */
+export function collapseRawBase64(text: string): string {
+	return text.includes('image_base64') ? text.replace(RAW_BASE64, `${PLACEHOLDER}Image data omitted</div>`) : text;
 }
 
 /**
@@ -510,7 +509,7 @@ export function clampRevealToMediaBoundary(text: string, cut: number): number {
 		if (cut < end) {
 			// Cut straddles this token. Clamp only if it is embeddable media.
 			const urlMatch = m[0].match(/\(([^)\s]+)\)/);
-			if (urlMatch && classifyMediaUrl(urlMatch[1])) return start;
+			if (urlMatch && (m[0].startsWith('!') ? imageEmbedKind : classifyMediaUrl)(urlMatch[1])) return start;
 			break;
 		}
 	}

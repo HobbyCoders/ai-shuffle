@@ -1,9 +1,8 @@
 import type { ChatMessage } from '$lib/stores/types';
-import { marked } from 'marked';
+import { marked, type Token } from 'marked';
 import {
-	mediaHtml,
+	embedKind,
 	resolveMediaUrl,
-	rewriteMediaMarkdown,
 	toolResultMedia,
 	type MediaKind,
 	type ToolResultMediaItem
@@ -23,10 +22,9 @@ export function safeMediaSource(src: string): boolean {
 }
 
 /**
- * `kind` is null for a markdown image whose URL names no media kind (an
- * artifact URL, `/api/v1/artifacts/<hash>`): the markdown renderer still draws
- * it as a picture, so a tool row must count it as shown, but it only joins the
- * gallery through the tool row that made it.
+ * `kind` is null for a markdown image whose URL names no media kind: the
+ * markdown renderer still draws it as a picture, so a tool row must count it
+ * as shown, but it only joins the gallery through the tool row that made it.
  */
 type ProseEmbed = readonly [kind: MediaKind | null, src: string, label: string];
 
@@ -42,24 +40,41 @@ const proseEmbeds = new Map<string, readonly ProseEmbed[]>();
 const PROSE_EMBED_CACHE_MAX = 4000;
 const NO_EMBEDS: readonly ProseEmbed[] = [];
 
+/**
+ * The image and link tokens the chat renderer draws, each read from its own
+ * href by the renderer's classifier (`embedKind`). The walk enters exactly the
+ * children the renderer renders: code has none, an image's alt text renders as
+ * plain text, and a media link becomes a player that replaces its whole label,
+ * so none of those is entered. marked's own walkTokens concatenates arrays per
+ * token, which is quadratic on a long reply.
+ */
+function collectEmbeds(tokens: readonly Token[], embeds: ProseEmbed[]): void {
+	for (const token of tokens) {
+		if (token.type === 'image' || token.type === 'link') {
+			const kind = embedKind(token.type, token.href);
+			// Audio is kept here so a tool row can tell its clip is already in
+			// the reply; the gallery itself takes only images and video.
+			if (kind || token.type === 'image') {
+				embeds.push([kind, token.href, token.text ?? '']);
+				continue;
+			}
+		}
+		if (token.type === 'table') {
+			for (const cell of token.header) collectEmbeds(cell.tokens, embeds);
+			for (const row of token.rows) for (const cell of row) collectEmbeds(cell.tokens, embeds);
+		} else if (token.type === 'list') {
+			collectEmbeds(token.items, embeds);
+		} else if ('tokens' in token && token.tokens) {
+			collectEmbeds(token.tokens, embeds);
+		}
+	}
+}
+
 function embedsOf(content: string): readonly ProseEmbed[] {
 	const cached = proseEmbeds.get(content);
 	if (cached) return cached;
 	const embeds: ProseEmbed[] = [];
-	// Only rendered embeds: fenced/inline code and ordinary text aren't media.
-	marked.walkTokens(marked.lexer(content), token => {
-		if (token.type !== 'image' && token.type !== 'link') return;
-		// Audio is kept here so a tool row can tell its clip is already in the
-		// reply; the gallery itself takes only images and video.
-		const before = embeds.length;
-		rewriteMediaMarkdown(token.raw, (kind, src, label) => {
-			embeds.push([kind, src, label]);
-			return '';
-		});
-		if (token.type === 'image' && embeds.length === before && token.href) {
-			embeds.push([null, token.href, token.text ?? '']);
-		}
-	});
+	collectEmbeds(marked.lexer(content), embeds);
 	return remember(proseEmbeds, content, embeds.length ? embeds : NO_EMBEDS);
 }
 
@@ -140,30 +155,14 @@ export function galleryMediaForTurn(messages: ChatMessage[], sessionId?: string 
 	return found.size > 1 ? [...found.values()] : [];
 }
 
-// A markdown image the media rewrite left alone (its URL names no kind), in
-// every destination form the lexer accepts: bare or `<angle-bracketed>`, with
-// an optional "title", 'title' or (title) (#792).
-const PLAIN_IMAGE_MD = /!\[[^\]]*\]\(\s*(?:<([^>\n]*)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
-// Fenced blocks and inline code spans: their text is code, never an embed.
-const CODE_SPAN = /(^|\n)( {0,3})(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\3[`~]*[ \t]*(?=\n|$)|$)|`+[^`\n]*?`+/g;
-
-/** Suppress only media represented by the gallery; keep prose, audio and links. */
-export function rewriteWithGallery(text: string, sources: ReadonlySet<string>, sessionId?: string | null): string {
-	const shown = (src: string) => sources.has(resolveMediaUrl(src, sessionId));
-	const prose = (part: string) =>
-		rewriteMediaMarkdown(part, (kind, src, label) => (shown(src) ? '' : mediaHtml(kind, src, label)))
-			// A generated picture the reply embeds by its artifact URL is the
-			// same picture the gallery shows from the tool row (#784).
-			.replace(PLAIN_IMAGE_MD, (match, bracketed: string | undefined, bare: string | undefined) =>
-				shown(bracketed ?? bare ?? '') ? '' : match
-			);
-	// Code renders exactly as it does without a gallery: nothing is dropped
-	// from it, since the lexer never counted it as an embed.
-	let out = '';
-	let at = 0;
-	for (const code of text.matchAll(CODE_SPAN)) {
-		out += prose(text.slice(at, code.index)) + rewriteMediaMarkdown(code[0]);
-		at = code.index + code[0].length;
-	}
-	return out + prose(text.slice(at));
+/**
+ * The hrefs of `text`'s embeds that the turn's gallery already shows, in
+ * order: the chat renderer draws nothing for them (`renderChatMarkdown`'s
+ * `hide`). Read from the same cached tokens as the dedupe, so code and an
+ * image's alt text are never dropped.
+ */
+export function galleryHiddenEmbeds(text: string, sources: ReadonlySet<string>, sessionId?: string | null): string[] {
+	const hidden = new Set<string>();
+	for (const [, src] of embedsOf(text)) if (sources.has(resolveMediaUrl(src, sessionId))) hidden.add(src);
+	return [...hidden];
 }
