@@ -232,6 +232,48 @@ async def test_a_forwarded_request_carries_a_stable_command_id(mirror):
 
 
 @pytest.mark.asyncio
+async def test_each_typed_message_is_its_own_request_on_the_owner(mirror, monkeypatch):
+    """#1543: typed messages had no request key, so every one was ``voice:<call>:None``
+    and the owner answered the second with the first message's turn."""
+    turns_by_command = {}
+
+    async def owner_call(device_id, action, body=None, **_kwargs):
+        # The owner's rule (control._turns): a repeated command id gets the turn it already has.
+        assert action == "turns"
+        mirror.sent.append((device_id, action, body))
+        command = body["command_id"]
+        duplicate = command in turns_by_command
+        turns_by_command.setdefault(command, f"owner-turn-{len(turns_by_command) + 1}")
+        return {"turn_id": turns_by_command[command], "session_id": body["session_id"], "duplicate": duplicate}
+
+    monkeypatch.setattr(control, "call", owner_call)
+    call = streamed_call()
+    call.upstream = Upstream()
+    call.progress = SimpleNamespace(submitted=AsyncMock(), heard=lambda _words: None)
+
+    for identity, text in (("msg-1", "Make the rail icons bigger."), ("msg-2", "Also fix the tooltip."),
+                           ("msg-1", "Make the rail icons bigger.")):  # The browser's retry of the first.
+        await call.receive_text(json.dumps({"type": "input_text", "id": identity, "text": text}))
+        await call.delegation_task
+
+    commands = [body["command_id"] for _, _, body in mirror.sent]
+    assert commands == [f"voice:{call.call_key}:typed-msg-1", f"voice:{call.call_key}:typed-msg-2"]
+    assert [c.args[0] for c in call.progress.submitted.await_args_list] == ["owner-turn-1", "owner-turn-2"]
+    assert [body["prompt"] for _, _, body in mirror.sent] == ["Make the rail icons bigger.", "Also fix the tooltip."]
+    accepted = [c.args[0]["id"] for c in call.websocket.send_json.await_args_list if c.args[0]["type"] == "text.accepted"]
+    assert accepted == ["msg-1", "msg-2", "msg-1"]
+
+    # Past the call's own dedupe (its id list is bounded), a retry still names
+    # the same request, so the owner answers it with the turn it already has.
+    call.typed_ids.clear()
+    await call.receive_text(json.dumps({"type": "input_text", "id": "msg-1", "text": "Make the rail icons bigger."}))
+    await call.delegation_task
+    assert mirror.sent[-1][2]["command_id"] == f"voice:{call.call_key}:typed-msg-1"
+    assert len(turns_by_command) == 2
+    assert_mirror_untouched(mirror)
+
+
+@pytest.mark.asyncio
 async def test_a_forwarded_request_carries_its_attachments_for_the_owner_to_check(monkeypatch):
     from app.core import voice_remote
     from app.network import control
