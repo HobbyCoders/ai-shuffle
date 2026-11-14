@@ -1097,6 +1097,84 @@ async def test_a_spoken_handoff_settling_mid_typed_send_leaves_the_typed_message
     assert requests[-1][1]["command"] == command_id(call.call_key, "typed-a")
 
 
+def _typed_call(monkeypatch, *, buffer):
+    """A call whose chat turns are recorded, with a ``buffer``-entry transcript."""
+    from collections import deque
+
+    from app.core import turn_recorder
+    call = stream()
+    call.upstream = Upstream([])
+    call.settle_speech = AsyncMock()
+    call.transcript = deque(maxlen=buffer)  # The 200-entry buffer, smaller: same rule.
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", AsyncMock())
+    requests = []
+
+    async def delegate(session, context, **kwargs):
+        requests.append((context, kwargs))
+        return "On it."
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    return call, requests
+
+
+def _typed(identity, text):
+    return json.dumps({"type": "input_text", "id": identity, "text": text})
+
+
+@pytest.mark.asyncio
+async def test_a_typed_resend_the_owner_drops_never_uses_up_fresh_speech(monkeypatch):
+    """Review S4: a resend past the call's id list and transcript took the speech
+    spoken since and moved the handoff cursor past it. The owner dropped it as a
+    duplicate of the first copy, so those words never reached the agent."""
+    from app.core.voice_remote import command_id
+    monkeypatch.setattr(voice_stream, "MAX_TYPED_IDS", 2)
+    call, requests = _typed_call(monkeypatch, buffer=4)
+    for identity in "abcde":  # "a" leaves both the id list and the transcript.
+        await call.receive_text(_typed(identity, f"Typed {identity}."))
+        await call.delegation_task
+    await call.caption("user", "Please also fix export.")
+
+    await call.receive_text(_typed("a", "Typed a."))  # The browser replays the first frame.
+    await call.delegation_task
+    context, kwargs = requests[-1]
+    assert kwargs["command"] == command_id(call.call_key, "typed-a")
+    assert "Typed a." in context and "export" not in context
+
+    call.settling = ["d1"]
+    await call.dispatch_when_settled()
+    context, kwargs = requests[-1]
+    assert kwargs["command"] == command_id(call.call_key, "d1") and "Please also fix export." in context
+
+
+@pytest.mark.asyncio
+async def test_speech_arriving_while_a_typed_message_is_stored_waits_for_its_handoff(monkeypatch):
+    """Review S5: captions that pushed the typed entry out of the transcript during
+    its durable flush were split by the latest one's position: earlier ones went
+    early in the typed request, the last was skipped, and the cursor passed all."""
+    from app.core.voice_remote import command_id
+    call, requests = _typed_call(monkeypatch, buffer=4)
+    flush, spoke = call.flush, []
+
+    async def storing(**kwargs):
+        if any(e.get("typed") for e in call.transcript) and not spoke:
+            spoke.append(True)
+            for n in range(1, 7):  # The caller talks on while the typed message is stored.
+                await call.caption("user", f" part{n}")
+        await flush(**kwargs)
+    call.flush = storing
+
+    await call.receive_text(_typed("a", "Read this."))
+    await call.delegation_task
+    (context, kwargs), = requests
+    assert kwargs["command"] == command_id(call.call_key, "typed-a")
+    assert "Read this." in context and "part" not in context
+
+    call.settling = ["d1"]
+    await call.dispatch_when_settled()
+    context, kwargs = requests[-1]
+    assert kwargs["command"] == command_id(call.call_key, "d1")
+    assert "part6" in context and "Read this." not in context
+
+
 @pytest.mark.asyncio
 async def test_a_typed_attachment_past_the_caption_limit_keeps_its_typed_record(monkeypatch):
     """The length flush inside ``caption`` stores this message, so it must carry the files."""

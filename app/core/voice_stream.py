@@ -1280,17 +1280,13 @@ class VoiceStream:
             words = "\n\n" + TYPED_MESSAGE_PREFIX + text
             await self.caption("user", words, typed_uploads=recorded, typed=key)
             await self.flush()  # Durable admission before acknowledging/dispatching.
-            # Only this path hands off the typed entry, always with its files
-            # and under its own key (#1505, #1543): spoken handoffs, check_work
-            # and the approval desk skip it, so it is never sent under another
-            # request's id or lost to one that settled during the awaits above.
-            # Unsent speech before it is its context; speech after it stays
-            # for the next handoff.
-            own = next((e for e in self.transcript if e.get("typed") == key),
-                       {"role": "user", "text": words, "seq": self.transcript_seq})
-            entries = [e for e in self.transcript if self.delegated_seq < e.get("seq", 0) < own["seq"]
-                       and e.get("seq") not in self.approval_consumed and not e.get("typed")] + [own]
-            self.delegated_seq = max(self.delegated_seq, own["seq"])
+            # A typed message is its own request: its words and files only,
+            # under its own key (#1505, #1543). Spoken handoffs, check_work and
+            # the approval desk skip its entry, so it is never sent under
+            # another request's id or lost to one that settled during the
+            # awaits above. Speech stays theirs: this path takes none of it and
+            # leaves ``delegated_seq`` alone, so a resend the owner drops as a
+            # duplicate never uses up words spoken since.
             # A resent draft is accepted once; typed ids stay out of the
             # provider session's handoff count.
             self.typed_ids[key] = None
@@ -1298,8 +1294,8 @@ class VoiceStream:
                 del self.typed_ids[next(iter(self.typed_ids))]
             # Its own command id: the owner of a chat on another worker dedupes
             # by it, so a resend of this message never runs twice (#1543).
-            self.delegation_task = asyncio.create_task(
-                self.run_delegation(None, entries, file_note=file_note, uploads=uploads, request_key=key))
+            self.delegation_task = asyncio.create_task(self.run_delegation(
+                None, [{"role": "user", "text": words}], file_note=file_note, uploads=uploads, request_key=key))
             _workers.add(self.delegation_task)
             self.delegation_task.add_done_callback(_workers.discard)
         await self.emit({"type": "text.accepted", "id": identity})
