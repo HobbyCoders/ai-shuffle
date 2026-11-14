@@ -478,8 +478,7 @@ def test_wire_stream_snapshot_matches_individual_metadata_reads(workers, incarna
         stream = engine._wire_stream(cursor, [dict(wire, origin_incarnation=incarnation)],
                                      engine.cached_context())
         assert stream is not None
-        assert (stream.highest, stream.watermark, stream.pending) == (
-            store.highest_incarnation(cursor, a.device_id),
+        assert (stream.watermark, stream.pending) == (
             store.get_watermark(cursor, a.device_id, incarnation),
             store.count_pending(cursor, a.device_id, incarnation),
         )

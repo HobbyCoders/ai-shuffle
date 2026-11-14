@@ -891,18 +891,6 @@ def own_watermark(cursor, device_id: str, incarnation: int) -> int:
     return next_origin_seq(cursor, device_id, incarnation) - 1
 
 
-def own_version_incarnation(cursor, device_id: str, collection: str, record_id: str, clock: int) -> Optional[int]:
-    """The incarnation of ours that signed this record's version at ``clock``.
-
-    ``None`` once that op left the log. Clocks can repeat across incarnations
-    (a restore puts an older clock back): the latest such incarnation counts.
-    """
-    cursor.execute("SELECT MAX(incarnation) AS incarnation FROM sync_ops WHERE collection = %s AND record_id = %s "
-                   "AND origin_device_id = %s AND clock = %s", (collection, record_id, device_id, clock))
-    row = cursor.fetchone()
-    return int(row["incarnation"]) if row is not None and row["incarnation"] is not None else None
-
-
 def local_watermarks(_conn=None) -> Dict[str, Dict[str, int]]:
     """Everything this worker holds, as ``{origin: {incarnation: last_seq}}``.
 

@@ -92,8 +92,10 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    cadence is 10 s; after a local write the pass runs at once, so two workers on
    a LAN converge within about two seconds.
 4. **Applying.** Verify signature against the members table, reject a revoked
-   origin past its `last_seq_accepted`, order per stream (holes wait in
-   `sync_pending`), decrypt, last-writer-wins on (clock, device id), materialize
+   origin past its `last_seq_accepted` (and in an incarnation older than the
+   newest one seen), order per stream (holes wait in `sync_pending`; an active
+   member's older incarnation is an ordinary stream), decrypt, last-writer-wins
+   on (clock, device id) for every collection and every origin, materialize
    into the domain table, keep the loser in `sync_conflicts` for 30 days
    (columns encrypted at rest are stored as `<secret>`, never in plaintext),
    advance the watermark. All in one transaction per envelope.
@@ -208,9 +210,15 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   from incarnations older than its current one, past what it holds, and it
   re-imports them. Its current incarnation is never sent back. Only a worker
   that advertises the `own-history-reimport` capability gets them; an older
-  worker is served as before. The restore forked the device's stream, so its
-  own versions order by (incarnation, clock): what it wrote since the restore,
-  published or not, beats a version it gets back, which is kept as a conflict.
+  worker is served as before. Other members accept and relay those older
+  streams too. Every replica orders the device's versions by (clock, device
+  id), as it does any other's, so all of them agree whichever stream carried
+  a version. The one loss: a write the device makes after the restore but
+  before it hears of a later version it signed before the restore has a
+  lower clock and loses to that version on every replica, as any concurrent
+  write would; the loser is kept as a conflict. Members on an older build
+  still refuse an older incarnation once they have seen a newer one, so until
+  they update they can disagree in that case.
   A version it gets back for a chat it runs restores the chat's owner-only
   fields (permission mode and ceiling, account label) too; no other copy can.
   Only the unbroken part of an old stream is sent: past an op already

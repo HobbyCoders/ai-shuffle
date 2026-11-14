@@ -309,24 +309,111 @@ async def test_restored_worker_gets_back_its_chat_title_permission_and_turns(wor
 
 
 @pytest.mark.asyncio
-async def test_writes_since_the_restore_beat_the_versions_it_gets_back(workers):
-    """The restore forked the chat: what B wrote since wins, whatever the clocks say."""
+async def test_a_write_after_the_restore_beats_every_version_it_has_seen(workers):
+    """The restore moved B's clock past the versions A proved it signed, so
+    what B writes next wins on every replica; what it gets back is kept as a
+    conflict, not dropped silently."""
     a, b = _restored_chat(workers)
     async for _ in _pull_twice(a, b):
         with b.active():
             database.update_session("chat", title="new-title")
             engine.scan_all()
-        _turn(b, "new turn", publish=False)  # not even published yet
+        _turn(b, "new turn")
     assert _chat(b) == ("new-title", None, ["hello 0 from b", "new turn"])
     assert _head(b, b.device_id, 1) == _head(a, b.device_id, 1)  # all consumed, none left to retry
-    # The versions it got back are kept as conflicts, not dropped silently.
     with b.active():
         lost = {c["record_id"] for c in store.list_conflicts() if c["losing_device_id"] == b.device_id}
     assert "chat" in lost
-    with b.active():
-        engine.scan_all()  # publishes the new turn, in incarnation 2
     converge([a, b])
     assert _chat(a) == _chat(b) == ("new-title", None, ["hello 0 from b", "new turn"])
+
+
+# ---------------------------------------------------------------------------
+# Three replicas: every one picks the same winner (#1568)
+# ---------------------------------------------------------------------------
+
+def _offer(sender, receiver):
+    """What ``sender`` hands ``receiver``, as ``peer_exchange`` serves a current build."""
+    with receiver.active():
+        marks = store.local_watermarks()
+        incarnation = engine.context().identity.incarnation
+    own_history = transport.own_history_before({transport.OWN_HISTORY_CAPABILITY: 1}, incarnation)
+    with sender.active():
+        ops, _, snapshot = store.exchange_batch(marks, exclude_origin=receiver.device_id,
+                                                own_history_before=own_history)
+    assert not snapshot
+    return ops
+
+
+def _exchange(sender, receiver):
+    ops = _offer(sender, receiver)
+    with receiver.active():
+        return engine.apply_batch(ops)
+
+
+def _converge(workers):
+    pairs = [(sender, receiver) for sender in workers for receiver in workers if sender is not receiver]
+    reasons = set()
+    for _ in range(3):
+        for sender, receiver in pairs:
+            reasons |= set(_exchange(sender, receiver).reasons)
+    assert not reasons
+    # Settled: no pair keeps re-sending what the other already refused.
+    assert {(s.name, r.name): len(_offer(s, r)) for s, r in pairs} == {(s.name, r.name): 0 for s, r in pairs}
+
+
+def _streams(worker, origin):
+    with worker.active():
+        return store.local_watermarks().get(origin, {})
+
+
+def test_a_relayed_lost_version_wins_on_every_replica(workers):
+    """A holds B's first write after its backup, C the next twenty. B restores,
+    takes its proof from A and writes before it reaches C: C's version has the
+    higher clock, so it wins everywhere, B included, and A takes C's relay of
+    B's older stream instead of refusing it as stale."""
+    a, b, c = _network(workers, "a", "b", "c")
+    set_owner_pref(b, "theme", "v0")
+    _converge([a, b, c])
+    backup = b.raw.serialize()
+    set_owner_pref(b, "theme", "lost-0")
+    _exchange(b, a)
+    for n in range(1, 20):
+        set_owner_pref(b, "theme", f"lost-{n}")
+    _exchange(b, c)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)
+    set_owner_pref(b, "theme", "incarnation-2")
+    _exchange(b, a)
+    _converge([a, b, c])
+    assert owner_pref(a, "theme") == owner_pref(b, "theme") == owner_pref(c, "theme") == "lost-19"
+    assert _streams(a, b.device_id) == _streams(b, b.device_id) == _streams(c, b.device_id)
+    with b.active():
+        assert any(conflict["losing_device_id"] == b.device_id and conflict["record_id"].endswith("theme")
+                   for conflict in store.list_conflicts())
+
+
+def test_replicas_agree_on_a_restored_chat_whatever_order_its_versions_arrive(workers):
+    """Owner-ordered rows too: B's own versions compare by clock, not by
+    "the same device always wins", which depends on arrival order."""
+    a, b, c = _network(workers, "a", "b", "c")
+    _session(b, "chat", title="before-backup", events=1)
+    _converge([a, b, c])
+    backup = b.raw.serialize()
+    _turn(b, "lost turn 1")
+    _exchange(b, a)
+    _turn(b, "lost turn 2")
+    _turn(b, "lost turn 3")
+    _rename(b, "lost-title")
+    _exchange(b, c)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)
+    _rename(b, "new-title")  # newer than what A proved, older than C's versions
+    _exchange(b, a)
+    _converge([a, b, c])
+    turns = ["hello 0 from b", "lost turn 1", "lost turn 2", "lost turn 3"]
+    assert _chat(a) == _chat(b) == _chat(c) == ("lost-title", None, turns)
+    assert _streams(a, b.device_id) == _streams(b, b.device_id) == _streams(c, b.device_id)
 
 
 def test_another_worker_cannot_replay_owner_fields_into_a_chat(workers):

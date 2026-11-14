@@ -1471,8 +1471,10 @@ def _origin_allowed(cursor, ctx: NetworkContext, env: Envelope) -> Optional[Memb
 
     A revoked device is honoured only up to the stream position recorded in
     its revocation: nothing from a newer incarnation (a removed device could
-    otherwise open a fresh stream with a fresh sequence budget) and nothing
-    past ``last_seq_accepted`` in the incarnation the revoker knew.
+    otherwise open a fresh stream with a fresh sequence budget), nothing
+    past ``last_seq_accepted`` in the incarnation the revoker knew, and
+    nothing from an incarnation older than the newest this worker has seen.
+    An active member's older incarnations are ordinary streams (#1568).
     """
     member = ctx.member(env.origin_device_id)
     if member is None:
@@ -1488,6 +1490,10 @@ def _origin_allowed(cursor, ctx: NetworkContext, env: Envelope) -> Optional[Memb
             raise ApplyError("origin revoked")
         if env.origin_incarnation == int(limit_incarnation) and env.origin_seq > int(limit):
             raise ApplyError("origin revoked")
+        if env.origin_incarnation < store.highest_incarnation(cursor, env.origin_device_id):
+            # Its key can still sign a fresh op into an older stream, which
+            # carries no recorded limit: once a newer one was seen, refuse it.
+            raise ApplyError("stale incarnation")
     return member
 
 
@@ -1584,12 +1590,10 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     if env.key_version not in ctx.keyring:
         raise TransientApplyError("unknown key version %d" % env.key_version)
 
-    # Stream ordering per (origin, incarnation). Every older stream of our own
-    # is closed history, re-imported in any order after repeated restores.
-    own = env.origin_device_id == ctx.device_id
-    highest = store.highest_incarnation(cursor, env.origin_device_id)
-    if env.origin_incarnation < highest and not own:
-        raise ApplyError("stale incarnation")
+    # Stream ordering per (origin, incarnation). An active member's older
+    # incarnation is not stale: after a restore from backup, a peer may still
+    # relay what it signed there, and versions order by (clock, origin) on
+    # every replica alike, whichever stream carried them (#1568).
     watermark = store.get_watermark(cursor, env.origin_device_id, env.origin_incarnation)
     if env.origin_seq <= watermark:
         # A previous catch-up may have stopped between committed chunks.
@@ -1606,8 +1610,6 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     outcome = _apply_next(cursor, ctx, env, member, result)
     store.set_watermark(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
     store.drop_pending_upto(cursor, env.origin_device_id, env.origin_incarnation, env.origin_seq)
-    if env.origin_incarnation > highest and highest and not own:
-        store.clear_pending_stream(cursor, env.origin_device_id, highest)
     # Continue only after this transaction commits, not recursively under its
     # state lock. A legacy pending buffer can contain thousands of successors.
     result._pending_drains.add((env.origin_device_id, env.origin_incarnation))
@@ -1981,20 +1983,14 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                 raise TransientApplyError("Local session membership is waiting for publishing")
     existing = store.get_record(cursor, env.collection, env.record_id)
     replay = env.origin_device_id == ctx.device_id and env.origin_incarnation < ctx.identity.incarnation
-    if replay:
-        wins = _own_replay_wins(cursor, ctx, coll, env, existing)
-    elif coll.mode == policy.MODE_OWNER_ORDERED:
-        # Owner-ordered: the owner's stream order is the order. No clock race.
-        wins = existing is None or env.origin_device_id == existing["origin_device_id"] or \
-            envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
-    else:
-        wins = existing is None or envelope_mod.compare(
-            env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
+    # Every replica picks the same winner from what travels with the op:
+    # (clock, origin). A device's clock rises with every op it signs, so for
+    # its own versions this is its stream order, owner-ordered rows included.
+    # Across incarnations (a restore forks the stream) the replicas still
+    # agree, which no stream-order rule can promise (#1568).
+    wins = existing is None or envelope_mod.compare(
+        env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     if not wins:
-        if existing is None:
-            # Our write since the restore, not published yet (_own_replay_wins).
-            existing = {"clock": env.clock, "origin_device_id": ctx.device_id, "content_hash": None,
-                        "deleted": False}
         merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
             cursor, coll, env.record_id, plaintext, existing)
         if merged:
@@ -2092,39 +2088,15 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     return "applied"
 
 
-def _own_replay_wins(cursor, ctx: NetworkContext, coll: policy.Collection, env: Envelope,
-                     existing: Optional[Mapping[str, Any]]) -> bool:
-    """Whether an op we signed in an earlier incarnation replaces what we hold (#1568).
-
-    A restore forks our stream: every later incarnation continued from the
-    backup, so it is newer than anything an earlier one wrote, whatever the
-    clocks say (the restore put an older clock back too). So our own versions
-    order by (incarnation, clock), and a replay that loses is kept as a
-    conflict like any other. Another device's version compares by clock, as
-    usual. A row we hold but never published is a write since the restore.
-    """
-    if existing is None:
-        return _read_row(cursor, coll, env.record_id) is None
-    if existing["origin_device_id"] != ctx.device_id:
-        return envelope_mod.compare(env.clock, env.origin_device_id,
-                                    int(existing["clock"]), existing["origin_device_id"]) > 0
-    held = store.own_version_incarnation(cursor, ctx.device_id, env.collection, env.record_id,
-                                         int(existing["clock"]))
-    # Compacted out of the log (in practice a version from before the backup):
-    # the clock decides, as it did before #1568. The restore already moved the
-    # clock past the versions it saw signed after the backup (#1506).
-    held = env.origin_incarnation if held is None else held
-    return (env.origin_incarnation, env.clock) > (held, int(existing["clock"]))
-
-
 def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any], *,
                     origin_device_id: Optional[str] = None, ctx: Optional[NetworkContext] = None,
                     own_replay: bool = False) -> Mapping[str, Any]:
     """Owner-ordered rows may reference local-only rows; drop what we cannot see.
 
     ``origin_device_id`` is the worker that wrote the copy (the envelope's
-    signer, or a snapshot item's recorded origin). ``own_replay``: a verified
-    op this device signed before a restore that won ``_own_replay_wins``.
+    signer, or a snapshot item's recorded origin). ``own_replay``: a winning
+    op this device signed, verified with its own key, in an earlier
+    incarnation (#1568).
     """
     if coll.name == "sessions":
         from app.network import catalog
@@ -2509,7 +2481,6 @@ class _WireStream:
     origin: str
     incarnation: int
     first_seq: int
-    highest: int
     watermark: int
     pending: int
 
@@ -2532,15 +2503,14 @@ def _wire_stream(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext
     # Fetch them together to retain the existing per-chunk round-trip budget
     # while keeping the counter reservation's separate fresh existence check.
     cursor.execute(
-        "SELECT COALESCE(MAX(incarnation), 0) AS highest, "
-        "COALESCE(MAX(CASE WHEN incarnation = %s THEN last_seq END), 0) AS watermark, "
+        "SELECT COALESCE(MAX(CASE WHEN incarnation = %s THEN last_seq END), 0) AS watermark, "
         "(SELECT COUNT(*) FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s) AS pending "
         "FROM sync_watermarks WHERE origin_device_id = %s",
         (first.origin_incarnation, first.origin_device_id, first.origin_incarnation, first.origin_device_id),
     )
     stream = cursor.fetchone()
     return _WireStream(first.origin_device_id, first.origin_incarnation, first.origin_seq,
-                       int(stream["highest"]), int(stream["watermark"]), int(stream["pending"]))
+                       int(stream["watermark"]), int(stream["pending"]))
 
 
 def _duplicate_prefix(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
@@ -2553,8 +2523,7 @@ def _duplicate_prefix(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
     network, member, incarnation, key and signature gates. Unusual runs retain
     the per-envelope path, including its revocation/backup and pending evidence.
     """
-    if (stream.first_seq > stream.watermark or stream.incarnation < stream.highest
-            or stream.pending):
+    if stream.first_seq > stream.watermark or stream.pending:
         return 0
     member = ctx.member(stream.origin)
     if (stream.origin == ctx.device_id or member is None
@@ -2584,7 +2553,7 @@ def _buffer_pending_chunk(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Netwo
     existing duplicate-at-cap behavior. Payload validation still happens when
     the missing head arrives, exactly as for single-row buffering.
     """
-    if (stream.first_seq <= stream.watermark + 1 or stream.incarnation < stream.highest
+    if (stream.first_seq <= stream.watermark + 1
             or stream.pending + len(chunk) > PENDING_CAP_PER_STREAM):
         return False  # Ordered appends must not parse the entire chunk twice.
     member = ctx.member(stream.origin)
@@ -2631,14 +2600,13 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
         if origin == ctx.device_id or member is None or member.status != membership.STATUS_ACTIVE:
             return False
         if _stream is None:
-            highest = store.highest_incarnation(cursor, origin)
             watermark = store.get_watermark(cursor, origin, incarnation)
             pending = 0 if _from_pending else store.count_pending(cursor, origin, incarnation)
         else:
             if (_stream.origin, _stream.incarnation) != (origin, incarnation):
                 return False
-            highest, watermark, pending = _stream.highest, _stream.watermark, _stream.pending
-        if incarnation < highest or (not _from_pending and pending):
+            watermark, pending = _stream.watermark, _stream.pending
+        if not _from_pending and pending:
             return False
         rows = []
         for index, env in enumerate(envs):
@@ -2692,8 +2660,6 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
         catalog.after_event_mirrored(cursor, max((row for row in rows if row["session_id"] == sid),
                                                 key=lambda row: int(row["seq"])))
     store.set_watermark(cursor, origin, incarnation, last_seq)
-    if incarnation > highest and highest:
-        store.clear_pending_stream(cursor, origin, highest)
     result.applied += len(envs)
     result.touched.extend((coll.name, env.record_id, env.op) for env in envs)
     return True
@@ -2742,8 +2708,7 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                 part._pending_drains.add((stream.origin, stream.incarnation))
                 chunk = chunk[skipped:]
                 stream = _WireStream(stream.origin, stream.incarnation,
-                                     stream.first_seq + skipped, stream.highest,
-                                     stream.watermark, stream.pending)
+                                     stream.first_seq + skipped, stream.watermark, stream.pending)
             appended = not chunk or (stream is not None and _buffer_pending_chunk(cursor, chunk, ctx, part, stream))
             if not appended:
                 # Fast append reserves the whole chunk itself. Pure gap

@@ -21,7 +21,8 @@ from tests.core.network.test_pending_apply_budget import (  # noqa: F401
 @pytest.mark.usefixtures("pending_semantics_clock")
 @pytest.mark.parametrize("scenario", [
     "duplicates", "mixed", "forged_duplicate", "malformed_duplicate",
-    "forged_fresh", "unknown_key", "wrong_network", "revoked", "stale", "unordered",
+    "forged_fresh", "unknown_key", "wrong_network", "revoked", "older_incarnation",
+    "revoked_older_incarnation", "unordered",
 ])
 def test_duplicate_prefix_matches_per_envelope(pg_workers, monkeypatch, scenario):
     a, bulk, perop = [pg_workers(name) for name in ("source", "bulk", "perop")]
@@ -67,9 +68,12 @@ def test_duplicate_prefix_matches_per_envelope(pg_workers, monkeypatch, scenario
             if scenario == "revoked":
                 ctx.members[a.device_id] = replace(ctx.member(a.device_id), status=membership.STATUS_REVOKED,
                     last_seq_accepted=ops[4]["origin_seq"], last_incarnation_accepted=1)
-            elif scenario == "stale":
+            if scenario in ("older_incarnation", "revoked_older_incarnation"):
                 with store.get_db() as conn:
                     store.set_watermark(conn.cursor(), a.device_id, 2, 0)
+            if scenario == "revoked_older_incarnation":
+                ctx.members[a.device_id] = replace(ctx.member(a.device_id), status=membership.STATUS_REVOKED,
+                    last_seq_accepted=10, last_incarnation_accepted=2)
             if force:
                 patch.setattr(engine, "_apply_chunk", lambda *a, **k: False)
                 patch.setattr(engine, "_append_pending", lambda *a, **k: None)
@@ -84,7 +88,11 @@ def test_duplicate_prefix_matches_per_envelope(pg_workers, monkeypatch, scenario
         assert results[0][0]["retry"] == 1
     if scenario == "revoked":
         assert results[0][0]["rejected"] == len(wire) - 5
-    if scenario == "stale":
+    if scenario == "older_incarnation":
+        # An active member's older stream is not stale (#1568): same as its newest.
+        assert results[0][0]["rejected"] == 0
+        assert (results[0][0]["duplicate"], results[0][0]["applied"]) == (24, len(wire) - 24)
+    if scenario == "revoked_older_incarnation":
         assert results[0][0]["rejected"] == len(wire)
 
 
@@ -119,7 +127,7 @@ def test_duplicate_prefix_statement_ratchet(receiver, monkeypatch, fresh):
     # One locked frontier read plus the unchanged post-commit readiness probe.
     frontier_reads = [q for q in statements if q.startswith("SELECT") and "sync_watermarks" in q]
     assert len(frontier_reads) == 2
-    assert sum(q.startswith("SELECT COALESCE(MAX(incarnation)") for q in frontier_reads) == 1
+    assert sum(q.startswith("SELECT COALESCE(MAX(CASE WHEN incarnation") for q in frontier_reads) == 1
     if fresh:
         _assert_complete(connect, ops)
 
