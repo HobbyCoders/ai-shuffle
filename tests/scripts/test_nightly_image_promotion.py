@@ -29,12 +29,12 @@ def lane(monkeypatch):
             state["branches"] += 1
             moved = scenario == "superseded" or (scenario == "moved_during" and state["branches"] > 1)
             return {"protected": scenario != "unprotected", "commit": {"sha": "c" * 40 if moved else REVISION}}
-        if route.startswith("actions/workflows/main-suite.yml/runs?"):
+        if route.startswith("actions/workflows/ci.yml/runs?"):
             return {"workflow_runs": [{"id": 41, "head_branch": "main", "event": "push"}]
                     if scenario == "hosted" else []}
         if route == "":
             return {"id": 42, "full_name": gate.REPOSITORY}
-        if route == "actions/workflows/main-suite.yml":
+        if route == "actions/workflows/ci.yml":
             return {"id": 7, "path": gate.MAIN_SUITE_PATH}
         if route == "actions/runs/41":
             return {"id": 41, "workflow_id": 7, "path": gate.MAIN_SUITE_PATH,

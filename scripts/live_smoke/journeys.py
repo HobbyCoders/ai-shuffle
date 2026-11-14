@@ -1,9 +1,9 @@
 """CI evidence for live-smoke rows of kind ``journey``.
 
 A journey row is covered by UI journeys (``frontend/tests/journeys/``), which
-run on every push to main in ``main-suite.yml`` (its ``javascript`` leg calls
+run on every push to main in ``ci.yml`` (its ``javascript`` leg calls
 ``ci-frontend.yml``, whose ``UI journeys (k/N)`` shards run every journey
-file). The evidence for a candidate revision is one main-suite run on main at
+file). The evidence for a candidate revision is one CI run on main at
 exactly that commit whose ``UI journeys`` shards are all present and all
 succeeded. Anything else (no run, a run still going, a failed or missing
 shard, GitHub unreachable) is not evidence, and the gate blocks.
@@ -19,7 +19,7 @@ import subprocess
 from collections.abc import Callable
 
 REPOSITORY = "HobbyCoders/ai-shuffle"
-WORKFLOW = "main-suite.yml"
+WORKFLOW = "ci.yml"
 SHARD = re.compile(r"UI journeys \((\d+)/(\d+)\)")
 
 
@@ -52,14 +52,15 @@ def shards_state(jobs: list) -> str:
 
 
 def state_from(runs: list, revision: str, jobs_for: Callable[[dict], list | None]) -> dict:
-    """``{"state", "url"}`` from main-suite runs (newest first) at ``revision``.
+    """``{"state", "url"}`` from CI runs (newest first) at ``revision``.
 
     A run counts only when it ran on main at exactly ``revision``. Any such
     run whose journey shards all succeeded is the evidence; otherwise the
     newest run's state is reported.
     """
+    # Pull requests run the same workflow: one from a fork's branch named main is not main.
     mine = [r for r in runs if (r.get("head_sha") or "").lower() == revision.lower()
-            and r.get("head_branch") == "main"]
+            and r.get("head_branch") == "main" and r.get("event") != "pull_request"]
     if not mine:
         return {"state": "missing", "url": None}
     newest = None
@@ -89,7 +90,7 @@ def fetch(revision: str, gh_json: Callable[..., object] | None = None) -> dict:
 
     def jobs_for(run: dict) -> list | None:
         jobs: list = []
-        for page in range(1, 6):  # main-suite has about 50 jobs; stop well past that
+        for page in range(1, 6):  # CI has about 50 jobs; stop well past that
             found = gh_json("api", f"repos/{REPOSITORY}/actions/runs/{run.get('id')}/jobs"
                                    f"?per_page=100&page={page}")
             batch = found.get("jobs") if isinstance(found, dict) else None

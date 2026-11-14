@@ -194,7 +194,7 @@ on free standard Linux and Windows runners: the full Linux suites and native
 Windows desktop tests. Desktop packaging, preview installers and macOS checks
 stay manual.
 Merge only after CI is green and the change has been reviewed. Publishing is
-separate: edge/nightly requires a hosted main-suite pass or the owner's attested
+separate: edge/nightly requires a hosted `CI` pass on main or the owner's attested
 full local run on the exact main revision.
 See [where tests run](../ci/pr-checks.md) for the runner and publication policy.
 Tests run on GitHub CI, not in the push gate. Install the hook once per clone:

@@ -1,7 +1,7 @@
 """Run the project's checks on this machine.
 
 Tests run on GitHub CI: every pull request runs the full hosted suites, and
-nightly publication accepts a hosted main-suite pass or an owner-local
+nightly publication accepts a hosted CI pass or an owner-local
 attested full run on main. The pre-push hook (.githooks/pre-push, copied into
 git's hooks directory by install) runs no test suites. Before anything leaves
 this machine it runs the offline secret scan on every outgoing commit and on

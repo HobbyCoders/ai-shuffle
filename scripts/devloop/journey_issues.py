@@ -103,8 +103,8 @@ def recovered(receipt: dict) -> list[FlakyCase]:
 
 def eligible_run(repository: str, run_id: int, metadata: dict) -> Run | None:
     if (metadata.get("id") != run_id or metadata.get("event") != "push"
-            or metadata.get("head_branch") != "main" or metadata.get("name") != "main-suite"
-            or metadata.get("path") != ".github/workflows/main-suite.yml"
+            or metadata.get("head_branch") != "main" or metadata.get("name") != "CI"
+            or metadata.get("path") != ".github/workflows/ci.yml"
             or metadata.get("repository", {}).get("full_name") != repository
             or metadata.get("head_repository", {}).get("full_name") != repository):
         return None
@@ -283,9 +283,9 @@ def main(argv=None) -> int:
         run = eligible_run(args.repository, args.run_id, api.request(f"actions/runs/{args.run_id}"))
         if run is None:
             if args.dry_run:
-                print("Not a push-to-main main-suite run; no issues reported.")
+                print("Not a push-to-main CI run; no issues reported.")
             else:
-                warning("Not a push-to-main main-suite run; issue reporting is disabled.")
+                warning("Not a push-to-main CI run; issue reporting is disabled.")
             return 0
         receipts = local_receipts(args.receipts) if args.receipts else api.receipts(run.id)
         report(api, run, receipts, dry_run=args.dry_run)

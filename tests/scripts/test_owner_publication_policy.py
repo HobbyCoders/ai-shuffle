@@ -62,7 +62,7 @@ def permits(expression, *, actor_id=OWNER, actor="example-maintainer", triggerin
                   triggering_actor=actor if triggering_actor is None else triggering_actor,
                   event_name=event, ref=ref, event=NS(repository=NS(private=True),
                       workflow_run=NS(event=run_event, conclusion=run_conclusion, head_sha=run_head,
-                                      name="main-suite", status=run_status, head_branch=run_branch,
+                                      name="CI", status=run_status, head_branch=run_branch,
                                       repository=NS(full_name=run_repo),
                                       pull_requests=[NS(head=NS(sha=head)) for head in open_pr_heads],
                                       head_repository=NS(full_name=run_repo)))),
@@ -124,7 +124,9 @@ def test_play_accepts_manual_release_caller_only_for_its_exact_tag(job):
 ])
 def test_pr_checks_stay_on_standard_runners_and_fail_loudly(name, job, commands):
     config = workflow(name)
-    assert set(config["on"]) == {"pull_request", "workflow_dispatch", "workflow_call"}
+    # ci.yml calls it for every pull request that changes what it reads.
+    assert set(config["on"]) == {"workflow_dispatch", "workflow_call"}
+    assert f"uses: ./.github/workflows/{name}" in (ROOT / ".github/workflows/ci.yml").read_text()
     check = config["jobs"][job]
     assert check["runs-on"] == "ubuntu-24.04"
     assert "continue-on-error" not in check
@@ -209,14 +211,21 @@ def test_javascript_chromium_setup_is_cached_bounded_and_sandboxed():
     assert "headless: true, chromiumSandbox: true" in editor
 
 
+def called_by(name, seen=None):
+    """Every workflow file `name` calls, directly or through another."""
+    seen = set() if seen is None else seen
+    for job in workflow(name)["jobs"].values():
+        used = job.get("uses", "")
+        if used.startswith("./.github/workflows/") and used.rsplit("/", 1)[1] not in seen:
+            seen.add(used.rsplit("/", 1)[1])
+            called_by(used.rsplit("/", 1)[1], seen)
+    return seen
+
+
 def test_pr_triggers_are_only_for_read_only_secret_free_checks():
     assert set(workflow("release.yml")["on"]) == {"workflow_dispatch"}
-    allowed = {
-        "ci-backend.yml", "ci-fluid.yml", "ci-frontend.yml", "desktop.yml",
-        "desktop-source-checks.yml", "windows-suite.yml", "ci-instance-identity.yml",
-        "ci-artifact-policy.yml", "ci-browser-workspace.yml", "container-postgres.yml",
-        "ci-android-minified.yml", "android.yml", "runtime-overlay-acceptance.yml",
-    }
+    # One workflow checks a pull request, and one acceptance check of three paths.
+    allowed = {"ci.yml", "runtime-overlay-acceptance.yml"}
     found = set()
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
         config = workflow(path.name)
@@ -224,19 +233,43 @@ def test_pr_triggers_are_only_for_read_only_secret_free_checks():
         if "pull_request" in config["on"]:
             found.add(path.name)
             assert config["permissions"] == {"contents": "read"}, path.name
-            if path.name != "android.yml":
-                assert "secrets." not in path.read_text(), path.name
-            else:
-                # Android keeps release steps in the same workflow. Every secret
-                # reference must be in a step whose actual predicate rejects PRs,
-                # never in a workflow/job env inherited by unsigned PR commands.
-                assert "secrets." not in str({key: value for key, value in config.items() if key != "jobs"})
-                for job in config["jobs"].values():
-                    assert "secrets." not in str({key: value for key, value in job.items() if key != "steps"})
-                    for step in job.get("steps", []):
-                        if "secrets." in str(step):
-                            assert not permits(step["if"], event="pull_request"), step["name"]
+            # No secret is read here or handed to a called workflow.
+            assert "secrets" not in path.read_text(), path.name
     assert found == allowed
+    reached = called_by("ci.yml")
+    assert reached == {
+        "ci-backend.yml", "ci-fluid.yml", "ci-frontend.yml", "desktop.yml",
+        "desktop-source-checks.yml", "windows-suite.yml", "ci-instance-identity.yml",
+        "ci-artifact-policy.yml", "ci-browser-workspace.yml", "container-postgres.yml",
+        "ci-android-minified.yml", "android.yml", "source-ui-bundle.yml", "record-pass.yml",
+    }
+    for name in sorted(reached):
+        config = workflow(name)
+        assert config["permissions"] == {"contents": "read"}, name
+        if name != "android.yml":
+            assert "secrets." not in (ROOT / ".github/workflows" / name).read_text(), name
+        else:
+            # Android keeps release steps in the same workflow. ci.yml hands it no
+            # secret; every secret reference must also be in a step whose actual
+            # predicate rejects PRs, never in a workflow/job env inherited by
+            # unsigned PR commands.
+            assert "secrets." not in str({key: value for key, value in config.items() if key != "jobs"})
+            for job in config["jobs"].values():
+                assert "secrets." not in str({key: value for key, value in job.items() if key != "steps"})
+                for step in job.get("steps", []):
+                    if "secrets." in str(step):
+                        assert not permits(step["if"], event="pull_request"), step["name"]
+    # Only the call of android.yml may be granted more than read access: its
+    # owner-only publishing job asks for it and runs from no event of ci.yml.
+    jobs = workflow("ci.yml")["jobs"]
+    assert [key for key, job in jobs.items() if "write" in str(job.get("permissions", {})) and "uses" in job] == ["android"]
+    assert jobs["android"]["permissions"] == {"contents": "write"}
+    assert "with" not in jobs["android"] and "secrets" not in jobs["android"]
+    publish = workflow("android.yml")["jobs"]["publish"]["if"]
+    for event in ("pull_request", "push", "schedule"):
+        assert not permits(publish, event=event, ref=MAIN)
+    # A manual run of ci.yml cannot ask for it either: ci.yml sets no `publish_download`.
+    assert "inputs.publish_download" in publish
 
 
 def test_nightly_hosted_completion_is_guarded_but_stable_stays_owner_only():
