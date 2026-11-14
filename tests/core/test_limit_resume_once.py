@@ -278,23 +278,25 @@ async def test_a_settle_while_snoozed_still_cancels_the_resume(stopped_chat, mon
     submit.assert_not_awaited()
 
 
-@pytest.mark.parametrize("settle_between", [False, True])
-async def test_a_second_wake_from_another_worker_keeps_the_resume(stopped_chat, monkeypatch, settle_between):
+async def test_a_second_wake_as_active_to_active_drops_the_resume_fail_safe(stopped_chat, monkeypatch):
+    """Fail safe (S9): an active -> active projection may be a held peer's settle +
+    reactivate coalesced into one row, which must cancel. So a second, concurrent
+    wake also drops the resume (the owner can re-arm). Follow-up: a replicated
+    settlement generation would tell the two apart."""
     from app.network import session_active
     turn, _, _ = stopped_chat
     await lr.arm("once-chat", turn["id"])
     [row] = wakeups.get_session_wakeups("once-chat", lr.LIMIT_RESUME_SOURCE)
     before = lr._once_fence("once-chat")
     session_active.write_shared("once-chat", False, _later())
-    session_active.write_shared("once-chat", True)  # this worker's wake
-    if settle_between:
-        session_active.write_shared("once-chat", False)
-        session_active.write_shared("once-chat", True)
-    # The other worker's independent wake lands as an active -> active projection.
-    with get_db() as conn:
+    session_active.write_shared("once-chat", True)  # this worker's wake keeps the fence
+    assert lr._same_fence(before, lr._once_fence("once-chat"))
+    with get_db() as conn:  # the other worker's wake (or a coalesced settle + reactivate)
         session_active.project(conn.cursor(), {"session_id": "once-chat", "is_active": True,
                                                "updated_at": "2099-01-01T00:00:00+00:00", "snoozed_until": None})
-    assert database.get_session("once-chat")["is_active"]
-    assert lr._same_fence(before, lr._once_fence("once-chat")) is not settle_between
+    assert not lr._same_fence(before, lr._once_fence("once-chat"))
+    session = database.get_session("once-chat")
+    assert await lr._once_refused("once-chat", session, lr.meta_of(row)) == "session_changed"
     fired, submit = await _fires(row, monkeypatch)
-    assert (fired == "resume-turn") is not settle_between
+    assert fired is None
+    submit.assert_not_awaited()

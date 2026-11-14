@@ -58,17 +58,18 @@ def project(cursor, record: dict) -> None:
 
 
 def _snooze_transition(before, active: bool, snoozed) -> bool:
-    """The chat stays Active or Snoozed on both sides: a snooze, re-snooze or
-    wake, including a second wake that arrives after another worker's.
+    """A snooze, re-snooze or wake: the chat only moves between Active and Snoozed.
 
     These writes do not advance the membership fence, so pending work fenced on
-    it (an armed limit resume) survives them. Any write to or from plain
-    Settled, an archived row or an unknown row still advances it.
+    it (an armed limit resume) survives them. A plain settle, an unsettle of a
+    settled chat, an archived row or an unknown row still advances it.
     """
     from app.core import session_snooze
     if before is None or not session_snooze.runs_work(dict(before)):
         return False
-    return active or bool(snoozed)
+    # Active -> active still fences: it can be a peer's settle + reactivate coalesced
+    # while it was held, which must cancel. Follow-up: a replicated settlement generation.
+    return bool(snoozed) or (active and bool(before["snoozed_until"]) and not before["is_active"])
 
 
 def project_snooze(cursor, session_id: str) -> None:
