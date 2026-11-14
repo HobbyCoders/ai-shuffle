@@ -17,10 +17,10 @@
 		activeTasks: Task[];
 		/** Fire the interrupt (always a full stop). */
 		onStop: () => void;
-		/** True for a stray pointer press (the composer: the second press of a
-		 *  double tap on Send, landing where Send was). Checked before the
-		 *  confirmation; keyboard activation is never ignored. */
-		ignoresPress?: (event: MouseEvent) => boolean;
+		/** True while a pointer press is a stray one (the composer: the second
+		 *  press of a double tap on Send, landing where Send was). Checked before
+		 *  the confirmation; keyboard activation is never ignored. */
+		ignoresPress?: () => boolean;
 	}
 
 	let { activeTasks, onStop, ignoresPress }: Props = $props();
@@ -40,7 +40,7 @@
 
 	function handleClick(event: MouseEvent) {
 		// detail is 0 for a click from the keyboard (Enter, Space).
-		if (event.detail > 0 && ignoresPress?.(event)) return;
+		if (event.detail > 0 && ignoresPress?.()) return;
 		if (runningCount > 0) {
 			showConfirm = true;
 		} else {

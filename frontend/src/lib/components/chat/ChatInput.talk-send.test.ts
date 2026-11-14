@@ -173,7 +173,7 @@ describe('Talk turns into Send', () => {
 
 		it('ignores the second tap, but not Stop from the keyboard or a later tap', async () => {
 			idle();
-			const { container } = render(ChatInput);
+			const { container } = render(ChatInput, { props: { compact: true } });
 			const stop = await sendDraft(container);
 			await tap(stop);
 			expect(stops).not.toHaveBeenCalled();
@@ -185,12 +185,11 @@ describe('Talk turns into Send', () => {
 			expect(stops).toHaveBeenCalledTimes(2);
 		});
 
-		it('never ignores a tap away from where Send was (the composer moved)', async () => {
+		it('never ignores Stop after a send from the start screen (the composer moves away)', async () => {
 			idle();
 			const { container } = render(ChatInput);
 			const stop = await sendDraft(container);
-			// jsdom lays nothing out: Send's old box is the point 0,0.
-			await fireEvent.click(stop, { detail: 1, clientX: 120, clientY: 40 });
+			await tap(stop);
 			expect(stops).toHaveBeenCalledOnce();
 		});
 
@@ -203,7 +202,7 @@ describe('Talk turns into Send', () => {
 				activeSession.setDraft('');
 				return true;
 			});
-			const { container } = render(ChatInput);
+			const { container } = render(ChatInput, { props: { compact: true } });
 			const stop = await sendDraft(container);
 			await tap(stop);
 			expect(screen.queryByRole('button', { name: 'Stop everything' })).toBeNull();
@@ -216,7 +215,7 @@ describe('Talk turns into Send', () => {
 		it('never ignores Stop after a queued send, with Stop already shown at the press', async () => {
 			idle();
 			startTurn();
-			const { container } = render(ChatInput);
+			const { container } = render(ChatInput, { props: { compact: true } });
 			const stop = await sendDraft(container);
 			await waitFor(() => expect(sends).toHaveBeenCalledOnce());
 			await tap(stop);
@@ -226,7 +225,7 @@ describe('Talk turns into Send', () => {
 		it('never ignores Stop after a press that sent nothing', async () => {
 			// No agent to send with: the submit is refused before it sends.
 			idle({ profile: '' });
-			const { container } = render(ChatInput);
+			const { container } = render(ChatInput, { props: { compact: true } });
 			await type(container, 'Ship it');
 			await waitFor(() => expect(circles(container)).toContain('Send'));
 			await tap(screen.getByRole('button', { name: 'Send' }));
