@@ -26,9 +26,6 @@ class RunSettingsUpdate(BaseModel):
     effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]] = None
     fast: Optional[StrictBool] = None
     context_window: Optional[int] = Field(None, strict=True, gt=0)
-    #: The model the composer has selected for an effort pick. It never switches
-    #: the chat's model; see :func:`_effort_for_unsent_model`.
-    for_model: Optional[str] = Field(None, min_length=1, max_length=512)
 
 
 async def _store_live_overrides(session_id: str, runtime) -> None:
@@ -148,7 +145,7 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
     from app.core.provider.types import SessionOptions
     from app.db.model_providers import resolve_model_provider
 
-    changes = body.model_dump(exclude_unset=True, exclude={"for_model"})
+    changes = body.model_dump(exclude_unset=True)
     if not changes or ("fast" in changes and changes["fast"] is None):
         raise ValueError("Provide effort, a boolean fast setting, or a context_window")
     lock = _locks.setdefault(session_id, asyncio.Lock())
@@ -312,47 +309,6 @@ async def handle_run_settings(body: dict, from_device: str) -> dict:
     return result
 
 
-async def _effort_for_unsent_model(session: dict, body: RunSettingsUpdate) -> Optional[dict]:
-    """Accept an effort pick the running chat refused when the selected model offers it.
-
-    A model picked in an open chat is switched with the next message, but an
-    effort pick goes to the chat at once and is checked against the model it
-    still runs. A level only the newly picked model offers (Hydrogen's xhigh
-    while the chat runs Argon) is refused there. The picker shows the selected
-    model's levels from its provider's current list, so the pick is checked
-    against that list here. It is accepted without touching the running chat or
-    its saved binding: the next message carries it with the model switch.
-
-    None leaves the refusal standing: no model named, the chat already runs it,
-    more than effort changed, or the picked model does not offer the level.
-    """
-    from app.core.model_effort import normalize_effort
-    from app.core.provider.harness_adapter import _decide_provider_kind
-    from app.core.provider.types import SessionOptions
-    from app.db.model_providers import resolve_model_provider
-
-    if body.for_model is None or body.model_fields_set - {"for_model"} != {"effort"}:
-        return None
-
-    def ref(model, provider_id):
-        if model and model.startswith("prov:"):
-            _, provider_id, model = model.split(":", 2)
-        return provider_id or None, model
-
-    provider_id, model = ref(body.for_model, None)
-    if (provider_id, model) == ref(session.get("model"), session.get("provider_id")):
-        return None
-    provider = await run_sync(resolve_model_provider, provider_id) if provider_id else None
-    if provider_id and provider is None:
-        return None
-    route = await run_sync(_decide_provider_kind, SessionOptions(
-        model=model, extra={"provider_id": provider_id} if provider_id else {}))
-    effort = normalize_effort(body.effort, model, provider, route=route)
-    if body.effort is not None and effort is None:
-        return None
-    return {"effort": effort, "fast": bool(session.get("fast")), "applies_with_next_message": True}
-
-
 @router.put("/{session_id}/run-settings")
 async def update_run_settings(
     request: Request, session_id: str, body: RunSettingsUpdate,
@@ -363,15 +319,12 @@ async def update_run_settings(
     try:
         if owner is not None:
             result = await control.call(owner, "run-settings", {
-                "session_id": session_id, **body.model_dump(exclude_unset=True, exclude={"for_model"}),
+                "session_id": session_id, **body.model_dump(exclude_unset=True),
             })
         else:
             result = await apply_run_settings(session_id, body)
     except (control.ControlRefused, ValueError) as exc:
-        pending = await _effort_for_unsent_model(session, body)
-        if pending is None:
-            raise HTTPException(409, str(exc)) from exc
-        return pending
+        raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         logger.exception("Could not change run settings for %s", session_id)
         raise HTTPException(503, "Could not confirm the setting change. Retry when the session is connected.") from exc

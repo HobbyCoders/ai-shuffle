@@ -699,7 +699,7 @@ describe('live effort and Fast mode selection', () => {
 	beforeEach(() => {
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({}));
 		sessionEphemeralCache.clear();
-		Object.assign(activeSession.current, { sessionId: 'live-knobs', modelOverride: 'opus', effortLevelOverride: 'high', fastMode: false, isStreaming: true });
+		Object.assign(activeSession.current, { sessionId: 'live-knobs', effortLevelOverride: 'high', fastMode: false, isStreaming: true });
 	});
 	afterEach(() => { vi.restoreAllMocks(); activeSession.current.sessionId = null; });
 
@@ -707,7 +707,7 @@ describe('live effort and Fast mode selection', () => {
 		let acknowledge!: (value: { effort: string; fast: boolean }) => void;
 		const put = vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
 		const pending = activeSession.setEffortLevelOverride('low');
-		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: 'low', for_model: 'opus' });
+		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: 'low' });
 		expect(activeSession.current.effortLevelOverride).toBe('high');
 		acknowledge({ effort: 'low', fast: false });
 		await pending;
@@ -721,10 +721,42 @@ describe('live effort and Fast mode selection', () => {
 
 	it("shows the worker's reason when it refuses an effort pick", async () => {
 		const error = vi.spyOn(notify, 'error').mockImplementation(() => '');
-		vi.spyOn(api, 'put').mockRejectedValue({ status: 409, detail: 'This model does not support the selected effort level' });
-		await activeSession.setEffortLevelOverride('xhigh');
-		expect(error).toHaveBeenCalledWith('Could not change effort: This model does not support the selected effort level', expect.anything());
+		vi.spyOn(api, 'put').mockRejectedValue({ status: 409, detail: 'The session is still connecting. Try again in a moment.' });
+		await activeSession.setEffortLevelOverride('low');
+		expect(error).toHaveBeenCalledWith('Could not change effort: The session is still connecting. Try again in a moment.', expect.anything());
 		expect(activeSession.current.effortLevelOverride).toBe('high');
+	});
+
+	describe('with a model picked that the chat does not run yet', () => {
+		beforeEach(() => {
+			const catalog = { ...appData.current, sessions: [{ id: 'live-knobs', model: 'gemini-4-argon', provider_id: 'ag' }] } as typeof appData.current;
+			vi.spyOn(appData, 'current', 'get').mockReturnValue(catalog);
+			activeSession.current.modelOverride = 'prov:ag:gemini-4-hydrogen';
+		});
+		afterEach(() => { activeSession.current.modelOverride = null; composerPreferences.rememberEffort('prov:ag:gemini-4-hydrogen', null); });
+
+		it('keeps a level for that model for the next message instead of asking the running chat', async () => {
+			const put = vi.spyOn(api, 'put');
+			await activeSession.setEffortLevelOverride('xhigh');
+			expect(put).not.toHaveBeenCalled();
+			expect(activeSession.current.effortLevelOverride).toBe('xhigh');
+			expect(composerPreferences.effortForModel('prov:ag:gemini-4-hydrogen')).toBe('xhigh');
+		});
+
+		it('still sends Auto to the chat, so a refusal leaves the level in force', async () => {
+			const put = vi.spyOn(api, 'put').mockRejectedValue({ status: 409, detail: 'The session is still connecting. Try again in a moment.' });
+			vi.spyOn(notify, 'error').mockImplementation(() => '');
+			await activeSession.setEffortLevelOverride(null);
+			expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: null });
+			expect(activeSession.current.effortLevelOverride).toBe('high');
+		});
+
+		it('asks the chat again once the picked model is the one it runs', async () => {
+			activeSession.current.modelOverride = 'prov:ag:gemini-4-argon';
+			const put = vi.spyOn(api, 'put').mockResolvedValue({ effort: 'low', fast: false });
+			await activeSession.setEffortLevelOverride('low');
+			expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: 'low' });
+		});
 	});
 
 	it('retains picks after rejection and does not submit a message', async () => {
@@ -766,7 +798,7 @@ describe('live effort and Fast mode selection', () => {
 		expect(put).toHaveBeenCalledTimes(1);
 		acknowledge({ effort: 'low', fast: false });
 		await Promise.all([first, second]);
-		expect(put).toHaveBeenLastCalledWith('/sessions/live-knobs/run-settings', { effort: 'medium', for_model: 'opus' });
+		expect(put).toHaveBeenLastCalledWith('/sessions/live-knobs/run-settings', { effort: 'medium' });
 		expect(activeSession.current.effortLevelOverride).toBe('medium');
 	});
 
@@ -775,7 +807,7 @@ describe('live effort and Fast mode selection', () => {
 		activeSession.current.fastMode = true;
 		await activeSession.setEffortLevelOverride(null);
 		await activeSession.setFastMode(false);
-		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: null, for_model: 'opus' });
+		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: null });
 		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { fast: false });
 		expect(activeSession.current.effortLevelOverride).toBeNull();
 		expect(activeSession.current.fastMode).toBe(false);

@@ -319,7 +319,7 @@ export function getPersistedModel(): string | null {
 }
 
 /** A worker stores a bare model id alongside its provider; the picker uses both. */
-function sessionModelBinding(row: { model?: string | null; provider_id?: string | null } | undefined): string | null {
+export function sessionModelBinding(row: { model?: string | null; provider_id?: string | null } | undefined): string | null {
 	const model = row?.model;
 	if (!model) return null;
 	return row?.provider_id && !model.startsWith('prov:')
