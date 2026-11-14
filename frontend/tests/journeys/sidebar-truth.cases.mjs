@@ -564,15 +564,15 @@ const PROJECT_ALLOW = [
 
 const noProjectChosen = (hero) => hero.getByRole('button', { name: /^No project/ });
 
-/** Choose the project unless the screen already holds it (it keeps the last one chosen). */
+/** Choose the project unless the screen already holds it (a new chat starts with none). */
 async function chooseProject(page, hero, name) {
 	if (await noProjectChosen(hero).isVisible()) await pickProject(page, hero, name);
 }
 
 /**
  * A project that worked without a remote, a chat in it, then a remote: what the app
- * links the next time it looks. Leaves the new-session screen open, which opens on
- * the project last chosen: the choice under test.
+ * links the next time it looks. Leaves the new-session screen open with the project
+ * chosen again there (a new chat starts with none): the choice under test.
  *
  * `rememberCatalogRow` stages the state #1078 needs instead of waiting for it to come
  * up by chance: a catalog load between the first chat and the link, which remembers
@@ -606,8 +606,9 @@ async function projectGainingARemote(ctx, { rememberCatalogRow = false } = {}) {
 		page.off('request', rememberWrite);
 	}
 
-	giveProjectARemote(status, id);
 	await backToNew(page);
+	await chooseProject(page, hero, ctx.project.name);
+	giveProjectARemote(status, id);
 }
 
 /** The worktree toggle, a new branch, and the composer showing it. Drop gets its own error. */
