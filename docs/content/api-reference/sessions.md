@@ -651,7 +651,7 @@ In a worker network, this is shared sidebar state, not an execution command. Any
 
 Older clients may still send `"archived": true`; this means ordinary Settle, even when the execution owner is offline. `"archived": false` uses the explicit `is_active` value and does not restore old work or clear Stop. The legacy metadata query `status=archived` also means ordinary Settle. Signed legacy catalog updates and full snapshots are normalized on upgraded peers; an older server may still display its own archive UI until it upgrades.
 
-There is no Archived settings page, Restore bar, Archive hover action or bulk Archive action. Desktop and the real mobile shell show former archived conversations in bounded Settled history and search. A left swipe settles a row or brings it back to Active; right swipe has no lifecycle action.
+There is no Archived settings page, Restore bar, Archive hover action or bulk Archive action. Desktop and the real mobile shell show former archived conversations in bounded Settled history and search. On touch, a left swipe settles a row or brings it back to Active, and a right swipe opens the snooze picker for that row (see Snooze below): it moves to **Snoozed** once you pick a time, and stays where it was if you close the picker.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \

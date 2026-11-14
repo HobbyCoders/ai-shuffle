@@ -159,10 +159,11 @@ export interface SnoozePreset {
 }
 
 /**
- * The picker's quick choices, in the viewer's local time: Later today (+3h),
- * This evening (6:00 PM), Tomorrow 9:00 AM and Next Monday 9:00 AM. A choice
- * that is not ahead of now, or that repeats another's time, is left out, and
- * "Later today" only shows while it is still today.
+ * The picker's quick choices, in the viewer's local time and in time order:
+ * Later today (+3h), This evening (6:00 PM), Tomorrow 9:00 AM and Next
+ * Monday 9:00 AM. A choice that is not ahead of now, or that repeats
+ * another's time, is left out. "Later today" only shows while it is still
+ * before 6:00 PM: from then on it would be later than "This evening".
  */
 export function snoozePresets(now: Date): SnoozePreset[] {
 	const at = (days: number, hour: number) => {
@@ -178,11 +179,12 @@ export function snoozePresets(now: Date): SnoozePreset[] {
 	const add = (p: SnoozePreset) => {
 		if (p.at.getTime() > now.getTime() && !out.some((o) => o.at.getTime() === p.at.getTime())) out.push(p);
 	};
-	if (sameDay(later, now)) add({ id: 'later', label: 'Later today', at: later });
-	add({ id: 'evening', label: 'This evening', at: at(0, 18) });
+	const evening = at(0, 18);
+	if (later.getTime() < evening.getTime()) add({ id: 'later', label: 'Later today', at: later });
+	add({ id: 'evening', label: 'This evening', at: evening });
 	add({ id: 'tomorrow', label: 'Tomorrow', at: at(1, 9) });
 	add({ id: 'monday', label: 'Next Monday', at: at(toMonday, 9) });
-	return out;
+	return out.sort((a, b) => a.at.getTime() - b.at.getTime());
 }
 
 /** `<input type="datetime-local">` value (local time) for a date. */
@@ -964,21 +966,32 @@ export type CardAction = 'settle' | 'activate' | 'snooze' | 'unsnooze';
 /**
  * The actions a row offers, in on-screen order. The first is what a left
  * swipe commits: Settle for an Active row, Move to Active for a settled or
- * snoozed one (a snooze whose time has passed counts as Active). An Active
- * row also offers Snooze (when the list can open the
- * picker); a snoozed row offers Settle, which ends its snooze.
+ * snoozed one (a snooze whose time has passed counts as Active). When the
+ * list can open the picker, every row that is not archived also offers
+ * Snooze: a snoozed row to pick a new wake time, a settled one to come back
+ * at a set time. A snoozed row also offers Settle, which ends its snooze.
  */
 export function cardActions(
 	s: Pick<Session, 'is_active' | 'status'> & Partial<Pick<Session, 'snoozed_until'>>,
 	now: number = Date.now(),
 	canSnooze = false
 ): CardAction[] {
+	if (s.status === 'archived') return ['activate'];
 	// A snooze whose time has passed is Active already, before the server says so.
-	if ((s.is_active || isSnoozeDue(s, now)) && s.status !== 'archived') {
-		return canSnooze ? ['settle', 'snooze'] : ['settle'];
-	}
-	if (isSnoozed(s, now)) return ['unsnooze', 'settle'];
-	return ['activate'];
+	if (s.is_active || isSnoozeDue(s, now)) return canSnooze ? ['settle', 'snooze'] : ['settle'];
+	if (isSnoozed(s, now)) return canSnooze ? ['unsnooze', 'snooze', 'settle'] : ['unsnooze', 'settle'];
+	return canSnooze ? ['activate', 'snooze'] : ['activate'];
+}
+
+/**
+ * What a touch or pen swipe commits in each direction. Left is the row's
+ * first action (Settle, or Move to Active). Right is Snooze on any row that
+ * offers it: a snooze needs a time, so the swipe only opens the picker and
+ * the row stays where it is until one is picked. A row without Snooze has no
+ * right swipe.
+ */
+export function swipeActions(actions: readonly CardAction[]): { left: CardAction; right: 'snooze' | null } {
+	return { left: actions[0], right: actions.includes('snooze') ? 'snooze' : null };
 }
 
 /**

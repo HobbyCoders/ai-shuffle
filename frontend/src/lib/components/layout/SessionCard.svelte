@@ -28,16 +28,18 @@
 	 * the button's description.
 	 *
 	 * Inbox gestures. A touch or pen swipe LEFT settles an active row (moves a
-	 * settled one back to Active); a swipe RIGHT is inert. Past 40% of
-	 * the row the lane goes solid and letting go commits; a fast flick commits
-	 * too. The row then slides out and folds away. A press-and-hold starts
+	 * settled or snoozed one back to Active). Past 40% of the row the lane goes
+	 * solid and letting go commits; a fast flick commits too. The row then
+	 * slides out and folds away. A swipe RIGHT snoozes: a snooze needs a time, so
+	 * it opens the sidebar's time picker for this row and springs back; the row
+	 * moves to Snoozed only once a time is picked. A press-and-hold starts
 	 * selection, where a tap toggles the row's checkmark. A mouse never
 	 * swipes: on a pointer that hovers, the same actions sit at the row's right
-	 * edge on hover. Settle has no Undo, since a settled
-	 * session is one tap from Active. Snooze sits beside Settle on an active
-	 * row and opens the sidebar's time picker; a snoozed row offers Unsnooze and
-	 * Settle instead, and its line two says when it wakes. Rename, Fork, and Delete
-	 * live on the header session-title menu.
+	 * edge on hover. Settle has no Undo, since a settled session is one tap from
+	 * Active. Snooze sits beside Settle on an active row and beside Move to
+	 * Active on a settled one; a snoozed row offers Unsnooze, Snooze (a new wake
+	 * time) and Settle, and its line two says when it wakes. Rename, Fork, and
+	 * Delete live on the header session-title menu.
 	 */
 	import { untrack } from 'svelte';
 	import {
@@ -88,6 +90,7 @@
 		cardActions,
 		snoozeLabel,
 		snoozeUntilMs,
+		swipeActions,
 		withinTapTarget,
 		type CardAction,
 		type SessionCardStatus,
@@ -352,12 +355,11 @@
 	// Read with the sidebar's clock, so a row whose snooze has run out already
 	// offers the Active actions.
 	const actions = $derived(cardActions(session, now, !!onSnooze));
-	/** The single membership toggle is also available to assistive technology. */
+	/** Every swipe action is also a button, for assistive technology. */
 	const hoverActions = $derived(actions);
-	/** Left swipe toggles membership; right swipe never changes the session. */
-	const leftAction = $derived<CardAction>(
-		actions[0]
-	);
+	/** Left swipe toggles membership; right swipe opens the snooze picker. */
+	const swipe = $derived(swipeActions(actions));
+	const leftAction = $derived<CardAction>(swipe.left);
 
 	const ACTION_META: Record<CardAction, { title: string; aria: string; label: string }> = {
 		settle: { title: 'Settle session', aria: 'Settle session', label: 'Settle' },
@@ -489,7 +491,7 @@
 			clearLongPress();
 			pressing = false;
 			const horizontal = Math.abs(dx) > Math.abs(dy);
-			const allowed = dx < 0;
+			const allowed = dx < 0 || swipe.right !== null;
 			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) {
 				if (horizontal && pointerType !== 'mouse' && !selecting && !allowed) suppressNextClick = true;
 				pointerId = null;
@@ -505,8 +507,8 @@
 		if (elapsed > 0) velocity = (event.clientX - lastX) / elapsed;
 		lastX = event.clientX;
 		lastT = t;
-		// There is no action on a right swipe.
-		dx = Math.min(0, dx);
+		// A row with no right-swipe action does not move that way.
+		if (swipe.right === null) dx = Math.min(0, dx);
 		const lim = rowWidth * EASE_RATIO;
 		dragX = Math.abs(dx) <= lim ? dx : Math.sign(dx) * (lim + (Math.abs(dx) - lim) * 0.35);
 		lane = dx > 0 ? 'l' : dx < 0 ? 'r' : null;
@@ -537,9 +539,12 @@
 		const dx = dragX ?? 0;
 		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
 		if (dx !== 0 && (armed || flick)) {
-			const dir = dx < 0 ? -1 : 1;
-			if (dir < 0) slideOut(dir, leftAction);
-			else springBack();
+			if (dx < 0) slideOut(-1, leftAction);
+			else {
+				// Snooze waits for a time: the row stays put, and the picker opens.
+				springBack();
+				if (swipe.right) void commitAction(swipe.right);
+			}
 		} else {
 			springBack();
 		}
@@ -577,10 +582,13 @@
 	}
 
 	function openCard(event?: MouseEvent) {
-		if (suppressNextClick) {
-			suppressNextClick = false;
-			return;
-		}
+		// Only a pointer's own click (detail > 0) can be the one a swipe or
+		// long press leaves behind. Pointer capture can send that click to the
+		// frame instead, leaving the guard set; keyboard activation (no event)
+		// and an assistive-tech click (detail 0) still open the row, and clear it.
+		const gestureClick = suppressNextClick && !!event && event.detail > 0;
+		suppressNextClick = false;
+		if (gestureClick) return;
 		// A finger that lands just off the 16 px PR chip still means the chip:
 		// touch taps within 44×44 px of it open the list, not the chat.
 		if (
@@ -642,6 +650,11 @@
 >
 	{#if lane}
 		<!-- Lane `l` is uncovered by a right swipe, lane `r` by a left one. -->
+		{#if swipe.right === 'snooze'}
+			<div class="lane l snooze" aria-hidden="true" class:on={lane === 'l'}>
+				<AlarmClock size={20} strokeWidth={2} /><span>Snooze</span>
+			</div>
+		{/if}
 		<div class="lane r toggle" aria-hidden="true" class:on={lane === 'r'}>
 			{#if leftAction === 'settle'}
 				<span>Settle</span><Check size={20} strokeWidth={2} />
@@ -827,9 +840,14 @@
 		background: color-mix(in oklab, var(--primary) 28%, var(--sidebar));
 		color: var(--primary);
 	}
+	.lane.snooze {
+		background: color-mix(in oklab, var(--warning) 28%, var(--sidebar));
+		color: var(--warning);
+	}
 	.lane span { opacity: 0.55; transition: opacity 150ms ease; }
 	.lane :global(svg) { flex: none; transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1); }
 	.scard-frame.armed .lane.toggle { background: var(--primary); color: var(--primary-foreground); }
+	.scard-frame.armed .lane.snooze { background: var(--warning); color: var(--warning-foreground); }
 	.scard-frame.armed .lane span { opacity: 1; }
 	.scard-frame.armed .lane :global(svg) { transform: scale(1.18); }
 
