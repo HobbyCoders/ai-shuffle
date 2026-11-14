@@ -48,6 +48,18 @@ describe('docs search ranking (#1581)', () => {
 		expect(result.snippets[0]).not.toContain('Remote hosts');
 	});
 
+	it('finds several words that are each too short to index, but not one alone', () => {
+		const engine = new DocsSearchEngine([
+			doc('faq', 'FAQ', 'What do I need to run it? Where do I get help?'),
+			doc('other', 'Other', 'I like it. Do not wait.')
+		]);
+		const [first, ...rest] = engine.search('do I');
+		expect(first?.slug).toBe('features/faq');
+		expect(first?.snippets[0]).toContain('What do I need');
+		expect(rest).toEqual([]);
+		expect(engine.search('do')).toEqual([]);
+	});
+
 	it('gives each query word found in the title its own boost', () => {
 		const engine = new DocsSearchEngine([doc('a', 'Voice Mode', 'voice mode'), doc('b', 'Voice', 'voice mode')]);
 		const [both, one] = engine.search('voice mode');
@@ -58,7 +70,10 @@ describe('docs search ranking (#1581)', () => {
 
 	it('finds a sentence pasted from the real docs at the top', async () => {
 		await preloadAllDocs();
-		const [first] = new DocsSearchEngine(docs).search('write its prompt (its instructions), and choose its tools');
+		const engine = new DocsSearchEngine(docs);
+		const [first] = engine.search('write its prompt (its instructions), and choose its tools');
 		expect(first.slug).toBe('getting-started/quick-start');
+		// Short words together find the FAQ first, as Spotlight's backend does.
+		expect(engine.search('do I')[0]?.slug).toBe('getting-started/faq');
 	});
 });

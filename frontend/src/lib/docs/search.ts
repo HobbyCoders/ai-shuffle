@@ -139,7 +139,10 @@ export class DocsSearchEngine {
 		if (!query || query.trim().length < 2) return [];
 
 		const queryTokens = this.tokenize(query);
-		if (queryTokens.length === 0) return [];
+		// Several words still reach the phrase match below though each is too
+		// short to index ("do I"), as the backend's search does.
+		const phrase = words(query);
+		if (queryTokens.length === 0 && !phrase.includes(' ')) return [];
 
 		const scores = new Map<string, number>();
 
@@ -164,7 +167,6 @@ export class DocsSearchEngine {
 
 		// A document holding the words together counts even when the query's
 		// tokens, split differently (`remote-access`), score nothing in it.
-		const phrase = words(query);
 		const hasPhrase = new Set<string>();
 		for (const [key, run] of this.wordRuns) {
 			if (!holdsPhrase(run, phrase)) continue;

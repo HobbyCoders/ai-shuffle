@@ -205,5 +205,7 @@ def test_real_docs_find_a_pasted_sentence_first():
     index = DocsIndex()
     [first, *_] = index.search("write its prompt (its instructions), and choose its tools")
     assert first["slug"] == "quick-start"
+    # Short words together find the FAQ first, as the Docs panel does.
+    assert index.search("do I")[0]["slug"] == "faq"
     [cloud] = [r for r in index.search("Ultimate") if r["slug"] == "cloud"]
     assert not any(ch in cloud["snippets"][0] for ch in "|*`") and "](" not in cloud["snippets"][0]
