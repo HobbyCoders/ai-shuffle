@@ -231,6 +231,20 @@ def _no_real_claude_cli_probe(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_claude_cli_model_list(monkeypatch):
+    """Pickers start from the static registry in every test.
+
+    A delegated turn or startup on a fake CLI captures that CLI's model list
+    into a module-level cache; left behind, it relabels the aliases for every
+    later test on the same worker. Tests of the list install their own.
+    """
+    from app.core import claude_cli_models
+
+    monkeypatch.setattr(claude_cli_models, "_snapshot", None)
+    monkeypatch.setattr(claude_cli_models, "_loaded", True)
+
+
+@pytest.fixture(autouse=True)
 def _agent_credentials_ready_by_default(request, monkeypatch):
     """Turn-start tests run on a worker that is set up to start agents.
 
