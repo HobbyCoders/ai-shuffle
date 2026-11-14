@@ -941,22 +941,22 @@
 	{/if}
 	<div class="col" class:selecting class:rail-hidden={ownsPanel} inert={ownsPanel} aria-hidden={ownsPanel || undefined}>
 		<!-- Selection bar: slides over the header while rows are selected. -->
-		<div class="selbar" inert={!selecting} aria-hidden={selecting ? undefined : 'true'}>
+		<div class="selbar" class:crowded={anySelectedSettled && anySelectedSettleable} inert={!selecting} aria-hidden={selecting ? undefined : 'true'}>
 			<button class="icon-btn" type="button" aria-label="Cancel selection" onclick={cancelSelection}>
 				<X size={18} strokeWidth={1.75} />
 			</button>
-			<span class="cnt" aria-live="polite">{selected.size} selected</span>
+			<span class="cnt" aria-live="polite">{selected.size}<span class="cnt-word">{' '}selected</span></span>
 			{#if anySelectedSettled}
-				<button class="act" type="button" onclick={() => runBulk('activate')}>
-					<Undo2 size={15} strokeWidth={2} />Active
+				<button class="act" type="button" aria-label="Active" onclick={() => runBulk('activate')}>
+					<Undo2 size={15} strokeWidth={2} /><span class="lbl">Active</span>
 				</button>
 			{/if}
 			{#if anySelectedSettleable}
-				<button class="act" type="button" aria-haspopup="dialog" onclick={snoozeSelected}>
-					<AlarmClock size={15} strokeWidth={2} />Snooze
+				<button class="act snooze" type="button" aria-label="Snooze" aria-haspopup="dialog" onclick={snoozeSelected}>
+					<AlarmClock size={15} strokeWidth={2} /><span class="lbl">Snooze</span>
 				</button>
-				<button class="act primary" type="button" onclick={() => runBulk('settle')}>
-					<Check size={15} strokeWidth={2.25} />Settle
+				<button class="act primary" type="button" aria-label="Settle" onclick={() => runBulk('settle')}>
+					<Check size={15} strokeWidth={2.25} /><span class="lbl">Settle</span>
 				</button>
 			{/if}
 		</div>
@@ -1437,15 +1437,20 @@
 		transform: translateY(-100%);
 		transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
 	}
-	.phone .selbar { height: calc(56px + env(safe-area-inset-top, 0px)); padding-top: env(safe-area-inset-top, 0px); }
+	.phone .selbar { gap: 4px; height: calc(56px + env(safe-area-inset-top, 0px)); padding-top: env(safe-area-inset-top, 0px); }
+	.phone .act { padding: 0 10px; }
 	.col.selecting .selbar { transform: none; }
-	.cnt { margin-right: auto; padding-left: 2px; font-size: 13px; font-weight: 650; white-space: nowrap; color: var(--foreground); }
+	/* A snoozed row offers Active, Snooze and Settle at once: the count gives
+	   way first so the three buttons fit a phone-width bar. */
+	.cnt { min-width: 0; margin-right: auto; padding-left: 2px; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 650; white-space: nowrap; color: var(--foreground); }
 	.act {
 		display: flex;
+		flex-shrink: 0;
 		align-items: center;
 		gap: 6px;
 		height: 34px;
 		padding: 0 12px;
+		white-space: nowrap;
 		border: 0;
 		border-radius: 10px;
 		background: var(--row-hover);
@@ -1458,6 +1463,23 @@
 	.act:hover { background: var(--row-selected); }
 	.act.primary { background: var(--action); color: var(--action-foreground); }
 	.act.primary:hover { background: var(--action-hover); }
+	/* A narrow sidebar cannot fit every labelled button (the bar's content box
+	   is about 248px at the desktop default width, 374px on a 390px phone).
+	   Each button carries an aria-label, so the words go first: Snooze's, then
+	   all three when a snoozed row adds Active, then the word after the count
+	   at the narrowest sidebar. */
+	.selbar { container-type: inline-size; }
+	@container (max-width: 359px) {
+		.crowded .act { padding: 0 10px; }
+		.crowded .act .lbl { display: none; }
+	}
+	@container (max-width: 309px) {
+		.act.snooze { padding: 0 10px; }
+		.act.snooze .lbl { display: none; }
+	}
+	@container (max-width: 229px) {
+		.cnt-word { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+	}
 
 	/* Sheet contents (SidebarSheet supplies the surface). */
 	h4 { margin: 0 4px 8px; font-size: 13px; font-weight: 600; color: var(--muted-foreground); }

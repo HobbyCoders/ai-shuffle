@@ -1441,6 +1441,27 @@ describe('Sidebar Snoozed lane', () => {
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('later', false, when.toISOString());
 		expect(bar.getAttribute('aria-hidden')).toBe('true');
 	});
+
+	it('offers Active, Snooze and Settle for a selected snoozed row, each with an accessible name', async () => {
+		vi.useFakeTimers({ now: NOW });
+		platform.set('mobile');
+		mocks.sessions.set([snoozed('soon', 'Soon snooze', 30)]);
+		render(Sidebar, sidebarProps);
+		const frame = document.querySelector('[data-session-card="soon"]') as HTMLElement;
+		const card = frame.querySelector('.scard') as HTMLElement;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		await vi.advanceTimersByTimeAsync(520);
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		const bar = document.querySelector('.selbar') as HTMLElement;
+		// The labels can collapse to icons in a narrow bar, so the names live on aria-label.
+		expect(within(bar).getAllByRole('button').slice(1).map((b) => b.getAttribute('aria-label'))).toEqual(['Active', 'Snooze', 'Settle']);
+		expect(bar.classList.contains('crowded')).toBe(true);
+		expect(bar.textContent).toContain('1 selected');
+
+		await fireEvent.click(within(bar).getByRole('button', { name: 'Active' }));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('soon', true);
+	});
 });
 
 // Each test renders the full sidebar and clicks through a multi-page run; the

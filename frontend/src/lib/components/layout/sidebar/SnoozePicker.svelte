@@ -133,10 +133,12 @@
 		border-top: 1px solid var(--border);
 	}
 	label { font-size: 12px; color: var(--muted-foreground); }
-	.row { display: flex; gap: 6px; }
+	/* The native date-time field needs the full width, so Snooze sits under it. */
+	.row { display: flex; flex-direction: column; gap: 6px; }
 	input {
-		flex: 1 1 auto;
+		width: 100%;
 		min-width: 0;
+		box-sizing: border-box;
 		height: 30px;
 		padding: 0 8px;
 		border: 1px solid var(--border);
@@ -151,7 +153,7 @@
 	input:focus-visible { outline: 2px solid var(--ring); outline-offset: -1px; }
 	input[aria-invalid='true'] { border-color: var(--destructive); }
 	.go {
-		flex: none;
+		align-self: flex-end;
 		height: 30px;
 		padding: 0 12px;
 		border: 0;
