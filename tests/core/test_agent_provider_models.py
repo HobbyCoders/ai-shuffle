@@ -766,3 +766,43 @@ def test_ui_changes_are_verified_in_a_browser(mock_db):
     assert "not with unit tests alone" in verification
     # Two sentences, no more.
     assert verification.strip().count(". ") <= 2
+
+
+def test_a_stored_version_runs_only_on_a_subscription_for_db_and_file_agents(mock_db, monkeypatch):
+    """Review S7: the replicated default ``{"model": "opus", "version": ...}``
+    runs the version on a subscription and the short name in API-key and cloud
+    modes, for a database agent (roster target) and a file agent alike."""
+    import json
+
+    from app.core import claude_auth_mode, subagent_default
+    from app.core.task_dispatch import _task_baseline_model
+    from app.db import database
+
+    database.create_profile("caller", "Caller", None, {"model": "opus", "enabled_agents": ["unpinned"]})
+    database.create_profile("unpinned", "Unpinned", None, {})
+    stored = {subagent_default.SETTING_KEY: json.dumps({"model": "opus", "version": "claude-opus-4-6"})}
+    monkeypatch.setattr(database, "get_system_setting", lambda k: stored.get(k))
+    monkeypatch.setattr(database, "set_system_setting", lambda k, v: stored.update({k: v}))
+    monkeypatch.setattr(subagent_default, "reset_asked", lambda: None)
+    mode = {"now": claude_auth_mode.MODE_SUBSCRIPTION}
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: mode["now"])
+
+    def runs():
+        (target,) = available_subagents("caller", None)
+        assert target.model_source == "default"
+        db_agent = _task_baseline_model(target, None, None, {}, "caller")
+        file_agent = _task_baseline_model(None, None, None, {}, "caller")
+        return target.model, db_agent, file_agent, subagent_default.payload()["model"]
+
+    # Subscription -> API key -> cloud -> subscription on one worker.
+    for now, want in ((claude_auth_mode.MODE_SUBSCRIPTION, "claude-opus-4-6"),
+                      (claude_auth_mode.MODE_API_KEY, "opus"), (claude_auth_mode.MODE_CLOUD, "opus"),
+                      (claude_auth_mode.MODE_SUBSCRIPTION, "claude-opus-4-6")):
+        mode["now"] = now
+        assert runs() == (want,) * 4, now
+    # The owner picks sonnet on an API-key worker: the version is gone everywhere.
+    mode["now"] = claude_auth_mode.MODE_API_KEY
+    subagent_default.write("sonnet")
+    assert json.loads(stored[subagent_default.SETTING_KEY]) == {"model": "sonnet"}
+    mode["now"] = claude_auth_mode.MODE_SUBSCRIPTION
+    assert runs() == ("sonnet",) * 4

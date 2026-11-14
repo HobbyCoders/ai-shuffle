@@ -47,7 +47,12 @@ class SubagentDefault:
 
 
 def read() -> SubagentDefault:
-    """The stored setting, shape-checked only. Never raises."""
+    """The stored setting as this worker runs it, shape-checked. Never raises.
+
+    The picked ``version`` counts only where full ids mean themselves (a
+    subscription sign-in); in API-key and cloud modes the short name in
+    ``model`` runs, as on main. Every reader goes through here.
+    """
     try:
         from app.db import database
 
@@ -64,13 +69,13 @@ def read() -> SubagentDefault:
     if not isinstance(data, dict):
         return SubagentDefault()
     version, model = data.get("version"), data.get("model")
-    if isinstance(version, str) and version.strip():
+    from app.core.model_registry import LEGACY_MODEL_MAP, keeps_own_id
+
+    if isinstance(version, str) and keeps_own_id(version.strip()):
         return SubagentDefault(model=version.strip())
     model = model.strip() if isinstance(model, str) and model.strip() else None
     if model:
         # ``model`` always meant an alias: a legacy id there runs today's alias.
-        from app.core.model_registry import LEGACY_MODEL_MAP
-
         model = LEGACY_MODEL_MAP.get(model, model)
     return SubagentDefault(model=model)
 
@@ -156,7 +161,7 @@ def effective() -> SubagentDefault:
 
 
 def payload() -> Dict[str, Any]:
-    """The GET body: the stored choice."""
+    """The GET body: the stored choice as this worker runs it (see :func:`read`)."""
     return {"model": read().model}
 
 
