@@ -23,7 +23,14 @@ from app.core.plugin_models import (
     PluginScope,
 )
 from app.core.fs_utils import force_rmtree as _force_rmtree
-from app.core.plugin_locks import serialized_plugin, serialized_state, state_lock
+from app.core.fs_utils import retry_sharing_violation
+from app.core.plugin_locks import (
+    marketplace_lock,
+    plugin_lock,
+    serialized_plugin,
+    serialized_state,
+    state_lock,
+)
 from app.core.process_tree import child_env
 from app.core.scrub import redact_url_credentials
 
@@ -608,7 +615,9 @@ def _preserve_install_settings(svc):
 
     path = svc.SETTINGS_FILE
     existed = path.exists()
-    before = path.read_bytes() if existed else None
+    # Settings are replaced atomically by other plugin operations; on Windows a
+    # read or rename during that replace is briefly refused, so retry it.
+    before = retry_sharing_violation(path.read_bytes) if existed else None
     backup = None
     retain = False
     if existed:
@@ -620,11 +629,11 @@ def _preserve_install_settings(svc):
     except BaseException:
         try:
             if existed:
-                if not path.exists() or path.read_bytes() != before:
-                    backup.replace(path)
+                if not path.exists() or retry_sharing_violation(path.read_bytes) != before:
+                    retry_sharing_violation(lambda: backup.replace(path))
                     backup = None
             else:
-                path.unlink(missing_ok=True)
+                retry_sharing_violation(lambda: path.unlink(missing_ok=True))
         except OSError as restore_error:
             retain = True
             location = str(backup) if backup else "the previously absent settings file"
@@ -940,6 +949,18 @@ def install_plugin_to_project(svc, plugin_id: str, scope: PluginScope = PluginSc
     plugin_name, marketplace_id = parts
     _safe_path_component(plugin_name, "name")
 
+    # Hold the source marketplace (so a sync or removal cannot swap its files
+    # mid-copy) and the same project-plugin locks uninstall takes, so two
+    # requests for one project plugin never interleave on worker threads.
+    project_marketplace = f"project-{scope.value}"
+    with ExitStack() as locks:
+        locks.enter_context(marketplace_lock(svc, marketplace_id))
+        locks.enter_context(marketplace_lock(svc, project_marketplace))
+        locks.enter_context(plugin_lock(svc, f"{plugin_name}@{project_marketplace}"))
+        return _install_plugin_to_project_locked(svc, plugin_name, marketplace_id, scope)
+
+
+def _install_plugin_to_project_locked(svc, plugin_name: str, marketplace_id: str, scope: PluginScope) -> PluginInfo:
     # Find the plugin in marketplace
     marketplaces = svc._read_json_file(svc.MARKETPLACES_FILE, {})
     if marketplace_id not in marketplaces:

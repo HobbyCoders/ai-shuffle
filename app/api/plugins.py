@@ -260,7 +260,7 @@ async def add_marketplace(
     """Add a new plugin marketplace from a git repository - Admin only"""
     service = get_plugin_service()
     try:
-        mp = service.add_marketplace(request.url, request.name)
+        mp = await run_sync(service.add_marketplace, request.url, request.name)
         return MarketplaceResponse(
             id=mp.id,
             source=mp.source,
@@ -289,7 +289,7 @@ async def remove_marketplace(
     """Remove a plugin marketplace and all its installed plugins - Admin only"""
     service = get_plugin_service()
     try:
-        service.remove_marketplace(marketplace_id)
+        await run_sync(service.remove_marketplace, marketplace_id)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -305,7 +305,7 @@ async def sync_marketplace(
     """Sync a marketplace with its remote repository - Admin only"""
     service = get_plugin_service()
     try:
-        service.sync_marketplace(marketplace_id)
+        await run_sync(service.sync_marketplace, marketplace_id)
         return {"status": "synced", "marketplace_id": marketplace_id}
     except ValueError as e:
         raise HTTPException(
@@ -532,7 +532,7 @@ async def update_all_plugins(token: str = Depends(require_admin)):
 async def get_auto_update_settings(token: str = Depends(require_auth)):
     """Get auto-update settings"""
     service = get_plugin_service()
-    au_settings = service.get_auto_update_settings()
+    au_settings = await run_sync(service.get_auto_update_settings)
     return AutoUpdateSettingsResponse(
         enabled=au_settings.enabled,
         interval_hours=au_settings.interval_hours,
@@ -548,20 +548,27 @@ async def update_auto_update_settings(
     token: str = Depends(require_admin)
 ):
     """Update auto-update settings - Admin only"""
+    from app.core.plugin_locks import state_lock
+
     service = get_plugin_service()
-    current = service.get_auto_update_settings()
 
-    # Merge provided fields
-    if request.enabled is not None:
-        current.enabled = request.enabled
-    if request.interval_hours is not None:
-        current.interval_hours = request.interval_hours
-    if request.auto_sync_marketplaces is not None:
-        current.auto_sync_marketplaces = request.auto_sync_marketplaces
-    if request.auto_update_plugins is not None:
-        current.auto_update_plugins = request.auto_update_plugins
+    def _merge_and_save():
+        # Off the event loop (file reads may back off on Windows sharing
+        # holds); the state lock keeps concurrent PUTs from losing a field.
+        with state_lock(service):
+            current = service.get_auto_update_settings()
+            if request.enabled is not None:
+                current.enabled = request.enabled
+            if request.interval_hours is not None:
+                current.interval_hours = request.interval_hours
+            if request.auto_sync_marketplaces is not None:
+                current.auto_sync_marketplaces = request.auto_sync_marketplaces
+            if request.auto_update_plugins is not None:
+                current.auto_update_plugins = request.auto_update_plugins
+            service.save_auto_update_settings(current)
+            return current
 
-    service.save_auto_update_settings(current)
+    current = await run_sync(_merge_and_save)
 
     # Signal the background task to reschedule if needed
     from app.core.plugin_auto_update import reschedule_auto_update

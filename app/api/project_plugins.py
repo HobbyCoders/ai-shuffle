@@ -156,7 +156,7 @@ async def list_project_plugins(
     project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
 
-    plugins = service.get_project_installed_plugins()
+    plugins = await run_sync(service.get_project_installed_plugins)
     return [_plugin_to_response(p) for p in plugins]
 
 
@@ -180,7 +180,7 @@ async def list_available_plugins(
     available = await run_sync(global_service.get_available_plugins, marketplace)
 
     # Get installed project plugins to mark which are already installed
-    installed = service.get_project_installed_plugins()
+    installed = await run_sync(service.get_project_installed_plugins)
     installed_names = {p.name for p in installed}
     installed_ids = {p.id for p in installed}
 
@@ -215,7 +215,7 @@ async def install_project_plugin(
         )
 
     try:
-        plugin = service.install_plugin_to_project(install_data.plugin_id, scope)
+        plugin = await run_sync(service.install_plugin_to_project, install_data.plugin_id, scope)
         return _plugin_to_response(plugin)
     except ValueError as e:
         raise HTTPException(
@@ -240,7 +240,7 @@ async def uninstall_project_plugin(
     service = _get_project_plugin_service(project)
 
     try:
-        service.uninstall_project_plugin(plugin_id)
+        await run_sync(service.uninstall_project_plugin, plugin_id)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -261,17 +261,18 @@ async def enable_project_plugin(
     project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
 
-    # Verify plugin exists
-    plugins = service.get_project_installed_plugins()
-    plugin_ids = {p.id for p in plugins}
+    def _enable() -> bool:
+        # Verify plugin exists
+        if plugin_id not in {p.id for p in service.get_project_installed_plugins()}:
+            return False
+        service.enable_project_plugin(plugin_id)
+        return True
 
-    if plugin_id not in plugin_ids:
+    if not await run_sync(_enable):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Plugin not found: {plugin_id}"
         )
-
-    service.enable_project_plugin(plugin_id)
 
 
 @router.post("/{project_id}/plugins/{plugin_id}/disable", status_code=status.HTTP_204_NO_CONTENT)
@@ -287,17 +288,18 @@ async def disable_project_plugin(
     project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
 
-    # Verify plugin exists
-    plugins = service.get_project_installed_plugins()
-    plugin_ids = {p.id for p in plugins}
+    def _disable() -> bool:
+        # Verify plugin exists
+        if plugin_id not in {p.id for p in service.get_project_installed_plugins()}:
+            return False
+        service.disable_project_plugin(plugin_id)
+        return True
 
-    if plugin_id not in plugin_ids:
+    if not await run_sync(_disable):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Plugin not found: {plugin_id}"
         )
-
-    service.disable_project_plugin(plugin_id)
 
 
 @router.get("/{project_id}/plugins/hooks", response_model=List[PluginHookResponse])
@@ -318,7 +320,7 @@ async def get_project_plugin_hooks(
     logger.debug(f"[get_project_plugin_hooks] Service project_dir: {service.project_dir}, LOCAL_PLUGINS_DIR: {service.LOCAL_PLUGINS_DIR}")
 
     # Get project-installed plugins
-    plugins = service.get_project_installed_plugins()
+    plugins = await run_sync(service.get_project_installed_plugins)
     logger.debug(f"[get_project_plugin_hooks] Found {len(plugins)} project plugins: {[p.id for p in plugins]}")
 
     # Get hooks from these plugins

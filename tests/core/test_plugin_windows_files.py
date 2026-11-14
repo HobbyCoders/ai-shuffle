@@ -188,7 +188,7 @@ def test_marketplace_removal_removes_its_clone_on_windows(sources, windows_delet
 def test_marketplace_reclone_replaces_a_folder_with_read_only_files_on_windows(sources, windows_deletes):
     svc, *_ = setup(sources, "marketplace")
     location = Path(svc._read_json_file(svc.MARKETPLACES_FILE, {})["sample"]["installLocation"])
-    shutil.rmtree(location / ".git")
+    force_rmtree(location / ".git")  # plain rmtree fails on Windows on read-only objects
     stale = location / "stale.txt"
     stale.write_text("left over")
     stale.chmod(0o444)
@@ -267,3 +267,106 @@ def test_mcp_config_read_and_write_wait_out_a_replace(tmp_path, held_file):
     held_file(config, always=True, winerror=None)
     with pytest.raises(McpConfigUnreadable):
         svc._read_json_file(config, {}, for_update=True)
+
+
+def test_install_settings_preservation_waits_out_a_replace(sources, held_file):
+    """Reading, comparing and restoring settings.json around a failed install."""
+    from app.core.plugin_install import _preserve_install_settings
+
+    svc, _ = sources
+    svc._write_json_file(svc.SETTINGS_FILE, {"enabledPlugins": {"a@b": True}})
+    attempts = held_file(svc.SETTINGS_FILE)
+    with pytest.raises(RuntimeError, match="activation failed"):
+        with _preserve_install_settings(svc):
+            svc.SETTINGS_FILE.write_text('{"enabledPlugins": {}}')
+            raise RuntimeError("activation failed")
+    assert attempts() >= 6, "read, compare and restore should each meet the hold"
+    assert json.loads(svc.SETTINGS_FILE.read_text()) == {"enabledPlugins": {"a@b": True}}
+    assert list(svc.SETTINGS_FILE.parent.glob(".plugin-settings-restore-*")) == []
+
+
+def test_seed_clone_cleanup_removes_read_only_git_files_on_windows(tmp_path, windows_deletes):
+    from app.core.checkout_manager import _rmtree_quiet
+
+    seed = tmp_path / ".seed-x"
+    (seed / ".git/objects/ab").mkdir(parents=True)
+    (seed / ".git/objects/ab/cdef").write_text("blob")
+    (seed / ".git/objects/ab/cdef").chmod(0o444)
+    windows_deletes()
+    _rmtree_quiet(str(seed))
+    assert not seed.exists()
+
+
+# ── Work moved off the event loop keeps its old serialization ───────────────
+
+
+def test_concurrent_installs_of_one_project_plugin_never_interleave(project_sources, monkeypatch):
+    import threading
+    import time
+
+    from app.core import plugin_install
+
+    svc, *_ = setup(project_sources, "directory")
+    real_copy = plugin_install._copy_tree_resolving_symlinks
+    active, peak, guard = {}, [0], threading.Lock()  # copying thread -> depth (the copy recurses)
+
+    def slow_copy(*args, **kwargs):
+        me = threading.get_ident()
+        with guard:
+            active[me] = active.get(me, 0) + 1
+            peak[0] = max(peak[0], len(active))
+        time.sleep(0.2)
+        try:
+            return real_copy(*args, **kwargs)
+        finally:
+            with guard:
+                active[me] -= 1
+                if not active[me]:
+                    del active[me]
+
+    monkeypatch.setattr(plugin_install, "_copy_tree_resolving_symlinks", slow_copy)
+    errors = []
+
+    def install():
+        try:
+            svc.install_plugin_to_project("sample@sample", PluginScope.LOCAL)
+        except Exception as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=install) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert errors == [] and peak[0] == 1
+    assert svc.get_project_enabled_plugins() == {"sample@project-local": True}
+
+
+def test_plugin_and_mcp_handlers_run_their_file_work_off_the_event_loop(monkeypatch):
+    import asyncio
+    import threading
+
+    from app.api import mcp as mcp_api
+    from app.api import plugins as plugins_api
+
+    seen = []
+
+    class Service:
+        def get_all_servers_with_builtins(self):
+            seen.append(threading.current_thread())
+            return []
+
+        def sync_marketplace(self, marketplace_id):
+            seen.append(threading.current_thread())
+            return True
+
+    monkeypatch.setattr(mcp_api, "get_mcp_service", lambda *a, **k: Service())
+    monkeypatch.setattr(plugins_api, "get_plugin_service", lambda *a, **k: Service())
+
+    async def main():
+        await mcp_api.list_global_mcp_servers(request=None, token="t")
+        await plugins_api.sync_marketplace("m", token="t")
+        return threading.current_thread()
+
+    loop_thread = asyncio.run(main())
+    assert len(seen) == 2 and loop_thread not in seen

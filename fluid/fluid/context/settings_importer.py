@@ -1247,6 +1247,26 @@ def _source_unchanged(item: SettingsImportItem) -> bool:
     return True
 
 
+def _remove_tree_best_effort(path: Path) -> None:
+    """Remove a copied tree, including Git's read-only files on Windows.
+
+    Windows refuses to delete a read-only file, so a refused delete is retried
+    once after setting the write bit. Links and junctions are never chmodded
+    (that would reach outside the tree). Anything still refused is left.
+    """
+    def _on_error(func, failed, exc):
+        if isinstance(exc, PermissionError) and func in (os.unlink, os.remove, os.rmdir):
+            try:
+                info = os.lstat(failed)
+                if not stat.S_ISLNK(info.st_mode) and not getattr(info, "st_reparse_tag", 0):
+                    os.chmod(failed, info.st_mode | stat.S_IWRITE)
+                func(failed)
+            except OSError:
+                pass
+
+    shutil.rmtree(path, onexc=_on_error)
+
+
 def _write_exclusive(destination: Path, data: bytes) -> None:
     destination = destination.absolute()
     if not _SUPPORTS_DIR_FD_WALK:
@@ -1427,7 +1447,7 @@ def _apply_settings_import(preview: SettingsImportPreview, *, selected_ids: Iter
             # never removes the competing native path.
             if destination.exists():
                 if item.is_directory:
-                    shutil.rmtree(destination, ignore_errors=True)
+                    _remove_tree_best_effort(destination)
                 else:
                     try:
                         destination.unlink()

@@ -18,9 +18,11 @@ def force_rmtree(path, ignore_errors=False):
             return  # already gone (or never there): the goal is met
         if isinstance(exc, PermissionError) and func in (os.unlink, os.remove, os.rmdir):
             try:
-                mode = os.lstat(failed_path).st_mode
-                if not stat.S_ISLNK(mode):  # chmod would follow a link
-                    os.chmod(failed_path, mode | stat.S_IWRITE)
+                info = os.lstat(failed_path)
+                # chmod would follow a symlink or a Windows junction (any
+                # reparse point) out of the tree; the delete itself never does.
+                if not stat.S_ISLNK(info.st_mode) and not getattr(info, "st_reparse_tag", 0):
+                    os.chmod(failed_path, info.st_mode | stat.S_IWRITE)
                 func(failed_path)
                 return
             except FileNotFoundError:
