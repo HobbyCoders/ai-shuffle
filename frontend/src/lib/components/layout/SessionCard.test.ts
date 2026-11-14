@@ -211,6 +211,44 @@ describe('SessionCard archive and undo', () => {
 
 });
 
+describe('SessionCard snooze', () => {
+	const NOW = Date.parse('2026-08-20T12:06:00Z');
+	const until = new Date(NOW + 2 * 3_600_000).toISOString();
+
+	it('puts Snooze beside Settle when the list can open the picker', async () => {
+		const onSnooze = vi.fn();
+		renderCard({ is_active: true }, { onSnooze });
+		const buttons = Array.from(document.querySelectorAll('.hover-acts button')).map((b) => b.getAttribute('title'));
+		expect(buttons).toEqual(['Settle session', 'Snooze session']);
+		await fireEvent.click(screen.getByTitle('Snooze session'));
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
+	it('offers no Snooze without a picker to open', () => {
+		renderCard({ is_active: true });
+		expect(screen.queryByTitle('Snooze session')).toBeNull();
+	});
+
+	it('shows the wake time on a snoozed row and offers Unsnooze and Settle', async () => {
+		renderCard({ is_active: false, snoozed_until: until }, { onSnooze: vi.fn(), status: 'idle', compact: true });
+		const label = document.querySelector('.snooze-until')?.textContent ?? '';
+		expect(label).toMatch(/^until /);
+		expect(document.querySelector('.details')?.textContent).toContain(`Snoozed ${label}`);
+		await fireEvent.click(screen.getByTitle('Unsnooze: move to Active'));
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
+		await fireEvent.click(screen.getByTitle('Settle session'));
+		expect(mocks.setSessionActive).toHaveBeenLastCalledWith('session-a', false);
+	});
+
+	it('drops the label and offers the Active actions once the time has passed', () => {
+		renderCard({ is_active: false, snoozed_until: until }, { onSnooze: vi.fn(), now: NOW + 3 * 3_600_000 });
+		expect(document.querySelector('.snooze-until')).toBeNull();
+		expect(screen.getByTitle('Settle session')).toBeTruthy();
+		expect(screen.getByTitle('Snooze session')).toBeTruthy();
+	});
+});
+
 describe('SessionCard actions', () => {
 	it('keeps settle and omits rename, fork, and delete controls', () => {
 		renderCard();

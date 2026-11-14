@@ -73,7 +73,8 @@ async def submit(owner: str, row: Dict[str, Any], transcript: str, *, instructio
                  caller: Optional[str] = None, uploads: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """Forward one voice request to the owner. Returns the owner's turn id.
 
-    Nothing is written here. The owner records the message (the payload does
+    Nothing is written here except ending a snooze (shared sidebar state).
+    The owner records the message (the payload does
     not claim it is already recorded), runs it in the session's own model and
     mode, and steers it into a running turn as it does any forwarded send.
     The call's context rides the engine-only voice note, never the stored
@@ -98,6 +99,13 @@ async def submit(owner: str, row: Dict[str, Any], transcript: str, *, instructio
     if prompt != transcript.strip():
         note = f"{instructions}\n\n{transcript.strip()}"
     payload: Dict[str, Any] = {turn_manager.VOICE_DELEGATION: True, VOICE_INSTRUCTIONS: note, **(uploads or {})}
+    # The owner's spoken request ends a snooze here too, as a forwarded typed
+    # send does; a plain settled chat stays settled. The owner does the same
+    # on intake, so a failure here never holds the request back.
+    try:
+        await turn_manager.reactivate_for_send(row["id"], SOURCE, payload)
+    except Exception:  # noqa: BLE001
+        logger.warning("Voice: could not end the snooze on %s before forwarding", row["id"], exc_info=True)
     result = await control.submit_turn(
         owner, row["id"], prompt=prompt, source=SOURCE,
         profile_id=row.get("profile_id"), project_id=row.get("project_id"),

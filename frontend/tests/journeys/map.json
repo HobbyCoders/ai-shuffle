@@ -260,6 +260,22 @@
 			]
 		},
 		{
+			"why": "snooze from a sidebar row: the row moves to the Snoozed group with its wake time, and Unsnooze brings it back to Active",
+			"journeys": ["sidebar-snooze"],
+			"globs": [
+				"frontend/tests/journeys/sidebar-snooze.journey.mjs",
+				"frontend/src/lib/stores/app-data*",
+				"frontend/src/lib/components/layout/Sidebar.svelte",
+				"frontend/src/lib/components/layout/SessionCard*",
+				"frontend/src/lib/components/layout/session-card-data*",
+				"frontend/src/lib/components/layout/sidebar/SnoozePicker*",
+				"frontend/src/lib/components/layout/sidebar/SidebarSheet*",
+				"app/core/session_snooze.py",
+				"app/network/session_active.py",
+				"app/api/sessions_helpers.py"
+			]
+		},
+		{
 			"why": "what a sidebar row says is true: one row's failed change undoes only that change, a failed turn reads Failed on every producer, a project is listed once in the Filter",
 			"journeys": ["sidebar-truth", "sidebar-truth-2"],
 			"globs": [

@@ -131,6 +131,8 @@ SPECS = (
         "Default scope is this project; use scope='all' for relevant cross-project work. "
         "Use state='settled' or 'all' for sidebar management; these also include "
         "stopped chats, which are not messaging targets; find chats to message with state='active'. "
+        "Snoozed chats (snoozed_until set) return to Active on their own; state='settled' omits them, "
+        "state='all' includes them. "
         "Follow next_offset when present; an empty filtered page may have more pages. "
         "To settle or unsettle several chats, pass their IDs together in one session_ids call. "
         "Follow MessageSession's peer-coordination rules."), input_schema={"type": "object", "properties": {

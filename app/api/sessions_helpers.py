@@ -4,6 +4,7 @@ Session helper functions, models, and shared state.
 Extracted from sessions.py for maintainability.
 """
 
+from datetime import datetime
 from typing import Any, List, Optional
 
 from fastapi import HTTPException, Request, status
@@ -53,6 +54,10 @@ class SessionActiveUpdate(BaseModel):
     #: Decode-only: True means Settle; False/None use explicit is_active.
     #: Neither value restores old work or clears an explicit user Stop.
     archived: Optional[bool] = None
+    #: Snooze: with ``is_active=False``, the time (ISO-8601 with a timezone)
+    #: the chat goes back to Active on its own. Must be in the future.
+    #: Activating or settling without it clears any snooze.
+    snoozed_until: Optional[datetime] = None
 
 
 class SessionImportResponse(BaseModel):
